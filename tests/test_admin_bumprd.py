@@ -66,6 +66,19 @@ class TestBumpGlickoRds:
         assert rating_data[0] == pytest.approx(1500.0)  # rating unchanged
         assert rating_data[2] == pytest.approx(0.07)  # volatility unchanged
 
+    def test_bumps_openskill_sigma_on_same_display_scale(self, repo_db_path):
+        repo = PlayerRepository(repo_db_path)
+        service = PlayerService(repo)
+        _make_player(repo, 1, 1500.0, 50.0)
+        repo.update_openskill_rating(1, TEST_GUILD_ID, 45.0, 4.0)
+
+        result = service.bump_glicko_rds(TEST_GUILD_ID, 100)
+
+        assert result["os_count"] == 1
+        mu, sigma = repo.get_openskill_rating(1, TEST_GUILD_ID)
+        assert mu == pytest.approx(45.0)
+        assert sigma == pytest.approx(6.0)
+
     def test_skips_unrated_players(self, repo_db_path):
         repo = PlayerRepository(repo_db_path)
         service = PlayerService(repo)

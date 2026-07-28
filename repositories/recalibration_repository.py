@@ -2,6 +2,10 @@
 Repository for recalibration state tracking.
 """
 
+from datetime import UTC, datetime
+
+from openskill_rating_system import CamaOpenSkillSystem
+from openskill_replay import OPENSKILL_ALGORITHM_VERSION
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IRecalibrationRepository
 
@@ -59,7 +63,13 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                     rating_at_recalibration = COALESCE(excluded.rating_at_recalibration, recalibration_state.rating_at_recalibration),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (discord_id, normalized_id, last_recalibration_at, total_recalibrations, rating_at_recalibration),
+                (
+                    discord_id,
+                    normalized_id,
+                    last_recalibration_at,
+                    total_recalibrations,
+                    rating_at_recalibration,
+                ),
             )
 
     def execute_recalibration_atomic(
@@ -71,8 +81,9 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
         rating: float,
         new_rd: float,
         new_volatility: float,
+        new_os_sigma: float | None = None,
     ) -> int:
-        """Atomically validate cooldown, apply Glicko update, bump state.
+        """Atomically validate cooldown, reset both systems' uncertainty, bump state.
 
         Closes the TOCTOU between the service-level cooldown check and the
         state write: two concurrent /recalibrate calls can no longer both pass
@@ -82,6 +93,7 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
         is still active. Returns the new ``total_recalibrations`` value.
         """
         normalized_guild_id = self.normalize_guild_id(guild_id)
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
@@ -105,10 +117,30 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                 """
                 UPDATE players
                 SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
+                    os_sigma = COALESCE(?, os_sigma),
+                    os_rating_version = CASE
+                        WHEN ? IS NULL THEN os_rating_version
+                        ELSE ?
+                    END,
+                    os_algorithm_fingerprint = CASE
+                        WHEN ? IS NULL THEN os_algorithm_fingerprint
+                        ELSE ?
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                (rating, new_rd, new_volatility, discord_id, normalized_guild_id),
+                (
+                    rating,
+                    new_rd,
+                    new_volatility,
+                    new_os_sigma,
+                    new_os_sigma,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    new_os_sigma,
+                    fingerprint,
+                    discord_id,
+                    normalized_guild_id,
+                ),
             )
 
             new_total = total + 1
@@ -127,6 +159,39 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                 """,
                 (discord_id, normalized_guild_id, now, new_total, rating),
             )
+            if new_os_sigma is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO openskill_rating_events (
+                        guild_id, discord_id, event_type, value, event_at,
+                        reason, actor_id, os_algorithm_version,
+                        os_algorithm_fingerprint
+                    )
+                    VALUES (?, ?, 'set_sigma', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_guild_id,
+                        discord_id,
+                        new_os_sigma,
+                        datetime.now(UTC).isoformat(),
+                        "player_recalibration",
+                        discord_id,
+                        OPENSKILL_ALGORITHM_VERSION,
+                        fingerprint,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO openskill_rating_revisions (
+                        guild_id, revision, updated_at
+                    )
+                    VALUES (?, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        revision = openskill_rating_revisions.revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_guild_id,),
+                )
 
             return new_total
 

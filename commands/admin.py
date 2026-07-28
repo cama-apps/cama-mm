@@ -993,9 +993,31 @@ class AdminCommands(commands.Cog):
             if current_vol is not None:
                 vol = current_vol
 
-        await asyncio.to_thread(
-            self.player_service.update_glicko_rating, user.id, guild_id, rating, rd, vol
+        update_both = getattr(
+            self.player_service,
+            "update_both_display_rating",
+            None,
         )
+        if callable(update_both):
+            await asyncio.to_thread(
+                update_both,
+                user.id,
+                guild_id,
+                rating,
+                rd,
+                vol,
+                reason="admin_initial_rating",
+                actor_id=interaction.user.id,
+            )
+        else:
+            await asyncio.to_thread(
+                self.player_service.update_glicko_rating,
+                user.id,
+                guild_id,
+                rating,
+                rd,
+                vol,
+            )
 
         await interaction.response.send_message(
             f"✅ Set initial rating for {user.mention} to {rating} (RD kept at {rd:.1f}).",
@@ -1006,7 +1028,10 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user}) to {rating} with RD={rd:.1f}"
         )
 
-    @adjust.command(name="rating", description="Set a player's Glicko rating (Admin only)")
+    @adjust.command(
+        name="rating",
+        description="Set a player's displayed rating in both systems (Admin only)",
+    )
     @app_commands.describe(
         user="Player to adjust",
         rating=f"New rating (0-{ADMIN_RATING_MAX:.0f})",
@@ -1015,7 +1040,7 @@ class AdminCommands(commands.Cog):
     async def adjust_rating(
         self, interaction: discord.Interaction, user: discord.Member, rating: float
     ):
-        """Admin command to set rating without changing RD/uncertainty."""
+        """Set both rating estimates without changing either uncertainty."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
                 "❌ Admin only! You need Administrator or Manage Server permissions.",
@@ -1050,13 +1075,35 @@ class AdminCommands(commands.Cog):
             return
 
         old_rating, rd, vol = rating_data
-        await asyncio.to_thread(
-            self.player_service.update_glicko_rating, user.id, guild_id, rating, rd, vol
+        update_both = getattr(
+            self.player_service,
+            "update_both_display_rating",
+            None,
         )
+        if callable(update_both):
+            await asyncio.to_thread(
+                update_both,
+                user.id,
+                guild_id,
+                rating,
+                rd,
+                vol,
+                reason="admin_rating_override",
+                actor_id=interaction.user.id,
+            )
+        else:
+            await asyncio.to_thread(
+                self.player_service.update_glicko_rating,
+                user.id,
+                guild_id,
+                rating,
+                rd,
+                vol,
+            )
 
         await interaction.response.send_message(
             f"✅ Set rating for {user.mention}: {old_rating:.0f} → **{rating:.0f}** "
-            f"(RD kept at {rd:.1f}).",
+            f"(RD kept at {rd:.1f}; OpenSkill σ unchanged).",
             ephemeral=True,
         )
         logger.info(
@@ -1199,11 +1246,18 @@ class AdminCommands(commands.Cog):
         rating = recal_result["old_rating"]
         total_recals = recal_result["total_recalibrations"]
         cooldown_ends = recal_result["cooldown_ends_at"]
+        os_line = ""
+        if recal_result.get("new_os_sigma") is not None:
+            os_line = (
+                f"• OpenSkill σ: {recal_result['old_os_sigma']:.2f} → "
+                f"**{recal_result['new_os_sigma']:.2f}**\n"
+            )
 
         await interaction.response.send_message(
             f"✅ Recalibrated {user.mention}!\n"
             f"• Rating: **{rating:.0f}** (unchanged)\n"
             f"• RD: {old_rd:.1f} → **{new_rd:.0f}** (high uncertainty)\n"
+            f"{os_line}"
             f"• Total recalibrations: {total_recals}\n"
             f"• Next recalibration available: <t:{cooldown_ends}:R>",
             ephemeral=True,
@@ -1214,7 +1268,8 @@ class AdminCommands(commands.Cog):
         )
 
     @admin.command(
-        name="bumprd", description="Increase Glicko RD for all players in this guild (Admin only)"
+        name="bumprd",
+        description="Increase rating uncertainty after a major patch (Admin only)",
     )
     @app_commands.describe(
         amount="RD increase amount (default 100, max 350)"
@@ -1223,7 +1278,7 @@ class AdminCommands(commands.Cog):
     async def bumprd(
         self, interaction: discord.Interaction, amount: int = 100
     ):
-        """Admin command to globally increase Glicko RD after a big patch."""
+        """Globally increase Glicko RD and OpenSkill sigma after a big patch."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
                 "❌ Admin only! You need Administrator or Manage Server permissions.",
@@ -1241,7 +1296,12 @@ class AdminCommands(commands.Cog):
         await safe_defer(interaction, ephemeral=True)
         guild_id = interaction.guild.id
 
-        result = await asyncio.to_thread(self.player_service.bump_glicko_rds, guild_id, amount)
+        result = await asyncio.to_thread(
+            self.player_service.bump_glicko_rds,
+            guild_id,
+            amount,
+            actor_id=interaction.user.id,
+        )
         if result is None:
             await safe_followup(interaction, content="❌ No rated players found.", ephemeral=True)
             return
@@ -1251,6 +1311,14 @@ class AdminCommands(commands.Cog):
             content=(
                 f"✅ Bumped RD for **{result['count']}** players by **+{amount}** (capped at 350)\n"
                 f"• Avg RD: {result['avg_before']:.0f} → **{result['avg_after']:.0f}**"
+                + (
+                    "\n"
+                    f"• Avg OpenSkill σ: "
+                    f"{result['avg_os_sigma_before']:.2f} → "
+                    f"**{result['avg_os_sigma_after']:.2f}**"
+                    if result.get("os_count")
+                    else ""
+                )
             ),
             ephemeral=True,
         )
@@ -1519,6 +1587,18 @@ class AdminCommands(commands.Cog):
                     corrected_by=interaction.user.id,
                 )
             )
+
+            if result.get("replay_recovered"):
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"✅ Recovered the pending OpenSkill replay for match "
+                        f"#{match_id} ({result['openskill_matches_replayed']} "
+                        "matches replayed)."
+                    ),
+                    ephemeral=True,
+                )
+                return
 
             # Build response message
             old_team = result["old_winning_team"].title()

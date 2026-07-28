@@ -151,8 +151,12 @@ RD_PRIORITY_WEIGHT = _parse_float("RD_PRIORITY_WEIGHT", 0.2)
 
 JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 3)
 STREAMING_BONUS = _parse_int("STREAMING_BONUS", 1)  # JC awarded for Go Live + Dota 2
-FIRST_GAME_BONUS = _parse_int("FIRST_GAME_BONUS", 2)  # JC awarded to all players in first game after 5pm PST
-FIRST_GAME_RESET_HOUR = _parse_int("FIRST_GAME_RESET_HOUR", 17)  # Hour (0-23) in America/Los_Angeles
+FIRST_GAME_BONUS = _parse_int(
+    "FIRST_GAME_BONUS", 2
+)  # JC awarded to all players in first game after 5pm PST
+FIRST_GAME_RESET_HOUR = _parse_int(
+    "FIRST_GAME_RESET_HOUR", 17
+)  # Hour (0-23) in America/Los_Angeles
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 4)
 JOPACOIN_EXCLUSION_REWARD = _parse_int("JOPACOIN_EXCLUSION_REWARD", 3)
@@ -175,7 +179,9 @@ HOSTILE_LOSS_MIN_BALANCE = _parse_int("HOSTILE_LOSS_MIN_BALANCE", 50)
 
 # Auto-liquidity (blind bets) configuration
 AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blind bets in pool mode
-AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to trigger blind (inclusive)
+AUTO_BLIND_THRESHOLD = _parse_int(
+    "AUTO_BLIND_THRESHOLD", 50
+)  # Min balance to trigger blind (inclusive)
 AUTO_BLIND_PERCENTAGE = _parse_float("AUTO_BLIND_PERCENTAGE", 0.10)  # 10% of balance
 AUTO_SPECTATOR_BET_ENABLED = _parse_bool("AUTO_SPECTATOR_BET_ENABLED", True)
 AUTO_SPECTATOR_BET_COUNT = _parse_int("AUTO_SPECTATOR_BET_COUNT", 10)
@@ -189,7 +195,9 @@ AUTO_SPECTATOR_BET_TOP_PERCENTAGE = _parse_float(
 BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.20)  # 20% chance per match
 BOMB_POT_BLIND_PERCENTAGE = _parse_float("BOMB_POT_BLIND_PERCENTAGE", 0.15)  # 15% plus ante
 BOMB_POT_ANTE = _parse_int("BOMB_POT_ANTE", 10)  # Flat 10 JC ante (mandatory, can go negative)
-BOMB_POT_PARTICIPATION_BONUS = _parse_int("BOMB_POT_PARTICIPATION_BONUS", 1)  # Extra +1 JC for all players
+BOMB_POT_PARTICIPATION_BONUS = _parse_int(
+    "BOMB_POT_PARTICIPATION_BONUS", 1
+)  # Extra +1 JC for all players
 
 # Leverage betting configuration
 LEVERAGE_TIERS = _parse_int_list("LEVERAGE_TIERS", [2, 3, 5])
@@ -200,9 +208,15 @@ GARNISHMENT_PERCENTAGE = _parse_float("GARNISHMENT_PERCENTAGE", 1.0)  # 100% of 
 
 # Bankruptcy configuration
 BANKRUPTCY_COOLDOWN_SECONDS = _parse_int("BANKRUPTCY_COOLDOWN_SECONDS", 604800)  # 1 week
-BANKRUPTCY_PENALTY_GAMES = _parse_int("BANKRUPTCY_PENALTY_GAMES", 3)  # wins needed to clear the penalty
-BANKRUPTCY_PENALTY_RATE = _parse_float("BANKRUPTCY_PENALTY_RATE", 0.75)  # fraction of winnings KEPT (0.75 => lose 25%)
-BANKRUPTCY_FRESH_START_BALANCE = _parse_int("BANKRUPTCY_FRESH_START_BALANCE", 3)  # Balance after bankruptcy
+BANKRUPTCY_PENALTY_GAMES = _parse_int(
+    "BANKRUPTCY_PENALTY_GAMES", 3
+)  # wins needed to clear the penalty
+BANKRUPTCY_PENALTY_RATE = _parse_float(
+    "BANKRUPTCY_PENALTY_RATE", 0.75
+)  # fraction of winnings KEPT (0.75 => lose 25%)
+BANKRUPTCY_FRESH_START_BALANCE = _parse_int(
+    "BANKRUPTCY_FRESH_START_BALANCE", 3
+)  # Balance after bankruptcy
 
 # Loan configuration
 LOAN_COOLDOWN_SECONDS = _parse_int("LOAN_COOLDOWN_SECONDS", 259200)  # 3 days
@@ -212,7 +226,9 @@ LOAN_FEE_RATE = _parse_float("LOAN_FEE_RATE", 0.20)  # 20% flat fee
 # Disbursement configuration
 DISBURSE_MIN_FUND = _parse_int("DISBURSE_MIN_FUND", 250)  # Min fund to propose disbursement
 DISBURSE_QUORUM_PERCENTAGE = _parse_float("DISBURSE_QUORUM_PERCENTAGE", 0.40)  # 40% of players
-LOTTERY_ACTIVITY_DAYS = _parse_int("LOTTERY_ACTIVITY_DAYS", 14)  # Days of activity required for lottery eligibility
+LOTTERY_ACTIVITY_DAYS = _parse_int(
+    "LOTTERY_ACTIVITY_DAYS", 14
+)  # Days of activity required for lottery eligibility
 
 # Shop pricing
 SHOP_ANNOUNCE_COST = _parse_int("SHOP_ANNOUNCE_COST", 10)
@@ -220,7 +236,9 @@ SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)
 SHOP_JOPA_COIN_COST = _parse_int("SHOP_JOPA_COIN_COST", 10000)
 SHOP_NEW_MYSTERY_GIFT_COST = _parse_int("SHOP_NEW_MYSTERY_GIFT_COST", 20000)
 SHOP_DOUBLE_OR_NOTHING_COST = _parse_int("SHOP_DOUBLE_OR_NOTHING_COST", 50)
-DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000)  # 30 days
+DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int(
+    "DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000
+)  # 30 days
 PINGEDASH_COST = _parse_int("PINGEDASH_COST", 10)
 PINGEDASH_COOLDOWN_SECONDS = _parse_int("PINGEDASH_COOLDOWN_SECONDS", 24 * 60 * 60)
 PINGEDASH_TARGET_USER_ID = _parse_optional_int("PINGEDASH_TARGET_USER_ID")
@@ -229,16 +247,32 @@ PINGEDKEVIN_COOLDOWN_SECONDS = PINGEDASH_COOLDOWN_SECONDS
 PINGEDKEVIN_TARGET_USER_ID = _parse_optional_int("PINGEDKEVIN_TARGET_USER_ID")
 
 # Soft Avoid configuration
-SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 750)  # Fallback cost to soft avoid a player
-SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 180.0)  # Penalty added to shuffler when pair on same team
+SHOP_SOFT_AVOID_COST = _parse_int(
+    "SHOP_SOFT_AVOID_COST", 750
+)  # Fallback cost to soft avoid a player
+SOFT_AVOID_PENALTY = _parse_float(
+    "SOFT_AVOID_PENALTY", 180.0
+)  # Penalty added to shuffler when pair on same team
 
 # Package Deal configuration
-SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
-SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0)  # Divide sum of ratings by this
-PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # Number of games deal lasts
-PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 100.0)  # Penalty when pair on DIFFERENT teams
-PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 100.0)  # Penalty when one selected, one excluded
-RATING_SPREAD_DIVISOR = _parse_float("RATING_SPREAD_DIVISOR", 10.0)  # Divisor for (max_rating - min_rating) pool spread penalty
+SHOP_PACKAGE_DEAL_BASE_COST = _parse_int(
+    "SHOP_PACKAGE_DEAL_BASE_COST", 500
+)  # Base cost for package deal
+SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float(
+    "SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0
+)  # Divide sum of ratings by this
+PACKAGE_DEAL_GAMES_DURATION = _parse_int(
+    "PACKAGE_DEAL_GAMES_DURATION", 10
+)  # Number of games deal lasts
+PACKAGE_DEAL_PENALTY = _parse_float(
+    "PACKAGE_DEAL_PENALTY", 100.0
+)  # Penalty when pair on DIFFERENT teams
+PACKAGE_DEAL_SPLIT_PENALTY = _parse_float(
+    "PACKAGE_DEAL_SPLIT_PENALTY", 100.0
+)  # Penalty when one selected, one excluded
+RATING_SPREAD_DIVISOR = _parse_float(
+    "RATING_SPREAD_DIVISOR", 10.0
+)  # Divisor for (max_rating - min_rating) pool spread penalty
 
 # Recalibrate shop item
 SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 300)
@@ -296,9 +330,11 @@ WHEEL_GOLDEN_TOP_N = _parse_int("WHEEL_GOLDEN_TOP_N", 3)
 WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -75.0)
 # Estimated EVs for special golden wedges — used to calibrate OVEREXTENDED value
 # so the overall wheel EV stays at WHEEL_GOLDEN_TARGET_EV.
-WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 33.0)          # per wedge (×2)
+WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 33.0)  # per wedge (×2)
 WHEEL_GOLDEN_MARKET_CRASH_EST_EV = _parse_float("WHEEL_GOLDEN_MARKET_CRASH_EST_EV", 35.0)
-WHEEL_GOLDEN_COMPOUND_EST_EV = _parse_float("WHEEL_GOLDEN_COMPOUND_EST_EV", 100.0)  # flat +100 reward
+WHEEL_GOLDEN_COMPOUND_EST_EV = _parse_float(
+    "WHEEL_GOLDEN_COMPOUND_EST_EV", 100.0
+)  # flat +100 reward
 WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV", 65.0)
 WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN", 0.02)
 WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX", 0.05)
@@ -359,9 +395,7 @@ def _select_llm_config(
     model_override: str | None,
 ) -> tuple[str, str | None]:
     """Select the startup model and its matching provider credential."""
-    model = model_override or (
-        _DEFAULT_GROQ_MODEL if groq_key else _DEFAULT_CEREBRAS_MODEL
-    )
+    model = model_override or (_DEFAULT_GROQ_MODEL if groq_key else _DEFAULT_CEREBRAS_MODEL)
     if model.startswith("groq/"):
         return model, groq_key
     if model.startswith("cerebras/"):
@@ -384,71 +418,154 @@ AI_FEATURES_ENABLED = _parse_bool("AI_FEATURES_ENABLED", False)  # Global defaul
 DIG_LLM_ENABLED = _parse_bool("DIG_LLM_ENABLED", True)  # Hard kill switch for Dig LLM calls
 
 # Glicko-2 rating system configuration
-CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated
-INITIAL_GLICKO_RD = _parse_float("INITIAL_GLICKO_RD", 350.0)  # New-player uncertainty and inactivity ceiling
-MAX_RATING_SWING_PER_GAME = _parse_float("MAX_RATING_SWING_PER_GAME", 400.0)  # Cap on individual rating change per match
-BASE_RATING_DELTA_MULTIPLIER = _parse_float("BASE_RATING_DELTA_MULTIPLIER", 1.1)  # Target about +/-15 at 80% certainty
-MAX_RD_CONTRACTION_PER_GAME = _parse_float("MAX_RD_CONTRACTION_PER_GAME", 0.065)  # Slow active confidence gain
-NEW_PLAYER_MMR_DISCOUNT = _parse_int("NEW_PLAYER_MMR_DISCOUNT", 500)  # Deliberate newcomer underseed before rating conversion
-ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int("ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 50)  # Max games for allowing admin rating adjustments
-ADMIN_RATING_MAX = _parse_float("ADMIN_RATING_MAX", 6000.0)  # Sanity ceiling on admin-set Glicko ratings (2x the MMR seed scale; catches MMR typed as rating)
-RD_DECAY_CONSTANT = _parse_float("RD_DECAY_CONSTANT", 100.0)  # Weekly inactivity uncertainty growth (c value)
-RD_DECAY_GRACE_PERIOD_DAYS = _parse_int("RD_DECAY_GRACE_PERIOD_DAYS", 7)  # No inactivity growth through this day
-MMR_MODAL_TIMEOUT_MINUTES = _parse_int("MMR_MODAL_TIMEOUT_MINUTES", 5)  # Timeout for MMR input modal
-MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retries for invalid MMR input
+CALIBRATION_RD_THRESHOLD = _parse_float(
+    "CALIBRATION_RD_THRESHOLD", 100.0
+)  # Players with RD <= this are considered calibrated
+INITIAL_GLICKO_RD = _parse_float(
+    "INITIAL_GLICKO_RD", 350.0
+)  # New-player uncertainty and inactivity ceiling
+MAX_RATING_SWING_PER_GAME = _parse_float(
+    "MAX_RATING_SWING_PER_GAME", 400.0
+)  # Cap on individual rating change per match
+BASE_RATING_DELTA_MULTIPLIER = _parse_float(
+    "BASE_RATING_DELTA_MULTIPLIER", 1.1
+)  # Target about +/-15 at 80% certainty
+MAX_RD_CONTRACTION_PER_GAME = _parse_float(
+    "MAX_RD_CONTRACTION_PER_GAME", 0.065
+)  # Slow active confidence gain
+NEW_PLAYER_MMR_DISCOUNT = _parse_int(
+    "NEW_PLAYER_MMR_DISCOUNT", 500
+)  # Deliberate newcomer underseed before rating conversion
+ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int(
+    "ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 50
+)  # Max games for allowing admin rating adjustments
+ADMIN_RATING_MAX = _parse_float(
+    "ADMIN_RATING_MAX", 6000.0
+)  # Sanity ceiling on admin-set Glicko ratings (2x the MMR seed scale; catches MMR typed as rating)
+RD_DECAY_CONSTANT = _parse_float(
+    "RD_DECAY_CONSTANT", 100.0
+)  # Weekly inactivity uncertainty growth (c value)
+RD_DECAY_GRACE_PERIOD_DAYS = _parse_int(
+    "RD_DECAY_GRACE_PERIOD_DAYS", 7
+)  # No inactivity growth through this day
+MMR_MODAL_TIMEOUT_MINUTES = _parse_int(
+    "MMR_MODAL_TIMEOUT_MINUTES", 5
+)  # Timeout for MMR input modal
+MMR_MODAL_RETRY_LIMIT = _parse_int(
+    "MMR_MODAL_RETRY_LIMIT", 3
+)  # Maximum retries for invalid MMR input
 
 # Streak-based rating adjustment configuration
-STREAK_THRESHOLD = _parse_int("STREAK_THRESHOLD", 3)  # Min streak length for multiplier (boost applies ON this game)
-STREAK_MULTIPLIER_PER_GAME = _parse_float("STREAK_MULTIPLIER_PER_GAME", 0.20)  # 20% boost per game at/above threshold
+STREAK_THRESHOLD = _parse_int(
+    "STREAK_THRESHOLD", 3
+)  # Min streak length for multiplier (boost applies ON this game)
+STREAK_MULTIPLIER_PER_GAME = _parse_float(
+    "STREAK_MULTIPLIER_PER_GAME", 0.20
+)  # 20% boost per game at/above threshold
+
+# OpenSkill rating system configuration
+OPENSKILL_CALIBRATION_SIGMA_THRESHOLD = _parse_float("OPENSKILL_CALIBRATION_SIGMA_THRESHOLD", 4.0)
+OPENSKILL_PERFORMANCE_STRENGTH = _parse_float("OPENSKILL_PERFORMANCE_STRENGTH", 0.10)
+OPENSKILL_SIGMA_DECAY_GRACE_PERIOD_DAYS = _parse_int("OPENSKILL_SIGMA_DECAY_GRACE_PERIOD_DAYS", 7)
+OPENSKILL_SIGMA_DECAY_PER_WEEK = _parse_float("OPENSKILL_SIGMA_DECAY_PER_WEEK", 2.0)
+OPENSKILL_WIN_PROBABILITY_TEMPERATURE = _parse_float("OPENSKILL_WIN_PROBABILITY_TEMPERATURE", 6.5)
 
 # Recalibration configuration
 RECALIBRATION_COOLDOWN_SECONDS = _parse_int("RECALIBRATION_COOLDOWN_SECONDS", 7776000)  # 90 days
 RECALIBRATION_INITIAL_RD = _parse_float("RECALIBRATION_INITIAL_RD", 350.0)  # RD to reset to
-RECALIBRATION_INITIAL_VOLATILITY = _parse_float("RECALIBRATION_INITIAL_VOLATILITY", 0.06)  # Volatility to reset to
+RECALIBRATION_INITIAL_VOLATILITY = _parse_float(
+    "RECALIBRATION_INITIAL_VOLATILITY", 0.06
+)  # Volatility to reset to
 
 # Player Stake Pool configuration (draft mode auto-liquidity)
-PLAYER_STAKE_POOL_SIZE = _parse_int("PLAYER_STAKE_POOL_SIZE", 50)  # Total auto-liquidity pool (5 per drafted player)
-PLAYER_STAKE_PER_PLAYER = _parse_int("PLAYER_STAKE_PER_PLAYER", 5)  # Auto-liquidity per drafted player
+PLAYER_STAKE_POOL_SIZE = _parse_int(
+    "PLAYER_STAKE_POOL_SIZE", 50
+)  # Total auto-liquidity pool (5 per drafted player)
+PLAYER_STAKE_PER_PLAYER = _parse_int(
+    "PLAYER_STAKE_PER_PLAYER", 5
+)  # Auto-liquidity per drafted player
 PLAYER_STAKE_ENABLED = _parse_bool("PLAYER_STAKE_ENABLED", True)  # Enable stake pool in draft mode
 STAKE_WIN_PROB_MIN = _parse_float("STAKE_WIN_PROB_MIN", 0.10)  # Clamp to prevent extreme odds
 STAKE_WIN_PROB_MAX = _parse_float("STAKE_WIN_PROB_MAX", 0.90)
 
 # Spectator Pool configuration
-SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 10% to winning players
+SPECTATOR_POOL_PLAYER_CUT = _parse_float(
+    "SPECTATOR_POOL_PLAYER_CUT", 0.10
+)  # 10% to winning players
 
 # Match Enrichment configuration
-ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200)  # 2 hours (seconds)
-ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation
-ENRICHMENT_RETRY_DELAYS = _parse_int_list("ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180])  # Exponential backoff delays (seconds)
+ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int(
+    "ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200
+)  # 2 hours (seconds)
+ENRICHMENT_MIN_PLAYER_MATCH = _parse_int(
+    "ENRICHMENT_MIN_PLAYER_MATCH", 10
+)  # All 10 players required for strict validation
+ENRICHMENT_RETRY_DELAYS = _parse_int_list(
+    "ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180]
+)  # Exponential backoff delays (seconds)
 
 # Wrapped (monthly summary) configuration
 WRAPPED_ENABLED = _parse_bool("WRAPPED_ENABLED", True)
 WRAPPED_MIN_GAMES = _parse_int("WRAPPED_MIN_GAMES", 3)  # Min games to appear in wrapped
 WRAPPED_MIN_BETS = _parse_int("WRAPPED_MIN_BETS", 3)  # Min bets for betting awards
-WRAPPED_CHECK_INTERVAL_HOURS = _parse_int("WRAPPED_CHECK_INTERVAL_HOURS", 12)  # Hours between checks (12-24)
+WRAPPED_CHECK_INTERVAL_HOURS = _parse_int(
+    "WRAPPED_CHECK_INTERVAL_HOURS", 12
+)  # Hours between checks (12-24)
 
 # Prediction market (order-book mechanic) configuration
-PREDICTION_CONTRACT_VALUE = _parse_int("PREDICTION_CONTRACT_VALUE", 10)          # jopa paid per winning contract
-PREDICTION_TICK_SIZE = _parse_int("PREDICTION_TICK_SIZE", 1)                     # jopa per price tick (= 1% probability)
-PREDICTION_LEVELS_PER_SIDE = _parse_int("PREDICTION_LEVELS_PER_SIDE", 3)         # ladder depth each side (initial seed)
-PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 50)          # contracts per level (initial seed)
-PREDICTION_OUTER_LEVEL_SIZES = _parse_int_list("PREDICTION_OUTER_LEVEL_SIZES", [20, 15, 10, 5])  # tapered levels beyond the initial seed
-PREDICTION_SPREAD_TICKS = _parse_int("PREDICTION_SPREAD_TICKS", 2)               # top-of-book offset from mid (initial seed)
-PREDICTION_REFRESH_LEVELS_PER_SIDE = _parse_int("PREDICTION_REFRESH_LEVELS_PER_SIDE", 3)  # daily-refresh ladder depth
-PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int("PREDICTION_REFRESH_SIZE_PER_LEVEL", 10)   # daily-refresh contracts/level
-PREDICTION_REFRESH_OUTER_LEVEL_SIZES = _parse_int_list("PREDICTION_REFRESH_OUTER_LEVEL_SIZES", [8, 6, 4, 2])  # tapered levels beyond the normal refresh range
-PREDICTION_REFRESH_SPREAD_TICKS = _parse_int("PREDICTION_REFRESH_SPREAD_TICKS", 4)        # daily-refresh top-of-book offset (wider than seed)
-PREDICTION_REFRESH_SECONDS = _parse_int("PREDICTION_REFRESH_SECONDS", 86400)     # per-market refresh interval (~daily)
-PREDICTION_REFRESH_WAKE_SECONDS = _parse_int("PREDICTION_REFRESH_WAKE_SECONDS", 3600)  # how often the worker wakes to scan
-PREDICTION_DRIFT_MIN = _parse_int("PREDICTION_DRIFT_MIN", -3)                    # inclusive uniform integer drift
+PREDICTION_CONTRACT_VALUE = _parse_int(
+    "PREDICTION_CONTRACT_VALUE", 10
+)  # jopa paid per winning contract
+PREDICTION_TICK_SIZE = _parse_int(
+    "PREDICTION_TICK_SIZE", 1
+)  # jopa per price tick (= 1% probability)
+PREDICTION_LEVELS_PER_SIDE = _parse_int(
+    "PREDICTION_LEVELS_PER_SIDE", 3
+)  # ladder depth each side (initial seed)
+PREDICTION_SIZE_PER_LEVEL = _parse_int(
+    "PREDICTION_SIZE_PER_LEVEL", 50
+)  # contracts per level (initial seed)
+PREDICTION_OUTER_LEVEL_SIZES = _parse_int_list(
+    "PREDICTION_OUTER_LEVEL_SIZES", [20, 15, 10, 5]
+)  # tapered levels beyond the initial seed
+PREDICTION_SPREAD_TICKS = _parse_int(
+    "PREDICTION_SPREAD_TICKS", 2
+)  # top-of-book offset from mid (initial seed)
+PREDICTION_REFRESH_LEVELS_PER_SIDE = _parse_int(
+    "PREDICTION_REFRESH_LEVELS_PER_SIDE", 3
+)  # daily-refresh ladder depth
+PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int(
+    "PREDICTION_REFRESH_SIZE_PER_LEVEL", 10
+)  # daily-refresh contracts/level
+PREDICTION_REFRESH_OUTER_LEVEL_SIZES = _parse_int_list(
+    "PREDICTION_REFRESH_OUTER_LEVEL_SIZES", [8, 6, 4, 2]
+)  # tapered levels beyond the normal refresh range
+PREDICTION_REFRESH_SPREAD_TICKS = _parse_int(
+    "PREDICTION_REFRESH_SPREAD_TICKS", 4
+)  # daily-refresh top-of-book offset (wider than seed)
+PREDICTION_REFRESH_SECONDS = _parse_int(
+    "PREDICTION_REFRESH_SECONDS", 86400
+)  # per-market refresh interval (~daily)
+PREDICTION_REFRESH_WAKE_SECONDS = _parse_int(
+    "PREDICTION_REFRESH_WAKE_SECONDS", 3600
+)  # how often the worker wakes to scan
+PREDICTION_DRIFT_MIN = _parse_int("PREDICTION_DRIFT_MIN", -3)  # inclusive uniform integer drift
 PREDICTION_DRIFT_MAX = _parse_int("PREDICTION_DRIFT_MAX", 3)
-PREDICTION_FADE_TICKS = _parse_int("PREDICTION_FADE_TICKS", 5)                   # how far fair fades when one side fully consumed
-PREDICTION_PRICE_LOW = _parse_int("PREDICTION_PRICE_LOW", 5)                     # clamp on fair so the seed ladder fits in {1..99}; wider refresh levels get filtered there
+PREDICTION_FADE_TICKS = _parse_int(
+    "PREDICTION_FADE_TICKS", 5
+)  # how far fair fades when one side fully consumed
+PREDICTION_PRICE_LOW = _parse_int(
+    "PREDICTION_PRICE_LOW", 5
+)  # clamp on fair so the seed ladder fits in {1..99}; wider refresh levels get filtered there
 PREDICTION_PRICE_HIGH = _parse_int("PREDICTION_PRICE_HIGH", 95)
 PREDICTION_RECENT_TRADES_SHOWN = _parse_int("PREDICTION_RECENT_TRADES_SHOWN", 5)
-PREDICTION_DIGEST_HOUR_UTC = _parse_int("PREDICTION_DIGEST_HOUR_UTC", 12)        # anchor UTC hour; guild digest fires here and 12h opposite (twice daily)
+PREDICTION_DIGEST_HOUR_UTC = _parse_int(
+    "PREDICTION_DIGEST_HOUR_UTC", 12
+)  # anchor UTC hour; guild digest fires here and 12h opposite (twice daily)
 PREDICTION_INITIAL_FAIR_DEFAULT = _parse_int("PREDICTION_INITIAL_FAIR_DEFAULT", 50)
-PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TRADE", 1000)  # hard cap on a single buy
+PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int(
+    "PREDICTION_MAX_CONTRACTS_PER_TRADE", 1000
+)  # hard cap on a single buy
 
 # Server-wide Jopacoin monetary policy. Recovery mode deliberately starts
 # enabled in production: it pauses player-directed Reserve disbursements and
@@ -457,43 +574,31 @@ PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TR
 # tests and tools do not mutate Reserve governance unless they explicitly ask.
 ECONOMY_EVENTS_ENABLED = _parse_bool("ECONOMY_EVENTS_ENABLED", True)
 ECONOMY_RECOVERY_MODE = _parse_bool("ECONOMY_RECOVERY_MODE", True)
-ECONOMY_RECOVERY_ANNUAL_RATE = _parse_float(
-    "ECONOMY_RECOVERY_ANNUAL_RATE", -0.035
-)
+ECONOMY_RECOVERY_ANNUAL_RATE = _parse_float("ECONOMY_RECOVERY_ANNUAL_RATE", -0.035)
 ECONOMY_NORMAL_ANNUAL_RATE = _parse_float("ECONOMY_NORMAL_ANNUAL_RATE", 0.01)
 ECONOMY_INFLATION_CEILING = _parse_float("ECONOMY_INFLATION_CEILING", 0.02)
 ECONOMY_EVENT_WAKE_SECONDS = _parse_int("ECONOMY_EVENT_WAKE_SECONDS", 3600)
-ECONOMY_EVENT_TRIGGER_HOUR_LOCAL = _parse_int(
-    "ECONOMY_EVENT_TRIGGER_HOUR_LOCAL", 10
-)
+ECONOMY_EVENT_TRIGGER_HOUR_LOCAL = _parse_int("ECONOMY_EVENT_TRIGGER_HOUR_LOCAL", 10)
 ECONOMY_RECOVERY_STABLE_DAYS = _parse_int("ECONOMY_RECOVERY_STABLE_DAYS", 30)
 ECONOMY_EVENT_LOOKBACK_DAYS = _parse_int("ECONOMY_EVENT_LOOKBACK_DAYS", 7)
-ECONOMY_EVENT_MAX_RESERVE_BURN_PCT = _parse_float(
-    "ECONOMY_EVENT_MAX_RESERVE_BURN_PCT", 0.03
-)
-ECONOMY_EVENT_MAX_WALLET_BURN_PCT = _parse_float(
-    "ECONOMY_EVENT_MAX_WALLET_BURN_PCT", 0.0025
-)
+ECONOMY_EVENT_MAX_RESERVE_BURN_PCT = _parse_float("ECONOMY_EVENT_MAX_RESERVE_BURN_PCT", 0.03)
+ECONOMY_EVENT_MAX_WALLET_BURN_PCT = _parse_float("ECONOMY_EVENT_MAX_WALLET_BURN_PCT", 0.0025)
 
 # Trivia configuration
 TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours
 TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
-TRIVIA_BANKRUPT_MULTIPLIER = _parse_float("TRIVIA_BANKRUPT_MULTIPLIER", 2.0)  # Streak-bonus multiplier when balance ≤ 0
+TRIVIA_BANKRUPT_MULTIPLIER = _parse_float(
+    "TRIVIA_BANKRUPT_MULTIPLIER", 2.0
+)  # Streak-bonus multiplier when balance ≤ 0
 
 # Player-stat trivia configuration. This is intentionally a separate cooldown
 # from /trivia: each run is a fixed daily set whose questions are frozen when
 # the session starts, so later stat updates cannot change an answer mid-game.
-PLAYER_TRIVIA_COOLDOWN_SECONDS = _parse_int(
-    "PLAYER_TRIVIA_COOLDOWN_SECONDS", 86400
-)
-PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int(
-    "PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS", 20
-)
+PLAYER_TRIVIA_COOLDOWN_SECONDS = _parse_int("PLAYER_TRIVIA_COOLDOWN_SECONDS", 86400)
+PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS", 20)
 PLAYER_TRIVIA_QUESTION_COUNT = _parse_int("PLAYER_TRIVIA_QUESTION_COUNT", 10)
-PLAYER_TRIVIA_REWARD_PER_CORRECT = _parse_int(
-    "PLAYER_TRIVIA_REWARD_PER_CORRECT", 1
-)
+PLAYER_TRIVIA_REWARD_PER_CORRECT = _parse_int("PLAYER_TRIVIA_REWARD_PER_CORRECT", 1)
 PLAYER_TRIVIA_RECENT_DAYS = _parse_int("PLAYER_TRIVIA_RECENT_DAYS", 30)
 PLAYER_TRIVIA_INCLUDE_SPICY = _parse_bool("PLAYER_TRIVIA_INCLUDE_SPICY", False)
 
@@ -509,6 +614,12 @@ NEON_LLM_CHANCE = _parse_float("NEON_LLM_CHANCE", 0.60)  # Chance of LLM comment
 NEON_COOLDOWN_SECONDS = _parse_int("NEON_COOLDOWN_SECONDS", 60)  # Per-user cooldown
 NEON_MVP_CHANCE = _parse_float("NEON_MVP_CHANCE", 0.35)  # One roll per enriched match
 NEON_DIG_CHANCE = _parse_float("NEON_DIG_CHANCE", 0.12)  # Base roll for routine dig GIF events
-NEON_BIGWIN_FLOOR = _parse_float("NEON_BIGWIN_FLOOR", 0.05)  # Min big-win GIF roll at the payout floor
-NEON_BIGWIN_FULL_PAYOUT = _parse_int("NEON_BIGWIN_FULL_PAYOUT", 5000)  # Payout where big-win odds saturate
-NEON_BIGWIN_MIN_PAYOUT = _parse_int("NEON_BIGWIN_MIN_PAYOUT", 500)  # Min payout to qualify for a big-win GIF
+NEON_BIGWIN_FLOOR = _parse_float(
+    "NEON_BIGWIN_FLOOR", 0.05
+)  # Min big-win GIF roll at the payout floor
+NEON_BIGWIN_FULL_PAYOUT = _parse_int(
+    "NEON_BIGWIN_FULL_PAYOUT", 5000
+)  # Payout where big-win odds saturate
+NEON_BIGWIN_MIN_PAYOUT = _parse_int(
+    "NEON_BIGWIN_MIN_PAYOUT", 500
+)  # Min payout to qualify for a big-win GIF

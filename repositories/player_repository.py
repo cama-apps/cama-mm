@@ -4,7 +4,7 @@ Repository for player data access.
 
 import json
 import logging
-from datetime import UTC
+from datetime import UTC, datetime
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from domain.models.player import Player
@@ -30,9 +30,7 @@ def _refresh_wrapped_enrichment_facts(
     if not unique_ids:
         return
 
-    steam_ids_by_discord: dict[int, set[int]] = {
-        discord_id: set() for discord_id in unique_ids
-    }
+    steam_ids_by_discord: dict[int, set[int]] = {discord_id: set() for discord_id in unique_ids}
     affected_matches: dict[tuple[int, int], dict] = {}
 
     for offset in range(0, len(unique_ids), 900):
@@ -195,7 +193,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
             if cursor.fetchone():
-                raise ValueError(f"Player with Discord ID {discord_id} already exists in this server.")
+                raise ValueError(
+                    f"Player with Discord ID {discord_id} already exists in this server."
+                )
 
             roles_json = json.dumps(preferred_roles) if preferred_roles else None
 
@@ -344,9 +344,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 (guild_id, *unique_ids),
             )
-            rows_by_id = {
-                row["discord_id"]: row for row in cursor.fetchall()
-            }
+            rows_by_id = {row["discord_id"]: row for row in cursor.fetchall()}
 
         players: list[Player] = []
         last_match_dates: dict[int, str | None] = {}
@@ -403,7 +401,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
 
-    def get_random_eligible_target(self, guild_id: int, exclude_id: int, min_balance: int = 1) -> "Player | None":
+    def get_random_eligible_target(
+        self, guild_id: int, exclude_id: int, min_balance: int = 1
+    ) -> "Player | None":
         """Get a random player with positive balance, excluding one player. SQL-level random."""
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -639,9 +639,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (region, discord_id, guild_id),
             )
 
-    def update_inferred_regions_bulk(
-        self, updates: list[tuple[int, int, str]]
-    ) -> None:
+    def update_inferred_regions_bulk(self, updates: list[tuple[int, int, str]]) -> None:
         """Cache multiple inferred regions in one transaction."""
         if not updates:
             return
@@ -675,7 +673,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (rating, rd, volatility, discord_id, guild_id),
             )
 
-    def get_glicko_rating(self, discord_id: int, guild_id: int) -> tuple[float, float, float] | None:
+    def get_glicko_rating(
+        self, discord_id: int, guild_id: int
+    ) -> tuple[float, float, float] | None:
         """
         Get player's Glicko-2 rating data.
 
@@ -702,14 +702,37 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         self, discord_ids: list[int], guild_id: int | None
     ) -> dict[int, dict]:
         """Bulk-load every player field used during match rating calculation."""
+        rating_inputs, _revision = (
+            self.get_match_rating_inputs_with_openskill_revision(
+                discord_ids,
+                guild_id,
+            )
+        )
+        return rating_inputs
+
+    def get_match_rating_inputs_with_openskill_revision(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+    ) -> tuple[dict[int, dict], int]:
+        """Read rating inputs and the concurrency revision on one snapshot."""
         unique_ids = list(dict.fromkeys(discord_ids))
         if not unique_ids:
-            return {}
+            return {}, 0
 
         guild_id = self.normalize_guild_id(guild_id)
         placeholders = ",".join("?" * len(unique_ids))
         with self.connection() as conn:
             cursor = conn.cursor()
+            revision_row = cursor.execute(
+                """
+                SELECT revision
+                FROM openskill_rating_revisions
+                WHERE guild_id = ?
+                """,
+                (guild_id,),
+            ).fetchone()
+            revision = int(revision_row["revision"]) if revision_row else 0
             cursor.execute(
                 f"""
                 SELECT
@@ -728,7 +751,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 unique_ids + [guild_id],
             )
-            return {row["discord_id"]: dict(row) for row in cursor.fetchall()}
+            return (
+                {
+                    row["discord_id"]: dict(row)
+                    for row in cursor.fetchall()
+                },
+                revision,
+            )
 
     def get_last_match_date(self, discord_id: int, guild_id: int) -> tuple | None:
         """
@@ -802,7 +831,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             losses = row["losses"] or 0
             return int(wins) + int(losses)
 
-    def update_last_match_date(self, discord_id: int, guild_id: int, timestamp: str | None = None) -> None:
+    def update_last_match_date(
+        self, discord_id: int, guild_id: int, timestamp: str | None = None
+    ) -> None:
         """
         Update last_match_date for a player.
 
@@ -834,7 +865,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     (timestamp, discord_id, guild_id),
                 )
 
-
     def get_balance(self, discord_id: int, guild_id: int) -> int:
         """Get a player's jopacoin balance."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -847,9 +877,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return int(row["balance"]) if row else 0
 
-    def get_balances_bulk(
-        self, discord_ids: list[int], guild_id: int | None
-    ) -> dict[int, int]:
+    def get_balances_bulk(self, discord_ids: list[int], guild_id: int | None) -> dict[int, int]:
         """Get balances for multiple players on one connection."""
         unique_ids = list(dict.fromkeys(discord_ids))
         if not unique_ids:
@@ -884,9 +912,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Returns 0 if the player row doesn't exist.
         """
-        return self.advance_dota_streaks_bulk(
-            [discord_id], guild_id, today, yesterday
-        )[0]
+        return self.advance_dota_streaks_bulk([discord_id], guild_id, today, yesterday)[0]
 
     def advance_dota_streaks_bulk(
         self,
@@ -929,11 +955,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 current = int(row["dota_streak_days"] or 0)
                 last_date = row["dota_last_played_date"]
                 resulting_streaks[discord_id] = (
-                    current
-                    if last_date == today
-                    else current + 1
-                    if last_date == yesterday
-                    else 1
+                    current if last_date == today else current + 1 if last_date == yesterday else 1
                 )
 
             # Same-day replays intentionally do not touch updated_at, matching
@@ -1221,9 +1243,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     ],
                 )
                 # Track lowest balance for players who had negative deltas
-                negative_ids = [
-                    did for did, delta in deltas_by_discord_id.items() if delta < 0
-                ]
+                negative_ids = [did for did, delta in deltas_by_discord_id.items() if delta < 0]
                 if negative_ids:
                     placeholders = ",".join("?" * len(negative_ids))
                     cursor.execute(
@@ -1534,9 +1554,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if penalty > 0:
             if has_context:
                 penalty_reason = (
-                    f"{reason} bankruptcy penalty"
-                    if reason
-                    else "bankruptcy penalty on income"
+                    f"{reason} bankruptcy penalty" if reason else "bankruptcy penalty on income"
                 )
                 self._set_economy_ledger_context(
                     cursor,
@@ -2068,7 +2086,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-    def get_all_registered_players_for_lottery(self, guild_id: int, activity_days: int = 14) -> list[dict]:
+    def get_all_registered_players_for_lottery(
+        self, guild_id: int, activity_days: int = 14
+    ) -> list[dict]:
         """
         Get recently active players (discord_id only) for lottery selection.
 
@@ -2153,7 +2173,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (guild_id,),
             )
             row = cursor.fetchone()
-            return {"discord_id": row["discord_id"], "jopacoin_balance": row["jopacoin_balance"]} if row else None
+            return (
+                {"discord_id": row["discord_id"], "jopacoin_balance": row["jopacoin_balance"]}
+                if row
+                else None
+            )
 
     def get_richest_players(
         self, guild_id: int, limit: int = 5, min_balance: int = 1
@@ -2189,7 +2213,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-
     def increment_wins(self, discord_id: int, guild_id: int) -> None:
         """Increment player's win count."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -2203,9 +2226,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
 
-
-
-    def apply_match_outcome(self, winning_ids: list[int], losing_ids: list[int], guild_id: int) -> None:
+    def apply_match_outcome(
+        self, winning_ids: list[int], losing_ids: list[int], guild_id: int
+    ) -> None:
         """
         Apply win/loss increments for a match in a single transaction.
         """
@@ -2231,7 +2254,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     [(pid, guild_id) for pid in losing_ids],
                 )
 
-    def update_glicko_ratings_bulk(self, updates: list[tuple[int, float, float, float]], guild_id: int) -> int:
+    def update_glicko_ratings_bulk(
+        self, updates: list[tuple[int, float, float, float]], guild_id: int
+    ) -> int:
         """
         Bulk update Glicko ratings in a single transaction.
 
@@ -2337,6 +2362,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return False
 
             cursor.execute(
+                """
+                DELETE FROM openskill_rating_events
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, guild_id),
+            )
+            cursor.execute(
                 "DELETE FROM players WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, guild_id),
             )
@@ -2348,9 +2380,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 "DELETE FROM rating_history WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, guild_id),
             )
+            self._increment_openskill_rating_revision(cursor, guild_id)
 
             return True
-
 
     def get_by_steam_id(self, steam_id: int, guild_id: int) -> Player | None:
         """
@@ -2621,9 +2653,17 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (guild_id,),
             )
             cursor.execute(
+                """
+                DELETE FROM openskill_rating_events
+                WHERE discord_id < 0 AND guild_id = ?
+                """,
+                (guild_id,),
+            )
+            cursor.execute(
                 "DELETE FROM players WHERE discord_id < 0 AND guild_id = ?",
                 (guild_id,),
             )
+            self._increment_openskill_rating_revision(cursor, guild_id)
 
             return count
 
@@ -2637,9 +2677,15 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
             row = cursor.fetchone()
-            return row["lowest_balance_ever"] if row and row["lowest_balance_ever"] is not None else None
+            return (
+                row["lowest_balance_ever"]
+                if row and row["lowest_balance_ever"] is not None
+                else None
+            )
 
-    def get_lowest_balances_bulk(self, discord_ids: list[int], guild_id: int) -> dict[int, int | None]:
+    def get_lowest_balances_bulk(
+        self, discord_ids: list[int], guild_id: int
+    ) -> dict[int, int | None]:
         """Get lowest_balance_ever for multiple players in a single query.
 
         Returns dict of {discord_id: lowest_balance_ever}.
@@ -2656,14 +2702,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return {row["discord_id"]: row["lowest_balance_ever"] for row in cursor.fetchall()}
 
-
     # =========================================================================
     # Easter Egg Tracking Methods (JOPA-T expansion)
     # =========================================================================
 
-    def update_personal_best_win_streak(
-        self, discord_id: int, guild_id: int, streak: int
-    ) -> bool:
+    def update_personal_best_win_streak(self, discord_id: int, guild_id: int, streak: int) -> bool:
         """
         Update personal best win streak if new streak is higher.
 
@@ -2709,14 +2752,12 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (*discord_ids, guild_id),
             )
             previous_bests = {
-                row["discord_id"]: int(row["personal_best"])
-                for row in cursor.fetchall()
+                row["discord_id"]: int(row["personal_best"]) for row in cursor.fetchall()
             }
             improvements = {
                 discord_id: streak
                 for discord_id, streak in streaks_by_discord_id.items()
-                if discord_id in previous_bests
-                and streak > previous_bests[discord_id]
+                if discord_id in previous_bests and streak > previous_bests[discord_id]
             }
             cursor.executemany(
                 """
@@ -2731,10 +2772,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     for discord_id, streak in improvements.items()
                 ],
             )
-            return {
-                discord_id: previous_bests[discord_id]
-                for discord_id in improvements
-            }
+            return {discord_id: previous_bests[discord_id] for discord_id in improvements}
 
     def get_personal_best_win_streak(self, discord_id: int, guild_id: int) -> int:
         """Get player's personal best win streak."""
@@ -2772,7 +2810,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["total_bets_placed"] if row and row["total_bets_placed"] else 0
 
-
     def mark_first_leverage_used(self, discord_id: int, guild_id: int) -> bool:
         """
         Mark that the player has used their first leverage bet.
@@ -2794,7 +2831,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
-
     def get_first_calibrated_at(self, discord_id: int, guild_id: int) -> int | None:
         """
         Get the Unix timestamp when the player first became calibrated.
@@ -2811,7 +2847,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             row = cursor.fetchone()
             return row["first_calibrated_at"] if row and row["first_calibrated_at"] else None
-
 
     def get_registered_player_count(self, guild_id: int) -> int:
         """
@@ -2927,19 +2962,51 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return (row["os_mu"], row["os_sigma"])
             return None
 
-    def update_openskill_rating(self, discord_id: int, guild_id: int, mu: float, sigma: float) -> None:
+    @staticmethod
+    def _increment_openskill_rating_revision(cursor, guild_id: int) -> None:
+        cursor.execute(
+            """
+            INSERT INTO openskill_rating_revisions (
+                guild_id, revision, updated_at
+            )
+            VALUES (?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                revision = openskill_rating_revisions.revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (guild_id,),
+        )
+
+    def update_openskill_rating(
+        self, discord_id: int, guild_id: int, mu: float, sigma: float
+    ) -> None:
         """Update player's OpenSkill rating."""
+        from openskill_rating_system import CamaOpenSkillSystem
+        from openskill_replay import OPENSKILL_ALGORITHM_VERSION
+
         guild_id = self.normalize_guild_id(guild_id)
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE players
-                SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                SET os_mu = ?, os_sigma = ?, os_rating_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                (mu, sigma, discord_id, guild_id),
+                (
+                    mu,
+                    sigma,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    fingerprint,
+                    discord_id,
+                    guild_id,
+                ),
             )
+            if cursor.rowcount:
+                self._increment_openskill_rating_revision(cursor, guild_id)
 
     def update_openskill_ratings_bulk(
         self, updates: list[tuple[int, float, float]], guild_id: int
@@ -2954,7 +3021,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Number of rows updated
         """
+        from openskill_rating_system import CamaOpenSkillSystem
+        from openskill_replay import OPENSKILL_ALGORITHM_VERSION
+
         guild_id = self.normalize_guild_id(guild_id)
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
         if not updates:
             return 0
         with self.connection() as conn:
@@ -2962,12 +3033,206 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor.executemany(
                 """
                 UPDATE players
-                SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                SET os_mu = ?, os_sigma = ?, os_rating_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                [(mu, sigma, pid, guild_id) for pid, mu, sigma in updates],
+                [
+                    (
+                        mu,
+                        sigma,
+                        OPENSKILL_ALGORITHM_VERSION,
+                        fingerprint,
+                        pid,
+                        guild_id,
+                    )
+                    for pid, mu, sigma in updates
+                ],
             )
-            return cursor.rowcount
+            updated = cursor.rowcount
+            if updated:
+                self._increment_openskill_rating_revision(cursor, guild_id)
+            return updated
+
+    def update_both_rating_estimates_atomic(
+        self,
+        *,
+        discord_id: int,
+        guild_id: int,
+        glicko_rating: float,
+        glicko_rd: float,
+        glicko_volatility: float,
+        os_mu: float,
+        reason: str,
+        actor_id: int | None = None,
+    ) -> None:
+        """Set both rating estimates and record a replayable OpenSkill μ event."""
+        from openskill_rating_system import CamaOpenSkillSystem
+        from openskill_replay import OPENSKILL_ALGORITHM_VERSION
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
+        event_at = datetime.now(UTC).isoformat()
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
+                    os_mu = ?,
+                    os_sigma = COALESCE(os_sigma, ?),
+                    os_rating_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (
+                    glicko_rating,
+                    glicko_rd,
+                    glicko_volatility,
+                    os_mu,
+                    CamaOpenSkillSystem.DEFAULT_SIGMA,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    fingerprint,
+                    discord_id,
+                    normalized_guild,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Player not found")
+            cursor.execute(
+                """
+                INSERT INTO openskill_rating_events (
+                    guild_id, discord_id, event_type, value, event_at,
+                    reason, actor_id, os_algorithm_version,
+                    os_algorithm_fingerprint
+                )
+                VALUES (?, ?, 'set_mu', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_guild,
+                    discord_id,
+                    os_mu,
+                    event_at,
+                    reason,
+                    actor_id,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    fingerprint,
+                ),
+            )
+            self._increment_openskill_rating_revision(
+                cursor,
+                normalized_guild,
+            )
+
+    def bump_rating_uncertainties_atomic(
+        self,
+        *,
+        guild_id: int,
+        rd_amount: float,
+        sigma_amount: float,
+        max_rd: float,
+        max_sigma: float,
+        reason: str,
+        actor_id: int | None = None,
+    ) -> dict | None:
+        """Increase both systems' uncertainty without resubmitting stale μ."""
+        from openskill_rating_system import CamaOpenSkillSystem
+        from openskill_replay import OPENSKILL_ALGORITHM_VERSION
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
+        event_at = datetime.now(UTC).isoformat()
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT discord_id, glicko_rd, os_sigma
+                FROM players
+                WHERE guild_id = ? AND glicko_rating IS NOT NULL
+                ORDER BY discord_id
+                """,
+                (normalized_guild,),
+            ).fetchall()
+            if not rows:
+                return None
+            old_rds = [float(row["glicko_rd"]) for row in rows]
+            new_rds = [min(max_rd, rd + rd_amount) for rd in old_rds]
+            cursor.executemany(
+                """
+                UPDATE players
+                SET glicko_rd = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                [
+                    (new_rd, row["discord_id"], normalized_guild)
+                    for row, new_rd in zip(rows, new_rds, strict=True)
+                ],
+            )
+
+            os_rows = [row for row in rows if row["os_sigma"] is not None]
+            old_sigmas = [float(row["os_sigma"]) for row in os_rows]
+            new_sigmas = [min(max_sigma, sigma + sigma_amount) for sigma in old_sigmas]
+            if os_rows:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET os_sigma = ?, os_rating_version = ?,
+                        os_algorithm_fingerprint = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (
+                            sigma,
+                            OPENSKILL_ALGORITHM_VERSION,
+                            fingerprint,
+                            row["discord_id"],
+                            normalized_guild,
+                        )
+                        for row, sigma in zip(os_rows, new_sigmas, strict=True)
+                    ],
+                )
+                cursor.executemany(
+                    """
+                    INSERT INTO openskill_rating_events (
+                        guild_id, discord_id, event_type, value, event_at,
+                        reason, actor_id, os_algorithm_version,
+                        os_algorithm_fingerprint
+                    )
+                    VALUES (?, ?, 'add_sigma', ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            normalized_guild,
+                            row["discord_id"],
+                            sigma_amount,
+                            event_at,
+                            reason,
+                            actor_id,
+                            OPENSKILL_ALGORITHM_VERSION,
+                            fingerprint,
+                        )
+                        for row in os_rows
+                    ],
+                )
+                self._increment_openskill_rating_revision(
+                    cursor,
+                    normalized_guild,
+                )
+            return {
+                "count": len(rows),
+                "avg_before": sum(old_rds) / len(old_rds),
+                "avg_after": sum(new_rds) / len(new_rds),
+                "os_count": len(os_rows),
+                "avg_os_sigma_before": (
+                    sum(old_sigmas) / len(old_sigmas) if old_sigmas else None
+                ),
+                "avg_os_sigma_after": (
+                    sum(new_sigmas) / len(new_sigmas) if new_sigmas else None
+                ),
+            }
 
     def get_openskill_ratings_bulk(
         self, discord_ids: list[int], guild_id: int
@@ -2996,10 +3261,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 discord_ids + [guild_id],
             )
-            return {
-                row["discord_id"]: (row["os_mu"], row["os_sigma"])
-                for row in cursor.fetchall()
-            }
+            return {row["discord_id"]: (row["os_mu"], row["os_sigma"]) for row in cursor.fetchall()}
 
     def try_purchase_pingedash(
         self,
@@ -3220,7 +3482,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (value, discord_id, guild_id),
             )
 
-    def try_claim_wheel_spin(self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int) -> bool:
+    def try_claim_wheel_spin(
+        self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int
+    ) -> bool:
         """
         Atomically check cooldown and claim a wheel spin.
 
@@ -3253,8 +3517,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return cursor.rowcount > 0
 
     def log_wheel_spin(
-        self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
-        is_bankrupt: bool = False, is_golden: bool = False,
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        result: int,
+        spin_time: int,
+        is_bankrupt: bool = False,
+        is_golden: bool = False,
         *,
         outcome_code: str | None = None,
         is_bonus: bool = False,
@@ -3501,9 +3770,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             if membership_added:
                 _refresh_wrapped_enrichment_facts(cursor, [discord_id])
 
-    def add_steam_ids_bulk(
-        self, steam_ids: list[tuple[int, int]]
-    ) -> list[dict[str, bool | str]]:
+    def add_steam_ids_bulk(self, steam_ids: list[tuple[int, int]]) -> list[dict[str, bool | str]]:
         """Backfill Steam IDs in order using one atomic transaction.
 
         Results align with ``steam_ids`` and report conflicts without aborting
@@ -3552,8 +3819,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 candidate_ids,
             )
             junction_owners = {
-                int(row["steam_id"]): int(row["discord_id"])
-                for row in cursor.fetchall()
+                int(row["steam_id"]): int(row["discord_id"]) for row in cursor.fetchall()
             }
             cursor.execute(
                 f"""
@@ -3565,29 +3831,23 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             legacy_owners: dict[int, set[int]] = {}
             for row in cursor.fetchall():
-                legacy_owners.setdefault(int(row["steam_id"]), set()).add(
-                    int(row["discord_id"])
-                )
+                legacy_owners.setdefault(int(row["steam_id"]), set()).add(int(row["discord_id"]))
 
             results: list[dict[str, bool | str]] = []
             affected_discord_ids: set[int] = set()
             for discord_id, steam_id in steam_ids:
                 junction_owner = junction_owners.get(steam_id)
                 legacy_conflict = any(
-                    owner != discord_id
-                    for owner in legacy_owners.get(steam_id, set())
+                    owner != discord_id for owner in legacy_owners.get(steam_id, set())
                 )
-                if (
-                    junction_owner is not None
-                    and junction_owner != discord_id
-                ) or legacy_conflict:
-                    results.append({
-                        "success": False,
-                        "is_primary": False,
-                        "error": (
-                            f"Steam ID {steam_id} is already linked to another player"
-                        ),
-                    })
+                if (junction_owner is not None and junction_owner != discord_id) or legacy_conflict:
+                    results.append(
+                        {
+                            "success": False,
+                            "is_primary": False,
+                            "error": (f"Steam ID {steam_id} is already linked to another player"),
+                        }
+                    )
                     continue
 
                 membership_added = junction_owner is None
@@ -3628,10 +3888,12 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     legacy_owners.setdefault(steam_id, set()).add(discord_id)
                 if membership_added:
                     affected_discord_ids.add(discord_id)
-                results.append({
-                    "success": True,
-                    "is_primary": is_primary,
-                })
+                results.append(
+                    {
+                        "success": True,
+                        "is_primary": is_primary,
+                    }
+                )
 
             _refresh_wrapped_enrichment_facts(cursor, affected_discord_ids)
 
@@ -4222,13 +4484,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id = row["guild_id"] if "guild_id" in keys else None
 
         # Easter egg tracking fields (may not exist in older schemas)
-        personal_best_win_streak = row["personal_best_win_streak"] if "personal_best_win_streak" in keys else 0
+        personal_best_win_streak = (
+            row["personal_best_win_streak"] if "personal_best_win_streak" in keys else 0
+        )
         total_bets_placed = row["total_bets_placed"] if "total_bets_placed" in keys else 0
-        first_leverage_used = bool(row["first_leverage_used"]) if "first_leverage_used" in keys else False
+        first_leverage_used = (
+            bool(row["first_leverage_used"]) if "first_leverage_used" in keys else False
+        )
 
         # Solo grinder detection fields (may not exist in older schemas)
         is_solo_grinder = bool(row["is_solo_grinder"]) if "is_solo_grinder" in keys else False
-        solo_grinder_checked_at = row["solo_grinder_checked_at"] if "solo_grinder_checked_at" in keys else None
+        solo_grinder_checked_at = (
+            row["solo_grinder_checked_at"] if "solo_grinder_checked_at" in keys else None
+        )
 
         # Server-region preference fields (may not exist in older schemas)
         preferred_region = row["preferred_region"] if "preferred_region" in keys else None
@@ -4276,7 +4544,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
             return int(row["last_trivia_session"])
 
-    def try_claim_trivia_session(self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int) -> bool:
+    def try_claim_trivia_session(
+        self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int
+    ) -> bool:
         """Atomically check cooldown and claim a trivia session."""
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:

@@ -100,36 +100,39 @@ class RatingComparisonService:
             if not team1_ids or not team2_ids:
                 continue
 
-            # OpenSkill prediction from pre-match rating_history snapshots.
-            # Do not use current player ratings here, or old matches leak future
-            # information and become incomparable with stored Glicko snapshots.
-            os_ratings = os_ratings_by_match.get(
-                match_id, {"team1": [], "team2": []}
-            )
-            team1_os_ratings = os_ratings.get("team1", [])
-            team2_os_ratings = os_ratings.get("team2", [])
-            if (
-                len(team1_os_ratings) != len(team1_ids)
-                or len(team2_os_ratings) != len(team2_ids)
-            ):
-                continue
-            raw_os_radiant_prob = self.openskill_system.os_predict_win_probability(
-                team1_os_ratings, team2_os_ratings
-            )
-            os_radiant_prob = self.openskill_system.calibrate_win_probability(
-                raw_os_radiant_prob
-            )
+            # Prefer the immutable pre-match OpenSkill prediction recorded
+            # with its algorithm version. Legacy rows fall back to the replayed
+            # pre-match history snapshots.
+            os_radiant_prob = match.get("openskill_radiant_win_prob")
+            raw_os_radiant_prob = match.get("openskill_raw_radiant_win_prob")
+            if os_radiant_prob is None or raw_os_radiant_prob is None:
+                os_ratings = os_ratings_by_match.get(match_id, {"team1": [], "team2": []})
+                team1_os_ratings = os_ratings.get("team1", [])
+                team2_os_ratings = os_ratings.get("team2", [])
+                if len(team1_os_ratings) != len(team1_ids) or len(team2_os_ratings) != len(
+                    team2_ids
+                ):
+                    continue
+                raw_os_radiant_prob = self.openskill_system.os_predict_win_probability(
+                    team1_os_ratings,
+                    team2_os_ratings,
+                )
+                os_radiant_prob = self.openskill_system.calibrate_win_probability(
+                    raw_os_radiant_prob
+                )
 
-            match_data.append({
-                "match_id": match_id,
-                "match_date": match["match_date"],
-                "radiant_won": radiant_won,
-                "glicko_radiant_prob": glicko_radiant_prob,
-                "openskill_radiant_prob": os_radiant_prob,
-                "raw_openskill_radiant_prob": raw_os_radiant_prob,
-                "glicko_correct": (glicko_radiant_prob >= 0.5) == radiant_won,
-                "openskill_correct": (os_radiant_prob >= 0.5) == radiant_won,
-            })
+            match_data.append(
+                {
+                    "match_id": match_id,
+                    "match_date": match["match_date"],
+                    "radiant_won": radiant_won,
+                    "glicko_radiant_prob": glicko_radiant_prob,
+                    "openskill_radiant_prob": os_radiant_prob,
+                    "raw_openskill_radiant_prob": raw_os_radiant_prob,
+                    "glicko_correct": (glicko_radiant_prob >= 0.5) == radiant_won,
+                    "openskill_correct": (os_radiant_prob >= 0.5) == radiant_won,
+                }
+            )
 
         if len(match_data) < 10:
             logger.warning(f"Only {len(match_data)} matches with complete data")
@@ -317,11 +320,13 @@ class RatingComparisonService:
             data = []
             for bucket in buckets.values():
                 if bucket["count"] > 0:
-                    data.append((
-                        bucket["avg_predicted"],
-                        bucket["actual_rate"],
-                        bucket["count"],
-                    ))
+                    data.append(
+                        (
+                            bucket["avg_predicted"],
+                            bucket["actual_rate"],
+                            bucket["count"],
+                        )
+                    )
             return sorted(data, key=lambda x: x[0])
 
         return {

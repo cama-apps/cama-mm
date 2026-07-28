@@ -119,8 +119,7 @@ class RecordingMixin:
         # bookkeeping split that stays in the balance), so a later match
         # correction can reverse exactly this amount from the old winners.
         win_bonus_delta = {
-            pid: int(r.get("net", 0)) + int(r.get("garnished", 0))
-            for pid, r in win_awards.items()
+            pid: int(r.get("net", 0)) + int(r.get("garnished", 0)) for pid, r in win_awards.items()
         }
         if (bonus_net or win_bonus_delta) and hasattr(
             self.match_repo, "update_participant_bonus_jc"
@@ -203,15 +202,11 @@ class RecordingMixin:
 
         pact_targets: set[int] | None = set()
         if self.betting_service:
-            get_pact_targets = getattr(
-                self.betting_service, "_get_blood_pact_targets", None
-            )
+            get_pact_targets = getattr(self.betting_service, "_get_blood_pact_targets", None)
             if callable(get_pact_targets):
                 try:
                     pact_targets = set(
-                        get_pact_targets(
-                            [pid for pid, _streak, _bonus in awards], guild_id
-                        )
+                        get_pact_targets([pid for pid, _streak, _bonus in awards], guild_id)
                     )
                 except TypeError:
                     # Compatibility with lightweight test doubles or older
@@ -252,12 +247,8 @@ class RecordingMixin:
                 metadata={"streak_days": new_streak, "bonus": bonus},
             )
             net_bonus = bonus
-            if self.betting_service and (
-                pact_targets is None or pid in pact_targets
-            ):
-                skimmed = self.betting_service._apply_blood_pact_skim(
-                    pid, guild_id, bonus
-                )
+            if self.betting_service and (pact_targets is None or pid in pact_targets):
+                skimmed = self.betting_service._apply_blood_pact_skim(pid, guild_id, bonus)
                 net_bonus = bonus - skimmed
             accumulate({pid: {"net": net_bonus}})
         return result
@@ -269,9 +260,7 @@ class RecordingMixin:
         Returns one dict per successful repayment (order follows input)."""
         if not self.loan_service:
             return []
-        borrower_ids = self.loan_service.get_outstanding_borrower_ids(
-            participant_ids, guild_id
-        )
+        borrower_ids = self.loan_service.get_outstanding_borrower_ids(participant_ids, guild_id)
         repayments: list[dict] = []
         attempted_ids: set[int] = set()
         for player_id in participant_ids:
@@ -282,16 +271,18 @@ class RecordingMixin:
             if not result.success:
                 continue
             r = result.value
-            repayments.append({
-                "player_id": player_id,
-                "success": True,
-                "principal": r.principal,
-                "fee": r.fee,
-                "total_repaid": r.total_repaid,
-                "balance_before": r.balance_before,
-                "new_balance": r.new_balance,
-                "nonprofit_total": r.nonprofit_total,
-            })
+            repayments.append(
+                {
+                    "player_id": player_id,
+                    "success": True,
+                    "principal": r.principal,
+                    "fee": r.fee,
+                    "total_repaid": r.total_repaid,
+                    "balance_before": r.balance_before,
+                    "new_balance": r.new_balance,
+                    "nonprofit_total": r.nonprofit_total,
+                }
+            )
         return repayments
 
     def _collect_match_easter_eggs(
@@ -314,9 +305,7 @@ class RecordingMixin:
         if self.pairings_repo:
             try:
                 all_players = radiant_team_ids + dire_team_ids
-                pairings = self.pairings_repo.get_pairings_for_players(
-                    all_players, guild_id
-                )
+                pairings = self.pairings_repo.get_pairings_for_players(all_players, guild_id)
                 for p1 in radiant_team_ids:
                     for p2 in dire_team_ids:
                         canonical_pair = (min(p1, p2), max(p1, p2))
@@ -334,12 +323,14 @@ class RecordingMixin:
                         )
                         winrate = (p1_wins / games_against) * 100
                         if winrate >= 70 or winrate <= 30:
-                            easter_egg_data["rivalries_detected"].append({
-                                "player1_id": p1,
-                                "player2_id": p2,
-                                "games_against": games_against,
-                                "winrate_vs": winrate,
-                            })
+                            easter_egg_data["rivalries_detected"].append(
+                                {
+                                    "player1_id": p1,
+                                    "player2_id": p2,
+                                    "games_against": games_against,
+                                    "winrate_vs": winrate,
+                                }
+                            )
             except Exception as e:
                 logger.debug(f"Rivalry detection error: {e}")
 
@@ -348,10 +339,12 @@ class RecordingMixin:
         for player in milestone_players:
             total_games = player.wins + player.losses
             if total_games in milestone_values:
-                easter_egg_data["games_milestones"].append({
-                    "discord_id": player.discord_id,
-                    "total_games": total_games,
-                })
+                easter_egg_data["games_milestones"].append(
+                    {
+                        "discord_id": player.discord_id,
+                        "total_games": total_games,
+                    }
+                )
 
         record_candidates = {
             pid: streak_data.get(pid, (1, 1.0))[0]
@@ -359,9 +352,7 @@ class RecordingMixin:
             if streak_data.get(pid, (1, 1.0))[0] >= 5
         }
         previous_bests: dict[int, int] = {}
-        update_many = getattr(
-            self.player_repo, "update_personal_best_win_streaks", None
-        )
+        update_many = getattr(self.player_repo, "update_personal_best_win_streaks", None)
         if record_candidates and callable(update_many):
             previous_bests = update_many(record_candidates, guild_id)
         elif record_candidates:
@@ -370,22 +361,20 @@ class RecordingMixin:
             for pid, slen in record_candidates.items():
                 if not hasattr(self.player_repo, "get_personal_best_win_streak"):
                     continue
-                prev_best = self.player_repo.get_personal_best_win_streak(
-                    pid, guild_id
-                )
+                prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
                 if slen > prev_best:
-                    self.player_repo.update_personal_best_win_streak(
-                        pid, guild_id, slen
-                    )
+                    self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
                     previous_bests[pid] = prev_best
         for pid in winning_ids:
             if pid not in previous_bests:
                 continue
-            easter_egg_data["win_streak_records"].append({
-                "discord_id": pid,
-                "current_streak": record_candidates[pid],
-                "previous_best": previous_bests[pid],
-            })
+            easter_egg_data["win_streak_records"].append(
+                {
+                    "discord_id": pid,
+                    "current_streak": record_candidates[pid],
+                    "previous_best": previous_bests[pid],
+                }
+            )
 
         return easter_egg_data
 
@@ -422,7 +411,6 @@ class RecordingMixin:
             self._recording_in_progress.add(lock_key)
 
         try:
-
             if winning_team not in ("radiant", "dire"):
                 raise ValueError("winning_team must be 'radiant' or 'dire'.")
 
@@ -445,9 +433,31 @@ class RecordingMixin:
 
             # ---- PURE COMPUTATION (reads only; safe to run before the atomic block) ----
             all_player_ids = radiant_team_ids + dire_team_ids
-            rating_inputs = self.player_repo.get_match_rating_inputs(
-                all_player_ids, guild_id
+            load_with_revision = getattr(
+                self.player_repo,
+                "get_match_rating_inputs_with_openskill_revision",
+                None,
             )
+            if callable(load_with_revision):
+                (
+                    rating_inputs,
+                    expected_openskill_revision,
+                ) = load_with_revision(all_player_ids, guild_id)
+            else:
+                get_openskill_revision = getattr(
+                    self.match_repo,
+                    "get_openskill_rating_revision",
+                    None,
+                )
+                expected_openskill_revision = (
+                    get_openskill_revision(guild_id)
+                    if callable(get_openskill_revision)
+                    else None
+                )
+                rating_inputs = self.player_repo.get_match_rating_inputs(
+                    all_player_ids,
+                    guild_id,
+                )
             radiant_glicko = [
                 (self._glicko_player_from_input(rating_inputs.get(pid)), pid)
                 for pid in radiant_team_ids
@@ -457,16 +467,15 @@ class RecordingMixin:
                 for pid in dire_team_ids
             ]
 
-            recent_outcomes_by_player = (
-                self.match_repo.get_player_recent_outcomes_bulk(
-                    all_player_ids, normalized_gid, limit=20
-                )
+            recent_outcomes_by_player = self.match_repo.get_player_recent_outcomes_bulk(
+                all_player_ids, normalized_gid, limit=20
             )
             streak_multipliers: dict[int, float] = {}
             streak_data: dict[int, tuple[int, float]] = {}
             for pid in all_player_ids:
-                won = (pid in radiant_team_ids and winning_team == "radiant") or \
-                      (pid in dire_team_ids and winning_team == "dire")
+                won = (pid in radiant_team_ids and winning_team == "radiant") or (
+                    pid in dire_team_ids and winning_team == "dire"
+                )
                 recent_outcomes = recent_outcomes_by_player.get(pid, [])
                 streak_length, multiplier = self.rating_system.calculate_streak_multiplier(
                     recent_outcomes, won=won
@@ -528,21 +537,24 @@ class RecordingMixin:
 
             # Phase 1 OpenSkill update (equal weights). Phase 2 happens post-enrichment.
             os_ratings = {
-                pid: (
-                    rating_inputs[pid].get("os_mu"),
-                    rating_inputs[pid].get("os_sigma"),
-                )
+                pid: self._openskill_rating_from_input(rating_inputs[pid])
                 for pid in all_player_ids
                 if pid in rating_inputs
             }
             radiant_os_data = [
                 (pid, *os_ratings.get(pid, (None, None))) for pid in radiant_team_ids
             ]
-            dire_os_data = [
-                (pid, *os_ratings.get(pid, (None, None))) for pid in dire_team_ids
-            ]
+            dire_os_data = [(pid, *os_ratings.get(pid, (None, None))) for pid in dire_team_ids]
+            openskill_raw_radiant_win_prob = self.openskill_system.os_predict_win_probability(
+                [(mu, sigma) for _pid, mu, sigma in radiant_os_data],
+                [(mu, sigma) for _pid, mu, sigma in dire_os_data],
+            )
+            openskill_radiant_win_prob = self.openskill_system.calibrate_win_probability(
+                openskill_raw_radiant_win_prob
+            )
             os_results = self.openskill_system.update_ratings_equal_weight(
-                radiant_os_data, dire_os_data,
+                radiant_os_data,
+                dire_os_data,
                 winning_team=1 if winning_team == "radiant" else 2,
             )
             os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
@@ -565,24 +577,26 @@ class RecordingMixin:
                 pre = pre_match.get(pid)
                 if not pre:
                     continue
-                rating_history_rows.append({
-                    "discord_id": pid,
-                    "rating": rating,
-                    "rating_before": pre["rating_before"],
-                    "rd_before": pre["rd_before"],
-                    "rd_after": rd,
-                    "volatility_before": pre["volatility_before"],
-                    "volatility_after": vol,
-                    "expected_team_win_prob": expected_team_win_prob.get(pre["team_number"]),
-                    "team_number": pre["team_number"],
-                    "won": pre["won"],
-                    "os_mu_before": pre.get("os_mu_before"),
-                    "os_mu_after": pre.get("os_mu_after"),
-                    "os_sigma_before": pre.get("os_sigma_before"),
-                    "os_sigma_after": pre.get("os_sigma_after"),
-                    "streak_length": pre.get("streak_length"),
-                    "streak_multiplier": pre.get("streak_multiplier"),
-                })
+                rating_history_rows.append(
+                    {
+                        "discord_id": pid,
+                        "rating": rating,
+                        "rating_before": pre["rating_before"],
+                        "rd_before": pre["rd_before"],
+                        "rd_after": rd,
+                        "volatility_before": pre["volatility_before"],
+                        "volatility_after": vol,
+                        "expected_team_win_prob": expected_team_win_prob.get(pre["team_number"]),
+                        "team_number": pre["team_number"],
+                        "won": pre["won"],
+                        "os_mu_before": pre.get("os_mu_before"),
+                        "os_mu_after": pre.get("os_mu_after"),
+                        "os_sigma_before": pre.get("os_sigma_before"),
+                        "os_sigma_after": pre.get("os_sigma_after"),
+                        "streak_length": pre.get("streak_length"),
+                        "streak_multiplier": pre.get("streak_multiplier"),
+                    }
+                )
 
             # First-calibration: precompute which players need first_calibrated_at
             # set, so the atomic block can apply the conditional UPDATE without
@@ -590,9 +604,8 @@ class RecordingMixin:
             now_unix = int(time.time())
             first_calibration_ids: list[int] = []
             for pid, _rating, rd, _vol in glicko_updates:
-                if (
-                    rd <= CALIBRATION_RD_THRESHOLD
-                    and not rating_inputs.get(pid, {}).get("first_calibrated_at")
+                if rd <= CALIBRATION_RD_THRESHOLD and not rating_inputs.get(pid, {}).get(
+                    "first_calibrated_at"
                 ):
                     first_calibration_ids.append(pid)
 
@@ -610,12 +623,8 @@ class RecordingMixin:
             half_exclusion_increment_ids: list[int] = []
             if last_shuffle.exclusion_updates_deferred:
                 exclusion_decay_ids = radiant_team_ids + dire_team_ids
-                full_exclusion_increment_ids = list(
-                    last_shuffle.full_exclusion_increment_ids
-                )
-                half_exclusion_increment_ids = list(
-                    last_shuffle.half_exclusion_increment_ids
-                )
+                full_exclusion_increment_ids = list(last_shuffle.full_exclusion_increment_ids)
+                half_exclusion_increment_ids = list(last_shuffle.half_exclusion_increment_ids)
 
             # ---- ATOMIC WRITE: match + participants + wins/losses + glicko +
             # OpenSkill + last_match_date + first_calibrated_at + match_prediction
@@ -630,6 +639,8 @@ class RecordingMixin:
                 "radiant_rd": radiant_rd,
                 "dire_rd": dire_rd,
                 "expected_radiant_win_prob": expected_radiant_win_prob,
+                "openskill_radiant_win_prob": openskill_radiant_win_prob,
+                "openskill_raw_radiant_win_prob": (openskill_raw_radiant_win_prob),
             }
 
             match_id = self.match_repo.record_match_core_atomic(
@@ -656,6 +667,7 @@ class RecordingMixin:
                 exclusion_decay_ids=exclusion_decay_ids,
                 full_exclusion_increment_ids=full_exclusion_increment_ids,
                 half_exclusion_increment_ids=half_exclusion_increment_ids,
+                expected_openskill_revision=expected_openskill_revision,
             )
             updated_count = len(glicko_updates)
 
@@ -663,20 +675,22 @@ class RecordingMixin:
             # transactions. Pending bets stay pending and loans stay outstanding
             # if these fail, so retry/recovery happens via the usual paths.
             distributions = self._settle_match_bets_and_bonuses(
-                match_id, winning_team, winning_ids, losing_ids,
-                excluded_player_ids, last_shuffle, guild_id,
+                match_id,
+                winning_team,
+                winning_ids,
+                losing_ids,
+                excluded_player_ids,
+                last_shuffle,
+                guild_id,
             )
-            loan_repayments = self._repay_outstanding_loans(
-                winning_ids + losing_ids, guild_id
-            )
+            loan_repayments = self._repay_outstanding_loans(winning_ids + losing_ids, guild_id)
 
             # Find the most notable streak (longest, >=5 games) for neon hooks
             notable_streak = None
             for pid, (slen, _smult) in streak_data.items():
                 if slen >= 5 and (notable_streak is None or slen > notable_streak["streak"]):
-                    won = (
-                        (pid in radiant_team_ids and winning_team == "radiant")
-                        or (pid in dire_team_ids and winning_team == "dire")
+                    won = (pid in radiant_team_ids and winning_team == "radiant") or (
+                        pid in dire_team_ids and winning_team == "dire"
                     )
                     notable_streak = {
                         "discord_id": pid,
@@ -685,8 +699,12 @@ class RecordingMixin:
                     }
 
             easter_egg_data = self._collect_match_easter_eggs(
-                radiant_team_ids, dire_team_ids, winning_ids, expected_ids,
-                streak_data, guild_id,
+                radiant_team_ids,
+                dire_team_ids,
+                winning_ids,
+                expected_ids,
+                streak_data,
+                guild_id,
             )
 
             # Clear state after successful record (only this specific match)

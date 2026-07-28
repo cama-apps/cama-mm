@@ -22,26 +22,40 @@ class VotingCorrectionMixin:
 
     # ==================== Voting Management (delegated to MatchVotingService) ====================
 
-    def has_admin_submission(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
+    def has_admin_submission(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> bool:
         """Check if an admin has submitted a result vote (delegates to voting_service)."""
         return self.voting_service.has_admin_submission(guild_id, pending_match_id)
 
-    def has_admin_abort_submission(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
+    def has_admin_abort_submission(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> bool:
         """Check if an admin has submitted an abort vote (delegates to voting_service)."""
         return self.voting_service.has_admin_abort_submission(guild_id, pending_match_id)
 
     def add_record_submission(
-        self, guild_id: int | None, user_id: int, result: str, is_admin: bool,
-        pending_match_id: int | None = None
+        self,
+        guild_id: int | None,
+        user_id: int,
+        result: str,
+        is_admin: bool,
+        pending_match_id: int | None = None,
     ) -> dict[str, Any]:
         """Add a vote for the match result (delegates to voting_service)."""
-        return self.voting_service.add_record_submission(guild_id, user_id, result, is_admin, pending_match_id)
+        return self.voting_service.add_record_submission(
+            guild_id, user_id, result, is_admin, pending_match_id
+        )
 
-    def get_non_admin_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
+    def get_non_admin_submission_count(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> int:
         """Get count of non-admin result votes (delegates to voting_service)."""
         return self.voting_service.get_non_admin_submission_count(guild_id, pending_match_id)
 
-    def get_abort_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
+    def get_abort_submission_count(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> int:
         """Get count of non-admin abort votes (delegates to voting_service)."""
         return self.voting_service.get_abort_submission_count(guild_id, pending_match_id)
 
@@ -54,17 +68,26 @@ class VotingCorrectionMixin:
         return self.voting_service.get_pending_match_for_abort_voter(guild_id, user_id)
 
     def add_abort_submission(
-        self, guild_id: int | None, user_id: int, is_admin: bool,
-        pending_match_id: int | None = None
+        self,
+        guild_id: int | None,
+        user_id: int,
+        is_admin: bool,
+        pending_match_id: int | None = None,
     ) -> dict[str, Any]:
         """Add a vote to abort the match (delegates to voting_service)."""
-        return self.voting_service.add_abort_submission(guild_id, user_id, is_admin, pending_match_id)
+        return self.voting_service.add_abort_submission(
+            guild_id, user_id, is_admin, pending_match_id
+        )
 
-    def get_vote_counts(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int]:
+    def get_vote_counts(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> dict[str, int]:
         """Get vote counts for radiant and dire (delegates to voting_service)."""
         return self.voting_service.get_vote_counts(guild_id, pending_match_id)
 
-    def get_pending_record_result(self, guild_id: int | None, pending_match_id: int | None = None) -> str | None:
+    def get_pending_record_result(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> str | None:
         """Get the result to record if threshold met (delegates to voting_service)."""
         return self.voting_service.get_pending_record_result(guild_id, pending_match_id)
 
@@ -122,9 +145,37 @@ class VotingCorrectionMixin:
         new_winning_team_num = 1 if new_winning_team == "radiant" else 2
 
         if old_winning_team_num == new_winning_team_num:
-            raise ValueError(
-                f"Match {match_id} already has {new_winning_team} as winner"
+            get_pending = getattr(
+                self.match_repo,
+                "get_pending_openskill_replay",
+                None,
             )
+            pending = get_pending(guild_id) if callable(get_pending) else None
+            if pending:
+                replay = self.backfill_openskill_ratings(
+                    guild_id=guild_id,
+                    reset_first=True,
+                )
+                if replay["errors"]:
+                    raise RuntimeError(
+                        "OpenSkill replay recovery failed: "
+                        + "; ".join(replay["errors"])
+                    )
+                return {
+                    "match_id": match_id,
+                    "old_winning_team": new_winning_team,
+                    "new_winning_team": new_winning_team,
+                    "correction_id": None,
+                    "players_affected": 0,
+                    "ratings_updated": 0,
+                    "openskill_matches_replayed": replay["matches_processed"],
+                    "bet_correction": {},
+                    "win_bonus_correction": {},
+                    "new_winner_ids": [],
+                    "new_loser_ids": [],
+                    "replay_recovered": True,
+                }
+            raise ValueError(f"Match {match_id} already has {new_winning_team} as winner")
 
         old_winning_team = "radiant" if old_winning_team_num == 1 else "dire"
 
@@ -170,13 +221,9 @@ class VotingCorrectionMixin:
         streak_multipliers: dict[int, float] = {}
         new_streaks: dict[int, tuple[int, float]] = {}
         participant_ids = radiant_ids + dire_ids
-        get_outcomes_bulk = getattr(
-            self.match_repo, "get_player_outcomes_before_match_bulk", None
-        )
+        get_outcomes_bulk = getattr(self.match_repo, "get_player_outcomes_before_match_bulk", None)
         if callable(get_outcomes_bulk):
-            outcomes_by_id = get_outcomes_bulk(
-                participant_ids, guild_id, match_id, limit=20
-            )
+            outcomes_by_id = get_outcomes_bulk(participant_ids, guild_id, match_id, limit=20)
             for pid in participant_ids:
                 slen, mult = self.rating_system.calculate_streak_multiplier(
                     outcomes_by_id.get(pid, []), won=pid in new_winner_ids
@@ -229,17 +276,43 @@ class VotingCorrectionMixin:
         }
         new_os_updates: list[tuple[int, float, float]] = []
         os_results: dict[int, tuple[float, float]] = {}
+        os_factors: dict[int, float | None] = {}
         if os_rating_by_id:
-            radiant_os_data = [
-                (pid, *os_rating_by_id.get(pid, (None, None))) for pid in radiant_ids
-            ]
-            dire_os_data = [
-                (pid, *os_rating_by_id.get(pid, (None, None))) for pid in dire_ids
-            ]
-            os_results = self.openskill_system.update_ratings_equal_weight(
-                radiant_os_data, dire_os_data,
-                winning_team=new_winning_team_num,
+            participants_by_id = {
+                participant["discord_id"]: participant for participant in participants
+            }
+            complete_fantasy = len(participants) == 10 and all(
+                participant.get("fantasy_points") is not None for participant in participants
             )
+            if complete_fantasy:
+                weighted = self.openskill_system.update_ratings_after_match(
+                    [
+                        (
+                            pid,
+                            *os_rating_by_id.get(pid, (None, None)),
+                            participants_by_id[pid]["fantasy_points"],
+                        )
+                        for pid in radiant_ids
+                    ],
+                    [
+                        (
+                            pid,
+                            *os_rating_by_id.get(pid, (None, None)),
+                            participants_by_id[pid]["fantasy_points"],
+                        )
+                        for pid in dire_ids
+                    ],
+                    winning_team=new_winning_team_num,
+                )
+                os_results = {pid: (mu, sigma) for pid, (mu, sigma, _factor) in weighted.items()}
+                os_factors = {pid: factor for pid, (_mu, _sigma, factor) in weighted.items()}
+            else:
+                os_results = self.openskill_system.update_ratings_equal_weight(
+                    [(pid, *os_rating_by_id.get(pid, (None, None))) for pid in radiant_ids],
+                    [(pid, *os_rating_by_id.get(pid, (None, None))) for pid in dire_ids],
+                    winning_team=new_winning_team_num,
+                )
+                os_factors = dict.fromkeys(os_results)
             new_os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
 
         # 6. Build rating_history correction rows.
@@ -260,6 +333,7 @@ class VotingCorrectionMixin:
                 new_mu, new_sigma = os_results[pid]
                 update["new_os_mu"] = new_mu
                 update["new_os_sigma"] = new_sigma
+                update["new_fantasy_weight"] = os_factors.get(pid)
             if pid in new_streaks:
                 update["new_streak_length"] = new_streaks[pid][0]
                 update["new_streak_multiplier"] = new_streaks[pid][1]
@@ -279,12 +353,14 @@ class VotingCorrectionMixin:
 
             if all_bets:
                 old_winning_bets = [
-                    b for b in all_bets
+                    b
+                    for b in all_bets
                     if (old_winning_team == "radiant" and b["team_bet_on"] == "radiant")
                     or (old_winning_team == "dire" and b["team_bet_on"] == "dire")
                 ]
                 new_winning_bets = [
-                    b for b in all_bets
+                    b
+                    for b in all_bets
                     if (new_winning_team == "radiant" and b["team_bet_on"] == "radiant")
                     or (new_winning_team == "dire" and b["team_bet_on"] == "dire")
                 ]
@@ -334,9 +410,7 @@ class VotingCorrectionMixin:
                 amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
                 if amount > 0:
                     win_bonus_debits[pid] = amount
-            self.match_repo.apply_win_bonus_reversal_atomic(
-                match_id, guild_id, win_bonus_debits
-            )
+            self.match_repo.apply_win_bonus_reversal_atomic(match_id, guild_id, win_bonus_debits)
             win_bonus_correction = {
                 "reversed": win_bonus_debits,
                 "awarded": win_bonus_awarded,
@@ -384,9 +458,7 @@ class VotingCorrectionMixin:
                     else 0.0
                 ),
                 vanity_taxable_ids=(
-                    self.betting_service.vanity_tax_service.taxable_ids(
-                        guild_id
-                    )
+                    self.betting_service.vanity_tax_service.taxable_ids(guild_id)
                     if self.betting_service.vanity_tax_service
                     else frozenset()
                 ),
@@ -397,6 +469,20 @@ class VotingCorrectionMixin:
                 "new_winners_paid": len(new_winning_bets),
                 "balance_changes": combined_bet_deltas,
             }
+
+        # The core transaction durably marked this guild replay-pending. Run
+        # the replay only after the other correction effects are complete so a
+        # replay failure has one idempotent recovery action and cannot strand
+        # bet correction behind an already-flipped result.
+        openskill_replay = self.backfill_openskill_ratings(
+            guild_id=guild_id,
+            reset_first=True,
+        )
+        if openskill_replay["errors"]:
+            raise RuntimeError(
+                "Match corrected; OpenSkill replay remains pending: "
+                + "; ".join(openskill_replay["errors"])
+            )
 
         logger.info(
             f"Match {match_id} corrected: {old_winning_team} -> {new_winning_team} "
@@ -410,6 +496,7 @@ class VotingCorrectionMixin:
             "correction_id": correction_id,
             "players_affected": len(radiant_ids) + len(dire_ids),
             "ratings_updated": len(new_glicko_updates),
+            "openskill_matches_replayed": openskill_replay["matches_processed"],
             "bet_correction": bet_correction_summary,
             "win_bonus_correction": win_bonus_correction,
             "new_winner_ids": new_winner_ids,

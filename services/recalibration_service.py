@@ -14,6 +14,7 @@ from config import (
     RECALIBRATION_INITIAL_RD,
     RECALIBRATION_INITIAL_VOLATILITY,
 )
+from openskill_rating_system import CamaOpenSkillSystem
 from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from utils.guild import normalize_guild_id
@@ -64,7 +65,9 @@ class RecalibrationService:
         )
         self.initial_rd = initial_rd if initial_rd is not None else RECALIBRATION_INITIAL_RD
         self.initial_volatility = (
-            initial_volatility if initial_volatility is not None else RECALIBRATION_INITIAL_VOLATILITY
+            initial_volatility
+            if initial_volatility is not None
+            else RECALIBRATION_INITIAL_VOLATILITY
         )
         self.min_games = min_games if min_games is not None else RECALIBRATION_MIN_GAMES
 
@@ -181,6 +184,12 @@ class RecalibrationService:
         old_volatility = check["current_volatility"]
 
         new_rd = max(self.initial_rd, old_rd)
+        openskill_data = self.player_repo.get_openskill_rating(
+            discord_id,
+            normalized_guild_id,
+        )
+        old_os_sigma = openskill_data[1] if openskill_data else None
+        new_os_sigma = CamaOpenSkillSystem.DEFAULT_SIGMA if old_os_sigma is not None else None
 
         # Atomic cooldown check + Glicko update + state bump. Closes the TOCTOU
         # where two concurrent /recalibrate calls could both pass the check
@@ -194,6 +203,7 @@ class RecalibrationService:
                 rating=old_rating,
                 new_rd=new_rd,
                 new_volatility=self.initial_volatility,
+                new_os_sigma=new_os_sigma,
             )
         except ValueError as exc:
             msg = str(exc)
@@ -223,6 +233,8 @@ class RecalibrationService:
             "old_volatility": old_volatility,
             "new_rd": new_rd,
             "new_volatility": self.initial_volatility,
+            "old_os_sigma": old_os_sigma,
+            "new_os_sigma": new_os_sigma,
             "total_recalibrations": new_total,
             "cooldown_ends_at": cooldown_ends_at,
         }

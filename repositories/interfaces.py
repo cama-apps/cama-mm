@@ -64,10 +64,14 @@ class IPlayerRepository(ABC):
     def update_roles(self, discord_id: int, guild_id: int, roles: list[str]) -> None: ...
 
     @abstractmethod
-    def update_preferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None: ...
+    def update_preferred_region(
+        self, discord_id: int, guild_id: int, region: str | None
+    ) -> None: ...
 
     @abstractmethod
-    def update_inferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None: ...
+    def update_inferred_region(
+        self, discord_id: int, guild_id: int, region: str | None
+    ) -> None: ...
 
     @abstractmethod
     def update_inferred_regions_bulk(self, updates: list[tuple[int, int, str]]) -> None:
@@ -83,13 +87,55 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def get_glicko_rating(self, discord_id: int, guild_id: int) -> tuple[float, float, float] | None: ...
+    def get_glicko_rating(
+        self, discord_id: int, guild_id: int
+    ) -> tuple[float, float, float] | None: ...
 
     @abstractmethod
     def get_match_rating_inputs(
         self, discord_ids: list[int], guild_id: int | None
     ) -> dict[int, dict]:
         """Bulk-load player fields needed to calculate a match's rating updates."""
+        ...
+
+    @abstractmethod
+    def get_match_rating_inputs_with_openskill_revision(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+    ) -> tuple[dict[int, dict], int]:
+        """Load rating inputs and their guild revision from one read snapshot."""
+        ...
+
+    @abstractmethod
+    def update_both_rating_estimates_atomic(
+        self,
+        *,
+        discord_id: int,
+        guild_id: int,
+        glicko_rating: float,
+        glicko_rd: float,
+        glicko_volatility: float,
+        os_mu: float,
+        reason: str,
+        actor_id: int | None = None,
+    ) -> None:
+        """Set both rating estimates and append a replayable OpenSkill event."""
+        ...
+
+    @abstractmethod
+    def bump_rating_uncertainties_atomic(
+        self,
+        *,
+        guild_id: int,
+        rd_amount: float,
+        sigma_amount: float,
+        max_rd: float,
+        max_sigma: float,
+        reason: str,
+        actor_id: int | None = None,
+    ) -> dict | None:
+        """Increase both systems' uncertainty in one transaction."""
         ...
 
     @abstractmethod
@@ -114,9 +160,7 @@ class IPlayerRepository(ABC):
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
-    def get_balances_bulk(
-        self, discord_ids: list[int], guild_id: int | None
-    ) -> dict[int, int]:
+    def get_balances_bulk(self, discord_ids: list[int], guild_id: int | None) -> dict[int, int]:
         """Get player balances in one query, defaulting missing players to zero."""
         ...
 
@@ -153,7 +197,6 @@ class IPlayerRepository(ABC):
     @abstractmethod
     def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
 
-
     @abstractmethod
     def get_exclusion_counts(self, discord_ids: list[int], guild_id: int) -> dict[int, int]: ...
 
@@ -168,7 +211,6 @@ class IPlayerRepository(ABC):
 
     @abstractmethod
     def delete(self, discord_id: int, guild_id: int) -> bool: ...
-
 
     @abstractmethod
     def delete_fake_users(self, guild_id: int) -> int: ...
@@ -215,9 +257,7 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
-    def add_steam_ids_bulk(
-        self, steam_ids: list[tuple[int, int]]
-    ) -> list[dict[str, bool | str]]:
+    def add_steam_ids_bulk(self, steam_ids: list[tuple[int, int]]) -> list[dict[str, bool | str]]:
         """Add Steam IDs in one transaction and return aligned outcomes."""
         ...
 
@@ -361,9 +401,10 @@ class IPlayerRepository(ABC):
         """Get a player's lowest balance ever recorded."""
         ...
 
-
     @abstractmethod
-    def get_all_registered_players_for_lottery(self, guild_id: int, activity_days: int = 14) -> list[dict]:
+    def get_all_registered_players_for_lottery(
+        self, guild_id: int, activity_days: int = 14
+    ) -> list[dict]:
         """Get recently active players for lottery selection."""
         ...
 
@@ -391,13 +432,10 @@ class IBetRepository(ABC):
     @abstractmethod
     def get_bets_for_pending_match(self, guild_id: int | None, since_ts: int | None = None): ...
 
-
     @abstractmethod
     def get_total_bets_by_guild(
         self, guild_id: int | None, since_ts: int | None = None
     ) -> dict[str, int]: ...
-
-
 
     @abstractmethod
     def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
@@ -581,6 +619,7 @@ class IMatchRepository(ABC):
         exclusion_decay_ids: list[int] | None = None,
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
+        expected_openskill_revision: int | None = None,
     ) -> int: ...
 
     @abstractmethod
@@ -630,6 +669,29 @@ class IMatchRepository(ABC):
     ) -> dict: ...
 
     @abstractmethod
+    def get_openskill_rating_revision(self, guild_id: int) -> int:
+        """Return the guild's optimistic-concurrency revision."""
+        ...
+
+    @abstractmethod
+    def replay_openskill_atomic(self, *, guild_id: int, system):
+        """Load, compute, and persist a complete replay under one write lock."""
+        ...
+
+    @abstractmethod
+    def mark_openskill_replay_pending(
+        self, guild_id: int, reason: str, *, cursor=None
+    ) -> None:
+        """Durably request a full OpenSkill replay."""
+        ...
+
+    @abstractmethod
+    def get_pending_openskill_replay(self, guild_id: int) -> dict | None: ...
+
+    @abstractmethod
+    def list_pending_openskill_replays(self) -> list[dict]: ...
+
+    @abstractmethod
     def get_match(self, match_id: int, guild_id: int | None = None): ...
 
     @abstractmethod
@@ -649,7 +711,9 @@ class IMatchRepository(ABC):
     def get_rating_history(self, discord_id: int, guild_id: int, limit: int = 20): ...
 
     @abstractmethod
-    def get_player_recent_outcomes(self, discord_id: int, guild_id: int, limit: int = 20) -> list[bool]:
+    def get_player_recent_outcomes(
+        self, discord_id: int, guild_id: int, limit: int = 20
+    ) -> list[bool]:
         """Get recent match outcomes for a player (True=win, most recent first)."""
         ...
 
@@ -692,7 +756,6 @@ class IMatchRepository(ABC):
         """Get count of matches recorded since a given ISO timestamp."""
         ...
 
-
     @abstractmethod
     def get_recent_match_predictions(self, guild_id: int, limit: int = 200): ...
 
@@ -702,7 +765,6 @@ class IMatchRepository(ABC):
     @abstractmethod
     def get_player_performance_stats(self, guild_id: int): ...
 
-
     @abstractmethod
     def save_pending_match(self, guild_id: int | None, payload: dict) -> int: ...
 
@@ -710,10 +772,14 @@ class IMatchRepository(ABC):
     def get_pending_match(self, guild_id: int | None) -> dict | None: ...
 
     @abstractmethod
-    def clear_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> None: ...
+    def clear_pending_match(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> None: ...
 
     @abstractmethod
-    def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None: ...
+    def consume_pending_match(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> dict | None: ...
 
     @abstractmethod
     def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
@@ -736,10 +802,11 @@ class IMatchRepository(ABC):
         ...
 
     @abstractmethod
-    def update_pending_match(self, pending_match_id: int, payload: dict, guild_id: int | None = None) -> None:
+    def update_pending_match(
+        self, pending_match_id: int, payload: dict, guild_id: int | None = None
+    ) -> None:
         """Update an existing pending match's payload, scoped to the given guild."""
         ...
-
 
 
 class ILobbyRepository(ABC):
@@ -870,7 +937,6 @@ class IPairingsRepository(ABC):
         """Get detailed stats between two specific players."""
         ...
 
-
     @abstractmethod
     def rebuild_all_pairings(self, guild_id: int | None) -> int:
         """Recalculate all pairings from match history. Returns count of pairings updated."""
@@ -926,7 +992,6 @@ class IPredictionRepository(ABC):
         """Get a prediction by ID."""
         ...
 
-
     @abstractmethod
     def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
         """Get predictions filtered by status."""
@@ -952,10 +1017,6 @@ class IPredictionRepository(ABC):
         """Update Discord IDs for a prediction (thread, embed message)."""
         ...
 
-
-
-
-
     # --- Order-book mechanic (new in feat/predict-orderbook) ---
 
     @abstractmethod
@@ -976,9 +1037,7 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def replace_levels(
-        self, prediction_id: int, levels: list[tuple[str, int, int]]
-    ) -> None:
+    def replace_levels(self, prediction_id: int, levels: list[tuple[str, int, int]]) -> None:
         """Atomically cancel all existing levels for a market and post a fresh ladder.
 
         ``levels`` is a list of ``(side, price, size)`` tuples where side is
@@ -1038,9 +1097,7 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def get_user_open_positions(
-        self, discord_id: int, guild_id: int | None = None
-    ) -> list[dict]:
+    def get_user_open_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Return a user's open positions across open markets in a guild.
 
         Each row includes nullable top-of-book exit prices: ``yes_mark`` is the
@@ -1067,9 +1124,7 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def get_markets_due_for_refresh(
-        self, refresh_interval_seconds: int, now_ts: int
-    ) -> list[dict]:
+    def get_markets_due_for_refresh(self, refresh_interval_seconds: int, now_ts: int) -> list[dict]:
         """Return open markets whose ``last_refresh_at`` is older than the cutoff."""
         ...
 
@@ -1092,15 +1147,16 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def get_fair_history(
-        self, prediction_id: int, guild_id: int
-    ) -> list[tuple[int, int]]:
+    def get_fair_history(self, prediction_id: int, guild_id: int) -> list[tuple[int, int]]:
         """Return ``[(snapshot_at, fair_pct), ...]`` for the per-market chart."""
         ...
 
     @abstractmethod
     def settle_prediction_orderbook(
-        self, prediction_id: int, outcome: str, resolved_by: int | None = None,
+        self,
+        prediction_id: int,
+        outcome: str,
+        resolved_by: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
         vanity_tax_rate: float = 0.0,
         vanity_taxable_ids: frozenset[int] | set[int] | None = None,
@@ -1171,8 +1227,9 @@ class IRecalibrationRepository(ABC):
         rating: float,
         new_rd: float,
         new_volatility: float,
+        new_os_sigma: float | None = None,
     ) -> int:
-        """Atomically enforce cooldown, apply Glicko update, bump state."""
+        """Atomically enforce cooldown and reset both systems' uncertainty."""
         ...
 
 
@@ -1364,30 +1421,22 @@ class IWrappedRepository(ABC):
     """Repository for Cama Wrapped data access."""
 
     @abstractmethod
-    def get_month_match_stats(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_match_stats(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get match participation stats for a time period."""
         ...
 
     @abstractmethod
-    def get_month_hero_stats(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_hero_stats(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get hero pick stats for a time period."""
         ...
 
     @abstractmethod
-    def get_month_player_heroes(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_player_heroes(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get per-player hero stats for a time period."""
         ...
 
     @abstractmethod
-    def get_month_rating_changes(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_rating_changes(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get rating changes for players over a time period."""
         ...
 
@@ -1403,16 +1452,12 @@ class IWrappedRepository(ABC):
         ...
 
     @abstractmethod
-    def get_month_betting_stats(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_betting_stats(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get betting stats for players over a time period."""
         ...
 
     @abstractmethod
-    def get_month_bankruptcy_count(
-        self, guild_id: int, start_ts: int, end_ts: int
-    ) -> list[dict]:
+    def get_month_bankruptcy_count(self, guild_id: int, start_ts: int, end_ts: int) -> list[dict]:
         """Get bankruptcy counts for the period."""
         ...
 
@@ -1540,7 +1585,6 @@ class ILoanRepository(ABC):
         outstanding_fee: int | None = None,
     ) -> None: ...
 
-
     @abstractmethod
     def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
 
@@ -1645,16 +1689,26 @@ class IBankruptcyRepository(ABC):
     def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
-    def get_bulk_states(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, dict]: ...
+    def get_bulk_states(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict]: ...
 
     @abstractmethod
     def upsert_state(
-        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        last_bankruptcy_at: int,
+        penalty_games_remaining: int,
     ) -> None: ...
 
     @abstractmethod
     def reset_cooldown_only(
-        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        last_bankruptcy_at: int,
+        penalty_games_remaining: int,
     ) -> None: ...
 
     @abstractmethod
@@ -1715,9 +1769,7 @@ class ILowPriorityRepository(ABC):
     ) -> bool: ...
 
     @abstractmethod
-    def get_active_ids(
-        self, discord_ids: list[int], guild_id: int | None = None
-    ) -> set[int]: ...
+    def get_active_ids(self, discord_ids: list[int], guild_id: int | None = None) -> set[int]: ...
 
     @abstractmethod
     def list_active(self, guild_id: int | None = None) -> list: ...
@@ -1743,9 +1795,7 @@ class IDisburseRepository(ABC):
         ...
 
     @abstractmethod
-    def set_proposal_message(
-        self, guild_id: int | None, message_id: int, channel_id: int
-    ) -> None:
+    def set_proposal_message(self, guild_id: int | None, message_id: int, channel_id: int) -> None:
         """Set the Discord message ID for an active proposal."""
         ...
 
@@ -1764,8 +1814,6 @@ class IDisburseRepository(ABC):
     def get_vote_counts(self, guild_id: int | None) -> dict[str, int]:
         """Get vote counts for each method for the active proposal."""
         ...
-
-
 
     @abstractmethod
     def get_individual_votes(self, guild_id: int | None) -> list[dict]:
@@ -1814,7 +1862,9 @@ class IManaRepository(ABC):
         ...
 
     @abstractmethod
-    def set_mana(self, discord_id: int, guild_id: int | None, land: str, assigned_date: str) -> None:
+    def set_mana(
+        self, discord_id: int, guild_id: int | None, land: str, assigned_date: str
+    ) -> None:
         """Upsert today's mana for the player."""
         ...
 
@@ -1841,16 +1891,12 @@ class IManaRepository(ABC):
         ...
 
     @abstractmethod
-    def is_bankrupt_buff_used(
-        self, discord_id: int, guild_id: int | None, buff: str
-    ) -> bool:
+    def is_bankrupt_buff_used(self, discord_id: int, guild_id: int | None, buff: str) -> bool:
         """Return True if the named buff (insurance/reroll) is already used for today."""
         ...
 
     @abstractmethod
-    def claim_bankrupt_buff_atomic(
-        self, discord_id: int, guild_id: int | None, buff: str
-    ) -> bool:
+    def claim_bankrupt_buff_atomic(self, discord_id: int, guild_id: int | None, buff: str) -> bool:
         """Atomically mark the buff used for today. Returns True if claim succeeded."""
         ...
 
@@ -1860,9 +1906,7 @@ class IManaRepository(ABC):
         ...
 
     @abstractmethod
-    def mark_mana_consumed_atomic(
-        self, discord_id: int, guild_id: int | None
-    ) -> bool:
+    def mark_mana_consumed_atomic(self, discord_id: int, guild_id: int | None) -> bool:
         """Atomically flip consumed_today 0→1. Returns True if claim succeeded."""
         ...
 
@@ -1928,15 +1972,27 @@ class IDigRepository(ABC):
     # Action Logging
     @abstractmethod
     def log_action(
-        self, guild_id: int, actor_id: int, target_id: int | None,
-        action_type: str, depth_before: int, depth_after: int,
-        jc_delta: int = 0, detail: dict | None = None,
+        self,
+        guild_id: int,
+        actor_id: int,
+        target_id: int | None,
+        action_type: str,
+        depth_before: int,
+        depth_after: int,
+        jc_delta: int = 0,
+        detail: dict | None = None,
     ) -> int: ...
 
     @abstractmethod
-    def get_recent_actions(self, discord_id: int, guild_id: int, limit: int = 5, *, action_type: str | None = None, hours: int | None = None) -> list[dict]: ...
-
-
+    def get_recent_actions(
+        self,
+        discord_id: int,
+        guild_id: int,
+        limit: int = 5,
+        *,
+        action_type: str | None = None,
+        hours: int | None = None,
+    ) -> list[dict]: ...
 
     @abstractmethod
     def count_recent_boss_kills(self, guild_id: int, hours: int = 24) -> int:
@@ -1944,9 +2000,7 @@ class IDigRepository(ABC):
         ...
 
     @abstractmethod
-    def get_player_jc_events(
-        self, discord_id: int, guild_id: int | None = None
-    ) -> list[dict]:
+    def get_player_jc_events(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Every dig action where the player is actor or target, oldest first,
         for balance-history reconstruction."""
         ...
@@ -1958,18 +2012,17 @@ class IDigRepository(ABC):
     @abstractmethod
     def add_item(self, discord_id: int, guild_id: int, item_type: str) -> int: ...
 
-
     @abstractmethod
     def get_queued_items(self, discord_id: int, guild_id: int) -> list[dict]: ...
 
     @abstractmethod
     def queue_item(self, item_id: int) -> None: ...
 
-
-
     # Artifacts
     @abstractmethod
-    def add_artifact(self, discord_id: int, guild_id: int, artifact_id: str, is_relic: bool = False) -> int: ...
+    def add_artifact(
+        self, discord_id: int, guild_id: int, artifact_id: str, is_relic: bool = False
+    ) -> int: ...
 
     @abstractmethod
     def get_artifacts(self, discord_id: int, guild_id: int) -> list[dict]: ...
@@ -1979,18 +2032,23 @@ class IDigRepository(ABC):
 
     @abstractmethod
     def equip_relic(
-        self, artifact_db_id: int, discord_id: int, guild_id: int | None,
+        self,
+        artifact_db_id: int,
+        discord_id: int,
+        guild_id: int | None,
         equipped: bool = True,
     ) -> None: ...
 
     @abstractmethod
     def unequip_relic(
-        self, artifact_db_id: int, discord_id: int, guild_id: int | None,
+        self,
+        artifact_db_id: int,
+        discord_id: int,
+        guild_id: int | None,
     ) -> None: ...
 
     @abstractmethod
     def count_equipped_relics(self, discord_id: int, guild_id: int) -> int: ...
-
 
     @abstractmethod
     def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool: ...
@@ -1998,8 +2056,13 @@ class IDigRepository(ABC):
     # Boss-combat Gear (Weapon / Armor / Boots slots)
     @abstractmethod
     def add_gear(
-        self, discord_id: int, guild_id: int, slot: str, tier: int,
-        source: str = "shop", durability: int | None = None,
+        self,
+        discord_id: int,
+        guild_id: int,
+        slot: str,
+        tier: int,
+        source: str = "shop",
+        durability: int | None = None,
         item_id: str | None = None,
     ) -> int: ...
 
@@ -2195,46 +2258,65 @@ class IDigRepository(ABC):
 
     # Social actions
     @abstractmethod
-    def get_recent_social_actions(self, discord_id: int, guild_id: int, hours: int = 48) -> list[dict]: ...
+    def get_recent_social_actions(
+        self, discord_id: int, guild_id: int, hours: int = 48
+    ) -> list[dict]: ...
 
     # Boss echoes (post-kill weakening window, keyed by boss_id)
     @abstractmethod
     def record_boss_echo(
-        self, guild_id: int | None, boss_id: str, depth: int,
-        killer_discord_id: int, window_seconds: int,
+        self,
+        guild_id: int | None,
+        boss_id: str,
+        depth: int,
+        killer_discord_id: int,
+        window_seconds: int,
     ) -> None: ...
 
     @abstractmethod
     def get_active_boss_echo(
-        self, guild_id: int | None, boss_id: str,
+        self,
+        guild_id: int | None,
+        boss_id: str,
     ) -> dict | None: ...
 
     # Active boss-duel state (mid-fight prompt persistence)
     @abstractmethod
     def get_active_duel(
-        self, discord_id: int, guild_id: int | None,
+        self,
+        discord_id: int,
+        guild_id: int | None,
     ) -> dict | None: ...
 
     @abstractmethod
     def save_active_duel(
-        self, discord_id: int, guild_id: int | None, state: dict,
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        state: dict,
     ) -> None: ...
 
     @abstractmethod
     def clear_active_duel(
-        self, discord_id: int, guild_id: int | None,
+        self,
+        discord_id: int,
+        guild_id: int | None,
     ) -> None: ...
 
     @abstractmethod
     def claim_active_duel(
-        self, discord_id: int, guild_id: int | None,
+        self,
+        discord_id: int,
+        guild_id: int | None,
     ) -> dict | None:
         """Atomically read-and-delete the paused duel row; ``None`` if already claimed."""
         ...
 
     @abstractmethod
     def has_great_lantern(
-        self, discord_id: int, guild_id: int | None,
+        self,
+        discord_id: int,
+        guild_id: int | None,
     ) -> bool: ...
 
 
@@ -2243,7 +2325,9 @@ class IReminderRepository(ABC):
     def get_preferences(self, discord_id: int, guild_id: int) -> dict: ...
 
     @abstractmethod
-    def set_preference(self, discord_id: int, guild_id: int, reminder_type: str, enabled: bool) -> None: ...
+    def set_preference(
+        self, discord_id: int, guild_id: int, reminder_type: str, enabled: bool
+    ) -> None: ...
 
     @abstractmethod
     def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]: ...
