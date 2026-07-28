@@ -12,11 +12,13 @@ from domain.pet_brawl import (
     HUNKER_COUNTER,
     HUNKER_HEAL,
     MAX_ROUNDS,
+    MOVE_BLURBS,
     MOVE_EMOJI,
     MYSTIC_COUNTER,
     SAFE_MOVE,
     SPITTER_CRIT_PCT,
     STAMPEDE_MISS_PCT,
+    TRAIT_BLURBS,
     BrawlTraits,
     PetBrawlMove,
     brawl_traits,
@@ -102,6 +104,9 @@ class TestMoveFlavor:
     def test_every_move_has_emoji(self):
         assert set(MOVE_EMOJI) == set(PetBrawlMove)
 
+    def test_every_move_has_a_blurb(self):
+        assert set(MOVE_BLURBS) == set(PetBrawlMove)
+
 
 class TestBrawlTraits:
     def test_every_species_has_an_explicit_entry(self):
@@ -111,6 +116,14 @@ class TestBrawlTraits:
 
     def test_unknown_species_falls_back_to_no_traits(self):
         assert brawl_traits("retired_species") == BrawlTraits()
+
+    def test_trait_blurbs_cover_exactly_the_quirked_species(self):
+        """A typo'd or missing TRAIT_BLURBS key fails silently (the quirk
+        line just never renders), so lock it to the quirked trait set."""
+        quirked = {
+            sid for sid, traits in BRAWL_TRAITS.items() if traits != BrawlTraits()
+        }
+        assert set(TRAIT_BLURBS) == quirked
 
 
 class TestResolveRound:

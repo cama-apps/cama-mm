@@ -11,8 +11,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from commands.pet import PetCommands
+from commands.pet_helpers import brawl_embeds
 from commands.pet_helpers.brawl_views import PetBrawlBattleView
-from domain.pet_brawl import SAFE_MOVE, PetBrawlMove
+from domain.models.pet import PetStage
+from domain.pet_brawl import (
+    SAFE_MOVE,
+    PetBrawlMove,
+    build_duelist,
+    initial_state,
+)
 from tests.conftest import TEST_GUILD_ID
 
 NOW = int(time.time())
@@ -300,6 +307,41 @@ class TestBattleView:
             assert not task.done()  # still parked on the lock, already acked
         await task
         assert "picked" in inter.followup.send.await_args.args[0]
+
+
+def _duelist(species: str, name: str, owner_id: int, pet_id: int):
+    return build_duelist(
+        pet_id=pet_id,
+        owner_id=owner_id,
+        name=name,
+        species_id=species,
+        stage=PetStage.ADULT,
+        hunger=100,
+        happy=False,
+        aegis_used=0,
+    )
+
+
+class TestRoundOnePrimer:
+    def test_quirks_field_lists_traits_and_shell(self):
+        state = initial_state(
+            _duelist("rama", "Spitfire", CHALLENGER, 1),
+            _duelist("aegis_cama", "Shelly", RECIPIENT, 2),
+        )
+        embed = brawl_embeds.build_battle_embed(state, (), {})
+        quirks = next(f for f in embed.fields if f.name == "Quirks")
+        assert "Spitfire" in quirks.value and "crits" in quirks.value
+        assert "Shelly" in quirks.value and "1 HP" in quirks.value
+
+    def test_quirkless_pair_gets_rules_but_no_quirks_field(self):
+        state = initial_state(
+            _duelist("common_cama", "Plain", CHALLENGER, 1),
+            _duelist("common_cama", "Simple", RECIPIENT, 2),
+        )
+        embed = brawl_embeds.build_battle_embed(state, (), {})
+        field_names = [f.name for f in embed.fields]
+        assert "How it works" in field_names
+        assert "Quirks" not in field_names
 
 
 class TestSweepHook:
