@@ -7,9 +7,9 @@ winners' OpenSkill mu moves UP and the losers' moves DOWN — and that the value
 actually change. Assertions go through the PUBLIC service methods on purpose
 (the task notes these keep their public signature even if the module is split).
 
-OpenSkill direction is unambiguous here: with the per-game swing clamp
-(``MAX_MU_SWING_PER_GAME``) and equal/near-equal weights, the Plackett-Luce
-update raises the winning team's mu and lowers the losing team's.
+OpenSkill direction is unambiguous here: with equal or near-equal contribution
+weights, the native Plackett-Luce posterior raises the winning team's mu and
+lowers the losing team's.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def test_update_openskill_for_match_moves_winners_up_losers_down(repo_db_path):
 
     record_match runs Phase-1 (equal weight) and stores the pre-match seed mu as
     os_mu_before in rating_history. Phase 2 starts from that seed, so we compare
-    the post-Phase-2 player mu against SEED_MU directly.
+    the post-replay player mu against the replayed pre-match snapshot.
     """
     service, player_repo, match_repo = _build_service(repo_db_path)
     player_ids = _seed_players(player_repo)
@@ -104,12 +104,24 @@ def test_update_openskill_for_match_moves_winners_up_losers_down(repo_db_path):
     assert res["players_updated"] == 10
 
     final = player_repo.get_openskill_ratings_bulk(player_ids, TEST_GUILD_ID)
+    with match_repo.connection() as conn:
+        baselines = {
+            row["discord_id"]: row["os_mu_before"]
+            for row in conn.execute(
+                """
+                SELECT discord_id, os_mu_before
+                FROM rating_history
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, TEST_GUILD_ID),
+            ).fetchall()
+        }
     for pid in player_ids:
         mu = final[pid][0]
         if won_by[pid]:
-            assert mu > SEED_MU, f"winner {pid} mu {mu} should exceed seed {SEED_MU}"
+            assert mu > baselines[pid]
         else:
-            assert mu < SEED_MU, f"loser {pid} mu {mu} should fall below seed {SEED_MU}"
+            assert mu < baselines[pid]
 
 
 def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
@@ -133,13 +145,8 @@ def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
     assert post == pre
 
 
-def test_phase2_unrated_participant_records_default_baseline_not_none(repo_db_path):
-    """Phase-2 overwrites rating_history.os_mu_before. When a participant is
-    absent from the Phase-1 baseline (its before-columns are NULL, so the
-    baseline query skips it) AND has no current OS rating, the engine recomputes
-    from its default mu/sigma. The persisted 'before' must therefore be that
-    default — not None — or the history row disagrees with the math that
-    produced 'after'."""
+def test_phase2_rebuilds_corrupt_baseline_from_initial_mmr(repo_db_path):
+    """A full replay reconstructs missing history from the durable initial seed."""
     service, player_repo, match_repo = _build_service(repo_db_path)
     player_ids = _seed_players(player_repo)
     match_id = _record_a_match(service, player_ids)
@@ -172,7 +179,10 @@ def test_phase2_unrated_participant_records_default_baseline_not_none(repo_db_pa
             "WHERE match_id = ? AND discord_id = ?",
             (match_id, unrated),
         ).fetchone()
-    assert row["os_mu_before"] == CamaOpenSkillSystem.DEFAULT_MU
+    expected_mu = service.openskill_system.mmr_to_os_mu(
+        service.rating_system.new_player_seed_mmr(SEED_MMR)
+    )
+    assert row["os_mu_before"] == expected_mu
     assert row["os_sigma_before"] == CamaOpenSkillSystem.DEFAULT_SIGMA
 
 
@@ -270,25 +280,27 @@ def test_backfill_no_matches_reports_empty(repo_db_path):
     """Backfill on a guild with no matches returns the documented empty result."""
     service, player_repo, _match_repo = _build_service(repo_db_path)
     _seed_players(player_repo, guild_id=0)  # players exist, but no matches recorded
-    summary = service.backfill_openskill_ratings(guild_id=None, reset_first=False)
+    summary = service.backfill_openskill_ratings(guild_id=None, reset_first=True)
     assert summary["matches_processed"] == 0
-    assert summary["players_updated"] == 0
-    assert summary["errors"] == ["No matches found"]
+    assert summary["players_updated"] == 10
+    assert summary["errors"] == []
 
 
-def test_backfill_loads_all_match_participants_once_without_point_reads(
+def test_backfill_uses_single_atomic_repository_operation(
     repo_db_path, monkeypatch
 ):
     service, player_repo, match_repo = _build_service(repo_db_path)
     player_ids = _seed_players(player_repo)
-    match_ids = [
-        _record_a_match(service, player_ids),
-        _record_a_match(service, player_ids),
-    ]
-    bulk_loader = Mock(wraps=match_repo.get_match_participants_bulk)
+    _record_a_match(service, player_ids)
+    _record_a_match(service, player_ids)
+    atomic_replay = Mock(wraps=match_repo.replay_openskill_atomic)
+    bulk_loader = Mock(
+        side_effect=AssertionError("service must not load replay inputs outside the lock")
+    )
     point_loader = Mock(
         side_effect=AssertionError("backfill must not issue participant point reads")
     )
+    monkeypatch.setattr(match_repo, "replay_openskill_atomic", atomic_replay)
     monkeypatch.setattr(match_repo, "get_match_participants_bulk", bulk_loader)
     monkeypatch.setattr(match_repo, "get_match_participants", point_loader)
 
@@ -298,10 +310,9 @@ def test_backfill_loads_all_match_participants_once_without_point_reads(
 
     assert summary["matches_processed"] == 2
     assert summary["errors"] == []
-    bulk_loader.assert_called_once()
-    loaded_match_ids, loaded_guild_id = bulk_loader.call_args.args
-    assert set(loaded_match_ids) == set(match_ids)
-    assert loaded_guild_id == TEST_GUILD_ID
+    atomic_replay.assert_called_once()
+    assert atomic_replay.call_args.kwargs["guild_id"] == TEST_GUILD_ID
+    bulk_loader.assert_not_called()
     point_loader.assert_not_called()
 
 
@@ -376,18 +387,28 @@ def test_backfill_replays_in_memory_and_flushes_once_with_reset(
             )
             expected_ratings.update(results)
 
-    get_all = Mock(wraps=player_repo.get_all)
+    atomic_replay = Mock(wraps=match_repo.replay_openskill_atomic)
+    get_all = Mock(
+        side_effect=AssertionError("service must not load replay players outside the lock")
+    )
     bulk_reader = Mock(
         side_effect=AssertionError("backfill replay must not bulk-read ratings")
     )
     point_reader = Mock(
         side_effect=AssertionError("backfill replay must not point-read ratings")
     )
-    bulk_writer = Mock(wraps=player_repo.update_openskill_ratings_bulk)
+    atomic_writer = Mock(
+        side_effect=AssertionError("atomic replay must persist in its own transaction")
+    )
+    monkeypatch.setattr(match_repo, "replay_openskill_atomic", atomic_replay)
     monkeypatch.setattr(player_repo, "get_all", get_all)
     monkeypatch.setattr(player_repo, "get_openskill_ratings_bulk", bulk_reader)
     monkeypatch.setattr(player_repo, "get_openskill_rating", point_reader)
-    monkeypatch.setattr(player_repo, "update_openskill_ratings_bulk", bulk_writer)
+    monkeypatch.setattr(
+        match_repo,
+        "replace_openskill_replay_atomic",
+        atomic_writer,
+    )
 
     summary = service.backfill_openskill_ratings(
         guild_id=TEST_GUILD_ID, reset_first=True
@@ -401,64 +422,38 @@ def test_backfill_replays_in_memory_and_flushes_once_with_reset(
         "total_matches": 2,
         "errors": [],
     }
-    get_all.assert_called_once_with(TEST_GUILD_ID)
+    atomic_replay.assert_called_once()
+    get_all.assert_not_called()
     bulk_reader.assert_not_called()
     point_reader.assert_not_called()
-    bulk_writer.assert_called_once()
-    final_updates, final_guild_id = bulk_writer.call_args.args
-    assert final_guild_id == TEST_GUILD_ID
-    assert {player_id for player_id, _mu, _sigma in final_updates} == set(
-        player_ids
-    )
-    actual_ratings = {
-        player_id: (mu, sigma) for player_id, mu, sigma in final_updates
-    }
+    atomic_writer.assert_not_called()
+    with match_repo.connection() as conn:
+        actual_ratings = {
+            row["discord_id"]: (row["os_mu"], row["os_sigma"])
+            for row in conn.execute(
+                """
+                SELECT discord_id, os_mu, os_sigma
+                FROM players
+                WHERE guild_id = ?
+                """,
+                (TEST_GUILD_ID,),
+            ).fetchall()
+        }
     for player_id, expected in expected_ratings.items():
         assert actual_ratings[player_id] == pytest.approx(expected)
 
 
-def test_backfill_without_reset_loads_players_and_flushes_once(
-    repo_db_path, monkeypatch
-):
-    service, player_repo, _match_repo = _build_service(repo_db_path)
+def test_backfill_without_reset_is_rejected(repo_db_path):
+    service, player_repo, match_repo = _build_service(repo_db_path)
     player_ids = _seed_players(player_repo)
     _record_a_match(service, player_ids)
     _record_a_match(service, player_ids)
 
-    get_all = Mock(wraps=player_repo.get_all)
-    bulk_reader = Mock(
-        side_effect=AssertionError("backfill replay must not bulk-read ratings")
-    )
-    point_reader = Mock(
-        side_effect=AssertionError("backfill replay must not point-read ratings")
-    )
-    bulk_writer = Mock(wraps=player_repo.update_openskill_ratings_bulk)
-    monkeypatch.setattr(player_repo, "get_all", get_all)
-    monkeypatch.setattr(player_repo, "get_openskill_ratings_bulk", bulk_reader)
-    monkeypatch.setattr(player_repo, "get_openskill_rating", point_reader)
-    monkeypatch.setattr(player_repo, "update_openskill_ratings_bulk", bulk_writer)
-
-    summary = service.backfill_openskill_ratings(
-        guild_id=TEST_GUILD_ID, reset_first=False
-    )
-
-    assert summary == {
-        "matches_processed": 2,
-        "matches_with_fantasy": 0,
-        "matches_equal_weight": 2,
-        "players_updated": 10,
-        "total_matches": 2,
-        "errors": [],
-    }
-    get_all.assert_called_once_with(TEST_GUILD_ID)
-    bulk_reader.assert_not_called()
-    point_reader.assert_not_called()
-    bulk_writer.assert_called_once()
-    final_updates, final_guild_id = bulk_writer.call_args.args
-    assert final_guild_id == TEST_GUILD_ID
-    assert {player_id for player_id, _mu, _sigma in final_updates} == set(
-        player_ids
-    )
+    with pytest.raises(ValueError, match="reset_first=False is unsupported"):
+        service.backfill_openskill_ratings(
+            guild_id=TEST_GUILD_ID,
+            reset_first=False,
+        )
 
 
 def test_openskill_prediction_uses_requested_guild_and_shared_probability_model(repo_db_path):

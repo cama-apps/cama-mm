@@ -6,6 +6,8 @@ import json
 import logging
 import time
 
+from openskill_rating_system import CamaOpenSkillSystem
+from openskill_replay import OPENSKILL_ALGORITHM_VERSION, OpenSkillReplayResult
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IMatchRepository
 from utils.match_bans import extract_match_bans
@@ -24,10 +26,7 @@ def _replace_match_bans(cursor, match_id: int, enrichment_data: str | None) -> N
             INSERT INTO match_bans (match_id, ban_index, team, hero_id)
             VALUES (?, ?, ?, ?)
             """,
-            [
-                (match_id, ban_index, team, hero_id)
-                for ban_index, team, hero_id in bans
-            ],
+            [(match_id, ban_index, team, hero_id) for ban_index, team, hero_id in bans],
         )
 
 
@@ -61,8 +60,7 @@ def _replace_wrapped_enrichment_facts(
     valid_facts = [
         facts
         for facts in facts_by_player
-        if isinstance(facts, dict)
-        and facts.get("discord_id") in participant_ids
+        if isinstance(facts, dict) and facts.get("discord_id") in participant_ids
     ]
     if not valid_facts:
         return
@@ -277,6 +275,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         exclusion_decay_ids: list[int] | None = None,
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
+        expected_openskill_revision: int | None = None,
     ) -> int:
         """Record a match and all dependent rating/pairings/consumable writes
         atomically.
@@ -297,6 +296,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns the new match_id.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
+        openskill_fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
@@ -321,15 +321,35 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 if existing:
                     return existing["match_id"]
 
+            # The rating calculation happened before this transaction began.
+            # Reject it if a replay/admin mutation committed in that window;
+            # otherwise a stale match calculation could overwrite the newer
+            # OpenSkill snapshot after waiting for the SQLite write lock.
+            if expected_openskill_revision is not None:
+                revision_row = cursor.execute(
+                    """
+                    SELECT revision
+                    FROM openskill_rating_revisions
+                    WHERE guild_id = ?
+                    """,
+                    (normalized_guild,),
+                ).fetchone()
+                current_revision = int(revision_row["revision"]) if revision_row else 0
+                if current_revision != expected_openskill_revision:
+                    raise RuntimeError(
+                        "OpenSkill ratings changed while this match was being "
+                        "calculated; retry recording the match"
+                    )
+
             # 1. matches row
             cursor.execute(
                 """
                 INSERT INTO matches (
                     guild_id, team1_players, team2_players, winning_team,
                     dotabuff_match_id, lobby_type, balancing_rating_system,
-                    betting_mode, pending_match_id
+                    betting_mode, pending_match_id, match_date
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_guild,
@@ -341,6 +361,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     balancing_rating_system,
                     betting_mode,
                     pending_match_id,
+                    last_match_date_iso,
                 ),
             )
             match_id = cursor.lastrowid
@@ -421,10 +442,23 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 cursor.executemany(
                     """
                     UPDATE players
-                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    SET os_mu = ?, os_sigma = ?,
+                        os_rating_version = ?,
+                        os_algorithm_fingerprint = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in openskill_updates],
+                    [
+                        (
+                            mu,
+                            sigma,
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
+                            pid,
+                            normalized_guild,
+                        )
+                        for pid, mu, sigma in openskill_updates
+                    ],
                 )
 
             # 6. last_match_date for all participants
@@ -492,15 +526,27 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 INSERT INTO match_predictions (
                     match_id, radiant_rating, dire_rating, radiant_rd, dire_rd,
-                    expected_radiant_win_prob
+                    expected_radiant_win_prob,
+                    openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version,
+                    openskill_algorithm_fingerprint
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(match_id) DO UPDATE SET
                     radiant_rating = excluded.radiant_rating,
                     dire_rating = excluded.dire_rating,
                     radiant_rd = excluded.radiant_rd,
                     dire_rd = excluded.dire_rd,
                     expected_radiant_win_prob = excluded.expected_radiant_win_prob,
+                    openskill_radiant_win_prob =
+                        excluded.openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob =
+                        excluded.openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version =
+                        excluded.openskill_algorithm_version,
+                    openskill_algorithm_fingerprint =
+                        excluded.openskill_algorithm_fingerprint,
                     timestamp = CURRENT_TIMESTAMP
                 """,
                 (
@@ -510,6 +556,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     match_prediction["radiant_rd"],
                     match_prediction["dire_rd"],
                     match_prediction["expected_radiant_win_prob"],
+                    match_prediction.get("openskill_radiant_win_prob"),
+                    match_prediction.get("openskill_raw_radiant_win_prob"),
+                    OPENSKILL_ALGORITHM_VERSION,
+                    openskill_fingerprint,
                 ),
             )
 
@@ -522,9 +572,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         rd_before, rd_after, volatility_before, volatility_after,
                         expected_team_win_prob, team_number, won, match_id,
                         os_mu_before, os_mu_after, os_sigma_before, os_sigma_after,
-                        fantasy_weight, streak_length, streak_multiplier
+                        fantasy_weight, os_algorithm_version,
+                        os_algorithm_fingerprint,
+                        streak_length, streak_multiplier
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -545,6 +597,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             row.get("os_sigma_before"),
                             row.get("os_sigma_after"),
                             row.get("fantasy_weight"),
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
                             row.get("streak_length"),
                             row.get("streak_multiplier"),
                         )
@@ -560,19 +614,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             teammate_rows: list[tuple] = []
             for idx, p1 in enumerate(team1_ids):
-                for p2 in team1_ids[idx + 1:]:
+                for p2 in team1_ids[idx + 1 :]:
                     c1, c2 = canonical(p1, p2)
                     w = 1 if team1_won else 0
-                    teammate_rows.append(
-                        (normalized_guild, c1, c2, w, match_id, w, match_id)
-                    )
+                    teammate_rows.append((normalized_guild, c1, c2, w, match_id, w, match_id))
             for idx, p1 in enumerate(team2_ids):
-                for p2 in team2_ids[idx + 1:]:
+                for p2 in team2_ids[idx + 1 :]:
                     c1, c2 = canonical(p1, p2)
                     w = 1 if team2_won else 0
-                    teammate_rows.append(
-                        (normalized_guild, c1, c2, w, match_id, w, match_id)
-                    )
+                    teammate_rows.append((normalized_guild, c1, c2, w, match_id, w, match_id))
             if teammate_rows:
                 cursor.executemany(
                     """
@@ -594,14 +644,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for p2 in team2_ids:
                     c1, c2 = canonical(p1, p2)
                     # In canonical order, does player1 (c1) match the team1 player?
-                    p1_is_canonical_first = (p1 == c1)
+                    p1_is_canonical_first = p1 == c1
                     # player1_wins_against tracks c1's wins. c1 is on team1 if
                     # p1_is_canonical_first, else on team2.
                     c1_won = team1_won if p1_is_canonical_first else team2_won
                     w = 1 if c1_won else 0
-                    opponent_rows.append(
-                        (normalized_guild, c1, c2, w, match_id, w, match_id)
-                    )
+                    opponent_rows.append((normalized_guild, c1, c2, w, match_id, w, match_id))
             if opponent_rows:
                 cursor.executemany(
                     """
@@ -651,6 +699,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
             # idempotent, so a retry after a post-core failure re-settles the
             # still-pending bets instead of stranding them. clear_last_shuffle
             # removes the pending row only once recording fully succeeds.
+            if openskill_updates:
+                self._increment_openskill_rating_revision(
+                    cursor,
+                    normalized_guild,
+                )
 
             return match_id
 
@@ -699,10 +752,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_sigma_before,
                     os_sigma_after,
                     fantasy_weight,
+                    os_algorithm_version,
+                    os_algorithm_fingerprint,
                     streak_length,
                     streak_multiplier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     discord_id,
@@ -722,6 +777,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_sigma_before,
                     os_sigma_after,
                     fantasy_weight,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    CamaOpenSkillSystem.algorithm_fingerprint(),
                     streak_length,
                     streak_multiplier,
                 ),
@@ -749,7 +806,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.lastrowid
 
-    def update_pending_match(self, pending_match_id: int, payload: dict, guild_id: int | None = None) -> None:
+    def update_pending_match(
+        self, pending_match_id: int, payload: dict, guild_id: int | None = None
+    ) -> None:
         """
         Update an existing pending match's payload.
 
@@ -878,7 +937,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             player_ids.update(match.get("dire_team_ids") or [])
         return player_ids
 
-    def clear_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
+    def clear_pending_match(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> None:
         """
         Clear pending match(es).
 
@@ -898,7 +959,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             else:
                 cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
 
-    def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None:
+    def consume_pending_match(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> dict | None:
         """
         Get and delete a pending match atomically.
 
@@ -1139,9 +1202,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 [(match_id, discord_id, normalized_guild) for discord_id in debits_by_player],
             )
 
-    def get_player_bonus_events(
-        self, discord_id: int, guild_id: int | None = None
-    ) -> list[dict]:
+    def get_player_bonus_events(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """
         Return every match the player participated in with the actual JC bonus
         awarded (after garnishment / bankruptcy penalty), if persisted. Older
@@ -1293,13 +1354,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "rating": row["rating"],
                     "match_id": row["match_id"],
                     "timestamp": row["timestamp"],
-                    "streak_length": row["streak_length"] if "streak_length" in row.keys() else None,
-                    "streak_multiplier": row["streak_multiplier"] if "streak_multiplier" in row.keys() else None,
+                    "streak_length": row["streak_length"]
+                    if "streak_length" in row.keys()
+                    else None,
+                    "streak_multiplier": row["streak_multiplier"]
+                    if "streak_multiplier" in row.keys()
+                    else None,
                 }
                 for row in rows
             ]
 
-    def get_player_recent_outcomes(self, discord_id: int, guild_id: int, limit: int = 20) -> list[bool]:
+    def get_player_recent_outcomes(
+        self, discord_id: int, guild_id: int, limit: int = 20
+    ) -> list[bool]:
         """
         Get recent match outcomes for a player in a guild.
 
@@ -1353,9 +1420,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     """,
                     (discord_id, guild_id, limit),
                 )
-                outcomes[discord_id] = [
-                    bool(row["won"]) for row in cursor.fetchall()
-                ]
+                outcomes[discord_id] = [bool(row["won"]) for row in cursor.fetchall()]
         return outcomes
 
     def get_player_outcomes_before_match(
@@ -1444,7 +1509,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 outcomes[row["discord_id"]].append(bool(row["won"]))
         return outcomes
 
-    def get_player_rating_history_detailed(self, discord_id: int, guild_id: int, limit: int = 50) -> list[dict]:
+    def get_player_rating_history_detailed(
+        self, discord_id: int, guild_id: int, limit: int = 50
+    ) -> list[dict]:
         """Get detailed rating history for a player in a guild including prediction and OpenSkill data."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -1476,8 +1543,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
                     "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
                     "os_mu_after": row["os_mu_after"] if "os_mu_after" in row.keys() else None,
-                    "os_sigma_before": row["os_sigma_before"] if "os_sigma_before" in row.keys() else None,
-                    "os_sigma_after": row["os_sigma_after"] if "os_sigma_after" in row.keys() else None,
+                    "os_sigma_before": row["os_sigma_before"]
+                    if "os_sigma_before" in row.keys()
+                    else None,
+                    "os_sigma_after": row["os_sigma_after"]
+                    if "os_sigma_after" in row.keys()
+                    else None,
                 }
                 for row in rows
             ]
@@ -1557,13 +1628,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in cursor.fetchall():
                     rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
                     if row["team_number"] == 1:
-                        ratings_by_match[row["match_id"]]["team1"].append(
-                            rating_tuple
-                        )
+                        ratings_by_match[row["match_id"]]["team1"].append(rating_tuple)
                     elif row["team_number"] == 2:
-                        ratings_by_match[row["match_id"]]["team2"].append(
-                            rating_tuple
-                        )
+                        ratings_by_match[row["match_id"]]["team2"].append(rating_tuple)
 
         return ratings_by_match
 
@@ -1596,12 +1663,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "won": row["won"],
                     "match_id": row["match_id"],
                     "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
-                    "os_sigma_before": row["os_sigma_before"] if "os_sigma_before" in row.keys() else None,
+                    "os_sigma_before": row["os_sigma_before"]
+                    if "os_sigma_before" in row.keys()
+                    else None,
                     "timestamp": row["timestamp"],
                 }
                 for row in rows
             ]
-
 
     def get_match_count(self, guild_id: int) -> int:
         """Get total match count for a guild."""
@@ -1621,7 +1689,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             row = cursor.fetchone()
             return row["count"] if row else 0
-
 
     def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:
         """Get recent match predictions with outcomes for a guild."""
@@ -1915,11 +1982,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         """
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            normalized_guild = (
-                self.normalize_guild_id(guild_id)
-                if guild_id is not None
-                else None
-            )
+            normalized_guild = self.normalize_guild_id(guild_id) if guild_id is not None else None
             match_filter = "WHERE match_id = ?"
             match_params: tuple = (match_id,)
             if normalized_guild is not None:
@@ -2042,7 +2105,29 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     for u in participant_updates
                 ],
             )
-            return cursor.rowcount
+            updated_count = cursor.rowcount
+            fantasy_state = cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS participant_count,
+                    SUM(CASE WHEN fantasy_points IS NOT NULL THEN 1 ELSE 0 END)
+                        AS fantasy_count
+                FROM match_participants
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, normalized_guild),
+            ).fetchone()
+            if (
+                fantasy_state
+                and fantasy_state["participant_count"] == 10
+                and fantasy_state["fantasy_count"] == 10
+            ):
+                self.mark_openskill_replay_pending(
+                    normalized_guild,
+                    f"match_enrichment:{match_id}",
+                    cursor=cursor,
+                )
+            return updated_count
 
     def apply_openskill_phase2_atomic(
         self,
@@ -2060,16 +2145,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
         disagreeing on whose OS rating reflects fantasy weighting.
 
         A player's live ``players.os_mu/os_sigma`` is only touched when this
-        match is their LATEST rated match (no rating_history row with a
-        higher match_id exists for them in this guild). Phase 2 values are
-        recomputed from this match's Phase 1 baseline, so writing them for an
-        old match (fantasy refill, manual /enrich of history) would rewind
-        the player's current rating to a stale post-that-match value. The
-        rating_history rows for the match are always updated.
+        match is their latest rated match by ``(match_date, match_id)``.
+        Phase 2 values are recomputed from this match's Phase 1 baseline, so
+        writing them for an old or back-dated match would rewind the player's
+        current rating to a stale post-that-match value. The rating_history
+        rows for the match are always updated.
 
         Returns ``{"players_updated": int, "history_updated": int}``.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
+        openskill_fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
@@ -2078,17 +2163,41 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 cursor.executemany(
                     """
                     UPDATE players
-                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    SET os_mu = ?, os_sigma = ?,
+                        os_rating_version = ?,
+                        os_algorithm_fingerprint = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                       AND NOT EXISTS (
-                          SELECT 1 FROM rating_history rh
+                          SELECT 1
+                          FROM rating_history rh
+                          JOIN matches later
+                            ON later.match_id = rh.match_id
+                           AND later.guild_id = rh.guild_id
+                          JOIN matches target
+                            ON target.match_id = ?
+                           AND target.guild_id = players.guild_id
                           WHERE rh.discord_id = players.discord_id
                             AND rh.guild_id = players.guild_id
-                            AND rh.match_id > ?
+                            AND (
+                                later.match_date > target.match_date
+                                OR (
+                                    later.match_date = target.match_date
+                                    AND later.match_id > target.match_id
+                                )
+                            )
                       )
                     """,
                     [
-                        (mu, sigma, pid, normalized_guild, match_id)
+                        (
+                            mu,
+                            sigma,
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
+                            pid,
+                            normalized_guild,
+                            match_id,
+                        )
                         for pid, mu, sigma in player_updates
                     ],
                 )
@@ -2103,8 +2212,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         os_mu_after = ?,
                         os_sigma_before = ?,
                         os_sigma_after = ?,
-                        fantasy_weight = ?
-                    WHERE match_id = ? AND discord_id = ?
+                        fantasy_weight = ?,
+                        os_algorithm_version = ?,
+                        os_algorithm_fingerprint = ?
+                    WHERE guild_id = ? AND match_id = ? AND discord_id = ?
                     """,
                     [
                         (
@@ -2113,6 +2224,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             u.get("os_sigma_before"),
                             u.get("os_sigma_after"),
                             u.get("fantasy_weight"),
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
+                            normalized_guild,
                             match_id,
                             u["discord_id"],
                         )
@@ -2121,10 +2235,340 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 )
                 history_updated = cursor.rowcount
 
+            if players_updated or history_updated:
+                self._increment_openskill_rating_revision(
+                    cursor,
+                    normalized_guild,
+                )
             return {
                 "players_updated": players_updated,
                 "history_updated": history_updated,
             }
+
+    def replace_openskill_replay_atomic(
+        self,
+        replay: OpenSkillReplayResult,
+        guild_id: int,
+    ) -> dict[str, int]:
+        """Persist a complete OpenSkill replay snapshot and history atomically."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            return self._persist_openskill_replay(
+                conn.cursor(),
+                replay,
+                normalized_guild,
+            )
+
+    def _persist_openskill_replay(
+        self,
+        cursor,
+        replay: OpenSkillReplayResult,
+        guild_id: int,
+    ) -> dict[str, int]:
+        """Persist replay output using a caller-owned write transaction."""
+        from openskill_rating_system import CamaOpenSkillSystem
+
+        history_rows = [row for row in replay.history_rows if row["guild_id"] == guild_id]
+        player_rows = [
+            (player_id, mu, sigma)
+            for (row_guild, player_id), (mu, sigma) in replay.final_ratings.items()
+            if row_guild == guild_id
+        ]
+        fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
+        history_updated = 0
+        history_inserted = 0
+        for history in history_rows:
+            cursor.execute(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?,
+                    os_algorithm_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    team_number = COALESCE(team_number, ?),
+                    won = COALESCE(won, ?)
+                WHERE guild_id = ? AND match_id = ? AND discord_id = ?
+                """,
+                (
+                    history["os_mu_before"],
+                    history["os_mu_after"],
+                    history["os_sigma_before"],
+                    history["os_sigma_after"],
+                    history["fantasy_weight"],
+                    OPENSKILL_ALGORITHM_VERSION,
+                    history["os_algorithm_fingerprint"],
+                    history["team_number"],
+                    history["won"],
+                    guild_id,
+                    history["match_id"],
+                    history["discord_id"],
+                ),
+            )
+            if cursor.rowcount:
+                history_updated += cursor.rowcount
+                continue
+            cursor.execute(
+                """
+                INSERT INTO rating_history (
+                    discord_id, guild_id, match_id, timestamp,
+                    team_number, won,
+                    os_mu_before, os_mu_after,
+                    os_sigma_before, os_sigma_after,
+                    fantasy_weight, os_algorithm_version,
+                    os_algorithm_fingerprint
+                )
+                VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP),
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    history["discord_id"],
+                    guild_id,
+                    history["match_id"],
+                    history["match_date"],
+                    history["team_number"],
+                    history["won"],
+                    history["os_mu_before"],
+                    history["os_mu_after"],
+                    history["os_sigma_before"],
+                    history["os_sigma_after"],
+                    history["fantasy_weight"],
+                    OPENSKILL_ALGORITHM_VERSION,
+                    history["os_algorithm_fingerprint"],
+                ),
+            )
+            history_inserted += 1
+
+        if player_rows:
+            cursor.executemany(
+                """
+                UPDATE players
+                SET os_mu = ?, os_sigma = ?,
+                    os_rating_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                [
+                    (
+                        mu,
+                        sigma,
+                        OPENSKILL_ALGORITHM_VERSION,
+                        fingerprint,
+                        player_id,
+                        guild_id,
+                    )
+                    for player_id, mu, sigma in player_rows
+                ],
+            )
+            players_updated = cursor.rowcount
+        else:
+            players_updated = 0
+
+        predictions_updated = 0
+        for prediction in replay.prediction_rows:
+            if prediction["guild_id"] != guild_id:
+                continue
+            cursor.execute(
+                """
+                INSERT INTO match_predictions (
+                    match_id,
+                    openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version,
+                    openskill_algorithm_fingerprint
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(match_id) DO UPDATE SET
+                    openskill_radiant_win_prob =
+                        excluded.openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob =
+                        excluded.openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version =
+                        excluded.openskill_algorithm_version,
+                    openskill_algorithm_fingerprint =
+                        excluded.openskill_algorithm_fingerprint
+                """,
+                (
+                    prediction["match_id"],
+                    prediction["openskill_radiant_win_prob"],
+                    prediction["openskill_raw_radiant_win_prob"],
+                    OPENSKILL_ALGORITHM_VERSION,
+                    prediction["openskill_algorithm_fingerprint"],
+                ),
+            )
+            predictions_updated += 1
+
+        cursor.execute(
+            "DELETE FROM openskill_replay_jobs WHERE guild_id = ?",
+            (guild_id,),
+        )
+        self._increment_openskill_rating_revision(cursor, guild_id)
+        return {
+            "players_updated": players_updated,
+            "history_updated": history_updated,
+            "history_inserted": history_inserted,
+            "predictions_updated": predictions_updated,
+        }
+
+    @staticmethod
+    def _increment_openskill_rating_revision(cursor, guild_id: int) -> None:
+        cursor.execute(
+            """
+            INSERT INTO openskill_rating_revisions (
+                guild_id, revision, updated_at
+            )
+            VALUES (?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                revision = openskill_rating_revisions.revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (guild_id,),
+        )
+
+    def get_openskill_rating_revision(self, guild_id: int) -> int:
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT revision
+                FROM openskill_rating_revisions
+                WHERE guild_id = ?
+                """,
+                (normalized_guild,),
+            ).fetchone()
+            return int(row["revision"]) if row else 0
+
+    def replay_openskill_atomic(
+        self,
+        *,
+        guild_id: int,
+        system,
+    ) -> tuple[OpenSkillReplayResult, int]:
+        """Load, calculate, and persist a guild replay under one write lock."""
+        from openskill_replay import replay_openskill
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            players = cursor.execute(
+                """
+                SELECT discord_id, guild_id, initial_mmr, os_mu, os_sigma
+                FROM players
+                WHERE guild_id = ?
+                ORDER BY discord_id
+                """,
+                (normalized_guild,),
+            ).fetchall()
+            matches = cursor.execute(
+                """
+                SELECT match_id, guild_id, winning_team, match_date,
+                       team1_players, team2_players
+                FROM matches
+                WHERE guild_id = ? AND winning_team IN (1, 2)
+                ORDER BY match_date, match_id
+                """,
+                (normalized_guild,),
+            ).fetchall()
+            participant_rows = cursor.execute(
+                """
+                SELECT mp.match_id, mp.discord_id, mp.team_number,
+                       mp.side, mp.fantasy_points
+                FROM match_participants mp
+                JOIN matches m
+                  ON m.match_id = mp.match_id AND m.guild_id = mp.guild_id
+                WHERE m.guild_id = ? AND m.winning_team IN (1, 2)
+                ORDER BY mp.match_id, mp.discord_id
+                """,
+                (normalized_guild,),
+            ).fetchall()
+            participants_by_match: dict[int, list] = {
+                row["match_id"]: [] for row in matches
+            }
+            for row in participant_rows:
+                participants_by_match.setdefault(row["match_id"], []).append(row)
+            rating_events = cursor.execute(
+                """
+                SELECT event_id, guild_id, discord_id, event_type, value, event_at
+                FROM openskill_rating_events
+                WHERE guild_id = ?
+                ORDER BY event_at, event_id
+                """,
+                (normalized_guild,),
+            ).fetchall()
+            replay = replay_openskill(
+                players=list(players),
+                matches=list(matches),
+                participants_by_match=participants_by_match,
+                rating_events=list(rating_events),
+                system=system,
+                reset_first=True,
+            )
+            if replay.errors:
+                cursor.execute(
+                    """
+                    UPDATE openskill_replay_jobs
+                    SET last_error = ?
+                    WHERE guild_id = ?
+                    """,
+                    ("; ".join(replay.errors[:10]), normalized_guild),
+                )
+                return replay, len(matches)
+            self._persist_openskill_replay(cursor, replay, normalized_guild)
+            return replay, len(matches)
+
+    def mark_openskill_replay_pending(
+        self,
+        guild_id: int,
+        reason: str,
+        *,
+        cursor=None,
+    ) -> None:
+        """Durably request replay, optionally inside a caller-owned transaction."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        sql = """
+            INSERT INTO openskill_replay_jobs (
+                guild_id, reason, requested_at, last_error
+            )
+            VALUES (?, ?, CURRENT_TIMESTAMP, NULL)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                reason = excluded.reason,
+                requested_at = excluded.requested_at,
+                last_error = NULL
+        """
+        if cursor is not None:
+            cursor.execute(sql, (normalized_guild, reason))
+            return
+        with self.atomic_transaction() as conn:
+            conn.execute(sql, (normalized_guild, reason))
+
+    def get_pending_openskill_replay(self, guild_id: int) -> dict | None:
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT guild_id, reason, requested_at, last_error
+                FROM openskill_replay_jobs
+                WHERE guild_id = ?
+                """,
+                (normalized_guild,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_pending_openskill_replays(self) -> list[dict]:
+        with self.connection() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT guild_id, reason, requested_at, last_error
+                    FROM openskill_replay_jobs
+                    ORDER BY requested_at, guild_id
+                    """
+                ).fetchall()
+            ]
 
     def update_participant_stats_bulk(self, match_id: int, updates: list[dict]) -> int:
         """
@@ -2210,9 +2654,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.rowcount
 
-    def get_match_participants(
-        self, match_id: int, guild_id: int | None = None
-    ) -> list[dict]:
+    def get_match_participants(self, match_id: int, guild_id: int | None = None) -> list[dict]:
         """Get all participants for a match with their stats (guild_id=None normalizes to 0)."""
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -2236,9 +2678,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return {}
 
         normalized_guild = self.normalize_guild_id(guild_id)
-        participants_by_match: dict[int, list[dict]] = {
-            match_id: [] for match_id in unique_ids
-        }
+        participants_by_match: dict[int, list[dict]] = {match_id: [] for match_id in unique_ids}
         with self.connection() as conn:
             cursor = conn.cursor()
             # Stay below conservative SQLite bind limits while retaining one
@@ -2625,16 +3065,22 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 winning_team = row["winning_team"]
                 # Calculate underdog's win probability
                 underdog_prob = win_prob if winning_team == 1 else 1.0 - win_prob
-                results.append({
-                    "match_id": row["match_id"],
-                    "underdog_win_prob": underdog_prob,
-                    "radiant_rating": row["radiant_rating"],
-                    "dire_rating": row["dire_rating"],
-                    "winning_team": winning_team,
-                    "match_date": row["match_date"],
-                    "team1_players": json.loads(row["team1_players"]) if row["team1_players"] else [],
-                    "team2_players": json.loads(row["team2_players"]) if row["team2_players"] else [],
-                })
+                results.append(
+                    {
+                        "match_id": row["match_id"],
+                        "underdog_win_prob": underdog_prob,
+                        "radiant_rating": row["radiant_rating"],
+                        "dire_rating": row["dire_rating"],
+                        "winning_team": winning_team,
+                        "match_date": row["match_date"],
+                        "team1_players": json.loads(row["team1_players"])
+                        if row["team1_players"]
+                        else [],
+                        "team2_players": json.loads(row["team2_players"])
+                        if row["team2_players"]
+                        else [],
+                    }
+                )
             return results
 
     def get_player_performance_stats(self, guild_id: int | None) -> list[dict]:
@@ -2745,7 +3191,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_hero_stats_detailed(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
+    def get_player_hero_stats_detailed(
+        self, discord_id: int, guild_id: int, limit: int = 10
+    ) -> list[dict]:
         """
         Get a player's recent hero performance from enriched matches in a guild.
 
@@ -2953,7 +3401,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        team1_players, team2_players
                 FROM matches
                 WHERE guild_id = ? AND winning_team IN (1, 2)
-                ORDER BY match_date ASC
+                ORDER BY match_date ASC, match_id ASC
                 """,
                 (normalized_guild,),
             )
@@ -2988,6 +3436,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT m.match_id, m.winning_team, m.match_date,
                        m.team1_players, m.team2_players,
                        mp.expected_radiant_win_prob,
+                       mp.openskill_radiant_win_prob,
+                       mp.openskill_raw_radiant_win_prob,
+                       mp.openskill_algorithm_version,
                        mp.radiant_rating, mp.dire_rating,
                        mp.radiant_rd, mp.dire_rd
                 FROM matches m
@@ -3006,6 +3457,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "team1_players": json.loads(row["team1_players"]),
                     "team2_players": json.loads(row["team2_players"]),
                     "expected_radiant_win_prob": row["expected_radiant_win_prob"],
+                    "openskill_radiant_win_prob": row["openskill_radiant_win_prob"],
+                    "openskill_raw_radiant_win_prob": row["openskill_raw_radiant_win_prob"],
+                    "openskill_algorithm_version": row["openskill_algorithm_version"],
                     "radiant_rating": row["radiant_rating"],
                     "dire_rating": row["dire_rating"],
                     "radiant_rd": row["radiant_rd"],
@@ -3014,7 +3468,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_openskill_history(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
+    def get_player_openskill_history(
+        self, discord_id: int, guild_id: int, limit: int = 10
+    ) -> list[dict]:
         """
         Get a player's recent OpenSkill rating changes in a guild.
 
@@ -3058,7 +3514,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-
     def get_os_baseline_for_match(
         self, match_id: int, guild_id: int | None = None
     ) -> dict[int, tuple[float, float]]:
@@ -3093,8 +3548,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(query, params)
             rows = cursor.fetchall()
             return {
-                row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"])
-                for row in rows
+                row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"]) for row in rows
             }
 
     def get_full_rating_history_for_match(self, match_id: int) -> list[dict]:
@@ -3169,6 +3623,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         its own recovery path.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
+        openskill_fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -3213,10 +3668,23 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 cursor.executemany(
                     """
                     UPDATE players
-                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    SET os_mu = ?, os_sigma = ?,
+                        os_rating_version = ?,
+                        os_algorithm_fingerprint = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in openskill_updates],
+                    [
+                        (
+                            mu,
+                            sigma,
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
+                            pid,
+                            normalized_guild,
+                        )
+                        for pid, mu, sigma in openskill_updates
+                    ],
                 )
 
             # 4. Update rating_history 'after' values to match the new result.
@@ -3230,6 +3698,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         won = ?,
                         os_mu_after = COALESCE(?, os_mu_after),
                         os_sigma_after = COALESCE(?, os_sigma_after),
+                        fantasy_weight = ?,
+                        os_algorithm_version = ?,
+                        os_algorithm_fingerprint = ?,
                         streak_length = COALESCE(?, streak_length),
                         streak_multiplier = COALESCE(?, streak_multiplier)
                     WHERE match_id = ? AND discord_id = ?
@@ -3242,6 +3713,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             u["new_won"],
                             u.get("new_os_mu"),
                             u.get("new_os_sigma"),
+                            u.get("new_fantasy_weight"),
+                            OPENSKILL_ALGORITHM_VERSION,
+                            openskill_fingerprint,
                             u.get("new_streak_length"),
                             u.get("new_streak_multiplier"),
                             match_id,
@@ -3279,12 +3753,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             teammate_rows: list[tuple] = []
             for idx, p1 in enumerate(radiant_ids):
-                for p2 in radiant_ids[idx + 1:]:
+                for p2 in radiant_ids[idx + 1 :]:
                     c1, c2 = canonical(p1, p2)
                     delta = (1 if new_team1_won else 0) - (1 if old_team1_won else 0)
                     teammate_rows.append((delta, normalized_guild, c1, c2))
             for idx, p1 in enumerate(dire_ids):
-                for p2 in dire_ids[idx + 1:]:
+                for p2 in dire_ids[idx + 1 :]:
                     c1, c2 = canonical(p1, p2)
                     delta = (1 if not new_team1_won else 0) - (1 if not old_team1_won else 0)
                     teammate_rows.append((delta, normalized_guild, c1, c2))
@@ -3303,7 +3777,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             for p1 in radiant_ids:
                 for p2 in dire_ids:
                     c1, c2 = canonical(p1, p2)
-                    p1_is_canonical_first = (p1 == c1)
+                    p1_is_canonical_first = p1 == c1
                     c1_old_won = old_team1_won if p1_is_canonical_first else not old_team1_won
                     c1_new_won = new_team1_won if p1_is_canonical_first else not new_team1_won
                     delta = (1 if c1_new_won else 0) - (1 if c1_old_won else 0)
@@ -3332,8 +3806,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 )
                 correction_id = cursor.lastrowid
 
-            return correction_id
+            self.mark_openskill_replay_pending(
+                normalized_guild,
+                f"match_correction:{match_id}",
+                cursor=cursor,
+            )
+            if openskill_updates:
+                self._increment_openskill_rating_revision(
+                    cursor,
+                    normalized_guild,
+                )
 
+            return correction_id
 
     def get_match_corrections(self, match_id: int) -> list[dict]:
         """
@@ -3629,12 +4113,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             totals["losses"] += losses
 
             my_hero = row["my_hero"]
-            if (
-                not row["is_ally"]
-                and my_hero is not None
-                and my_hero > 0
-                and games >= min_games
-            ):
+            if not row["is_ally"] and my_hero is not None and my_hero > 0 and games >= min_games:
                 hero_matchups.append(
                     {
                         "my_hero": my_hero,
@@ -3789,9 +4268,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.fetchone()["count"]
 
-    def get_player_overall_hero_stats(
-        self, discord_id: int, guild_id: int | None = None
-    ) -> dict:
+    def get_player_overall_hero_stats(self, discord_id: int, guild_id: int | None = None) -> dict:
         """
         Get aggregated hero stats for a player (for tab header).
 
@@ -3974,7 +4451,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_multi_player_hero_stats(self, discord_ids: list[int], guild_id: int | None = None) -> list[dict]:
+    def get_multi_player_hero_stats(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> list[dict]:
         """
         Get hero stats for multiple players in a single query.
 
@@ -4042,8 +4521,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
             return [
-                {"discord_id": row["discord_id"], "total_games": row["total_games"]}
-                for row in rows
+                {"discord_id": row["discord_id"], "total_games": row["total_games"]} for row in rows
             ]
 
     # -------------------------------------------------------------------------
@@ -4132,13 +4610,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     else:
                         primary_role = 1  # Default to carry if no data
 
-                    heroes.append({
-                        "hero_id": hero_id,
-                        "games": games,
-                        "wins": wins,
-                        "losses": losses,
-                        "primary_role": primary_role,
-                    })
+                    heroes.append(
+                        {
+                            "hero_id": hero_id,
+                            "games": games,
+                            "wins": wins,
+                            "losses": losses,
+                            "primary_role": primary_role,
+                        }
+                    )
 
                 # Sort by games descending
                 heroes.sort(key=lambda x: x["games"], reverse=True)
@@ -4195,10 +4675,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """,
                 [normalized_guild, *discord_ids],
             )
-            return {
-                row["hero_id"]: row["ban_count"]
-                for row in cursor.fetchall()
-            }
+            return {row["hero_id"]: row["ban_count"] for row in cursor.fetchall()}
 
     def get_match_count_for_players(
         self, discord_ids: list[int], guild_id: int | None = None

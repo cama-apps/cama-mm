@@ -111,7 +111,9 @@ class MatchService(
         # to allow concurrent recording of different matches in the same guild
         self._recording_in_progress: set[tuple[int, int | None]] = set()
 
-    def _load_glicko_player(self, player_id: int, guild_id: int | None = None) -> tuple[Player, int]:
+    def _load_glicko_player(
+        self, player_id: int, guild_id: int | None = None
+    ) -> tuple[Player, int]:
         rating_data = self.player_repo.get_glicko_rating(player_id, guild_id)
         last_dates = self.player_repo.get_last_match_date(player_id, guild_id)
 
@@ -170,6 +172,40 @@ class MatchService(
             base_player.rd = self.rating_system.apply_rd_decay(base_player.rd, days_since)
 
         return base_player
+
+    def _openskill_rating_from_input(
+        self,
+        rating_input: dict | None,
+    ) -> tuple[float, float]:
+        """Build an inactivity-adjusted OpenSkill rating from a preload row."""
+        rating_input = rating_input or {}
+        mu = rating_input.get("os_mu")
+        sigma = rating_input.get("os_sigma")
+        if mu is None:
+            source_mmr = rating_input.get("current_mmr")
+            seed_mmr = self.rating_system.new_player_seed_mmr(
+                int(source_mmr) if source_mmr is not None else 4000
+            )
+            mu = self.openskill_system.mmr_to_os_mu(seed_mmr)
+        if sigma is None:
+            sigma = self.openskill_system.DEFAULT_SIGMA
+
+        reference_value = rating_input.get("last_match_date") or rating_input.get("created_at")
+        if reference_value:
+            try:
+                reference_dt = datetime.fromisoformat(str(reference_value).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                reference_dt = None
+            if reference_dt is not None:
+                if reference_dt.tzinfo is None:
+                    reference_dt = reference_dt.replace(tzinfo=UTC)
+                days_since = max(0, (datetime.now(UTC) - reference_dt).days)
+                sigma = self.openskill_system.apply_sigma_decay(
+                    float(sigma),
+                    days_since,
+                )
+
+        return float(mu), float(sigma)
 
     def is_first_game_of_night(self, guild_id: int | None = None) -> bool:
         """Check if no matches have been recorded since the most recent reset boundary.

@@ -5,7 +5,7 @@ These tests verify:
 - Admin gating (non-admin invocations get rejected without side effects).
 - Each action dispatches to the correct handler.
 - The "player" sub-handler computes derived OpenSkill values correctly:
-  * normalized_rating = mu * 50 + 250
+  * normalized_rating = (mu - 25) * 50
   * is_calibrated when sigma <= 4.0
   * ordinal = mu - 3*sigma
 - The "compare" sub-handler refuses gracefully when comparison data is missing.
@@ -513,7 +513,7 @@ class TestPlayerAction:
     async def test_player_with_openskill_data_calibrated(self, monkeypatch):
         monkeypatch.setattr("commands.rating_analysis.has_admin_permission", lambda _: True)
         # mu=30, sigma=3.0 → calibrated (sigma <= 4.0)
-        # ordinal = 30 - 9 = 21.0; normalized = 30 * 50 + 250 = 1750
+        # ordinal = 30 - 9 = 21.0; normalized = (30 - 25) * 50 = 250
         player_obj = types.SimpleNamespace(glicko_rating=1500.0, glicko_rd=80.0)
         ps = StubPlayerService(
             players={42: player_obj},
@@ -540,8 +540,8 @@ class TestPlayerAction:
         assert embed is not None
         assert "Star" in embed.title
         names = {f.name: f.value for f in embed.fields}
-        # Normalized rating: 30 * 50 + 250 = 1750
-        assert "1750" in names["Normalized Rating"]
+        # Normalized rating: (30 - 25) * 50 = 250
+        assert "250" in names["Normalized Rating"]
         # Glicko comparison present
         assert "1500" in names["Glicko-2 Rating"]
         # Calibrated since sigma <= 4.0
@@ -555,7 +555,7 @@ class TestPlayerAction:
         # History rendered
         history_field = names["Recent OpenSkill Changes"]
         assert "+1.50" in history_field  # mu change
-        assert "(w=1.5)" in history_field
+        assert "(perf×1.500)" in history_field
 
     @pytest.mark.asyncio
     async def test_player_with_high_sigma_not_calibrated(self, monkeypatch):

@@ -2,10 +2,10 @@
 Tests for OpenSkill Plackett-Luce rating system.
 
 Tests cover:
-- Weight blending (25% FP, 75% equal)
-- Asymmetric weight behavior (high FP = more credit on win, less blame on loss)
-- Per-game mu swing cap (±2.0)
-- Mu floor enforcement (minimum 25)
+- Native bounded contribution weights without min/max expansion
+- Asymmetric performance behavior (high FP = more credit on win, less blame on loss)
+- Uncapped native mu and sigma posteriors
+- Inactivity uncertainty decay
 """
 
 
@@ -15,7 +15,7 @@ from openskill_rating_system import CamaOpenSkillSystem
 
 
 class TestWeightBlending:
-    """Test that FP impact is limited to 10% blend with equal weight."""
+    """Test that direct contribution weights stay bounded."""
 
     def test_weight_blending_reduces_fp_impact(self):
         """High FP player should only get ~1.1x the gain, not 3x."""
@@ -50,11 +50,61 @@ class TestWeightBlending:
         high_fp_gain = high_fp_new_mu - starting_mu
         low_fp_gain = low_fp_new_mu - starting_mu
 
-        # With 25% blend, the ratio should be much less than 3:1 (raw weight ratio)
-        # Expected: ~1.1-1.2x difference, not 3x
+        # The revised absolute-score nudge must remain small.
         ratio = high_fp_gain / low_fp_gain if low_fp_gain > 0 else float('inf')
-        assert ratio < 1.5, f"FP impact too high: {ratio:.2f}x gain ratio (should be < 1.5x)"
+        assert ratio < 1.25, f"FP impact too high: {ratio:.2f}x gain ratio"
         assert ratio > 1.0, f"High FP should still gain more: {ratio:.2f}x"
+
+    def test_one_point_difference_does_not_expand_to_two_x(self):
+        system = CamaOpenSkillSystem()
+        team1 = [
+            (1, 45.0, 4.0, 15.0),
+            (2, 45.0, 4.0, 15.0),
+            (3, 45.0, 4.0, 15.0),
+            (4, 45.0, 4.0, 15.0),
+            (5, 45.0, 4.0, 16.0),
+        ]
+        team2 = [(pid, 45.0, 4.0, 15.0) for pid in range(6, 11)]
+
+        weighted = system.update_ratings_after_match(team1, team2, 1)
+        equal = system.update_ratings_equal_weight(
+            [(pid, mu, sigma) for pid, mu, sigma, _fp in team1],
+            [(pid, mu, sigma) for pid, mu, sigma, _fp in team2],
+            1,
+        )
+
+        base = equal[5][0] - 45.0
+        weighted_delta = weighted[5][0] - 45.0
+        assert weighted_delta / base < 1.01
+
+    def test_performance_can_change_each_teams_total_movement(self):
+        system = CamaOpenSkillSystem()
+        team1 = [
+            (1, 45.0, 4.0, 30.0),
+            (2, 45.0, 8.0, 5.0),
+        ]
+        team2 = [
+            (3, 45.0, 4.0, 30.0),
+            (4, 45.0, 8.0, 5.0),
+        ]
+        weighted = system.update_ratings_after_match(team1, team2, 1)
+        equal = system.update_ratings_equal_weight(
+            [(pid, mu, sigma) for pid, mu, sigma, _fp in team1],
+            [(pid, mu, sigma) for pid, mu, sigma, _fp in team2],
+            1,
+        )
+
+        for player_ids in ((1, 2), (3, 4)):
+            weighted_total = sum(
+                weighted[pid][0] - 45.0 for pid in player_ids
+            )
+            equal_total = sum(equal[pid][0] - 45.0 for pid in player_ids)
+            assert weighted_total != pytest.approx(equal_total)
+
+    def test_model_does_not_expand_direct_weights(self):
+        system = CamaOpenSkillSystem()
+
+        assert system.model.weight_bounds is None
 
     def test_equal_fp_gives_equal_gains(self):
         """Players with equal FP should get equal rating changes."""
@@ -120,157 +170,96 @@ class TestLossWeightInversion:
             f"low FP loser ({low_fp_loss:.3f})"
         )
 
-    def test_compute_match_weights_blending(self):
-        """Test compute_match_weights produces correct blended weights."""
+    def test_native_weights_are_persistable_and_bounded(self):
+        """The returned third value is the contribution weight sent to OpenSkill."""
+        system = CamaOpenSkillSystem()
+        team1 = [(1, 35.0, 4.0, 30.0), (2, 35.0, 4.0, 5.0)]
+        team2 = [(3, 35.0, 4.0, 30.0), (4, 35.0, 4.0, 5.0)]
+
+        results = system.update_ratings_after_match(team1, team2, 1)
+
+        assert 1.0 < results[1][2] < 1.15
+        assert 0.85 < results[2][2] < 1.0
+        assert 1.0 < results[3][2] < 1.15
+        assert 0.85 < results[4][2] < 1.0
+
+
+class TestNativePosterior:
+    """OpenSkill's native mu and sigma outputs are stored without post-processing."""
+
+    def test_weighted_update_matches_installed_plackett_luce_exactly(self):
+        system = CamaOpenSkillSystem()
+        team1 = [(1, 42.0, 5.0, 30.0), (2, 38.0, 7.0, 5.0)]
+        team2 = [(3, 45.0, 4.0, 20.0), (4, 35.0, 6.0, 10.0)]
+        factors = [
+            system._performance_factors([30.0, 5.0]),
+            system._performance_factors([20.0, 10.0]),
+        ]
+
+        actual = system.update_ratings_after_match(team1, team2, 1)
+        direct = system.model.rate(
+            [
+                [system.create_rating(mu, sigma) for _pid, mu, sigma, _fp in team1],
+                [system.create_rating(mu, sigma) for _pid, mu, sigma, _fp in team2],
+            ],
+            ranks=[1, 2],
+            weights=factors,
+        )
+
+        assert actual[1][:2] == pytest.approx(
+            (direct[0][0].mu, direct[0][0].sigma)
+        )
+        assert actual[2][:2] == pytest.approx(
+            (direct[0][1].mu, direct[0][1].sigma)
+        )
+        assert actual[3][:2] == pytest.approx(
+            (direct[1][0].mu, direct[1][0].sigma)
+        )
+        assert actual[4][:2] == pytest.approx(
+            (direct[1][1].mu, direct[1][1].sigma)
+        )
+
+    def test_uncertain_upset_is_not_capped_at_two_mu(self):
         system = CamaOpenSkillSystem()
 
-        # High FP = 30, Low FP = 5
-        team1_fantasy = [30.0, 5.0]
-        team2_fantasy = [30.0, 5.0]
-
-        team1_weights, team2_weights = system.compute_match_weights(
-            team1_fantasy, team2_fantasy
-        )
-
-        # Both teams should have same weights (no inversion)
-        # High FP (30) → raw 3.0 → blended = 0.10*3.0 + 0.90*1.0 = 1.2
-        # Low FP (5) → raw 1.0 → blended = 0.10*1.0 + 0.90*1.0 = 1.0
-        assert team1_weights[0] > team1_weights[1], (
-            f"High FP should have higher weight: "
-            f"high FP={team1_weights[0]:.3f}, low FP={team1_weights[1]:.3f}"
-        )
-        assert team2_weights[0] > team2_weights[1], (
-            f"High FP should have higher weight: "
-            f"high FP={team2_weights[0]:.3f}, low FP={team2_weights[1]:.3f}"
-        )
-
-        # Verify blending reduces impact (weights should be closer to 1.0 than raw)
-        assert 1.0 < team1_weights[0] < 2.0, "High FP weight should be blended"
-        assert 0.9 < team1_weights[1] < 1.1, "Low FP weight should be near 1.0"
-
-
-class TestMuSwingCap:
-    """Test that per-game mu change is capped at ±2.0."""
-
-    def test_mu_swing_cap_on_win(self):
-        """Winner's mu gain should be capped at MAX_MU_SWING_PER_GAME."""
-        system = CamaOpenSkillSystem()
-
-        # Very low rated player beats very high rated players
-        # Without cap, this would result in massive gain
         low_mu = 25.0
-        high_sigma = 8.333  # High uncertainty = large swings
+        high_sigma = 8.333
 
         team1_data = [(1, low_mu, high_sigma, 30.0)]
-        team2_data = [(2, 60.0, 4.0, 5.0)]  # Very high mu, calibrated
+        team2_data = [(2, 60.0, 4.0, 5.0)]
 
         results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
 
-        new_mu = results[1][0]
-        mu_change = new_mu - low_mu
+        assert results[1][0] - low_mu > 2.0
 
-        assert mu_change <= system.MAX_MU_SWING_PER_GAME, (
-            f"Mu gain should be capped at {system.MAX_MU_SWING_PER_GAME}, "
-            f"got {mu_change:.3f}"
-        )
-
-    def test_mu_swing_cap_on_loss(self):
-        """Loser's mu loss should be capped at MAX_MU_SWING_PER_GAME."""
+    def test_native_mu_can_move_below_display_origin(self):
         system = CamaOpenSkillSystem()
-
-        # High rated player loses to low rated players
-        high_mu = 60.0
-        high_sigma = 8.333
-
-        team1_data = [(1, 25.0, 4.0, 30.0)]  # Low mu, calibrated
-        team2_data = [(2, high_mu, high_sigma, 5.0)]  # High mu, uncertain
-
-        results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
-
-        new_mu = results[2][0]
-        mu_change = high_mu - new_mu  # Loss is positive
-
-        assert mu_change <= system.MAX_MU_SWING_PER_GAME, (
-            f"Mu loss should be capped at {system.MAX_MU_SWING_PER_GAME}, "
-            f"got {mu_change:.3f}"
-        )
-
-
-class TestMuFloorEnforcement:
-    """Test that mu cannot go below MIN_MU (25.0)."""
-
-    def test_mu_floor_enforcement(self):
-        """Player at minimum mu should not go below floor after loss."""
-        system = CamaOpenSkillSystem()
-
-        # Player at floor
-        floor_mu = system.MIN_MU
-        team1_data = [(1, 60.0, 4.0, 30.0)]  # High rated winner
-        team2_data = [(2, floor_mu, 8.0, 5.0)]  # At floor, loses
-
-        results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
-
-        new_mu = results[2][0]
-
-        assert new_mu >= system.MIN_MU, (
-            f"Mu should not go below {system.MIN_MU}, got {new_mu:.3f}"
-        )
-
-    def test_mu_floor_applied_after_clamping(self):
-        """Floor should be applied even if unclamped mu would go below."""
-        system = CamaOpenSkillSystem()
-
-        # Player just above floor with high uncertainty
-        near_floor_mu = 26.0
-        high_sigma = 8.333
-
         team1_data = [(1, 60.0, 4.0, 30.0)]
-        team2_data = [(2, near_floor_mu, high_sigma, 5.0)]
+        team2_data = [(2, system.MIN_MU, 8.0, 5.0)]
 
         results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
 
-        new_mu = results[2][0]
-
-        assert new_mu >= system.MIN_MU, (
-            f"Mu should be floored at {system.MIN_MU}, got {new_mu:.3f}"
-        )
-
-    def test_multiple_losses_cannot_break_floor(self):
-        """Repeated losses should keep player at floor, not below."""
-        system = CamaOpenSkillSystem()
-
-        current_mu = system.MIN_MU
-        sigma = 8.0
-
-        # Simulate 5 consecutive losses
-        for i in range(5):
-            team1_data = [(1, 60.0, 4.0, 30.0)]
-            team2_data = [(2, current_mu, sigma, 5.0)]
-
-            results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
-            current_mu = results[2][0]
-            sigma = results[2][1]
-
-            assert current_mu >= system.MIN_MU, (
-                f"After loss {i+1}, mu should be >= {system.MIN_MU}, got {current_mu:.3f}"
-            )
+        assert results[2][0] < system.MIN_MU
+        assert system.mu_to_display(results[2][0]) == 0
 
 
 class TestEqualWeightUpdate:
     """Test equal weight updates (for non-enriched matches)."""
 
-    def test_equal_weight_uses_clamping(self):
-        """Equal weight updates should also use mu clamping and floor."""
+    def test_equal_weight_uses_native_posterior(self):
         system = CamaOpenSkillSystem()
 
-        # Player at floor
-        team1_data = [(1, 60.0, 4.0)]  # No fantasy points
+        team1_data = [(1, 60.0, 4.0)]
         team2_data = [(2, system.MIN_MU, 8.0)]
 
         results = system.update_ratings_equal_weight(team1_data, team2_data, winning_team=1)
 
-        new_mu = results[2][0]
-        assert new_mu >= system.MIN_MU, "Equal weight should enforce floor"
+        direct = system.model.rate(
+            [[system.create_rating(60.0, 4.0)], [system.create_rating(system.MIN_MU, 8.0)]],
+            ranks=[1, 2],
+        )
+        assert results[1] == pytest.approx((direct[0][0].mu, direct[0][0].sigma))
+        assert results[2] == pytest.approx((direct[1][0].mu, direct[1][0].sigma))
 
     def test_equal_weight_symmetry(self):
         """Equal weight updates should give symmetric changes to equal players."""
@@ -289,6 +278,27 @@ class TestEqualWeightUpdate:
 
         # All losers should have same mu
         assert abs(results[3][0] - results[4][0]) < 0.01
+
+
+class TestSigmaDecay:
+    def test_decay_respects_grace_period(self):
+        system = CamaOpenSkillSystem()
+
+        assert system.apply_sigma_decay(4.0, 7) == pytest.approx(4.0)
+
+    def test_decay_increases_uncertainty_by_variance(self):
+        system = CamaOpenSkillSystem()
+
+        decayed = system.apply_sigma_decay(4.0, 14)
+
+        assert decayed == pytest.approx((4.0**2 + 2.0**2) ** 0.5)
+
+    def test_decay_caps_at_new_player_uncertainty(self):
+        system = CamaOpenSkillSystem()
+
+        decayed = system.apply_sigma_decay(4.0, 1000)
+
+        assert decayed == pytest.approx(system.DEFAULT_SIGMA)
 
 
 class TestWinProbabilityCalibration:
@@ -365,3 +375,15 @@ class TestDisplayScaling:
             f"OpenSkill display at max MMR ({os_display}) must equal "
             f"Glicko-2 RATING_MAX ({glicko_display})"
         )
+
+
+def test_algorithm_fingerprint_changes_with_rating_configuration(monkeypatch):
+    original = CamaOpenSkillSystem.algorithm_fingerprint()
+
+    monkeypatch.setattr(
+        CamaOpenSkillSystem,
+        "PERFORMANCE_STRENGTH",
+        CamaOpenSkillSystem.PERFORMANCE_STRENGTH + 0.01,
+    )
+
+    assert CamaOpenSkillSystem.algorithm_fingerprint() != original

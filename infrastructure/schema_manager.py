@@ -234,7 +234,10 @@ class SchemaManager:
             ("add_rating_history_details", self._migration_add_rating_history_details),
             ("create_match_predictions_table", self._migration_create_match_predictions_table),
             ("create_predictions_system", self._migration_create_predictions_system),
-            ("add_prediction_channel_message_id", self._migration_add_prediction_channel_message_id),
+            (
+                "add_prediction_channel_message_id",
+                self._migration_add_prediction_channel_message_id,
+            ),
             ("add_last_match_date_to_players", self._migration_add_last_match_date_to_players),
             ("add_bet_is_blind_column", self._migration_add_bet_is_blind_column),
             ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
@@ -242,21 +245,30 @@ class SchemaManager:
             ("add_ai_features_enabled", self._migration_add_ai_features_enabled),
             ("add_bankruptcy_count_column", self._migration_add_bankruptcy_count_column),
             ("create_recalibration_state_table", self._migration_create_recalibration_state_table),
-            ("add_first_calibrated_at_to_players", self._migration_add_first_calibrated_at_to_players),
+            (
+                "add_first_calibrated_at_to_players",
+                self._migration_add_first_calibrated_at_to_players,
+            ),
             ("add_captain_eligible_column", self._migration_add_captain_eligible_column),
             ("add_lobby_type_column", self._migration_add_lobby_type_column),
             ("create_player_stakes_table", self._migration_create_player_stakes_table),
             ("create_spectator_bets_table", self._migration_create_spectator_bets_table),
             ("create_player_pool_bets_table", self._migration_create_player_pool_bets_table),
             ("add_conditional_players_to_lobby", self._migration_add_conditional_players_to_lobby),
-            ("add_leaderboard_performance_indexes", self._migration_add_leaderboard_performance_indexes),
+            (
+                "add_leaderboard_performance_indexes",
+                self._migration_add_leaderboard_performance_indexes,
+            ),
             ("add_fantasy_columns", self._migration_add_fantasy_columns),
             ("add_openskill_columns", self._migration_add_openskill_columns),
             ("create_tip_transactions_table", self._migration_create_tip_transactions_table),
             ("add_origin_channel_id_to_lobby", self._migration_add_origin_channel_id_to_lobby),
             ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
             ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
-            ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
+            (
+                "add_balancing_rating_system_column",
+                self._migration_add_balancing_rating_system_column,
+            ),
             ("create_match_corrections_table", self._migration_create_match_corrections_table),
             ("create_player_steam_ids_table", self._migration_create_player_steam_ids_table),
             ("add_streak_columns_to_rating_history", self._migration_add_streak_columns),
@@ -266,12 +278,18 @@ class SchemaManager:
             # Guild isolation migrations (Phase 1)
             ("add_guild_id_to_players", self._migration_add_guild_id_to_players),
             ("add_guild_id_to_matches", self._migration_add_guild_id_to_matches),
-            ("add_guild_id_to_match_participants", self._migration_add_guild_id_to_match_participants),
+            (
+                "add_guild_id_to_match_participants",
+                self._migration_add_guild_id_to_match_participants,
+            ),
             ("add_guild_id_to_rating_history", self._migration_add_guild_id_to_rating_history),
             ("add_guild_id_to_player_pairings", self._migration_add_guild_id_to_player_pairings),
             ("add_guild_id_to_loan_state", self._migration_add_guild_id_to_loan_state),
             ("add_guild_id_to_bankruptcy_state", self._migration_add_guild_id_to_bankruptcy_state),
-            ("add_guild_id_to_recalibration_state", self._migration_add_guild_id_to_recalibration_state),
+            (
+                "add_guild_id_to_recalibration_state",
+                self._migration_add_guild_id_to_recalibration_state,
+            ),
             # Soft avoid feature
             ("create_soft_avoids_table", self._migration_create_soft_avoids_table),
             # Ready check join times
@@ -280,7 +298,10 @@ class SchemaManager:
             ("add_easter_egg_tracking_columns", self._migration_add_easter_egg_tracking_columns),
             ("create_neon_events_table", self._migration_create_neon_events_table),
             # Concurrent match support migrations
-            ("restructure_pending_matches_for_concurrent", self._migration_restructure_pending_matches_for_concurrent),
+            (
+                "restructure_pending_matches_for_concurrent",
+                self._migration_restructure_pending_matches_for_concurrent,
+            ),
             ("add_pending_match_id_to_bets", self._migration_add_pending_match_id_to_bets),
             # Package deal feature
             ("create_package_deals_table", self._migration_create_package_deals_table),
@@ -316,11 +337,17 @@ class SchemaManager:
             ("upgrade_boss_progress_json", self._migration_upgrade_boss_progress_json),
             ("rekey_dig_boss_echoes_by_boss_id", self._migration_rekey_dig_boss_echoes_by_boss_id),
             ("add_stinger_curse_to_tunnels", self._migration_add_stinger_curse_to_tunnels),
-            ("clear_active_boss_ids_for_pool_reroll", self._migration_clear_active_boss_ids_for_pool_reroll),
+            (
+                "clear_active_boss_ids_for_pool_reroll",
+                self._migration_clear_active_boss_ids_for_pool_reroll,
+            ),
             # Predictions: continuous-quote order-book rework
             ("predictions_orderbook_v1", self._migration_predictions_orderbook),
             ("predictions_prev_price_v1", self._migration_predictions_prev_price),
-            ("prediction_trades_last_fill_price", self._migration_prediction_trades_last_fill_price),
+            (
+                "prediction_trades_last_fill_price",
+                self._migration_prediction_trades_last_fill_price,
+            ),
             # Dig boss-gear: persistent equipment with durability + relic equip wiring
             ("create_dig_gear_system", self._migration_create_dig_gear_system),
             # Persist betting_mode per match so /admin correctmatch can reverse
@@ -328,7 +355,10 @@ class SchemaManager:
             ("add_betting_mode_to_matches", self._migration_add_betting_mode_to_matches),
             # Persist actual JC awarded per participant so the balance-history
             # chart can't drift when reward constants or penalty rules change.
-            ("add_bonus_jc_to_match_participants", self._migration_add_bonus_jc_to_match_participants),
+            (
+                "add_bonus_jc_to_match_participants",
+                self._migration_add_bonus_jc_to_match_participants,
+            ),
             # Boss revamp: scaling rebalance, persisted boss HP, pinnacle boss,
             # luminosity-as-real-resource, retreat cost, dialogue v2.
             ("dig_boss_revamp_columns", self._migration_dig_boss_revamp_columns),
@@ -344,8 +374,14 @@ class SchemaManager:
             ),
             # Cheer cooldown decoupled from free-dig cooldown.
             ("add_last_cheer_at_to_tunnels", self._migration_add_last_cheer_at_to_tunnels),
-            ("create_reminder_preferences_table", self._migration_create_reminder_preferences_table),
-            ("add_dig_enabled_to_reminder_preferences", self._migration_add_dig_enabled_to_reminder_preferences),
+            (
+                "create_reminder_preferences_table",
+                self._migration_create_reminder_preferences_table,
+            ),
+            (
+                "add_dig_enabled_to_reminder_preferences",
+                self._migration_add_dig_enabled_to_reminder_preferences,
+            ),
             # Drop the unused mana shop / mana daily loss tables. The
             # delayed-token paths that wrote to them never had readers.
             ("drop_mana_shop_items_table", self._migration_drop_mana_shop_items_table),
@@ -360,7 +396,10 @@ class SchemaManager:
                 self._migration_clear_dig_active_duels_for_retired_timed_mechanics,
             ),
             # Daily mana flags for bankruptcy-specific buffs (Green insurance, Red re-roll)
-            ("add_bankrupt_buff_flags_to_player_mana", self._migration_add_bankrupt_buff_flags_to_player_mana),
+            (
+                "add_bankrupt_buff_flags_to_player_mana",
+                self._migration_add_bankrupt_buff_flags_to_player_mana,
+            ),
             # Witch's Curse: per-target hex with anonymous casters and 7-day duration
             ("create_curses_table", self._migration_create_curses_table),
             # Guild-wide modifiers (e.g. dig "bell" effects that bias all
@@ -371,7 +410,10 @@ class SchemaManager:
             ("add_dota_streak_to_players", self._migration_add_dota_streak_to_players),
             # Manashop rework: consumed-today tap flag, per-item daily use tracking,
             # 24h buff store, slow-drip idle-income claims.
-            ("add_consumed_today_to_player_mana", self._migration_add_consumed_today_to_player_mana),
+            (
+                "add_consumed_today_to_player_mana",
+                self._migration_add_consumed_today_to_player_mana,
+            ),
             ("create_manashop_daily_uses_table", self._migration_create_manashop_daily_uses_table),
             ("create_manashop_buffs_table", self._migration_create_manashop_buffs_table),
             ("create_slow_drip_claims_table", self._migration_create_slow_drip_claims_table),
@@ -461,7 +503,10 @@ class SchemaManager:
             ("create_mafia_signups_table", self._migration_create_mafia_signups_table),
             # Continuous cadence: games start back-to-back, so more than one can
             # share a calendar start-date — drop the per-date unique constraint.
-            ("rebuild_mafia_games_drop_date_unique", self._migration_rebuild_mafia_games_drop_date_unique),
+            (
+                "rebuild_mafia_games_drop_date_unique",
+                self._migration_rebuild_mafia_games_drop_date_unique,
+            ),
             (
                 "create_mafia_phase_reminders_table",
                 self._migration_create_mafia_phase_reminders_table,
@@ -469,7 +514,10 @@ class SchemaManager:
             # Persist the bankruptcy penalty withheld at order-book settlement so
             # realized-P&L stats / balance-chart deltas match the JC actually
             # credited (mirrors match_participants.bonus_jc).
-            ("add_bankruptcy_penalty_to_prediction_positions", self._migration_add_bankruptcy_penalty_to_prediction_positions),
+            (
+                "add_bankruptcy_penalty_to_prediction_positions",
+                self._migration_add_bankruptcy_penalty_to_prediction_positions,
+            ),
             (
                 "add_vanity_tax_to_prediction_positions",
                 self._migration_add_vanity_tax_to_prediction_positions,
@@ -480,7 +528,10 @@ class SchemaManager:
             ),
             # Immutable package-deal purchase log so year-in-review counts deals
             # even after they are consumed/deleted.
-            ("create_package_deal_purchases_table", self._migration_create_package_deal_purchases_table),
+            (
+                "create_package_deal_purchases_table",
+                self._migration_create_package_deal_purchases_table,
+            ),
             # Idempotency key for match recording: stamp the originating pending
             # match on the matches row so a retry after a post-core failure
             # (bet settlement / loan repayment raising) can't double-record.
@@ -494,7 +545,10 @@ class SchemaManager:
                 "create_mana_protection_tables",
                 self._migration_create_mana_protection_tables,
             ),
-            ("add_next_match_pot_to_nonprofit_fund", self._migration_add_next_match_pot_to_nonprofit_fund),
+            (
+                "add_next_match_pot_to_nonprofit_fund",
+                self._migration_add_next_match_pot_to_nonprofit_fund,
+            ),
             # Remove storage left behind by the retired Wheel War feature.
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
             # Persistent per-guild cooldown for the paid /shop pingedash command.
@@ -676,9 +730,295 @@ class SchemaManager:
                 "create_pet_brawls",
                 self._migration_create_pet_brawls,
             ),
+            # OpenSkill v3: native bounded contribution, durable non-match
+            # rating events, parameter fingerprinting, and atomic replay state.
+            (
+                "openskill_v3_durable_native_replay",
+                self._migration_openskill_v3_durable_native_replay,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_openskill_v3_durable_native_replay(self, cursor) -> None:
+        """Back-calculate durable OpenSkill v3 state atomically."""
+        from openskill_rating_system import CamaOpenSkillSystem
+        from openskill_replay import OPENSKILL_ALGORITHM_VERSION, replay_openskill
+
+        self._add_column_if_not_exists(
+            cursor,
+            "players",
+            "os_rating_version",
+            f"INTEGER NOT NULL DEFAULT {OPENSKILL_ALGORITHM_VERSION}",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "players",
+            "os_algorithm_fingerprint",
+            "TEXT",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "os_algorithm_version",
+            "INTEGER",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "os_algorithm_fingerprint",
+            "TEXT",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "match_predictions",
+            "openskill_radiant_win_prob",
+            "REAL",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "match_predictions",
+            "openskill_raw_radiant_win_prob",
+            "REAL",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "match_predictions",
+            "openskill_algorithm_version",
+            "INTEGER",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "match_predictions",
+            "openskill_algorithm_fingerprint",
+            "TEXT",
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS openskill_rating_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+                    CHECK(event_type IN ('set_mu', 'set_sigma', 'add_sigma')),
+                value REAL NOT NULL,
+                event_at TIMESTAMP NOT NULL,
+                reason TEXT,
+                actor_id INTEGER,
+                os_algorithm_version INTEGER NOT NULL,
+                os_algorithm_fingerprint TEXT NOT NULL,
+                FOREIGN KEY (discord_id, guild_id)
+                    REFERENCES players(discord_id, guild_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_openskill_events_guild_time
+            ON openskill_rating_events(guild_id, event_at, event_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS openskill_rating_revisions (
+                guild_id INTEGER PRIMARY KEY,
+                revision INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS openskill_replay_jobs (
+                guild_id INTEGER PRIMARY KEY,
+                reason TEXT NOT NULL,
+                requested_at TIMESTAMP NOT NULL,
+                last_error TEXT
+            )
+            """
+        )
+
+        players = cursor.execute(
+            """
+            SELECT discord_id, guild_id, initial_mmr, os_mu, os_sigma
+            FROM players
+            ORDER BY guild_id, discord_id
+            """
+        ).fetchall()
+        matches = cursor.execute(
+            """
+            SELECT match_id, guild_id, winning_team, match_date,
+                   team1_players, team2_players
+            FROM matches
+            WHERE winning_team IN (1, 2)
+            ORDER BY guild_id, match_date, match_id
+            """
+        ).fetchall()
+        match_ids = [row["match_id"] for row in matches]
+        participants_by_match: dict[int, list] = {match_id: [] for match_id in match_ids}
+        if match_ids:
+            participant_rows = cursor.execute(
+                """
+                SELECT mp.match_id, mp.discord_id, mp.team_number,
+                       mp.side, mp.fantasy_points
+                FROM match_participants mp
+                JOIN matches m
+                  ON m.match_id = mp.match_id AND m.guild_id = mp.guild_id
+                WHERE m.winning_team IN (1, 2)
+                ORDER BY mp.match_id, mp.discord_id
+                """
+            ).fetchall()
+            for row in participant_rows:
+                participants_by_match.setdefault(row["match_id"], []).append(row)
+        rating_events = cursor.execute(
+            """
+            SELECT event_id, guild_id, discord_id, event_type, value, event_at
+            FROM openskill_rating_events
+            ORDER BY guild_id, event_at, event_id
+            """
+        ).fetchall()
+
+        replay = replay_openskill(
+            players=list(players),
+            matches=list(matches),
+            participants_by_match=participants_by_match,
+            rating_events=list(rating_events),
+            reset_first=True,
+        )
+        if replay.errors:
+            preview = "; ".join(replay.errors[:5])
+            raise RuntimeError(f"OpenSkill v3 replay failed: {preview}")
+
+        for history in replay.history_rows:
+            cursor.execute(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?,
+                    os_algorithm_version = ?,
+                    os_algorithm_fingerprint = ?,
+                    team_number = COALESCE(team_number, ?),
+                    won = COALESCE(won, ?)
+                WHERE guild_id = ? AND match_id = ? AND discord_id = ?
+                """,
+                (
+                    history["os_mu_before"],
+                    history["os_mu_after"],
+                    history["os_sigma_before"],
+                    history["os_sigma_after"],
+                    history["fantasy_weight"],
+                    history["os_algorithm_version"],
+                    history["os_algorithm_fingerprint"],
+                    history["team_number"],
+                    history["won"],
+                    history["guild_id"],
+                    history["match_id"],
+                    history["discord_id"],
+                ),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    """
+                    INSERT INTO rating_history (
+                        discord_id, guild_id, match_id, timestamp,
+                        team_number, won,
+                        os_mu_before, os_mu_after,
+                        os_sigma_before, os_sigma_after,
+                        fantasy_weight, os_algorithm_version
+                        , os_algorithm_fingerprint
+                    )
+                    VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP),
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        history["discord_id"],
+                        history["guild_id"],
+                        history["match_id"],
+                        history["match_date"],
+                        history["team_number"],
+                        history["won"],
+                        history["os_mu_before"],
+                        history["os_mu_after"],
+                        history["os_sigma_before"],
+                        history["os_sigma_after"],
+                        history["fantasy_weight"],
+                        history["os_algorithm_version"],
+                        history["os_algorithm_fingerprint"],
+                    ),
+                )
+
+        for prediction in replay.prediction_rows:
+            cursor.execute(
+                """
+                INSERT INTO match_predictions (
+                    match_id,
+                    openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version,
+                    openskill_algorithm_fingerprint
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(match_id) DO UPDATE SET
+                    openskill_radiant_win_prob =
+                        excluded.openskill_radiant_win_prob,
+                    openskill_raw_radiant_win_prob =
+                        excluded.openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version =
+                        excluded.openskill_algorithm_version,
+                    openskill_algorithm_fingerprint =
+                        excluded.openskill_algorithm_fingerprint
+                """,
+                (
+                    prediction["match_id"],
+                    prediction["openskill_radiant_win_prob"],
+                    prediction["openskill_raw_radiant_win_prob"],
+                    OPENSKILL_ALGORITHM_VERSION,
+                    prediction["openskill_algorithm_fingerprint"],
+                ),
+            )
+
+        algorithm_fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
+        cursor.executemany(
+            """
+            UPDATE players
+            SET os_mu = ?, os_sigma = ?, os_rating_version = ?,
+                os_algorithm_fingerprint = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE guild_id = ? AND discord_id = ?
+            """,
+            [
+                (
+                    mu,
+                    sigma,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    algorithm_fingerprint,
+                    guild_id,
+                    player_id,
+                )
+                for (guild_id, player_id), (mu, sigma) in sorted(replay.final_ratings.items())
+            ],
+        )
+        cursor.execute(
+            """
+            INSERT INTO openskill_rating_revisions (guild_id, revision)
+            SELECT guild_id, 1
+            FROM players
+            GROUP BY guild_id
+            ON CONFLICT(guild_id) DO UPDATE SET
+                revision = openskill_rating_revisions.revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            """
+        )
+        logger.info(
+            "OpenSkill v3 replayed %d matches (%d performance, %d equal) and %d player snapshots",
+            replay.matches_processed,
+            replay.matches_with_fantasy,
+            replay.matches_equal_weight,
+            len(replay.final_ratings),
+        )
 
     def _migration_create_low_priority_state(self, cursor) -> None:
         """Create isolated moderation state for matchmaking priority."""
@@ -1053,10 +1393,7 @@ class SchemaManager:
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                [
-                    (row["match_id"], ban_index, team, hero_id)
-                    for ban_index, team, hero_id in bans
-                ],
+                [(row["match_id"], ban_index, team, hero_id) for ban_index, team, hero_id in bans],
             )
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
@@ -1088,9 +1425,7 @@ class SchemaManager:
         after the restore write left the gate open, so a retry re-applied the
         bonus. The date stamp commits in the same UPDATE as the restore,
         making a re-run within the day a no-op."""
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "lantern_stub_date", "TEXT"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "lantern_stub_date", "TEXT")
 
     def _migration_add_win_bonus_jc_to_match_participants(self, cursor) -> None:
         """Snapshot the win-bonus balance delta (gross minus bankruptcy
@@ -1098,14 +1433,10 @@ class SchemaManager:
         the balance) per winner. bonus_jc aggregates every bonus for the
         match, so a correction couldn't isolate the win bonus to reverse it;
         this column records exactly the JC the win bonus put on the balance."""
-        self._add_column_if_not_exists(
-            cursor, "match_participants", "win_bonus_jc", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "match_participants", "win_bonus_jc", "INTEGER")
 
     def _migration_add_announced_at_to_economy_daily_events(self, cursor) -> None:
-        self._add_column_if_not_exists(
-            cursor, "economy_daily_events", "announced_at", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "economy_daily_events", "announced_at", "INTEGER")
         # Pre-migration rows predate announcement tracking; treat them as
         # announced so the wake loop does not re-announce stale events.
         cursor.execute(
@@ -1289,8 +1620,7 @@ class SchemaManager:
             "ON duel_challenges(guild_id, recipient_id, created_at DESC)"
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_duel_due_expiry "
-            "ON duel_challenges(status, expires_at)"
+            "CREATE INDEX IF NOT EXISTS idx_duel_due_expiry ON duel_challenges(status, expires_at)"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_duel_due_reminder "
@@ -1684,9 +2014,7 @@ class SchemaManager:
         self._add_column_if_not_exists(
             cursor, "loan_state", "outstanding_principal", "INTEGER DEFAULT 0"
         )
-        self._add_column_if_not_exists(
-            cursor, "loan_state", "outstanding_fee", "INTEGER DEFAULT 0"
-        )
+        self._add_column_if_not_exists(cursor, "loan_state", "outstanding_fee", "INTEGER DEFAULT 0")
 
     def _migration_create_disburse_system(self, cursor) -> None:
         """Create tables for nonprofit fund disbursement voting system."""
@@ -1795,12 +2123,8 @@ class SchemaManager:
 
     def _migration_add_prediction_channel_message_id(self, cursor) -> None:
         """Add channel_message_id column to predictions table."""
-        self._add_column_if_not_exists(
-            cursor, "predictions", "channel_message_id", "INTEGER"
-        )
-        self._add_column_if_not_exists(
-            cursor, "predictions", "close_message_id", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "predictions", "channel_message_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "predictions", "close_message_id", "INTEGER")
 
     def _migration_add_last_match_date_to_players(self, cursor) -> None:
         """
@@ -1833,11 +2157,15 @@ class SchemaManager:
 
     def _migration_add_ai_features_enabled(self, cursor) -> None:
         """Add ai_features_enabled column to guild_config for AI feature toggle."""
-        self._add_column_if_not_exists(cursor, "guild_config", "ai_features_enabled", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "guild_config", "ai_features_enabled", "INTEGER DEFAULT 0"
+        )
 
     def _migration_add_bankruptcy_count_column(self, cursor) -> None:
         """Add bankruptcy_count column to bankruptcy_state to track total bankruptcies."""
-        self._add_column_if_not_exists(cursor, "bankruptcy_state", "bankruptcy_count", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "bankruptcy_state", "bankruptcy_count", "INTEGER DEFAULT 0"
+        )
         # Backfill: if last_bankruptcy_at is set but bankruptcy_count is 0, set to 1
         cursor.execute(
             """
@@ -1876,7 +2204,9 @@ class SchemaManager:
 
     def _migration_add_captain_eligible_column(self, cursor) -> None:
         """Add is_captain_eligible column to players for Immortal Draft mode."""
-        self._add_column_if_not_exists(cursor, "players", "is_captain_eligible", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "players", "is_captain_eligible", "INTEGER DEFAULT 0"
+        )
 
     def _migration_add_lobby_type_column(self, cursor) -> None:
         """Add lobby_type column to matches for tracking shuffle vs draft mode."""
@@ -1913,8 +2243,7 @@ class SchemaManager:
             "ON player_stakes(guild_id, match_id, stake_time)"
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_player_stakes_discord "
-            "ON player_stakes(discord_id)"
+            "CREATE INDEX IF NOT EXISTS idx_player_stakes_discord ON player_stakes(discord_id)"
         )
 
     def _migration_create_spectator_bets_table(self, cursor) -> None:
@@ -1948,8 +2277,7 @@ class SchemaManager:
             "ON spectator_bets(guild_id, match_id, bet_time)"
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_spectator_bets_discord "
-            "ON spectator_bets(discord_id)"
+            "CREATE INDEX IF NOT EXISTS idx_spectator_bets_discord ON spectator_bets(discord_id)"
         )
 
     def _migration_create_player_pool_bets_table(self, cursor) -> None:
@@ -1989,9 +2317,7 @@ class SchemaManager:
     def _migration_add_leaderboard_performance_indexes(self, cursor) -> None:
         """Add indexes to improve leaderboard query performance."""
         # Index for filtering bets by discord_id (used in gambling stats)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_bets_discord_id ON bets(discord_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bets_discord_id ON bets(discord_id)")
         # Composite index for guild + discord_id lookups
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_bets_guild_discord ON bets(guild_id, discord_id)"
@@ -2008,7 +2334,9 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "match_participants", "towers_killed", "INTEGER")
         self._add_column_if_not_exists(cursor, "match_participants", "roshans_killed", "INTEGER")
         # Teamfight participation (0.0 - 1.0)
-        self._add_column_if_not_exists(cursor, "match_participants", "teamfight_participation", "REAL")
+        self._add_column_if_not_exists(
+            cursor, "match_participants", "teamfight_participation", "REAL"
+        )
         # Vision game
         self._add_column_if_not_exists(cursor, "match_participants", "obs_placed", "INTEGER")
         self._add_column_if_not_exists(cursor, "match_participants", "sen_placed", "INTEGER")
@@ -2016,7 +2344,9 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "match_participants", "camps_stacked", "INTEGER")
         self._add_column_if_not_exists(cursor, "match_participants", "rune_pickups", "INTEGER")
         # Early game
-        self._add_column_if_not_exists(cursor, "match_participants", "firstblood_claimed", "INTEGER")
+        self._add_column_if_not_exists(
+            cursor, "match_participants", "firstblood_claimed", "INTEGER"
+        )
         # Crowd control (stun duration in seconds)
         self._add_column_if_not_exists(cursor, "match_participants", "stuns", "REAL")
         # Calculated fantasy points
@@ -2101,17 +2431,13 @@ class SchemaManager:
     def _migration_add_betting_mode_to_matches(self, cursor) -> None:
         """Persist the betting mode per match. Without it, match correction has
         no way to reverse house-mode payouts with the right formula."""
-        self._add_column_if_not_exists(
-            cursor, "matches", "betting_mode", "TEXT DEFAULT 'pool'"
-        )
+        self._add_column_if_not_exists(cursor, "matches", "betting_mode", "TEXT DEFAULT 'pool'")
 
     def _migration_add_bonus_jc_to_match_participants(self, cursor) -> None:
         """Snapshot the JC actually credited (after garnishment / bankruptcy
         penalty) so the balance-history chart can replay real values instead
         of recomputing from the current config constants."""
-        self._add_column_if_not_exists(
-            cursor, "match_participants", "bonus_jc", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "match_participants", "bonus_jc", "INTEGER")
 
     def _migration_add_pending_match_id_to_matches(self, cursor) -> None:
         """Stamp the originating pending match on the recorded matches row and
@@ -2176,27 +2502,17 @@ class SchemaManager:
         """Boss revamp: add tunnel columns for luminosity refill anchor,
         pinnacle state, and retreat cooldown."""
         # Slow on-demand luminosity refill anchor (replaces the daily-snap reset).
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "last_lum_update_at", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "last_lum_update_at", "INTEGER")
         # Pinnacle state — locked boss id, current phase (1-3), persisted HP,
         # and last engagement time for regen.
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "pinnacle_boss_id", "TEXT"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "pinnacle_boss_id", "TEXT")
         self._add_column_if_not_exists(
             cursor, "tunnels", "pinnacle_phase", "INTEGER NOT NULL DEFAULT 0"
         )
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "pinnacle_hp_remaining", "INTEGER"
-        )
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "pinnacle_last_engaged_at", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "pinnacle_hp_remaining", "INTEGER")
+        self._add_column_if_not_exists(cursor, "tunnels", "pinnacle_last_engaged_at", "INTEGER")
         # Retreat cooldown — when retreats from a boss become free again.
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "retreat_cooldown_until", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "retreat_cooldown_until", "INTEGER")
 
     def _migration_dig_boss_progress_persistent_hp(self, cursor) -> None:
         """Boss revamp: upgrade boss_progress JSON entries from string status
@@ -2231,8 +2547,7 @@ class SchemaManager:
                 # Already-dict values: leave alone.
             if changed:
                 cursor.execute(
-                    "UPDATE tunnels SET boss_progress = ? "
-                    "WHERE discord_id = ? AND guild_id = ?",
+                    "UPDATE tunnels SET boss_progress = ? WHERE discord_id = ? AND guild_id = ?",
                     (_json.dumps(bp), row["discord_id"], row["guild_id"]),
                 )
 
@@ -2428,9 +2743,7 @@ class SchemaManager:
 
         # Recreate indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_players_steam_id ON players(steam_id)")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_players_guild_id ON players(guild_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_players_guild_id ON players(guild_id)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_players_leaderboard "
             "ON players(guild_id, jopacoin_balance DESC, wins DESC, glicko_rating DESC)"
@@ -2441,14 +2754,10 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "matches", "guild_id", "INTEGER NOT NULL DEFAULT 0")
 
         # Update existing matches with legacy guild_id
-        cursor.execute(
-            f"UPDATE matches SET guild_id = {self._LEGACY_GUILD_ID} WHERE guild_id = 0"
-        )
+        cursor.execute(f"UPDATE matches SET guild_id = {self._LEGACY_GUILD_ID} WHERE guild_id = 0")
 
         # Add index for guild-filtered queries
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_matches_guild_id ON matches(guild_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_guild_id ON matches(guild_id)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_matches_guild_date ON matches(guild_id, match_date DESC)"
         )
@@ -2538,8 +2847,7 @@ class SchemaManager:
 
         # Recreate indexes
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_player_pairings_guild "
-            "ON player_pairings(guild_id)"
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_guild ON player_pairings(guild_id)"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_player_pairings_player1 "
@@ -2601,9 +2909,7 @@ class SchemaManager:
         cursor.execute("ALTER TABLE loan_state_new RENAME TO loan_state")
 
         # Add index
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_loan_state_guild ON loan_state(guild_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_loan_state_guild ON loan_state(guild_id)")
 
     def _migration_add_guild_id_to_bankruptcy_state(self, cursor) -> None:
         """
@@ -2779,9 +3085,7 @@ class SchemaManager:
             cursor, "players", "personal_best_win_streak", "INTEGER DEFAULT 0"
         )
         # Track total bets placed for 100 bets milestone
-        self._add_column_if_not_exists(
-            cursor, "players", "total_bets_placed", "INTEGER DEFAULT 0"
-        )
+        self._add_column_if_not_exists(cursor, "players", "total_bets_placed", "INTEGER DEFAULT 0")
         # Track whether first leverage bet has been used (one-time trigger)
         self._add_column_if_not_exists(
             cursor, "players", "first_leverage_used", "INTEGER DEFAULT 0"
@@ -2829,7 +3133,9 @@ class SchemaManager:
             return  # Already migrated
 
         # Check if pending_matches_old exists from a previous failed migration
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_matches_old'")
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_matches_old'"
+        )
         old_table_exists = cursor.fetchone() is not None
         if old_table_exists:
             # Previous migration failed - the old table still has the data
@@ -2990,9 +3296,7 @@ class SchemaManager:
         manashop item, the column flips to 1 and all passive mana effects
         deactivate for the day. Resets when claim_mana_atomic runs at next
         4 AM PST."""
-        self._add_column_if_not_exists(
-            cursor, "player_mana", "consumed_today", "INTEGER DEFAULT 0"
-        )
+        self._add_column_if_not_exists(cursor, "player_mana", "consumed_today", "INTEGER DEFAULT 0")
 
     def _migration_create_manashop_daily_uses_table(self, cursor) -> None:
         """Track per-item per-day usage for mid-tier manashop items
@@ -3171,7 +3475,9 @@ class SchemaManager:
 
         from utils.game_date import game_date_for, yesterday_of
 
-        self._add_column_if_not_exists(cursor, "players", "dota_streak_days", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "players", "dota_streak_days", "INTEGER NOT NULL DEFAULT 0"
+        )
         self._add_column_if_not_exists(cursor, "players", "dota_last_played_date", "TEXT")
 
         rows = cursor.execute(
@@ -3433,21 +3739,35 @@ class SchemaManager:
 
     def _migration_dig_expansion(self, cursor) -> None:
         """Add luminosity and temp buff columns for the dig expansion."""
-        self._add_column_if_not_exists(cursor, "tunnels", "luminosity", "INTEGER NOT NULL DEFAULT 100")
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "luminosity", "INTEGER NOT NULL DEFAULT 100"
+        )
         self._add_column_if_not_exists(cursor, "tunnels", "temp_buffs", "TEXT")
 
     def _migration_dig_prestige_events(self, cursor) -> None:
         """Add prestige run tracking and mutation columns for the dig prestige/events expansion."""
-        self._add_column_if_not_exists(cursor, "tunnels", "best_run_score", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "tunnels", "current_run_jc", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "tunnels", "current_run_artifacts", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "tunnels", "current_run_events", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "tunnels", "total_prestige_score", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "best_run_score", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "current_run_jc", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "current_run_artifacts", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "current_run_events", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "total_prestige_score", "INTEGER NOT NULL DEFAULT 0"
+        )
         self._add_column_if_not_exists(cursor, "tunnels", "mutations", "TEXT")
 
     def _migration_dig_void_bait(self, cursor) -> None:
         """Add void_bait_digs column for tracking Void Bait charges."""
-        self._add_column_if_not_exists(cursor, "tunnels", "void_bait_digs", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "void_bait_digs", "INTEGER NOT NULL DEFAULT 0"
+        )
 
     def _migration_dig_weather_table(self, cursor) -> None:
         """Create dig_weather table for daily layer weather conditions."""
@@ -3501,9 +3821,7 @@ class SchemaManager:
         self._add_column_if_not_exists(
             cursor, "tunnels", "miner_origin", "TEXT NOT NULL DEFAULT ''"
         )
-        self._add_column_if_not_exists(
-            cursor, "tunnels", "miner_about", "TEXT NOT NULL DEFAULT ''"
-        )
+        self._add_column_if_not_exists(cursor, "tunnels", "miner_about", "TEXT NOT NULL DEFAULT ''")
         self._add_column_if_not_exists(
             cursor, "tunnels", "stat_strength", "INTEGER NOT NULL DEFAULT 0"
         )
@@ -3606,10 +3924,12 @@ class SchemaManager:
                     WHERE discord_id = ? AND guild_id = ?
                     """,
                     (
-                        json.dumps({
-                            "prestige_level": prestige_level,
-                            "awards": updated_awards,
-                        }),
+                        json.dumps(
+                            {
+                                "prestige_level": prestige_level,
+                                "awards": updated_awards,
+                            }
+                        ),
                         discord_id,
                         guild_id,
                     ),
@@ -3626,10 +3946,12 @@ class SchemaManager:
                 """,
                 (
                     updated_stat_points,
-                    json.dumps({
-                        "prestige_level": prestige_level,
-                        "awards": updated_awards,
-                    }),
+                    json.dumps(
+                        {
+                            "prestige_level": prestige_level,
+                            "awards": updated_awards,
+                        }
+                    ),
                     discord_id,
                     guild_id,
                 ),
@@ -3713,10 +4035,12 @@ class SchemaManager:
                 """,
                 (
                     expected_points,
-                    json.dumps({
-                        "prestige_level": prestige_level,
-                        "awards": updated_awards,
-                    }),
+                    json.dumps(
+                        {
+                            "prestige_level": prestige_level,
+                            "awards": updated_awards,
+                        }
+                    ),
                     discord_id,
                     guild_id,
                 ),
@@ -3785,10 +4109,16 @@ class SchemaManager:
     def _migration_add_amulet_crit_to_dig_active_duels(self, cursor) -> None:
         """Add crit_chance / crit_bonus columns to paused boss-duel rows."""
         self._add_column_if_not_exists(
-            cursor, "dig_active_duels", "crit_chance", "REAL NOT NULL DEFAULT 0",
+            cursor,
+            "dig_active_duels",
+            "crit_chance",
+            "REAL NOT NULL DEFAULT 0",
         )
         self._add_column_if_not_exists(
-            cursor, "dig_active_duels", "crit_bonus", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "dig_active_duels",
+            "crit_bonus",
+            "INTEGER NOT NULL DEFAULT 0",
         )
 
     def _migration_upgrade_boss_progress_json(self, cursor) -> None:
@@ -3846,8 +4176,7 @@ class SchemaManager:
                     upgraded[depth_key] = val
             if changed:
                 cursor.execute(
-                    "UPDATE tunnels SET boss_progress = ? "
-                    "WHERE discord_id = ? AND guild_id = ?",
+                    "UPDATE tunnels SET boss_progress = ? WHERE discord_id = ? AND guild_id = ?",
                     (_json.dumps(upgraded), discord_id, guild_id),
                 )
 
@@ -3910,8 +4239,7 @@ class SchemaManager:
         )
         if cursor.fetchone() is not None:
             cursor.execute(
-                "SELECT guild_id, depth, killer_discord_id, weakened_until "
-                "FROM dig_boss_echoes_old"
+                "SELECT guild_id, depth, killer_discord_id, weakened_until FROM dig_boss_echoes_old"
             )
             for row in cursor.fetchall():
                 guild_id = row[0]
@@ -3956,6 +4284,7 @@ class SchemaManager:
         would falsify stat-points and dig_boss_echoes records.
         """
         import json as _json
+
         cursor.execute(
             "SELECT discord_id, guild_id, boss_progress FROM tunnels "
             "WHERE boss_progress IS NOT NULL AND boss_progress != ''"
@@ -3970,17 +4299,12 @@ class SchemaManager:
                 continue
             changed = False
             for val in data.values():
-                if (
-                    isinstance(val, dict)
-                    and val.get("status") == "active"
-                    and val.get("boss_id")
-                ):
+                if isinstance(val, dict) and val.get("status") == "active" and val.get("boss_id"):
                     val["boss_id"] = ""
                     changed = True
             if changed:
                 cursor.execute(
-                    "UPDATE tunnels SET boss_progress = ? "
-                    "WHERE discord_id = ? AND guild_id = ?",
+                    "UPDATE tunnels SET boss_progress = ? WHERE discord_id = ? AND guild_id = ?",
                     (_json.dumps(data), discord_id, guild_id),
                 )
 
@@ -4121,12 +4445,10 @@ class SchemaManager:
             """
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pred_trades_pred "
-            "ON prediction_trades(prediction_id)"
+            "CREATE INDEX IF NOT EXISTS idx_pred_trades_pred ON prediction_trades(prediction_id)"
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pred_trades_user "
-            "ON prediction_trades(discord_id)"
+            "CREATE INDEX IF NOT EXISTS idx_pred_trades_user ON prediction_trades(discord_id)"
         )
 
     def _migration_predictions_prev_price(self, cursor) -> None:
@@ -4284,12 +4606,8 @@ class SchemaManager:
             "SET yes_contracts = yes_contracts * 10, "
             "    no_contracts = no_contracts * 10"
         )
-        cursor.execute(
-            "UPDATE prediction_levels SET remaining_size = remaining_size * 10"
-        )
-        cursor.execute(
-            "UPDATE prediction_trades SET contracts = contracts * 10"
-        )
+        cursor.execute("UPDATE prediction_levels SET remaining_size = remaining_size * 10")
+        cursor.execute("UPDATE prediction_trades SET contracts = contracts * 10")
 
         cursor.execute(
             """
@@ -4415,8 +4733,7 @@ class SchemaManager:
             """
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_guild "
-            "ON reminder_preferences(guild_id)"
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_guild ON reminder_preferences(guild_id)"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_wheel "
@@ -4581,12 +4898,8 @@ class SchemaManager:
         )
 
     def _migration_add_pet_refund_announcement_state(self, cursor) -> None:
-        self._add_column_if_not_exists(
-            cursor, "pet_refund_windows", "announcement_payload", "TEXT"
-        )
-        self._add_column_if_not_exists(
-            cursor, "pet_refund_windows", "announced_at", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "pet_refund_windows", "announcement_payload", "TEXT")
+        self._add_column_if_not_exists(cursor, "pet_refund_windows", "announced_at", "INTEGER")
         # Pre-migration windows have no reconstructable summary. Treat them as
         # delivered rather than replaying incomplete historical announcements.
         cursor.execute(
@@ -4729,8 +5042,7 @@ class SchemaManager:
             cursor,
             "pets",
             "egg_tier",
-            "TEXT NOT NULL DEFAULT 'standard' "
-            "CHECK (egg_tier IN ('standard', 'gilded'))",
+            "TEXT NOT NULL DEFAULT 'standard' CHECK (egg_tier IN ('standard', 'gilded'))",
         )
         # Before this column existed, the base adoption fee topped out at
         # 100 JC and every gilded egg added a 230 JC premium.
@@ -4753,7 +5065,8 @@ class SchemaManager:
         )
 
     def _migration_clear_dig_active_duels_for_retired_timed_mechanics(
-        self, cursor,
+        self,
+        cursor,
     ) -> None:
         """Clear any in-flight duels paused on the retired arithmetic / riddle
         pinnacle mechanics. Without this, players whose duel was waiting on the
@@ -4779,10 +5092,16 @@ class SchemaManager:
         triggered event to pass by harmlessly.
         """
         self._add_column_if_not_exists(
-            cursor, "tunnels", "grappling_hook_charges", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "grappling_hook_charges",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         self._add_column_if_not_exists(
-            cursor, "tunnels", "sonar_skip_pending", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "sonar_skip_pending",
+            "INTEGER NOT NULL DEFAULT 0",
         )
 
     def _migration_relic_loadout_cap_and_streak(self, cursor) -> None:
@@ -4801,10 +5120,16 @@ class SchemaManager:
         matches ``RELIC_SLOTS_MAX`` at the time of this one-time correction.
         """
         self._add_column_if_not_exists(
-            cursor, "tunnels", "cavein_free_streak", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "cavein_free_streak",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         self._add_column_if_not_exists(
-            cursor, "tunnels", "relic_trim_notice", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "relic_trim_notice",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         cursor.execute(
             """
@@ -4834,10 +5159,16 @@ class SchemaManager:
     def _migration_add_dig_auto_buy_settings(self, cursor) -> None:
         """Add per-miner auto-buy toggles for common dig consumables."""
         self._add_column_if_not_exists(
-            cursor, "tunnels", "auto_buy_torch", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "auto_buy_torch",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         self._add_column_if_not_exists(
-            cursor, "tunnels", "auto_buy_hard_hat", "INTEGER NOT NULL DEFAULT 0",
+            cursor,
+            "tunnels",
+            "auto_buy_hard_hat",
+            "INTEGER NOT NULL DEFAULT 0",
         )
 
     def _migration_add_item_id_to_dig_gear(self, cursor) -> None:
@@ -5302,21 +5633,14 @@ class SchemaManager:
         self._add_column_if_not_exists(
             cursor, "mafia_games", "day_number", "INTEGER NOT NULL DEFAULT 1"
         )
-        self._add_column_if_not_exists(
-            cursor, "mafia_games", "phase_started_at", "INTEGER"
-        )
-        self._add_column_if_not_exists(
-            cursor, "mafia_games", "standings_message_id", "INTEGER"
-        )
-        self._add_column_if_not_exists(
-            cursor, "mafia_games", "graveyard_thread_id", "INTEGER"
-        )
+        self._add_column_if_not_exists(cursor, "mafia_games", "phase_started_at", "INTEGER")
+        self._add_column_if_not_exists(cursor, "mafia_games", "standings_message_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "mafia_games", "graveyard_thread_id", "INTEGER")
         self._add_column_if_not_exists(
             cursor, "mafia_games", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"
         )
         cursor.execute(
-            "UPDATE mafia_games SET phase_started_at = started_at "
-            "WHERE phase_started_at IS NULL"
+            "UPDATE mafia_games SET phase_started_at = started_at WHERE phase_started_at IS NULL"
         )
 
     def _migration_rebuild_mafia_actions_per_night(self, cursor) -> None:

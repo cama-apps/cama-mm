@@ -149,6 +149,12 @@ class TestRecalibrationService:
             glicko_volatility=0.05,
             guild_id=TEST_GUILD_ID,
         )
+        player_repo.update_openskill_rating(
+            12345,
+            TEST_GUILD_ID,
+            35.0,
+            3.0,
+        )
         for _ in range(5):
             player_repo.increment_wins(12345, TEST_GUILD_ID)
 
@@ -168,6 +174,10 @@ class TestRecalibrationService:
         assert rating == 1500.0  # Rating unchanged
         assert rd == 350.0  # RD set to max(configured initial RD, old_rd)
         assert vol == 0.06  # Volatility reset
+        assert player_repo.get_openskill_rating(
+            12345,
+            TEST_GUILD_ID,
+        ) == pytest.approx((35.0, 25.0 / 3.0))
 
     def test_recalibrate_preserves_rating(self, services):
         """Test recalibration preserves current rating."""

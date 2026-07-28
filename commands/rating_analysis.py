@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from openskill_rating_system import CamaOpenSkillSystem
 from services.permissions import has_admin_permission
 from utils.drawing import (
     draw_calibration_curve,
@@ -46,11 +47,17 @@ class RatingAnalysisCommands(commands.Cog):
     )
     @app_commands.choices(
         action=[
-            app_commands.Choice(name="compare - Show Glicko vs OpenSkill comparison", value="compare"),
+            app_commands.Choice(
+                name="compare - Show Glicko vs OpenSkill comparison", value="compare"
+            ),
             app_commands.Choice(name="calibration - Show calibration curves", value="calibration"),
             app_commands.Choice(name="trend - Show accuracy over time", value="trend"),
-            app_commands.Choice(name="backfill - Recalculate OpenSkill from history", value="backfill"),
-            app_commands.Choice(name="player - Show player's OpenSkill rating details", value="player"),
+            app_commands.Choice(
+                name="backfill - Recalculate OpenSkill from history", value="backfill"
+            ),
+            app_commands.Choice(
+                name="player - Show player's OpenSkill rating details", value="player"
+            ),
         ]
     )
     @require_guild
@@ -98,7 +105,9 @@ class RatingAnalysisCommands(commands.Cog):
         # Run in thread to avoid blocking
         try:
             result = await asyncio.to_thread(
-                lambda: self.match_service.backfill_openskill_ratings(guild_id=interaction.guild.id if interaction.guild else None, reset_first=True),
+                lambda: self.match_service.backfill_openskill_ratings(
+                    guild_id=interaction.guild.id if interaction.guild else None, reset_first=True
+                ),
             )
         except Exception as e:
             logger.error(f"Backfill error: {e}")
@@ -216,7 +225,11 @@ class RatingAnalysisCommands(commands.Cog):
         else:
             summary_parts.append("Mixed results - neither system clearly dominates")
 
-        brier_diff_pct = abs(glicko["brier_score"] - openskill["brier_score"]) / max(glicko["brier_score"], 0.001) * 100
+        brier_diff_pct = (
+            abs(glicko["brier_score"] - openskill["brier_score"])
+            / max(glicko["brier_score"], 0.001)
+            * 100
+        )
         if brier_diff_pct < 5:
             summary_parts.append("Difference is marginal (<5%)")
         elif brier_diff_pct < 15:
@@ -358,9 +371,7 @@ class RatingAnalysisCommands(commands.Cog):
                 content=friendly_error("generate the trend chart"),
             )
 
-    async def _handle_player(
-        self, interaction: discord.Interaction, user: discord.Member | None
-    ):
+    async def _handle_player(self, interaction: discord.Interaction, user: discord.Member | None):
         """Handle the player action - show a player's OpenSkill rating details."""
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -371,9 +382,7 @@ class RatingAnalysisCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Fetch player data
-        player = await asyncio.to_thread(
-            self.player_service.get_player, discord_id, guild_id
-        )
+        player = await asyncio.to_thread(self.player_service.get_player, discord_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -395,8 +404,9 @@ class RatingAnalysisCommands(commands.Cog):
             mu, sigma = os_data
             # Calculate ordinal (conservative skill estimate)
             ordinal = mu - 3 * sigma
-            # Normalize to Glicko-like scale: μ * 50 + 250 (so μ=25 → 1500)
-            normalized_rating = mu * 50 + 250
+            # Use the same canonical OpenSkill display conversion as the
+            # leaderboard and team balancer.
+            normalized_rating = CamaOpenSkillSystem.mu_to_display(mu)
             # Check calibration status (sigma <= 4.0 is calibrated)
             is_calibrated = sigma <= 4.0
 
@@ -452,7 +462,11 @@ class RatingAnalysisCommands(commands.Cog):
                     sigma_change = h["os_sigma_after"] - h["os_sigma_before"]
                     won = h.get("won", None)
                     result_emoji = "🏆" if won else "❌" if won is False else "•"
-                    weight_str = f" (w={h['fantasy_weight']:.1f})" if h.get("fantasy_weight") else ""
+                    weight_str = (
+                        f" (perf×{h['fantasy_weight']:.3f})"
+                        if h.get("fantasy_weight") is not None
+                        else ""
+                    )
                     history_lines.append(
                         f"{result_emoji} μ: {mu_change:+.2f}, σ: {sigma_change:+.3f}{weight_str}"
                     )

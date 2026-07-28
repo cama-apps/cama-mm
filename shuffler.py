@@ -24,6 +24,7 @@ from domain.low_priority_constants import (
 )
 from domain.models.player import Player
 from domain.models.team import Team
+from domain.rating_constants import OPENSKILL_DISPLAY_SCALE
 from utils.region import region_split_mismatches
 from utils.role_assignment_cache import get_cached_role_assignments
 
@@ -36,8 +37,7 @@ logger = logging.getLogger("cama_bot.shuffler")
 _UNIQUE_TEAM_SPLITS = tuple(
     (team1_indices, tuple(i for i in range(10) if i not in team1_indices))
     for team1_indices in (
-        (0, *other_indices)
-        for other_indices in itertools.combinations(range(1, 10), 4)
+        (0, *other_indices) for other_indices in itertools.combinations(range(1, 10), 4)
     )
 )
 
@@ -96,15 +96,15 @@ class _ShuffleScoringContext:
     """Request-local values and role metrics reused across candidate splits."""
 
     player_values: dict[int, float] = field(default_factory=dict)
-    team_metrics: dict[
-        tuple[tuple[int, ...], int], tuple[_RoleAssignmentMetrics, ...]
-    ] = field(default_factory=dict)
+    team_metrics: dict[tuple[tuple[int, ...], int], tuple[_RoleAssignmentMetrics, ...]] = field(
+        default_factory=dict
+    )
     team_metric_summaries: dict[tuple[int, ...], _TeamRoleMetricsSummary] = field(
         default_factory=dict
     )
-    assigned_metrics: dict[
-        tuple[tuple[int, ...], tuple[str, ...]], _RoleAssignmentMetrics
-    ] = field(default_factory=dict)
+    assigned_metrics: dict[tuple[tuple[int, ...], tuple[str, ...]], _RoleAssignmentMetrics] = field(
+        default_factory=dict
+    )
 
 
 class BalancedShuffler:
@@ -179,9 +179,7 @@ class BalancedShuffler:
             else settings["exclusion_penalty_weight"]
         )
         self.rd_priority_weight = (
-            rd_priority_weight
-            if rd_priority_weight is not None
-            else RD_PRIORITY_WEIGHT
+            rd_priority_weight if rd_priority_weight is not None else RD_PRIORITY_WEIGHT
         )
         self.recent_match_penalty_weight = (
             recent_match_penalty_weight
@@ -189,14 +187,10 @@ class BalancedShuffler:
             else settings["recent_match_penalty_weight"]
         )
         self.soft_avoid_penalty = (
-            soft_avoid_penalty
-            if soft_avoid_penalty is not None
-            else SOFT_AVOID_PENALTY
+            soft_avoid_penalty if soft_avoid_penalty is not None else SOFT_AVOID_PENALTY
         )
         self.package_deal_penalty = (
-            package_deal_penalty
-            if package_deal_penalty is not None
-            else PACKAGE_DEAL_PENALTY
+            package_deal_penalty if package_deal_penalty is not None else PACKAGE_DEAL_PENALTY
         )
         self.package_deal_split_penalty = (
             package_deal_split_penalty
@@ -204,9 +198,7 @@ class BalancedShuffler:
             else PACKAGE_DEAL_SPLIT_PENALTY
         )
         self.rating_spread_divisor = (
-            rating_spread_divisor
-            if rating_spread_divisor is not None
-            else RATING_SPREAD_DIVISOR
+            rating_spread_divisor if rating_spread_divisor is not None else RATING_SPREAD_DIVISOR
         )
         self.region_split = region_split
         self.region_split_penalty = (
@@ -254,6 +246,7 @@ class BalancedShuffler:
         Returns:
             Sum of deltas across the five critical matchups
         """
+
         # Effective value for each role, per team
         def role_value(team: Team, role: str) -> float:
             _player, value = team.get_player_by_role(
@@ -276,7 +269,9 @@ class BalancedShuffler:
         support_cross_2 = abs(t2["4"] - t1["5"])
 
         # Return the sum of all five deltas
-        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
+        return (
+            carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
+        )
 
     def _calculate_region_split_penalty(
         self,
@@ -289,11 +284,14 @@ class BalancedShuffler:
         return region_split_mismatches(team1_players, team2_players) * self.region_split_penalty
 
     def _calculate_rd_priority(self, players: Iterable[Player]) -> float:
-        """Compute the RD-based bonus for a group of players."""
+        """Compute the active rating system's uncertainty-priority bonus."""
         if self.rd_priority_weight <= 0:
             return 0.0
-        rd_total = sum(p.glicko_rd or 0.0 for p in players)
-        return rd_total * self.rd_priority_weight
+        if self.use_openskill:
+            uncertainty_total = sum((p.os_sigma or 0.0) * OPENSKILL_DISPLAY_SCALE for p in players)
+        else:
+            uncertainty_total = sum(p.glicko_rd or 0.0 for p in players)
+        return uncertainty_total * self.rd_priority_weight
 
     def calculate_soft_avoid_penalty(
         self,
@@ -367,9 +365,8 @@ class BalancedShuffler:
             partner = deal.partner_discord_id
 
             # Check if on OPPOSITE teams (penalty applies)
-            on_opposite = (
-                (buyer in team1_ids and partner in team2_ids) or
-                (buyer in team2_ids and partner in team1_ids)
+            on_opposite = (buyer in team1_ids and partner in team2_ids) or (
+                buyer in team2_ids and partner in team1_ids
             )
 
             if on_opposite:
@@ -409,9 +406,8 @@ class BalancedShuffler:
             partner = deal.partner_discord_id
 
             # Split: one selected, one excluded
-            is_split = (
-                (buyer in selected_ids and partner in excluded_ids) or
-                (buyer in excluded_ids and partner in selected_ids)
+            is_split = (buyer in selected_ids and partner in excluded_ids) or (
+                buyer in excluded_ids and partner in selected_ids
             )
             if is_split:
                 effectiveness = (
@@ -430,10 +426,7 @@ class BalancedShuffler:
     ) -> float:
         if not low_priority_ids:
             return 0.0
-        return (
-            len(selected_ids & low_priority_ids)
-            * LOW_PRIORITY_GOODNESS_PENALTY
-        )
+        return len(selected_ids & low_priority_ids) * LOW_PRIORITY_GOODNESS_PENALTY
 
     def _greedy_shuffle(
         self,
@@ -444,7 +437,6 @@ class BalancedShuffler:
         deals: list | None = None,
         low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
-
     ) -> tuple[Team, Team, list[Player], float]:
         """
         Greedy snake-draft shuffle for initial upper bound in branch and bound.
@@ -484,7 +476,9 @@ class BalancedShuffler:
                 # excluded). Guard the divisor: an exclusion penalty of 0 means "no
                 # exclusion weighting", so recent participants get no reduction.
                 if p.name in recent_match_names and self.exclusion_penalty_weight:
-                    return base_count - (self.recent_match_penalty_weight / self.exclusion_penalty_weight)
+                    return base_count - (
+                        self.recent_match_penalty_weight / self.exclusion_penalty_weight
+                    )
                 return base_count
 
             # Exclude the players with the lowest effective counts; break ties
@@ -538,8 +532,7 @@ class BalancedShuffler:
 
         # Add exclusion penalty
         exclusion_penalty = (
-            sum(exclusion_counts.get(p.name, 0) for p in excluded)
-            * self.exclusion_penalty_weight
+            sum(exclusion_counts.get(p.name, 0) for p in excluded) * self.exclusion_penalty_weight
         )
 
         # Add recent match penalty for selected players
@@ -565,24 +558,24 @@ class BalancedShuffler:
 
         # Rating spread penalty: incentivize selecting players of closer skill
         selected_values = [
-            self._player_value(p, _scoring_context)
-            for p in team1.players + team2.players
+            self._player_value(p, _scoring_context) for p in team1.players + team2.players
         ]
         rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
         lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
 
         total_score = (
-            base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+            base_score
+            + exclusion_penalty
+            + recent_penalty
+            + deal_split_penalty
             + low_priority_penalty
-            + rating_spread_penalty - lobby_rating_bonus
+            + rating_spread_penalty
+            - lobby_rating_bonus
         )
 
         return team1, team2, excluded, total_score
 
-
-    def _get_cached_role_assignments(
-        self, players: list[Player]
-    ) -> tuple[tuple[str, ...], ...]:
+    def _get_cached_role_assignments(self, players: list[Player]) -> tuple[tuple[str, ...], ...]:
         """
         Get optimal role assignments using service-layer caching.
 
@@ -611,12 +604,8 @@ class BalancedShuffler:
         off_role_count = 0
         role_values = [0.0] * Team.TEAM_SIZE
 
-        for player, assigned_role, base_value in zip(
-            players, role_assignments, player_values
-        ):
-            is_on_role = bool(
-                player.preferred_roles and assigned_role in player.preferred_roles
-            )
+        for player, assigned_role, base_value in zip(players, role_assignments, player_values):
+            is_on_role = bool(player.preferred_roles and assigned_role in player.preferred_roles)
             if is_on_role:
                 effective_value = base_value
             else:
@@ -673,21 +662,15 @@ class BalancedShuffler:
                 return cached
 
         assignments = self._get_cached_role_assignments(players)[:max_assignments]
-        player_values = [
-            self._player_value(player, scoring_context) for player in players
-        ]
+        player_values = [self._player_value(player, scoring_context) for player in players]
         metrics = tuple(
-            self._role_assignment_metrics(players, roles, player_values)
-            for roles in assignments
+            self._role_assignment_metrics(players, roles, player_values) for roles in assignments
         )
 
         if scoring_context is not None:
             scoring_context.team_metrics[cache_key] = metrics
             scoring_context.assigned_metrics.update(
-                {
-                    (player_key, metric.role_assignments): metric
-                    for metric in metrics
-                }
+                {(player_key, metric.role_assignments): metric for metric in metrics}
             )
         return metrics
 
@@ -746,10 +729,7 @@ class BalancedShuffler:
         metrics = self._role_assignment_metrics(
             team.players,
             roles,
-            [
-                self._player_value(player, scoring_context)
-                for player in team.players
-            ],
+            [self._player_value(player, scoring_context) for player in team.players],
         )
         if scoring_context is not None:
             scoring_context.assigned_metrics[cache_key] = metrics
@@ -781,7 +761,6 @@ class BalancedShuffler:
         low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
         _rd_priority: float | None = None,
-
     ) -> tuple[Team, Team, float]:
         """
         Find optimal role assignments for two teams that minimize total score.
@@ -941,9 +920,7 @@ class BalancedShuffler:
         role_matchup_delta_weight = self.role_matchup_delta_weight
         for team1_assignment in team1_metrics:
             team1_value = team1_assignment.team_value
-            team1_off_role_penalty = (
-                team1_assignment.off_role_count * off_role_flat_penalty
-            )
+            team1_off_role_penalty = team1_assignment.off_role_count * off_role_flat_penalty
             (
                 t1_carry,
                 t1_mid,
@@ -955,8 +932,7 @@ class BalancedShuffler:
                 value_diff = abs(team1_value - team2_assignment.team_value)
 
                 off_role_penalty = (
-                    team1_off_role_penalty
-                    + team2_assignment.off_role_count * off_role_flat_penalty
+                    team1_off_role_penalty + team2_assignment.off_role_count * off_role_flat_penalty
                 )
 
                 (
@@ -973,12 +949,15 @@ class BalancedShuffler:
                     + abs(t1_soft_support - t2_hard_support)
                     + abs(t2_soft_support - t1_hard_support)
                 )
-                weighted_role_delta = (
-                    role_matchup_delta * role_matchup_delta_weight
-                )
+                weighted_role_delta = role_matchup_delta * role_matchup_delta_weight
                 total_score = (
-                    value_diff + off_role_penalty + weighted_role_delta - rd_priority
-                    + avoid_penalty + deal_penalty + region_penalty
+                    value_diff
+                    + off_role_penalty
+                    + weighted_role_delta
+                    - rd_priority
+                    + avoid_penalty
+                    + deal_penalty
+                    + region_penalty
                 )
 
                 if total_score < best_score:
@@ -1106,12 +1085,8 @@ class BalancedShuffler:
             value_diff = abs(team1_value - team2_value)
             team1_off_roles = team1_metrics.off_role_count
             team2_off_roles = team2_metrics.off_role_count
-            off_role_penalty = (
-                team1_off_roles + team2_off_roles
-            ) * self.off_role_flat_penalty
-            role_matchup_delta = self._role_matchup_delta_from_metrics(
-                team1_metrics, team2_metrics
-            )
+            off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
+            role_matchup_delta = self._role_matchup_delta_from_metrics(team1_metrics, team2_metrics)
             total_off_roles = team1_off_roles + team2_off_roles
 
             # Track this matchup (normalized 12-tuple shape shared with shuffle_from_pool;
@@ -1231,12 +1206,8 @@ class BalancedShuffler:
         value_diff = abs(team1_value - team2_value)
         team1_off_roles = team1_metrics.off_role_count
         team2_off_roles = team2_metrics.off_role_count
-        off_role_penalty = (
-            team1_off_roles + team2_off_roles
-        ) * self.off_role_flat_penalty
-        role_matchup_delta = self._role_matchup_delta_from_metrics(
-            team1_metrics, team2_metrics
-        )
+        off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
+        role_matchup_delta = self._role_matchup_delta_from_metrics(team1_metrics, team2_metrics)
         total_off_roles = team1_off_roles + team2_off_roles
 
         log_entry = (
@@ -1426,8 +1397,7 @@ class BalancedShuffler:
             # The recent-player penalty is fixed for all splits of these ten.
             selected_names = frozenset(p.name for p in selected_players)
             recent_penalty = (
-                len(selected_names & recent_match_names)
-                * self.recent_match_penalty_weight
+                len(selected_names & recent_match_names) * self.recent_match_penalty_weight
             )
 
             exclusion_penalty = (
@@ -1450,16 +1420,15 @@ class BalancedShuffler:
             )
 
             # Rating spread penalty: incentivize selecting players of closer skill
-            selected_values = [
-                self._player_value(p, scoring_context)
-                for p in selected_players
-            ]
+            selected_values = [self._player_value(p, scoring_context) for p in selected_players]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
 
             # Penalties that are constant across every team split of this combination.
             combo_penalty = (
-                exclusion_penalty + deal_split_penalty + low_priority_penalty
+                exclusion_penalty
+                + deal_split_penalty
+                + low_priority_penalty
                 + rating_spread_penalty
                 - lobby_rating_bonus
             )
@@ -1559,7 +1528,6 @@ class BalancedShuffler:
         avoids: list | None = None,
         deals: list | None = None,
         low_priority_ids: set[int] | None = None,
-
     ) -> tuple[Team, Team, list[Player]]:
         """
         Branch and bound shuffle optimized for 14 players.
@@ -1579,7 +1547,9 @@ class BalancedShuffler:
             Tuple of (Team1, Team2, excluded_players)
         """
         if len(players) != 14:
-            raise ValueError(f"Branch and bound shuffle requires exactly 14 players, got {len(players)}")
+            raise ValueError(
+                f"Branch and bound shuffle requires exactly 14 players, got {len(players)}"
+            )
 
         exclusion_counts = exclusion_counts or {}
         recent_match_names = recent_match_names or set()
@@ -1600,9 +1570,7 @@ class BalancedShuffler:
         logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
 
         # Precompute player values for fast lower bound calculations
-        player_values = [
-            self._player_value(player, scoring_context) for player in players
-        ]
+        player_values = [self._player_value(player, scoring_context) for player in players]
 
         # Track pruning statistics
         pruned_player_selections = 0
@@ -1618,17 +1586,11 @@ class BalancedShuffler:
             and self.role_matchup_delta_weight >= 0
             and (
                 not avoids
-                or (
-                    math.isfinite(self.soft_avoid_penalty)
-                    and self.soft_avoid_penalty >= 0
-                )
+                or (math.isfinite(self.soft_avoid_penalty) and self.soft_avoid_penalty >= 0)
             )
             and (
                 not deals
-                or (
-                    math.isfinite(self.package_deal_penalty)
-                    and self.package_deal_penalty >= 0
-                )
+                or (math.isfinite(self.package_deal_penalty) and self.package_deal_penalty >= 0)
             )
         )
         recent_score_term_nonnegative = (
@@ -1636,9 +1598,7 @@ class BalancedShuffler:
             and self.recent_match_penalty_weight >= 0
         )
         score_role_assignments = self._score_role_assignments_for_matchup
-        score_unconstrained_assignments = (
-            self._score_unconstrained_role_assignments
-        )
+        score_unconstrained_assignments = self._score_unconstrained_role_assignments
         get_team_metrics_summary = self._team_role_metrics_summary
 
         # On the unconstrained path, all remaining role-score components are
@@ -1658,13 +1618,16 @@ class BalancedShuffler:
         team_summary_by_mask: list[_TeamRoleMetricsSummary | None] = (
             [None] * (1 << 14) if use_split_role_bound else []
         )
-        best_mask_result: tuple[
-            int,
-            int,
-            tuple[str, ...],
-            tuple[str, ...],
-            list[Player],
-        ] | None = None
+        best_mask_result: (
+            tuple[
+                int,
+                int,
+                tuple[str, ...],
+                tuple[str, ...],
+                list[Player],
+            ]
+            | None
+        ) = None
 
         # Step 2: Iterate through all ways to select 10 players from 14
         # C(14,10) = C(14,4) = 1001 combinations
@@ -1698,7 +1661,9 @@ class BalancedShuffler:
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_value_list)
             combo_penalty = (
-                exclusion_penalty + deal_split_penalty + low_priority_penalty
+                exclusion_penalty
+                + deal_split_penalty
+                + low_priority_penalty
                 + rating_spread_penalty
                 - lobby_rating_bonus
             )
@@ -1717,8 +1682,7 @@ class BalancedShuffler:
 
             selected_player_names = {p.name for p in selected_players}
             recent_penalty = (
-                len(selected_player_names & recent_match_names)
-                * self.recent_match_penalty_weight
+                len(selected_player_names & recent_match_names) * self.recent_match_penalty_weight
             )
             lower_bound = recent_penalty + combo_lower_bound
 
@@ -1754,9 +1718,7 @@ class BalancedShuffler:
                             for index, bit_mask in enumerate(player_bit_masks)
                             if team1_mask & bit_mask
                         ]
-                        team1_summary = get_team_metrics_summary(
-                            team1_players, 3, scoring_context
-                        )
+                        team1_summary = get_team_metrics_summary(team1_players, 3, scoring_context)
                         team_summary_by_mask[team1_mask] = team1_summary
 
                     team2_summary = team_summary_by_mask[team2_mask]
@@ -1766,9 +1728,7 @@ class BalancedShuffler:
                             for index, bit_mask in enumerate(player_bit_masks)
                             if team2_mask & bit_mask
                         ]
-                        team2_summary = get_team_metrics_summary(
-                            team2_players, 3, scoring_context
-                        )
+                        team2_summary = get_team_metrics_summary(team2_players, 3, scoring_context)
                         team_summary_by_mask[team2_mask] = team2_summary
 
                     # Every assignment's value lies in its team's interval.
@@ -1783,49 +1743,37 @@ class BalancedShuffler:
                     ):
                         min_value_diff = max(
                             0.0,
-                            team1_summary.min_team_value
-                            - team2_summary.max_team_value,
-                            team2_summary.min_team_value
-                            - team1_summary.max_team_value,
+                            team1_summary.min_team_value - team2_summary.max_team_value,
+                            team2_summary.min_team_value - team1_summary.max_team_value,
                         )
                         min_off_role_penalty = (
-                            team1_summary.min_off_role_count
-                            + team2_summary.min_off_role_count
+                            team1_summary.min_off_role_count + team2_summary.min_off_role_count
                         ) * self.off_role_flat_penalty
-                        split_lower_bound = (
-                            min_value_diff + min_off_role_penalty - rd_priority
-                        )
+                        split_lower_bound = min_value_diff + min_off_role_penalty - rd_priority
                         split_lower_bound += recent_penalty
                         split_lower_bound += combo_penalty
 
-                        if (
-                            math.isfinite(split_lower_bound)
-                            and split_lower_bound >= best_score
-                        ):
+                        if math.isfinite(split_lower_bound) and split_lower_bound >= best_score:
                             pruned_team_splits += 1
                             continue
 
-                    team1_roles, team2_roles, base_score = (
-                        score_unconstrained_assignments(
-                            team1_summary.metrics,
-                            team2_summary.metrics,
-                            rd_priority,
-                        )
+                    team1_roles, team2_roles, base_score = score_unconstrained_assignments(
+                        team1_summary.metrics,
+                        team2_summary.metrics,
+                        rd_priority,
                     )
                 else:
                     team1_players = [selected_players[i] for i in team1_indices]
                     team2_players = [selected_players[i] for i in team2_indices]
-                    team1_roles, team2_roles, base_score = (
-                        score_role_assignments(
-                            team1_players,
-                            team2_players,
-                            max_assignments_per_team=3,
-                            avoids=avoids,
-                            deals=deals,
-                            low_priority_ids=low_priority_ids,
-                            _scoring_context=scoring_context,
-                            _rd_priority=rd_priority,
-                        )
+                    team1_roles, team2_roles, base_score = score_role_assignments(
+                        team1_players,
+                        team2_players,
+                        max_assignments_per_team=3,
+                        avoids=avoids,
+                        deals=deals,
+                        low_priority_ids=low_priority_ids,
+                        _scoring_context=scoring_context,
+                        _rd_priority=rd_priority,
                     )
 
                 evaluated_matchups += 1
@@ -1908,9 +1856,7 @@ class BalancedShuffler:
             Best (lowest) score across all splits.
         """
         best_score = float("inf")
-        rd_priority = self._calculate_rd_priority(
-            [captain_a, captain_b, *pool]
-        )
+        rd_priority = self._calculate_rd_priority([captain_a, captain_b, *pool])
 
         for team_a_indices, team_b_indices in _DRAFT_POOL_SPLITS:
             team_a_players = [captain_a] + [pool[i] for i in team_a_indices]
@@ -1963,8 +1909,7 @@ class BalancedShuffler:
 
         # Exclusion penalty: penalize excluding frequently-excluded players
         exclusion_penalty = (
-            sum(exclusion_counts.get(p.name, 0) for p in excluded)
-            * self.exclusion_penalty_weight
+            sum(exclusion_counts.get(p.name, 0) for p in excluded) * self.exclusion_penalty_weight
         )
 
         # Recent match penalty for selected players
@@ -2019,15 +1964,21 @@ class BalancedShuffler:
         # Greedy initial pool: sort by rating (descending) and take top 8
         sorted_candidates = sorted(
             candidates,
-            key=lambda p: p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin),
+            key=lambda p: p.get_value(
+                self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+            ),
             reverse=True,
         )
         initial_pool = sorted_candidates[:8]
         initial_excluded = sorted_candidates[8:]
 
         initial_score = self._score_full_pool(
-            captain_a, captain_b, initial_pool, initial_excluded,
-            exclusion_counts, recent_match_names,
+            captain_a,
+            captain_b,
+            initial_pool,
+            initial_excluded,
+            exclusion_counts,
+            recent_match_names,
             _scoring_context=scoring_context,
         )
 
@@ -2068,7 +2019,7 @@ class BalancedShuffler:
                 for i, _ in enumerate(pool):
                     for in_player in outside:
                         # Create new pool with swap
-                        new_pool = pool[:i] + [in_player] + pool[i + 1:]
+                        new_pool = pool[:i] + [in_player] + pool[i + 1 :]
                         new_pool_set = frozenset(p.name for p in new_pool)
 
                         # Skip if we've already seen this pool this iteration
@@ -2083,8 +2034,12 @@ class BalancedShuffler:
                         score = score_cache.get(new_pool_set)
                         if score is None:
                             score = self._score_full_pool(
-                                captain_a, captain_b, new_pool, new_excluded,
-                                exclusion_counts, recent_match_names,
+                                captain_a,
+                                captain_b,
+                                new_pool,
+                                new_excluded,
+                                exclusion_counts,
+                                recent_match_names,
                                 _scoring_context=scoring_context,
                             )
                             score_cache[new_pool_set] = score
@@ -2123,8 +2078,7 @@ class BalancedShuffler:
                     break
 
         logger.info(
-            f"Beam search: finished after {iteration + 1} iterations, "
-            f"best score={best_score:.1f}"
+            f"Beam search: finished after {iteration + 1} iterations, best score={best_score:.1f}"
         )
 
         return DraftPoolResult(
@@ -2161,9 +2115,7 @@ class BalancedShuffler:
             ValueError: If fewer than 8 candidates
         """
         if len(candidates) < 8:
-            raise ValueError(
-                f"Need at least 8 non-captain candidates, got {len(candidates)}"
-            )
+            raise ValueError(f"Need at least 8 non-captain candidates, got {len(candidates)}")
 
         exclusion_counts = exclusion_counts or {}
         recent_match_names = recent_match_names or set()
@@ -2181,7 +2133,9 @@ class BalancedShuffler:
 
             # Add recent match penalty
             selected_names = {p.name for p in candidates}
-            recent_penalty = len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+            recent_penalty = (
+                len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+            )
 
             pool_score = best_split_score + recent_penalty
 
@@ -2201,8 +2155,7 @@ class BalancedShuffler:
                 f"(threshold: {BEAM_SEARCH_THRESHOLD})"
             )
             return self.select_draft_pool_beam(
-                captain_a, captain_b, candidates,
-                exclusion_counts, recent_match_names
+                captain_a, captain_b, candidates, exclusion_counts, recent_match_names
             )
 
         # Enumerate all C(N, 8) pools and pick the best (for <=12 candidates)
@@ -2228,7 +2181,9 @@ class BalancedShuffler:
 
             # Recent match penalty for selected players
             selected_names = {p.name for p in pool}
-            recent_penalty = len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+            recent_penalty = (
+                len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+            )
 
             pool_score = best_split_score + exclusion_penalty + recent_penalty
 

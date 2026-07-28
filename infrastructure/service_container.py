@@ -310,6 +310,29 @@ class ServiceContainer:
             low_priority_repo=c["low_priority_repo"],
             state_service=c["match_state_service"],
         )
+        list_pending = getattr(
+            c["match_repo"],
+            "list_pending_openskill_replays",
+            None,
+        )
+        if callable(list_pending):
+            for job in list_pending():
+                result = c["match_service"].backfill_openskill_ratings(
+                    guild_id=job["guild_id"],
+                    reset_first=True,
+                )
+                if result["errors"]:
+                    logger.error(
+                        "Pending OpenSkill replay remains blocked for guild %s: %s",
+                        job["guild_id"],
+                        "; ".join(result["errors"]),
+                    )
+                else:
+                    logger.info(
+                        "Recovered pending OpenSkill replay for guild %s (%s)",
+                        job["guild_id"],
+                        job["reason"],
+                    )
 
     def _init_advanced_services(self) -> None:
         """Services that depend on match_service."""

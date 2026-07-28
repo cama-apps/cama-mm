@@ -6,18 +6,29 @@ to reward individual performance within team context.
 
 Key differences from Glicko-2:
 - Uses mu (mean skill) and sigma (uncertainty) instead of rating/rd
-- Fantasy points weight individual contribution to team result
-- Higher fantasy = more credit for wins, less blame for losses
+- Rates complete teams natively
+- Uses bounded fantasy-performance contribution weights inside the native
+  Plackett-Luce posterior
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
+from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING
 
 from openskill.models import PlackettLuce
 
+from config import (
+    OPENSKILL_CALIBRATION_SIGMA_THRESHOLD,
+    OPENSKILL_PERFORMANCE_STRENGTH,
+    OPENSKILL_SIGMA_DECAY_GRACE_PERIOD_DAYS,
+    OPENSKILL_SIGMA_DECAY_PER_WEEK,
+    OPENSKILL_WIN_PROBABILITY_TEMPERATURE,
+)
 from domain.rating_constants import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
 
 if TYPE_CHECKING:
@@ -28,142 +39,125 @@ logger = logging.getLogger("cama_bot.openskill")
 
 class CamaOpenSkillSystem:
     """
-    Manages OpenSkill Plackett-Luce ratings using fantasy points as weights.
+    Manages native weighted OpenSkill Plackett-Luce ratings.
 
-    OpenSkill weight semantics (asymmetric by win/loss):
-    - For WINNERS: higher weight = larger gain, lower weight = smaller gain
-    - For LOSERS: higher weight = smaller loss, lower weight = larger loss
-
-    This naturally achieves our desired behavior without any inversion:
-    - High FP winner → high weight → large gain (more credit)
-    - Low FP winner → low weight → small gain (less credit)
-    - High FP loser → high weight → small loss (less blame)
-    - Low FP loser → low weight → large loss (more blame)
-
-    Weight blending: 10% FP-based + 90% equal (FP is a nudge, not dominant)
+    Fantasy performance is converted into small contribution weights centered
+    around 1.0 and passed directly to ``PlackettLuce.rate``. OpenSkill applies
+    those weights to both mu and sigma: high-performing winners receive more
+    credit, while high-performing losers receive less blame. No post-hoc
+    rating cap or team-total conservation is imposed.
     """
 
     DEFAULT_MU = 25.0
     DEFAULT_SIGMA = 25.0 / 3.0  # ~8.333
 
-    # Weight bounds for normalization (before blending)
-    WEIGHT_MIN = 1.0
-    WEIGHT_MAX = 3.0  # Reduced from 10 to limit rating swings
-
     # Fantasy point bounds for normalization (typical observed range)
     FANTASY_MIN = 5.0
     FANTASY_MAX = 30.0
 
-    # Default weight when no fantasy data available
-    DEFAULT_WEIGHT = 1.0  # Equal weight (after blending this stays 1.0)
-
     # Calibration threshold (sigma below this = calibrated)
-    CALIBRATION_THRESHOLD = 4.0
+    CALIBRATION_THRESHOLD = OPENSKILL_CALIBRATION_SIGMA_THRESHOLD
 
     # Raw OpenSkill predict_win() is directionally useful for this league but
     # empirically too confident. This temperature softens probabilities toward
     # 50/50 without changing favorite direction.
-    WIN_PROBABILITY_TEMPERATURE = 6.5
+    WIN_PROBABILITY_TEMPERATURE = OPENSKILL_WIN_PROBABILITY_TEMPERATURE
     WIN_PROBABILITY_EPSILON = 1e-12
 
-    # Weight blending: 10% FP-based, 90% equal weight
-    # FP is a tiny nudge, not a significant factor
-    FP_WEIGHT_BLEND = 0.10
+    # Maximum contribution tilt around 1.0.
+    PERFORMANCE_STRENGTH = OPENSKILL_PERFORMANCE_STRENGTH
+    # Backwards-compatible alias for callers/tests that used the old name.
+    FP_WEIGHT_BLEND = PERFORMANCE_STRENGTH
+
+    SIGMA_DECAY_GRACE_PERIOD_DAYS = OPENSKILL_SIGMA_DECAY_GRACE_PERIOD_DAYS
+    SIGMA_DECAY_PER_WEEK = OPENSKILL_SIGMA_DECAY_PER_WEEK
 
     # Display constants. Canonical values (with full rationale) live in
     # domain.rating_constants.
-    MIN_MU = OPENSKILL_MIN_MU  # mu floor (display rating 0)
+    MIN_MU = OPENSKILL_MIN_MU  # display origin; model mu is not floored here
     DISPLAY_SCALE = OPENSKILL_DISPLAY_SCALE  # (mu - MIN_MU) * scale = display
 
-    # Per-game mu swing cap (prevents massive rating swings).
-    # In display units this equals DISPLAY_SCALE * MAX_MU_SWING_PER_GAME points
-    # per game (currently 50.0 * 2.0 = 100 display rating points). If you tune
-    # DISPLAY_SCALE, revisit this cap so the effective swing stays on-scale.
-    MAX_MU_SWING_PER_GAME = 2.0
+    @classmethod
+    def algorithm_spec(cls) -> dict[str, object]:
+        """Return every setting that can change persisted OpenSkill results."""
+        return {
+            "family": "weng_lin.plackett_luce",
+            "openskill_package": package_version("openskill"),
+            "mu": cls.DEFAULT_MU,
+            "sigma": cls.DEFAULT_SIGMA,
+            "beta": cls.DEFAULT_MU / 6.0,
+            "kappa": 0.0001,
+            "tau": cls.DEFAULT_MU / 300.0,
+            "limit_sigma": False,
+            "balance": False,
+            "weight_bounds": None,
+            "fantasy_min": cls.FANTASY_MIN,
+            "fantasy_max": cls.FANTASY_MAX,
+            "performance_strength": cls.PERFORMANCE_STRENGTH,
+            "sigma_decay_grace_days": cls.SIGMA_DECAY_GRACE_PERIOD_DAYS,
+            "sigma_decay_per_week": cls.SIGMA_DECAY_PER_WEEK,
+            "win_probability_temperature": cls.WIN_PROBABILITY_TEMPERATURE,
+            "display_scale": cls.DISPLAY_SCALE,
+            "display_origin": cls.MIN_MU,
+        }
+
+    @classmethod
+    def algorithm_fingerprint(cls) -> str:
+        """Stable identifier for the exact configured algorithm."""
+        encoded = json.dumps(
+            cls.algorithm_spec(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
     def __init__(self):
+        if not 0.0 <= self.PERFORMANCE_STRENGTH <= 1.0:
+            raise ValueError(
+                "OPENSKILL_PERFORMANCE_STRENGTH must be between 0 and 1"
+            )
+        if self.SIGMA_DECAY_PER_WEEK < 0:
+            raise ValueError(
+                "OPENSKILL_SIGMA_DECAY_PER_WEEK cannot be negative"
+            )
         self.model = PlackettLuce(
             mu=self.DEFAULT_MU,
             sigma=self.DEFAULT_SIGMA,
         )
+        # OpenSkill otherwise min/max-normalizes every team's weights to its
+        # default (1, 2) range, turning even a one-point fantasy difference
+        # into the maximum contribution gap. The installed extension rejects
+        # None in the constructor even though the public API documents it, so
+        # disable normalization on the model attribute after construction.
+        self.model.weight_bounds = None
 
-    def normalize_fantasy_weight(self, fantasy_points: float | None) -> float:
-        """
-        Normalize fantasy points to a bounded weight range.
-
-        Maps fantasy points from typical range (5-30) to weight range (1-3).
-        This limits the impact of fantasy weighting to at most 3x difference
-        between best and worst performers, reducing massive rating swings.
-
-        Args:
-            fantasy_points: Raw fantasy points (or None)
-
-        Returns:
-            Normalized weight in [WEIGHT_MIN, WEIGHT_MAX] range
-        """
-        if fantasy_points is None:
-            return self.DEFAULT_WEIGHT
-
-        # Clamp to expected range
+    def normalize_fantasy_score(self, fantasy_points: float) -> float:
+        """Map an absolute fantasy score from the configured range to [0, 1]."""
         clamped = max(self.FANTASY_MIN, min(self.FANTASY_MAX, fantasy_points))
+        return (clamped - self.FANTASY_MIN) / (self.FANTASY_MAX - self.FANTASY_MIN)
 
-        # Linear interpolation from fantasy range to weight range
-        # (fp - 5) / (30 - 5) * (3 - 1) + 1
-        normalized = (
-            (clamped - self.FANTASY_MIN)
-            / (self.FANTASY_MAX - self.FANTASY_MIN)
-            * (self.WEIGHT_MAX - self.WEIGHT_MIN)
-            + self.WEIGHT_MIN
-        )
-        return normalized
+    @classmethod
+    def apply_sigma_decay(cls, sigma: float, days_since_last_match: int) -> float:
+        """Increase uncertainty after inactivity, capped at new-player sigma."""
+        if sigma >= cls.DEFAULT_SIGMA:
+            return cls.DEFAULT_SIGMA
+        if days_since_last_match <= cls.SIGMA_DECAY_GRACE_PERIOD_DAYS:
+            return sigma
+        periods = (days_since_last_match - cls.SIGMA_DECAY_GRACE_PERIOD_DAYS) / 7.0
+        decayed = math.sqrt(sigma * sigma + cls.SIGMA_DECAY_PER_WEEK**2 * periods)
+        return min(cls.DEFAULT_SIGMA, decayed)
 
-    def compute_match_weights(
+    def _performance_factors(
         self,
-        team1_fantasy: list[float | None],
-        team2_fantasy: list[float | None],
-    ) -> tuple[list[float], list[float]]:
-        """
-        Compute weights with blending (no inversion needed).
-
-        OpenSkill weight semantics (asymmetric):
-        - For WINNERS: higher weight = larger gain, lower weight = smaller gain
-        - For LOSERS: higher weight = smaller loss, lower weight = larger loss
-
-        This naturally achieves our goal without inversion:
-        - High FP winner (high weight) → large gain
-        - Low FP winner (low weight) → small gain
-        - High FP loser (high weight) → small loss (less blame)
-        - Low FP loser (low weight) → large loss (more blame)
-
-        Weight calculation:
-        1. Normalize FP to raw weights (1-3 range)
-        2. Blend: 10% FP weight + 90% equal weight (1.0)
-
-        Args:
-            team1_fantasy: Fantasy points for team 1 players (may contain None)
-            team2_fantasy: Fantasy points for team 2 players (may contain None)
-
-        Returns:
-            Tuple of (team1_weights, team2_weights)
-        """
-        def compute_team_weights(fantasy_list: list[float | None]) -> list[float]:
-            weights = []
-            for fp in fantasy_list:
-                # Step 1: Normalize FP to raw weight (1-3)
-                raw_weight = self.normalize_fantasy_weight(fp)
-
-                # Step 2: Blend with equal weight
-                # blended = FP_WEIGHT_BLEND * raw_weight + (1 - FP_WEIGHT_BLEND) * 1.0
-                # Default FP_WEIGHT_BLEND is 0.10 (10% FP-based, 90% equal weight)
-                blended = self.FP_WEIGHT_BLEND * raw_weight + (1.0 - self.FP_WEIGHT_BLEND) * 1.0
-
-                weights.append(blended)
-            return weights
-
-        team1_weights = compute_team_weights(team1_fantasy)
-        team2_weights = compute_team_weights(team2_fantasy)
-
-        return team1_weights, team2_weights
+        fantasy_points: list[float],
+    ) -> list[float]:
+        """Return native contribution weights centered on this team's mean."""
+        normalized = [self.normalize_fantasy_score(fp) for fp in fantasy_points]
+        team_mean = sum(normalized) / len(normalized)
+        return [
+            1.0 + self.PERFORMANCE_STRENGTH * (score - team_mean)
+            for score in normalized
+        ]
 
     def mmr_to_os_mu(self, mmr: int) -> float:
         """
@@ -211,19 +205,11 @@ class CamaOpenSkillSystem:
         winning_team: int,
     ) -> dict[int, tuple[float, float, float | None]]:
         """
-        Update ratings using Plackett-Luce with fantasy weights.
+        Update ratings through OpenSkill's native weighted posterior.
 
-        Weight processing:
-        1. Normalize FP to raw weights (1-3)
-        2. Blend: 10% FP + 90% equal weight (no inversion needed)
-
-        OpenSkill naturally handles win/loss asymmetry:
-        - Winners: high weight = more gain
-        - Losers: high weight = less loss (protected from blame)
-
-        Bounds enforcement:
-        - Per-game mu change clamped to ±MAX_MU_SWING_PER_GAME
-        - Mu floored at MIN_MU (display rating 0)
+        Fantasy is used only when all ten players have scores. Contribution
+        weights remain close to 1.0 and are passed without OpenSkill's default
+        per-team min/max normalization.
 
         Args:
             team1_data: List of (discord_id, mu, sigma, fantasy_points) for Radiant
@@ -231,37 +217,29 @@ class CamaOpenSkillSystem:
             winning_team: 1 for Radiant, 2 for Dire
 
         Returns:
-            Dict mapping discord_id -> (new_mu, new_sigma, fantasy_weight_used)
+            Dict mapping discord_id -> (new_mu, new_sigma, contribution_weight)
         """
-        # Create ratings for each player and track original mu
+        if winning_team not in (1, 2):
+            raise ValueError("winning_team must be 1 or 2")
+        if not team1_data or not team2_data:
+            raise ValueError("both teams must contain at least one player")
+
+        # Create ratings for each player.
         team1_ratings = []
         team1_ids = []
-        team1_original_mu = []
 
         for discord_id, mu, sigma, _ in team1_data:
-            actual_mu = mu if mu is not None else self.DEFAULT_MU
             rating = self.create_rating(mu, sigma, name=str(discord_id))
             team1_ratings.append(rating)
             team1_ids.append(discord_id)
-            team1_original_mu.append(actual_mu)
 
         team2_ratings = []
         team2_ids = []
-        team2_original_mu = []
 
         for discord_id, mu, sigma, _ in team2_data:
-            actual_mu = mu if mu is not None else self.DEFAULT_MU
             rating = self.create_rating(mu, sigma, name=str(discord_id))
             team2_ratings.append(rating)
             team2_ids.append(discord_id)
-            team2_original_mu.append(actual_mu)
-
-        # Compute blended fantasy weights for both teams
-        team1_fantasy = [fp for _, _, _, fp in team1_data]
-        team2_fantasy = [fp for _, _, _, fp in team2_data]
-        team1_weights, team2_weights = self.compute_match_weights(
-            team1_fantasy, team2_fantasy
-        )
 
         # Set ranks based on winning team (1 = winner, 2 = loser)
         if winning_team == 1:
@@ -270,47 +248,44 @@ class CamaOpenSkillSystem:
             ranks = [2, 1]  # Team 2 won
 
         teams = [team1_ratings, team2_ratings]
-        weights = [team1_weights, team2_weights]
+        all_fantasy = [fp for _, _, _, fp in team1_data + team2_data]
+        complete_fantasy = all(fp is not None for fp in all_fantasy)
+        if complete_fantasy:
+            team1_factors = self._performance_factors(
+                [float(fp) for _, _, _, fp in team1_data if fp is not None]
+            )
+            team2_factors = self._performance_factors(
+                [float(fp) for _, _, _, fp in team2_data if fp is not None]
+            )
+            weights = [team1_factors, team2_factors]
+        else:
+            team1_factors = [None] * len(team1_data)
+            team2_factors = [None] * len(team2_data)
+            weights = None
 
-        # Update ratings
         try:
-            updated_teams = self.model.rate(teams, ranks=ranks, weights=weights)
+            updated_teams = self.model.rate(
+                teams,
+                ranks=ranks,
+                weights=weights,
+            )
         except Exception as e:
             logger.error(f"OpenSkill rate() failed: {e}")
             raise
 
-        # Extract results with mu clamping
         results: dict[int, tuple[float, float, float | None]] = {}
-
-        for i, (rating, discord_id) in enumerate(zip(updated_teams[0], team1_ids)):
-            old_mu = team1_original_mu[i]
-            new_mu = rating.mu
-
-            # Clamp mu change to ±MAX_MU_SWING_PER_GAME
-            delta = new_mu - old_mu
-            clamped_delta = max(-self.MAX_MU_SWING_PER_GAME, min(self.MAX_MU_SWING_PER_GAME, delta))
-            clamped_mu = old_mu + clamped_delta
-
-            # Enforce floor
-            clamped_mu = max(self.MIN_MU, clamped_mu)
-
-            fantasy_used = team1_data[i][3]  # Original fantasy points (may be None)
-            results[discord_id] = (clamped_mu, rating.sigma, fantasy_used)
-
-        for i, (rating, discord_id) in enumerate(zip(updated_teams[1], team2_ids)):
-            old_mu = team2_original_mu[i]
-            new_mu = rating.mu
-
-            # Clamp mu change to ±MAX_MU_SWING_PER_GAME
-            delta = new_mu - old_mu
-            clamped_delta = max(-self.MAX_MU_SWING_PER_GAME, min(self.MAX_MU_SWING_PER_GAME, delta))
-            clamped_mu = old_mu + clamped_delta
-
-            # Enforce floor
-            clamped_mu = max(self.MIN_MU, clamped_mu)
-
-            fantasy_used = team2_data[i][3]
-            results[discord_id] = (clamped_mu, rating.sigma, fantasy_used)
+        for discord_id, rating, factor in zip(
+            team1_ids,
+            updated_teams[0],
+            team1_factors,
+        ):
+            results[discord_id] = (rating.mu, rating.sigma, factor)
+        for discord_id, rating, factor in zip(
+            team2_ids,
+            updated_teams[1],
+            team2_factors,
+        ):
+            results[discord_id] = (rating.mu, rating.sigma, factor)
 
         return results
 
@@ -471,9 +446,7 @@ class CamaOpenSkillSystem:
         cls, probability: float, temperature: float | None = None
     ) -> float:
         """Apply post-hoc temperature scaling to raw OpenSkill win probability."""
-        actual_temperature = (
-            cls.WIN_PROBABILITY_TEMPERATURE if temperature is None else temperature
-        )
+        actual_temperature = cls.WIN_PROBABILITY_TEMPERATURE if temperature is None else temperature
         if actual_temperature <= 0:
             raise ValueError("OpenSkill probability temperature must be positive")
 

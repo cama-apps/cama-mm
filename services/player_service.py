@@ -826,6 +826,80 @@ class PlayerService:
         """
         self.player_repo.update_glicko_rating(discord_id, guild_id, rating, rd, volatility)
 
+    def sync_openskill_mu_to_display_rating(
+        self,
+        discord_id: int,
+        guild_id: int,
+        display_rating: float,
+    ) -> None:
+        """Keep an explicit admin rating override aligned across both systems."""
+        glicko = self.player_repo.get_glicko_rating(discord_id, guild_id)
+        if glicko is None:
+            raise ValueError("Player has no Glicko rating")
+        self.update_both_display_rating(
+            discord_id,
+            guild_id,
+            display_rating,
+            glicko[1],
+            glicko[2],
+            reason="admin_rating_override",
+        )
+
+    def update_both_display_rating(
+        self,
+        discord_id: int,
+        guild_id: int,
+        display_rating: float,
+        rd: float,
+        volatility: float,
+        *,
+        reason: str,
+        actor_id: int | None = None,
+    ) -> None:
+        """Atomically set both estimates and make the OpenSkill override replayable."""
+        existing = self.player_repo.get_openskill_rating(discord_id, guild_id)
+        mu = self.openskill_system.MIN_MU + max(
+            0.0,
+            display_rating,
+        ) / self.openskill_system.DISPLAY_SCALE
+        update_atomic = getattr(
+            self.player_repo,
+            "update_both_rating_estimates_atomic",
+            None,
+        )
+        if not callable(update_atomic):
+            # Compatibility for lightweight repository fakes; production uses
+            # the atomic event-writing path.
+            self.player_repo.update_glicko_rating(
+                discord_id,
+                guild_id,
+                display_rating,
+                rd,
+                volatility,
+            )
+            sigma = (
+                existing[1]
+                if existing is not None and existing[1] is not None
+                else self.openskill_system.DEFAULT_SIGMA
+            )
+            self.player_repo.update_openskill_rating(
+                discord_id,
+                guild_id,
+                mu,
+                sigma,
+            )
+            return
+        update_atomic(
+            discord_id=discord_id,
+            guild_id=guild_id,
+            glicko_rating=display_rating,
+            glicko_rd=rd,
+            glicko_volatility=volatility,
+            os_mu=mu,
+            reason=reason,
+            actor_id=actor_id,
+        )
+
     # --- Steam ID operations ---
 
     def get_steam_ids(self, discord_id: int) -> list[int]:
@@ -918,27 +992,33 @@ class PlayerService:
         """Get all players in a guild."""
         return self.player_repo.get_all(guild_id)
 
-    def bump_glicko_rds(self, guild_id: int, amount: int) -> dict | None:
-        """Increase Glicko RD for all rated players in a guild, capped at 350.
+    def bump_glicko_rds(
+        self,
+        guild_id: int,
+        amount: int,
+        *,
+        actor_id: int | None = None,
+    ) -> dict | None:
+        """Increase both systems' uncertainty after a major game patch.
 
         Returns a summary dict with count, avg_before, avg_after, or None if no rated players.
         """
-        players = self.player_repo.get_all(guild_id)
-        rated = [p for p in players if p.glicko_rating is not None]
-        if not rated:
-            return None
-        old_rds = [p.glicko_rd for p in rated]
-        updates = [
-            (p.discord_id, p.glicko_rating, min(350.0, p.glicko_rd + amount), p.glicko_volatility)
-            for p in rated
-        ]
-        count = self.player_repo.update_glicko_ratings_bulk(updates, guild_id)
-        new_rds = [min(350.0, rd + amount) for rd in old_rds]
-        return {
-            "count": count,
-            "avg_before": sum(old_rds) / len(old_rds),
-            "avg_after": sum(new_rds) / len(new_rds),
-        }
+        bump_atomic = getattr(
+            self.player_repo,
+            "bump_rating_uncertainties_atomic",
+            None,
+        )
+        if not callable(bump_atomic):
+            raise RuntimeError("Repository does not support atomic uncertainty bumps")
+        return bump_atomic(
+            guild_id=guild_id,
+            rd_amount=float(amount),
+            sigma_amount=float(amount) / self.openskill_system.DISPLAY_SCALE,
+            max_rd=350.0,
+            max_sigma=self.openskill_system.DEFAULT_SIGMA,
+            reason="major_patch_uncertainty_bump",
+            actor_id=actor_id,
+        )
 
     def get_by_ids(self, discord_ids: list[int], guild_id: int | None) -> list:
         """

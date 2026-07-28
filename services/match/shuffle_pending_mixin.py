@@ -37,8 +37,9 @@ class ShufflePendingMixin:
 
     # ==================== State Management (delegated to MatchStateService) ====================
 
-
-    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> PendingMatchState | None:
+    def get_last_shuffle(
+        self, guild_id: int | None = None, pending_match_id: int | None = None
+    ) -> PendingMatchState | None:
         """Get the pending shuffle state (delegates to state_service)."""
         return self.state_service.get_last_shuffle(guild_id, pending_match_id)
 
@@ -85,7 +86,9 @@ class ShufflePendingMixin:
             cmd_channel_id=cmd_channel_id,
         )
 
-    def get_shuffle_message_info(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int | None]:
+    def get_shuffle_message_info(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> dict[str, int | None]:
         """Return message metadata for the pending shuffle (delegates to state_service)."""
         return self.state_service.get_shuffle_message_info(guild_id, pending_match_id)
 
@@ -182,22 +185,30 @@ class ShufflePendingMixin:
                 f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
             )
 
-        # Apply RD decay for shuffle priority calculation (not persisted).
-        # This ensures returning players get appropriate priority boost.
+        # Apply uncertainty decay for shuffle priority and previews (not
+        # persisted). The next recorded match commits the decayed posterior.
         # Safe to mutate: players are fetched fresh via get_shuffle_inputs().
         now = datetime.now(UTC)
         for player in players:
-            if player.discord_id and player.glicko_rd is not None:
+            if player.discord_id:
                 last_match_str = last_match_dates.get(player.discord_id)
                 if last_match_str:
                     try:
                         last_match = datetime.fromisoformat(last_match_str.replace("Z", "+00:00"))
-                        days_since = (now - last_match).days
-                        player.glicko_rd = CamaRatingSystem.apply_rd_decay(
-                            player.glicko_rd, days_since
-                        )
+                        if last_match.tzinfo is None:
+                            last_match = last_match.replace(tzinfo=UTC)
+                        days_since = max(0, (now - last_match).days)
+                        if player.glicko_rd is not None:
+                            player.glicko_rd = CamaRatingSystem.apply_rd_decay(
+                                player.glicko_rd, days_since
+                            )
+                        if player.os_sigma is not None:
+                            player.os_sigma = self.openskill_system.apply_sigma_decay(
+                                player.os_sigma,
+                                days_since,
+                            )
                     except (ValueError, TypeError):
-                        pass  # Keep original RD if date parsing fails
+                        pass  # Keep stored uncertainty if date parsing fails
 
         if len(players) < 10:
             raise ValueError("Need at least 10 players to shuffle.")
@@ -214,9 +225,7 @@ class ShufflePendingMixin:
 
         # Get recent match participants and convert to player names
         recent_match_ids = self.match_repo.get_last_match_participant_ids(guild_id)
-        recent_match_names = {
-            p.name for p in players if p.discord_id in recent_match_ids
-        }
+        recent_match_names = {p.name for p in players if p.discord_id in recent_match_ids}
 
         # Fall back to Glicko if any player lacks OpenSkill ratings
         if rating_system == "openskill" and any(p.os_mu is None for p in players):
@@ -244,9 +253,7 @@ class ShufflePendingMixin:
 
         low_priority_ids = set()
         if self.low_priority_repo:
-            low_priority_ids = self.low_priority_repo.get_active_ids(
-                player_ids, guild_id
-            )
+            low_priority_ids = self.low_priority_repo.get_active_ids(player_ids, guild_id)
 
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
@@ -370,10 +377,16 @@ class ShufflePendingMixin:
         lobby_rating_bonus = shuffler._calculate_lobby_rating_bonus(selected_values)
 
         goodness_score = (
-            value_diff + off_role_penalty + weighted_role_matchup_delta
-            + excluded_penalty + recent_match_penalty + soft_avoid_penalty
-            + package_deal_penalty + low_priority_penalty
-            + region_split_penalty + rating_spread_penalty
+            value_diff
+            + off_role_penalty
+            + weighted_role_matchup_delta
+            + excluded_penalty
+            + recent_match_penalty
+            + soft_avoid_penalty
+            + package_deal_penalty
+            + low_priority_penalty
+            + region_split_penalty
+            + rating_spread_penalty
             - lobby_rating_bonus
         )
 
@@ -410,11 +423,17 @@ class ShufflePendingMixin:
 
         # Calculate OpenSkill win probability for Radiant
         radiant_os_ratings = [
-            (p.os_mu or self.openskill_system.DEFAULT_MU, p.os_sigma or self.openskill_system.DEFAULT_SIGMA)
+            (
+                p.os_mu or self.openskill_system.DEFAULT_MU,
+                p.os_sigma or self.openskill_system.DEFAULT_SIGMA,
+            )
             for p in radiant_team.players
         ]
         dire_os_ratings = [
-            (p.os_mu or self.openskill_system.DEFAULT_MU, p.os_sigma or self.openskill_system.DEFAULT_SIGMA)
+            (
+                p.os_mu or self.openskill_system.DEFAULT_MU,
+                p.os_sigma or self.openskill_system.DEFAULT_SIGMA,
+            )
             for p in dire_team.players
         ]
         raw_openskill_radiant_win_prob = self.openskill_system.os_predict_win_probability(
@@ -438,9 +457,8 @@ class ShufflePendingMixin:
                 if avoider not in included_player_ids or avoided not in included_player_ids:
                     continue
                 # They must be on opposite teams (avoid "worked")
-                on_opposite = (
-                    (avoider in radiant_set and avoided in dire_set) or
-                    (avoider in dire_set and avoided in radiant_set)
+                on_opposite = (avoider in radiant_set and avoided in dire_set) or (
+                    avoider in dire_set and avoided in radiant_set
                 )
                 if on_opposite:
                     effective_avoid_ids.append(avoid.id)

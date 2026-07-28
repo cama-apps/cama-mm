@@ -106,10 +106,8 @@ class TestPhase2LatestMatchGuard:
             current[pid][0] != pytest.approx(phase1[pid][0]) for pid in player_ids
         )
 
-    def test_enriching_old_match_leaves_players_untouched(self, phase2_services):
-        """Phase 2 on an OLD match (a newer rated match exists) must update
-        only that match's rating_history — players.os_* stays at the live
-        post-match-2 values instead of rewinding to stale post-match-1 ones."""
+    def test_enriching_old_match_replays_later_history(self, phase2_services):
+        """Late Phase 2 must propagate through every newer match."""
         match_service = phase2_services["match_service"]
         match_repo = phase2_services["match_repo"]
         player_repo = phase2_services["player_repo"]
@@ -126,20 +124,31 @@ class TestPhase2LatestMatchGuard:
             match1_id, guild_id=TEST_GUILD_ID
         )
         assert result["success"] is True
-        assert result["players_updated"] == 0, (
-            "enriching an old match must not rewrite live player ratings"
-        )
+        assert result["players_updated"] == 10
 
         after = player_repo.get_openskill_ratings_bulk(player_ids, TEST_GUILD_ID)
-        assert after == live, "players.os_* must be byte-identical after old-match Phase 2"
+        assert any(after[pid] != live[pid] for pid in player_ids)
 
-        # The old match's history rows still got the fantasy-weighted rewrite.
-        history = {
+        history1 = {
             e["discord_id"]: e
             for e in match_repo.get_full_rating_history_for_match(match1_id)
         }
+        history2 = {
+            e["discord_id"]: e
+            for e in match_repo.get_full_rating_history_for_match(match2_id)
+        }
         for pid in player_ids:
-            assert history[pid]["fantasy_weight"] is not None
+            assert history1[pid]["fantasy_weight"] is not None
+            assert history1[pid]["os_mu_after"] == pytest.approx(
+                history2[pid]["os_mu_before"]
+            )
+            assert history1[pid]["os_sigma_after"] == pytest.approx(
+                history2[pid]["os_sigma_before"]
+            )
+            assert after[pid][0] == pytest.approx(history2[pid]["os_mu_after"])
+            assert after[pid][1] == pytest.approx(
+                history2[pid]["os_sigma_after"]
+            )
 
 
 class TestEnrichZeroMatchedParticipants:
