@@ -3,6 +3,7 @@ Utilities for safely interacting with Discord responses/followups.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 
 import discord
 
@@ -111,6 +112,72 @@ async def safe_followup(
             except Exception as reset_exc:
                 logger.debug("Could not rewind attachment for channel fallback: %s", reset_exc)
         return await channel.send(**fallback_kwargs)
+
+
+async def edit_message_with_fallback(
+    message: discord.Message | None,
+    *,
+    send_fallback: Callable[..., Awaitable[object]] | None = None,
+    log_label: str = "Message",
+    **edit_kwargs,
+) -> bool:
+    """Edit ``message``; on failure, rewind attachments and re-send fresh.
+
+    ``message.edit`` fails once the message is deleted or (on view timeout
+    paths) after Discord's 15-minute interaction token has expired; without a
+    fallback the user is left staring at stale buttons forever. On edit
+    failure any ``discord.File`` attachments are rewound (files are
+    single-use — the failed edit consumed their buffers) and the embed (plus
+    files) or content is re-sent: via ``send_fallback(embed=..., files=...,
+    content=...)`` when provided (e.g. a ``safe_followup`` partial), otherwise
+    via ``message.channel.send``. The ``view`` kwarg only applies to the edit;
+    the fallback send carries no view. Failures are logged at WARNING with
+    ``log_label`` so recurring problems stay visible.
+
+    Returns True when either the edit or the fallback delivered the content.
+    """
+    if message is None:
+        return False
+    try:
+        await message.edit(**edit_kwargs)
+        return True
+    except Exception as exc:
+        logger.warning("%s edit failed: %s", log_label, exc)
+
+    embed = edit_kwargs.get("embed")
+    content = edit_kwargs.get("content")
+    files = [
+        a for a in (edit_kwargs.get("attachments") or []) if isinstance(a, discord.File)
+    ]
+    # discord.File is single-use — the failed edit consumed the buffers, so
+    # rewind each before the fallback send.
+    for attachment in files:
+        try:
+            attachment.reset()
+        except Exception as reset_exc:
+            logger.debug("Could not rewind attachment for fallback send: %s", reset_exc)
+
+    send_kwargs: dict = {}
+    if embed is not None:
+        send_kwargs["embed"] = embed
+        if files:
+            send_kwargs["files"] = files
+    elif content:
+        send_kwargs["content"] = content
+    else:
+        return False
+
+    if send_fallback is None:
+        channel = getattr(message, "channel", None)
+        if channel is None:
+            return False
+        send_fallback = channel.send
+    try:
+        await send_fallback(**send_kwargs)
+        return True
+    except Exception as exc:
+        logger.warning("%s fallback send also failed: %s", log_label, exc)
+        return False
 
 
 async def send_public_or_ephemeral(

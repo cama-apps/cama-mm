@@ -39,7 +39,7 @@ def create_test_players(count: int = 10) -> list[Player]:
 
 
 class TestSoftAvoidPenaltyCalculation:
-    """Tests for _calculate_soft_avoid_penalty method."""
+    """Tests for calculate_soft_avoid_penalty method."""
 
     def test_no_avoids_returns_zero(self):
         """Test that no avoids means zero penalty."""
@@ -48,10 +48,10 @@ class TestSoftAvoidPenaltyCalculation:
         team1_ids = {1000, 1001, 1002, 1003, 1004}
         team2_ids = {1005, 1006, 1007, 1008, 1009}
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids=None)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids=None)
         assert penalty == 0.0
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids=[])
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids=[])
         assert penalty == 0.0
 
     def test_avoid_same_team_applies_penalty(self):
@@ -64,7 +64,7 @@ class TestSoftAvoidPenaltyCalculation:
         # Player 1000 avoids player 1001 (both on team1)
         avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1001)]
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 500.0
 
     def test_only_low_priority_owner_gets_half_strength(self):
@@ -73,13 +73,13 @@ class TestSoftAvoidPenaltyCalculation:
         team2_ids = {1005, 1006, 1007, 1008, 1009}
         avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1001)]
 
-        owner_penalty = shuffler._calculate_soft_avoid_penalty(
+        owner_penalty = shuffler.calculate_soft_avoid_penalty(
             team1_ids,
             team2_ids,
             avoids,
             low_priority_ids={1000},
         )
-        target_penalty = shuffler._calculate_soft_avoid_penalty(
+        target_penalty = shuffler.calculate_soft_avoid_penalty(
             team1_ids,
             team2_ids,
             avoids,
@@ -99,7 +99,7 @@ class TestSoftAvoidPenaltyCalculation:
         # Player 1000 avoids player 1005 (opposite teams)
         avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1005)]
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 0.0
 
     def test_bidirectional_avoids_additive(self):
@@ -115,7 +115,7 @@ class TestSoftAvoidPenaltyCalculation:
             MockSoftAvoid(avoider_discord_id=1001, avoided_discord_id=1000, id=2),
         ]
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 1000.0
 
     def test_multiple_avoids_same_team(self):
@@ -131,7 +131,7 @@ class TestSoftAvoidPenaltyCalculation:
             MockSoftAvoid(avoider_discord_id=1002, avoided_discord_id=1003, id=2),
         ]
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 1000.0
 
     def test_mixed_avoids(self):
@@ -147,7 +147,7 @@ class TestSoftAvoidPenaltyCalculation:
             MockSoftAvoid(avoider_discord_id=1005, avoided_discord_id=1006, id=3),  # Same team2 (penalty)
         ]
 
-        penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 1000.0
 
 

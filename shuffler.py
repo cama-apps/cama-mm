@@ -295,7 +295,7 @@ class BalancedShuffler:
         rd_total = sum(p.glicko_rd or 0.0 for p in players)
         return rd_total * self.rd_priority_weight
 
-    def _calculate_soft_avoid_penalty(
+    def calculate_soft_avoid_penalty(
         self,
         team1_ids: set[int],
         team2_ids: set[int],
@@ -337,7 +337,7 @@ class BalancedShuffler:
 
         return penalty
 
-    def _calculate_package_deal_penalty(
+    def calculate_package_deal_penalty(
         self,
         team1_ids: set[int],
         team2_ids: set[int],
@@ -424,7 +424,7 @@ class BalancedShuffler:
         return penalty
 
     @staticmethod
-    def _calculate_low_priority_penalty(
+    def calculate_low_priority_penalty(
         selected_ids: set[int],
         low_priority_ids: set[int] | None,
     ) -> float:
@@ -558,7 +558,7 @@ class BalancedShuffler:
             deals,
             low_priority_ids=low_priority_ids,
         )
-        low_priority_penalty = self._calculate_low_priority_penalty(
+        low_priority_penalty = self.calculate_low_priority_penalty(
             selected_discord_ids,
             low_priority_ids,
         )
@@ -920,13 +920,13 @@ class BalancedShuffler:
         # fallback path that can produce a non-zero penalty.
         team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
         team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
-        avoid_penalty = self._calculate_soft_avoid_penalty(
+        avoid_penalty = self.calculate_soft_avoid_penalty(
             team1_ids,
             team2_ids,
             avoids,
             low_priority_ids=low_priority_ids,
         )
-        deal_penalty = self._calculate_package_deal_penalty(
+        deal_penalty = self.calculate_package_deal_penalty(
             team1_ids,
             team2_ids,
             deals,
@@ -1444,7 +1444,7 @@ class BalancedShuffler:
                 deals,
                 low_priority_ids=low_priority_ids,
             )
-            low_priority_penalty = self._calculate_low_priority_penalty(
+            low_priority_penalty = self.calculate_low_priority_penalty(
                 selected_discord_ids,
                 low_priority_ids,
             )
@@ -1688,7 +1688,7 @@ class BalancedShuffler:
                 deals,
                 low_priority_ids=low_priority_ids,
             )
-            low_priority_penalty = self._calculate_low_priority_penalty(
+            low_priority_penalty = self.calculate_low_priority_penalty(
                 selected_discord_ids,
                 low_priority_ids,
             )

@@ -20,7 +20,6 @@ def _commands(*, player_exists: bool = True):
     player_service = MagicMock()
     player_service.get_player.return_value = object() if player_exists else None
     repo = MagicMock()
-    repo.REQUIRED_WINS = 3
     return (
         AdminCommands(
             bot=None,

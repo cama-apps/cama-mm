@@ -334,7 +334,7 @@ class ShufflePendingMixin:
         # Calculate soft avoid penalty (for display only - already factored into shuffler)
         radiant_ids_set = {p.discord_id for p in radiant_team.players if p.discord_id}
         dire_ids_set = {p.discord_id for p in dire_team.players if p.discord_id}
-        soft_avoid_penalty = shuffler._calculate_soft_avoid_penalty(
+        soft_avoid_penalty = shuffler.calculate_soft_avoid_penalty(
             radiant_ids_set,
             dire_ids_set,
             avoids,
@@ -342,13 +342,13 @@ class ShufflePendingMixin:
         )
 
         # Calculate package deal penalty (for display only - already factored into shuffler)
-        package_deal_penalty = shuffler._calculate_package_deal_penalty(
+        package_deal_penalty = shuffler.calculate_package_deal_penalty(
             radiant_ids_set,
             dire_ids_set,
             deals,
             low_priority_ids=low_priority_ids,
         )
-        low_priority_penalty = shuffler._calculate_low_priority_penalty(
+        low_priority_penalty = shuffler.calculate_low_priority_penalty(
             radiant_ids_set | dire_ids_set,
             low_priority_ids,
         )

@@ -18,6 +18,7 @@ from config import (
     ADMIN_RATING_MAX,
     INITIAL_GLICKO_RD,
 )
+from domain.low_priority_constants import LOW_PRIORITY_REQUIRED_WINS
 from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS, format_betting_display
@@ -177,9 +178,9 @@ class AdminCommands(commands.Cog):
         if state is None or not state.active:
             message = f"{user.mention} does not have active restricted matchmaking state."
         else:
-            completed = self.low_priority_repo.REQUIRED_WINS - state.wins_remaining
+            completed = LOW_PRIORITY_REQUIRED_WINS - state.wins_remaining
             message = (
-                f"{user.mention}: {completed}/{self.low_priority_repo.REQUIRED_WINS} "
+                f"{user.mention}: {completed}/{LOW_PRIORITY_REQUIRED_WINS} "
                 f"wins completed ({state.wins_remaining} remaining)."
             )
         await interaction.response.send_message(message, ephemeral=True)
