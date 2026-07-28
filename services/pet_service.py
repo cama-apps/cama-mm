@@ -148,7 +148,7 @@ class PetService:
             now=now,
         )
 
-    def _resolve_starvation(self, pet: Pet, now: int) -> Pet | None:
+    def resolve_starvation(self, pet: Pet, now: int) -> Pet | None:
         """Return the (possibly Aegis-revived) living pet, or None if it died.
 
         Death is claimed with the computed starvation moment. A Shellback
@@ -204,17 +204,26 @@ class PetService:
             current = self.pet_repo.get_pet_by_id(current.pet_id, current.guild_id)
         return None
 
-    def _living_pet(self, discord_id: int, guild_id: int | None, now: int) -> Pet | None:
+    def living_pet(self, discord_id: int, guild_id: int | None, now: int) -> Pet | None:
         pet = self.pet_repo.get_active_pet(discord_id, guild_id)
         if pet is None:
             return None
-        return self._resolve_starvation(pet, now)
+        return self.resolve_starvation(pet, now)
+
+    def living_pet_by_id(
+        self, pet_id: int, guild_id: int | None, now: int
+    ) -> Pet | None:
+        """Fetch a pet by id and resolve any pending starvation (or hatch)."""
+        pet = self.pet_repo.get_pet_by_id(pet_id, guild_id)
+        if pet is None:
+            return None
+        return self.resolve_starvation(pet, now)
 
     # --- status ---
 
     def get_status(self, discord_id: int, guild_id: int | None) -> Result[PetStatus]:
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         supplies = self.pet_repo.get_supplies(discord_id, guild_id)
         if pet is None:
             last_dead = self.pet_repo.get_latest_dead_pet(discord_id, guild_id)
@@ -243,7 +252,7 @@ class PetService:
     ) -> PetDigWork | None:
         """Return accrued work for a prospective dig without persisting it."""
         now = self._now() if now is None else int(now)
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None or now < pet.hatched_at:
             return None
         accrued_units, as_of = self._dig_work_settlement(pet, now)
@@ -273,7 +282,7 @@ class PetService:
         the pet repository or duplicates hunger math.
         """
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None or now < pet.hatched_at:
             return None
         return self.warning_crossing_for(pet), pet.name
@@ -309,7 +318,7 @@ class PetService:
         now = self._now()
         # Resolve a pending starvation first so a long-dead-on-paper pet does
         # not block adoption, and the fee tier reflects that death.
-        existing = self._living_pet(discord_id, guild_id, now)
+        existing = self.living_pet(discord_id, guild_id, now)
         if existing is not None:
             if (
                 egg_tier == "gilded"
@@ -371,7 +380,7 @@ class PetService:
     def _sacrificial_pet(
         self, discord_id: int, guild_id: int | None, now: int
     ) -> Result | Pet:
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail(
                 "You have no living pet to sacrifice.", code=error_codes.NO_PET
@@ -470,7 +479,7 @@ class PetService:
         if name_error is not None:
             return name_error
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail("You have no living pet.", code=error_codes.NO_PET)
         try:
@@ -497,7 +506,7 @@ class PetService:
                 code=error_codes.VALIDATION_ERROR,
             )
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         species_id = pet.species if pet is not None and now >= pet.hatched_at else ""
         unit_cost = food_cost(species_id, item_id)
         total = unit_cost * qty
@@ -527,7 +536,7 @@ class PetService:
                 code=error_codes.VALIDATION_ERROR,
             )
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail("You have no living pet.", code=error_codes.NO_PET)
         if now < pet.hatched_at:
@@ -573,7 +582,7 @@ class PetService:
         """Buy a Mystery Trinket: a weighted accessory roll for the living,
         hatched pet. Duplicates dissolve for a partial refund (net sink)."""
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail(
                 "Trinkets are gifts — you need a living pet first.",
@@ -614,7 +623,7 @@ class PetService:
         if accessory_id not in ACCESSORIES:
             return Result.fail("Unknown trinket.", code=error_codes.VALIDATION_ERROR)
         now = self._now()
-        pet = self._living_pet(discord_id, guild_id, now)
+        pet = self.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail("You have no living pet.", code=error_codes.NO_PET)
         try:
@@ -633,7 +642,7 @@ class PetService:
     def camadex(self, discord_id: int, guild_id: int | None) -> tuple[list[str], int]:
         """(species ids hatched by this player, roster size)."""
         now = self._now()
-        self._living_pet(discord_id, guild_id, now)
+        self.living_pet(discord_id, guild_id, now)
         raised = self.pet_repo.species_raised(discord_id, guild_id, now)
         return raised, len(SPECIES)
 
@@ -648,7 +657,7 @@ class PetService:
         last_error: Result[FeedOutcome] | None = None
         for _ in range(2):  # one retry on a concurrent anchor change
             now = self._now()
-            pet = self._living_pet(discord_id, guild_id, now)
+            pet = self.living_pet(discord_id, guild_id, now)
             if pet is None:
                 return Result.fail(
                     "You have no living pet.", code=error_codes.NO_PET
@@ -728,7 +737,7 @@ class PetService:
             now = self._now()
             pets = self.pet_repo.get_active_pets_for(winner_ids, guild_id)
             for pet in pets:
-                living = self._resolve_starvation(pet, now)
+                living = self.resolve_starvation(pet, now)
                 if living is None or now < living.hatched_at:
                     continue
                 amount = MATCH_WIN_HUNGER + get_species(living.species).match_feed_bonus
@@ -778,7 +787,7 @@ class PetService:
         pets = self.pet_repo.get_oldest_living(guild_id, limit * 2)
         living: list[Pet] = []
         for pet in pets:
-            resolved = self._resolve_starvation(pet, now)
+            resolved = self.resolve_starvation(pet, now)
             if resolved is not None and now >= resolved.hatched_at:
                 living.append(resolved)
             if len(living) >= limit:
@@ -799,7 +808,7 @@ class PetService:
             now, decay_per_day=self.decay_per_day, max_decay_pct=_MAX_DECAY_PCT
         )
         for pet in candidates:
-            self._resolve_starvation(pet, now)
+            self.resolve_starvation(pet, now)
 
         deaths = [DeathNotice(pet=p) for p in self.pet_repo.get_unannounced_deaths()]
         hatches = [

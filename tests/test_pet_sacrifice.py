@@ -243,7 +243,7 @@ class TestService:
                 "services.pet_service.random.choices",
                 return_value=["common_cama"],
             ):
-                assert service._living_pet(100, TEST_GUILD_ID, clock.now) is None
+                assert service.living_pet(100, TEST_GUILD_ID, clock.now) is None
         assert service._pity_active(100, TEST_GUILD_ID)
         # A sacrifice in between must neither count toward nor reset pity.
         adopted = service.adopt(100, TEST_GUILD_ID, "Altar Fodder")

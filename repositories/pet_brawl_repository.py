@@ -12,13 +12,13 @@ Validation errors are raised as ``ValueError(code)``:
 
 from __future__ import annotations
 
-import datetime
 import sqlite3
 
 from domain.models.pet import Pet
 from domain.models.pet_brawl import PetBrawl, PetBrawlStatus
 from repositories.base_repository import BaseRepository
-from utils.game_date import game_date_for_timestamp
+from repositories.pet_repository import write_hunger_anchor
+from utils.game_date import game_day_start_ts
 
 _BRAWL_COLUMNS = (
     "brawl_id, guild_id, channel_id, challenger_id, recipient_id, "
@@ -27,20 +27,9 @@ _BRAWL_COLUMNS = (
     "winner_hunger_delta, loser_hunger_delta"
 )
 
-_PST = datetime.timezone(datetime.timedelta(hours=-8))
-
 
 def _row_to_brawl(row: sqlite3.Row) -> PetBrawl:
     return PetBrawl.from_row(dict(row))
-
-
-def _game_day_start_ts(now: int) -> int:
-    """Unix timestamp of 4 AM PST on `now`'s game-date (the day boundary)."""
-    day = game_date_for_timestamp(now)
-    start = datetime.datetime.strptime(day, "%Y-%m-%d").replace(
-        hour=4, tzinfo=_PST
-    )
-    return int(start.timestamp())
 
 
 class PetBrawlRepository(BaseRepository):
@@ -373,18 +362,14 @@ class PetBrawlRepository(BaseRepository):
             "SELECT COUNT(*) AS n FROM pet_brawls "
             "WHERE winner_pet_id = ? AND guild_id = ? AND status = 'done' "
             "AND winner_hunger_delta > 0 AND resolved_at >= ?",
-            (pet_id, gid, _game_day_start_ts(now)),
+            (pet_id, gid, game_day_start_ts(now)),
         ).fetchone()["n"]
         if rewarded_today >= daily_win_cap:
             return 0
         new_hunger = min(100, hunger + gain)
         if new_hunger == hunger:
             return 0
-        cursor.execute(
-            "UPDATE pets SET last_fed_at = ?, hunger_at_last_fed = ? "
-            "WHERE pet_id = ? AND died_at IS NULL",
-            (now, new_hunger, pet_id),
-        )
+        write_hunger_anchor(cursor, pet_id, now, new_hunger)
         return new_hunger - hunger
 
     def _apply_loser_loss(
@@ -404,9 +389,5 @@ class PetBrawlRepository(BaseRepository):
         applied = min(loss, max(0, hunger - floor))
         if applied <= 0:
             return 0
-        cursor.execute(
-            "UPDATE pets SET last_fed_at = ?, hunger_at_last_fed = ? "
-            "WHERE pet_id = ? AND died_at IS NULL",
-            (now, hunger - applied, pet_id),
-        )
+        write_hunger_anchor(cursor, pet_id, now, hunger - applied)
         return -applied

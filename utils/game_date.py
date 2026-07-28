@@ -36,6 +36,13 @@ def game_date_for_timestamp(ts: float) -> str:
     return game_date_for(datetime.datetime.fromtimestamp(ts, tz=datetime.UTC))
 
 
+def game_day_start_ts(ts: int) -> int:
+    """Unix timestamp of 4 AM PST on `ts`'s game-date (the day boundary)."""
+    day = game_date_for_timestamp(ts)
+    start = datetime.datetime.strptime(day, "%Y-%m-%d").replace(hour=4, tzinfo=_PST)
+    return int(start.timestamp())
+
+
 def weekday_of_game_date(date_str: str) -> int:
     """Weekday of a game-date string. Monday=0 … Sunday=6."""
     return datetime.datetime.strptime(date_str, "%Y-%m-%d").weekday()

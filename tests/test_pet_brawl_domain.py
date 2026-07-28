@@ -8,6 +8,7 @@ import pytest
 from domain.models.pet import PetStage
 from domain.pet_brawl import (
     BASE_CRIT_PCT,
+    BRAWL_TRAITS,
     HUNKER_COUNTER,
     HUNKER_HEAL,
     MAX_ROUNDS,
@@ -16,12 +17,15 @@ from domain.pet_brawl import (
     SAFE_MOVE,
     SPITTER_CRIT_PCT,
     STAMPEDE_MISS_PCT,
+    BrawlTraits,
     PetBrawlMove,
+    brawl_traits,
     build_duelist,
     initial_state,
     move_name,
     resolve_round,
 )
+from domain.pet_constants import SPECIES
 
 
 class FakeRng:
@@ -97,6 +101,16 @@ class TestMoveFlavor:
 
     def test_every_move_has_emoji(self):
         assert set(MOVE_EMOJI) == set(PetBrawlMove)
+
+
+class TestBrawlTraits:
+    def test_every_species_has_an_explicit_entry(self):
+        """Lock the table's coverage: adding a species to pet_constants
+        requires an explicit BRAWL_TRAITS entry (no-trait entries count)."""
+        assert set(BRAWL_TRAITS) == set(SPECIES)
+
+    def test_unknown_species_falls_back_to_no_traits(self):
+        assert brawl_traits("retired_species") == BrawlTraits()
 
 
 class TestResolveRound:
