@@ -369,15 +369,31 @@ class EconomyEventService:
         self.repository.mark_event_announced(guild_id, event_id, now=now)
 
     def get_policy_status(self, guild_id: int | None) -> dict[str, Any]:
-        policy = self.ensure_policy(guild_id)
+        now = int(time.time())
+        policy = self.ensure_policy(guild_id, now=now)
         snapshot = self.repository.capture_balance_sheet(guild_id)
         latest = self.repository.get_latest_snapshot(guild_id)
-        event_date = self._event_date_for_timestamp(time.time())
+        trends = self.repository.get_monetary_trends(
+            guild_id,
+            current_stock=int(snapshot["monetary_stock"]),
+            now=now,
+        )
+        flows = self.repository.get_flow_indicators(
+            guild_id,
+            current_stock=int(snapshot["monetary_stock"]),
+            player_count=int(snapshot["player_count"]),
+            now=now,
+        )
+        distribution = self.repository.get_distribution_indicators(guild_id)
+        event_date = self._event_date_for_timestamp(now)
         event = self.repository.get_event_for_date(guild_id, event_date)
         return {
             "policy": policy,
             "balance_sheet": snapshot,
             "latest_snapshot": latest,
+            "monetary_trends": trends,
+            "flow_indicators": flows,
+            "distribution": distribution,
             "event": event,
             "effects": EconomyEventEffects.from_mapping(
                 event.get("effects") if event else None

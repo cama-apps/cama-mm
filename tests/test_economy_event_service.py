@@ -118,6 +118,120 @@ def test_reward_volume_includes_trivia_and_generated_mana(repo_db_path):
     assert volumes["reward_credits"] == 150
 
 
+def test_live_monetary_trends_use_nearest_daily_snapshot_anchors(repo_db_path):
+    repo = EconomyEventRepository(repo_db_path)
+    now = _local_timestamp(2026, 7, 18, 14)
+    sheet = {
+        "player_wallets": 0,
+        "positive_wallets": 0,
+        "visible_debt": 0,
+        "player_count": 0,
+        "average_wallet": 0,
+        "reserve_available": 0,
+        "reserve_locked": 0,
+        "reserve_next_match_pot": 0,
+        "prediction_open_cash": 0,
+        "wager_escrow": 0,
+        "monetary_stock": 0,
+    }
+    for days_ago, stock in ((1, 1_050), (3, 1_000), (7, 900)):
+        captured_at = now - days_ago * 86400
+        repo.save_snapshot(
+            TEST_GUILD_ID,
+            datetime.fromtimestamp(captured_at, tz=UTC).date().isoformat(),
+            {**sheet, "monetary_stock": stock},
+            captured_at=captured_at,
+        )
+
+    trends = repo.get_monetary_trends(
+        TEST_GUILD_ID,
+        current_stock=1_100,
+        now=now,
+    )
+
+    assert trends["1d"]["change_jc"] == 50
+    assert trends["1d"]["period_rate"] == pytest.approx(1_100 / 1_050 - 1)
+    assert trends["3d"]["elapsed_days"] == 3
+    assert trends["3d"]["average_daily_change_jc"] == pytest.approx(100 / 3)
+    assert trends["7d"]["change_jc"] == 200
+    assert trends["7d"]["period_rate"] == pytest.approx(1_100 / 900 - 1)
+
+
+def test_monetary_trends_report_missing_windows_without_fake_rates(repo_db_path):
+    repo = EconomyEventRepository(repo_db_path)
+
+    trends = repo.get_monetary_trends(
+        TEST_GUILD_ID,
+        current_stock=1_000,
+        now=_local_timestamp(2026, 7, 18, 14),
+    )
+
+    assert trends == {"1d": None, "3d": None, "7d": None}
+
+
+def test_flow_indicators_measure_rolling_turnover_and_participation(repo_db_path):
+    repo = EconomyEventRepository(repo_db_path)
+    now = int(time.time())
+    rows = (
+        ("player", 1, 100, "dig", now - 86400),
+        ("player", 2, -40, "gamba", now - 2 * 86400),
+        ("nonprofit", TEST_GUILD_ID, 60, "tax_fine", now - 5 * 86400),
+        ("player", 3, 999, "ledger_backfill", now - 86400),
+    )
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO economy_ledger_entries (
+                guild_id, account_type, account_id, delta,
+                balance_before, balance_after, source, created_at
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+            """,
+            (
+                (
+                    TEST_GUILD_ID,
+                    account_type,
+                    account_id,
+                    delta,
+                    delta,
+                    source,
+                    created_at,
+                )
+                for account_type, account_id, delta, source, created_at in rows
+            ),
+        )
+
+    flows = repo.get_flow_indicators(
+        TEST_GUILD_ID,
+        current_stock=1_000,
+        player_count=4,
+        now=now,
+    )
+
+    assert flows["3d"]["net_flow_jc"] == 60
+    assert flows["3d"]["gross_flow_jc"] == 140
+    assert flows["3d"]["active_players"] == 2
+    assert flows["3d"]["active_player_rate"] == 0.5
+    assert flows["3d"]["daily_turnover_rate"] == pytest.approx(140 / 3 / 1_000)
+    assert flows["7d"]["net_flow_jc"] == 120
+    assert flows["7d"]["gross_flow_jc"] == 200
+
+
+def test_distribution_indicators_report_concentration(repo_db_path):
+    players = PlayerRepository(repo_db_path)
+    for discord_id, balance in enumerate((10, 20, 30, 40, 100), start=1):
+        players.add(discord_id, f"player-{discord_id}", TEST_GUILD_ID)
+        players.update_balance(discord_id, TEST_GUILD_ID, balance)
+    repo = EconomyEventRepository(repo_db_path)
+
+    distribution = repo.get_distribution_indicators(TEST_GUILD_ID)
+
+    assert distribution["positive_player_count"] == 5
+    assert distribution["median_positive_wallet"] == 30
+    assert distribution["top_decile_count"] == 1
+    assert distribution["top_decile_share"] == 0.5
+    assert distribution["gini"] == pytest.approx(0.4)
+
+
 def test_atomic_event_burns_once_and_records_ledger(repo_db_path):
     repo, players = _seed_economy(repo_db_path)
     date = get_game_date()

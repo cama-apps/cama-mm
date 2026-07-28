@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import discord
 from discord import app_commands
@@ -760,6 +761,9 @@ def _build_policy_embed(status: dict) -> discord.Embed:
     policy = status["policy"]
     sheet = status["balance_sheet"]
     latest = status.get("latest_snapshot") or {}
+    trends = status.get("monetary_trends") or {}
+    flows = status.get("flow_indicators") or {}
+    distribution = status.get("distribution") or {}
     event = status.get("event")
     mode = str(policy.get("mode", "unknown")).replace("_", " ").title()
     target = float(policy.get("target_annual_rate", 0.0)) * 100
@@ -781,22 +785,113 @@ def _build_policy_embed(status: dict) -> discord.Embed:
             f"Total: **{int(sheet['monetary_stock']):,} JC**\n"
             f"Wallets: **{int(sheet['player_wallets']):,} JC** "
             f"(avg **{float(sheet['average_wallet']):,.2f}**)\n"
+            f"Positive wallets: **{int(sheet.get('positive_wallets', 0)):,} JC** · "
+            f"visible debt: **{int(sheet.get('visible_debt', 0)):,} JC**\n"
             f"Reserve: **{int(sheet['reserve_available']):,} available** + "
             f"**{int(sheet['reserve_locked']):,} locked**\n"
+            f"Next-match pot: **{int(sheet.get('reserve_next_match_pot', 0)):,} JC**\n"
             f"Prediction cash: **{int(sheet['prediction_open_cash']):,} JC**\n"
             f"Wager escrow: **{int(sheet['wager_escrow']):,} JC**"
         ),
         inline=False,
     )
+
+    trend_lines = [
+        _format_supply_trend("Live ~24h", trends.get("1d")),
+        _format_supply_trend("Rolling 3d", trends.get("3d")),
+        _format_supply_trend("Rolling 7d", trends.get("7d")),
+    ]
+    momentum = _format_supply_momentum(trends)
+    if momentum:
+        trend_lines.append(momentum)
     annualized_30d = latest.get("annualized_30d")
     annualized_90d = latest.get("annualized_90d")
-    inflation_lines = [
-        "30-day annualized: "
-        + (f"**{float(annualized_30d) * 100:+.2f}%**" if annualized_30d is not None else "collecting data"),
-        "90-day annualized: "
-        + (f"**{float(annualized_90d) * 100:+.2f}%**" if annualized_90d is not None else "collecting data"),
+    trend_lines.extend(
+        [
+            "30-day annualized: "
+            + (
+                f"**{float(annualized_30d) * 100:+.2f}%**"
+                if annualized_30d is not None
+                else "collecting data"
+            ),
+            "90-day annualized: "
+            + (
+                f"**{float(annualized_90d) * 100:+.2f}%**"
+                if annualized_90d is not None
+                else "collecting data"
+            ),
+        ]
+    )
+    embed.add_field(
+        name="Money-supply inflation proxy",
+        value="\n".join(trend_lines),
+        inline=False,
+    )
+
+    flow_lines = [
+        _format_flow_indicator("3d", flows.get("3d")),
+        _format_flow_indicator("7d", flows.get("7d")),
     ]
-    embed.add_field(name="Measured inflation", value="\n".join(inflation_lines), inline=False)
+    seven_day_flow = flows.get("7d")
+    if seven_day_flow:
+        flow_lines.append(
+            "7d participation: "
+            f"**{int(seven_day_flow.get('active_players', 0)):,}/"
+            f"{int(sheet.get('player_count', 0)):,} players** "
+            f"({float(seven_day_flow.get('active_player_rate', 0.0)):.1%})"
+        )
+    embed.add_field(
+        name="Flows & activity",
+        value="\n".join(flow_lines),
+        inline=False,
+    )
+
+    stock = int(sheet.get("monetary_stock", 0))
+    positive_wallets = int(sheet.get("positive_wallets", 0))
+    visible_debt = int(sheet.get("visible_debt", 0))
+    reserve_available = int(sheet.get("reserve_available", 0))
+    committed = sum(
+        int(sheet.get(key, 0))
+        for key in (
+            "reserve_locked",
+            "reserve_next_match_pot",
+            "prediction_open_cash",
+            "wager_escrow",
+        )
+    )
+    player_count = int(sheet.get("player_count", 0))
+    median_wallet = float(distribution.get("median_positive_wallet", 0))
+    health_lines = [
+        "Supply per registered player: "
+        + (
+            f"**{stock / player_count:,.2f} JC**"
+            if player_count
+            else "**n/a**"
+        ),
+        "Visible debt / positive wallets: "
+        + (
+            f"**{visible_debt / positive_wallets:.1%}**"
+            if positive_wallets
+            else "**n/a**"
+        ),
+        "Available Reserve / positive wallets: "
+        + (
+            f"**{reserve_available / positive_wallets:.1%}**"
+            if positive_wallets
+            else "**n/a**"
+        ),
+        "Committed or escrowed supply: "
+        + (f"**{committed / stock:.1%}**" if stock > 0 else "**n/a**"),
+        f"Median positive wallet: **{median_wallet:,.2f} JC**",
+        "Positive-wallet top 10% share: "
+        f"**{float(distribution.get('top_decile_share', 0.0)):.1%}** · "
+        f"positive-wallet Gini: **{float(distribution.get('gini', 0.0)):.3f}**",
+    ]
+    embed.add_field(
+        name="Player-economy health",
+        value="\n".join(health_lines),
+        inline=False,
+    )
     if event:
         direct_effect = int(event["direct_effect_jc"])
         immediate = (
@@ -815,8 +910,64 @@ def _build_policy_embed(status: dict) -> discord.Embed:
             inline=False,
         )
     else:
-        embed.add_field(name="Active event", value="No event has activated today.", inline=False)
+        embed.add_field(
+            name="Active event",
+            value="No event has activated today.",
+            inline=False,
+        )
+    embed.set_footer(
+        text=(
+            "Supply growth is a best-effort inflation proxy, not a price index. "
+            "Windows use the nearest daily stock snapshot; turnover is gross "
+            "ledger balance movement."
+        )
+    )
     return embed
+
+
+def _format_supply_trend(label: str, trend: dict | None) -> str:
+    if not trend:
+        return f"{label}: **collecting data**"
+    elapsed = float(trend["elapsed_days"])
+    period_rate = float(trend["period_rate"])
+    daily_rate = float(trend["daily_rate"])
+    average_daily_change = float(trend["average_daily_change_jc"])
+    arrow = "↗" if daily_rate > 0 else "↘" if daily_rate < 0 else "→"
+    return (
+        f"{label}: **{period_rate:+.2%}** ({int(trend['change_jc']):+,} JC) "
+        f"{arrow} **{daily_rate:+.2%}/day**, "
+        f"**{average_daily_change:+,.0f} JC/day** over {elapsed:.1f}d"
+    )
+
+
+def _format_supply_momentum(trends: dict) -> str | None:
+    three_day = trends.get("3d")
+    seven_day = trends.get("7d")
+    if not three_day or not seven_day:
+        return None
+    short_rate = float(three_day["daily_rate"])
+    long_rate = float(seven_day["daily_rate"])
+    difference = short_rate - long_rate
+    if math.isclose(difference, 0.0, abs_tol=0.0001):
+        label = "steady"
+    elif difference > 0:
+        label = "heating"
+    else:
+        label = "cooling"
+    return (
+        f"Momentum: **{label}** "
+        f"(3d pace vs 7d: **{difference:+.2%}/day**)"
+    )
+
+
+def _format_flow_indicator(label: str, flow: dict | None) -> str:
+    if not flow:
+        return f"{label}: **collecting data**"
+    return (
+        f"{label}: net **{float(flow['average_daily_net_jc']):+,.0f} JC/day** · "
+        f"ledger movement **{float(flow['average_daily_gross_jc']):,.0f} JC/day** · "
+        f"turnover **{float(flow['daily_turnover_rate']):.2%}/day**"
+    )
 
 
 def _format_tax_error(error: str) -> str:
