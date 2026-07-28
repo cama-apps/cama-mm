@@ -727,6 +727,7 @@ class PetCommands(commands.Cog):
                 message,
                 send_fallback=partial(safe_followup, interaction),
                 log_label="Altar farewell",
+                edit_exceptions=(discord.HTTPException,),
                 embed=embed,
                 view=None,
                 attachments=[file] if file else [],

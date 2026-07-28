@@ -304,3 +304,27 @@ async def test_edit_and_fallback_both_failing_returns_false():
     message.channel = _Recorder(raises=_http_error())
 
     assert await edit_message_with_fallback(message, embed="E") is False
+
+
+@pytest.mark.asyncio
+async def test_edit_exceptions_scopes_the_fallback_trigger():
+    """A caller that only wants Discord API failures to trigger the fallback
+    (the altar farewell's historical behavior) passes edit_exceptions; local
+    bugs then propagate instead of being masked by a duplicate post."""
+    channel = _Recorder()
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=TypeError("bad kwarg"))
+    message.channel = channel
+
+    with pytest.raises(TypeError):
+        await edit_message_with_fallback(
+            message, embed="E", edit_exceptions=(discord.HTTPException,)
+        )
+    assert channel.calls == []
+
+    message.edit = AsyncMock(side_effect=_http_error())
+    ok = await edit_message_with_fallback(
+        message, embed="E", edit_exceptions=(discord.HTTPException,)
+    )
+    assert ok is True
+    assert channel.calls == [{"embed": "E"}]
