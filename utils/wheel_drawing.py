@@ -921,8 +921,8 @@ def _create_wheel_face(
 
 
 _CACHED_SHELL_ICONS: dict[tuple[str, int], Image.Image] = {}
-_WEDGE_LABEL_PHASE_STEPS = 4
-_WEDGE_LABEL_SPRITE_CACHE_SIZE = 512
+_WEDGE_LABEL_PHASE_STEPS = 8
+_WEDGE_LABEL_SPRITE_CACHE_SIZE = 2048
 _WEDGE_LABEL_TEXT_STYLE = ("#000000", "#ffffff", 1)
 _WEDGE_LABEL_SPRITE_PADDING = 2
 
@@ -1622,9 +1622,11 @@ def create_wheel_gif(
             else:
                 rotation = total_spin
         elif i <= slow_end:
-            # Main spin with quintic ease-out
+            # Main spin with cubic ease-out. Quintic flattening made the last
+            # two pre-creep frames pixel-identical after bounded subpixel label
+            # caching, so Pillow coalesced them and merged their durations.
             phase_progress = i / slow_end
-            eased = 1 - pow(1 - phase_progress, 5)
+            eased = 1 - pow(1 - phase_progress, 3)
             rotation = near_miss_rotation * eased
         elif ending_style == "double_pump" and i <= slow_end + 5:
             # Tiny acceleration burst
