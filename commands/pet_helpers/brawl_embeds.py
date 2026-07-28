@@ -12,7 +12,17 @@ import discord
 from commands.pet_helpers.embeds import COLOR_DEAD, TIER_BADGE
 from domain.models.pet import Pet, PetStage
 from domain.models.pet_brawl import PetBrawl
-from domain.pet_brawl import MAX_ROUNDS, Duelist, PetBrawlState
+from domain.pet_brawl import (
+    MAX_ROUNDS,
+    MOVE_BLURBS,
+    MOVE_EMOJI,
+    SHELL_BLURB,
+    TRAIT_BLURBS,
+    Duelist,
+    PetBrawlMove,
+    PetBrawlState,
+    move_name,
+)
 from domain.pet_constants import PET_BRAWL_TURN_SECONDS, get_species
 from utils.embeds import COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE
 from utils.pet_assets import get_pet_card, get_versus_card
@@ -85,6 +95,30 @@ def build_battle_embed(
         embed.add_field(
             name=f"Round {state.round_no}", value="\n".join(log_lines), inline=False
         )
+    if state.round_no == 0 and not log_lines:
+        embed.add_field(
+            name="How it works",
+            value=(
+                "Both owners pick a move **every round** — picks are secret "
+                "and resolve together, no turns.\n"
+                + "\n".join(
+                    f"{MOVE_EMOJI[m]} **{move_name('', m)}** — {MOVE_BLURBS[m]}"
+                    for m in PetBrawlMove
+                )
+                + "\nHungry camas start wounded; happy camas hit harder."
+            ),
+            inline=False,
+        )
+        quirk_lines = []
+        for d in (state.a, state.b):
+            if d.species_id in TRAIT_BLURBS:
+                quirk_lines.append(f"✨ **{d.name}**: {TRAIT_BLURBS[d.species_id]}")
+            if d.shield_available:
+                quirk_lines.append(f"✨ **{d.name}**: {SHELL_BLURB}")
+        if quirk_lines:
+            embed.add_field(
+                name="Quirks", value="\n".join(quirk_lines), inline=False
+            )
     lock_a = "✅" if "a" in picks else "🤔"
     lock_b = "✅" if "b" in picks else "🤔"
     embed.set_footer(
@@ -129,6 +163,9 @@ def build_result_embed(
             f"**{loser.name}** {lose_rec[0]}W-{lose_rec[1]}L"
         ),
         color=COLOR_GREEN,
+    )
+    embed.set_footer(
+        text="No jopacoins change hands — brawls play for hunger and honor."
     )
     file = get_pet_card(
         winner.species_id,
