@@ -250,6 +250,18 @@ class DigCoreMixin:
         pet_applied = max(0, final_advance - base_applied)
         return final_advance, pet_applied, boss_encounter
 
+    @staticmethod
+    def _claim_pet_work(pet_work, pet_dig_bonus: int):
+        """Return ``(pet_work_claim, pet_name)`` for a dig commit.
+
+        The claim payload feeds ``atomic_tunnel_balance_update`` and the pet
+        name the log/result dicts; both are ``None`` when no pet blocks were
+        applied this dig.
+        """
+        if pet_work is not None and pet_dig_bonus > 0:
+            return pet_work.claim(pet_dig_bonus), pet_work.pet_name
+        return None, None
+
     # ── Layer Weather ────────────────────────────────────────────────
 
     def _build_parked_boss_return(
@@ -320,6 +332,7 @@ class DigCoreMixin:
             )
         )
         new_depth = depth_before + advance
+        pet_work_claim, pet_name = self._claim_pet_work(pet_work, pet_dig_bonus)
 
         # Tunnel advance + JC payout commit together so a crash can't
         # leave the depth written with the player unpaid.
@@ -334,11 +347,7 @@ class DigCoreMixin:
                 "streak_days": 1,
                 "streak_last_date": today,
             },
-            pet_work_claim=(
-                pet_work.claim(pet_dig_bonus)
-                if pet_work is not None and pet_dig_bonus > 0
-                else None
-            ),
+            pet_work_claim=pet_work_claim,
         )
         # Blood Pact skims the first dig's payout too (tiny amount, but coverage
         # must be uniform across every dig path).
@@ -352,7 +361,7 @@ class DigCoreMixin:
             details=json.dumps({
                 "advance": advance, "jc": jc_earned, "first_dig": True,
                 "pet_dig_bonus": pet_dig_bonus,
-                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
+                "pet_name": pet_name,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "depth_before": depth_before, "depth_after": new_depth,
@@ -385,7 +394,7 @@ class DigCoreMixin:
             pickaxe_tier=0,
             tip="Welcome to the mines! Use /dig again after the cooldown.",
             pet_dig_bonus=pet_dig_bonus,
-            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
+            pet_name=pet_name,
         )
 
     def _consume_streak_charm(self, discord_id: int, guild_id) -> bool:
@@ -735,6 +744,7 @@ class DigCoreMixin:
         today = p["today"]
         tunnel = p["tunnel"]
         depth_before = p["depth_before"]
+        paid_charge = p["paid_dig_charge"]
 
         # Cave-in check. Hard Hat absorb also drains luminosity (matches the
         # main dig() flow).
@@ -805,7 +815,7 @@ class DigCoreMixin:
                 gamblers_charm_bonus = max(1, int(block_loss_pre_save * 0.5))
 
             tunnel_updates: dict = {
-                **p.get("paid_dig_updates", {}),
+                **paid_charge.tunnel_updates,
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
@@ -834,10 +844,8 @@ class DigCoreMixin:
                 })
 
             injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
-            balance = max(
-                0,
+            balance = paid_charge.effective_balance(
                 self.player_repo.get_balance(discord_id, guild_id)
-                - int(p.get("paid_dig_cost") or 0),
             )
             if grappling_absorbed:
                 catastrophic = False
@@ -872,10 +880,10 @@ class DigCoreMixin:
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=net_delta,
-                balance_cost=int(p.get("paid_dig_cost") or 0),
+                balance_cost=paid_charge.cost,
                 tunnel_updates=tunnel_updates,
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
-                require_tunnel_state=p.get("paid_dig_guard") or None,
+                require_tunnel_state=paid_charge.guard or None,
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -1002,7 +1010,7 @@ class DigCoreMixin:
             weather_code=weather_code_now,
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), p["today"]),
-            is_paid_dig=p.get("paid_dig_cost", 0) > 0,
+            is_paid_dig=paid_charge.cost > 0,
         )
         # Mana × weather combo: Sunny + White boosts yield.
         weather_combo_yield = 1.0
@@ -1183,12 +1191,13 @@ class DigCoreMixin:
         run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
         # Tunnel advance + JC payout commit together so a crash can't
         # leave the depth written with the player unpaid.
+        pet_work_claim, pet_name = self._claim_pet_work(pet_work, pet_dig_bonus)
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
             vanity_tax=dig_vanity_tax,
             tunnel_updates={
-                **p.get("paid_dig_updates", {}),
+                **paid_charge.tunnel_updates,
                 "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                 "max_depth": max(prev_max_depth, new_depth),
                 "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1198,14 +1207,10 @@ class DigCoreMixin:
                 "current_run_artifacts": run_artifacts,
                 "current_run_events": run_events_count,
             },
-            balance_cost=int(p.get("paid_dig_cost") or 0),
+            balance_cost=paid_charge.cost,
             consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
-            require_tunnel_state=p.get("paid_dig_guard") or None,
-            pet_work_claim=(
-                pet_work.claim(pet_dig_bonus)
-                if pet_work is not None and pet_dig_bonus > 0
-                else None
-            ),
+            require_tunnel_state=paid_charge.guard or None,
+            pet_work_claim=pet_work_claim,
         )
         jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
@@ -1213,7 +1218,7 @@ class DigCoreMixin:
             details=json.dumps({
                 "advance": advance, "jc": jc_earned,
                 "pet_dig_bonus": pet_dig_bonus,
-                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
+                "pet_name": pet_name,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "overgrowth_bonus": overgrowth_bonus,
@@ -1229,7 +1234,6 @@ class DigCoreMixin:
             except Exception:
                 logger.exception("Failed to consume Overgrowth charge")
 
-        paid_dig_cost = p["paid_dig_cost"]
         return self._ok(
             tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
             depth_before=depth_before, depth_after=new_depth,
@@ -1249,7 +1253,7 @@ class DigCoreMixin:
             pickaxe_tier=p["pickaxe_tier"],
             tip=self._pick_tip(new_depth),
             luminosity_info=p["lum_info"],
-            paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
+            paid_cost=paid_charge.cost,
             dynamite_bonus=dynamite_bonus,
             corruption=p["corruption"],
             mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
@@ -1259,7 +1263,7 @@ class DigCoreMixin:
             weather=p["weather_info"],
             streak_charm_used=streak_charm_used,
             pet_dig_bonus=pet_dig_bonus,
-            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
+            pet_name=pet_name,
         )
 
     def apply_dig_outcome(self, preconditions: dict, outcome: dict) -> dict:
@@ -1279,6 +1283,7 @@ class DigCoreMixin:
         today = p["today"]
         tunnel = p["tunnel"]
         depth_before = p["depth_before"]
+        paid_charge = p["paid_dig_charge"]
 
         cave_in = outcome.get("cave_in", False)
 
@@ -1301,7 +1306,7 @@ class DigCoreMixin:
             # here and commit in one atomic write below, so a crash can't
             # leave depth lost without the matching injury/balance change.
             cave_in_tunnel_updates: dict = {
-                **p.get("paid_dig_updates", {}),
+                **paid_charge.tunnel_updates,
             }
             cave_in_balance_delta = 0
             # Enforce game-rule constraints
@@ -1360,10 +1365,8 @@ class DigCoreMixin:
                 )
             else:  # medical_bill
                 med_cost = outcome.get("cave_in_jc_lost", 5)
-                balance = max(
-                    0,
+                balance = paid_charge.effective_balance(
                     self.player_repo.get_balance(discord_id, guild_id)
-                    - int(p.get("paid_dig_cost") or 0),
                 )
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
@@ -1405,10 +1408,10 @@ class DigCoreMixin:
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
-                balance_cost=int(p.get("paid_dig_cost") or 0),
+                balance_cost=paid_charge.cost,
                 tunnel_updates=cave_in_tunnel_updates,
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
-                require_tunnel_state=p.get("paid_dig_guard") or None,
+                require_tunnel_state=paid_charge.guard or None,
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -1633,12 +1636,13 @@ class DigCoreMixin:
             run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
             # Tunnel advance + JC payout commit together so a crash can't
             # leave the depth written with the player unpaid.
+            pet_work_claim, pet_name = self._claim_pet_work(pet_work, pet_dig_bonus)
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=jc_earned,
                 vanity_tax=dig_vanity_tax,
                 tunnel_updates={
-                    **p.get("paid_dig_updates", {}),
+                    **paid_charge.tunnel_updates,
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                     "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1648,14 +1652,10 @@ class DigCoreMixin:
                     "current_run_artifacts": run_artifacts,
                     "current_run_events": run_events_count,
                 },
-                balance_cost=int(p.get("paid_dig_cost") or 0),
+                balance_cost=paid_charge.cost,
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
-                require_tunnel_state=p.get("paid_dig_guard") or None,
-                pet_work_claim=(
-                    pet_work.claim(pet_dig_bonus)
-                    if pet_work is not None and pet_dig_bonus > 0
-                    else None
-                ),
+                require_tunnel_state=paid_charge.guard or None,
+                pet_work_claim=pet_work_claim,
             )
             jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
 
@@ -1667,9 +1667,7 @@ class DigCoreMixin:
                 details=json.dumps({
                     "advance": advance, "jc": jc_earned,
                     "pet_dig_bonus": pet_dig_bonus,
-                    "pet_name": (
-                        pet_work.pet_name if pet_dig_bonus > 0 else None
-                    ),
+                    "pet_name": pet_name,
                     "gross_jc": gross_jc,
                     "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "overgrowth_bonus": overgrowth_bonus,
@@ -1686,7 +1684,6 @@ class DigCoreMixin:
                 except Exception:
                     logger.exception("Failed to consume Overgrowth charge")
 
-            paid_dig_cost = p["paid_dig_cost"]
             result = self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
@@ -1707,7 +1704,7 @@ class DigCoreMixin:
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
                 luminosity_info=p["lum_info"],
-                paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
+                paid_cost=paid_charge.cost,
                 corruption=p["corruption"],
                 mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
                 event_preview=event_preview,
@@ -1716,7 +1713,7 @@ class DigCoreMixin:
                 weather=p["weather_info"],
                 streak_charm_used=streak_charm_used,
                 pet_dig_bonus=pet_dig_bonus,
-                pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
+                pet_name=pet_name,
             )
 
         return result

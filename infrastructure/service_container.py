@@ -85,9 +85,9 @@ class ServiceContainer:
         self._init_ai_services()
         self._init_duel_flavor_service()
         self._init_mana_service()
+        self._init_pet_service()
         self._init_dig_service()
         self._init_mafia_service()
-        self._init_pet_service()
         self._init_extras()
         self._init_reminder_service()
 
@@ -468,6 +468,7 @@ class ServiceContainer:
             prediction_repo=c.get("prediction_repo"),
             economy_event_service=c.get("economy_event_service"),
             vanity_tax_service=c["vanity_tax_service"],
+            pet_service=c.get("pet_service"),
         )
         # Hostile dig splashes and sabotage are wired after both services exist.
         c["dig_service"].protection_service = c["protection_service"]
@@ -541,8 +542,6 @@ class ServiceContainer:
             c["pet_service"] = None
             c["pet_flavor_service"] = None
             c["pet_brawl_service"] = None
-            if c.get("dig_service") is not None:
-                c["dig_service"].pet_service = None
             logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
             return
         from services.pet_brawl_service import PetBrawlService
@@ -564,8 +563,6 @@ class ServiceContainer:
             c["pet_service"],
             c["pet_brawl_repo"],
         )
-        if c.get("dig_service") is not None:
-            c["dig_service"].pet_service = c["pet_service"]
 
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
