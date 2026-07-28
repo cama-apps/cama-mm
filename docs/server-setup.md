@@ -45,6 +45,9 @@ Add:
 ```
 DISCORD_BOT_TOKEN=your_token_here
 ADMIN_USER_IDS=123456789,987654321
+# Optional: restrict the dig and pet games to dedicated channels
+DIG_CHANNEL_ID=123456789012345678
+PET_CHANNEL_ID=123456789012345678
 ```
 
 ## GitHub Secrets

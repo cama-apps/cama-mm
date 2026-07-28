@@ -19,7 +19,16 @@ Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements
 - **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
 - **Match enrichment** via OpenDota for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
 - **Dota 2 reference** commands for hero/ability lookup (via dotabase)
-- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations) - **AI features** (optional): Flavor text generation and natural language SQL queries via the configured Groq or Cerebras LLM
+- **Dig mining game** with depth layers, bosses, items, pickaxes, quests, and NPCs
+- **Pets (Camagotchi)** with hatching, care, brawls, and the altar
+- **Mafia** social deduction game
+- **Duels** between players
+- **Vanity tax** on wealth
+- **Mana** resource system with effects
+- **Trivia** (general and player-based) with image questions
+- **Wrapped** year-in-review summaries
+- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations)
+- **AI features** (optional): Flavor text generation and natural language SQL queries via the configured Groq or Cerebras LLM
 
 ## Commands
 
@@ -41,10 +50,11 @@ uv run --locked pytest tests/test_e2e_core.py -v
 # Run single test
 uv run --locked pytest tests/test_betting_service.py::TestBettingCore::test_can_place_multiple_bets_same_team -v
 
-# Restart the bot (use anchored pattern to avoid killing the shell itself)
+# Restart the bot — on the server only, not the (Windows) dev box
+# (use anchored pattern to avoid killing the shell itself)
 pkill -f "^uv run python bot.py$" 2>/dev/null || true; sleep 1; nohup uv run python bot.py > /tmp/bot.log 2>&1 &
 
-# Check bot logs
+# Check bot logs (on the server)
 tail -f /tmp/bot.log
 ```
 
@@ -150,7 +160,7 @@ See `config.py` for the full list (50+ options). See `README.md` for high level 
 
 ### Adding a New Slash Command
 
-**WARNING: We are approaching the Discord maximum of 100 slash commands. Use subcommands for new functionality instead of top-level commands.**
+**Discord caps bots at 100 top-level slash commands; we currently use 42 (asserted in `tests/test_command_tree_shape.py`). Prefer subcommands for new functionality instead of top-level commands.**
 
 1. Prefer adding subcommands to existing command groups (e.g., `/shop buy`, `/stats player`)
 2. If a new top-level command is truly needed, check the current count first
@@ -163,12 +173,11 @@ See `config.py` for the full list (50+ options). See `README.md` for high level 
 1. Create `services/<name>_service.py`
 2. Accept repositories via constructor injection
 3. Add interface if needed in `repositories/interfaces.py`
-4. Initialize in `bot.py::_init_services()`
-5. Expose on bot object: `bot.<service> = <service>`
+4. Wire it up in `infrastructure/service_container.py` (`ServiceContainer`) — construct it there and expose it on the bot in `expose_to_bot()`. (`bot.py::_init_services()` just builds the container and calls `expose_to_bot`.)
 
 ### Adding a Database Column
 1. Add migration in `infrastructure/schema_manager.py::_get_migrations()`
-2. Use `ALTER TABLE ADD COLUMN IF NOT EXISTS` pattern
+2. Use `SchemaManager._add_column_if_not_exists()` (PRAGMA table_info check, then `ALTER TABLE ADD COLUMN` — SQLite has no `IF NOT EXISTS` for columns)
 3. Update repository to read/write new column
 4. Update domain model if applicable
 
@@ -176,7 +185,7 @@ See `config.py` for the full list (50+ options). See `README.md` for high level 
 1. Define interface in `repositories/interfaces.py`
 2. Implement in `repositories/<name>_repository.py`
 3. Extend `BaseRepository` for connection management
-4. Initialize in `bot.py::_init_services()`
+4. Wire it up in `infrastructure/service_container.py` (`ServiceContainer`)
 
 ## Parallel Agent Fleets
 

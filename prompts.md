@@ -8,6 +8,8 @@ All images should have a dark underground fantasy RPG aesthetic. Think dungeon c
 
 These appear when a player first reaches a boss boundary. The boss should be imposing, center-frame, with a small miner figure approaching from the left. Dramatic torch/ambient lighting.
 
+> **Coverage note:** the prompts below cover only the original 7 bosses. `assets/dig/bosses/` now ships art for 39 boss slugs (encounter/victory/defeat each); the later bosses' prompts were never recorded here.
+
 ### Grothak the Unbreakable (Depth 25 — Dirt Layer)
 ```
 A massive stone golem guardian blocking a narrow dirt tunnel underground, glowing amber eyes, crude rocky armor, arms crossed defiantly, a tiny miner with a pickaxe approaching from the left side, torchlight casting warm shadows on brown earthen walls, roots hanging from the ceiling, fantasy RPG boss encounter, dark earthy brown palette, digital painting, dramatic composition
@@ -329,6 +331,12 @@ assets/dig/pickaxes/void_touched.png
 ```
 ---
 
+## Events
+
+`assets/dig/events/` ships 173 event images, but no prompts for them were ever recorded in this file.
+
+---
+
 ## Pet Art — Component Packs (Nano Banana Prompts)
 
 Cama pets are camel–llama hybrid creatures collected and raised by players. Same dark underground fantasy RPG aesthetic as the dig art above — but these are companions, not bosses: aim for **cute, expressive, collectible-creature appeal (think Neopets/Tamagotchi charm meets dark Dota bestiary)**.
@@ -426,12 +434,6 @@ A complete card at `assets/pets/{species_id}_{stage}_{mood}.png` bypasses compos
 
 ---
 
-## Altar Card (512x288, landscape)
-
-```
-Discord embed card art, clear and readable at roughly 400 pixels wide, no watermark or logo, explicitly not photorealistic. A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
-```
-
 ### Altar Card (full card, 512x288)
 
 Shown as-is for every `/pet altar` sacrifice (`assets/pets/altar.png`, or `.gif`).
@@ -440,7 +442,7 @@ species-agnostic: no pet, no readable text. Ominous-cozy, never gory — it post
 publicly in the pet channel. Falls back to the engraved tombstone until authored.
 
 ```
-A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
+Discord embed card art, clear and readable at roughly 400 pixels wide, no watermark or logo, explicitly not photorealistic. A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
 ```
 
 ### Versus Overlay (transparent overlay, 1024x288)

@@ -1,3 +1,5 @@
+> Historical document — superseded by the shipped implementation; command names and file references may be stale.
+
 # MangoByte Integration Implementation
 
 Tracking document for implementing features from [mango-integration.md](./mango-integration.md).
