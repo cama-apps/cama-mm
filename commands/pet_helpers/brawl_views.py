@@ -35,7 +35,7 @@ from domain.pet_constants import (
     PET_BRAWL_ACCEPT_SECONDS,
     PET_BRAWL_TURN_SECONDS,
 )
-from utils.interaction_safety import edit_message_with_fallback
+from utils.interaction_safety import edit_message_with_fallback, safe_defer
 
 if TYPE_CHECKING:
     from commands.pet import PetCommands
@@ -43,9 +43,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.commands.pet_brawl")
 
 _MOVE_BUTTONS = (
-    (PetBrawlMove.SPIT, "Spit", "Reliable chip damage. Never misses."),
-    (PetBrawlMove.STAMPEDE, "Stampede", "Big damage, might whiff."),
-    (PetBrawlMove.HUNKER, "Hunker Down", "Brace, heal, and counter."),
+    (PetBrawlMove.SPIT, "Spit"),
+    (PetBrawlMove.STAMPEDE, "Stampede"),
+    (PetBrawlMove.HUNKER, "Hunker Down"),
 )
 
 
@@ -217,12 +217,20 @@ class PetBrawlBattleView(discord.ui.View):
         self.session = session
         self.message: discord.Message | None = session.message
         self._resolved = False
-        for move, label, _blurb in _MOVE_BUTTONS:
+        # The round number MUST be part of the custom_id: successive rounds
+        # share one message, and ViewStore.remove_view (run by the previous
+        # round's stop()) deregisters by (type, custom_id) with no identity
+        # check — identical ids let the old view's stop() kill the new
+        # round's buttons, leaving every click silently discarded.
+        for move, label in _MOVE_BUTTONS:
             btn = discord.ui.Button(
                 label=label,
                 emoji=MOVE_EMOJI[move],
                 style=discord.ButtonStyle.primary,
-                custom_id=f"pet_brawl:{session.brawl_id}:{move.value}",
+                custom_id=(
+                    f"pet_brawl:{session.brawl_id}:"
+                    f"{session.state.round_no}:{move.value}"
+                ),
             )
             btn.callback = self._make_callback(move)
             self.add_item(btn)
@@ -243,21 +251,27 @@ class PetBrawlBattleView(discord.ui.View):
                     "Only the two duelists can fight this battle.", ephemeral=True
                 )
                 return
+            # Ack before touching the lock: a round resolving on the other
+            # side (DB settle + art render + edits) can hold it well past
+            # Discord's 3-second response window, and a click that waits
+            # that long dies as "This interaction failed".
+            if not await safe_defer(interaction):
+                return
             async with session.lock:
                 if self._resolved:
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "That round already resolved.", ephemeral=True
                     )
                     return
                 if side in session.picks:
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "You're already locked in for this round.", ephemeral=True
                     )
                     return
                 session.picks[side] = move
                 duelist = session.state.a if side == "a" else session.state.b
                 flavored = move_name(duelist.species_id, move)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"{MOVE_EMOJI[move]} You picked **{flavored}** ✅ — "
                     "waiting for your opponent.",
                     ephemeral=True,
@@ -305,17 +319,25 @@ class PetBrawlBattleView(discord.ui.View):
                     return
             else:
                 session.consecutive_full_timeouts = 0
+            auto_notes = []
             for side in missing:
                 session.picks[side] = SAFE_MOVE
+                duelist = session.state.a if side == "a" else session.state.b
+                auto_notes.append(
+                    f"⏰ **{duelist.name}** never picked — "
+                    f"{move_name(duelist.species_id, SAFE_MOVE)} thrown "
+                    "automatically."
+                )
             self._resolved = True
-            await self._resolve()
+            await self._resolve(prefix_log=tuple(auto_notes))
 
-    async def _resolve(self) -> None:
+    async def _resolve(self, prefix_log: tuple[str, ...] = ()) -> None:
         """Resolve the round. Caller holds session.lock and set _resolved."""
         session = self.session
         move_a, move_b = session.picks["a"], session.picks["b"]
         session.picks = {}
         state, log = resolve_round(session.state, move_a, move_b, session.rng)
+        log = prefix_log + log
         rounds = state.round_no
         session.state = state
         session.last_log = log

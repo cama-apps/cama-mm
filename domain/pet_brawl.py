@@ -55,6 +55,13 @@ MOVE_EMOJI = {
     PetBrawlMove.HUNKER: "🛡️",
 }
 
+# Player-facing move explanations, shown in the round-1 battle embed.
+MOVE_BLURBS = {
+    PetBrawlMove.SPIT: "reliable chip damage, never misses.",
+    PetBrawlMove.STAMPEDE: f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff.",
+    PetBrawlMove.HUNKER: "halve incoming damage, heal a little, counter any hit.",
+}
+
 _DEFAULT_MOVE_NAMES = {
     PetBrawlMove.SPIT: "Spit",
     PetBrawlMove.STAMPEDE: "Stampede",
@@ -142,6 +149,22 @@ BRAWL_TRAITS: dict[str, BrawlTraits] = {
 
 def brawl_traits(species_id: str) -> BrawlTraits:
     return BRAWL_TRAITS.get(species_id, _NO_TRAITS)
+
+
+# Player-facing one-liners for BRAWL_TRAITS, shown in the round-1 battle
+# embed so quirks aren't invisible. Quirkless species are simply absent.
+TRAIT_BLURBS: dict[str, str] = {
+    "dromedary_cross": "hardy — shrugs a point off every hit",
+    "jopacama": "insured — loses less hunger in defeat",
+    "pudge_cama": "ravenous — hits harder, takes more, heals extra hunkered",
+    "invoker_cama": "mystic — counters harder while hunkered",
+    "crystal_cama": "chilling — enemy Stampedes whiff more often",
+    "rama": "royal temper — crits far more often",
+}
+
+# Shellback save (rides on Aegis state, see build_duelist), shown per-duelist
+# when the shield is actually available this brawl.
+SHELL_BLURB = "shelled — survives the first knockout on 1 HP"
 
 
 @dataclass(frozen=True, slots=True)

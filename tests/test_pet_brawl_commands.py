@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from dataclasses import replace
@@ -145,6 +146,9 @@ class TestChallengeView:
         edit_kwargs = view.message.edit.await_args.kwargs
         assert isinstance(edit_kwargs["view"], PetBrawlBattleView)
         assert "Round 1" in edit_kwargs["embed"].title
+        # Round 1 explains the rules so nobody has to ask "is this RPS?".
+        field_names = [field.name for field in edit_kwargs["embed"].fields]
+        assert "How it works" in field_names
 
     @pytest.mark.asyncio
     async def test_decline(self, brawl_cog):
@@ -205,10 +209,10 @@ class TestBattleView:
         view, session = await start_battle(brawl_cog)
         inter = make_interaction(user_id=CHALLENGER)
         await press(view, SAFE_MOVE)(inter)
-        assert "picked" in inter.response.send_message.await_args.args[0]
+        assert "picked" in inter.followup.send.await_args.args[0]
         inter2 = make_interaction(user_id=CHALLENGER)
         await press(view, PetBrawlMove.HUNKER)(inter2)
-        assert "already locked" in inter2.response.send_message.await_args.args[0]
+        assert "already locked" in inter2.followup.send.await_args.args[0]
         assert session.picks["a"] is SAFE_MOVE
 
     @pytest.mark.asyncio
@@ -231,6 +235,8 @@ class TestBattleView:
         assert session.consecutive_full_timeouts == 0
         # The hunker log line proves the challenger's own pick was kept.
         assert any("hunkers" in line for line in session.last_log)
+        # The laggard's auto-pick is called out, not passed off as a choice.
+        assert any("never picked" in line for line in session.last_log)
 
     @pytest.mark.asyncio
     async def test_double_full_timeout_voids(self, brawl_cog):
@@ -261,6 +267,39 @@ class TestBattleView:
         edit_kwargs = view.message.edit.await_args.kwargs
         assert "wins the brawl" in edit_kwargs["embed"].title
         assert edit_kwargs["view"] is None
+        # Answers the "was there any JC reward?" question at the finish line.
+        assert "jopacoin" in edit_kwargs["embed"].footer.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_round_views_use_distinct_custom_ids(self, brawl_cog):
+        """Identical ids across rounds let the old round's stop() deregister
+        the new round's buttons in discord.py's ViewStore (keyed by
+        custom_id, popped with no identity check) — every click after round
+        one then dies as 'This interaction failed'."""
+        view, session = await start_battle(brawl_cog)
+        old_ids = {child.custom_id for child in view.children}
+        await press(view, SAFE_MOVE)(make_interaction(user_id=CHALLENGER))
+        await press(view, SAFE_MOVE)(make_interaction(user_id=RECIPIENT))
+        next_view = view.message.edit.await_args.kwargs["view"]
+        new_ids = {child.custom_id for child in next_view.children}
+        assert old_ids.isdisjoint(new_ids)
+
+    @pytest.mark.asyncio
+    async def test_click_is_acked_while_round_resolves(self, brawl_cog):
+        """The ack must happen before waiting on the session lock — a round
+        resolving on the other side can hold it past Discord's 3s window."""
+        view, session = await start_battle(brawl_cog)
+        inter = make_interaction(user_id=CHALLENGER)
+        async with session.lock:
+            task = asyncio.ensure_future(press(view, SAFE_MOVE)(inter))
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if inter.response.defer.await_count:
+                    break
+            assert inter.response.defer.await_count == 1
+            assert not task.done()  # still parked on the lock, already acked
+        await task
+        assert "picked" in inter.followup.send.await_args.args[0]
 
 
 class TestSweepHook:
