@@ -303,6 +303,188 @@ class EconomyEventRepository(BaseRepository):
             ).fetchone()
         return dict(row) if row else None
 
+    def get_monetary_trends(
+        self,
+        guild_id: int | None,
+        *,
+        current_stock: int,
+        now: int | None = None,
+        windows: tuple[int, ...] = (1, 3, 7),
+    ) -> dict[str, dict[str, Any] | None]:
+        """Compare live supply with the nearest usable daily snapshot anchors.
+
+        Daily cards are normally captured at the same local hour, but deploys
+        and missed cards can leave gaps. Each window therefore accepts the
+        closest anchor between 75% and 200% of its requested age and reports
+        the actual elapsed time instead of pretending the sample is exact.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        now = int(now if now is not None else time.time())
+        current_stock = int(current_stock)
+        trends: dict[str, dict[str, Any] | None] = {}
+        with self.connection() as conn:
+            for requested_days in windows:
+                days = max(1, int(requested_days))
+                target_age = days * 86400
+                minimum_age = int(target_age * 0.75)
+                maximum_age = int(target_age * 2.0)
+                row = conn.execute(
+                    """
+                    SELECT snapshot_date, captured_at, monetary_stock
+                    FROM economy_daily_snapshots
+                    WHERE guild_id = ?
+                      AND captured_at BETWEEN ? AND ?
+                    ORDER BY ABS(captured_at - ?), captured_at DESC
+                    LIMIT 1
+                    """,
+                    (
+                        gid,
+                        now - maximum_age,
+                        now - minimum_age,
+                        now - target_age,
+                    ),
+                ).fetchone()
+                key = f"{days}d"
+                if not row:
+                    trends[key] = None
+                    continue
+
+                anchor_stock = int(row["monetary_stock"] or 0)
+                elapsed_days = (now - int(row["captured_at"])) / 86400.0
+                if anchor_stock <= 0 or current_stock <= 0 or elapsed_days <= 0:
+                    trends[key] = None
+                    continue
+
+                change_jc = current_stock - anchor_stock
+                period_rate = current_stock / anchor_stock - 1.0
+                daily_rate = math.pow(current_stock / anchor_stock, 1.0 / elapsed_days) - 1.0
+                try:
+                    annualized_rate = math.pow(
+                        current_stock / anchor_stock, 365.0 / elapsed_days
+                    ) - 1.0
+                except OverflowError:
+                    annualized_rate = math.inf
+                trends[key] = {
+                    "requested_days": days,
+                    "elapsed_days": elapsed_days,
+                    "anchor_date": str(row["snapshot_date"]),
+                    "anchor_stock": anchor_stock,
+                    "current_stock": current_stock,
+                    "change_jc": change_jc,
+                    "period_rate": period_rate,
+                    "daily_rate": daily_rate,
+                    "annualized_rate": annualized_rate,
+                    "average_daily_change_jc": change_jc / elapsed_days,
+                }
+        return trends
+
+    def get_flow_indicators(
+        self,
+        guild_id: int | None,
+        *,
+        current_stock: int,
+        player_count: int,
+        now: int | None = None,
+        windows: tuple[int, ...] = (3, 7),
+    ) -> dict[str, dict[str, int | float]]:
+        """Return rolling ledger flow, turnover, and player participation."""
+        gid = self.normalize_guild_id(guild_id)
+        now = int(now if now is not None else time.time())
+        current_stock = int(current_stock)
+        player_count = max(0, int(player_count))
+        indicators: dict[str, dict[str, int | float]] = {}
+        with self.connection() as conn:
+            for requested_days in windows:
+                days = max(1, int(requested_days))
+                cutoff = now - days * 86400
+                row = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(delta), 0) AS net_flow,
+                        COALESCE(SUM(ABS(delta)), 0) AS gross_flow,
+                        COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0)
+                            AS inflow,
+                        COALESCE(-SUM(CASE WHEN delta < 0 THEN delta ELSE 0 END), 0)
+                            AS outflow,
+                        COUNT(*) AS entry_count,
+                        COUNT(DISTINCT CASE
+                            WHEN account_type = 'player' THEN account_id END
+                        ) AS active_players
+                    FROM economy_ledger_entries
+                    WHERE guild_id = ? AND created_at BETWEEN ? AND ?
+                      AND source != 'ledger_backfill'
+                    """,
+                    (gid, cutoff, now),
+                ).fetchone()
+                gross_flow = int(row["gross_flow"] or 0)
+                active_players = int(row["active_players"] or 0)
+                indicators[f"{days}d"] = {
+                    "days": days,
+                    "net_flow_jc": int(row["net_flow"] or 0),
+                    "gross_flow_jc": gross_flow,
+                    "inflow_jc": int(row["inflow"] or 0),
+                    "outflow_jc": int(row["outflow"] or 0),
+                    "entry_count": int(row["entry_count"] or 0),
+                    "active_players": active_players,
+                    "active_player_rate": (
+                        active_players / player_count if player_count else 0.0
+                    ),
+                    "average_daily_net_jc": int(row["net_flow"] or 0) / days,
+                    "average_daily_gross_jc": gross_flow / days,
+                    "daily_turnover_rate": (
+                        gross_flow / days / current_stock
+                        if current_stock > 0
+                        else 0.0
+                    ),
+                }
+        return indicators
+
+    def get_distribution_indicators(
+        self, guild_id: int | None
+    ) -> dict[str, int | float]:
+        """Measure the current distribution of positive player balances."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT jopacoin_balance
+                FROM players
+                WHERE guild_id = ? AND jopacoin_balance > 0
+                ORDER BY jopacoin_balance
+                """,
+                (gid,),
+            ).fetchall()
+
+        balances = [int(row["jopacoin_balance"]) for row in rows]
+        count = len(balances)
+        total = sum(balances)
+        if not count or total <= 0:
+            return {
+                "positive_player_count": 0,
+                "median_positive_wallet": 0,
+                "top_decile_count": 0,
+                "top_decile_share": 0.0,
+                "gini": 0.0,
+            }
+
+        top_decile_count = max(1, math.ceil(count * 0.1))
+        midpoint = count // 2
+        if count % 2:
+            median = balances[midpoint]
+        else:
+            median = (balances[midpoint - 1] + balances[midpoint]) / 2
+        weighted_sum = sum(
+            rank * balance for rank, balance in enumerate(balances, start=1)
+        )
+        gini = (2.0 * weighted_sum) / (count * total) - (count + 1.0) / count
+        return {
+            "positive_player_count": count,
+            "median_positive_wallet": median,
+            "top_decile_count": top_decile_count,
+            "top_decile_share": sum(balances[-top_decile_count:]) / total,
+            "gini": min(1.0, max(0.0, gini)),
+        }
+
     def forecast_daily_flow(
         self, guild_id: int | None, *, lookback_days: int, now: int | None = None
     ) -> int:

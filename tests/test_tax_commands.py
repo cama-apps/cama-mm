@@ -245,6 +245,76 @@ def test_private_policy_embed_labels_zero_direct_effect_as_indirect():
     assert "works through adjusted outcomes" in text
 
 
+def test_private_policy_embed_shows_granular_macro_signals():
+    status = _global_silence_status()
+    status["balance_sheet"].update(
+        {
+            "player_count": 120,
+            "positive_wallets": 60_000,
+            "visible_debt": 6_000,
+            "reserve_next_match_pot": 500,
+        }
+    )
+    status["monetary_trends"] = {
+        "1d": {
+            "elapsed_days": 1.0,
+            "period_rate": 0.01,
+            "daily_rate": 0.01,
+            "change_jc": 1_232,
+            "average_daily_change_jc": 1_232,
+        },
+        "3d": {
+            "elapsed_days": 3.0,
+            "period_rate": 0.024,
+            "daily_rate": 0.00794,
+            "change_jc": 2_916,
+            "average_daily_change_jc": 972,
+        },
+        "7d": {
+            "elapsed_days": 7.0,
+            "period_rate": 0.035,
+            "daily_rate": 0.00493,
+            "change_jc": 4_209,
+            "average_daily_change_jc": 601.3,
+        },
+    }
+    status["flow_indicators"] = {
+        "3d": {
+            "average_daily_net_jc": 825,
+            "average_daily_gross_jc": 4_200,
+            "daily_turnover_rate": 0.03375,
+        },
+        "7d": {
+            "average_daily_net_jc": 600,
+            "average_daily_gross_jc": 3_750,
+            "daily_turnover_rate": 0.03013,
+            "active_players": 48,
+            "active_player_rate": 0.4,
+        },
+    }
+    status["distribution"] = {
+        "median_positive_wallet": 250,
+        "top_decile_share": 0.58,
+        "gini": 0.612,
+    }
+
+    embed = tax_commands._build_policy_embed(status)
+    text = _embed_text(embed)
+
+    assert "Money-supply inflation proxy" in text
+    assert "Live ~24h" in text
+    assert "Rolling 3d" in text
+    assert "Rolling 7d" in text
+    assert "Momentum: **heating**" in text
+    assert "ledger movement" in text
+    assert "48/120 players" in text
+    assert "Visible debt / positive wallets: **10.0%**" in text
+    assert "Positive-wallet top 10% share: **58.0%**" in text
+    assert "positive-wallet Gini: **0.612**" in text
+    assert "not a price index" in text
+    assert validate_embed(embed) == []
+
+
 @pytest.mark.asyncio
 async def test_tax_event_is_public_and_does_not_require_tax_man(monkeypatch):
     async def _safe_defer(interaction, ephemeral=False):
