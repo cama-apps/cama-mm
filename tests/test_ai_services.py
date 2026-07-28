@@ -1066,6 +1066,75 @@ class TestFlavorTextService:
         assert result in EVENT_EXAMPLES[FlavorEvent.LOAN_TAKEN]
 
     @pytest.mark.asyncio
+    async def test_generate_event_flavor_rejects_links_with_fallback(
+        self, flavor_service, mock_ai_service
+    ):
+        """AI output containing a link is discarded in favor of a static fallback."""
+        mock_ai_service.generate_flavor = AsyncMock(
+            return_value="Join my server discord.gg/evil for free coins"
+        )
+        result = await flavor_service.generate_event_flavor(
+            guild_id=123,
+            event=FlavorEvent.LOAN_TAKEN,
+            discord_id=456,
+            event_details={"amount": 50, "fee": 10},
+        )
+        from services.flavor_text_service import EVENT_EXAMPLES
+
+        assert result in EVENT_EXAMPLES[FlavorEvent.LOAN_TAKEN]
+
+    @pytest.mark.asyncio
+    async def test_generate_event_flavor_neutralizes_mentions(
+        self, flavor_service, mock_ai_service
+    ):
+        """AI output can't ping: @ is swapped for the fullwidth variant."""
+        mock_ai_service.generate_flavor = AsyncMock(
+            return_value="big win @everyone bow down"
+        )
+        result = await flavor_service.generate_event_flavor(
+            guild_id=123,
+            event=FlavorEvent.LOAN_TAKEN,
+            discord_id=456,
+            event_details={},
+        )
+        assert result == "big win ＠everyone bow down"
+
+    @pytest.mark.asyncio
+    async def test_generate_betting_lines_reject_links_with_fallback(
+        self, flavor_service, mock_ai_service
+    ):
+        """Betting last-call/warning lines fall back when AI output has a link."""
+        mock_ai_service.generate_flavor = AsyncMock(
+            return_value="Bet now at https://evil.example"
+        )
+        from services.flavor_text_service import EVENT_EXAMPLES
+
+        last_call = await flavor_service.generate_betting_last_call(
+            guild_id=123, event_details={}
+        )
+        assert last_call in EVENT_EXAMPLES[FlavorEvent.BET_LAST_CALL]
+        warning = await flavor_service.generate_betting_warning(
+            guild_id=123, event_details={}
+        )
+        assert warning in EVENT_EXAMPLES[FlavorEvent.BET_LAST_CALL]
+
+    @pytest.mark.asyncio
+    async def test_generate_data_insight_sanitized(self, flavor_service, mock_ai_service):
+        """Data insights are sanitized too: links reject, mentions neutralize."""
+        mock_ai_service.complete = AsyncMock(return_value="Queue with @Player1 more")
+        result = await flavor_service.generate_data_insight(
+            guild_id=123, data_type="leaderboard", data={}
+        )
+        assert result == "Queue with ＠Player1 more"
+        mock_ai_service.complete = AsyncMock(
+            return_value="See http://evil.example for details"
+        )
+        result = await flavor_service.generate_data_insight(
+            guild_id=123, data_type="leaderboard", data={}
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_generate_data_insight_returns_insight(self, flavor_service, mock_ai_service):
         """Test that generate_data_insight returns AI insight."""
         result = await flavor_service.generate_data_insight(

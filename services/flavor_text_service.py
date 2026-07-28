@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from services.betting_personas import pick_betting_persona
 from services.flavor_personas import pick_persona
+from utils.flavor_sanitize import sanitize_output
 
 if TYPE_CHECKING:
     from repositories.interfaces import IGuildConfigRepository, IPlayerRepository
@@ -424,7 +425,7 @@ class FlavorTextService:
                 return self._get_fallback_flavor(event)
 
             logger.info(f"AI generated flavor: {result[:50]}..." if len(result) > 50 else f"AI generated flavor: {result}")
-            return result
+            return sanitize_output(result) or self._get_fallback_flavor(event)
         except Exception as e:
             logger.error(f"Failed to generate flavor text: {e}, using fallback")
             return self._get_fallback_flavor(event)
@@ -492,7 +493,9 @@ class FlavorTextService:
             )
             if result is None:
                 return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
-            return result
+            return sanitize_output(result) or self._get_fallback_flavor(
+                FlavorEvent.BET_LAST_CALL
+            )
         except Exception as e:
             logger.error(f"Failed to generate betting last call: {e}, using fallback")
             return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
@@ -568,7 +571,9 @@ class FlavorTextService:
             )
             if result is None:
                 return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
-            return result
+            return sanitize_output(result) or self._get_fallback_flavor(
+                FlavorEvent.BET_LAST_CALL
+            )
         except Exception as e:
             logger.error(f"Failed to generate betting warning: {e}, using fallback")
             return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
@@ -625,7 +630,8 @@ Be clear and informative. Keep it conversational but not too casual.""",
                 max_tokens=2000,  # Reasoning models need more tokens to complete
                 feature=f"stats.{data_type}_insight",
             )
-            return result
+            # Insights run longer than one-liner flavor; cap generously.
+            return sanitize_output(result, max_length=1000) or None
         except Exception as e:
             logger.error(f"Failed to generate data insight: {e}")
             return None
