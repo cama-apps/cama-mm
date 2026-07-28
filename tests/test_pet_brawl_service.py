@@ -220,6 +220,26 @@ class TestDeclineWithdraw:
             service.pet_brawl_repo.get_brawl(brawl_id, TEST_GUILD_ID).status == "void"
         )
 
+    def test_withdraw_racing_accept_cannot_void_active_brawl(
+        self, service, insert_pet, monkeypatch
+    ):
+        """A withdraw whose pre-read saw 'pending' must lose to a committed accept."""
+        insert_pet(CHALLENGER)
+        insert_pet(RECIPIENT)
+        challenge = service.challenge(CHALLENGER, RECIPIENT, TEST_GUILD_ID, 555)
+        brawl_id = challenge.value["brawl"].brawl_id
+        stale = service.pet_brawl_repo.get_brawl(brawl_id, TEST_GUILD_ID)
+        assert service.accept(brawl_id, TEST_GUILD_ID, RECIPIENT).success
+        monkeypatch.setattr(
+            service.pet_brawl_repo, "get_brawl", lambda *a, **k: stale
+        )
+        assert not service.withdraw(brawl_id, TEST_GUILD_ID, CHALLENGER).success
+        monkeypatch.undo()
+        assert (
+            service.pet_brawl_repo.get_brawl(brawl_id, TEST_GUILD_ID).status
+            == "active"
+        )
+
 
 class TestSettle:
     def play_out(self, battle):

@@ -186,6 +186,31 @@ class PetBrawlRepository(BaseRepository):
             if cursor.rowcount != 1:
                 self._raise_transition_error(cursor, brawl_id, gid, recipient_id, now)
 
+    def withdraw_atomic(
+        self, brawl_id: int, guild_id: int | None, challenger_id: int, now: int
+    ) -> None:
+        """Void a still-pending challenge, on behalf of its challenger only."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pet_brawls SET status = 'void', resolved_at = ? "
+                "WHERE brawl_id = ? AND guild_id = ? AND challenger_id = ? "
+                "AND status = 'pending'",
+                (now, brawl_id, gid, challenger_id),
+            )
+            if cursor.rowcount != 1:
+                row = cursor.execute(
+                    "SELECT challenger_id FROM pet_brawls "
+                    "WHERE brawl_id = ? AND guild_id = ?",
+                    (brawl_id, gid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("no_brawl")
+                if row["challenger_id"] != challenger_id:
+                    raise ValueError("not_challenger")
+                raise ValueError("not_pending")
+
     def void_atomic(self, brawl_id: int, guild_id: int | None, now: int) -> None:
         """Void an open brawl (withdrawn, invalidated, or abandoned)."""
         gid = self.normalize_guild_id(guild_id)

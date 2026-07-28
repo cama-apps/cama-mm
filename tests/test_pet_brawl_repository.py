@@ -162,6 +162,20 @@ class TestLifecycle:
         with pytest.raises(ValueError, match="not_open"):
             brawl_repo.void_atomic(brawl.brawl_id, TEST_GUILD_ID, NOW + 6)
 
+    def test_withdraw_atomic_pending_only(self, brawl_repo, insert_pet):
+        brawl, _, _ = make_pending(brawl_repo, insert_pet)
+        with pytest.raises(ValueError, match="not_challenger"):
+            brawl_repo.withdraw_atomic(brawl.brawl_id, TEST_GUILD_ID, 200, NOW + 4)
+        with pytest.raises(ValueError, match="no_brawl"):
+            brawl_repo.withdraw_atomic(12345, TEST_GUILD_ID, 100, NOW + 4)
+        brawl_repo.withdraw_atomic(brawl.brawl_id, TEST_GUILD_ID, 100, NOW + 5)
+        assert brawl_repo.get_brawl(brawl.brawl_id, TEST_GUILD_ID).status == "void"
+        # An accepted (active) brawl can no longer be withdrawn.
+        active, _, _ = make_active(brawl_repo, insert_pet, 300, 400)
+        with pytest.raises(ValueError, match="not_pending"):
+            brawl_repo.withdraw_atomic(active.brawl_id, TEST_GUILD_ID, 300, NOW + 6)
+        assert brawl_repo.get_brawl(active.brawl_id, TEST_GUILD_ID).status == "active"
+
     def test_sweep_stale(self, brawl_repo, insert_pet):
         pending, _, _ = make_pending(brawl_repo, insert_pet, 100, 200)
         active, _, _ = make_active(brawl_repo, insert_pet, 300, 400)

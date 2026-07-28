@@ -41,6 +41,10 @@ _REPO_ERRORS = {
         "This challenge isn't yours to answer.",
         error_codes.VALIDATION_ERROR,
     ),
+    "not_challenger": (
+        "Only the challenger can withdraw.",
+        error_codes.VALIDATION_ERROR,
+    ),
     "expired": ("That challenge has expired.", error_codes.NOT_FOUND),
     "not_pending": (
         "That challenge has already been answered.",
@@ -207,17 +211,13 @@ class PetBrawlService:
     def withdraw(
         self, brawl_id: int, guild_id: int | None, challenger_id: int
     ) -> Result[None]:
-        brawl = self.pet_brawl_repo.get_brawl(brawl_id, guild_id)
-        if brawl is None or brawl.challenger_id != challenger_id:
-            return Result.fail(
-                "Only the challenger can withdraw.", code=error_codes.VALIDATION_ERROR
+        try:
+            self.pet_brawl_repo.withdraw_atomic(
+                brawl_id, guild_id, challenger_id, self._now()
             )
-        if brawl.status != "pending":
-            return Result.fail(
-                "That challenge has already been answered.",
-                code=error_codes.VALIDATION_ERROR,
-            )
-        return self.void(brawl_id, guild_id)
+        except ValueError as exc:
+            return self._map_repo_error(exc)
+        return Result.ok()
 
     def void(self, brawl_id: int, guild_id: int | None) -> Result[None]:
         try:
