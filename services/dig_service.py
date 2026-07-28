@@ -8,6 +8,7 @@ items, artifacts, sabotage, and traps.
 import json
 import random
 import time
+from dataclasses import dataclass, field
 
 from domain.models.mana_effects import ManaEffects
 from repositories.dig_repository import DigRepository
@@ -102,6 +103,26 @@ def _get_events_with_art() -> set[str]:
     except Exception:
         _EVENTS_WITH_ART = set()
     return _EVENTS_WITH_ART
+
+
+@dataclass(frozen=True)
+class PaidDigCharge:
+    """A validated-but-deferred paid-dig charge.
+
+    ``_charge_paid_dig_or_block`` validates the cost up front, but the debit,
+    the paid-counter bump (``tunnel_updates``) and the optimistic-lock
+    snapshot (``guard``) all commit atomically with the eventual dig outcome,
+    so a failed or stale outcome cannot leave the player charged. A default
+    instance represents "no charge" (free dig / first dig).
+    """
+
+    cost: int = 0
+    tunnel_updates: dict = field(default_factory=dict)
+    guard: dict = field(default_factory=dict)
+
+    def effective_balance(self, balance: int) -> int:
+        """Balance still available after reserving this charge's cost."""
+        return max(0, balance - self.cost)
 
 
 class DigService(
@@ -426,19 +447,18 @@ class DigService(
         paid: bool,
         *,
         mana_effects=None,
-    ) -> tuple[dict | None, int, dict, dict]:
+    ) -> tuple[dict | None, PaidDigCharge]:
         """Resolve the cooldown / paid-dig gate for a non-first dig.
 
-        Returns ``(block, paid_dig_cost, tunnel_updates, tunnel_guard)``. The
-        cost and paid counter are validated here but committed with the
-        eventual dig outcome, so a failed or stale outcome cannot leave the
-        player charged.
+        Returns ``(block, charge)``. The charge's cost and paid counter are
+        validated here but committed with the eventual dig outcome, so a
+        failed or stale outcome cannot leave the player charged.
         """
         cooldown_remaining = self._get_cooldown_remaining(
             tunnel, mana_effects=mana_effects,
         )
         if cooldown_remaining <= 0:
-            return None, 0, {}, {}
+            return None, PaidDigCharge()
 
         if not paid:
             pc = tunnel.get("paid_digs_today") or 0
@@ -454,7 +474,7 @@ class DigService(
                 "cooldown_remaining": cooldown_remaining,
                 "paid_dig_cost": preview_cost,
                 "paid_dig_available": True,
-            }, 0, {}, {}
+            }, PaidDigCharge()
 
         paid_count = tunnel.get("paid_digs_today") or 0
         if tunnel.get("paid_dig_date") != today:
@@ -467,19 +487,21 @@ class DigService(
         if balance < paid_dig_cost:
             return self._error(
                 f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
-            ), 0, {}, {}
+            ), PaidDigCharge()
 
         return (
             None,
-            paid_dig_cost,
-            {
-                "paid_dig_date": today,
-                "paid_digs_today": paid_count + 1,
-            },
-            {
-                "paid_dig_date": tunnel.get("paid_dig_date"),
-                "paid_digs_today": tunnel.get("paid_digs_today") or 0,
-            },
+            PaidDigCharge(
+                cost=paid_dig_cost,
+                tunnel_updates={
+                    "paid_dig_date": today,
+                    "paid_digs_today": paid_count + 1,
+                },
+                guard={
+                    "paid_dig_date": tunnel.get("paid_dig_date"),
+                    "paid_digs_today": tunnel.get("paid_digs_today") or 0,
+                },
+            ),
         )
 
     def dig(
@@ -525,7 +547,6 @@ class DigService(
         tunnel["discord_id"] = discord_id
         tunnel["guild_id"] = guild_id
         deferred_tunnel_updates: dict = {}
-        paid_dig_guard: dict = {}
         relic_trim_notice = int(tunnel.get("relic_trim_notice", 0) or 0) == 1
 
         pending_route = self._pending_route_result(tunnel)
@@ -566,23 +587,21 @@ class DigService(
 
         # 3. Cooldown / paid dig check — normal digs only, parked players
         #    short-circuited above.
-        paid_dig_cost = 0
+        paid_charge = PaidDigCharge()
         mana_effects = None
         if not is_first_dig:
             mana_effects = self._get_mana_effects_snapshot(discord_id, guild_id)
-            block, paid_dig_cost, paid_dig_updates, paid_dig_guard = (
-                self._charge_paid_dig_or_block(
-                    discord_id,
-                    guild_id,
-                    tunnel,
-                    today,
-                    paid,
-                    mana_effects=mana_effects,
-                )
+            block, paid_charge = self._charge_paid_dig_or_block(
+                discord_id,
+                guild_id,
+                tunnel,
+                today,
+                paid,
+                mana_effects=mana_effects,
             )
             if block is not None:
                 return block
-            deferred_tunnel_updates.update(paid_dig_updates)
+            deferred_tunnel_updates.update(paid_charge.tunnel_updates)
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
@@ -594,7 +613,7 @@ class DigService(
             discord_id,
             guild_id,
             tunnel,
-            reserved_balance=paid_dig_cost,
+            reserved_balance=paid_charge.cost,
         )
 
         # 5. Check injury state
@@ -872,7 +891,7 @@ class DigService(
             # cave-in balance delta below.
             blue_refund = 0
             if (
-                paid_dig_cost > 0
+                paid_charge.cost > 0
                 and mana_effects is not None
                 and mana_effects.color is not None
                 and mana_effects.dig_paid_refund_on_caveins > 0
@@ -880,7 +899,7 @@ class DigService(
                 blue_refund = max(
                     1,
                     int(
-                        paid_dig_cost
+                        paid_charge.cost
                         * mana_effects.dig_paid_refund_on_caveins
                     ),
                 )
@@ -987,10 +1006,8 @@ class DigService(
 
             # Mutation: fragile — injuries last longer
             injury_bonus = int(mutation_fx.get("injury_duration_bonus", 0))
-            balance = max(
-                0,
+            balance = paid_charge.effective_balance(
                 self.player_repo.get_balance(discord_id, guild_id)
-                - paid_dig_cost,
             )
             # Grappling hook absorbed: skip consequence roll entirely so the
             # player doesn't get stunned/injured by a cave-in their gear caught.
@@ -1025,10 +1042,10 @@ class DigService(
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
-                balance_cost=paid_dig_cost,
+                balance_cost=paid_charge.cost,
                 tunnel_updates=cave_in_tunnel_updates,
                 consume_inventory_item_ids=consumed_item_row_ids,
-                require_tunnel_state=paid_dig_guard or None,
+                require_tunnel_state=paid_charge.guard or None,
                 log_detail={
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
@@ -1171,7 +1188,7 @@ class DigService(
             discord_id, guild_id, weather_code=weather_code_now,
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
-            is_paid_dig=paid_dig_cost > 0,
+            is_paid_dig=paid_charge.cost > 0,
         )
         # Mana × weather combo: Sunny + White boosts yield.
         weather_combo_yield = 1.0
@@ -1439,23 +1456,20 @@ class DigService(
             # waits across event-less digs until something to skip shows up.
             final_tunnel_updates["sonar_skip_pending"] = 0
 
+        pet_work_claim, pet_name = self._claim_pet_work(pet_work, pet_dig_bonus)
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
-            balance_cost=paid_dig_cost,
+            balance_cost=paid_charge.cost,
             vanity_tax=dig_vanity_tax,
             tunnel_updates=final_tunnel_updates,
             consume_inventory_item_ids=consumed_item_row_ids,
-            require_tunnel_state=paid_dig_guard or None,
-            pet_work_claim=(
-                pet_work.claim(pet_dig_bonus)
-                if pet_work is not None and pet_dig_bonus > 0
-                else None
-            ),
+            require_tunnel_state=paid_charge.guard or None,
+            pet_work_claim=pet_work_claim,
             log_detail={
                 "advance": advance, "jc": jc_earned,
                 "pet_dig_bonus": pet_dig_bonus,
-                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
+                "pet_name": pet_name,
                 "gross_jc": gross_jc,
                 "vanity_tax": dig_vanity_tax,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
@@ -1513,7 +1527,7 @@ class DigService(
             pickaxe_tier=pickaxe_tier,
             tip=self._pick_tip(new_depth),
             luminosity_info=lum_info,
-            paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
+            paid_cost=paid_charge.cost,
             dynamite_bonus=dynamite_bonus,
             corruption=corruption,
             mutations=[m.get("name") for m in mutations] if mutations else None,
@@ -1525,7 +1539,7 @@ class DigService(
             relic_trim_notice=relic_trim_notice,
             next_free_dig_at=next_free_dig_at,
             pet_dig_bonus=pet_dig_bonus,
-            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
+            pet_name=pet_name,
         )
 
     # ------------------------------------------------------------------
@@ -1587,18 +1601,13 @@ class DigService(
                     return parked_return, None
 
         # Cooldown / paid dig check — normal digs only.
-        paid_dig_cost = 0
-        paid_dig_guard: dict = {}
+        paid_charge = PaidDigCharge()
         if not is_first_dig:
-            block, paid_dig_cost, paid_dig_updates, paid_dig_guard = (
-                self._charge_paid_dig_or_block(
-                    discord_id, guild_id, tunnel, today, paid,
-                )
+            block, paid_charge = self._charge_paid_dig_or_block(
+                discord_id, guild_id, tunnel, today, paid,
             )
             if block is not None:
                 return block, None
-        else:
-            paid_dig_updates = {}
 
         if is_first_dig:
             return self._execute_first_dig(
@@ -1609,7 +1618,7 @@ class DigService(
             discord_id,
             guild_id,
             tunnel,
-            reserved_balance=paid_dig_cost,
+            reserved_balance=paid_charge.cost,
         )
 
         # Injury state
@@ -1870,7 +1879,7 @@ class DigService(
             weather_code=self._get_weather_code(guild_id, layer_name),
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
-            is_paid_dig=paid_dig_cost > 0,
+            is_paid_dig=paid_charge.cost > 0,
             include_random=False,
         )
         if depth_before >= 276:
@@ -2053,9 +2062,7 @@ class DigService(
             "sonar_skip_active_this_dig": sonar_skip_active_this_dig,
             "cave_in_chance": cave_in_chance,
             "thick_skin_saved": thick_skin_saved,
-            "paid_dig_cost": paid_dig_cost,
-            "paid_dig_updates": paid_dig_updates,
-            "paid_dig_guard": paid_dig_guard,
+            "paid_dig_charge": paid_charge,
             "advance_min": advance_min,
             "advance_max": advance_max,
             "jc_min": jc_min,

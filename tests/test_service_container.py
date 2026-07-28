@@ -286,6 +286,20 @@ class TestServiceDependencies:
         assert match.state_service is not None
         assert match.state_service is state
 
+    def test_dig_service_receives_pet_service_via_constructor(
+        self, repo_db_path, monkeypatch
+    ):
+        """DigService is wired with PetService at construction time."""
+        import config
+
+        monkeypatch.setattr(config, "PET_CHANNEL_ID", 12345)
+        container = ServiceContainer(repo_db_path)
+        container.initialize()
+
+        pet = container._components["pet_service"]
+        assert pet is not None
+        assert container._components["dig_service"].pet_service is pet
+
     def test_lobby_service_has_state_service(self, repo_db_path):
         """LobbyService is wired with MatchStateService."""
         container = ServiceContainer(repo_db_path)
