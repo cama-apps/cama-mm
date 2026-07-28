@@ -476,7 +476,7 @@ class TestGacha:
         for i in range(3):
             pet = adopt_common(service, clock, name=f"Common {i}")
             clock.now = pet.hatched_at + 9 * DAY  # starves; resolved lazily
-            assert service._living_pet(100, TEST_GUILD_ID, clock.now) is None
+            assert service.living_pet(100, TEST_GUILD_ID, clock.now) is None
         assert service._pity_active(100, TEST_GUILD_ID)
         result = service.adopt(100, TEST_GUILD_ID, "Pity Roll")
         assert result.success
@@ -492,13 +492,13 @@ class TestGacha:
         service.player_repo.update_balance(100, TEST_GUILD_ID, 5000)
         pet = adopt_common(service, clock, name="C1")
         clock.now = pet.hatched_at + 9 * DAY
-        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        service.living_pet(100, TEST_GUILD_ID, clock.now)
         pet = adopt_species(service, "Fancy", "jopacama")
         clock.now = pet.hatched_at + 9 * DAY
-        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        service.living_pet(100, TEST_GUILD_ID, clock.now)
         pet = adopt_common(service, clock, name="C2")
         clock.now = pet.hatched_at + 9 * DAY
-        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        service.living_pet(100, TEST_GUILD_ID, clock.now)
         assert not service._pity_active(100, TEST_GUILD_ID)
 
     def test_trinket_roll_equips_and_dupes_refund(self, service, clock):
@@ -662,7 +662,7 @@ class TestSweep:
         assert service.feed(100, TEST_GUILD_ID, "cheese").success
         # Simulate a sweep holding the PRE-feed snapshot past starvation time.
         clock.now = pet.hatched_at + 6 * DAY
-        resolved = service._resolve_starvation(pet, clock.now)
+        resolved = service.resolve_starvation(pet, clock.now)
         assert resolved is not None
         assert resolved.died_at is None
 

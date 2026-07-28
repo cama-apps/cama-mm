@@ -1,7 +1,7 @@
 """Pure combat engine for pet brawls.
 
 Everything here is deterministic given an injected `random.Random`, so the
-whole fight is unit-testable and replayable. No I/O, no clocks, no config —
+whole fight is unit-testable. No I/O, no clocks, no config —
 duelists are built from a snapshot of pet state taken once at accept time,
 and nothing in a brawl mutates a pet (settlement happens elsewhere).
 
@@ -36,9 +36,9 @@ HUNKER_HEAL = (5, 12)
 HUNKER_COUNTER = 5  # + power; 8 base for the Mystic Cama
 MYSTIC_COUNTER = 8
 BASE_CRIT_PCT = 10  # crit = double damage
-SPITTER_CRIT_PCT = 25  # species with spit_one_in > 0 (Rama)
+SPITTER_CRIT_PCT = 25  # Rama
 CHILL_MISS_BONUS_PP = 10  # Frostwool: opponent's Stampede misses more
-RAVENOUS_HEAL_BONUS = 3  # restore_pct > 100: hunker heals a little extra
+RAVENOUS_HEAL_BONUS = 3  # Ravenous: hunker heals a little extra
 
 
 class PetBrawlMove(StrEnum):
@@ -100,6 +100,48 @@ MOVE_FLAVOR: dict[tuple[str, PetBrawlMove], str] = {
 
 def move_name(species_id: str, move: PetBrawlMove) -> str:
     return MOVE_FLAVOR.get((species_id, move), _DEFAULT_MOVE_NAMES[move])
+
+
+@dataclass(frozen=True, slots=True)
+class BrawlTraits:
+    """One species' combat quirks. Every field defaults to 'no quirk'."""
+
+    dodge_bonus_pp: int = 0  # added to the opponent's Stampede miss chance
+    crit_pct: int = BASE_CRIT_PCT
+    damage_dealt_bonus: int = 0  # flat, applied before hunker halving
+    damage_taken_mod: int = 0  # flat; a negative mod never drops a hit below 1
+    counter_base: int = HUNKER_COUNTER  # power is added on top
+    heal_bonus: int = 0  # added to hunker healing
+    loss_insurance: bool = False  # settles a brawl loss for less hunger
+
+
+_NO_TRAITS = BrawlTraits()
+
+# Explicit per-species combat quirks, keyed by species_id like MOVE_FLAVOR.
+# Every species in pet_constants.SPECIES has an entry (_NO_TRAITS = explicit
+# no-quirk); unknown or retired species fall through to _NO_TRAITS. The
+# Shellback's shell save is not a trait: it rides on real Aegis state and is
+# handled in build_duelist.
+BRAWL_TRAITS: dict[str, BrawlTraits] = {
+    "common_cama": _NO_TRAITS,
+    "dromedary_cross": BrawlTraits(damage_taken_mod=-1),  # Dune is hardy
+    "banana_ears": _NO_TRAITS,
+    "jopacama": BrawlTraits(loss_insurance=True),
+    "pudge_cama": BrawlTraits(  # Ravenous glass cannon
+        damage_dealt_bonus=1,
+        damage_taken_mod=1,
+        heal_bonus=RAVENOUS_HEAL_BONUS,
+    ),
+    "courier_cama": _NO_TRAITS,
+    "aegis_cama": _NO_TRAITS,
+    "invoker_cama": BrawlTraits(counter_base=MYSTIC_COUNTER),
+    "crystal_cama": BrawlTraits(dodge_bonus_pp=CHILL_MISS_BONUS_PP),
+    "rama": BrawlTraits(crit_pct=SPITTER_CRIT_PCT),
+}
+
+
+def brawl_traits(species_id: str) -> BrawlTraits:
+    return BRAWL_TRAITS.get(species_id, _NO_TRAITS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,49 +209,36 @@ def _attack_damage(
     rng: random.Random,
 ) -> tuple[int, bool, bool]:
     """Return (damage, landed, crit) for one attack, defender mods applied."""
-    atk_sp = get_species(attacker.species_id)
-    def_sp = get_species(defender.species_id)
+    atk = brawl_traits(attacker.species_id)
+    dfn = brawl_traits(defender.species_id)
     if move is PetBrawlMove.HUNKER:
         return 0, False, False
     if move is PetBrawlMove.STAMPEDE:
-        miss_pct = STAMPEDE_MISS_PCT + (
-            CHILL_MISS_BONUS_PP if def_sp.food_cost_pct < 100 else 0
-        )
+        miss_pct = STAMPEDE_MISS_PCT + dfn.dodge_bonus_pp
         if rng.randint(1, 100) <= miss_pct:
             return 0, False, False
         low, high = STAMPEDE_DMG
     else:
         low, high = SPIT_DMG
     dmg = rng.randint(low, high) + attacker.power
-    crit_pct = SPITTER_CRIT_PCT if atk_sp.spit_one_in > 0 else BASE_CRIT_PCT
-    crit = rng.randint(1, 100) <= crit_pct
+    crit = rng.randint(1, 100) <= atk.crit_pct
     if crit:
         dmg *= 2
-    if atk_sp.decay_pct > 100:  # Ravenous hits harder...
-        dmg += 1
+    dmg += atk.damage_dealt_bonus  # Ravenous hits harder...
     if defender_hunkers:
         dmg = -(-dmg // 2)  # ceil half
-    if def_sp.decay_pct > 100:  # ...and takes more
-        dmg += 1
-    if def_sp.decay_pct < 100:  # Dune is hardy
-        dmg = max(1, dmg - 1)
+    dmg += dfn.damage_taken_mod  # ...and takes more; Dune is hardy
+    if dfn.damage_taken_mod < 0:
+        dmg = max(1, dmg)
     return dmg, True, crit
 
 
 def _counter_damage(hunkerer: Duelist) -> int:
-    base = (
-        MYSTIC_COUNTER
-        if get_species(hunkerer.species_id).salt_lick_pct > 100
-        else HUNKER_COUNTER
-    )
-    return base + hunkerer.power
+    return brawl_traits(hunkerer.species_id).counter_base + hunkerer.power
 
 
 def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
-    heal = rng.randint(*HUNKER_HEAL)
-    if get_species(hunkerer.species_id).restore_pct > 100:
-        heal += RAVENOUS_HEAL_BONUS
-    return heal
+    return rng.randint(*HUNKER_HEAL) + brawl_traits(hunkerer.species_id).heal_bonus
 
 
 def _hp_pct(d: Duelist) -> int:

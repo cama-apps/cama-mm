@@ -58,6 +58,22 @@ def _row_to_pet(row: sqlite3.Row) -> Pet:
     return Pet.from_row(dict(row))
 
 
+def write_hunger_anchor(
+    cursor: sqlite3.Cursor, pet_id: int, now: int, hunger: int
+) -> None:
+    """Move a living pet's hunger anchor (last_fed_at / hunger_at_last_fed).
+
+    Single author for the anchor schema: other repositories that settle
+    hunger into the pets table (e.g. brawl settlement) write through this
+    helper, inside their own open transaction. Never touches a dead pet.
+    """
+    cursor.execute(
+        "UPDATE pets SET last_fed_at = ?, hunger_at_last_fed = ? "
+        "WHERE pet_id = ? AND died_at IS NULL",
+        (now, hunger, pet_id),
+    )
+
+
 class PetRepository(BaseRepository):
     # --- reads ---
 

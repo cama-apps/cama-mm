@@ -15,7 +15,13 @@ import logging
 import random
 
 from domain.models.pet import Pet, PetMood
-from domain.pet_brawl import Duelist, PetBrawlState, build_duelist, initial_state
+from domain.pet_brawl import (
+    Duelist,
+    PetBrawlState,
+    brawl_traits,
+    build_duelist,
+    initial_state,
+)
 from domain.pet_constants import (
     BRAWL_INSURANCE_REDUCTION,
     BRAWL_LOSS_FLOOR,
@@ -80,7 +86,7 @@ class PetBrawlService:
     def _battle_ready_pet(
         self, discord_id: int, guild_id: int | None, now: int, *, whose: str
     ) -> Result[Pet]:
-        pet = self.pet_service._living_pet(discord_id, guild_id, now)
+        pet = self.pet_service.living_pet(discord_id, guild_id, now)
         if pet is None:
             return Result.fail(
                 f"{whose} pet to brawl with — adopt one with /pet adopt."
@@ -157,11 +163,9 @@ class PetBrawlService:
         brawl = self.pet_brawl_repo.get_brawl(brawl_id, guild_id)
         if brawl is None:
             return Result.fail("That brawl no longer exists.", code=error_codes.NOT_FOUND)
-        challenger_pet = self.pet_service.pet_repo.get_pet_by_id(
-            brawl.challenger_pet_id, guild_id
+        challenger_pet = self.pet_service.living_pet_by_id(
+            brawl.challenger_pet_id, guild_id, now
         )
-        if challenger_pet is not None:
-            challenger_pet = self.pet_service._resolve_starvation(challenger_pet, now)
         if challenger_pet is None:
             # The challenger's pet died while the challenge sat open.
             try:
@@ -183,7 +187,6 @@ class PetBrawlService:
             )
         except ValueError as exc:
             return self._map_repo_error(exc)
-        seed = self._rng.getrandbits(64)
         state = initial_state(
             self._to_duelist(challenger_pet, now),
             self._to_duelist(recipient_pet.value, now),
@@ -192,8 +195,7 @@ class PetBrawlService:
             {
                 "brawl": brawl,
                 "state": state,
-                "rng": random.Random(seed),
-                "seed": seed,
+                "rng": random.Random(self._rng.getrandbits(64)),
             }
         )
 
@@ -241,11 +243,12 @@ class PetBrawlService:
             )
         winner = final_state.a if final_state.winner == "a" else final_state.b
         loser = final_state.b if final_state.winner == "a" else final_state.a
-        winner_species = get_species(winner.species_id)
-        loser_species = get_species(loser.species_id)
-        winner_gain = BRAWL_WIN_HUNGER + winner_species.match_feed_bonus
+        # Winner gain mirrors match wins, Pack Cama feed bonus included.
+        winner_gain = BRAWL_WIN_HUNGER + get_species(winner.species_id).match_feed_bonus
         loser_loss = BRAWL_LOSS_HUNGER - (
-            BRAWL_INSURANCE_REDUCTION if loser_species.refund_bonus_pp > 0 else 0
+            BRAWL_INSURANCE_REDUCTION
+            if brawl_traits(loser.species_id).loss_insurance
+            else 0
         )
         try:
             settlement = self.pet_brawl_repo.settle_brawl_atomic(
