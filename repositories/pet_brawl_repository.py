@@ -6,8 +6,8 @@ re-reads both pets so a death claimed mid-battle can never be overwritten
 (writing fresh anchors onto a starved pet would resurrect it).
 
 Validation errors are raised as ``ValueError(code)``:
-    brawl_busy, no_brawl, not_recipient, not_pending, expired,
-    not_open, not_active, already_done
+    brawl_busy, no_brawl, not_recipient, not_challenger, not_pending,
+    expired, not_open, not_active, already_done
 """
 
 from __future__ import annotations
