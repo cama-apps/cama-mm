@@ -119,6 +119,7 @@ async def edit_message_with_fallback(
     *,
     send_fallback: Callable[..., Awaitable[object]] | None = None,
     log_label: str = "Message",
+    edit_exceptions: tuple[type[BaseException], ...] = (Exception,),
     **edit_kwargs,
 ) -> bool:
     """Edit ``message``; on failure, rewind attachments and re-send fresh.
@@ -134,6 +135,10 @@ async def edit_message_with_fallback(
     the fallback send carries no view. Failures are logged at WARNING with
     ``log_label`` so recurring problems stay visible.
 
+    ``edit_exceptions`` scopes which edit failures trigger the fallback;
+    pass ``(discord.HTTPException,)`` to let local bugs propagate instead of
+    being masked by a duplicate post.
+
     Returns True when either the edit or the fallback delivered the content.
     """
     if message is None:
@@ -141,7 +146,7 @@ async def edit_message_with_fallback(
     try:
         await message.edit(**edit_kwargs)
         return True
-    except Exception as exc:
+    except edit_exceptions as exc:
         logger.warning("%s edit failed: %s", log_label, exc)
 
     embed = edit_kwargs.get("embed")
