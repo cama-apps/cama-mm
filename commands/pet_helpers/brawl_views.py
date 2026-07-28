@@ -271,11 +271,16 @@ class PetBrawlBattleView(discord.ui.View):
                 session.picks[side] = move
                 duelist = session.state.a if side == "a" else session.state.b
                 flavored = move_name(duelist.species_id, move)
-                await interaction.followup.send(
-                    f"{MOVE_EMOJI[move]} You picked **{flavored}** ✅ — "
-                    "waiting for your opponent.",
-                    ephemeral=True,
-                )
+                try:
+                    await interaction.followup.send(
+                        f"{MOVE_EMOJI[move]} You picked **{flavored}** ✅ — "
+                        "waiting for your opponent.",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException as exc:
+                    # The pick is recorded; a failed ephemeral ack must not
+                    # abort resolution and stall the round until timeout.
+                    logger.warning("Pet brawl pick ack failed: %s", exc)
                 if len(session.picks) == 2:
                     session.consecutive_full_timeouts = 0
                     self._resolved = True

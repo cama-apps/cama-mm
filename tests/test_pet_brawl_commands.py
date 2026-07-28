@@ -8,6 +8,7 @@ import time
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 
 from commands.pet import PetCommands
@@ -276,6 +277,21 @@ class TestBattleView:
         assert edit_kwargs["view"] is None
         # Answers the "was there any JC reward?" question at the finish line.
         assert "jopacoin" in edit_kwargs["embed"].footer.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_round_resolves_even_if_pick_ack_fails(self, brawl_cog):
+        """The ephemeral ack precedes resolution; if it raises, the recorded
+        second pick must still resolve the round instead of stalling it
+        until the view timeout."""
+        view, session = await start_battle(brawl_cog)
+        await press(view, SAFE_MOVE)(make_interaction(user_id=CHALLENGER))
+        inter = make_interaction(user_id=RECIPIENT)
+        inter.followup.send = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(status=404), "gone")
+        )
+        await press(view, SAFE_MOVE)(inter)
+        assert session.state.round_no == 1
+        assert session.picks == {}
 
     @pytest.mark.asyncio
     async def test_round_views_use_distinct_custom_ids(self, brawl_cog):
