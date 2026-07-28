@@ -1,21 +1,6 @@
 # Contributing
 
-## Getting Started
-
-**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-
-1. Clone the repo and set up your environment:
-   ```bash
-   git clone https://github.com/cama-apps/cama-mm.git
-   cd cama-mm
-   uv sync --frozen
-   ```
-
-2. Create a `.env` file with your test bot token:
-   ```
-   DISCORD_BOT_TOKEN=your_test_token
-   ADMIN_USER_IDS=your_discord_id
-   ```
+For prerequisites, installation, and `.env` setup, see the [README](README.md).
 
 ## Making Changes
 
@@ -26,7 +11,7 @@
 
 2. Make your changes and add tests for new functionality
 
-3. Run lint checks and tests:
+3. Run lint checks and tests (same commands CI runs):
    ```bash
    uv run --locked ruff check .
    uv run --locked pytest

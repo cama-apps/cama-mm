@@ -1,3 +1,5 @@
+> Historical document — superseded by the shipped implementation; command names and file references may be stale.
+
 # Plan: `/calibration` Command - Server Rating System Stats
 
 ## Overview

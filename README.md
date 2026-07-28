@@ -12,12 +12,19 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Win/Loss Tracking**: Tracks match results for statistics and rating updates
 - **Role Distribution**: Role-based balancing with off-role penalties
 - **Match Recording**: Record match results with Radiant/Dire team support and voting system
-- **Betting System**: Jopacoin wagering on match outcomes with leverage (2x-5x), house/pool modes
+- **Betting System**: Jopacoin wagering on match outcomes with leverage (2x-10x), house/pool modes
 - **Prediction Markets**: Create yes/no predictions with community resolution voting
 - **Economy Features**: Loans, bankruptcy, Jopacoin Reserve, disbursement voting, tipping, Wheel of Fortune
+- **Tax Man**: Guild monetary policy — audits, fines, economy events, central ledger, and a vanity tax on profits of members without a server nickname
+- **Dig Minigame**: Tunnel-digging game with gear, artifacts, weather, insurance, sabotage, prestige, and miner builds
+- **Pets**: Adopt and raise a cama (camel-llama hybrid) — feeding, trinkets, brawls, a memorial graveyard, and a sacrificial altar
+- **Daily Mafia**: Social-deduction subgame with secret roles, night actions, and day-phase lynch votes
+- **Duels**: Challenges of honor between players
+- **Mana**: Daily mana land assignments that feed color-exclusive shop items
 - **Match Enrichment**: Automatic stats from OpenDota (K/D/A, heroes, GPM, fantasy points)
 - **Dota 2 Reference**: Hero and ability lookup with autocomplete
-- **Trivia**: Dota 2 trivia with escalating difficulty streaks, covering heroes, items, abilities, facets, and voicelines
+- **Trivia**: Dota 2 trivia with escalating difficulty streaks, plus a daily player-stats trivia set
+- **Cama Wrapped**: Personal year-in-review stats
 - **Stats Visualization**: Image generation for match tables, radar graphs, and charts
 - **AI Features** (optional): Narrative/flavor text and natural language queries via the configured Groq or Cerebras LLM
 - **SQLite Database**: Lightweight database with automatic migrations
@@ -56,12 +63,14 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
      DISCORD_BOT_TOKEN=your_bot_token_here
      ADMIN_USER_IDS=123456789012345678,234567890123456789
      ```
-     If `ADMIN_USER_IDS` is empty, no one is treated as an allowlisted admin for commands like `/addfake`.
+     If `ADMIN_USER_IDS` is empty, no one is treated as an allowlisted admin for commands like `/admin addfake`.
    - Optional variables you can include:
      ```
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
      OPENDOTA_API_KEY=your_opendota_key  # unlocks the 1200 req/min rate limit
      DIG_CHANNEL_ID=123456789012345678   # gates /dig commands and routes output to this channel
+     LOBBY_CHANNEL_ID=123456789012345678 # lobby embeds post here instead of the command channel
+     PET_CHANNEL_ID=123456789012345678   # REQUIRED for pets: without it the /pet cog is not loaded
      ```
      `DB_PATH` defaults to `cama_shuffle.db`; the API and channel settings are optional.
 
@@ -70,6 +79,11 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
    posts there. To also hide the slash commands from other channels, restrict
    the bot's integration in Discord: Server Settings → Integrations → Cama MM →
    Channels.
+
+   **Pet channel setup:** the entire pets feature is gated on `PET_CHANNEL_ID`.
+   Until it is set, the `/pet` cog is not loaded, no pet service is created, and
+   the match/profile pet hooks no-op. When set, hatch announcements, obituaries,
+   and weekly refund summaries post to that channel.
 
 ## Running the Bot
 
@@ -81,33 +95,12 @@ The bot will connect to Discord and sync slash commands automatically.
 
 ## Discord Commands
 
-### Registration & Profile
+The bot registers **42 top-level commands/groups totaling 169 subcommands**. The
+core flows (lobby/shuffle, draft, match recording, betting) are documented in
+full below; everything else gets a summary — run `/help` in Discord for the
+complete list, and Discord's slash-command autocomplete shows per-option details.
 
-#### `/register`
-Register yourself as a player. Fetches your MMR from OpenDota to initialize your Glicko-2 rating.
-
-**Options:**
-- `steam_id`: Your **Steam32** ID (found in your Dotabuff URL, e.g., `123456789`)
-
-#### `/linksteam`
-Link your Steam account if you're already registered.
-
-**Options:**
-- `steam_id`: Your **Steam32** ID
-
-#### `/setroles`
-Set your preferred roles for matchmaking.
-
-**Options:**
-- `roles`: Roles (1-5, e.g., "123" or "1,2,3" for carry, mid, offlane). Commas and spaces are optional.
-
-#### `/profile`
-View comprehensive player profile with tabbed navigation (Overview, Rating, Economy, Gambling, Predictions, Dota, Teammates).
-
-**Options:**
-- `user` (optional): Discord user to look up. If omitted, shows your own profile.
-
-### Lobby Management
+### Lobby & Shuffle
 
 #### `/lobby`
 Create or view the matchmaking lobby. Use buttons in the thread to join/leave. Requires 10+ players to shuffle.
@@ -117,6 +110,9 @@ Join the matchmaking lobby from any channel.
 
 #### `/leave`
 Leave the matchmaking lobby.
+
+#### `/readycheck`
+Check lobby players' online status and ping those who are away.
 
 #### `/kick`
 Kick a player from the lobby.
@@ -131,16 +127,29 @@ Reset the current lobby (clears all players).
 
 **Permissions:** Admin or lobby creator only
 
-### Match Management
-
 #### `/shuffle`
 Create balanced teams from the lobby (requires at least 10 players). Uses pool betting mode with auto-blind liquidity.
 
-#### `/startdraft`
-Start a Captain's Draft. Selects captains, runs coinflip, and enables snake draft for team picking.
+**Options:**
+- `mode` (optional): "Balanced" (default) or "Region Split" (US West vs US East)
+- `rating_system` (optional): "Glicko-2" (default), "OpenSkill" (experimental), or "Jopacoin Balance"
 
-#### `/setcaptain`
-Set yourself or another player as captain for your team during draft.
+### Captain's Draft — `/draft`
+
+#### `/draft start`
+Start an Immortal Draft with captain-based player selection: coinflip, side/pick choice, and snake draft.
+
+**Options:**
+- `captain1` (optional): Specify first captain
+- `captain2` (optional): Specify second captain
+
+#### `/draft restart`
+Restart the current Immortal Draft, preserving the lobby. Captains or admins only.
+
+#### `/draft samplecomplete` / `/draft sampleinprogress`
+Admin-only sample draft UI renders for testing.
+
+### Match Recording
 
 #### `/record`
 Record a match result or abort the match.
@@ -149,111 +158,61 @@ Record a match result or abort the match.
 - `result`: Choose "Radiant Won", "Dire Won", or "Abort Match"
 - `dotabuff_match_id` (optional): Dotabuff match ID for automatic data fetching
 
-### Betting & Economy
+### Betting
 
 #### `/bet`
-Place a jopacoin bet on the current match.
+Place a jopacoin bet on a match.
 
 **Options:**
 - `team`: Choose "Radiant" or "Dire"
 - `amount`: Amount of jopacoin to wager
-- `leverage` (optional): Multiplier (2x, 3x, or 5x)
+- `leverage` (optional): Multiplier (2x, 3x, 5x, or 10x) — can cause debt!
+- `match` (optional): Match to bet on; auto-selects if you're a participant or only one match exists
 
 #### `/mybets`
-Show your active bet for the current match.
+Show your active bets.
 
-#### `/balance`
-Check your jopacoin balance and debt status.
-
-#### `/economy tip`
-Give jopacoin to another player (1% fee goes to the Jopacoin Reserve).
-
-**Options:**
-- `player`: The recipient
-- `amount`: Amount to tip
-
-#### `/economy paydebt`
-Help another player pay off their debt.
-
-**Options:**
-- `player`: The player in debt
-- `amount`: Amount to pay
-
-#### `/economy bankruptcy`
-Declare bankruptcy to clear debt. Has a 1-week cooldown and 5-game win reward penalty.
-
-#### `/economy loan`
-Borrow jopacoin with a 20% fee. Auto-repaid after your next match.
-
-**Options:**
-- `amount`: Amount to borrow (max 100)
-
-#### `/economy reserve`
-View the Jopacoin Reserve, the server operations budget.
-
-#### `/economy disburse`
-Propose or manage Jopacoin Reserve allocation voting.
-
-**Options:**
-- `action`: "propose", "status", "reset", "votes", or "execute"
+#### `/bets`
+Show all bets in the current pool (optional `match` filter).
 
 #### `/gamba`
 Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 
-#### `/shop buy`
-Spend jopacoin in the shop for special items.
+### Economy — `/economy`
 
-**Options:**
-- `item`: The item to purchase
-- `target` (optional): Target player for certain items
+- `/economy tip` — Give jopacoin to another player (1% fee goes to the Jopacoin Reserve)
+- `/economy paydebt` — Help another player pay off their debt
+- `/economy bankruptcy` — Declare bankruptcy to clear debt (1-week cooldown; win-reward penalty for your next 3 wins)
+- `/economy loan` — Borrow up to 100 jopacoin with a 20% fee, auto-repaid after your next match
+- `/economy reserve` — View the Jopacoin Reserve, the server operations budget
+- `/economy disburse` — Propose or manage Reserve allocation voting (`propose`, `status`, `reset`, `votes`, `execute`)
 
-#### `/shop pingedash`
-Spend jopacoin to send the configured Pingedash. Has a 24-hour cooldown.
+### Shop — `/shop`
 
-#### `/shop pingedkevin`
-Spend jopacoin to ping the configured Kevin with the PingedKevin GIF. Has an
-independent 24-hour cooldown.
+- `/shop buy` — Spend jopacoin on special items (some take a `target` player)
+- `/shop pingedash` / `/shop pingedkevin` — Paid pings of the configured targets, each on an independent 24-hour cooldown
+- `/shop avoids` — View your active soft avoids
+- `/shop deals` — View your active package deals
+- `/shop mana` — Spend mana on color-exclusive items
 
-#### `/shop avoids`
-View your active soft avoids.
+### Predictions — `/predict`
 
-#### `/shop deals`
-View your active package deals.
+- `/predict create` — Create a prediction market (admin)
+- `/predict list` / `/predict view` / `/predict mine` — Browse markets, market detail (price, ladder, trades), and your positions
+- `/predict resolve` / `/predict cancel` — Resolve YES/NO or cancel and refund (admin)
+- `/predict help` plus admin maintenance subcommands (`set_fair`, `rollback`, `refresh_status`, `force_refresh`)
 
-#### `/shop mana`
-Spend mana on color-exclusive items.
+### Registration & Profile — `/player`
 
-### Predictions
+- `/player register` — Register yourself with your Steam32 ID; fetches MMR from OpenDota to seed your rating
+- `/player link` / `/player unlink` / `/player steamids` — Link, unlink, and list your Steam accounts
+- `/player roles` — Set preferred roles (1-5) for matchmaking
+- `/player region` — Set your preferred Dota server (US East / US West)
+- `/player exclusion` — Check your exclusion factor
+- `/player lobby autonotify` — Lobby notification preferences
 
-#### `/prediction`
-Create a prediction market with yes/no outcomes.
-
-**Options:**
-- `question`: The prediction question
-- `closes_in`: Time until betting closes (e.g., "1h", "30m")
-
-#### `/predictions`
-List all active predictions.
-
-#### `/mypredictions`
-View your prediction positions and P&L.
-
-#### `/predictionresolve`
-Vote to resolve a prediction. Requires 3 matching votes or 1 admin vote.
-
-**Options:**
-- `prediction_id`: The prediction ID
-- `outcome`: "yes" or "no"
-
-#### `/predictionclose`
-Close prediction betting early.
-
-**Permissions:** Admin only
-
-#### `/predictioncancel`
-Cancel a prediction and refund all bets.
-
-**Permissions:** Admin only
+#### `/profile`
+View comprehensive player profile with tabbed navigation (Overview, Rating, Economy, Gambling, Predictions, Dota, Teammates). Optional `user` to look up someone else.
 
 ### Statistics & Leaderboards
 
@@ -261,82 +220,33 @@ Cancel a prediction and refund all bets.
 View leaderboard with multiple ranking types.
 
 **Options:**
-- `type`: "balance", "gambling", "predictions", "glicko", or "openskill"
-- `limit` (optional): Number of players to show (default: 20, max: 100)
+- `type`: "Balance" (default), "Glicko-2 Rating", "OpenSkill Rating", "Gambling", "Tips", or "Trivia"
+- `limit` (optional): Number of entries to show (default: 100, max: 100)
 
-#### `/calibration`
-View rating system health stats and player calibration progress.
+- `/calibration` — Rating system health stats and player calibration progress
+- `/matchup` — Head-to-head statistics between two players
+- `/matches history` / `/matches view` / `/matches recent` — Recent matches, detailed match embed, and image-table view
+- `/ratinganalysis` — Compare rating systems (`compare`, `calibration`, `trend`, `backfill`, `player`) (Admin)
+- `/wrapped` — Your Cama Wrapped year in review
+- `/herogrid` — Player x hero grid image showing hero pools and win rates
+- `/scout report` / `/scout links` — Hero scouting report and Dotabuff links for players in the current game
 
-**Options:**
-- `user` (optional): Discord user to look up
+### Minigames & Extras
 
-#### `/matchup`
-Head-to-head statistics between two players.
+- `/dig` — Tunnel digging minigame: 25 player subcommands (`go`, `gear`, `shop`, `buy`, `use`, `inventory`, `artifacts`, `insure`, `trap`, `sabotage`, `gift`, `flex`, `prestige`, `weather`, `abandon`, `leaderboard`, `halloffame`, `guide`, `help`, `info`, and the `/dig miner` build system: `about`, `autobuy`, `build`, `profile`, `respec`) plus `/dig admin resetcooldown|forceevent|setdepth`. Gated to the configured dig channel.
+- `/pet` — Cama pet care: `adopt`, `status`, `feed`, `shop`, `buy`, `rename`, `trinket`, `brawl` (challenge someone to a pet brawl), `altar` (sacrifice your cama for a better egg), `graveyard`, `leaderboard`. Requires `PET_CHANNEL_ID`.
+- `/mafia` — Daily Mafia: `join`, `role`, `act`, `vote`, `remind`, `status`, `bounty`, `history`, `leaderboard`, `info`, `optin`, `optout`, plus `/mafia admin start|stop|abort`. Runs in the dedicated mafia channel.
+- `/duel` — Challenges of honor: `issue`, `respond`, `list`, `resolve`
+- `/tax` — Jopacoin economy and Tax Man tools: `audit`, `policy`, `player`, `ledger`, `event`, `fine`, `vanity` (check the nickname vanity tax), `bankruptcy`, `resetcooldown`
+- `/mana` — Check your daily mana land assignment
+- `/trivia` — Dota 2 trivia with four difficulty tiers that escalate with your streak (heroes, items, abilities, facets, voicelines). Four options per question with a 15-second timer; a correct answer awards 1 JC plus streak bonuses, a wrong answer resets the streak. 6-hour cooldown.
+- `/playertrivia` — Daily trivia set about this server's player stats
+- `/setreminder` — Configure DM reminders for cooldowns and match betting windows
 
-**Options:**
-- `user1`: First player
-- `user2`: Second player
+### Dota 2 Reference — `/dota`
 
-#### `/matches history`
-View recent matches with hero picks and stats.
-
-**Options:**
-- `user` (optional): Filter by player
-- `limit` (optional): Number of matches
-
-#### `/matches view`
-Detailed match embed with participant stats.
-
-**Options:**
-- `match_id`: The match ID to view
-
-#### `/matches recent`
-Recent matches displayed as a formatted image table.
-
-**Options:**
-- `user` (optional): Filter by player
-- `limit` (optional): Number of matches
-
-### Dota 2 Reference
-
-#### `/hero`
-Look up hero information (stats, abilities, talents, facets).
-
-**Options:**
-- `hero_name`: Hero name (autocomplete enabled)
-
-#### `/ability`
-Look up ability details.
-
-**Options:**
-- `ability_name`: Ability name (autocomplete enabled)
-
-### Trivia
-
-#### `/trivia`
-Play a Dota 2 trivia question. Questions span heroes, abilities, and items across four difficulty tiers that escalate with your streak:
-
-| Streak | Difficulty | Question types |
-|--------|------------|----------------|
-| 0–2 | Easy | Hero by image, primary attribute, melee/ranged, ability → hero, ability by icon, item by icon, item cost compare, neutral item tier, damage type |
-| 3–5 | Medium | Hero real name, hero by hype, innate ability, voiceline (with portrait) |
-| 6–9 | Hard | Scepter/shard upgrades, item cost exact, ability lore, item lore, hero bio, move speed, ability cooldown, ability mana cost, item active cooldown, armor at level 1, attack damage |
-| 10+ | Challenging | Voiceline, base attack time, attribute gain per level, night vision, turn rate |
-
-Each question has 4 options with a 30-second timer. A correct answer awards 1 JC and extends your streak; a wrong answer resets it. Streak bonuses add +1 JC at streaks 3 and 6, +2 JC at streak 10, then +1 JC every 4 correct answers after 10.
-
-#### `/trivia-reset-cooldown` (Admin)
-Reset the cooldown on the trivia streak for testing or moderation.
-
-### Rating Analysis
-
-#### `/ratinganalysis`
-Analyze and compare rating systems with subcommands:
-- `compare`: Compare Glicko-2 vs OpenSkill accuracy
-- `calibration`: Show calibration curves
-- `trend`: Show prediction accuracy over time
-- `backfill`: Recalculate OpenSkill from history (Admin)
-- `player`: Show player's OpenSkill details
+- `/dota hero` — Hero information (stats, abilities, talents, facets) with autocomplete
+- `/dota ability` — Ability details with autocomplete
 
 ### AI Features (Optional)
 
@@ -348,82 +258,13 @@ Ask a question about league data and get an AI-powered answer.
 #### `/help`
 List all available commands with descriptions.
 
-### Admin Commands
+### Admin
 
 **Permissions:** Admin only (requires Administrator or Manage Server permission, or Discord ID in `ADMIN_USER_IDS`)
 
-#### `/addfake`
-Add fake users to the lobby for testing.
-
-**Options:**
-- `count` (optional): Number of fake users to add (1-10, default: 1)
-
-#### `/filllobbytest`
-Fill the lobby with test players.
-
-#### `/resetuser`
-Reset a specific user's account (wins, losses, rating, jopacoin).
-
-**Options:**
-- `user`: Discord user to reset
-
-#### `/registeruser`
-Register another user as a player.
-
-**Options:**
-- `user`: Discord user to register
-- `steam_id`: Their Steam32 ID
-- `mmr` (optional): Manual MMR if OpenDota unavailable
-
-#### `/givecoin`
-Give or take jopacoin from a user or the Jopacoin Reserve.
-
-**Options:**
-- `user`: Target user, or use the reserve option
-- `amount`: Amount (negative to take)
-
-#### `/setinitialrating`
-Set initial Glicko-2 rating for a player (max 50 games played).
-
-**Options:**
-- `user`: Discord user
-- `rating`: New rating value
-
-#### `/recalibrate`
-Reset a player's rating uncertainty (RD to 350) while keeping their rating. 90-day cooldown, minimum 5 games.
-
-**Options:**
-- `user`: Discord user
-
-#### `/extendbetting`
-Extend the betting window after shuffle.
-
-**Options:**
-- `minutes`: Extension time (1-60)
-
-#### `/setleague`
-Set the Dota 2 league ID used by OpenDota for automatic match discovery.
-
-**Options:**
-- `league_id`: The Dota 2 league ID
-
-#### `/enrichmatch`
-Manually enrich a match with OpenDota data.
-
-#### `/autodiscover`
-Auto-discover Dota matches from configured league ID.
-
-#### `/wipematch`
-Delete enrichment data for a specific match.
-
-#### `/showconfig`
-Display current server configuration.
-
-#### `/rebuildpairings`
-Rebuild pairwise teammate/opponent statistics from match history.
-
-#### `/sync`
-Force sync slash commands with Discord (useful after command updates).
+- `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`), and `/admin lowprio add|remove|status|list` for restricted matchmaking
+- `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
+- `/trivia-reset-cooldown` — Reset a user's trivia cooldown
 
 ## Configuration
 
@@ -440,16 +281,19 @@ Set these in your `.env` file:
 | `ADMIN_USER_IDS` | [] | Comma-separated Discord user IDs for admin access |
 | `DB_PATH` | cama_shuffle.db | Database file path |
 | `OPENDOTA_API_KEY` | None | OpenDota API key for higher rate limits (60→1200 req/min) |
+| `DIG_CHANNEL_ID` | None | Gates `/dig` commands to this channel and routes public dig output there |
+| `LOBBY_CHANNEL_ID` | None | If set, lobby embeds post here instead of the command channel |
+| `PET_CHANNEL_ID` | None | Gates the entire pets feature: without it the `/pet` cog is not loaded and pet hooks no-op |
 
 ### Advanced Configuration
 
-Additional settings can be configured in `.env` (see `config.py` for all 50+ options):
+Additional settings can be configured in `.env` (see `config.py` for all 200+ options):
 
 **Lobby:**
 - `LOBBY_READY_THRESHOLD`, `LOBBY_MAX_PLAYERS` - Lobby size settings
 
 **Betting:**
-- `LEVERAGE_TIERS` - Available leverage options (default: 2,3,5)
+- `LEVERAGE_TIERS` - Available leverage options (default: 2,3,5; 10x is always allowed on top)
 - `MAX_DEBT` - Maximum negative balance (default: 500)
 - `BET_LOCK_SECONDS` - Betting window duration (default: 1200 / 20 min)
 - `AUTO_BLIND_ENABLED`, `AUTO_BLIND_THRESHOLD`, `AUTO_BLIND_PERCENTAGE` - Auto-liquidity settings
@@ -457,7 +301,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 
 **Economy:**
 - `LOAN_COOLDOWN_SECONDS`, `LOAN_MAX_AMOUNT`, `LOAN_FEE_RATE` - Loan system
-- `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES` - Bankruptcy settings
+- `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES` - Bankruptcy settings (default penalty: 3 games)
 - `TIP_FEE_RATE` - Tipping fee (default: 1%)
 - `VANITY_TAX_RATE` - Profit tax on members without a server nickname (default: 5%)
 - `DISBURSE_MIN_FUND`, `DISBURSE_QUORUM_PERCENTAGE` - Disbursement voting
@@ -466,7 +310,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 
 **Wheel of Fortune:**
 - `WHEEL_COOLDOWN_SECONDS` - Time between spins (default: 24 hours)
-- `WHEEL_TARGET_EV` - Target expected value per spin (default: -10)
+- `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
 **Draft Mode:**
 - `PLAYER_STAKE_POOL_SIZE` - Total auto-liquidity for drafts
@@ -475,6 +319,10 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 **Rating:**
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_PENALTY` - Team balancing penalties
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
+
+**Trivia:**
+- `TRIVIA_COOLDOWN_SECONDS` - Time between trivia questions (default: 6 hours)
+- `TRIVIA_ANSWER_TIMEOUT_SECONDS` - Per-question answer timer (default: 15)
 
 **AI (Optional):**
 - `GROQ_API_KEY`, `CEREBRAS_API_KEY` - Credentials for the configured LLM provider
@@ -496,7 +344,7 @@ uv run --locked pytest
 
 **Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `uv sync --frozen`
 
-**Commands not showing:** Wait a few minutes for Discord to sync, or use `/sync` command (admin only)
+**Commands not showing:** Wait a few minutes for Discord to sync, or use `/admin sync` (admin only)
 
 **Database issues:** Only run one bot instance. Delete `cama_shuffle.db` to reset database if needed.
 
