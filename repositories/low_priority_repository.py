@@ -24,8 +24,6 @@ class LowPriorityState:
 class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
     """Persist and query low-priority state without economy side effects."""
 
-    REQUIRED_WINS = LOW_PRIORITY_REQUIRED_WINS
-
     @staticmethod
     def _to_state(row) -> LowPriorityState:
         return LowPriorityState(
@@ -87,7 +85,7 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
                 (
                     discord_id,
                     normalized_guild,
-                    self.REQUIRED_WINS,
+                    LOW_PRIORITY_REQUIRED_WINS,
                     reason,
                     set_by,
                 ),

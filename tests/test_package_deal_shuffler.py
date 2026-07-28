@@ -44,7 +44,7 @@ class TestPackageDealPenalty:
         # Deal between 100 and 105 (different teams)
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         assert penalty == shuffler.package_deal_penalty
 
     def test_only_low_priority_buyer_gets_half_strength(self):
@@ -56,13 +56,13 @@ class TestPackageDealPenalty:
         team2_ids = {105, 106, 107, 108, 109}
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
-        buyer_penalty = shuffler._calculate_package_deal_penalty(
+        buyer_penalty = shuffler.calculate_package_deal_penalty(
             team1_ids,
             team2_ids,
             deals,
             low_priority_ids={100},
         )
-        partner_penalty = shuffler._calculate_package_deal_penalty(
+        partner_penalty = shuffler.calculate_package_deal_penalty(
             team1_ids,
             team2_ids,
             deals,
@@ -94,7 +94,7 @@ class TestPackageDealPenalty:
         # Deal between 100 and 101 (same team)
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=101)]
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         assert penalty == 0.0
 
     def test_multiple_deals_penalty_stacks(self, shuffler):
@@ -108,7 +108,7 @@ class TestPackageDealPenalty:
             MockPackageDeal(id=2, buyer_discord_id=101, partner_discord_id=106),
         ]
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         assert penalty == 2 * shuffler.package_deal_penalty
 
     def test_bidirectional_deals_stack(self, shuffler):
@@ -122,7 +122,7 @@ class TestPackageDealPenalty:
             MockPackageDeal(id=2, buyer_discord_id=105, partner_discord_id=100),
         ]
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         assert penalty == 2 * shuffler.package_deal_penalty
 
     def test_no_deals_no_penalty(self, shuffler):
@@ -130,10 +130,10 @@ class TestPackageDealPenalty:
         team1_ids = {100, 101, 102, 103, 104}
         team2_ids = {105, 106, 107, 108, 109}
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, [])
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, [])
         assert penalty == 0.0
 
-        penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, None)
+        penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, None)
         assert penalty == 0.0
 
     def test_shuffle_respects_package_deals(self, sample_players):
@@ -172,7 +172,7 @@ class TestPackageDealPenalty:
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
         # Package deal penalty (opposite teams)
-        deal_penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        deal_penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
 
         # Mock soft avoid with same structure
         @dataclass
@@ -185,7 +185,7 @@ class TestPackageDealPenalty:
         avoids = [MockSoftAvoid(id=1, avoider_discord_id=100, avoided_discord_id=101)]
 
         # Soft avoid penalty (same teams)
-        avoid_penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        avoid_penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
 
         # Both should be calculated independently
         assert deal_penalty == shuffler.package_deal_penalty

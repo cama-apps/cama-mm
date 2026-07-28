@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from typing import TYPE_CHECKING
 
 import discord
@@ -40,7 +41,11 @@ from domain.pet_constants import (
 from services.pet_flavor_service import PetFlavorEvent
 from utils.formatting import JOPACOIN_EMOTE
 from utils.game_date import game_date_for_timestamp
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import (
+    edit_message_with_fallback,
+    safe_defer,
+    safe_followup,
+)
 from utils.pet_assets import get_altar_card
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -715,28 +720,37 @@ class PetCommands(commands.Cog):
         file = await asyncio.to_thread(get_altar_card, dead.name, dead.pet_id)
         if file:
             embed.set_image(url=f"attachment://{file.filename}")
-        posted = False
-        try:
-            if message is not None:
-                await message.edit(
-                    embed=embed, view=None, attachments=[file] if file else []
-                )
-            else:
-                await safe_followup(interaction, embed=embed, file=file)
-            posted = True
-        except discord.HTTPException:
-            # discord.File is single-use — the failed send consumed the
-            # buffer, so rewind before retrying on the fallback path.
-            if file is not None:
-                file.reset()
+        if message is not None:
+            # On edit failure the helper rewinds the single-use file and
+            # re-sends through safe_followup (webhook, then channel).
+            posted = await edit_message_with_fallback(
+                message,
+                send_fallback=partial(safe_followup, interaction),
+                log_label="Altar farewell",
+                embed=embed,
+                view=None,
+                attachments=[file] if file else [],
+            )
+        else:
+            posted = False
             try:
                 await safe_followup(interaction, embed=embed, file=file)
                 posted = True
             except discord.HTTPException:
-                logger.warning(
-                    "Altar farewell for pet %s failed to post; sweep will retry",
-                    dead.pet_id,
-                )
+                # discord.File is single-use — the failed send consumed the
+                # buffer, so rewind before retrying on the fallback path.
+                if file is not None:
+                    file.reset()
+                try:
+                    await safe_followup(interaction, embed=embed, file=file)
+                    posted = True
+                except discord.HTTPException:
+                    pass
+        if not posted:
+            logger.warning(
+                "Altar farewell for pet %s failed to post; sweep will retry",
+                dead.pet_id,
+            )
         if posted:
             # At-least-once: only a delivered farewell marks the death
             # announced — otherwise the sweep posts the tombstone instead.

@@ -18,7 +18,7 @@ from utils.region import region_split_mismatches, resolve_region
 def test_low_priority_penalty_is_500_per_selected_player():
     shuffler = BalancedShuffler()
 
-    assert shuffler._calculate_low_priority_penalty(
+    assert shuffler.calculate_low_priority_penalty(
         {100, 101, 102},
         {100, 101, 999},
     ) == 1000.0
@@ -1150,8 +1150,8 @@ class TestRoleAssignmentCommonPath:
         def unexpected(*_args, **_kwargs):
             raise AssertionError("constraint penalty ran on the common path")
 
-        monkeypatch.setattr(shuffler, "_calculate_soft_avoid_penalty", unexpected)
-        monkeypatch.setattr(shuffler, "_calculate_package_deal_penalty", unexpected)
+        monkeypatch.setattr(shuffler, "calculate_soft_avoid_penalty", unexpected)
+        monkeypatch.setattr(shuffler, "calculate_package_deal_penalty", unexpected)
         monkeypatch.setattr(shuffler, "_calculate_region_split_penalty", unexpected)
 
         team1_roles, team2_roles, score = shuffler._score_role_assignments_for_matchup(

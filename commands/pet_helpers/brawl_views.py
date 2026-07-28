@@ -7,7 +7,8 @@ persisted row only tracks lifecycle, so a bot restart voids the fight
 harmlessly (stakes are hunger-only and settle at the very end).
 
 Message updates go through ``message.edit`` with a channel.send fallback
-(the BossDuelView idiom) — never the 15-minute interaction token.
+(``utils.interaction_safety.edit_message_with_fallback``) — never the
+15-minute interaction token.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from domain.pet_constants import (
     PET_BRAWL_ACCEPT_SECONDS,
     PET_BRAWL_TURN_SECONDS,
 )
+from utils.interaction_safety import edit_message_with_fallback
 
 if TYPE_CHECKING:
     from commands.pet import PetCommands
@@ -64,36 +66,9 @@ class PetBrawlSession:
 
 async def _edit_or_send(message: discord.Message | None, **kwargs) -> None:
     """Edit the brawl message; fall back to a fresh channel send."""
-    if message is None:
-        return
-    try:
-        await message.edit(**kwargs)
-        return
-    except Exception as exc:
-        logger.warning("Pet brawl message edit failed: %s", exc)
-    channel = getattr(message, "channel", None)
-    if channel is None:
-        return
-    embed = kwargs.get("embed")
-    attachments = [
-        a for a in (kwargs.get("attachments") or []) if isinstance(a, discord.File)
-    ]
-    # discord.File is single-use — the failed edit consumed the buffers, so
-    # rewind each before the fallback send.
-    for attachment in attachments:
-        try:
-            attachment.reset()
-        except Exception as exc:
-            logger.debug("Could not rewind brawl attachment: %s", exc)
-    try:
-        if embed is not None and attachments:
-            await channel.send(embed=embed, files=attachments)
-        elif embed is not None:
-            await channel.send(embed=embed)
-        elif kwargs.get("content"):
-            await channel.send(content=kwargs["content"])
-    except Exception as exc:
-        logger.warning("Pet brawl channel fallback also failed: %s", exc)
+    await edit_message_with_fallback(
+        message, log_label="Pet brawl message", **kwargs
+    )
 
 
 class PetBrawlChallengeView(discord.ui.View):
