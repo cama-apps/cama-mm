@@ -444,14 +444,15 @@ class TestPinnacleWagerPayout:
         tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
         before = player_repository.get_balance(20001, guild_id)
 
-        # bold tier, win chance below the taper knee -> full BOSS_PAYOUTS[350]
-        # bold multiplier (3.8); a 200 wager profits int(200 * (3.8 - 1)) = 560.
+        # bold tier, win chance below the taper knee -> the BOSS_PAYOUTS[350]
+        # bold multiplier (3.8) log-compresses to 1 + ln(3.8); a 200 wager
+        # profits int(200 * ln(3.8)) = 267.
         result = _finalize_pinnacle(
             dig_service, guild_id, tunnel=tunnel,
             phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.55,
         )
 
-        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 560
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 267
         assert result["payout"] == expected
         assert player_repository.get_balance(20001, guild_id) == before + expected
 
@@ -595,9 +596,9 @@ class TestWagerSettledExactlyOnceAcrossPhases:
             phase_idx=3, won=True, wager=carried, risk_tier=carried_tier,
             win_chance=0.55, boss_progress=bp,
         )
-        # bold mult 3.8 untapered -> profit int(200 * 2.8) = 560.
-        assert r3["wager_payout"] == 560
-        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 560
+        # bold mult 3.8 untapered but log-compressed -> int(200 * ln(3.8)) = 267.
+        assert r3["wager_payout"] == 267
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 267
         assert r3["payout"] == expected
         assert player_repository.get_balance(20001, guild_id) == (
             start_balance + expected

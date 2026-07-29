@@ -10,6 +10,7 @@ missing effects on the no-pause path; both fail against the old inline loop.
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 
@@ -151,9 +152,11 @@ def test_pinnacle_scout_multiplier_matches_live_payout(
         DISCORD_ID, TEST_GUILD_ID,
     )
 
-    assert result["odds"]["cautious"]["multiplier"] == BOSS_PAYOUTS[
-        PINNACLE_DEPTH
-    ][0]
+    # Scout shows the same log-capped multiplier settlement pays:
+    # 1 + min(4, ln(m)), rounded like the odds payload.
+    assert result["odds"]["cautious"]["multiplier"] == round(
+        1 + min(4.0, math.log(BOSS_PAYOUTS[PINNACLE_DEPTH][0])), 2,
+    )
 
 
 def test_deaths_door_saves_a_killing_blow_without_a_pause(
