@@ -106,13 +106,13 @@ class TestBuildDuelist:
     def test_hp_and_power_derivation(self):
         cases = [
             # species, adult, hunger, happy -> max_hp, hp, power
-            ("common_cama", True, 100, False, 120, 120, 0),
-            ("common_cama", False, 100, False, 100, 100, 0),
-            ("common_cama", True, 0, False, 120, 100, 0),
-            ("common_cama", True, 55, True, 120, 111, 1),
-            ("jopacama", True, 100, False, 120, 120, 1),
-            ("aegis_cama", False, 40, False, 100, 88, 1),
-            ("rama", True, 100, True, 120, 120, 3),
+            ("common_cama", True, 100, False, 100, 100, 0),
+            ("common_cama", False, 100, False, 80, 80, 0),
+            ("common_cama", True, 0, False, 100, 80, 0),
+            ("common_cama", True, 55, True, 100, 91, 1),
+            ("jopacama", True, 100, False, 100, 100, 1),
+            ("aegis_cama", False, 40, False, 80, 68, 1),
+            ("rama", True, 100, True, 100, 100, 3),
         ]
         for species, adult, hunger, happy, max_hp, hp, power in cases:
             d = mk(species, adult=adult, hunger=hunger, happy=happy)
@@ -191,7 +191,7 @@ class TestResolveRound:
     def test_strength_adds_all_attack_damage_and_extra_stampede_damage(self):
         spit_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
         spit, _ = resolve_round(spit_state, SAFE_MOVE, SAFE_MOVE, FakeRng([8, 100, 8, 100]))
-        assert spit.b.hp == 120 - 9
+        assert spit.b.hp == 100 - 9
 
         stampede_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
         stampede, _ = resolve_round(
@@ -200,46 +200,46 @@ class TestResolveRound:
             SAFE_MOVE,
             FakeRng([100, 16, 100, 8, 100]),
         )
-        assert stampede.b.hp == 120 - 18
+        assert stampede.b.hp == 100 - 18
 
     def test_dexterity_improves_general_crit_spit_crit_and_stampede_evasion(self):
         spit_state = initial_state(mk(name="A", training_dex=1), mk(name="B"))
         spit, _ = resolve_round(spit_state, SAFE_MOVE, SAFE_MOVE, FakeRng([8, 14, 8, 100]))
-        assert spit.b.hp == 120 - 16
+        assert spit.b.hp == 100 - 16
 
         dodge_state = initial_state(mk(name="A"), mk(name="B", training_dex=1))
         dodge, _ = resolve_round(
             dodge_state,
             PetBrawlMove.STAMPEDE,
             SAFE_MOVE,
-            FakeRng([37, 8, 100]),
+            FakeRng([STAMPEDE_MISS_PCT + 1, 8, 100]),
         )
-        assert dodge.b.hp == 120
+        assert dodge.b.hp == 100
 
     def test_intelligence_reduces_damage_and_improves_hunker(self):
         state = initial_state(
             mk(name="A"),
-            replace(mk(name="B", training_int=1), hp=100),
+            replace(mk(name="B", training_int=1), hp=70),
         )
         resolved, _ = resolve_round(
             state,
             SAFE_MOVE,
             PetBrawlMove.HUNKER,
-            FakeRng([8, 100, 5]),
+            FakeRng([8, 100, 2]),
         )
 
-        # Incoming 8 is halved to 4, then INT mitigates 1; Hunker heals 5+1.
-        assert resolved.b.hp == 100 - 3 + 6
+        # Incoming 8 is halved to 4, then INT mitigates 1; Hunker heals 2+1.
+        assert resolved.b.hp == 70 - 3 + 3
         # Hunker counter is base 5 plus one INT.
-        assert resolved.a.hp == 120 - 6
+        assert resolved.a.hp == 100 - 6
 
     def test_spit_deals_scripted_damage_both_ways(self):
         state = initial_state(mk(name="A"), mk(name="B"))
         # a: dmg 10, no crit; b: dmg 12, no crit.
         rng = FakeRng([10, 100, 12, 100])
         new, log = resolve_round(state, SAFE_MOVE, SAFE_MOVE, rng)
-        assert new.a.hp == 120 - 12
-        assert new.b.hp == 120 - 10
+        assert new.a.hp == 100 - 12
+        assert new.b.hp == 100 - 10
         assert new.winner is None
         assert new.round_no == 1
         assert any("hits for 10" in line for line in log)
@@ -248,75 +248,93 @@ class TestResolveRound:
         state = initial_state(mk(name="A"), mk(name="B"))
         rng = FakeRng([10, 1, 12, 100])  # a crits
         new, log = resolve_round(state, SAFE_MOVE, SAFE_MOVE, rng)
-        assert new.b.hp == 120 - 20
+        assert new.b.hp == 100 - 20
         assert any("CRITICAL" in line for line in log)
 
     def test_stampede_can_miss(self):
         state = initial_state(mk(name="A"), mk(name="B"))
-        # a's stampede miss roll 35 (<=35 misses); b spits 8, no crit.
-        rng = FakeRng([35, 8, 100])
+        # A roll at the configured threshold misses; b spits 8, no crit.
+        rng = FakeRng([STAMPEDE_MISS_PCT, 8, 100])
         new, log = resolve_round(state, PetBrawlMove.STAMPEDE, SAFE_MOVE, rng)
-        assert new.b.hp == 120
+        assert new.b.hp == 100
         assert any("misses" in line for line in log)
 
-    def test_hunker_halves_heals_and_counters(self):
+    def test_hunker_halves_spit_heals_and_counters(self):
         state = initial_state(mk(name="A"), mk(name="B"))
-        # a spits 11 no crit; b hunkers, heal 7.
-        rng = FakeRng([11, 100, 7])
+        # a spits 11 no crit; b hunkers, heal 4.
+        rng = FakeRng([11, 100, 4])
         new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
-        # b takes ceil(11/2)=6, heals 7 (capped at max) -> 120 - 6 + 7 -> 120 cap.
-        assert new.b.hp == 120
+        # b takes ceil(11/2)=6, heals 4 -> 98.
+        assert new.b.hp == 98
         # a takes the counter: 5 + power 0.
-        assert new.a.hp == 120 - HUNKER_COUNTER
+        assert new.a.hp == 100 - HUNKER_COUNTER
+
+    def test_stampede_punches_further_through_hunker(self):
+        state = initial_state(
+            mk(name="A"),
+            replace(mk(name="B"), hp=50),
+        )
+        # Stampede lands for 20 before guard; Hunker heals 2.
+        rng = FakeRng([STAMPEDE_MISS_PCT + 1, 20, 100, 2])
+        new, _ = resolve_round(
+            state,
+            PetBrawlMove.STAMPEDE,
+            PetBrawlMove.HUNKER,
+            rng,
+        )
+        # Hunker retains 60% of Stampede damage: ceil(20 * .60) = 12.
+        assert new.b.hp == 50 - 12 + 2
+        # The landed Stampede still draws Hunker's counter.
+        assert new.a.hp == 100 - HUNKER_COUNTER
 
     def test_hunker_counter_only_when_attack_lands(self):
         state = initial_state(mk(name="A"), mk(name="B"))
-        # a's stampede misses (roll 1); b hunkers, heal 5.
-        rng = FakeRng([1, 5])
+        # a's stampede misses (roll 1); b hunkers, heal 2.
+        rng = FakeRng([1, 2])
         new, _ = resolve_round(state, PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER, rng)
-        assert new.a.hp == 120  # no counter
-        assert new.b.hp == 120
+        assert new.a.hp == 100  # no counter
+        assert new.b.hp == 100
 
     def test_mystic_counter_is_stronger(self):
         state = initial_state(mk(name="A"), mk("invoker_cama", name="B"))
-        rng = FakeRng([11, 100, 7])
+        rng = FakeRng([11, 100, 4])
         new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
         # Mystic is rare tier: counter 8 + power 1.
-        assert new.a.hp == 120 - (MYSTIC_COUNTER + 1)
+        assert new.a.hp == 100 - (MYSTIC_COUNTER + 1)
 
     def test_dune_reduces_damage_with_floor_one(self):
         state = initial_state(mk(name="A"), mk("dromedary_cross", name="B"))
         rng = FakeRng([8, 100, 8, 100])
         new, _ = resolve_round(state, SAFE_MOVE, SAFE_MOVE, rng)
-        assert new.b.hp == 120 - 7  # 8 - 1 hardy
+        assert new.b.hp == 100 - 7  # 8 - 1 hardy
         # Hardy reduction applies after hunker halving, never below 1.
         b = replace(mk("dromedary_cross", name="B"), hp=50)
         state = initial_state(mk(name="A"), b)
-        rng = FakeRng([8, 100, 5])  # a spits 8; b hunkers, heals 5
+        rng = FakeRng([8, 100, 2])  # a spits 8; b hunkers, heals 2
         new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
-        assert new.b.hp == 50 - 3 + 5  # ceil(8/2)=4, -1 hardy = 3
+        assert new.b.hp == 50 - 3 + 2  # ceil(8/2)=4, -1 hardy = 3
 
     def test_ravenous_deals_and_takes_extra(self):
         state = initial_state(mk("pudge_cama", name="A"), mk(name="B"))
         rng = FakeRng([10, 100, 10, 100])
         new, _ = resolve_round(state, SAFE_MOVE, SAFE_MOVE, rng)
-        assert new.b.hp == 120 - (10 + 1 + 1)  # +1 power(uncommon)? no: dmg+power
+        assert new.b.hp == 100 - (10 + 1 + 1)  # +1 power(uncommon)? no: dmg+power
         # Ravenous is uncommon: damage = 10 + power 1 + ravenous 1 = 12.
-        assert new.a.hp == 120 - (10 + 1)  # b's 10 + ravenous taken 1
+        assert new.a.hp == 100 - (10 + 1)  # b's 10 + ravenous taken 1
 
     def test_ravenous_hunker_heals_extra(self):
         state = initial_state(mk(name="A"), mk("pudge_cama", name="B", hunger=0))
-        # b starts at 100 hp (hunger 0 -> -20). a stampede misses; b heals 5+3.
-        rng = FakeRng([1, 5])
+        # b starts at 80 hp (hunger 0 -> -20). a stampede misses; b heals 2+3.
+        rng = FakeRng([1, 2])
         new, _ = resolve_round(state, PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER, rng)
-        assert new.b.hp == 100 + 8
+        assert new.b.hp == 80 + 5
 
     def test_frostwool_makes_stampedes_miss_more(self):
         state = initial_state(mk(name="A"), mk("crystal_cama", name="B"))
-        # Roll of 45 misses only with the +10pp chill bonus.
+        # Ten points above the base threshold misses only with the chill bonus.
         rng = FakeRng([STAMPEDE_MISS_PCT + 10, 8, 100])
         new, _ = resolve_round(state, PetBrawlMove.STAMPEDE, SAFE_MOVE, rng)
-        assert new.b.hp == 120
+        assert new.b.hp == 100
 
     def test_shellback_shield_saves_once(self):
         a = mk(name="A")
@@ -375,6 +393,21 @@ class TestResolveRound:
 
 
 class TestTermination:
+    def test_hunker_standoff_is_called_after_eight_rounds(self):
+        rng = random.Random(0)
+        state = initial_state(mk(name="A"), mk(name="B"))
+
+        while state.winner is None:
+            state, log = resolve_round(
+                state,
+                PetBrawlMove.HUNKER,
+                PetBrawlMove.HUNKER,
+                rng,
+            )
+
+        assert state.round_no == 8
+        assert any("judges" in line for line in log)
+
     def test_any_seed_terminates_by_max_rounds(self):
         moves = list(PetBrawlMove)
         for seed in range(60):
@@ -394,6 +427,25 @@ class TestTermination:
 
 
 class TestStatisticalTuning:
+    def test_move_matchups_form_soft_counter_cycle(self):
+        counters = (
+            (PetBrawlMove.HUNKER, PetBrawlMove.SPIT),
+            (PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER),
+            (PetBrawlMove.SPIT, PetBrawlMove.STAMPEDE),
+        )
+        trials = 1000
+
+        for favored, countered in counters:
+            wins = 0
+            for seed in range(trials):
+                rng = random.Random(seed)
+                state = initial_state(mk(name="A"), mk(name="B"))
+                while state.winner is None:
+                    state, _ = resolve_round(state, favored, countered, rng)
+                wins += state.winner == "a"
+
+            assert wins > trials // 2, (favored, countered, wins)
+
     def test_stampede_miss_rate_near_tuning(self):
         rng = random.Random(7)
         misses = 0
@@ -426,8 +478,8 @@ class TestStatisticalTuning:
         for _ in range(200):
             state = initial_state(mk(name="A"), mk(name="B"))
             new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
-            assert new.b.hp <= 120  # heal capped at max
-            assert 120 - new.a.hp == HUNKER_COUNTER  # spit never misses
+            assert new.b.hp <= 100  # heal capped at max
+            assert 100 - new.a.hp == HUNKER_COUNTER  # spit never misses
 
     def test_hunker_heal_within_range(self):
         rng = random.Random(5)

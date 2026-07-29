@@ -20,20 +20,23 @@ from enum import StrEnum
 from domain.models.pet import PetStage
 from domain.pet_constants import get_species
 
-MAX_ROUNDS = 10
+MAX_ROUNDS = 8
 
 # Near-flat tier edge (~55/45 up-tier): power adds to attack and counter
 # damage only. Legendaries feel a touch stronger, never dominant.
 TIER_POWER = {"common": 0, "uncommon": 1, "rare": 1, "legendary": 2}
 
-ADULT_HP_BONUS = 20  # adults 120 max HP, babies 100
+BASE_HP = 80
+ADULT_HP_BONUS = 20  # adults 100 max HP, babies 80
 HUNGER_HP_PENALTY_DIV = 5  # start_hp = max_hp - (100 - hunger) // 5
 
 SPIT_DMG = (8, 16)  # safe move, never misses
 STAMPEDE_DMG = (16, 32)
-STAMPEDE_MISS_PCT = 35
-HUNKER_HEAL = (5, 12)
+STAMPEDE_MISS_PCT = 55
+HUNKER_HEAL = (2, 4)
 HUNKER_COUNTER = 5  # + power; 8 base for the Mystic Cama
+HUNKER_DAMAGE_TAKEN_PCT = 50
+HUNKER_STAMPEDE_DAMAGE_TAKEN_PCT = 60
 MYSTIC_COUNTER = 8
 BASE_CRIT_PCT = 10  # crit = double damage
 SPITTER_CRIT_PCT = 25  # Rama
@@ -65,8 +68,12 @@ MOVE_EMOJI = {
 # Player-facing move explanations, shown in the round-1 battle embed.
 MOVE_BLURBS = {
     PetBrawlMove.SPIT: "reliable chip damage, never misses.",
-    PetBrawlMove.STAMPEDE: f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff.",
-    PetBrawlMove.HUNKER: "halve incoming damage, heal a little, counter any hit.",
+    PetBrawlMove.STAMPEDE: (
+        f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff, punches through Hunker."
+    ),
+    PetBrawlMove.HUNKER: (
+        "halve Spit damage, soften Stampede, heal a little, counter any hit."
+    ),
 }
 
 _DEFAULT_MOVE_NAMES = {
@@ -131,7 +138,7 @@ class BrawlTraits:
 
     dodge_bonus_pp: int = 0  # added to the opponent's Stampede miss chance
     crit_pct: int = BASE_CRIT_PCT
-    damage_dealt_bonus: int = 0  # flat, applied before hunker halving
+    damage_dealt_bonus: int = 0  # flat, applied before hunker reduction
     damage_taken_mod: int = 0  # flat; a negative mod never drops a hit below 1
     counter_base: int = HUNKER_COUNTER  # power is added on top
     heal_bonus: int = 0  # added to hunker healing
@@ -228,7 +235,7 @@ def build_duelist(
     """Snapshot a pet into a duelist. `happy` = mood HAPPY or pampered."""
     species = get_species(species_id)
     is_adult = stage is PetStage.ADULT
-    max_hp = 100 + (ADULT_HP_BONUS if is_adult else 0)
+    max_hp = BASE_HP + (ADULT_HP_BONUS if is_adult else 0)
     hp = max_hp - (100 - max(0, min(100, hunger))) // HUNGER_HP_PENALTY_DIV
     power = TIER_POWER.get(species.tier, 0) + (1 if happy else 0)
     return Duelist(
@@ -291,7 +298,12 @@ def _attack_damage(
         dmg *= 2
     dmg += atk.damage_dealt_bonus  # Ravenous hits harder...
     if defender_hunkers:
-        dmg = -(-dmg // 2)  # ceil half
+        damage_taken_pct = (
+            HUNKER_STAMPEDE_DAMAGE_TAKEN_PCT
+            if move is PetBrawlMove.STAMPEDE
+            else HUNKER_DAMAGE_TAKEN_PCT
+        )
+        dmg = -(-(dmg * damage_taken_pct) // 100)
     dmg += (
         dfn.damage_taken_mod
         - defender.training_int * TRAINING_INT_MITIGATION
