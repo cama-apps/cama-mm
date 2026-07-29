@@ -1371,11 +1371,17 @@ class MatchCommands(commands.Cog):
                 return
             from domain.pet_constants import get_species
 
-            lines = [
-                f"🦙 **{pet.name}** the {get_species(pet.species).display_name} "
-                f"munches +{amount} hunger in celebration"
-                for pet, amount in fed[:10]
-            ]
+            lines = []
+            for pet, amount in fed[:10]:
+                snack = (
+                    f"+{amount} fullness in celebration"
+                    if amount
+                    else "a victory snack — already full"
+                )
+                lines.append(
+                    f"🦙 **{pet.name}** the {get_species(pet.species).display_name} "
+                    f"munches {snack}"
+                )
             await interaction.followup.send(
                 "🎉 Post-game snacks:\n" + "\n".join(lines), ephemeral=False
             )

@@ -65,7 +65,7 @@ logger = logging.getLogger("cama_bot.commands.pet")
 
 FOOD_CHOICES = [
     app_commands.Choice(
-        name=f"{food.display_name} ({food.cost} JC, +{food.restore} hunger)",
+        name=f"{food.display_name} ({food.cost} JC, +{food.restore} fullness)",
         value=item_id,
     )
     for item_id, food in FOOD_ITEMS.items()
@@ -323,7 +323,7 @@ class PetCommands(commands.Cog):
             embed.set_image(url=f"attachment://{file.filename}")
         await safe_followup(interaction, embed=embed, file=file)
 
-    @pet.command(name="status", description="Check on your cama (art, hunger, mood)")
+    @pet.command(name="status", description="Check on your cama (art, fullness, mood)")
     @app_commands.describe(
         user="Peek at someone else's pet", public="Show to the whole channel"
     )
@@ -464,7 +464,7 @@ class PetCommands(commands.Cog):
             interaction,
             content=(
                 f"{food.emoji} **{outcome.pet.name}** munches the "
-                f"{food.display_name}. Hunger {outcome.old_hunger} → "
+                f"{food.display_name}. Fullness {outcome.old_hunger} → "
                 f"**{outcome.new_hunger}** `{bar}` · {outcome.remaining_qty} left · "
                 f"{outcome.feeds_left_today} feeds left today"
                 f"{flavor_line}"

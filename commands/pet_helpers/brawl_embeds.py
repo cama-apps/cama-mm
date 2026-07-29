@@ -74,7 +74,7 @@ def build_challenge_embed(
             )
         )
     else:
-        embed.set_footer(text="No coin at stake — hunger and honor only.")
+        embed.set_footer(text="No coin at stake — fullness and honor only.")
     file = get_versus_card(
         challenger_pet.species,
         challenger_pet.stage(now).value,
@@ -154,7 +154,7 @@ def build_result_embed(
             description=(
                 ("\n".join(final_log) + "\n\n" if final_log else "")
                 + f"Draw after {rounds} rounds.\n"
-                "No hunger, records, or training XP change.\n\n"
+                "No fullness, records, or training XP change.\n\n"
                 f"⚔️ **{a.name}** {record_a[0]}W-{record_a[1]}L · "
                 f"**{b.name}** {record_b[0]}W-{record_b[1]}L"
             ),
@@ -180,14 +180,14 @@ def build_result_embed(
     loser_delta = settlement["loser_delta"]
 
     winner_gain_line = (
-        f"**{winner.name}** feasts on victory: hunger +{winner_delta}"
+        f"**{winner.name}** feasts on victory: fullness +{winner_delta}"
         if winner_delta > 0
-        else f"**{winner.name}** is too well-fed to want a victory snack"
+        else f"**{winner.name}** gets no fullness from this victory"
     )
     loser_loss_line = (
-        f"**{loser.name}** sulks off: hunger {loser_delta}"
+        f"**{loser.name}** sulks off: fullness {loser_delta}"
         if loser_delta < 0
-        else f"**{loser.name}** was too hungry to lose anything more"
+        else f"**{loser.name}** loses no fullness from this defeat"
     )
     win_rec = records.get(winner.pet_id, (0, 0))
     lose_rec = records.get(loser.pet_id, (0, 0))
@@ -244,7 +244,7 @@ def build_result_embed(
         )
     else:
         embed.set_footer(
-            text="No jopacoins change hands — brawls play for hunger and honor."
+            text="No jopacoins change hands — brawls play for fullness and honor."
         )
     file = get_pet_card(
         winner.species_id,

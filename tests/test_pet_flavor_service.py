@@ -137,6 +137,9 @@ async def test_everyday_events_share_one_cached_llm_bundle():
     assert fed_line.startswith("Snack secured; tiny victory dance initiated.")
     assert spat_line.startswith("The chef has received one very damp review.")
     assert ai_service.call_with_tools.await_count == 1
+    prompt = ai_service.call_with_tools.await_args.kwargs["messages"][1]["content"]
+    assert "Fullness: 72/100" in prompt
+    assert "Hunger:" not in prompt
 
 
 @pytest.mark.asyncio

@@ -595,6 +595,15 @@ class TestMatchHook:
         service.on_match_win([100], TEST_GUILD_ID)
         assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
 
+    def test_win_reports_only_fullness_actually_applied(self, service, clock):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + DAY // 4  # fullness 95
+
+        fed = service.on_match_win([100], TEST_GUILD_ID)
+
+        assert fed[0][1] == 5
+        assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
+
     def test_win_returns_post_top_up_anchors(self, service, clock):
         pet = adopt_common(service, clock)
         clock.now = pet.hatched_at + 2 * DAY  # hunger 60
