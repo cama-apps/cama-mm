@@ -41,7 +41,7 @@ SPITTER_CRIT_PCT = 25  # Rama
 CHILL_MISS_BONUS_PP = 10  # Frostwool: opponent's Stampede misses more
 MOONDRIFT_MISS_BONUS_PP = 15
 RAVENOUS_HEAL_BONUS = 3  # Ravenous: hunker heals a little extra
-SUNSPUN_COUNTER = 9
+SUNSPUN_HEAL_BONUS = 5
 TRAINING_STR_DAMAGE = 1
 TRAINING_STR_STAMPEDE_BONUS = 1
 TRAINING_DEX_CRIT_PP = 2
@@ -178,7 +178,7 @@ BRAWL_TRAITS: dict[str, BrawlTraits] = {
     "moondrift_cama": BrawlTraits(
         dodge_bonus_pp=MOONDRIFT_MISS_BONUS_PP
     ),
-    "sunspun_cama": BrawlTraits(counter_base=SUNSPUN_COUNTER),
+    "sunspun_cama": BrawlTraits(heal_bonus=SUNSPUN_HEAL_BONUS),
 }
 
 
@@ -190,7 +190,7 @@ def brawl_traits(species_id: str) -> BrawlTraits:
 # embed so quirks aren't invisible. Quirkless species are simply absent.
 TRAIT_BLURBS: dict[str, str] = {
     "moondrift_cama": "elusive — enemy Stampedes whiff far more often",
-    "sunspun_cama": "radiant — counters harder while hunkered",
+    "sunspun_cama": "radiant — recovers far more while hunkered",
     "dromedary_cross": "hardy — shrugs a point off every hit",
     "jopacama": "insured — loses less hunger in defeat",
     "pudge_cama": "ravenous — hits harder, takes more, heals extra hunkered",

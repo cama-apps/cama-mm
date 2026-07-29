@@ -184,7 +184,7 @@ class TestBrawlTraits:
 
     def test_new_legendary_species_have_distinct_traits(self):
         assert brawl_traits("moondrift_cama") == BrawlTraits(dodge_bonus_pp=15)
-        assert brawl_traits("sunspun_cama") == BrawlTraits(counter_base=9)
+        assert brawl_traits("sunspun_cama") == BrawlTraits(heal_bonus=5)
 
     def test_trait_blurbs_cover_exactly_the_quirked_species(self):
         """A typo'd or missing TRAIT_BLURBS key fails silently (the quirk
@@ -208,8 +208,11 @@ class TestResolveRound:
 
         assert resolved.b.hp == 100
 
-    def test_sunspun_hunkers_with_a_stronger_counter(self):
-        state = initial_state(mk(name="A"), mk("sunspun_cama", name="B"))
+    def test_sunspun_recovers_more_while_hunkered(self):
+        state = initial_state(
+            mk(name="A"),
+            replace(mk("sunspun_cama", name="B"), hp=70),
+        )
 
         resolved, _ = resolve_round(
             state,
@@ -218,7 +221,8 @@ class TestResolveRound:
             FakeRng([8, 100, 2]),
         )
 
-        assert resolved.a.hp == 89
+        assert resolved.a.hp == 100
+        assert resolved.b.hp == 73
 
     def test_strength_adds_all_attack_damage_and_extra_stampede_damage(self):
         spit_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
