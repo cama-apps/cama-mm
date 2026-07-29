@@ -127,6 +127,7 @@ class ServiceContainer:
         from repositories.package_deal_repository import PackageDealRepository
         from repositories.pairings_repository import PairingsRepository
         from repositories.pet_brawl_repository import PetBrawlRepository
+        from repositories.pet_evolution_repository import PetEvolutionRepository
         from repositories.pet_repository import PetRepository
         from repositories.player_repository import PlayerRepository
         from repositories.player_trivia_repository import PlayerTriviaRepository
@@ -174,6 +175,7 @@ class ServiceContainer:
             "dig_quest_repo": DigQuestRepository(p),
             "mafia_repo": MafiaRepository(p),
             "pet_repo": PetRepository(p),
+            "pet_evolution_repo": PetEvolutionRepository(p),
             "pet_brawl_repo": PetBrawlRepository(p),
         })
 
@@ -563,18 +565,33 @@ class ServiceContainer:
         c = self._components
         if not config.PET_CHANNEL_ID:
             c["pet_service"] = None
+            c["pet_evolution_service"] = None
             c["pet_flavor_service"] = None
             c["pet_brawl_service"] = None
             logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
             return
         from services.pet_brawl_service import PetBrawlService
+        from services.pet_evolution_service import PetEvolutionService
         from services.pet_flavor_service import PetFlavorService
         from services.pet_service import PetService
 
+        c["pet_evolution_service"] = PetEvolutionService(
+            c["pet_evolution_repo"],
+            c["pet_repo"],
+        )
+        for service_name in (
+            "betting_service",
+            "prediction_service",
+            "duel_service",
+        ):
+            service = c.get(service_name)
+            if service is not None:
+                service.pet_evolution_service = c["pet_evolution_service"]
         c["pet_service"] = PetService(
             c["pet_repo"],
             c["player_repo"],
             decay_per_day=config.PET_HUNGER_DECAY_PER_DAY,
+            evolution_service=c["pet_evolution_service"],
         )
         c["pet_flavor_service"] = PetFlavorService(
             ai_service=c.get("ai_service"),
@@ -585,6 +602,7 @@ class ServiceContainer:
         c["pet_brawl_service"] = PetBrawlService(
             c["pet_service"],
             c["pet_brawl_repo"],
+            pet_evolution_service=c["pet_evolution_service"],
         )
 
     def _init_extras(self) -> None:
@@ -687,6 +705,7 @@ class ServiceContainer:
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]
+        bot.pet_evolution_service = c["pet_evolution_service"]
         bot.pet_flavor_service = c["pet_flavor_service"]
         bot.pet_brawl_service = c["pet_brawl_service"]
         bot.player_trivia_service = c["player_trivia_service"]

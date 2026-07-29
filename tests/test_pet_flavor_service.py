@@ -710,6 +710,39 @@ async def test_adoption_hides_species_while_hatching_reveals_it():
 
 
 @pytest.mark.asyncio
+async def test_evolution_flavor_uses_calling_personality_without_changing_facts():
+    ai_service = MagicMock()
+    ai_service.call_with_tools = AsyncMock(
+        return_value=ToolCallResult(
+            tool_name="generate_pet_flavor_line",
+            tool_args={"line": "Blep reads tomorrow in the glittering dust."},
+        )
+    )
+    service = PetFlavorService(
+        ai_service=ai_service,
+        guild_config_repo=None,
+        economy_ledger_repo=MagicMock(get_recent_entries=MagicMock(return_value=[])),
+        player_repo=MagicMock(get_balance=MagicMock(return_value=500)),
+        rng=random.Random(9),
+        clock=lambda: T0,
+    )
+    pet = make_pet(
+        evolved_at=T0,
+        evolution_calling="oracle",
+        evolution_primary="fortune",
+        evolution_secondary="wisdom",
+    )
+
+    line = await service.generate(PetFlavorEvent.EVOLVED, pet=pet)
+
+    assert line == "Blep reads tomorrow in the glittering dust."
+    prompt = ai_service.call_with_tools.await_args.kwargs["messages"][1]["content"]
+    assert "Calling: Oracle" in prompt
+    assert "Fortune" in prompt
+    assert "Wisdom" in prompt
+
+
+@pytest.mark.asyncio
 async def test_adoption_rejects_generated_species_or_rarity_reveal():
     """Adoption copy must not reveal an outcome that the prompt says is hidden."""
     ai_service = MagicMock()

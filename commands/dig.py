@@ -72,6 +72,7 @@ from commands.dig_helpers.route_views import (
     get_route_choice,
 )
 from config import DIG_CHANNEL_ID
+from domain.pet_evolution import PetActivity
 from services.dig._common import MINER_RESPEC_COST
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
@@ -87,6 +88,7 @@ from utils.embed_safety import add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.pet_activity import record_pet_activity
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -337,6 +339,7 @@ class DigCommands(commands.Cog):
         paid: bool = False,
         *,
         player_verified: bool = False,
+        source_key: str | None = None,
     ):
         """Run a deterministic dig, then layer LLM flavor on top.
 
@@ -354,6 +357,22 @@ class DigCommands(commands.Cog):
             guild_id,
             **dig_kwargs,
         )
+        if (
+            isinstance(raw, dict)
+            and raw.get("success", False)
+            and (raw.get("is_first_dig", False) or raw.get("dig_consumed", False))
+        ):
+            await record_pet_activity(
+                self.bot,
+                user_id,
+                guild_id,
+                PetActivity.DIG_COMPLETED,
+                source_key
+                or (
+                    f"dig:{user_id}:{int(time.time())}:"
+                    f"{raw.get('depth_after', 0)}"
+                ),
+            )
         if isinstance(raw, dict) and raw.get("success", False) and "relic_trim_notice" not in raw:
             try:
                 if await asyncio.to_thread(
@@ -523,6 +542,7 @@ class DigCommands(commands.Cog):
                 interaction.user.id,
                 guild_id,
                 player_verified=True,
+                source_key=f"dig:{interaction.id}",
             )
         except Exception as e:
             logger.error("Dig error: %s", e, exc_info=True)
@@ -748,6 +768,7 @@ class DigCommands(commands.Cog):
                 guild_id,
                 paid=True,
                 player_verified=True,
+                source_key=f"dig:{interaction.id}",
             )
         except Exception as e:
             logger.error("Paid dig error: %s", e)

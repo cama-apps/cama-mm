@@ -42,7 +42,9 @@ _PET_COLUMNS = (
     "aegis_used, "
     "hatch_announced_at, died_at, death_cause, death_announced_at, egg_tier, "
     "training_xp, training_str, training_int, training_dex, "
-    "solo_training_sessions, solo_training_recharged_at"
+    "solo_training_sessions, solo_training_recharged_at, "
+    "evolution_started_at, evolution_due_at, evolved_at, evolution_calling, "
+    "evolution_primary, evolution_secondary, evolution_announced_at"
 )
 
 # Shared SET fragment: accumulate care JC into the current week, shifting the
@@ -318,9 +320,10 @@ class PetRepository(BaseRepository):
                     INSERT INTO pets (
                         discord_id, guild_id, name, species, egg_tier, adopted_at,
                         hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
-                        dig_work_units, dig_work_at
+                        dig_work_units, dig_work_at, evolution_started_at,
+                        evolution_due_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?, ?, ?)
                     """,
                     (
                         discord_id,
@@ -333,6 +336,8 @@ class PetRepository(BaseRepository):
                         fee,
                         hatched_at,
                         hatched_at,
+                        hatched_at,
+                        hatched_at + 7 * 86400,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -478,11 +483,40 @@ class PetRepository(BaseRepository):
             if mid_brawl:
                 raise ValueError("in_brawl")
             cursor.execute(
-                "UPDATE pets SET died_at = ?, death_cause = 'sacrifice' "
-                "WHERE pet_id = ? AND guild_id = ? AND discord_id = ? "
-                "AND died_at IS NULL "
-                "AND last_fed_at = ? AND hunger_at_last_fed = ?",
+                """
+                UPDATE pets
+                SET died_at = ?,
+                    death_cause = 'sacrifice',
+                    evolved_at = CASE
+                        WHEN evolution_due_at < ? THEN evolved_at
+                        ELSE NULL
+                    END,
+                    evolution_calling = CASE
+                        WHEN evolution_due_at < ? THEN evolution_calling
+                        ELSE NULL
+                    END,
+                    evolution_primary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_primary
+                        ELSE NULL
+                    END,
+                    evolution_secondary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_secondary
+                        ELSE NULL
+                    END,
+                    evolution_announced_at = CASE
+                        WHEN evolution_due_at < ? THEN evolution_announced_at
+                        ELSE NULL
+                    END
+                WHERE pet_id = ? AND guild_id = ? AND discord_id = ?
+                  AND died_at IS NULL
+                  AND last_fed_at = ? AND hunger_at_last_fed = ?
+                """,
                 (
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
                     now,
                     old_pet_id,
                     gid,
@@ -517,9 +551,10 @@ class PetRepository(BaseRepository):
                     INSERT INTO pets (
                         discord_id, guild_id, name, species, adopted_at,
                         hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
-                        dig_work_units, dig_work_at
+                        dig_work_units, dig_work_at, evolution_started_at,
+                        evolution_due_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?, ?, ?)
                     """,
                     (
                         discord_id,
@@ -531,6 +566,8 @@ class PetRepository(BaseRepository):
                         fee,
                         hatched_at,
                         hatched_at,
+                        hatched_at,
+                        hatched_at + 7 * 86400,
                     ),
                 )
             except sqlite3.IntegrityError as exc:

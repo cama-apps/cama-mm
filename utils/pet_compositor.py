@@ -53,6 +53,7 @@ from utils.pet_drawing import (
     _slot_rng,
     assemble_card,
     render_accessory,
+    render_evolution_motif,
     render_layer,
 )
 
@@ -269,7 +270,15 @@ def _accessory_layer(
 
 
 def compose_pet_card(
-    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
+    species_id: str,
+    stage: str,
+    mood: str,
+    seed: int,
+    accessory: str | None = None,
+    *,
+    calling=None,
+    primary=None,
+    secondary=None,
 ):
     """Compose a pet card from disk components with procedural fallback
     per slot. Returns io.BytesIO of the finished PNG.
@@ -312,4 +321,8 @@ def compose_pet_card(
             SLOT_ORDER.index("front"),
             _accessory_layer(accessory, stage, seed, authoring, geometry, target),
         )
+    layers.insert(
+        SLOT_ORDER.index("front"),
+        render_evolution_motif(calling, primary, secondary, stage, seed),
+    )
     return assemble_card(layers)

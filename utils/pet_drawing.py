@@ -40,6 +40,14 @@ _EYE_WHITE = (250, 250, 252)
 _BLUSH = (242, 148, 158)
 _TEAR = (150, 200, 240)
 
+_INSTINCT_COLORS = {
+    "delving": (192, 132, 74),
+    "competition": (224, 82, 78),
+    "fortune": (242, 196, 72),
+    "fellowship": (232, 116, 164),
+    "wisdom": (151, 112, 214),
+}
+
 # Species palettes: (dark shade, body mid, light wool, accent).
 SPECIES_PALETTES: dict[str, tuple[tuple[int, int, int], ...]] = {
     "common_cama":     ((122, 89, 53),  (181, 141, 96),  (215, 185, 141), (150, 110, 70)),
@@ -508,6 +516,73 @@ def render_accessory(accessory_id: str, stage: str) -> Image.Image | None:
     return img
 
 
+def render_evolution_motif(
+    calling,
+    primary,
+    secondary,
+    stage: str,
+    seed: int,
+) -> Image.Image | None:
+    """Draw a cheap, deterministic adult aura from already-resolved traits."""
+    if calling is None or stage != "adult":
+        return None
+
+    calling_value = str(calling)
+    instinct_values = [
+        str(instinct) for instinct in (primary, secondary) if instinct is not None
+    ]
+    if not instinct_values:
+        instinct_values = list(_INSTINCT_COLORS)
+
+    img = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    rng = random.Random(f"{seed}:evolution:{calling_value}")
+    calling_rank = sum(calling_value.encode("utf-8"))
+
+    # Each calling receives a stable arrangement; hybrids visibly carry both
+    # parent palettes. Marks stay outside the face/body focal area.
+    for index in range(8 + calling_rank % 5):
+        instinct = instinct_values[index % len(instinct_values)]
+        color = _INSTINCT_COLORS[instinct]
+        side = -1 if index % 2 == 0 else 1
+        x = CARD_WIDTH // 2 + side * rng.randint(104, 194)
+        y = rng.randint(46, 210)
+        size = rng.choice((4, 5, 6, 7))
+        alpha_color = (*color, 205)
+        motif = (calling_rank + index) % 4
+        if motif == 0:
+            draw.polygon(
+                [(x, y - size), (x + size, y), (x, y + size), (x - size, y)],
+                fill=alpha_color,
+            )
+        elif motif == 1:
+            draw.line(
+                [(x - size, y), (x, y + size), (x + size, y)],
+                fill=alpha_color,
+                width=3,
+            )
+        elif motif == 2:
+            draw.ellipse(
+                [x - size, y - size, x + size, y + size],
+                outline=alpha_color,
+                width=3,
+            )
+        else:
+            draw.line(
+                [(x - size, y), (x + size, y), (x, y), (x, y - size), (x, y + size)],
+                fill=alpha_color,
+                width=2,
+            )
+
+    # A small two-tone mantle makes the resolved paths part of the pet itself,
+    # while staying compatible with every procedural or authored creature.
+    left = _INSTINCT_COLORS[instinct_values[0]]
+    right = _INSTINCT_COLORS[instinct_values[-1]]
+    draw.arc([190, 126, 322, 244], 18, 162, fill=(*left, 190), width=4)
+    draw.arc([190, 126, 322, 244], 198, 342, fill=(*right, 190), width=4)
+    return img
+
+
 def assemble_card(layers: list[Image.Image | None]) -> io.BytesIO:
     """Stack layers back-to-front onto the card and finish with a vignette."""
     img = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (*_BACKGROUND, 255))
@@ -521,13 +596,25 @@ def assemble_card(layers: list[Image.Image | None]) -> io.BytesIO:
 
 
 def render_pet_card(
-    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
+    species_id: str,
+    stage: str,
+    mood: str,
+    seed: int,
+    accessory: str | None = None,
+    *,
+    calling=None,
+    primary=None,
+    secondary=None,
 ) -> io.BytesIO:
     """Render a deterministic, fully procedural 512x288 pet portrait PNG."""
     layers = [render_layer(slot, species_id, stage, mood, seed) for slot in SLOT_ORDER]
     if accessory:
         # Trinkets sit above the face, below front features (orbs).
         layers.insert(SLOT_ORDER.index("front"), render_accessory(accessory, stage))
+    layers.insert(
+        SLOT_ORDER.index("front"),
+        render_evolution_motif(calling, primary, secondary, stage, seed),
+    )
     return assemble_card(layers)
 
 

@@ -11,6 +11,7 @@ import functools
 import logging
 import math
 import random
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -28,11 +29,13 @@ from config import (
     LOAN_FEE_RATE,
     TIP_FEE_RATE,
 )
+from domain.pet_evolution import PetActivity
 from services.flavor_text_service import FlavorEvent
 from utils.economy_scaling import adjust_generated_jc_reward
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import send_neon_result
+from utils.pet_activity import record_pet_activity
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -223,6 +226,14 @@ async def tip_action(
             ephemeral=True,
         )
         return
+
+    await record_pet_activity(
+        cog.bot,
+        interaction.user.id,
+        guild_id,
+        PetActivity.TIP_SENT,
+        f"tip:{getattr(interaction, 'id', int(time.time()))}",
+    )
 
     # Mana post-effects on tip. These run as separate, non-atomic balance
     # adjustments after the transfer commits; guard each so a failure logs

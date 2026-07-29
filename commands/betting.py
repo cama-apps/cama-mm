@@ -115,6 +115,7 @@ from config import (
     WHEEL_GOLDEN_TOP_N,
     WHEEL_LOSE_PENALTY_COOLDOWN,
 )
+from domain.pet_evolution import PetActivity
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
 from services.dig_data.balance import (
@@ -131,6 +132,7 @@ from services.tip_service import TipService
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.pet_activity import record_pet_activity
 from utils.wheel_drawing import (
     apply_mana_wedge,
     compute_live_golden_wedges,
@@ -911,6 +913,14 @@ class BettingCommands(commands.Cog):
                     },
                 )
             )
+            await record_pet_activity(
+                self.bot,
+                user_id,
+                guild_id,
+                PetActivity.WHEEL_SPUN,
+                f"wheel:{wheel_event_id}",
+                occurred_at=int(now),
+            )
 
             await asyncio.sleep(0.5)
             result_embed = self._wheel_explosion_embed(
@@ -1528,6 +1538,14 @@ class BettingCommands(commands.Cog):
                 event_id=wheel_event_id,
                 outcome_metadata=outcome_metadata,
             )
+        )
+        await record_pet_activity(
+            self.bot,
+            user_id,
+            guild_id,
+            PetActivity.WHEEL_SPUN,
+            f"wheel:{wheel_event_id}",
+            occurred_at=int(now),
         )
 
         if (

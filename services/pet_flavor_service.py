@@ -15,12 +15,15 @@ from typing import Any
 
 from domain.models.pet import PetStage
 from domain.pet_constants import SPECIES, get_accessory, get_species
+from domain.pet_evolution import calling_profile, instinct_label
 from services.ai_service import ToolCallResult
 from utils.flavor_sanitize import sanitize_output as _sanitize_output
 
 CACHE_SECONDS = 12 * 3600
 MAX_CONCURRENT_AI_REQUESTS = 2
 logger = logging.getLogger("cama_bot.services.pet_flavor")
+
+EverydayCacheKey = tuple[int, int, str] | tuple[int, int, str, str]
 
 
 class PetFlavorEvent(StrEnum):
@@ -29,6 +32,7 @@ class PetFlavorEvent(StrEnum):
     FED = "fed"
     SPAT = "spat"
     HATCHED = "hatched"
+    EVOLVED = "evolved"
     DIED = "died"
 
 
@@ -92,6 +96,10 @@ _LIFECYCLE_SYSTEM_PROMPTS = {
         "A Camagotchi just hatched. Celebrate its revealed species with joyful, surprising "
         "humor and a little Dota or camelid flavor."
     ),
+    PetFlavorEvent.EVOLVED: (
+        "A Camagotchi just found its adult calling. Celebrate the calling's personality "
+        "and the two paths that shaped it without suggesting any gameplay advantage."
+    ),
     PetFlavorEvent.DIED: (
         "Write an especially gentle Camagotchi memorial: affectionate, cozy, and softly "
         "funny. Use no financial context or jokes, no blame, and no roast of the owner."
@@ -126,6 +134,10 @@ FALLBACKS: dict[PetFlavorEvent, tuple[str, ...]] = {
     PetFlavorEvent.HATCHED: (
         "Small hooves, enormous plans.",
         "The newest member of the herd would like snacks and applause.",
+    ),
+    PetFlavorEvent.EVOLVED: (
+        "A new calling, fitted perfectly to four small hooves.",
+        "The upbringing is complete. The personality is only getting started.",
     ),
     PetFlavorEvent.DIED: (
         "A small, woolly legend has gone to the great pasture.",
@@ -167,8 +179,8 @@ class PetFlavorService:
         self._rng = rng or random
         self._clock = clock
         self._provider_slots = asyncio.Semaphore(MAX_CONCURRENT_AI_REQUESTS)
-        self._bundle_cache: dict[tuple[int, int, str], _CachedBundle] = {}
-        self._bundle_requests: dict[tuple[int, int, str], asyncio.Task[_CachedBundle]] = {}
+        self._bundle_cache: dict[EverydayCacheKey, _CachedBundle] = {}
+        self._bundle_requests: dict[EverydayCacheKey, asyncio.Task[_CachedBundle]] = {}
         self._lifecycle_cache: dict[tuple[int, int, PetFlavorEvent], _CachedLine] = {}
         self._lifecycle_requests: dict[
             tuple[int, int, PetFlavorEvent], asyncio.Task[_CachedLine]
@@ -196,7 +208,9 @@ class PetFlavorService:
 
     async def _get_everyday_bundle(self, pet, status) -> _CachedBundle:
         stage = self._resolve_stage(pet, status)
-        key = (pet.guild_id, pet.pet_id, stage.value)
+        key: EverydayCacheKey = (pet.guild_id, pet.pet_id, stage.value)
+        if pet.evolution_calling is not None:
+            key += (str(pet.evolution_calling),)
         now = self._clock()
         if not await self._ai_enabled(pet.guild_id):
             return _CachedBundle(
@@ -219,7 +233,7 @@ class PetFlavorService:
 
     async def _build_everyday_bundle(
         self,
-        key: tuple[int, int, str],
+        key: EverydayCacheKey,
         pet,
         status,
         now: float,
@@ -330,6 +344,14 @@ class PetFlavorService:
                     f"Species tier: {species.tier}",
                 ]
             )
+            if pet.evolution_calling is not None:
+                profile = calling_profile(pet.evolution_calling)
+                facts.extend(
+                    [
+                        f"Calling: {profile.label}",
+                        f"Calling personality: {profile.blurb}",
+                    ]
+                )
         if status is not None and stage != PetStage.EGG:
             facts.extend(
                 [
@@ -438,6 +460,20 @@ class PetFlavorService:
                 [
                     f"Age: {pet.age_seconds(lived_until) // 86400} days",
                     f"Cause: {_sanitize_prompt_value(pet.death_cause or 'unknown')}",
+                ]
+            )
+        elif event == PetFlavorEvent.EVOLVED:
+            profile = calling_profile(pet.evolution_calling)
+            instincts = [
+                instinct_label(instinct)
+                for instinct in (pet.evolution_primary, pet.evolution_secondary)
+                if instinct is not None
+            ]
+            facts.extend(
+                [
+                    f"Calling: {profile.label}",
+                    f"Calling personality: {profile.blurb}",
+                    f"Paths: {' + '.join(instincts) if instincts else 'balanced'}",
                 ]
             )
         else:

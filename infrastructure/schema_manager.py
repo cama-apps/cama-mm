@@ -734,6 +734,10 @@ class SchemaManager:
                 "add_pet_training_and_brawl_wagers",
                 self._migration_add_pet_training_and_brawl_wagers,
             ),
+            (
+                "add_pet_evolution",
+                self._migration_add_pet_evolution,
+            ),
             # OpenSkill v3: native bounded contribution, durable non-match
             # rating events, parameter fingerprinting, and atomic replay state.
             (
@@ -5028,6 +5032,69 @@ class SchemaManager:
             ("personality_event_key", "TEXT"),
         ):
             self._add_column_if_not_exists(cursor, "pet_brawls", column, definition)
+
+    def _migration_add_pet_evolution(self, cursor) -> None:
+        """Bounded upbringing aggregates and one-time adult calling state."""
+        for column, column_type in (
+            ("evolution_started_at", "INTEGER"),
+            ("evolution_due_at", "INTEGER"),
+            ("evolved_at", "INTEGER"),
+            ("evolution_calling", "TEXT"),
+            ("evolution_primary", "TEXT"),
+            ("evolution_secondary", "TEXT"),
+            ("evolution_announced_at", "INTEGER"),
+        ):
+            self._add_column_if_not_exists(cursor, "pets", column, column_type)
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_evolution_daily (
+                pet_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                upbringing_day INTEGER NOT NULL
+                    CHECK (upbringing_day BETWEEN 0 AND 6),
+                instinct TEXT NOT NULL,
+                score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 3),
+                first_activity TEXT NOT NULL,
+                first_source_key TEXT NOT NULL,
+                second_activity TEXT,
+                second_source_key TEXT,
+                PRIMARY KEY (pet_id, upbringing_day, instinct)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_evolution_due "
+            "ON pets(evolution_due_at, pet_id) "
+            "WHERE died_at IS NULL AND evolved_at IS NULL "
+            "AND evolution_due_at IS NOT NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_evolution_unannounced "
+            "ON pets(evolved_at, pet_id) "
+            "WHERE evolved_at IS NOT NULL AND evolution_announced_at IS NULL"
+        )
+
+        now = int(time.time())
+        cursor.execute(
+            """
+            UPDATE pets
+            SET evolution_started_at = COALESCE(
+                    evolution_started_at,
+                    CASE WHEN hatched_at > ? THEN hatched_at ELSE ? END
+                ),
+                evolution_due_at = COALESCE(
+                    evolution_due_at,
+                    COALESCE(
+                        evolution_started_at,
+                        CASE WHEN hatched_at > ? THEN hatched_at ELSE ? END
+                    ) + ?
+                )
+            WHERE died_at IS NULL
+              AND (evolution_started_at IS NULL OR evolution_due_at IS NULL)
+            """,
+            (now, now, now, now, 7 * 86400),
+        )
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:
         self._add_column_if_not_exists(

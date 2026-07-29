@@ -50,8 +50,14 @@ from utils.pet_assets import get_altar_card
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
-    from domain.models.pet import DeathNotice, HatchNotice, RefundNotice
+    from domain.models.pet import (
+        DeathNotice,
+        EvolutionNotice,
+        HatchNotice,
+        RefundNotice,
+    )
     from services.pet_brawl_service import PetBrawlService
+    from services.pet_evolution_service import PetEvolutionService
     from services.pet_flavor_service import PetFlavorService
     from services.pet_service import PetService
 
@@ -83,11 +89,13 @@ class PetCommands(commands.Cog):
         pet_service: PetService,
         pet_brawl_service: PetBrawlService,
         pet_flavor_service: PetFlavorService | None = None,
+        pet_evolution_service: PetEvolutionService | None = None,
     ):
         self.bot = bot
         self.pet_service = pet_service
         self.pet_brawl_service = pet_brawl_service
         self.pet_flavor_service = pet_flavor_service
+        self.pet_evolution_service = pet_evolution_service
         # In-memory battle state per active brawl (see brawl_views docstring).
         self._brawl_sessions: dict[int, PetBrawlSession] = {}
 
@@ -851,8 +859,19 @@ class PetCommands(commands.Cog):
         camadex = await asyncio.to_thread(
             self.pet_service.camadex, target.id, guild_id
         )
+        callingdex = None
+        pet_evolution_service = getattr(self, "pet_evolution_service", None)
+        if pet_evolution_service is not None:
+            callingdex = await asyncio.to_thread(
+                pet_evolution_service.callingdex,
+                target.id,
+                guild_id,
+            )
         embed = pet_embeds.build_graveyard_embed(
-            result.value, target.display_name, camadex=camadex
+            result.value,
+            target.display_name,
+            camadex=camadex,
+            callingdex=callingdex,
         )
         await safe_followup(interaction, embed=embed)
 
@@ -901,6 +920,14 @@ class PetCommands(commands.Cog):
                 logger.exception(
                     "Hatch delivery failed for pet %s; will retry", hatch.pet.pet_id
                 )
+        for evolution in result.get("evolutions", []):
+            try:
+                await self._deliver_evolution(evolution)
+            except Exception:
+                logger.exception(
+                    "Evolution delivery failed for pet %s; will retry",
+                    evolution.pet.pet_id,
+                )
         for death in result["deaths"]:
             try:
                 await self._deliver_death(death)
@@ -948,6 +975,27 @@ class PetCommands(commands.Cog):
                 pass  # permanent: mark below so we don't loop forever
         await asyncio.to_thread(self.pet_service.mark_hatch_announced, pet)
         await self._rearm_warning(pet)
+
+    async def _deliver_evolution(self, notice: EvolutionNotice) -> None:
+        pet = notice.pet
+        channel = self._pet_channel(pet.guild_id)
+        if channel is not None:
+            flavor_text = await self._generate_pet_flavor(
+                PetFlavorEvent.EVOLVED,
+                pet,
+            )
+            embed, file = await asyncio.to_thread(
+                pet_embeds.build_evolution_embed,
+                pet,
+                flavor_text=flavor_text,
+            )
+            try:
+                await channel.send(embed=embed, file=file)
+            except discord.Forbidden:
+                pass
+        pet_evolution_service = getattr(self, "pet_evolution_service", None)
+        if pet_evolution_service is not None:
+            await asyncio.to_thread(pet_evolution_service.mark_announced, pet)
 
     async def _deliver_death(self, notice: DeathNotice) -> None:
         pet = notice.pet
@@ -1032,5 +1080,6 @@ async def setup(bot: commands.Bot):
             pet_service,
             pet_brawl_service,
             getattr(bot, "pet_flavor_service", None),
+            getattr(bot, "pet_evolution_service", None),
         )
     )
