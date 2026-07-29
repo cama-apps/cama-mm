@@ -775,7 +775,7 @@ def test_wheel_hazard_ceilings_are_ten_percent_stronger_again():
     """Hazard floors stay stable while each current ceiling increases by 10%."""
     assert (WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX) == (15, 32)
     assert (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) == (10, 25)
-    assert pytest.approx((0.02, 0.057)) == (LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
+    assert pytest.approx((0.02, 0.0627)) == (LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
 
     banana_mean = (WHEEL_BANANA_PEEL_LOSS_MIN + WHEEL_BANANA_PEEL_LOSS_MAX) / 2
     bomb_mean = (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN + WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) / 2
@@ -784,6 +784,7 @@ def test_wheel_hazard_ceilings_are_ten_percent_stronger_again():
     assert round(23 * 1.10) == WHEEL_BOMB_OMB_VICTIM_LOSS_MAX
     assert pytest.approx(-banana_mean) == WHEEL_BANANA_PEEL_EST_EV
     assert pytest.approx(-bomb_mean * WHEEL_BOMB_OMB_VICTIM_COUNT) == WHEEL_BOMB_OMB_EST_EV
+    assert pytest.approx(-65.0) == WHEEL_LIGHTNING_BOLT_EST_EV
 
 
 def test_wheel_expected_value_matches_config():
@@ -1177,9 +1178,9 @@ async def test_wheel_blue_shell_steals_from_richest():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.get_leaderboard = MagicMock(return_value=[richest])
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 46,
-        "thief_new_balance": 96,
-        "victim_new_balance": 454,
+        "amount": 50,
+        "thief_new_balance": 100,
+        "victim_new_balance": 450,
     })
 
     message = MagicMock()
@@ -1203,27 +1204,27 @@ async def test_wheel_blue_shell_steals_from_richest():
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
             # First call: wedge selection, second call: raised flat upper bound.
-            mock_randint.side_effect = [blue_shell_idx, 26]
+            mock_randint.side_effect = [blue_shell_idx, 29]
             with patch(
-                "commands.betting.random.uniform", return_value=0.0924
+                "commands.betting.random.uniform", return_value=0.1016
             ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
 
-    assert mock_randint.call_args_list[-1].args == (4, 26)
-    mock_uniform.assert_called_once_with(0.02, 0.0924)
+    assert mock_randint.call_args_list[-1].args == (4, 29)
+    mock_uniform.assert_called_once_with(0.02, 0.1016)
 
     # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
-    # Neutral scaling preserves max(pct=46, flat=26) at 46 JC.
+    # Neutral scaling preserves max(pct=50, flat=29) at 50 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
-        amount=46,
+        amount=50,
     )
 
 
@@ -1380,26 +1381,27 @@ async def test_wheel_lightning_bolt_taxes_all_players():
 
     with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint", return_value=bolt_idx):
-            with patch("commands.betting.random.uniform", return_value=0.02):  # 2% tax
+            with patch(
+                "commands.betting.random.uniform", return_value=0.0627
+            ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await cmds.gamba.callback(cmds, interaction)
 
     # Should call adjust_balance for each positive-balance player
-    # Neutral scaling preserves Alice: 20, Bob: 10, Carol: 2.
+    # Neutral scaling preserves Alice: 62, Bob: 31, Carol: 6.
     adjust_calls = player_service.adjust_balance.call_args_list
     assert len(adjust_calls) == 3
-    # Check each call is negative (tax)
-    for call in adjust_calls:
-        assert call[0][2] < 0, "Tax should be negative"
+    assert [call.args[2] for call in adjust_calls] == [-62, -31, -6]
+    mock_uniform.assert_called_once_with(0.02, 0.0627)
 
-    # The Reserve receives the neutral-scale total (20 + 10 + 2 = 32).
+    # The Reserve receives the neutral-scale total (62 + 31 + 6 = 99).
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 32)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 99)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
     assert log_kwargs["outcome_code"] == "LIGHTNING_BOLT"
-    assert log_kwargs["outcome_metadata"]["lightning_total"] == 32
+    assert log_kwargs["outcome_metadata"]["lightning_total"] == 99
     assert log_kwargs["outcome_metadata"]["lightning_count"] == 3
 
 
