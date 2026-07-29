@@ -26,6 +26,7 @@ from config import (
     PREDICTION_SPREAD_TICKS,
     PREDICTION_TICK_SIZE,
 )
+from domain.pet_evolution import PetActivity
 from repositories.interfaces import IPredictionRepository
 from repositories.player_repository import PlayerRepository
 
@@ -49,6 +50,7 @@ class PredictionService:
         bankruptcy_service=None,
         economy_event_service=None,
         vanity_tax_service=None,
+        pet_evolution_service=None,
     ):
         self.prediction_repo = prediction_repo
         self.player_repo = player_repo
@@ -56,6 +58,7 @@ class PredictionService:
         self.bankruptcy_service = bankruptcy_service
         self.economy_event_service = economy_event_service
         self.vanity_tax_service = vanity_tax_service
+        self.pet_evolution_service = pet_evolution_service
 
     def _get_prediction_effects(self, guild_id: int) -> tuple[float, float, int]:
         """Return payout/depth/spread modifiers for the guild's daily event.
@@ -304,21 +307,36 @@ class PredictionService:
     def buy_contracts(
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict[str, Any]:
-        return self.prediction_repo.buy_contracts_atomic(
+        result = self.prediction_repo.buy_contracts_atomic(
             prediction_id=prediction_id,
             discord_id=discord_id,
             side=side,
             contracts=contracts,
         )
+        self._record_trade_activity(discord_id, result)
+        return result
 
     def sell_contracts(
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict[str, Any]:
-        return self.prediction_repo.sell_contracts_atomic(
+        result = self.prediction_repo.sell_contracts_atomic(
             prediction_id=prediction_id,
             discord_id=discord_id,
             side=side,
             contracts=contracts,
+        )
+        self._record_trade_activity(discord_id, result)
+        return result
+
+    def _record_trade_activity(self, discord_id: int, trade: dict[str, Any]) -> None:
+        if self.pet_evolution_service is None:
+            return
+        self.pet_evolution_service.record_activity(
+            discord_id,
+            int(trade["guild_id"]),
+            PetActivity.PREDICTION_TRADED,
+            f"prediction-trade:{int(trade['trade_id'])}",
+            occurred_at=int(trade["trade_time"]),
         )
 
     def get_market_view(

@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from domain.pet_constants import ADULT_AGE_SECONDS
 from infrastructure.schema_manager import SchemaManager
 
 
@@ -258,6 +259,151 @@ class TestPetMigrations:
         with _connect(repo_db_path) as conn:
             cursor = conn.cursor()
             manager._migration_create_pet_brawls(cursor)
+            conn.commit()
+
+    def test_training_and_wager_columns_default_for_legacy_rows(self, repo_db_path):
+        with _connect(repo_db_path) as conn:
+            _insert_pet(conn, 30, 100)
+            conn.execute(
+                "INSERT INTO pet_brawls (guild_id, channel_id, challenger_id, "
+                "recipient_id, challenger_pet_id, status, created_at, expires_at) "
+                "VALUES (100, 5, 30, 31, 10, 'pending', 1000, 1300)"
+            )
+
+            pet = conn.execute(
+                "SELECT training_xp, training_str, training_int, training_dex, "
+                "solo_training_sessions, solo_training_recharged_at "
+                "FROM pets WHERE discord_id = 30 AND guild_id = 100"
+            ).fetchone()
+            brawl = conn.execute(
+                "SELECT wager, fee, challenger_xp_delta, recipient_xp_delta, "
+                "challenger_stat_gain, recipient_stat_gain, personality_event_key "
+                "FROM pet_brawls WHERE challenger_id = 30 AND guild_id = 100"
+            ).fetchone()
+
+            assert tuple(pet) == (0, 0, 0, 0, 3, None)
+            assert tuple(brawl) == (0, 0, 0, 0, None, None, None)
+
+    def test_pet_evolution_schema_is_bounded_and_due_lookup_is_indexed(
+        self, repo_db_path
+    ):
+        with _connect(repo_db_path) as conn:
+            pet_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(pets)")
+            }
+            assert {
+                "evolution_started_at",
+                "evolution_due_at",
+                "evolved_at",
+                "evolution_calling",
+                "evolution_primary",
+                "evolution_secondary",
+                "evolution_announced_at",
+            } <= pet_columns
+
+            daily_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(pet_evolution_daily)")
+            }
+            assert {
+                "pet_id",
+                "guild_id",
+                "upbringing_day",
+                "instinct",
+                "score",
+                "first_activity",
+                "first_source_key",
+                "second_activity",
+                "second_source_key",
+            } <= daily_columns
+
+            indexes = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            assert "idx_pets_evolution_due" in indexes
+            assert "idx_pets_evolution_unannounced" in indexes
+
+            plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT pet_id FROM pets "
+                "WHERE died_at IS NULL AND evolved_at IS NULL "
+                "AND evolution_due_at <= ?",
+                (2_000_000_000,),
+            ).fetchall()
+            assert any(
+                "idx_pets_evolution_due" in row["detail"] for row in plan
+            )
+            announcement_plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT pet_id FROM pets "
+                "WHERE evolved_at IS NOT NULL "
+                "AND evolution_announced_at IS NULL "
+                "ORDER BY evolved_at, pet_id"
+            ).fetchall()
+            assert any(
+                "idx_pets_evolution_unannounced" in row["detail"]
+                for row in announcement_plan
+            )
+
+    def test_pet_evolution_migration_grandfathers_only_living_pets(
+        self, repo_db_path
+    ):
+        manager = SchemaManager(repo_db_path)
+        before = int(__import__("time").time())
+        future_hatch = before + 3 * 86400
+        with _connect(repo_db_path) as conn:
+            _insert_pet(
+                conn,
+                31,
+                100,
+                adopted_at=1000,
+                hatched_at=2000,
+                last_fed_at=2000,
+            )
+            _insert_pet(
+                conn,
+                32,
+                100,
+                adopted_at=before,
+                hatched_at=future_hatch,
+                last_fed_at=future_hatch,
+            )
+            _insert_pet(
+                conn,
+                33,
+                100,
+                died_at=3000,
+                death_cause="starvation",
+            )
+
+            manager._migration_add_pet_evolution(conn.cursor())
+            conn.commit()
+            after = int(__import__("time").time())
+
+            rows = {
+                row["discord_id"]: row
+                for row in conn.execute(
+                    "SELECT discord_id, evolution_started_at, evolution_due_at "
+                    "FROM pets WHERE discord_id IN (31, 32, 33)"
+                )
+            }
+
+        assert before <= rows[31]["evolution_started_at"] <= after
+        assert (
+            rows[31]["evolution_due_at"]
+            == rows[31]["evolution_started_at"] + ADULT_AGE_SECONDS
+        )
+        assert rows[32]["evolution_started_at"] == future_hatch
+        assert rows[32]["evolution_due_at"] == future_hatch + ADULT_AGE_SECONDS
+        assert rows[33]["evolution_started_at"] is None
+        assert rows[33]["evolution_due_at"] is None
+
+    def test_pet_evolution_migration_is_idempotent(self, repo_db_path):
+        manager = SchemaManager(repo_db_path)
+        with _connect(repo_db_path) as conn:
+            manager._migration_add_pet_evolution(conn.cursor())
+            manager._migration_add_pet_evolution(conn.cursor())
             conn.commit()
 
     def test_reminder_preferences_pet_column(self, repo_db_path):

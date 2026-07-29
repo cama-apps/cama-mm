@@ -39,6 +39,13 @@ BASE_CRIT_PCT = 10  # crit = double damage
 SPITTER_CRIT_PCT = 25  # Rama
 CHILL_MISS_BONUS_PP = 10  # Frostwool: opponent's Stampede misses more
 RAVENOUS_HEAL_BONUS = 3  # Ravenous: hunker heals a little extra
+TRAINING_STR_DAMAGE = 1
+TRAINING_STR_STAMPEDE_BONUS = 1
+TRAINING_DEX_CRIT_PP = 2
+TRAINING_DEX_SPIT_CRIT_BONUS_PP = 2
+TRAINING_DEX_DODGE_PP = 2
+TRAINING_INT_MITIGATION = 1
+TRAINING_INT_HUNKER_BONUS = 1
 
 
 class PetBrawlMove(StrEnum):
@@ -188,6 +195,9 @@ class Duelist:
     tier: str
     is_adult: bool
     power: int
+    training_str: int
+    training_int: int
+    training_dex: int
     max_hp: int
     hp: int
     shield_available: bool  # per-brawl Shellback save; never burns the real Aegis
@@ -211,6 +221,9 @@ def build_duelist(
     hunger: int,
     happy: bool,
     aegis_used: int,
+    training_str: int = 0,
+    training_int: int = 0,
+    training_dex: int = 0,
 ) -> Duelist:
     """Snapshot a pet into a duelist. `happy` = mood HAPPY or pampered."""
     species = get_species(species_id)
@@ -226,6 +239,9 @@ def build_duelist(
         tier=species.tier,
         is_adult=is_adult,
         power=power,
+        training_str=training_str,
+        training_int=training_int,
+        training_dex=training_dex,
         max_hp=max_hp,
         hp=hp,
         shield_available=species.has_aegis and not aegis_used,
@@ -249,31 +265,56 @@ def _attack_damage(
     if move is PetBrawlMove.HUNKER:
         return 0, False, False
     if move is PetBrawlMove.STAMPEDE:
-        miss_pct = STAMPEDE_MISS_PCT + dfn.dodge_bonus_pp
+        miss_pct = (
+            STAMPEDE_MISS_PCT
+            + dfn.dodge_bonus_pp
+            + defender.training_dex * TRAINING_DEX_DODGE_PP
+        )
         if rng.randint(1, 100) <= miss_pct:
             return 0, False, False
         low, high = STAMPEDE_DMG
     else:
         low, high = SPIT_DMG
-    dmg = rng.randint(low, high) + attacker.power
-    crit = rng.randint(1, 100) <= atk.crit_pct
+    strength_damage = attacker.training_str * TRAINING_STR_DAMAGE
+    if move is PetBrawlMove.STAMPEDE:
+        strength_damage += (
+            attacker.training_str * TRAINING_STR_STAMPEDE_BONUS
+        )
+    dmg = rng.randint(low, high) + attacker.power + strength_damage
+    crit_pct = atk.crit_pct + attacker.training_dex * TRAINING_DEX_CRIT_PP
+    if move is PetBrawlMove.SPIT:
+        crit_pct += (
+            attacker.training_dex * TRAINING_DEX_SPIT_CRIT_BONUS_PP
+        )
+    crit = rng.randint(1, 100) <= crit_pct
     if crit:
         dmg *= 2
     dmg += atk.damage_dealt_bonus  # Ravenous hits harder...
     if defender_hunkers:
         dmg = -(-dmg // 2)  # ceil half
-    dmg += dfn.damage_taken_mod  # ...and takes more; Dune is hardy
-    if dfn.damage_taken_mod < 0:
+    dmg += (
+        dfn.damage_taken_mod
+        - defender.training_int * TRAINING_INT_MITIGATION
+    )
+    if dfn.damage_taken_mod < 0 or defender.training_int:
         dmg = max(1, dmg)
     return dmg, True, crit
 
 
 def _counter_damage(hunkerer: Duelist) -> int:
-    return brawl_traits(hunkerer.species_id).counter_base + hunkerer.power
+    return (
+        brawl_traits(hunkerer.species_id).counter_base
+        + hunkerer.power
+        + hunkerer.training_int * TRAINING_INT_HUNKER_BONUS
+    )
 
 
 def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
-    return rng.randint(*HUNKER_HEAL) + brawl_traits(hunkerer.species_id).heal_bonus
+    return (
+        rng.randint(*HUNKER_HEAL)
+        + brawl_traits(hunkerer.species_id).heal_bonus
+        + hunkerer.training_int * TRAINING_INT_HUNKER_BONUS
+    )
 
 
 def _hp_pct(d: Duelist) -> int:

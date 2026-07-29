@@ -22,6 +22,7 @@ from config import (
     OPENSKILL_SHUFFLE_CHANCE,
     STREAMING_BONUS,
 )
+from domain.pet_evolution import PetActivity
 from services.jopat_post_match import JopatPostMatchContext
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -41,6 +42,7 @@ from utils.interaction_safety import safe_defer, update_lobby_message_closed
 from utils.match_views import EnrichedMatchView
 from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.pet_activity import record_pet_activity
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.region import REGION_NAMES, resolve_region, summarize_region
@@ -1288,6 +1290,8 @@ class MatchCommands(commands.Cog):
             # Cancel any pending betting reminders when recording completes (success or failure)
             self._cancel_betting_tasks(guild_id)
 
+        await self._record_pet_match_activity(guild_id, record_result)
+
         # Finalize lobby thread as soon as the match is committed. Everything
         # below this point is presentation/notification work and may fail
         # independently of the persisted match result.
@@ -1354,7 +1358,7 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         record_result: dict,
     ) -> None:
-        """Feed the winners' pets and post a snack line. Never blocks recording."""
+        """Feed the winners' pets and post a snack line."""
         pet_service = getattr(self.bot, "pet_service", None)
         winning_ids = list(record_result.get("winning_player_ids", []) or [])
         if pet_service is None or not winning_ids:
@@ -1382,6 +1386,36 @@ class MatchCommands(commands.Cog):
                     await pet_cog._rearm_warning(pet)
         except Exception:
             logger.exception("Pet match hook failed; match recording unaffected")
+
+    async def _record_pet_match_activity(
+        self,
+        guild_id: int | None,
+        record_result: dict,
+    ) -> None:
+        """Capture committed participation before fallible presentation work."""
+        match_id = record_result.get("match_id")
+        participant_ids = list(
+            dict.fromkeys(
+                [
+                    *(record_result.get("winning_player_ids", []) or []),
+                    *(record_result.get("losing_player_ids", []) or []),
+                ]
+            )
+        )
+        try:
+            if match_id is not None:
+                for participant_id in participant_ids:
+                    await record_pet_activity(
+                        self.bot,
+                        participant_id,
+                        guild_id,
+                        PetActivity.MATCH_RECORDED,
+                        f"match:{match_id}",
+                    )
+        except Exception:
+            logger.exception(
+                "Pet match activity capture failed; match recording unaffected"
+            )
 
     async def _send_record_announcement(
         self,

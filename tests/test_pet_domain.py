@@ -51,6 +51,17 @@ def make_pet(**overrides) -> Pet:
     return Pet(**defaults)
 
 
+def test_training_fields_default_to_an_untrained_pet():
+    pet = make_pet()
+
+    assert pet.training_xp == 0
+    assert pet.training_str == 0
+    assert pet.training_int == 0
+    assert pet.training_dex == 0
+    assert pet.solo_training_sessions == 3
+    assert pet.solo_training_recharged_at is None
+
+
 class TestHungerMath:
     def test_full_pet_loses_20_points_per_day(self):
         pet = make_pet()

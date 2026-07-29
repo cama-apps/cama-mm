@@ -20,8 +20,17 @@ import logging
 import sqlite3
 
 from domain.models.pet import Pet, RefundNotice, RefundPayout
-from domain.pet_constants import UNHATCHED_SPECIES
+from domain.pet_constants import (
+    BRAWL_TRAINING_LEVEL_CAP,
+    BRAWL_TRAINING_STAT_CAP,
+    BRAWL_TRAINING_XP_CAP,
+    BRAWL_XP_PER_LEVEL,
+    SOLO_TRAINING_SESSION_CAP,
+    SOLO_TRAINING_XP_PER_SESSION,
+    UNHATCHED_SPECIES,
+)
 from repositories.base_repository import BaseRepository, safe_json_loads
+from utils.game_date import game_day_start_ts
 
 logger = logging.getLogger("cama_bot.repositories.pet")
 
@@ -31,7 +40,11 @@ _PET_COLUMNS = (
     "feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, "
     "prev_week_key, pampered_until, accessory, dig_work_units, dig_work_at, "
     "aegis_used, "
-    "hatch_announced_at, died_at, death_cause, death_announced_at, egg_tier"
+    "hatch_announced_at, died_at, death_cause, death_announced_at, egg_tier, "
+    "training_xp, training_str, training_int, training_dex, "
+    "solo_training_sessions, solo_training_recharged_at, "
+    "evolution_started_at, evolution_due_at, evolved_at, evolution_calling, "
+    "evolution_primary, evolution_secondary, evolution_announced_at"
 )
 
 # Shared SET fragment: accumulate care JC into the current week, shifting the
@@ -77,6 +90,21 @@ def write_hunger_anchor(
 class PetRepository(BaseRepository):
     # --- reads ---
 
+    @staticmethod
+    def available_solo_training_sessions(pet: Pet, now: int) -> int:
+        sessions = pet.solo_training_sessions
+        if pet.solo_training_recharged_at is None:
+            return min(SOLO_TRAINING_SESSION_CAP, sessions)
+        elapsed_days = max(
+            0,
+            (
+                game_day_start_ts(now)
+                - game_day_start_ts(pet.solo_training_recharged_at)
+            )
+            // 86400,
+        )
+        return min(SOLO_TRAINING_SESSION_CAP, sessions + elapsed_days)
+
     def get_active_pet(self, discord_id: int, guild_id: int | None) -> Pet | None:
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -95,6 +123,97 @@ class PetRepository(BaseRepository):
                 (pet_id, gid),
             ).fetchone()
         return _row_to_pet(row) if row else None
+
+    def train_solo_atomic(
+        self,
+        pet_id: int,
+        guild_id: int | None,
+        *,
+        now: int,
+        proposed_stat: str | None,
+    ) -> dict:
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets "
+                "WHERE pet_id = ? AND guild_id = ?",
+                (pet_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_pet")
+            pet = _row_to_pet(row)
+            if pet.died_at is not None:
+                raise ValueError("pet_dead")
+            if now < pet.hatched_at:
+                raise ValueError("pet_egg")
+            if pet.training_xp >= BRAWL_TRAINING_XP_CAP:
+                raise ValueError("training_complete")
+            in_brawl = cursor.execute(
+                "SELECT 1 FROM pet_brawls WHERE guild_id = ? "
+                "AND status = 'active' "
+                "AND (challenger_id = ? OR recipient_id = ?) LIMIT 1",
+                (gid, pet.discord_id, pet.discord_id),
+            ).fetchone()
+            if in_brawl:
+                raise ValueError("in_brawl")
+
+            available = self.available_solo_training_sessions(pet, now)
+            if available <= 0:
+                raise ValueError("no_training_sessions")
+            sessions_used = min(
+                available,
+                (BRAWL_TRAINING_XP_CAP - pet.training_xp)
+                // SOLO_TRAINING_XP_PER_SESSION,
+            )
+            xp_delta = sessions_used * SOLO_TRAINING_XP_PER_SESSION
+            new_xp = pet.training_xp + xp_delta
+            stats = {
+                "str": pet.training_str,
+                "int": pet.training_int,
+                "dex": pet.training_dex,
+            }
+            stat_gain = None
+            if (
+                new_xp // BRAWL_XP_PER_LEVEL
+                > pet.training_xp // BRAWL_XP_PER_LEVEL
+                and sum(stats.values()) < BRAWL_TRAINING_LEVEL_CAP
+            ):
+                eligible = [
+                    stat
+                    for stat, value in stats.items()
+                    if value < BRAWL_TRAINING_STAT_CAP
+                ]
+                if eligible:
+                    stat_gain = (
+                        proposed_stat if proposed_stat in eligible else eligible[0]
+                    )
+                    stats[stat_gain] += 1
+            sessions_available = available - sessions_used
+            cursor.execute(
+                "UPDATE pets SET training_xp = ?, training_str = ?, "
+                "training_int = ?, training_dex = ?, solo_training_sessions = ?, "
+                "solo_training_recharged_at = ? "
+                "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL",
+                (
+                    new_xp,
+                    stats["str"],
+                    stats["int"],
+                    stats["dex"],
+                    sessions_available,
+                    now,
+                    pet_id,
+                    gid,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("pet_dead")
+        return {
+            "sessions_used": sessions_used,
+            "sessions_available": sessions_available,
+            "xp_delta": xp_delta,
+            "stat_gain": stat_gain,
+        }
 
     def count_dead_pets(self, discord_id: int, guild_id: int | None) -> int:
         gid = self.normalize_guild_id(guild_id)
@@ -201,9 +320,10 @@ class PetRepository(BaseRepository):
                     INSERT INTO pets (
                         discord_id, guild_id, name, species, egg_tier, adopted_at,
                         hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
-                        dig_work_units, dig_work_at
+                        dig_work_units, dig_work_at, evolution_started_at,
+                        evolution_due_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?, ?, ?)
                     """,
                     (
                         discord_id,
@@ -216,6 +336,8 @@ class PetRepository(BaseRepository):
                         fee,
                         hatched_at,
                         hatched_at,
+                        hatched_at,
+                        hatched_at + 7 * 86400,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -361,11 +483,40 @@ class PetRepository(BaseRepository):
             if mid_brawl:
                 raise ValueError("in_brawl")
             cursor.execute(
-                "UPDATE pets SET died_at = ?, death_cause = 'sacrifice' "
-                "WHERE pet_id = ? AND guild_id = ? AND discord_id = ? "
-                "AND died_at IS NULL "
-                "AND last_fed_at = ? AND hunger_at_last_fed = ?",
+                """
+                UPDATE pets
+                SET died_at = ?,
+                    death_cause = 'sacrifice',
+                    evolved_at = CASE
+                        WHEN evolution_due_at < ? THEN evolved_at
+                        ELSE NULL
+                    END,
+                    evolution_calling = CASE
+                        WHEN evolution_due_at < ? THEN evolution_calling
+                        ELSE NULL
+                    END,
+                    evolution_primary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_primary
+                        ELSE NULL
+                    END,
+                    evolution_secondary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_secondary
+                        ELSE NULL
+                    END,
+                    evolution_announced_at = CASE
+                        WHEN evolution_due_at < ? THEN evolution_announced_at
+                        ELSE NULL
+                    END
+                WHERE pet_id = ? AND guild_id = ? AND discord_id = ?
+                  AND died_at IS NULL
+                  AND last_fed_at = ? AND hunger_at_last_fed = ?
+                """,
                 (
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
                     now,
                     old_pet_id,
                     gid,
@@ -400,9 +551,10 @@ class PetRepository(BaseRepository):
                     INSERT INTO pets (
                         discord_id, guild_id, name, species, adopted_at,
                         hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
-                        dig_work_units, dig_work_at
+                        dig_work_units, dig_work_at, evolution_started_at,
+                        evolution_due_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?, ?, ?)
                     """,
                     (
                         discord_id,
@@ -414,6 +566,8 @@ class PetRepository(BaseRepository):
                         fee,
                         hatched_at,
                         hatched_at,
+                        hatched_at,
+                        hatched_at + 7 * 86400,
                     ),
                 )
             except sqlite3.IntegrityError as exc:

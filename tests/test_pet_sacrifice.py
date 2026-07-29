@@ -13,9 +13,11 @@ from domain.pet_constants import (
     SACRIFICE_TIER_WEIGHTS,
 )
 from repositories.pet_brawl_repository import PetBrawlRepository
+from repositories.pet_evolution_repository import PetEvolutionRepository
 from repositories.pet_repository import PetRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
+from services.pet_evolution_service import PetEvolutionService
 from services.pet_service import PetService
 from tests.conftest import TEST_GUILD_ID
 
@@ -206,6 +208,45 @@ class TestService:
         result = service.sacrifice(100, TEST_GUILD_ID, "Rebirth")
         assert result.success, result.error
         assert result.value["fee"] == ADOPTION_FEES[1]
+
+    def test_sacrifice_at_evolution_due_does_not_evolve(
+        self,
+        repo_db_path,
+        pet_repo,
+        player_repo,
+        clock,
+        monkeypatch,
+    ):
+        pet = make_living_pet(pet_repo, clock)
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.execute(
+                """
+                UPDATE pets
+                SET evolution_started_at = ?, evolution_due_at = ?
+                WHERE pet_id = ?
+                """,
+                (clock.now - 7 * DAY, clock.now, pet.pet_id),
+            )
+
+        evolution_repo = PetEvolutionRepository(repo_db_path)
+        evolution_service = PetEvolutionService(evolution_repo, pet_repo)
+        service = PetService(
+            pet_repo,
+            player_repo,
+            decay_per_day=20,
+            evolution_service=evolution_service,
+        )
+        monkeypatch.setattr(service, "_now", clock)
+        monkeypatch.setattr(service, "_roll_species_tiered", lambda _weights: "rama")
+
+        result = service.sacrifice(100, TEST_GUILD_ID, "Rebirth")
+
+        assert result.success, result.error
+        dead_pet = result.value["dead_pet"]
+        assert dead_pet.died_at == clock.now
+        assert dead_pet.evolved_at is None
+        assert dead_pet.evolution_calling is None
+        assert evolution_service.get_unannounced() == []
 
     def test_weights_follow_tier_and_stage(self, service, pet_repo, clock):
         make_living_pet(pet_repo, clock, species="invoker_cama")

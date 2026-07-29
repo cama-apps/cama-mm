@@ -9,6 +9,7 @@ from domain.models.duel import (
     DuelResolution,
     DuelTrial,
 )
+from domain.pet_evolution import PetActivity
 
 MIN_WAGER = 500
 MAX_WAGER = 1000
@@ -20,9 +21,15 @@ RECIPIENT_COOLDOWN_SECONDS = 7 * 86400
 class DuelService:
     """Route duel use cases through the atomic challenge repository."""
 
-    def __init__(self, repo, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        repo,
+        clock: Callable[[], float] = time.time,
+        pet_evolution_service=None,
+    ):
         self.repo = repo
         self._clock = clock
+        self.pet_evolution_service = pet_evolution_service
 
     def issue(
         self,
@@ -83,13 +90,30 @@ class DuelService:
             DuelResolution.RECIPIENT_VICTORY: challenge.recipient_id,
             DuelResolution.VOID: None,
         }[resolution]
-        return self.repo.resolve_atomic(
+        now = int(self._clock())
+        resolved = self.repo.resolve_atomic(
             challenge_id,
             guild_id,
             winner_id,
-            int(self._clock()),
+            now,
             actor_id,
         )
+        if (
+            resolution is not DuelResolution.VOID
+            and self.pet_evolution_service is not None
+        ):
+            for participant_id in (
+                challenge.challenger_id,
+                challenge.recipient_id,
+            ):
+                self.pet_evolution_service.record_activity(
+                    participant_id,
+                    guild_id,
+                    PetActivity.DUEL_COMPLETED,
+                    f"duel:{challenge.challenge_id}",
+                    occurred_at=now,
+                )
+        return resolved
 
     def bind_message(self, challenge_id, guild_id, message_id):
         return self.repo.bind_message(challenge_id, guild_id, message_id)

@@ -1,6 +1,6 @@
 """Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
 
-Command surface is the /pet group (11 subcommands). A 10-minute background
+Command surface is the /pet group (12 subcommands). A 10-minute background
 sweep detects hatches and starvation deaths (both computed lazily from
 anchors — the loop only announces), expires/voids stale brawls, and pays the
 weekly nonprofit care refund. Public posts go to PET_CHANNEL_ID when
@@ -50,8 +50,14 @@ from utils.pet_assets import get_altar_card
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
-    from domain.models.pet import DeathNotice, HatchNotice, RefundNotice
+    from domain.models.pet import (
+        DeathNotice,
+        EvolutionNotice,
+        HatchNotice,
+        RefundNotice,
+    )
     from services.pet_brawl_service import PetBrawlService
+    from services.pet_evolution_service import PetEvolutionService
     from services.pet_flavor_service import PetFlavorService
     from services.pet_service import PetService
 
@@ -83,11 +89,13 @@ class PetCommands(commands.Cog):
         pet_service: PetService,
         pet_brawl_service: PetBrawlService,
         pet_flavor_service: PetFlavorService | None = None,
+        pet_evolution_service: PetEvolutionService | None = None,
     ):
         self.bot = bot
         self.pet_service = pet_service
         self.pet_brawl_service = pet_brawl_service
         self.pet_flavor_service = pet_flavor_service
+        self.pet_evolution_service = pet_evolution_service
         # In-memory battle state per active brawl (see brawl_views docstring).
         self._brawl_sessions: dict[int, PetBrawlSession] = {}
 
@@ -129,6 +137,8 @@ class PetCommands(commands.Cog):
                 status=status,
             )
         brawl_record = None
+        career = None
+        solo_training_sessions = None
         if (
             status.pet is not None
             and status.stage != PetStage.EGG
@@ -136,6 +146,16 @@ class PetCommands(commands.Cog):
         ):
             brawl_record = await asyncio.to_thread(
                 self.pet_brawl_service.record, status.pet.pet_id, guild_id
+            )
+            career = self.pet_brawl_service.career_summary(
+                status.pet,
+                wins=brawl_record[0],
+                losses=brawl_record[1],
+            )
+            solo_training_sessions = await asyncio.to_thread(
+                self.pet_service.pet_repo.available_solo_training_sessions,
+                status.pet,
+                now,
             )
         embed, file = await asyncio.to_thread(
             pet_embeds.build_status_embed,
@@ -146,6 +166,8 @@ class PetCommands(commands.Cog):
             next_fee=next_fee,
             flavor_text=flavor_text,
             brawl_record=brawl_record,
+            career=career,
+            solo_training_sessions=solo_training_sessions,
         )
         view = None
         if with_view and status.pet is not None:
@@ -340,6 +362,53 @@ class PetCommands(commands.Cog):
         )
         if view is not None:
             view.message = message
+
+    @pet.command(
+        name="train",
+        description="Cash in up to three banked solo training sessions",
+    )
+    @require_guild
+    async def train(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        result = await asyncio.to_thread(
+            self.pet_brawl_service.train_solo,
+            interaction.user.id,
+            guild_id,
+        )
+        if not result.success:
+            await safe_followup(
+                interaction,
+                content=f"❌ {result.error}",
+                ephemeral=True,
+            )
+            return
+        outcome = result.value
+        sessions = outcome["sessions_used"]
+        session_word = "session" if sessions == 1 else "sessions"
+        career = outcome["career"]
+        lines = [
+            outcome["flavor"],
+            (
+                f"{sessions} banked {session_word} → **+{outcome['xp_delta']} XP** "
+                f"({career['xp']}/20)."
+            ),
+        ]
+        if outcome["stat_gain"]:
+            lines.append(f"✨ **{outcome['stat_gain'].upper()} +1**")
+        if career["build"]:
+            lines.append(f"Battle style: **{career['build']}**")
+        if outcome["sessions_available"]:
+            lines.append(
+                f"{outcome['sessions_available']} banked "
+                f"session{'s' if outcome['sessions_available'] != 1 else ''} remain."
+            )
+        await safe_followup(
+            interaction,
+            content="\n".join(lines),
+            ephemeral=True,
+        )
 
     @pet.command(name="feed", description="Feed your cama from your supplies")
     @app_commands.describe(item="Which food to serve")
@@ -577,11 +646,19 @@ class PetCommands(commands.Cog):
 
     @pet.command(
         name="brawl",
-        description="Challenge someone to a pet brawl (no coin — hunger and honor)",
+        description="Challenge someone to a pet brawl, optionally for up to 100 JC",
     )
-    @app_commands.describe(user="Whose cama to challenge")
+    @app_commands.describe(
+        user="Whose cama to challenge",
+        wager="Optional matching wager (0 or omitted is free; max 100 JC)",
+    )
     @require_guild
-    async def brawl(self, interaction: discord.Interaction, user: discord.Member):
+    async def brawl(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        wager: app_commands.Range[int, 0, 100] | None = None,
+    ):
         guild_id = interaction.guild.id if interaction.guild else None
         rl = GLOBAL_RATE_LIMITER.check(
             scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
@@ -607,6 +684,7 @@ class PetCommands(commands.Cog):
             user.id,
             guild_id,
             interaction.channel_id or 0,
+            wager or 0,
         )
         if not result.success:
             await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
@@ -630,6 +708,13 @@ class PetCommands(commands.Cog):
                 everyone=False, roles=False, users=[user]
             ),
         )
+        if message is None:
+            await asyncio.to_thread(
+                self.pet_brawl_service.void,
+                challenge["brawl"].brawl_id,
+                guild_id,
+            )
+            return
         view.message = message
 
     @pet.command(
@@ -774,8 +859,19 @@ class PetCommands(commands.Cog):
         camadex = await asyncio.to_thread(
             self.pet_service.camadex, target.id, guild_id
         )
+        callingdex = None
+        pet_evolution_service = getattr(self, "pet_evolution_service", None)
+        if pet_evolution_service is not None:
+            callingdex = await asyncio.to_thread(
+                pet_evolution_service.callingdex,
+                target.id,
+                guild_id,
+            )
         embed = pet_embeds.build_graveyard_embed(
-            result.value, target.display_name, camadex=camadex
+            result.value,
+            target.display_name,
+            camadex=camadex,
+            callingdex=callingdex,
         )
         await safe_followup(interaction, embed=embed)
 
@@ -824,6 +920,14 @@ class PetCommands(commands.Cog):
                 logger.exception(
                     "Hatch delivery failed for pet %s; will retry", hatch.pet.pet_id
                 )
+        for evolution in result.get("evolutions", []):
+            try:
+                await self._deliver_evolution(evolution)
+            except Exception:
+                logger.exception(
+                    "Evolution delivery failed for pet %s; will retry",
+                    evolution.pet.pet_id,
+                )
         for death in result["deaths"]:
             try:
                 await self._deliver_death(death)
@@ -871,6 +975,27 @@ class PetCommands(commands.Cog):
                 pass  # permanent: mark below so we don't loop forever
         await asyncio.to_thread(self.pet_service.mark_hatch_announced, pet)
         await self._rearm_warning(pet)
+
+    async def _deliver_evolution(self, notice: EvolutionNotice) -> None:
+        pet = notice.pet
+        channel = self._pet_channel(pet.guild_id)
+        if channel is not None:
+            flavor_text = await self._generate_pet_flavor(
+                PetFlavorEvent.EVOLVED,
+                pet,
+            )
+            embed, file = await asyncio.to_thread(
+                pet_embeds.build_evolution_embed,
+                pet,
+                flavor_text=flavor_text,
+            )
+            try:
+                await channel.send(embed=embed, file=file)
+            except discord.Forbidden:
+                pass
+        pet_evolution_service = getattr(self, "pet_evolution_service", None)
+        if pet_evolution_service is not None:
+            await asyncio.to_thread(pet_evolution_service.mark_announced, pet)
 
     async def _deliver_death(self, notice: DeathNotice) -> None:
         pet = notice.pet
@@ -955,5 +1080,6 @@ async def setup(bot: commands.Bot):
             pet_service,
             pet_brawl_service,
             getattr(bot, "pet_flavor_service", None),
+            getattr(bot, "pet_evolution_service", None),
         )
     )

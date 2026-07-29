@@ -730,6 +730,14 @@ class SchemaManager:
                 "create_pet_brawls",
                 self._migration_create_pet_brawls,
             ),
+            (
+                "add_pet_training_and_brawl_wagers",
+                self._migration_add_pet_training_and_brawl_wagers,
+            ),
+            (
+                "add_pet_evolution",
+                self._migration_add_pet_evolution,
+            ),
             # OpenSkill v3: native bounded contribution, durable non-match
             # rating events, parameter fingerprinting, and atomic replay state.
             (
@@ -4983,6 +4991,109 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_pet_brawls_record_loss "
             "ON pet_brawls(loser_pet_id) WHERE status = 'done'"
+        )
+
+    def _migration_add_pet_training_and_brawl_wagers(self, cursor) -> None:
+        """Add capped training state and durable optional-brawl settlement data."""
+        for column, definition in (
+            ("training_xp", "INTEGER NOT NULL DEFAULT 0 CHECK (training_xp BETWEEN 0 AND 20)"),
+            ("training_str", "INTEGER NOT NULL DEFAULT 0 CHECK (training_str BETWEEN 0 AND 2)"),
+            ("training_int", "INTEGER NOT NULL DEFAULT 0 CHECK (training_int BETWEEN 0 AND 2)"),
+            ("training_dex", "INTEGER NOT NULL DEFAULT 0 CHECK (training_dex BETWEEN 0 AND 2)"),
+            (
+                "solo_training_sessions",
+                "INTEGER NOT NULL DEFAULT 3 "
+                "CHECK (solo_training_sessions BETWEEN 0 AND 3)",
+            ),
+            ("solo_training_recharged_at", "INTEGER"),
+        ):
+            self._add_column_if_not_exists(cursor, "pets", column, definition)
+        for column, definition in (
+            ("wager", "INTEGER NOT NULL DEFAULT 0 CHECK (wager BETWEEN 0 AND 100)"),
+            ("fee", "INTEGER NOT NULL DEFAULT 0 CHECK (fee >= 0)"),
+            (
+                "challenger_xp_delta",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (challenger_xp_delta BETWEEN 0 AND 2)",
+            ),
+            (
+                "recipient_xp_delta",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (recipient_xp_delta BETWEEN 0 AND 2)",
+            ),
+            (
+                "challenger_stat_gain",
+                "TEXT CHECK (challenger_stat_gain IS NULL OR "
+                "challenger_stat_gain IN ('str', 'int', 'dex'))",
+            ),
+            (
+                "recipient_stat_gain",
+                "TEXT CHECK (recipient_stat_gain IS NULL OR "
+                "recipient_stat_gain IN ('str', 'int', 'dex'))",
+            ),
+            ("personality_event_key", "TEXT"),
+        ):
+            self._add_column_if_not_exists(cursor, "pet_brawls", column, definition)
+
+    def _migration_add_pet_evolution(self, cursor) -> None:
+        """Bounded upbringing aggregates and one-time adult calling state."""
+        for column, column_type in (
+            ("evolution_started_at", "INTEGER"),
+            ("evolution_due_at", "INTEGER"),
+            ("evolved_at", "INTEGER"),
+            ("evolution_calling", "TEXT"),
+            ("evolution_primary", "TEXT"),
+            ("evolution_secondary", "TEXT"),
+            ("evolution_announced_at", "INTEGER"),
+        ):
+            self._add_column_if_not_exists(cursor, "pets", column, column_type)
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_evolution_daily (
+                pet_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                upbringing_day INTEGER NOT NULL
+                    CHECK (upbringing_day BETWEEN 0 AND 6),
+                instinct TEXT NOT NULL,
+                score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 3),
+                first_activity TEXT NOT NULL,
+                first_source_key TEXT NOT NULL,
+                second_activity TEXT,
+                second_source_key TEXT,
+                PRIMARY KEY (pet_id, upbringing_day, instinct)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_evolution_due "
+            "ON pets(evolution_due_at, pet_id) "
+            "WHERE died_at IS NULL AND evolved_at IS NULL "
+            "AND evolution_due_at IS NOT NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_evolution_unannounced "
+            "ON pets(evolved_at, pet_id) "
+            "WHERE evolved_at IS NOT NULL AND evolution_announced_at IS NULL"
+        )
+
+        now = int(time.time())
+        cursor.execute(
+            """
+            UPDATE pets
+            SET evolution_started_at = COALESCE(
+                    evolution_started_at,
+                    CASE WHEN hatched_at > ? THEN hatched_at ELSE ? END
+                ),
+                evolution_due_at = COALESCE(
+                    evolution_due_at,
+                    COALESCE(
+                        evolution_started_at,
+                        CASE WHEN hatched_at > ? THEN hatched_at ELSE ? END
+                    ) + ?
+                )
+            WHERE died_at IS NULL
+              AND (evolution_started_at IS NULL OR evolution_due_at IS NULL)
+            """,
+            (now, now, now, now, 7 * 86400),
         )
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:
