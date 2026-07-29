@@ -297,9 +297,9 @@ WHEEL_BANKRUPT_TARGET_EV = _parse_float("WHEEL_BANKRUPT_TARGET_EV", 12.0)
 WHEEL_RED_SHELL_EST_EV = _parse_float("WHEEL_RED_SHELL_EST_EV", 0.0)
 # BLUE_SHELL: mostly zero-sum transfer, self-hit (~1/N chance) sends to nonprofit
 WHEEL_BLUE_SHELL_EST_EV = _parse_float("WHEEL_BLUE_SHELL_EST_EV", -4.0)
-# LIGHTNING_BOLT: taxes ALL positive-balance players 2-5.7%, all to nonprofit sink
-# Wider range raises the average tax from 3.5% to 3.85%; estimated impact scales by 10%.
-WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -60.5)
+# LIGHTNING_BOLT: taxes ALL positive-balance players 2-6.27%, all to nonprofit sink
+# Raising the ceiling by 10% moves the average tax from 3.85% to 4.135%.
+WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -65.0)
 # COMMUNE: all positive-balance players donate 1 JC to spinner; positive for spinner
 # estimate ~8 active players with positive balance → spinner receives ~8 JC
 WHEEL_COMMUNE_EST_EV = _parse_float("WHEEL_COMMUNE_EST_EV", 8.0)
@@ -322,12 +322,12 @@ WHEEL_DISCOVER_EST_EV = _parse_float("WHEEL_DISCOVER_EST_EV", 5.0)
 
 # Lightning Bolt (wheel wedge: server-wide tax to nonprofit)
 LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.02)
-LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.057)
+LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.0627)
 LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
 
 # Golden Wheel (exclusive to top N jopacoin balance holders)
 WHEEL_GOLDEN_TOP_N = _parse_int("WHEEL_GOLDEN_TOP_N", 3)
-WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -75.0)
+WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -82.5)
 # Estimated EVs for special golden wedges — used to calibrate OVEREXTENDED value
 # so the overall wheel EV stays at WHEEL_GOLDEN_TARGET_EV.
 WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 33.0)  # per wedge (×2)
