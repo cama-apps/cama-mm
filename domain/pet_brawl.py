@@ -22,8 +22,8 @@ from domain.pet_constants import get_species
 
 MAX_ROUNDS = 8
 
-# Near-flat tier edge (~55/45 up-tier): power adds to attack and counter
-# damage only. Legendaries feel a touch stronger, never dominant.
+# Near-flat tier edge (~55/45 up-tier): power adds to attack damage only.
+# Legendaries feel a touch stronger, never dominant.
 TIER_POWER = {"common": 0, "uncommon": 1, "rare": 1, "legendary": 2}
 
 BASE_HP = 80
@@ -34,10 +34,8 @@ SPIT_DMG = (8, 16)  # safe move, never misses
 STAMPEDE_DMG = (16, 32)
 STAMPEDE_MISS_PCT = 55
 HUNKER_HEAL = (2, 4)
-HUNKER_COUNTER = 5  # + power; 8 base for the Mystic Cama
 HUNKER_DAMAGE_TAKEN_PCT = 50
 HUNKER_STAMPEDE_DAMAGE_TAKEN_PCT = 60
-MYSTIC_COUNTER = 8
 BASE_CRIT_PCT = 10  # crit = double damage
 SPITTER_CRIT_PCT = 25  # Rama
 CHILL_MISS_BONUS_PP = 10  # Frostwool: opponent's Stampede misses more
@@ -69,10 +67,10 @@ MOVE_EMOJI = {
 MOVE_BLURBS = {
     PetBrawlMove.SPIT: "reliable chip damage, never misses.",
     PetBrawlMove.STAMPEDE: (
-        f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff, punches through Hunker."
+        f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff unless they Hunker."
     ),
     PetBrawlMove.HUNKER: (
-        "halve Spit damage, soften Stampede, heal a little, counter any hit."
+        "halve Spit damage, soften Stampede, and heal a little."
     ),
 }
 
@@ -140,7 +138,6 @@ class BrawlTraits:
     crit_pct: int = BASE_CRIT_PCT
     damage_dealt_bonus: int = 0  # flat, applied before hunker reduction
     damage_taken_mod: int = 0  # flat; a negative mod never drops a hit below 1
-    counter_base: int = HUNKER_COUNTER  # power is added on top
     heal_bonus: int = 0  # added to hunker healing
     loss_insurance: bool = False  # settles a brawl loss for less hunger
 
@@ -166,7 +163,7 @@ BRAWL_TRAITS: dict[str, BrawlTraits] = {
     "courier_cama": _NO_TRAITS,
     "riverglow_cama": _NO_TRAITS,
     "aegis_cama": _NO_TRAITS,
-    "invoker_cama": BrawlTraits(counter_base=MYSTIC_COUNTER),
+    "invoker_cama": _NO_TRAITS,
     "crystal_cama": BrawlTraits(dodge_bonus_pp=CHILL_MISS_BONUS_PP),
     "prismwool_cama": _NO_TRAITS,
     "rama": BrawlTraits(crit_pct=SPITTER_CRIT_PCT),
@@ -183,7 +180,6 @@ TRAIT_BLURBS: dict[str, str] = {
     "dromedary_cross": "hardy — shrugs a point off every hit",
     "jopacama": "insured — loses less hunger in defeat",
     "pudge_cama": "ravenous — hits harder, takes more, heals extra hunkered",
-    "invoker_cama": "mystic — counters harder while hunkered",
     "crystal_cama": "chilling — enemy Stampedes whiff more often",
     "rama": "royal temper — crits far more often",
 }
@@ -215,7 +211,7 @@ class PetBrawlState:
     a: Duelist
     b: Duelist
     round_no: int  # completed rounds
-    winner: str | None  # "a" | "b" | None while the fight is live
+    winner: str | None  # "a" | "b" | "draw" | None while the fight is live
 
 
 def build_duelist(
@@ -271,7 +267,7 @@ def _attack_damage(
     dfn = brawl_traits(defender.species_id)
     if move is PetBrawlMove.HUNKER:
         return 0, False, False
-    if move is PetBrawlMove.STAMPEDE:
+    if move is PetBrawlMove.STAMPEDE and not defender_hunkers:
         miss_pct = (
             STAMPEDE_MISS_PCT
             + dfn.dodge_bonus_pp
@@ -279,6 +275,7 @@ def _attack_damage(
         )
         if rng.randint(1, 100) <= miss_pct:
             return 0, False, False
+    if move is PetBrawlMove.STAMPEDE:
         low, high = STAMPEDE_DMG
     else:
         low, high = SPIT_DMG
@@ -313,14 +310,6 @@ def _attack_damage(
     return dmg, True, crit
 
 
-def _counter_damage(hunkerer: Duelist) -> int:
-    return (
-        brawl_traits(hunkerer.species_id).counter_base
-        + hunkerer.power
-        + hunkerer.training_int * TRAINING_INT_HUNKER_BONUS
-    )
-
-
 def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
     return (
         rng.randint(*HUNKER_HEAL)
@@ -329,17 +318,13 @@ def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
     )
 
 
-def _hp_pct(d: Duelist) -> int:
-    return d.hp * 100 // d.max_hp
-
-
 def resolve_round(
     state: PetBrawlState,
     move_a: PetBrawlMove,
     move_b: PetBrawlMove,
     rng: random.Random,
 ) -> tuple[PetBrawlState, tuple[str, ...]]:
-    """Resolve one simultaneous round. Guaranteed winner by MAX_ROUNDS."""
+    """Resolve one simultaneous round. Guaranteed outcome by MAX_ROUNDS."""
     if state.winner is not None:
         raise ValueError("brawl already resolved")
     a, b = state.a, state.b
@@ -354,10 +339,6 @@ def resolve_round(
     )
     heal_a = _hunker_heal(a, rng) if move_a is PetBrawlMove.HUNKER else 0
     heal_b = _hunker_heal(b, rng) if move_b is PetBrawlMove.HUNKER else 0
-    if move_a is PetBrawlMove.HUNKER and b_landed:
-        dmg_to_b += _counter_damage(a)
-    if move_b is PetBrawlMove.HUNKER and a_landed:
-        dmg_to_a += _counter_damage(b)
 
     for atk, dfn, move, landed, crit, dmg in (
         (a, b, move_a, a_landed, a_crit, dmg_to_b),
@@ -376,10 +357,6 @@ def resolve_round(
         log.append(f"💚 **{a.name}** recovers {heal_a} HP.")
     if heal_b:
         log.append(f"💚 **{b.name}** recovers {heal_b} HP.")
-    if move_a is PetBrawlMove.HUNKER and b_landed:
-        log.append(f"⚡ **{a.name}** counters for {_counter_damage(a)}!")
-    if move_b is PetBrawlMove.HUNKER and a_landed:
-        log.append(f"⚡ **{b.name}** counters for {_counter_damage(b)}!")
 
     new_hp_a = min(a.max_hp, a.hp - dmg_to_a + heal_a)
     new_hp_b = min(b.max_hp, b.hp - dmg_to_b + heal_b)
@@ -410,15 +387,17 @@ def resolve_round(
         winner = "b"
         log.append(f"🏆 **{a.name}** is knocked out!")
     elif round_no >= MAX_ROUNDS:
-        pct_a, pct_b = _hp_pct(a), _hp_pct(b)
-        if pct_a != pct_b:
-            winner = "a" if pct_a > pct_b else "b"
+        hp_share_a = a.hp * b.max_hp
+        hp_share_b = b.hp * a.max_hp
+        if hp_share_a != hp_share_b:
+            winner = "a" if hp_share_a > hp_share_b else "b"
+            judge = a if winner == "a" else b
+            log.append(
+                f"🔔 The judges call it after {MAX_ROUNDS} rounds — "
+                f"**{judge.name}** takes it!"
+            )
         else:
-            winner = "a" if rng.randint(0, 1) == 0 else "b"
-        judge = a if winner == "a" else b
-        log.append(
-            f"🔔 The judges call it after {MAX_ROUNDS} rounds — "
-            f"**{judge.name}** takes it!"
-        )
+            winner = "draw"
+            log.append(f"🔔 The judges call a draw after {MAX_ROUNDS} rounds!")
 
     return PetBrawlState(a=a, b=b, round_no=round_no, winner=winner), tuple(log)

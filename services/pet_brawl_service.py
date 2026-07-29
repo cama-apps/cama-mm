@@ -493,9 +493,37 @@ class PetBrawlService:
         final_state: PetBrawlState,
         rounds: int,
     ) -> Result[dict]:
-        if final_state.winner not in ("a", "b"):
+        if final_state.winner not in ("a", "b", "draw"):
             return Result.fail(
                 "That brawl has no winner yet.", code=error_codes.VALIDATION_ERROR
+            )
+        if final_state.winner == "draw":
+            duelists = (final_state.a, final_state.b)
+            now = self._now()
+            try:
+                settlement = self.pet_brawl_repo.settle_draw_atomic(
+                    brawl_id,
+                    guild_id,
+                    participant_pet_ids=(
+                        final_state.a.pet_id,
+                        final_state.b.pet_id,
+                    ),
+                    rounds=rounds,
+                    now=now,
+                )
+            except ValueError as exc:
+                return self._map_repo_error(exc)
+            records = self.pet_brawl_repo.get_records_for(
+                [d.pet_id for d in duelists], guild_id
+            )
+            return Result.ok(
+                {
+                    "draw": True,
+                    "duelists": duelists,
+                    "records": records,
+                    "wager": settlement["wager"],
+                    "fee": settlement["fee"],
+                }
             )
         winner = final_state.a if final_state.winner == "a" else final_state.b
         loser = final_state.b if final_state.winner == "a" else final_state.a

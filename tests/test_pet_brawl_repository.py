@@ -308,6 +308,49 @@ class TestWagerEconomy:
         assert self.balances(players) == (100, 100)
         assert PetRepository(repo_db_path).get_nonprofit_balance(TEST_GUILD_ID) == 0
 
+    def test_draw_finalizes_without_rewards_and_refunds_all_escrow(
+        self, repo_db_path, brawl_repo, insert_pet
+    ):
+        players = seed_player(repo_db_path, 100, 100)
+        seed_player(repo_db_path, 200, 100)
+        brawl, pet_a, pet_b = make_pending(
+            brawl_repo, insert_pet, wager=20, fee=1
+        )
+        brawl_repo.accept_atomic(
+            brawl.brawl_id, TEST_GUILD_ID, 200, pet_b, NOW + 5
+        )
+
+        result = brawl_repo.settle_draw_atomic(
+            brawl.brawl_id,
+            TEST_GUILD_ID,
+            participant_pet_ids=(pet_a, pet_b),
+            rounds=8,
+            now=NOW + 60,
+        )
+
+        assert result == {"wager": 20, "fee": 1}
+        assert self.balances(players) == (100, 100)
+        assert PetRepository(repo_db_path).get_nonprofit_balance(TEST_GUILD_ID) == 0
+        done = brawl_repo.get_brawl(brawl.brawl_id, TEST_GUILD_ID)
+        assert done.status == "done"
+        assert done.rounds == 8
+        assert done.winner_id is None
+        assert done.winner_pet_id is None
+        assert done.loser_pet_id is None
+        assert brawl_repo.get_records_for(
+            [pet_a, pet_b], TEST_GUILD_ID
+        ) == {pet_a: (0, 0), pet_b: (0, 0)}
+        assert (
+            PetRepository(repo_db_path)
+            .get_pet_by_id(pet_a, TEST_GUILD_ID)
+            .training_xp
+        ) == 0
+        assert (
+            PetRepository(repo_db_path)
+            .get_pet_by_id(pet_b, TEST_GUILD_ID)
+            .training_xp
+        ) == 0
+
     def test_accept_insufficient_funds_keeps_pending_escrow_refundable(
         self, repo_db_path, brawl_repo, insert_pet
     ):
