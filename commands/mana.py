@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -17,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_gamba_channel, require_guild
+from config import WHEEL_COOLDOWN_SECONDS
 from services.mana_service import LAND_COLORS, LAND_EMOJIS, LAND_ORDER, get_today_pst
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -179,13 +181,32 @@ class ManaCommands(commands.Cog):
                     )
                 except Exception:
                     logger.exception("Failed to apply White stipend")
-            embed = _build_single_embed(target, result, stipend_paid=stipend_paid)
+            next_wheel_spin_at = await _get_next_wheel_spin_at(
+                interaction.client.player_service,
+                target.id,
+                guild_id,
+            )
+            embed = _build_single_embed(
+                target,
+                result,
+                next_wheel_spin_at=next_wheel_spin_at,
+                stipend_paid=stipend_paid,
+            )
             await safe_followup(interaction, embed=embed)
             return
 
         current = await asyncio.to_thread(mana_service.get_current_mana, target.id, guild_id)
         if current:
-            embed = _build_single_embed(target, current)
+            next_wheel_spin_at = await _get_next_wheel_spin_at(
+                interaction.client.player_service,
+                target.id,
+                guild_id,
+            )
+            embed = _build_single_embed(
+                target,
+                current,
+                next_wheel_spin_at=next_wheel_spin_at,
+            )
         else:
             embed = _build_no_mana_embed(target)
         await safe_followup(interaction, embed=embed)
@@ -208,6 +229,25 @@ def _apply_fresh_plains_stipends(
         if assignment.get("land") == "Plains"
     ]
     return mana_effects_service.apply_bankrupt_stipends(plains_ids, guild_id)
+
+
+async def _get_next_wheel_spin_at(
+    player_service,
+    discord_id: int,
+    guild_id: int,
+) -> int:
+    """Return when the player's regular wheel cooldown ends."""
+    now = int(time.time())
+    last_wheel_spin = await asyncio.to_thread(
+        player_service.get_last_wheel_spin,
+        discord_id,
+        guild_id,
+    )
+    if last_wheel_spin is None:
+        return now
+    # The atomic claim uses ``last_wheel_spin < now - cooldown``, so equality
+    # remains locked until the following second.
+    return max(now, int(last_wheel_spin) + WHEEL_COOLDOWN_SECONDS + 1)
 
 
 def _build_all_pages(
@@ -265,6 +305,7 @@ def _build_single_embed(
     member: discord.Member | discord.User,
     mana: dict,
     *,
+    next_wheel_spin_at: int | None = None,
     stipend_paid: int = 0,
 ) -> discord.Embed:
     land = mana["land"]
@@ -273,14 +314,15 @@ def _build_single_embed(
     assigned_date = mana.get("assigned_date", "")
 
     today = get_today_pst()
-    date_label = "Today" if assigned_date == today else assigned_date
 
     embed = discord.Embed(
         title=f"🔮 Daily Mana — {member.display_name}",
         color=LAND_EMBED_COLORS.get(land, 0x95A5A6),
     )
-    embed.add_field(name="Land", value=f"{emoji} **{land}** · {color_name} Mana", inline=False)
-    embed.add_field(name="Assigned", value=date_label, inline=True)
+    land_value = f"{emoji} **{land}** · {color_name} Mana"
+    if next_wheel_spin_at is not None:
+        land_value += f"\nNext wheel spin <t:{next_wheel_spin_at}:R>"
+    embed.add_field(name="Land", value=land_value, inline=False)
     # The aura only exists for today's assignment — a stale Plains row from a
     # previous day has no active shield to display.
     if land == "Plains" and assigned_date == today and not mana.get("consumed", False):

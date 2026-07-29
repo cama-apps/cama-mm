@@ -100,6 +100,120 @@ class TestStaleGuardianDisplay:
         assert any("Guardian" in field.name for field in embed.fields)
 
 
+class TestWheelCountdownDisplay:
+    async def test_selected_player_countdown_uses_atomic_unlock_boundary(
+        self, monkeypatch
+    ):
+        viewer_id = 701
+        target_id = 702
+        viewer_last_spin = 1_700_000_000
+        target_last_spin = 1_800_000_000
+        now = target_last_spin + 3_600
+        cooldown_seconds = 12_345
+        mana_service = SimpleNamespace(
+            has_assigned_today=lambda *_args: True,
+            get_current_mana=lambda *_args: {
+                "land": "Island",
+                "color": "Blue",
+                "emoji": "🏝️",
+                "assigned_date": get_today_pst(),
+            },
+        )
+        player_service = SimpleNamespace(
+            get_last_wheel_spin=lambda discord_id, _guild_id: {
+                viewer_id: viewer_last_spin,
+                target_id: target_last_spin,
+            }[discord_id],
+        )
+
+        monkeypatch.setattr(mana_commands.time, "time", lambda: now)
+        monkeypatch.setattr(
+            mana_commands, "WHEEL_COOLDOWN_SECONDS", cooldown_seconds
+        )
+        monkeypatch.setattr(
+            mana_commands, "require_gamba_channel", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(mana_commands, "safe_defer", AsyncMock(return_value=True))
+        safe_followup = AsyncMock()
+        monkeypatch.setattr(mana_commands, "safe_followup", safe_followup)
+
+        client = SimpleNamespace(
+            mana_service=mana_service,
+            mana_effects_service=None,
+            player_service=player_service,
+        )
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=GID, members=[]),
+            user=SimpleNamespace(
+                id=viewer_id,
+                roles=[],
+                display_name="Viewer",
+                display_avatar=None,
+            ),
+            client=client,
+            channel=None,
+        )
+        target = SimpleNamespace(
+            id=target_id,
+            display_name="Skater",
+            display_avatar=None,
+        )
+        cog = mana_commands.ManaCommands(SimpleNamespace())
+
+        await cog.mana.callback(cog, interaction, target, False)
+
+        embed = safe_followup.await_args.kwargs["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        assert fields["Land"].splitlines()[-1] == (
+            f"Next wheel spin <t:{target_last_spin + cooldown_seconds + 1}:R>"
+        )
+
+    @pytest.mark.parametrize(
+        ("last_spin", "expected"),
+        [
+            (None, 1_800_000_000),
+            (1_799_999_899, 1_800_000_000),
+            (1_799_999_900, 1_800_000_001),
+            (1_800_345_600, 1_800_345_701),
+        ],
+        ids=["never-spun", "expired", "exact-boundary", "future-adjusted-penalty"],
+    )
+    async def test_next_wheel_spin_matches_atomic_claim_semantics(
+        self, monkeypatch, last_spin, expected
+    ):
+        monkeypatch.setattr(mana_commands.time, "time", lambda: 1_800_000_000)
+        monkeypatch.setattr(mana_commands, "WHEEL_COOLDOWN_SECONDS", 100)
+        player_service = SimpleNamespace(
+            get_last_wheel_spin=lambda *_args: last_spin,
+        )
+
+        result = await mana_commands._get_next_wheel_spin_at(
+            player_service,
+            702,
+            GID,
+        )
+
+        assert result == expected
+
+    def test_single_player_omits_assigned_field(self):
+        member = SimpleNamespace(display_name="Skater", display_avatar=None)
+        mana = {
+            "land": "Island",
+            "color": "Blue",
+            "emoji": "🏝️",
+            "assigned_date": get_today_pst(),
+        }
+
+        embed = mana_commands._build_single_embed(
+            member,
+            mana,
+            next_wheel_spin_at=1_800_086_400,
+        )
+        fields = {field.name: field.value for field in embed.fields}
+
+        assert "Assigned" not in fields
+
+
 class TestDoubleTapClaimRace:
     """A lost claim_mana_atomic race must answer politely, not error out."""
 

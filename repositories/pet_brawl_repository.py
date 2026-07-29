@@ -493,6 +493,52 @@ class PetBrawlRepository(BaseRepository):
 
     # --- settlement ---
 
+    def settle_draw_atomic(
+        self,
+        brawl_id: int,
+        guild_id: int | None,
+        *,
+        participant_pet_ids: tuple[int, int],
+        rounds: int,
+        now: int,
+    ) -> dict:
+        """Finalize a draw and refund both stakes without pet progression."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                f"SELECT {_BRAWL_COLUMNS} FROM pet_brawls "
+                "WHERE brawl_id = ? AND guild_id = ?",
+                (brawl_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_brawl")
+            brawl = _row_to_brawl(row)
+            if brawl.status == PetBrawlStatus.DONE:
+                raise ValueError("already_done")
+            if brawl.status != PetBrawlStatus.ACTIVE:
+                raise ValueError("not_active")
+            if (
+                brawl.recipient_pet_id is None
+                or set(participant_pet_ids)
+                != {brawl.challenger_pet_id, brawl.recipient_pet_id}
+            ):
+                raise ValueError("participant_mismatch")
+
+            cursor.execute(
+                "UPDATE pet_brawls SET status = 'done', resolved_at = ?, "
+                "winner_id = NULL, winner_pet_id = NULL, loser_pet_id = NULL, "
+                "rounds = ? WHERE brawl_id = ? AND guild_id = ?",
+                (now, rounds, brawl_id, gid),
+            )
+            self._refund_escrow(
+                cursor,
+                brawl,
+                prior_status=PetBrawlStatus.ACTIVE,
+                actor_id=None,
+            )
+        return {"wager": brawl.wager, "fee": brawl.fee}
+
     def settle_brawl_atomic(
         self,
         brawl_id: int,
