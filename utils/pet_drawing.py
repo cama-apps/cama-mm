@@ -71,6 +71,8 @@ SPECIES_PALETTES: dict[str, tuple[tuple[int, int, int], ...]] = {
     "crystal_cama":    ((72, 118, 158), (128, 182, 220), (190, 226, 248), (162, 206, 236)),
     "prismwool_cama":  ((78, 46, 102),  (132, 82, 154),  (214, 176, 226), (242, 102, 190)),
     "rama":            ((150, 100, 96), (222, 214, 205), (248, 244, 238), (192, 52, 58)),
+    "moondrift_cama":  ((32, 36, 78),   (72, 82, 138),   (188, 202, 236), (128, 226, 240)),
+    "sunspun_cama":    ((126, 54, 34),  (220, 126, 52),  (255, 222, 136), (255, 246, 190)),
 }
 _DEFAULT_PALETTE = SPECIES_PALETTES["common_cama"]
 
@@ -224,6 +226,27 @@ def _draw_ground_features(
                 fill=(*color[:3], min(150, color[3] + 70)),
                 width=2,
             )
+    elif species_id == "moondrift_cama":
+        # Crescent hoofprints drift away across the floor.
+        print_y = FLOOR_Y - max(2, cell // 5)
+        radius = max(4, cell // 2)
+        for print_x, offset_y in (
+            (cx - g.body_w // 2 - cell, 0),
+            (cx + g.body_w // 2 + cell // 2, cell // 4),
+            (cx + g.body_w // 2 + 2 * cell, 0),
+        ):
+            draw.arc(
+                [
+                    print_x - radius,
+                    print_y - radius + offset_y,
+                    print_x + radius,
+                    print_y + radius + offset_y,
+                ],
+                35,
+                305,
+                fill=(170, 226, 242, 170),
+                width=max(2, cell // 5),
+            )
 
 
 def _draw_back_features(draw: ImageDraw.ImageDraw, species_id: str, g: _Geo) -> None:
@@ -274,6 +297,35 @@ def _draw_back_features(draw: ImageDraw.ImageDraw, species_id: str, g: _Geo) -> 
                 [ox - radius, oy - radius, ox + radius, oy + radius],
                 fill=color,
             )
+    elif species_id == "sunspun_cama":
+        # A soft corona and short rays sit behind the fleece.
+        halo_x = cx
+        halo_y = g.body_top + g.body_rows * cell // 2
+        radius_x = g.body_w // 2 + cell
+        radius_y = g.body_rows * cell // 2 + cell
+        draw.ellipse(
+            [
+                halo_x - radius_x,
+                halo_y - radius_y,
+                halo_x + radius_x,
+                halo_y + radius_y,
+            ],
+            fill=(255, 184, 72, 45),
+            outline=(255, 228, 134, 130),
+            width=max(2, cell // 4),
+        )
+        for start, end in (
+            ((halo_x, halo_y - radius_y), (halo_x, halo_y - radius_y - cell)),
+            (
+                (halo_x - radius_x, halo_y),
+                (halo_x - radius_x - cell, halo_y),
+            ),
+            (
+                (halo_x + radius_x, halo_y),
+                (halo_x + radius_x + cell, halo_y),
+            ),
+        ):
+            draw.line([start, end], fill=(255, 226, 126, 155), width=3)
 
 
 def _draw_body_features(
@@ -388,6 +440,29 @@ def _draw_body_features(
                     (px - radius, py + radius // 2),
                 ),
                 fill=color,
+            )
+    elif species_id == "moondrift_cama":
+        # Sparse silver pinpricks make the fleece read as a night sky.
+        for col, row in ((2, 1), (4, 3), (6, 1), (7, 3)):
+            px = x0 + col * cell
+            py = body_top + row * cell
+            radius = max(2, cell // 6)
+            draw.ellipse(
+                [px - radius, py - radius, px + radius, py + radius],
+                fill=(224, 238, 252, 210),
+            )
+    elif species_id == "sunspun_cama":
+        # Gold curls follow the warm threads coiled through its fleece.
+        for col, row in ((2, 1), (5, 2), (7, 1)):
+            px = x0 + col * cell
+            py = body_top + row * cell
+            radius = max(4, cell // 3)
+            draw.arc(
+                [px - radius, py - radius, px + radius, py + radius],
+                15,
+                325,
+                fill=(255, 244, 184, 220),
+                width=max(2, cell // 5),
             )
 
 
