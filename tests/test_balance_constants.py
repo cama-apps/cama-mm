@@ -19,7 +19,7 @@ from services.prediction_service import PredictionService
 
 
 def test_paid_dig_cost_ladder_pinned():
-    assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40, 60]
+    assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40, 60, 80, 100]
 
 
 def test_gamba_wheel_target_ev_pinned():

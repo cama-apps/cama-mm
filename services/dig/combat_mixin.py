@@ -387,6 +387,39 @@ class BossCombatMixin:
         eff = base_multiplier * (1.0 - t) + fair * t
         return min(base_multiplier, eff)
 
+    # Hard ceiling on wager profit as a ratio of the stake: 4.0 means a
+    # winning wager returns at most 5x total (stake + 4x profit).
+    _WAGER_PROFIT_CAP_RATIO: float = 4.0
+
+    def _log_capped_multiplier(self, multiplier: float) -> float:
+        """Compress a total-return wager multiplier logarithmically.
+
+        Profit scales as ``ln(multiplier)`` and is hard-capped at
+        ``_WAGER_PROFIT_CAP_RATIO`` x the stake, so the total payout on a
+        winning wager tops out at 5x regardless of depth, risk tier, or
+        ascension payout bonuses. ``ln`` is near-linear just above 1, so
+        low multipliers (and the high-win-chance taper toward fair odds)
+        are barely touched, while the old 8-10x top-end table values
+        compress to ~3.1-3.3x. Applied after every other multiplier
+        (taper, tier, ascension) so nothing can stack past the cap.
+        """
+        if multiplier <= 1.0:
+            return multiplier
+        return 1.0 + min(self._WAGER_PROFIT_CAP_RATIO, math.log(multiplier))
+
+    def _settled_wager_multiplier(
+        self, tapered_multiplier: float, boss_payout_mult: float = 1.0,
+    ) -> float:
+        """Single source of truth for the final wager payout multiplier.
+
+        Folds the ascension payout bonus into the win-chance-tapered
+        multiplier, then log-compresses/caps the result. Every settlement
+        and preview path must route through this so the composition — in
+        particular that bonuses apply *inside* the cap — cannot drift
+        between copies.
+        """
+        return self._log_capped_multiplier(tapered_multiplier * boss_payout_mult)
+
     def _get_carried_wager(self, boss_progress: dict, at_boss) -> tuple[int, str] | None:
         """Return (wager, risk_tier) carried from a prior phase win, or None.
 
@@ -1417,10 +1450,10 @@ class BossCombatMixin:
             if wager > 0:
                 # Compute normal wager profit first; Echo trims that profit
                 # without touching the stake or flat boss-clear reward.
-                wager_profit = max(
-                    0,
-                    int(wager * (multiplier * boss_payout_mult - 1)),
+                capped_mult = self._settled_wager_multiplier(
+                    multiplier, boss_payout_mult,
                 )
+                wager_profit = max(0, int(wager * (capped_mult - 1)))
                 if echo_applied:
                     wager_profit = int(wager_profit * 0.7)
             else:
@@ -3017,11 +3050,15 @@ class BossCombatMixin:
             )
             if wager > 0:
                 # Preserve the drain calculation, then let Echo trim the final
-                # computed wager-profit component.
+                # computed wager-profit component. Drain scales off the capped
+                # multiplier so the penalty stays proportional to real payouts.
+                capped_mult = self._settled_wager_multiplier(
+                    multiplier, boss_payout_mult,
+                )
                 wager_profit = max(
                     0,
-                    int(wager * (multiplier * boss_payout_mult - 1))
-                    - (int(round(wager * multiplier * 0.25)) if drain_applied else 0),
+                    int(wager * (capped_mult - 1))
+                    - (int(round(wager * capped_mult * 0.25)) if drain_applied else 0),
                 )
                 if echo_applied:
                     wager_profit = int(wager_profit * 0.7)
@@ -3556,9 +3593,10 @@ class BossCombatMixin:
                 crit_bonus=_scout_crit_bonus,
             )
             base_multiplier = payouts[i] if i < len(payouts) else 2.0
-            effective_multiplier = self._effective_wager_multiplier(
-                base_multiplier, win_pct,
-            ) * boss_payout_mult
+            effective_multiplier = self._settled_wager_multiplier(
+                self._effective_wager_multiplier(base_multiplier, win_pct),
+                boss_payout_mult,
+            )
             if echo_applied:
                 effective_multiplier = 1 + (effective_multiplier - 1) * 0.7
             odds[tier] = {
