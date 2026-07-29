@@ -161,13 +161,13 @@ class TestDigConstants:
             )
 
     def test_paid_dig_cost_levels_off_after_seed_ladder(self, dig_service):
-        """Paid digs beyond the seed ladder cost 60 JC before modifiers."""
+        """Paid digs beyond the seed ladder cost 100 JC before modifiers."""
         tunnel = {"prestige_level": 0, "stat_stamina": 0}
 
         assert [
             dig_service._calculate_paid_dig_cost(tunnel, paid_count)
-            for paid_count in (4, 5, 6)
-        ] == [40, 60, 60]
+            for paid_count in (4, 5, 6, 7, 8)
+        ] == [40, 60, 80, 100, 100]
 
         tunnel["stat_stamina"] = 13
         assert dig_service._calculate_paid_dig_cost(tunnel, paid_count=5) == 30
@@ -847,6 +847,10 @@ class TestCooldown:
         _register_player(player_repository, balance=500)
         base_time = 1_000_000
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
+        # Pin advance rolls to their minimum: enough paid digs could
+        # otherwise reach the depth-25 boss gate, which returns an
+        # encounter instead of a paid-dig result.
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
 
         # First free dig
         monkeypatch.setattr(time, "time", lambda: base_time)
@@ -2656,10 +2660,13 @@ class TestBossOdds:
         assert cautious_pct > 0.70, f"Cautious odds {cautious_pct} should reflect 0.75 base, not 0.50 default"
 
         # Multiplier comes from BOSS_PAYOUTS[25] (1.5), tapered toward
-        # break-even by the high cautious win chance — not the 2.0 default.
+        # break-even by the high cautious win chance and log-capped like
+        # settlement — not the 2.0 default.
         cautious_mult = result["odds"]["cautious"]["multiplier"]
-        expected_mult = dig_service._effective_wager_multiplier(
-            BOSS_PAYOUTS[25][0], cautious_pct,
+        expected_mult = dig_service._log_capped_multiplier(
+            dig_service._effective_wager_multiplier(
+                BOSS_PAYOUTS[25][0], cautious_pct,
+            )
         )
         assert abs(cautious_mult - expected_mult) < 0.05, (
             f"Expected ~{expected_mult:.2f}, got {cautious_mult}"

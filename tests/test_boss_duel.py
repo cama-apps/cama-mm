@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from types import SimpleNamespace
@@ -46,6 +47,15 @@ def dig_service(dig_repo, player_repository, monkeypatch):
     svc = DigService(dig_repo, player_repository)
     monkeypatch.setattr(svc, "_get_weather_effects", lambda guild_id, layer_name: {})
     return svc
+
+
+def _capped(multiplier):
+    """Mirror the settlement-side log profit cap: 1 + min(4, ln(m)).
+
+    Wager profit scales as ln(multiplier) and never exceeds 4x the stake,
+    so a winning wager returns at most 5x total.
+    """
+    return 1 + min(4.0, math.log(multiplier))
 
 
 def _register(player_repo, discord_id=10001, balance=200):
@@ -396,7 +406,7 @@ class TestDuelPayout:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is True
         expected_multiplier = BOSS_PAYOUTS[25][0]
-        expected_profit = int(10 * (expected_multiplier - 1))
+        expected_profit = int(10 * (_capped(expected_multiplier) - 1))
         # Every victory pays the flat base reward on top of the wager profit.
         expected_credit = (
             scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + expected_profit
@@ -814,10 +824,10 @@ class TestBossEchoWeakening:
         assert result.get("echo_applied") is True
         assert result.get("echo_killer_id") == 10001
 
-        # Echo trims the computed wager profit by exactly 30%; it does not
-        # multiply the total return or touch the flat boss reward.
+        # Echo trims the computed (log-capped) wager profit by exactly 30%;
+        # it does not multiply the total return or touch the flat boss reward.
         base_multiplier = BOSS_PAYOUTS[25][0]
-        normal_profit = int(10 * (base_multiplier - 1))
+        normal_profit = int(10 * (_capped(base_multiplier) - 1))
         expected_profit = int(normal_profit * 0.7)
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == (
             balance_before
@@ -845,7 +855,7 @@ class TestBossEchoWeakening:
 
         assert result["success"] is True
         assert result["echo_applied"] is True
-        normal_multiplier = BOSS_PAYOUTS[25][0]
+        normal_multiplier = _capped(BOSS_PAYOUTS[25][0])
         expected_multiplier = 1 + (normal_multiplier - 1) * 0.7
         assert result["odds"]["cautious"]["multiplier"] == round(
             expected_multiplier, 2,
@@ -898,7 +908,7 @@ class TestBossEchoWeakening:
 
         ascension = dig_service._get_ascension_effects(4)
         boss_payout_multiplier = 1 + ascension["boss_payout_multiplier"]
-        live_multiplier = BOSS_PAYOUTS[25][0] * boss_payout_multiplier
+        live_multiplier = _capped(BOSS_PAYOUTS[25][0] * boss_payout_multiplier)
         expected_echo_multiplier = 1 + (live_multiplier - 1) * 0.7
         assert result["success"] is True
         assert result["echo_applied"] is True
@@ -933,8 +943,8 @@ class TestBossEchoWeakening:
             10001, TEST_GUILD_ID, "cautious", wager=100,
         )
 
-        normal_profit = int(100 * (BOSS_PAYOUTS[25][0] - 1))
-        drain_penalty = int(round(100 * BOSS_PAYOUTS[25][0] * 0.25))
+        normal_profit = int(100 * (_capped(BOSS_PAYOUTS[25][0]) - 1))
+        drain_penalty = int(round(100 * _capped(BOSS_PAYOUTS[25][0]) * 0.25))
         expected_profit = int(max(0, normal_profit - drain_penalty) * 0.7)
         assert result["won"] is True
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == (
@@ -1387,7 +1397,8 @@ class TestWagerTaper:
     ):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         # A genuine ~50/50 bet sits below the taper knee: the authored
-        # BOSS_PAYOUTS multiplier is used unchanged.
+        # BOSS_PAYOUTS multiplier reaches settlement untapered (only the
+        # log profit cap applies).
         monkeypatch.setattr(
             "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
         )
@@ -1397,7 +1408,7 @@ class TestWagerTaper:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
 
         assert result["won"] is True
-        wager_profit = int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        wager_profit = int(100 * (_capped(BOSS_PAYOUTS[25][0]) - 1))
         expected = scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + wager_profit
         assert (player_repository.get_balance(10001, TEST_GUILD_ID)
                 == balance_before + expected)

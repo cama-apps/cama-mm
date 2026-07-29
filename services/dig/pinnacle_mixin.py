@@ -313,8 +313,10 @@ class PinnacleMixin:
             base_multiplier = (
                 payouts[index] if index < len(payouts) else 2.0
             )
-            effective_multiplier = self._effective_wager_multiplier(
-                base_multiplier, paid_win_pct,
+            effective_multiplier = self._settled_wager_multiplier(
+                self._effective_wager_multiplier(
+                    base_multiplier, paid_win_pct,
+                )
             )
             odds[risk_tier] = {
                 "win_pct": round(paid_win_pct, 2),
@@ -1137,7 +1139,9 @@ class PinnacleMixin:
             if wager > 0:
                 tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
                 base_mult = BOSS_PAYOUTS.get(PINNACLE_DEPTH, (2.0, 3.0, 6.0))[tier_index]
-                eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
+                eff_mult = self._settled_wager_multiplier(
+                    self._effective_wager_multiplier(base_mult, win_chance)
+                )
                 wager_payout = int(wager * (eff_mult - 1))
             (
                 gross_base_reward, scaled_base_reward, gross_payout,

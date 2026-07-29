@@ -55,7 +55,7 @@ def get_layer(depth: int) -> LayerDef:
 FREE_DIG_COOLDOWN_SECONDS: int = 3_600           # 1 hour (flat, all players)
 CHEER_COOLDOWN_SECONDS: int = 45                 # short anti-spam, independent of dig
 
-PAID_DIG_COSTS_PER_DAY: list[int] = [3, 5, 10, 20, 40, 60]
+PAID_DIG_COSTS_PER_DAY: list[int] = [3, 5, 10, 20, 40, 60, 80, 100]
 
 # First dig guarantees
 FIRST_DIG_ADVANCE_MIN: int = 3
