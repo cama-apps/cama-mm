@@ -85,6 +85,12 @@ class Pet:
     death_cause: str | None
     death_announced_at: int | None
     egg_tier: str = "standard"
+    training_xp: int = 0
+    training_str: int = 0
+    training_int: int = 0
+    training_dex: int = 0
+    solo_training_sessions: int = 3
+    solo_training_recharged_at: int | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Pet:

@@ -13,6 +13,7 @@ import pytest
 
 from commands.pet import PetCommands
 from commands.pet_helpers import brawl_embeds
+from commands.pet_helpers import embeds as pet_embeds
 from commands.pet_helpers.brawl_views import PetBrawlBattleView
 from domain.models.pet import PetStage
 from domain.pet_brawl import (
@@ -64,6 +65,13 @@ def brawl_cog(repo_db_path, monkeypatch):
     monkeypatch.setattr(config, "PET_CHANNEL_ID", PET_CHANNEL)
 
     player_repo = PlayerRepository(repo_db_path)
+    for discord_id in (CHALLENGER, RECIPIENT):
+        player_repo.add(
+            discord_id=discord_id,
+            discord_username=f"Player {discord_id}",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repo.update_balance(discord_id, TEST_GUILD_ID, 100)
     service = PetService(
         PetRepository(repo_db_path), player_repo, decay_per_day=20
     )
@@ -95,14 +103,32 @@ def brawl_status(cog, brawl_id):
     ).status
 
 
-async def issue_challenge(cog):
+async def issue_challenge(cog, wager=None):
     inter = make_interaction()
     target = MagicMock()
     target.id = RECIPIENT
     target.bot = False
-    await cog.brawl.callback(cog, inter, target)
+    await cog.brawl.callback(cog, inter, target, wager)
     kwargs = inter.followup.send.await_args.kwargs
     return kwargs["view"], kwargs
+
+
+class TestSoloTrainingCommand:
+    @pytest.mark.asyncio
+    async def test_training_cashes_in_banked_sessions(self, brawl_cog):
+        inter = make_interaction()
+
+        await brawl_cog.train.callback(brawl_cog, inter)
+
+        kwargs = inter.followup.send.await_args.kwargs
+        assert "3 banked sessions" in kwargs["content"]
+        assert "+3 XP" in kwargs["content"]
+        assert kwargs["ephemeral"] is True
+        pet = brawl_cog.pet_service.pet_repo.get_active_pet(
+            CHALLENGER, TEST_GUILD_ID
+        )
+        assert pet.training_xp == 3
+        assert pet.solo_training_sessions == 0
 
 
 class TestBrawlCommand:
@@ -110,7 +136,47 @@ class TestBrawlCommand:
     async def test_happy_path_posts_challenge(self, brawl_cog):
         view, kwargs = await issue_challenge(brawl_cog)
         assert "challenge" in kwargs["embed"].title.lower()
+        assert "No coin" in kwargs["embed"].footer.text
         assert brawl_status(brawl_cog, view.brawl.brawl_id) == "pending"
+
+    @pytest.mark.asyncio
+    async def test_optional_wager_posts_stakes_and_escrows_challenger(
+        self, brawl_cog
+    ):
+        view, kwargs = await issue_challenge(brawl_cog, wager=20)
+
+        assert "20" in kwargs["embed"].footer.text
+        assert "40" in kwargs["embed"].footer.text
+        assert "fee: 1" in kwargs["embed"].footer.text.lower()
+        assert (
+            brawl_cog.pet_service.player_repo.get_balance(
+                CHALLENGER, TEST_GUILD_ID
+            )
+            == 79
+        )
+        assert view.brawl.wager == 20
+
+    @pytest.mark.asyncio
+    async def test_failed_challenge_delivery_voids_and_refunds(
+        self, brawl_cog
+    ):
+        inter = make_interaction()
+        inter.followup.send = AsyncMock(return_value=None)
+        target = MagicMock(id=RECIPIENT, bot=False)
+
+        await brawl_cog.brawl.callback(brawl_cog, inter, target, 20)
+
+        with sqlite3.connect(brawl_cog.pet_service.pet_repo.db_path) as conn:
+            status = conn.execute(
+                "SELECT status FROM pet_brawls ORDER BY brawl_id DESC LIMIT 1"
+            ).fetchone()[0]
+        assert status == "void"
+        assert (
+            brawl_cog.pet_service.player_repo.get_balance(
+                CHALLENGER, TEST_GUILD_ID
+            )
+            == 100
+        )
 
     @pytest.mark.asyncio
     async def test_rejected_outside_pet_channel(self, brawl_cog):
@@ -131,6 +197,41 @@ class TestBrawlCommand:
         target.bot = True
         await brawl_cog.brawl.callback(brawl_cog, inter, target)
         assert "Bots" in inter.response.send_message.await_args.args[0]
+
+    def test_status_embed_shows_training_stats_rank_and_build(self, brawl_cog):
+        with sqlite3.connect(brawl_cog.pet_service.pet_repo.db_path) as conn:
+            conn.execute(
+                "UPDATE pets SET training_xp = 20, training_str = 2, "
+                "training_int = 1, training_dex = 1 "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (CHALLENGER, TEST_GUILD_ID),
+            )
+        status = brawl_cog.pet_service.get_status(
+            CHALLENGER, TEST_GUILD_ID
+        ).value
+        career = brawl_cog.pet_brawl_service.career_summary(
+            status.pet, wins=10, losses=2
+        )
+
+        embed, _ = pet_embeds.build_status_embed(
+            status,
+            brawl_cog.pet_service.decay_per_day,
+            NOW,
+            owner_name="Owner",
+            next_fee=20,
+            brawl_record=(10, 2),
+            career=career,
+            solo_training_sessions=3,
+        )
+
+        training = next(field for field in embed.fields if field.name == "🏋️ Training")
+        assert "20/20 XP" in training.value
+        assert "STR 2" in training.value
+        assert "INT 1" in training.value
+        assert "DEX 1" in training.value
+        assert "Champion" in training.value
+        assert "Bruiser" in training.value
+        assert "3/3 banked" in training.value
 
 
 class TestChallengeView:
@@ -185,8 +286,8 @@ class TestChallengeView:
         assert brawl_status(brawl_cog, view.brawl.brawl_id) == "void"
 
 
-async def start_battle(brawl_cog):
-    challenge_view, _ = await issue_challenge(brawl_cog)
+async def start_battle(brawl_cog, wager=None):
+    challenge_view, _ = await issue_challenge(brawl_cog, wager=wager)
     challenge_view.message = MagicMock(edit=AsyncMock())
     inter = make_interaction(user_id=RECIPIENT)
     await challenge_view.accept.callback(inter)
@@ -274,9 +375,28 @@ class TestBattleView:
         assert session.brawl_id not in brawl_cog._brawl_sessions
         edit_kwargs = view.message.edit.await_args.kwargs
         assert "wins the brawl" in edit_kwargs["embed"].title
+        assert "XP" in edit_kwargs["embed"].description
+        assert "Rookie" in edit_kwargs["embed"].description
         assert edit_kwargs["view"] is None
         # Answers the "was there any JC reward?" question at the finish line.
         assert "jopacoin" in edit_kwargs["embed"].footer.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_wagered_result_footer_reports_the_payout(self, brawl_cog):
+        view, session = await start_battle(brawl_cog, wager=20)
+        session.state = type(session.state)(
+            a=session.state.a,
+            b=replace(session.state.b, hp=1),
+            round_no=session.state.round_no,
+            winner=None,
+        )
+
+        await press(view, SAFE_MOVE)(make_interaction(user_id=CHALLENGER))
+        await press(view, SAFE_MOVE)(make_interaction(user_id=RECIPIENT))
+
+        footer = view.message.edit.await_args.kwargs["embed"].footer.text
+        assert "40" in footer
+        assert "no jopacoins" not in footer.lower()
 
     @pytest.mark.asyncio
     async def test_round_resolves_even_if_pick_ack_fails(self, brawl_cog):
@@ -358,6 +478,38 @@ class TestRoundOnePrimer:
         field_names = [f.name for f in embed.fields]
         assert "How it works" in field_names
         assert "Quirks" not in field_names
+
+    @pytest.mark.asyncio
+    async def test_failed_settlement_immediately_voids_and_refunds_wager(
+        self, brawl_cog, monkeypatch
+    ):
+        from services.result import Result
+
+        view, session = await start_battle(brawl_cog, wager=20)
+        session.state = type(session.state)(
+            a=session.state.a,
+            b=replace(session.state.b, hp=1),
+            round_no=session.state.round_no,
+            winner=None,
+        )
+        monkeypatch.setattr(
+            brawl_cog.pet_brawl_service,
+            "settle",
+            lambda *args, **kwargs: Result.fail("database unavailable"),
+        )
+
+        await press(view, SAFE_MOVE)(make_interaction(user_id=CHALLENGER))
+        await press(view, SAFE_MOVE)(make_interaction(user_id=RECIPIENT))
+
+        assert brawl_status(brawl_cog, session.brawl_id) == "void"
+        assert (
+            brawl_cog.pet_service.player_repo.get_balance(
+                CHALLENGER, TEST_GUILD_ID
+            ),
+            brawl_cog.pet_service.player_repo.get_balance(
+                RECIPIENT, TEST_GUILD_ID
+            ),
+        ) == (100, 100)
 
 
 class TestSweepHook:

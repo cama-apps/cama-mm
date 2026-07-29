@@ -17,6 +17,7 @@ from domain.pet_constants import (
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
     SALT_LICK,
+    SOLO_TRAINING_SESSION_CAP,
     SPECIES,
     get_species,
 )
@@ -93,6 +94,8 @@ def build_status_embed(
     next_fee: int,
     flavor_text: str | None = None,
     brawl_record: tuple[int, int] | None = None,
+    career: dict | None = None,
+    solo_training_sessions: int | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     pet = status.pet
     if pet is None:
@@ -103,7 +106,13 @@ def build_status_embed(
         embed, file = _build_egg_embed(pet, status)
     else:
         embed, file = _build_living_embed(
-            pet, status, decay_per_day, now, brawl_record=brawl_record
+            pet,
+            status,
+            decay_per_day,
+            now,
+            brawl_record=brawl_record,
+            career=career,
+            solo_training_sessions=solo_training_sessions,
         )
     if flavor_text:
         embed.add_field(
@@ -173,6 +182,8 @@ def _build_living_embed(
     now: int,
     *,
     brawl_record: tuple[int, int] | None = None,
+    career: dict | None = None,
+    solo_training_sessions: int | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     species = get_species(pet.species)
     mood = status.mood or PetMood.CONTENT
@@ -231,6 +242,27 @@ def _build_living_embed(
     if brawl_record is not None and any(brawl_record):
         wins, losses = brawl_record
         embed.add_field(name="⚔️ Brawls", value=f"{wins}W · {losses}L", inline=True)
+    if career is not None:
+        level = career["str"] + career["int"] + career["dex"]
+        title = " · ".join(
+            value for value in (career.get("rank"), career.get("build")) if value
+        )
+        training = (
+            f"Level {level}/4 · {career['xp']}/20 XP\n"
+            f"STR {career['str']} · INT {career['int']} · DEX {career['dex']}"
+        )
+        if solo_training_sessions is not None:
+            training += (
+                f"\nSolo: {solo_training_sessions}/"
+                f"{SOLO_TRAINING_SESSION_CAP} banked · `/pet train`"
+            )
+        if title:
+            training += f"\n{title}"
+        embed.add_field(
+            name="🏋️ Training",
+            value=training,
+            inline=False,
+        )
     feeds_used = pet.feeds_used_on(game_date_for_timestamp(now))
     feeds_left = max(0, FEED_CAP_PER_DAY - feeds_used)
     embed.set_footer(text=f"{feeds_left}/{FEED_CAP_PER_DAY} feeds left today")

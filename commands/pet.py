@@ -1,6 +1,6 @@
 """Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
 
-Command surface is the /pet group (11 subcommands). A 10-minute background
+Command surface is the /pet group (12 subcommands). A 10-minute background
 sweep detects hatches and starvation deaths (both computed lazily from
 anchors — the loop only announces), expires/voids stale brawls, and pays the
 weekly nonprofit care refund. Public posts go to PET_CHANNEL_ID when
@@ -129,6 +129,8 @@ class PetCommands(commands.Cog):
                 status=status,
             )
         brawl_record = None
+        career = None
+        solo_training_sessions = None
         if (
             status.pet is not None
             and status.stage != PetStage.EGG
@@ -136,6 +138,16 @@ class PetCommands(commands.Cog):
         ):
             brawl_record = await asyncio.to_thread(
                 self.pet_brawl_service.record, status.pet.pet_id, guild_id
+            )
+            career = self.pet_brawl_service.career_summary(
+                status.pet,
+                wins=brawl_record[0],
+                losses=brawl_record[1],
+            )
+            solo_training_sessions = await asyncio.to_thread(
+                self.pet_service.pet_repo.available_solo_training_sessions,
+                status.pet,
+                now,
             )
         embed, file = await asyncio.to_thread(
             pet_embeds.build_status_embed,
@@ -146,6 +158,8 @@ class PetCommands(commands.Cog):
             next_fee=next_fee,
             flavor_text=flavor_text,
             brawl_record=brawl_record,
+            career=career,
+            solo_training_sessions=solo_training_sessions,
         )
         view = None
         if with_view and status.pet is not None:
@@ -340,6 +354,53 @@ class PetCommands(commands.Cog):
         )
         if view is not None:
             view.message = message
+
+    @pet.command(
+        name="train",
+        description="Cash in up to three banked solo training sessions",
+    )
+    @require_guild
+    async def train(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        result = await asyncio.to_thread(
+            self.pet_brawl_service.train_solo,
+            interaction.user.id,
+            guild_id,
+        )
+        if not result.success:
+            await safe_followup(
+                interaction,
+                content=f"❌ {result.error}",
+                ephemeral=True,
+            )
+            return
+        outcome = result.value
+        sessions = outcome["sessions_used"]
+        session_word = "session" if sessions == 1 else "sessions"
+        career = outcome["career"]
+        lines = [
+            outcome["flavor"],
+            (
+                f"{sessions} banked {session_word} → **+{outcome['xp_delta']} XP** "
+                f"({career['xp']}/20)."
+            ),
+        ]
+        if outcome["stat_gain"]:
+            lines.append(f"✨ **{outcome['stat_gain'].upper()} +1**")
+        if career["build"]:
+            lines.append(f"Battle style: **{career['build']}**")
+        if outcome["sessions_available"]:
+            lines.append(
+                f"{outcome['sessions_available']} banked "
+                f"session{'s' if outcome['sessions_available'] != 1 else ''} remain."
+            )
+        await safe_followup(
+            interaction,
+            content="\n".join(lines),
+            ephemeral=True,
+        )
 
     @pet.command(name="feed", description="Feed your cama from your supplies")
     @app_commands.describe(item="Which food to serve")
@@ -577,11 +638,19 @@ class PetCommands(commands.Cog):
 
     @pet.command(
         name="brawl",
-        description="Challenge someone to a pet brawl (no coin — hunger and honor)",
+        description="Challenge someone to a pet brawl, optionally for up to 100 JC",
     )
-    @app_commands.describe(user="Whose cama to challenge")
+    @app_commands.describe(
+        user="Whose cama to challenge",
+        wager="Optional matching wager (0 or omitted is free; max 100 JC)",
+    )
     @require_guild
-    async def brawl(self, interaction: discord.Interaction, user: discord.Member):
+    async def brawl(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        wager: app_commands.Range[int, 0, 100] | None = None,
+    ):
         guild_id = interaction.guild.id if interaction.guild else None
         rl = GLOBAL_RATE_LIMITER.check(
             scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
@@ -607,6 +676,7 @@ class PetCommands(commands.Cog):
             user.id,
             guild_id,
             interaction.channel_id or 0,
+            wager or 0,
         )
         if not result.success:
             await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
@@ -630,6 +700,13 @@ class PetCommands(commands.Cog):
                 everyone=False, roles=False, users=[user]
             ),
         )
+        if message is None:
+            await asyncio.to_thread(
+                self.pet_brawl_service.void,
+                challenge["brawl"].brawl_id,
+                guild_id,
+            )
+            return
         view.message = message
 
     @pet.command(

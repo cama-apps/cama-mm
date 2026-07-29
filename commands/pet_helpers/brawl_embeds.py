@@ -25,6 +25,7 @@ from domain.pet_brawl import (
 )
 from domain.pet_constants import PET_BRAWL_TURN_SECONDS, get_species
 from utils.embeds import COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE
+from utils.formatting import JOPACOIN_EMOTE
 from utils.pet_assets import get_pet_card, get_versus_card
 
 COLOR_BRAWL = COLOR_ORANGE
@@ -65,7 +66,15 @@ def build_challenge_embed(
         ),
         color=COLOR_BRAWL,
     )
-    embed.set_footer(text="No coin at stake — hunger and honor only.")
+    if brawl.wager:
+        embed.set_footer(
+            text=(
+                f"Wager: {brawl.wager} {JOPACOIN_EMOTE} each · "
+                f"pot: {2 * brawl.wager} · challenger fee: {brawl.fee}"
+            )
+        )
+    else:
+        embed.set_footer(text="No coin at stake — hunger and honor only.")
     file = get_versus_card(
         challenger_pet.species,
         challenger_pet.stage(now).value,
@@ -153,6 +162,38 @@ def build_result_embed(
     )
     win_rec = records.get(winner.pet_id, (0, 0))
     lose_rec = records.get(loser.pet_id, (0, 0))
+    career = settlement.get("career", {})
+
+    def progression_line(duelist: Duelist, side: str) -> str:
+        summary = career.get(duelist.pet_id, {})
+        xp_delta = settlement.get(f"{side}_xp_delta", 0)
+        stat_gain = settlement.get(f"{side}_stat_gain")
+        title = " · ".join(
+            value
+            for value in (summary.get("rank"), summary.get("build"))
+            if value
+        )
+        parts = [
+            f"**{duelist.name}** +{xp_delta} XP "
+            f"({summary.get('xp', 0)}/20)",
+        ]
+        if stat_gain:
+            parts.append(f"{stat_gain.upper()} +1")
+        if title:
+            parts.append(title)
+        return " · ".join(parts)
+
+    extra_lines = [
+        progression_line(winner, "winner"),
+        progression_line(loser, "loser"),
+    ]
+    if settlement.get("wager"):
+        extra_lines.append(
+            f"💰 Pot: **{settlement['payout']}** {JOPACOIN_EMOTE} · "
+            f"fee: {settlement['fee']} to the Reserve"
+        )
+    if settlement.get("personality_event"):
+        extra_lines.append(settlement["personality_event"])
     embed = discord.Embed(
         title=f"🏆 {winner.name} wins the brawl!",
         description=(
@@ -160,13 +201,22 @@ def build_result_embed(
             + f"Victory in {rounds} round{'s' if rounds != 1 else ''}.\n"
             f"{winner_gain_line}\n{loser_loss_line}\n\n"
             f"⚔️ **{winner.name}** {win_rec[0]}W-{win_rec[1]}L · "
-            f"**{loser.name}** {lose_rec[0]}W-{lose_rec[1]}L"
+            f"**{loser.name}** {lose_rec[0]}W-{lose_rec[1]}L\n\n"
+            + "\n".join(extra_lines)
         ),
         color=COLOR_GREEN,
     )
-    embed.set_footer(
-        text="No jopacoins change hands — brawls play for hunger and honor."
-    )
+    if settlement.get("wager"):
+        embed.set_footer(
+            text=(
+                f"Wager settled: {settlement['payout']} JC to the winner · "
+                f"{settlement['fee']} JC fee to the Reserve."
+            )
+        )
+    else:
+        embed.set_footer(
+            text="No jopacoins change hands — brawls play for hunger and honor."
+        )
     file = get_pet_card(
         winner.species_id,
         PetStage.ADULT.value if winner.is_adult else PetStage.BABY.value,

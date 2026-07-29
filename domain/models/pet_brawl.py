@@ -42,6 +42,13 @@ class PetBrawl:
     rounds: int | None
     winner_hunger_delta: int
     loser_hunger_delta: int
+    wager: int = 0
+    fee: int = 0
+    challenger_xp_delta: int = 0
+    recipient_xp_delta: int = 0
+    challenger_stat_gain: str | None = None
+    recipient_stat_gain: str | None = None
+    personality_event_key: str | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> PetBrawl:
