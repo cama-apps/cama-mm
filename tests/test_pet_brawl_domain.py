@@ -10,12 +10,10 @@ from domain.models.pet_brawl import PetBrawl
 from domain.pet_brawl import (
     BASE_CRIT_PCT,
     BRAWL_TRAITS,
-    HUNKER_COUNTER,
     HUNKER_HEAL,
     MAX_ROUNDS,
     MOVE_BLURBS,
     MOVE_EMOJI,
-    MYSTIC_COUNTER,
     SAFE_MOVE,
     SPITTER_CRIT_PCT,
     STAMPEDE_MISS_PCT,
@@ -230,8 +228,7 @@ class TestResolveRound:
 
         # Incoming 8 is halved to 4, then INT mitigates 1; Hunker heals 2+1.
         assert resolved.b.hp == 70 - 3 + 3
-        # Hunker counter is base 5 plus one INT.
-        assert resolved.a.hp == 100 - 6
+        assert resolved.a.hp == 100
 
     def test_spit_deals_scripted_damage_both_ways(self):
         state = initial_state(mk(name="A"), mk(name="B"))
@@ -259,48 +256,37 @@ class TestResolveRound:
         assert new.b.hp == 100
         assert any("misses" in line for line in log)
 
-    def test_hunker_halves_spit_heals_and_counters(self):
+    def test_hunker_halves_spit_and_heals_without_countering(self):
         state = initial_state(mk(name="A"), mk(name="B"))
         # a spits 11 no crit; b hunkers, heal 4.
         rng = FakeRng([11, 100, 4])
         new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
         # b takes ceil(11/2)=6, heals 4 -> 98.
         assert new.b.hp == 98
-        # a takes the counter: 5 + power 0.
-        assert new.a.hp == 100 - HUNKER_COUNTER
+        assert new.a.hp == 100
 
-    def test_stampede_punches_further_through_hunker(self):
+    def test_stampede_cannot_miss_a_hunkered_opponent(self):
         state = initial_state(
             mk(name="A"),
             replace(mk(name="B"), hp=50),
         )
-        # Stampede lands for 20 before guard; Hunker heals 2.
-        rng = FakeRng([STAMPEDE_MISS_PCT + 1, 20, 100, 2])
-        new, _ = resolve_round(
+        # Seed 1's first accuracy roll normally misses. A stationary,
+        # hunkered opponent must still be hit.
+        new, log = resolve_round(
             state,
             PetBrawlMove.STAMPEDE,
             PetBrawlMove.HUNKER,
-            rng,
+            random.Random(1),
         )
-        # Hunker retains 60% of Stampede damage: ceil(20 * .60) = 12.
-        assert new.b.hp == 50 - 12 + 2
-        # The landed Stampede still draws Hunker's counter.
-        assert new.a.hp == 100 - HUNKER_COUNTER
+        assert new.b.hp < 50
+        assert new.a.hp == 100
+        assert not any("misses" in line for line in log)
 
-    def test_hunker_counter_only_when_attack_lands(self):
-        state = initial_state(mk(name="A"), mk(name="B"))
-        # a's stampede misses (roll 1); b hunkers, heal 2.
-        rng = FakeRng([1, 2])
-        new, _ = resolve_round(state, PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER, rng)
-        assert new.a.hp == 100  # no counter
-        assert new.b.hp == 100
-
-    def test_mystic_counter_is_stronger(self):
+    def test_mystic_hunker_is_also_pure_defense(self):
         state = initial_state(mk(name="A"), mk("invoker_cama", name="B"))
         rng = FakeRng([11, 100, 4])
         new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
-        # Mystic is rare tier: counter 8 + power 1.
-        assert new.a.hp == 100 - (MYSTIC_COUNTER + 1)
+        assert new.a.hp == 100
 
     def test_dune_reduces_damage_with_floor_one(self):
         state = initial_state(mk(name="A"), mk("dromedary_cross", name="B"))
@@ -324,9 +310,14 @@ class TestResolveRound:
 
     def test_ravenous_hunker_heals_extra(self):
         state = initial_state(mk(name="A"), mk("pudge_cama", name="B", hunger=0))
-        # b starts at 80 hp (hunger 0 -> -20). a stampede misses; b heals 2+3.
-        rng = FakeRng([1, 2])
-        new, _ = resolve_round(state, PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER, rng)
+        # b starts at 80 hp (hunger 0 -> -20) and heals 2+3.
+        rng = FakeRng([2, 2])
+        new, _ = resolve_round(
+            state,
+            PetBrawlMove.HUNKER,
+            PetBrawlMove.HUNKER,
+            rng,
+        )
         assert new.b.hp == 80 + 5
 
     def test_frostwool_makes_stampedes_miss_more(self):
@@ -385,6 +376,29 @@ class TestResolveRound:
         assert new.winner == "a"
         assert any("judges" in line for line in log)
 
+    def test_round_cap_equal_hp_percentage_is_a_draw(self):
+        a = replace(mk(name="A"), hp=60)
+        b = replace(mk(name="B", adult=False), hp=48)
+        state = initial_state(a, b)
+        state = type(state)(
+            a=state.a,
+            b=state.b,
+            round_no=MAX_ROUNDS - 1,
+            winner=None,
+        )
+
+        new, log = resolve_round(
+            state,
+            SAFE_MOVE,
+            SAFE_MOVE,
+            FakeRng([8, 100, 10, 100, 0]),
+        )
+
+        assert (new.a.hp, new.a.max_hp) == (50, 100)
+        assert (new.b.hp, new.b.max_hp) == (40, 80)
+        assert new.winner == "draw"
+        assert any("draw" in line.lower() for line in log)
+
     def test_resolve_on_finished_state_raises(self):
         state = initial_state(mk(name="A"), mk(name="B"))
         finished = type(state)(a=state.a, b=state.b, round_no=3, winner="a")
@@ -406,6 +420,7 @@ class TestTermination:
             )
 
         assert state.round_no == 8
+        assert state.winner == "draw"
         assert any("judges" in line for line in log)
 
     def test_any_seed_terminates_by_max_rounds(self):
@@ -423,28 +438,22 @@ class TestTermination:
                 )
                 rounds += 1
                 assert rounds <= MAX_ROUNDS
-            assert state.winner in ("a", "b")
+            assert state.winner in ("a", "b", "draw")
 
 
 class TestStatisticalTuning:
-    def test_move_matchups_form_soft_counter_cycle(self):
-        counters = (
-            (PetBrawlMove.HUNKER, PetBrawlMove.SPIT),
-            (PetBrawlMove.STAMPEDE, PetBrawlMove.HUNKER),
-            (PetBrawlMove.SPIT, PetBrawlMove.STAMPEDE),
-        )
-        trials = 1000
-
-        for favored, countered in counters:
-            wins = 0
-            for seed in range(trials):
-                rng = random.Random(seed)
-                state = initial_state(mk(name="A"), mk(name="B"))
-                while state.winner is None:
-                    state, _ = resolve_round(state, favored, countered, rng)
-                wins += state.winner == "a"
-
-            assert wins > trials // 2, (favored, countered, wins)
+    def test_repeated_hunker_cannot_defeat_an_attacking_opponent(self):
+        for seed in range(100):
+            rng = random.Random(seed)
+            state = initial_state(mk(name="A"), mk(name="B"))
+            while state.winner is None:
+                state, _ = resolve_round(
+                    state,
+                    PetBrawlMove.HUNKER,
+                    PetBrawlMove.SPIT,
+                    rng,
+                )
+            assert state.winner == "b"
 
     def test_stampede_miss_rate_near_tuning(self):
         rng = random.Random(7)
@@ -473,13 +482,13 @@ class TestStatisticalTuning:
         assert abs(crit_rate("rama") - SPITTER_CRIT_PCT / 100) < 0.04
         assert abs(crit_rate("common_cama") - BASE_CRIT_PCT / 100) < 0.04
 
-    def test_spit_always_lands_and_draws_the_counter(self):
+    def test_spit_always_lands_without_drawing_a_counter(self):
         rng = random.Random(3)
         for _ in range(200):
             state = initial_state(mk(name="A"), mk(name="B"))
             new, _ = resolve_round(state, SAFE_MOVE, PetBrawlMove.HUNKER, rng)
             assert new.b.hp <= 100  # heal capped at max
-            assert 100 - new.a.hp == HUNKER_COUNTER  # spit never misses
+            assert new.a.hp == 100
 
     def test_hunker_heal_within_range(self):
         rng = random.Random(5)

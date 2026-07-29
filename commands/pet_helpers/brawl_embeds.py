@@ -144,6 +144,35 @@ def build_result_embed(
     rounds: int,
     final_log: tuple[str, ...],
 ) -> tuple[discord.Embed, discord.File | None]:
+    if settlement.get("draw"):
+        a, b = settlement["duelists"]
+        records = settlement["records"]
+        record_a = records.get(a.pet_id, (0, 0))
+        record_b = records.get(b.pet_id, (0, 0))
+        embed = discord.Embed(
+            title="🤝 The brawl ends in a draw!",
+            description=(
+                ("\n".join(final_log) + "\n\n" if final_log else "")
+                + f"Draw after {rounds} rounds.\n"
+                "No hunger, records, or training XP change.\n\n"
+                f"⚔️ **{a.name}** {record_a[0]}W-{record_a[1]}L · "
+                f"**{b.name}** {record_b[0]}W-{record_b[1]}L"
+            ),
+            color=COLOR_BRAWL,
+        )
+        if settlement.get("wager"):
+            embed.set_footer(
+                text=(
+                    f"Wagers refunded: {settlement['wager']} JC each · "
+                    f"challenger fee: {settlement['fee']} JC returned."
+                )
+            )
+        else:
+            embed.set_footer(
+                text="No jopacoins change hands — the honors finish even."
+            )
+        return embed, None
+
     winner: Duelist = settlement["winner"]
     loser: Duelist = settlement["loser"]
     records: dict[int, tuple[int, int]] = settlement["records"]

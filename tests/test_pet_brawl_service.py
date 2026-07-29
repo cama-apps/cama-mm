@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -551,6 +552,42 @@ class TestSettle:
             battle["brawl"].brawl_id, TEST_GUILD_ID, battle["state"], 0
         )
         assert not result.success
+
+    def test_settle_draw_has_no_winner_or_progression(
+        self, service, insert_pet
+    ):
+        battle, pet_a, pet_b = start_battle(service, insert_pet)
+        service.pet_evolution_service = MagicMock()
+        state = battle["state"]
+        draw = type(state)(
+            a=state.a,
+            b=state.b,
+            round_no=8,
+            winner="draw",
+        )
+
+        result = service.settle(
+            battle["brawl"].brawl_id,
+            TEST_GUILD_ID,
+            draw,
+            8,
+        )
+
+        assert result.success, result.error
+        assert result.value["draw"] is True
+        assert result.value["duelists"] == (state.a, state.b)
+        assert result.value["records"] == {
+            pet_a: (0, 0),
+            pet_b: (0, 0),
+        }
+        done = service.pet_brawl_repo.get_brawl(
+            battle["brawl"].brawl_id, TEST_GUILD_ID
+        )
+        assert done.status == "done"
+        assert done.winner_id is None
+        assert done.challenger_xp_delta == 0
+        assert done.recipient_xp_delta == 0
+        service.pet_evolution_service.record_activity.assert_not_called()
 
     def test_settle_returns_training_titles_and_persisted_personality_event(
         self, service, pet_service, insert_pet
