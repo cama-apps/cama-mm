@@ -8,7 +8,13 @@ from PIL import Image
 
 from domain.pet_constants import SPECIES
 from utils import pet_assets
-from utils.pet_drawing import render_egg_card, render_pet_card, render_tombstone_card
+from utils.pet_compositor import compose_pet_card
+from utils.pet_drawing import (
+    render_egg_card,
+    render_layer,
+    render_pet_card,
+    render_tombstone_card,
+)
 
 STAGES = ("baby", "adult")
 MOODS = ("happy", "neutral", "hungry")
@@ -53,6 +59,58 @@ class TestRenderPetCard:
             for species_id in SPECIES
         }
         assert len(set(renders.values())) == len(SPECIES)
+
+    def test_new_species_have_distinct_composed_visuals(self):
+        renders = {
+            species_id: compose_pet_card(
+                species_id, "adult", "neutral", seed=17
+            ).getvalue()
+            for species_id in (
+                "common_cama",
+                "embergear_cama",
+                "riverglow_cama",
+                "prismwool_cama",
+            )
+        }
+
+        assert len(set(renders.values())) == len(renders)
+
+    def test_riverglow_uses_grounded_effect_instead_of_floating_orbs(self):
+        front = render_layer("front", "riverglow_cama", "adult", "neutral", seed=17)
+        river = render_layer(
+            "ground", "riverglow_cama", "adult", "neutral", seed=17
+        )
+        common = render_layer(
+            "ground", "common_cama", "adult", "neutral", seed=17
+        )
+
+        assert front is not None
+        assert front.getchannel("A").getbbox() is None
+        assert river is not None
+        assert common is not None
+        assert river.tobytes() != common.tobytes()
+
+    def test_riverglow_body_mark_stays_compact(self):
+        detail = render_layer(
+            "detail", "riverglow_cama", "adult", "neutral", seed=17
+        )
+
+        assert detail is not None
+        bbox = detail.getchannel("A").getbbox()
+        assert bbox is not None
+        assert bbox[2] - bbox[0] <= 20
+
+    def test_prismwool_casts_prismatic_light_beyond_its_fleece(self):
+        prism = render_layer(
+            "ground", "prismwool_cama", "adult", "neutral", seed=17
+        )
+        common = render_layer(
+            "ground", "common_cama", "adult", "neutral", seed=17
+        )
+
+        assert prism is not None
+        assert common is not None
+        assert prism.tobytes() != common.tobytes()
 
 
 class TestRenderEggAndTombstone:

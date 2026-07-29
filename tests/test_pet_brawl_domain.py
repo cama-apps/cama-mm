@@ -101,6 +101,24 @@ class TestMoveFlavor:
         assert move_name("retired_species", PetBrawlMove.SPIT) == "Spit"
         assert move_name("retired_species", PetBrawlMove.HUNKER) == "Hunker Down"
 
+    def test_new_species_have_themed_move_names(self):
+        expected = {
+            ("embergear_cama", PetBrawlMove.SPIT): "Spark Spit",
+            ("embergear_cama", PetBrawlMove.STAMPEDE): "Overdrive",
+            ("embergear_cama", PetBrawlMove.HUNKER): "Vent Heat",
+            ("riverglow_cama", PetBrawlMove.SPIT): "Charged Spit",
+            ("riverglow_cama", PetBrawlMove.STAMPEDE): "River Rush",
+            ("riverglow_cama", PetBrawlMove.HUNKER): "Bottle Up",
+            ("prismwool_cama", PetBrawlMove.SPIT): "Prismatic Spit",
+            ("prismwool_cama", PetBrawlMove.STAMPEDE): "Linked Charge",
+            ("prismwool_cama", PetBrawlMove.HUNKER): "Wool Ward",
+        }
+
+        assert {
+            key: move_name(*key)
+            for key in expected
+        } == expected
+
     def test_every_move_has_emoji(self):
         assert set(MOVE_EMOJI) == set(PetBrawlMove)
 

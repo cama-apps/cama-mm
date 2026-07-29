@@ -1,1 +1,14 @@
-{"head_center": [250, 102], "head_width": 84, "body_center": [256, 190], "body_width": 140}
+{
+  "head_center": [250, 102],
+  "head_width": 84,
+  "face_center": [244, 107],
+  "face_width": 84,
+  "headwear_center": [250, 80],
+  "headwear_width": 70,
+  "neck_center": [250, 140],
+  "neck_width": 84,
+  "chest_center": [250, 155],
+  "chest_width": 84,
+  "body_center": [256, 190],
+  "body_width": 140
+}

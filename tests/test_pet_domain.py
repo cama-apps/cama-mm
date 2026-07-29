@@ -7,6 +7,7 @@ from domain.pet_constants import (
     ADULT_AGE_SECONDS,
     DEFAULT_HUNGER_DECAY_PER_DAY,
     EGG_HATCH_SECONDS,
+    SPECIES,
     adoption_fee,
     food_cost,
     get_species,
@@ -230,6 +231,39 @@ class TestConstantsAndRows:
         from domain.pet_constants import SPECIES, SPECIES_WEIGHT_TOTAL
 
         assert sum(s.weight for s in SPECIES.values()) == SPECIES_WEIGHT_TOTAL
+
+    def test_new_species_have_distinct_care_quirks(self):
+        expected = {
+            "embergear_cama": ("Embergear Cama", "common", 2, 100, 100),
+            "riverglow_cama": ("Riverglow Cama", "uncommon", 0, 125, 100),
+            "prismwool_cama": ("Prismwool Cama", "rare", 0, 100, 105),
+        }
+
+        actual = {
+            species_id: (
+                get_species(species_id).display_name,
+                get_species(species_id).tier,
+                get_species(species_id).match_feed_bonus,
+                get_species(species_id).salt_lick_pct,
+                get_species(species_id).restore_pct,
+            )
+            for species_id in expected
+        }
+
+        assert actual == expected
+
+    def test_new_species_preserve_existing_tier_odds(self):
+        tier_weights = {
+            tier: sum(species.weight for species in SPECIES.values() if species.tier == tier)
+            for tier in ("common", "uncommon", "rare", "legendary")
+        }
+
+        assert tier_weights == {
+            "common": 6000,
+            "uncommon": 3000,
+            "rare": 900,
+            "legendary": 100,
+        }
 
     def test_feeds_used_on_resets_across_game_days(self):
         pet = make_pet(feeds_today=4, feed_date="2026-07-25")

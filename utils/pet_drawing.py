@@ -30,7 +30,15 @@ FLOOR_Y = 248
 # Layer slots, back to front. Each renders independently on a transparent
 # canvas (backdrop is opaque) so the compositor can substitute any subset
 # with disk components.
-SLOT_ORDER = ("backdrop", "back", "creature", "detail", "face", "front")
+SLOT_ORDER = (
+    "backdrop",
+    "ground",
+    "back",
+    "creature",
+    "detail",
+    "face",
+    "front",
+)
 
 _BACKGROUND = (26, 22, 38)
 _FLOOR = (46, 39, 60)
@@ -45,12 +53,15 @@ SPECIES_PALETTES: dict[str, tuple[tuple[int, int, int], ...]] = {
     "common_cama":     ((122, 89, 53),  (181, 141, 96),  (215, 185, 141), (150, 110, 70)),
     "dromedary_cross": ((146, 106, 48), (206, 166, 98),  (234, 206, 152), (182, 142, 82)),
     "banana_ears":     ((86, 112, 60),  (142, 172, 98),  (198, 216, 152), (172, 192, 92)),
+    "embergear_cama":  ((68, 58, 54),   (138, 90, 58),   (214, 164, 94),  (80, 220, 224)),
     "jopacama":        ((152, 108, 20), (218, 172, 42),  (250, 216, 112), (255, 196, 40)),
     "pudge_cama":      ((108, 48, 38),  (162, 82, 62),   (204, 130, 104), (140, 60, 50)),
     "courier_cama":    ((94, 56, 26),   (139, 90, 43),   (188, 138, 88),  (120, 76, 36)),
+    "riverglow_cama":  ((42, 72, 98),   (58, 132, 142),  (144, 214, 202), (142, 92, 238)),
     "aegis_cama":      ((186, 172, 96), (234, 224, 150), (255, 250, 206), (255, 236, 140)),
     "invoker_cama":    ((94, 50, 128),  (138, 84, 182),  (186, 140, 222), (122, 70, 162)),
     "crystal_cama":    ((72, 118, 158), (128, 182, 220), (190, 226, 248), (162, 206, 236)),
+    "prismwool_cama":  ((78, 46, 102),  (132, 82, 154),  (214, 176, 226), (242, 102, 190)),
     "rama":            ((150, 100, 96), (222, 214, 205), (248, 244, 238), (192, 52, 58)),
 }
 _DEFAULT_PALETTE = SPECIES_PALETTES["common_cama"]
@@ -148,8 +159,67 @@ def _half_blob(
     return cells
 
 
+def _draw_ground_features(
+    draw: ImageDraw.ImageDraw, species_id: str, g: _Geo
+) -> None:
+    """Floor-relative effects that may resize horizontally, never vertically."""
+    cell, cx = g.cell, CARD_WIDTH // 2
+    if species_id == "riverglow_cama":
+        # A shallow luminous current pools around the hooves.
+        ripple_y = FLOOR_Y - cell // 3
+        for radius_x, radius_y, color, width in (
+            (g.body_w // 2 + cell, cell, (76, 170, 206, 90), 2),
+            (g.body_w // 2, int(0.7 * cell), (92, 214, 218, 135), 3),
+            (g.body_w // 3, cell // 2, (190, 246, 226, 180), 2),
+        ):
+            draw.arc(
+                [
+                    cx - radius_x,
+                    ripple_y - radius_y,
+                    cx + radius_x,
+                    ripple_y + radius_y,
+                ],
+                8,
+                172,
+                fill=color,
+                width=width,
+            )
+    elif species_id == "prismwool_cama":
+        # Small floor glints suggest light splitting beneath the fleece.
+        glint_y = FLOOR_Y - max(2, cell // 5)
+        half_w = max(5, cell // 2)
+        half_h = max(2, cell // 4)
+        for glint_x, color in (
+            (cx - g.body_w // 2 - cell // 2, (90, 205, 246, 65)),
+            (cx - g.body_w // 4, (190, 118, 246, 70)),
+            (cx + g.body_w // 4, (246, 116, 188, 70)),
+            (cx + g.body_w // 2 + cell // 2, (246, 204, 96, 65)),
+        ):
+            draw.polygon(
+                [
+                    (glint_x - half_w, glint_y),
+                    (glint_x, glint_y - half_h),
+                    (glint_x + half_w, glint_y),
+                    (glint_x, min(FLOOR_Y, glint_y + half_h)),
+                ],
+                fill=color,
+            )
+            draw.line(
+                [
+                    glint_x - half_w,
+                    glint_y,
+                    glint_x,
+                    glint_y - half_h,
+                    glint_x + half_w,
+                    glint_y,
+                ],
+                fill=(*color[:3], min(150, color[3] + 70)),
+                width=2,
+            )
+
+
 def _draw_back_features(draw: ImageDraw.ImageDraw, species_id: str, g: _Geo) -> None:
-    """Silhouette features drawn behind the body: shell dome, hump."""
+    """Body-relative silhouette features drawn behind the creature."""
     cell, cx = g.cell, CARD_WIDTH // 2
     if species_id == "aegis_cama":
         shell = [
@@ -170,6 +240,32 @@ def _draw_back_features(draw: ImageDraw.ImageDraw, species_id: str, g: _Geo) -> 
             [hump[0] + cell // 2, hump[1] + 3, hump[2] - cell // 2, hump[1] + cell],
             fill=(234, 206, 152),
         )
+    elif species_id == "embergear_cama":
+        # A short, tapering exhaust trail sits behind the brass harness.
+        for ox, oy, radius, color in (
+            (
+                g.x0 + g.body_w + cell // 3,
+                g.body_top + 2 * cell,
+                int(0.7 * cell),
+                (96, 82, 82, 190),
+            ),
+            (
+                g.x0 + g.body_w + cell,
+                g.body_top + int(1.4 * cell),
+                cell // 2,
+                (82, 74, 82, 155),
+            ),
+            (
+                g.x0 + g.body_w + int(1.5 * cell),
+                g.body_top + cell,
+                cell // 3,
+                (70, 66, 78, 115),
+            ),
+        ):
+            draw.ellipse(
+                [ox - radius, oy - radius, ox + radius, oy + radius],
+                fill=color,
+            )
 
 
 def _draw_body_features(
@@ -228,6 +324,63 @@ def _draw_body_features(
         draw.arc([kx0, ky0, kx0 + cell, ky0 + cell], 0, 180, fill=(196, 198, 206), width=3)
         draw.line([kx0 + cell - 1, ky0 + cell // 2, kx0 + cell - 1, ky0 - cell // 2],
                   fill=(196, 198, 206), width=3)
+    elif species_id == "embergear_cama":
+        # Fitted copper harness segments feed a cool-running power core.
+        cy = body_top + 2 * cell
+        core_x = x0 + g.body_w // 2
+        core_r = max(4, cell // 3)
+        strap_color = (226, 156, 70)
+        strap_width = max(2, cell // 4)
+        draw.line(
+            [x0 + cell, cy - cell // 2, core_x - core_r, cy],
+            fill=strap_color,
+            width=strap_width,
+        )
+        draw.line(
+            [core_x + core_r, cy, x0 + g.body_w - cell, cy - cell // 2],
+            fill=strap_color,
+            width=strap_width,
+        )
+        draw.ellipse(
+            [core_x - core_r, cy - core_r, core_x + core_r, cy + core_r],
+            fill=accent,
+            outline=(236, 228, 176),
+            width=2,
+        )
+    elif species_id == "riverglow_cama":
+        # A compact droplet mark echoes the luminous current under its hooves.
+        drop_x = x0 + g.body_w - int(1.3 * cell)
+        drop_y = body_top + int(1.5 * cell)
+        drop_r = max(3, cell // 4)
+        draw.polygon(
+            [
+                (drop_x, drop_y - drop_r),
+                (drop_x - drop_r, drop_y + drop_r // 2),
+                (drop_x, drop_y + drop_r),
+                (drop_x + drop_r, drop_y + drop_r // 2),
+            ],
+            fill=(190, 246, 226, 165),
+        )
+    elif species_id == "prismwool_cama":
+        # Irregular translucent facets read as refracted fleece, not jewelry.
+        facets = (
+            (x0 + 2 * cell, body_top + 2 * cell, (96, 212, 238, 135)),
+            (x0 + g.body_w // 2, body_top + cell, (220, 154, 246, 125)),
+            (x0 + g.body_w - 2 * cell, body_top + 2 * cell, (246, 190, 92, 130)),
+            (x0 + 3 * cell, body_top + 3 * cell, (246, 132, 194, 105)),
+        )
+        radius = max(3, cell // 4)
+        for px, py, color in facets:
+            draw.polygon(
+                (
+                    (px - radius, py - radius // 2),
+                    (px, py - radius),
+                    (px + radius, py),
+                    (px + radius // 3, py + radius),
+                    (px - radius, py + radius // 2),
+                ),
+                fill=color,
+            )
 
 
 def _draw_ears(
@@ -396,13 +549,15 @@ def render_layer(
         return _card_base(rng)
     img = _blank_layer()
     draw = ImageDraw.Draw(img)
-    if slot == "back":
+    if slot == "ground":
         cell = g.cell
         draw.ellipse(  # ground shadow anchors the creature to the floor
             [g.x0 - cell, FLOOR_Y - cell // 2,
              g.x0 + g.body_w + cell, FLOOR_Y + cell // 2],
             fill=(30, 25, 44),
         )
+        _draw_ground_features(draw, species_id, g)
+    elif slot == "back":
         _draw_back_features(draw, species_id, g)
     elif slot == "creature":
         _draw_creature_core(draw, rng, species_id, g, mood)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from PIL import Image
 
@@ -112,8 +114,6 @@ class TestComposition:
     def test_anchor_sidecar_moves_face_onto_the_creatures_head(self, tmp_path):
         """A creature component may declare where its head ACTUALLY is; the
         face layer must follow it."""
-        import json
-
         write_component(tmp_path, "adult", "creature", "any_01", BODY_BOX, (90, 90, 90, 255))
         write_component(tmp_path, "adult", "face", "any_happy_01", FACE_BOX, MAGENTA)
         sidecar = tmp_path / "components" / "adult" / "creature" / "any_01.json"
@@ -126,6 +126,106 @@ class TestComposition:
         # Face translated +44px right onto the declared head position.
         assert img.getpixel((300, 60))[:3] == MAGENTA[:3]
         assert img.getpixel(FACE_PX)[:3] != MAGENTA[:3]
+
+    @pytest.mark.parametrize(
+        ("stage", "expected"),
+        [
+            (
+                "adult",
+                {
+                    "face_center": [256, 68],
+                    "face_width": 64,
+                    "headwear_center": [256, 32],
+                    "headwear_width": 64,
+                    "neck_center": [256, 100],
+                    "neck_width": 64,
+                    "chest_center": [256, 115],
+                    "chest_width": 64,
+                },
+            ),
+            (
+                "baby",
+                {
+                    "face_center": [256, 100],
+                    "face_width": 80,
+                    "headwear_center": [256, 55],
+                    "headwear_width": 80,
+                    "neck_center": [256, 138],
+                    "neck_width": 80,
+                    "chest_center": [256, 149],
+                    "chest_width": 80,
+                },
+            ),
+        ],
+    )
+    def test_component_without_sidecar_keeps_authoring_mounts(
+        self, tmp_path, stage, expected
+    ):
+        write_component(
+            tmp_path, stage, "creature", "any_01", BODY_BOX, (90, 90, 90, 255)
+        )
+        component_path = (
+            tmp_path / "components" / stage / "creature" / "any_01.png"
+        )
+
+        anchors = pet_compositor._load_anchors(component_path, stage)
+
+        assert {key: anchors[key] for key in expected} == expected
+
+    def test_legacy_sidecar_derives_missing_semantic_mounts(self, tmp_path):
+        write_component(
+            tmp_path, "adult", "creature", "any_01", BODY_BOX, (90, 90, 90, 255)
+        )
+        component_path = (
+            tmp_path / "components" / "adult" / "creature" / "any_01.png"
+        )
+        component_path.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "head_center": [300, 70],
+                    "head_width": 60,
+                    "body_center": [270, 190],
+                    "body_width": 150,
+                }
+            )
+        )
+
+        anchors = pet_compositor._load_anchors(component_path, "adult")
+
+        assert anchors["face_center"] == [300, 70]
+        assert anchors["face_width"] == 60
+        assert anchors["headwear_center"] == [300, 40]
+        assert anchors["neck_center"] == [300, 103]
+        assert anchors["chest_center"] == [285, 128]
+
+    def test_mood_specific_face_mount_overrides_generic_mount(self, tmp_path):
+        write_component(
+            tmp_path, "adult", "creature", "any_01", BODY_BOX, (90, 90, 90, 255)
+        )
+        write_component(
+            tmp_path, "adult", "face", "any_hungry_01", FACE_BOX, MAGENTA
+        )
+        sidecar = tmp_path / "components" / "adult" / "creature" / "any_01.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "head_center": [256, 64],
+                    "head_width": 64,
+                    "face_center": [256, 68],
+                    "face_width": 64,
+                    "face_hungry_center": [300, 68],
+                    "face_hungry_width": 64,
+                    "body_center": [256, 184],
+                    "body_width": 160,
+                }
+            )
+        )
+        pet_compositor.clear_caches()
+
+        img = compose_image(mood="hungry")
+
+        assert img.getpixel((300, 68))[:3] == MAGENTA[:3]
+        assert img.getpixel((256, 68))[:3] != MAGENTA[:3]
 
     def test_baby_backdrops_fall_back_to_adult_pool(self, tmp_path):
         """Backdrops are stage-agnostic scenes: no baby dir means reuse the
