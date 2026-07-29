@@ -19,12 +19,14 @@ from config import (
     TRIVIA_COOLDOWN_SECONDS,
     TRIVIA_REWARD_PER_QUESTION,
 )
+from domain.pet_evolution import PetActivity
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
+from utils.pet_activity import record_pet_activity
 
 logger = logging.getLogger("cama_bot.commands.trivia")
 
@@ -224,6 +226,16 @@ class TriviaView(discord.ui.View):
         self.stop()
 
         is_correct = choice_index == self.question.correct_index
+        await record_pet_activity(
+            self.cog.bot,
+            self.session.user_id,
+            self.session.guild_id,
+            PetActivity.TRIVIA_COMPLETED,
+            (
+                "trivia-answer:"
+                f"{getattr(interaction, 'id', getattr(self.session.message, 'id', self.question_num))}"
+            ),
+        )
 
         if is_correct:
             self.session.streak += 1

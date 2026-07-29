@@ -99,7 +99,15 @@ def _engrave_tombstone(data: bytes, name: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 def get_pet_card(
-    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
+    species_id: str,
+    stage: str,
+    mood: str,
+    seed: int,
+    accessory: str | None = None,
+    *,
+    calling=None,
+    primary=None,
+    secondary=None,
 ) -> discord.File | None:
     """Return a discord.File for a pet portrait card.
 
@@ -111,7 +119,7 @@ def get_pet_card(
 
     # 1. Full-card override on disk
     asset_path = _find_asset(ASSETS_DIR, base_name)
-    if asset_path:
+    if asset_path and calling is None:
         data = _load_cached_bytes(asset_path)
         if data:
             return _file_from_bytes(data, f"pet_{base_name}{asset_path.suffix}")
@@ -122,13 +130,20 @@ def get_pet_card(
     try:
         from utils import pet_compositor
         cache_key = (
-            f"compose_{base_name}_{seed}_{accessory}_"
+            f"compose_{base_name}_{seed}_{accessory}_{calling}_{primary}_{secondary}_"
             f"{pet_compositor.manifest_token()}"
         )
         data = _bytes_cache.get(cache_key)
         if data is None:
             data = pet_compositor.compose_pet_card(
-                species_id, stage, mood, seed, accessory=accessory
+                species_id,
+                stage,
+                mood,
+                seed,
+                accessory=accessory,
+                calling=calling,
+                primary=primary,
+                secondary=secondary,
             ).getvalue()
             _bytes_cache[cache_key] = data
         return _file_from_bytes(data, f"pet_{base_name}.png")
@@ -137,12 +152,21 @@ def get_pet_card(
 
     # 3. Fully procedural last resort
     try:
-        cache_key = f"render_{base_name}_{seed}_{accessory}"
+        cache_key = (
+            f"render_{base_name}_{seed}_{accessory}_{calling}_{primary}_{secondary}"
+        )
         data = _bytes_cache.get(cache_key)
         if data is None:
             from utils.pet_drawing import render_pet_card
             data = render_pet_card(
-                species_id, stage, mood, seed, accessory=accessory
+                species_id,
+                stage,
+                mood,
+                seed,
+                accessory=accessory,
+                calling=calling,
+                primary=primary,
+                secondary=secondary,
             ).getvalue()
             _bytes_cache[cache_key] = data
         return _file_from_bytes(data, f"pet_{base_name}.png")

@@ -20,11 +20,13 @@ from config import (
     PLAYER_TRIVIA_RECENT_DAYS,
     PLAYER_TRIVIA_REWARD_PER_CORRECT,
 )
+from domain.pet_evolution import PetActivity
 from services.permissions import has_admin_permission
 from services.player_trivia_service import PlayerTriviaQuestion
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
+from utils.pet_activity import record_pet_activity
 
 logger = logging.getLogger("cama_bot.commands.player_trivia")
 
@@ -236,6 +238,17 @@ class PlayerTriviaView(discord.ui.View):
                 view=None,
             )
             return
+
+        await record_pet_activity(
+            self.cog.bot,
+            self.session.user_id,
+            self.session.guild_id,
+            PetActivity.TRIVIA_COMPLETED,
+            (
+                f"player-trivia:{self.session.session_id}:"
+                f"{self.question_index + 1}"
+            ),
+        )
 
         is_correct = bool(result["is_correct"])
         awarded = int(result.get("reward", 0))

@@ -12,6 +12,7 @@ import commands.pet as pet_commands
 from commands.pet import PetCommands, setup
 from domain.models.pet import (
     DeathNotice,
+    EvolutionNotice,
     HatchNotice,
     Pet,
     PetMood,
@@ -63,7 +64,7 @@ def make_pet(**overrides) -> Pet:
 def make_cog(sweep_result=None, channel=None) -> PetCommands:
     service = MagicMock()
     service.sweep.return_value = sweep_result or {
-        "hatches": [], "deaths": [], "refunds": []
+        "hatches": [], "evolutions": [], "deaths": [], "refunds": []
     }
     bot = MagicMock()
     cog = PetCommands.__new__(PetCommands)
@@ -93,6 +94,43 @@ def channel():
 
 
 class TestSweepDelivery:
+    @pytest.mark.asyncio
+    async def test_evolution_posts_before_death_and_marks_independently(
+        self, channel, monkeypatch
+    ):
+        pet = make_pet(
+            evolved_at=T0 + 8 * DAY,
+            evolution_calling="oracle",
+            evolution_primary="fortune",
+            evolution_secondary="wisdom",
+        )
+        dead = make_pet(
+            pet_id=2,
+            died_at=T0 + 9 * DAY,
+            death_cause="starvation",
+        )
+        cog = make_cog(
+            {
+                "hatches": [],
+                "evolutions": [EvolutionNotice(pet=pet)],
+                "deaths": [DeathNotice(pet=dead)],
+                "refunds": [],
+            }
+        )
+        evolution_service = MagicMock()
+        cog.pet_evolution_service = evolution_service
+        cog.pet_flavor_service = MagicMock()
+        cog.pet_flavor_service.generate = AsyncMock(return_value="A new path!")
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
+        cog._dm_death_notice = AsyncMock()
+
+        await cog._pet_sweep_loop.coro(cog)
+
+        assert channel.send.await_count == 2
+        assert "evolved" in channel.send.await_args_list[0].kwargs["embed"].title
+        evolution_service.mark_announced.assert_called_once_with(pet)
+        cog.pet_service.mark_death_announced.assert_called_once_with(dead)
+
     @pytest.mark.asyncio
     async def test_hatch_posts_to_channel_and_marks(self, channel, monkeypatch):
         pet = make_pet()
@@ -296,11 +334,15 @@ class TestSetup:
         container._components["player_repo"] = MagicMock()
         container._init_pet_service()
         assert container._components["pet_service"] is None
+        assert container._components["pet_evolution_service"] is None
         assert container._components["pet_flavor_service"] is None
 
         monkeypatch.setattr(config, "PET_CHANNEL_ID", 123456)
         container._init_pet_service()
         assert container._components["pet_service"] is not None
+        evolution = container._components["pet_evolution_service"]
+        assert evolution is not None
+        assert container._components["pet_service"].evolution_service is evolution
         flavor = container._components["pet_flavor_service"]
         assert flavor is not None
         assert flavor.ai_service is None

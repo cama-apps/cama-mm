@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from domain.models.pet import PetStage
 from domain.pet_constants import EGG_HATCH_SECONDS
+from domain.pet_evolution import PetActivity
 from repositories.pet_repository import PetRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
@@ -241,6 +242,25 @@ class TestEggHatchAndUpgrade:
 
 
 class TestFeeding:
+    def test_successful_feed_records_one_care_activity(self, service, clock):
+        evolution = MagicMock()
+        evolution.resolve_if_due.side_effect = lambda pet, **_kwargs: pet
+        service.evolution_service = evolution
+        pet = adopt_common(service, clock)
+        service.buy(100, TEST_GUILD_ID, "tango", 1)
+        clock.now = pet.hatched_at + DAY
+
+        result = service.feed(100, TEST_GUILD_ID, "tango")
+
+        assert result.success
+        evolution.record_activity.assert_called_once_with(
+            100,
+            TEST_GUILD_ID,
+            PetActivity.PET_CARED,
+            f"pet-care:{pet.pet_id}:{clock.now}:1",
+            occurred_at=clock.now,
+        )
+
     def test_feed_flow(self, service, clock):
         pet = adopt_common(service, clock)
         service.buy(100, TEST_GUILD_ID, "tango", 5)

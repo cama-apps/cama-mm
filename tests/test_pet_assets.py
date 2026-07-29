@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from domain.pet_constants import SPECIES
+from domain.pet_evolution import PetCalling, PetInstinct
 from utils import pet_assets
 from utils.pet_drawing import render_egg_card, render_pet_card, render_tombstone_card
 
@@ -71,6 +72,9 @@ class TestPetAssetLoader:
     def _empty_assets_dir(self, tmp_path, monkeypatch):
         """Point the loader at an empty dir so the procedural tier is exercised."""
         monkeypatch.setattr(pet_assets, "ASSETS_DIR", tmp_path / "pets")
+        pet_assets._bytes_cache.clear()
+        yield
+        pet_assets._bytes_cache.clear()
 
     def test_get_pet_card_procedural_fallback_filename(self):
         file = pet_assets.get_pet_card("common_cama", "adult", "happy", seed=3)
@@ -84,6 +88,34 @@ class TestPetAssetLoader:
         assert second is not None
         assert first is not second
         assert first.fp is not second.fp
+
+    def test_evolved_card_bytes_are_rendered_once_and_then_cached(self, monkeypatch):
+        from utils import pet_compositor
+
+        calls = 0
+        original = pet_compositor.compose_pet_card
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(pet_compositor, "compose_pet_card", counted)
+        kwargs = {
+            "calling": PetCalling.PROSPECTOR,
+            "primary": PetInstinct.DELVING,
+            "secondary": PetInstinct.FORTUNE,
+        }
+
+        first = pet_assets.get_pet_card(
+            "common_cama", "adult", "happy", seed=13, **kwargs
+        )
+        second = pet_assets.get_pet_card(
+            "common_cama", "adult", "happy", seed=13, **kwargs
+        )
+
+        assert first is not second
+        assert calls == 1
 
     def test_get_egg_card_procedural_fallback(self):
         file = pet_assets.get_egg_card(seed=4)

@@ -572,6 +572,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     now,
                 ),
             )
+            trade_id = int(cursor.lastrowid)
 
             cursor.execute(
                 "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) + ? WHERE prediction_id = ?",
@@ -579,6 +580,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
 
             return {
+                "guild_id": int(guild_id),
+                "trade_id": trade_id,
+                "trade_time": now,
                 "side": side,
                 "contracts": contracts,
                 "total_cost": total_cost,
@@ -746,6 +750,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     now,
                 ),
             )
+            trade_id = int(cursor.lastrowid)
 
             cursor.execute(
                 "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) - ? WHERE prediction_id = ?",
@@ -759,6 +764,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             new_balance = int(cursor.fetchone()["balance"])
 
             return {
+                "guild_id": int(guild_id),
+                "trade_id": trade_id,
+                "trade_time": now,
                 "side": side,
                 "contracts": contracts,
                 "total_proceeds": total_proceeds,

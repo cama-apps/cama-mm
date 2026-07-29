@@ -30,6 +30,7 @@ from config import (
     MAX_DEBT,
 )
 from domain.models.pending_match_state import PendingMatchState
+from domain.pet_evolution import PetActivity
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 from utils.economy_scaling import adjust_generated_jc_reward
@@ -53,6 +54,7 @@ class BettingService:
         buff_service=None,
         economy_event_service=None,
         vanity_tax_service=None,
+        pet_evolution_service=None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
@@ -63,6 +65,7 @@ class BettingService:
         self.buff_service = buff_service
         self.economy_event_service = economy_event_service
         self.vanity_tax_service = vanity_tax_service
+        self.pet_evolution_service = pet_evolution_service
 
     def _economy_event_multiplier(self, guild_id: int | None, field: str) -> float:
         """Return one bounded daily-event multiplier, defaulting safely to 1x."""
@@ -178,7 +181,7 @@ class BettingService:
         odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
 
         # Atomic placement using DB pending match payload (enforces lock + team restriction).
-        self.bet_repo.place_bet_against_pending_match_atomic(
+        bet_id = self.bet_repo.place_bet_against_pending_match_atomic(
             guild_id=guild_id,
             discord_id=discord_id,
             team=team,
@@ -189,6 +192,13 @@ class BettingService:
             odds_at_placement=odds_at_placement,
             pending_match_id=pending_match_id,
         )
+        if self.pet_evolution_service is not None:
+            self.pet_evolution_service.record_activity(
+                discord_id,
+                guild_id,
+                PetActivity.BET_PLACED,
+                f"bet:{bet_id}",
+            )
 
     def award_participation(
         self,

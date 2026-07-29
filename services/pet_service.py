@@ -70,6 +70,7 @@ from domain.pet_constants import (
     get_species,
     species_ids_by_tier,
 )
+from domain.pet_evolution import PetActivity
 from services import error_codes
 from services.result import Result
 from utils.game_date import game_date_for_timestamp
@@ -95,10 +96,18 @@ def _prev_week_key_for_timestamp(ts: int) -> str:
 
 
 class PetService:
-    def __init__(self, pet_repo, player_repo, *, decay_per_day: int):
+    def __init__(
+        self,
+        pet_repo,
+        player_repo,
+        *,
+        decay_per_day: int,
+        evolution_service=None,
+    ):
         self.pet_repo = pet_repo
         self.player_repo = player_repo
         self.decay_per_day = decay_per_day
+        self.evolution_service = evolution_service
 
     # --- time helpers (patchable in tests) ---
 
@@ -161,9 +170,17 @@ class PetService:
                 return None
             if current.died_at is not None:
                 return None
+            starvation_at = current.starvation_time(self.decay_per_day)
+            if self.evolution_service is not None:
+                current = self.evolution_service.resolve_if_due(
+                    current,
+                    alive_through=min(now, starvation_at - 1),
+                )
+                if current.died_at is not None:
+                    return None
             if not current.is_starved(now, self.decay_per_day):
                 return current
-            died_at = current.starvation_time(self.decay_per_day)
+            died_at = starvation_at
             work_units, work_at = self._dig_work_settlement(current, died_at)
             species = get_species(current.species)
             if species.has_aegis and not current.aegis_used:
@@ -240,6 +257,11 @@ class PetService:
                 supplies=supplies,
                 dig_work_units=self._dig_work_settlement(pet, now)[0],
                 dig_work_rate=self._dig_work_rate(pet, now),
+                evolution_hint=(
+                    self.evolution_service.hint_for(pet)
+                    if self.evolution_service is not None
+                    else None
+                ),
             )
         )
 
@@ -566,6 +588,14 @@ class PetService:
             )
         except ValueError as exc:
             return self._map_repo_error(exc, fee=cost)
+        if self.evolution_service is not None:
+            self.evolution_service.record_activity(
+                discord_id,
+                guild_id,
+                PetActivity.PET_CARED,
+                f"pet-care:{fresh.pet_id}:salt:{now}",
+                occurred_at=now,
+            )
         return Result.ok(
             {
                 "item_id": SALT_LICK.item_id,
@@ -712,6 +742,17 @@ class PetService:
                     continue
                 return self._map_repo_error(exc)
             supplies = self.pet_repo.get_supplies(discord_id, guild_id)
+            if self.evolution_service is not None:
+                self.evolution_service.record_activity(
+                    discord_id,
+                    guild_id,
+                    PetActivity.PET_CARED,
+                    (
+                        f"pet-care:{fresh.pet_id}:"
+                        f"{fresh.last_fed_at}:{fresh.feeds_today}"
+                    ),
+                    occurred_at=now,
+                )
             return Result.ok(
                 FeedOutcome(
                     pet=fresh,
@@ -797,13 +838,16 @@ class PetService:
     # --- background sweep ---
 
     def sweep(self) -> dict:
-        """One global pass: starvation, hatch reveals, death notices, refunds.
+        """One global pass: evolution, starvation, hatch/death notices, refunds.
 
-        Returns {"deaths": [DeathNotice], "hatches": [HatchNotice],
-        "refunds": [RefundNotice]}. Delivery bookkeeping (mark_* methods) is
-        the caller's job so failed Discord sends retry next tick.
+        Delivery bookkeeping is the caller's job so failed Discord sends retry
+        next tick.
         """
         now = self._now()
+        if self.evolution_service is not None:
+            for pet in self.evolution_service.find_due(now):
+                self.resolve_starvation(pet, now)
+
         candidates = self.pet_repo.find_starvation_candidates(
             now, decay_per_day=self.decay_per_day, max_decay_pct=_MAX_DECAY_PCT
         )
@@ -815,8 +859,18 @@ class PetService:
             HatchNotice(pet=self._resolve_hatch(pet, now))
             for pet in self.pet_repo.find_unannounced_hatches(now)
         ]
+        evolutions = (
+            self.evolution_service.get_unannounced()
+            if self.evolution_service is not None
+            else []
+        )
         refunds = self._sweep_refunds(now)
-        return {"deaths": deaths, "hatches": hatches, "refunds": refunds}
+        return {
+            "deaths": deaths,
+            "hatches": hatches,
+            "evolutions": evolutions,
+            "refunds": refunds,
+        }
 
     def mark_death_announced(self, pet: Pet) -> None:
         self.pet_repo.mark_death_announced(pet.pet_id, pet.guild_id, self._now())

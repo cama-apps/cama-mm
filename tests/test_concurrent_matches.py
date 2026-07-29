@@ -6,6 +6,7 @@ with proper isolation of state, betting, and recording.
 """
 
 
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -13,11 +14,15 @@ import pytest
 from discord import app_commands
 
 from commands.match import MatchCommands
+from domain.pet_evolution import PetInstinct
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
+from repositories.pet_evolution_repository import PetEvolutionRepository
+from repositories.pet_repository import PetRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
+from services.pet_evolution_service import PetEvolutionService
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -707,6 +712,57 @@ class TestRecordFinalizeThreadIsolation:
             "radiant",
             thread_id=555_333,
             pending_match_id=state.pending_match_id,
+        )
+
+    async def test_record_captures_pet_activity_before_final_followup_send(
+        self, services
+    ):
+        """A committed match still shapes pets when its announcement fails."""
+        match_service = services["match_service"]
+        players = list(range(45000, 45010))
+        _register_players(services["player_repo"], players)
+        match_service.shuffle_players(players, guild_id=TEST_GUILD_ID)
+
+        pet_repo = PetRepository(services["db_path"])
+        pet = pet_repo.adopt_pet(
+            players[0],
+            TEST_GUILD_ID,
+            name="Blep",
+            egg_tier="standard",
+            fee=0,
+            now=int(time.time()) - 1,
+            hatch_seconds=0,
+        )
+        evolution_repo = PetEvolutionRepository(services["db_path"])
+        evolution_service = PetEvolutionService(evolution_repo, pet_repo)
+
+        cog, mock_bot = self._make_record_cog(services)
+        mock_bot.pet_evolution_service = evolution_service
+        result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
+
+        with (
+            patch.object(cog, "_finalize_lobby_thread", AsyncMock()),
+            patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
+        ):
+            for voter in players[:2]:
+                await cog.record.callback(
+                    cog,
+                    self._make_interaction(voter),
+                    result_choice,
+                )
+
+            final_interaction = self._make_interaction(players[2])
+            final_interaction.followup.send.side_effect = RuntimeError(
+                "simulated followup failure"
+            )
+            with pytest.raises(RuntimeError, match="simulated followup failure"):
+                await cog.record.callback(cog, final_interaction, result_choice)
+
+        assert (
+            evolution_repo.get_scores(pet.pet_id, TEST_GUILD_ID)[
+                PetInstinct.COMPETITION
+            ]
+            == 2
         )
 
     async def test_finalize_archives_recorded_matchs_thread(self, services):

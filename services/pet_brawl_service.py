@@ -41,6 +41,7 @@ from domain.pet_constants import (
     SOLO_TRAINING_XP_PER_SESSION,
     get_species,
 )
+from domain.pet_evolution import PetActivity
 from services import error_codes
 from services.result import Result
 
@@ -128,10 +129,18 @@ _SOLO_TRAINING_COPY = (
 
 
 class PetBrawlService:
-    def __init__(self, pet_service, pet_brawl_repo, *, rng: random.Random | None = None):
+    def __init__(
+        self,
+        pet_service,
+        pet_brawl_repo,
+        *,
+        rng: random.Random | None = None,
+        pet_evolution_service=None,
+    ):
         self.pet_service = pet_service
         self.pet_brawl_repo = pet_brawl_repo
         self._rng = rng or random.Random()
+        self.pet_evolution_service = pet_evolution_service
 
     # Patchable seam, mirroring PetService._now.
     def _now(self) -> int:
@@ -519,6 +528,7 @@ class PetBrawlService:
             if brawl_traits(loser.species_id).loss_insurance
             else 0
         )
+        now = self._now()
         try:
             settlement = self.pet_brawl_repo.settle_brawl_atomic(
                 brawl_id,
@@ -527,7 +537,7 @@ class PetBrawlService:
                 winner_pet_id=winner.pet_id,
                 loser_pet_id=loser.pet_id,
                 rounds=rounds,
-                now=self._now(),
+                now=now,
                 decay_per_day=self.pet_service.decay_per_day,
                 winner_gain=winner_gain,
                 loser_loss=loser_loss,
@@ -539,6 +549,15 @@ class PetBrawlService:
             )
         except ValueError as exc:
             return self._map_repo_error(exc)
+        if self.pet_evolution_service is not None:
+            for duelist in (winner, loser):
+                self.pet_evolution_service.record_activity(
+                    duelist.owner_id,
+                    guild_id,
+                    PetActivity.PET_BRAWL_COMPLETED,
+                    f"pet-brawl:{brawl_id}",
+                    occurred_at=now,
+                )
         records = self.pet_brawl_repo.get_records_for(
             [winner.pet_id, loser.pet_id], guild_id
         )

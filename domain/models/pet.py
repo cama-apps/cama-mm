@@ -91,6 +91,13 @@ class Pet:
     training_dex: int = 0
     solo_training_sessions: int = 3
     solo_training_recharged_at: int | None = None
+    evolution_started_at: int | None = None
+    evolution_due_at: int | None = None
+    evolved_at: int | None = None
+    evolution_calling: str | None = None
+    evolution_primary: str | None = None
+    evolution_secondary: str | None = None
+    evolution_announced_at: int | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Pet:
@@ -271,6 +278,7 @@ class PetStatus:
     last_dead: Pet | None = None
     dig_work_units: int = 0
     dig_work_rate: int = 0
+    evolution_hint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +307,11 @@ class DeathNotice:
 
 @dataclass(frozen=True, slots=True)
 class HatchNotice:
+    pet: Pet
+
+
+@dataclass(frozen=True, slots=True)
+class EvolutionNotice:
     pet: Pet
 
 
