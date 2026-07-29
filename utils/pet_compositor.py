@@ -21,13 +21,12 @@ Component contract (also documented in prompts.md):
     grayscale; they are remapped to the species palette at compose time.
   - Multiple variants per scope are encouraged: the pet's id seeds which
     variant an individual pet gets, so every pet looks subtly unique.
-  - A creature component whose head/body don't sit exactly in the default
-    zones may ship an ANCHOR SIDECAR ({same name}.json) declaring where
-    they actually are: {"head_center": [x, y], "head_width": w,
-    "body_center": [x, y], "body_width": w}. The compositor then shifts
-    and scales the face/front layers to the head anchor and the
-    back/detail layers to the body anchor, so every face variant fits
-    every body variant. No sidecar means the default zones apply.
+  - A creature component whose parts don't sit exactly in the default
+    zones may ship an ANCHOR SIDECAR ({same name}.json). The original
+    head_center/head_width and body_center/body_width values remain
+    supported; face, headwear, neck, and chest center/width pairs can
+    refine individual mounts. Missing semantic mounts derive from the
+    head/body frame, so older component packs remain compatible.
 
 Directory listings and file bytes are cached for the process lifetime
 (same policy as utils/pet_assets.py — new component packs need a restart).
@@ -62,7 +61,7 @@ logger = logging.getLogger(__name__)
 COMPONENTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "pets" / "components"
 
 # Slots whose shared ("any"-scoped) parts get species-palette tinting.
-TINTED_SLOTS = {"back", "creature", "detail"}
+TINTED_SLOTS = {"ground", "back", "creature", "detail"}
 # Slots whose components are keyed by mood.
 MOOD_SLOTS = {"face"}
 
@@ -166,10 +165,20 @@ def _tint_layer(img: Image.Image, species_id: str) -> Image.Image:
 AUTHORING_FRAMES = {
     "adult": {
         "head_center": [256, 64], "head_width": 64,
+        "face_center": [256, 68], "face_width": 64,
+        "face_content_width": 42, "face_content_height": 25,
+        "headwear_center": [256, 32], "headwear_width": 64,
+        "neck_center": [256, 100], "neck_width": 64,
+        "chest_center": [256, 115], "chest_width": 64,
         "body_center": [256, 184], "body_width": 160,
     },
     "baby": {
         "head_center": [256, 95], "head_width": 80,
+        "face_center": [256, 100], "face_width": 80,
+        "face_content_width": 64, "face_content_height": 33,
+        "headwear_center": [256, 55], "headwear_width": 80,
+        "neck_center": [256, 138], "neck_width": 80,
+        "chest_center": [256, 149], "chest_width": 80,
         "body_center": [256, 190], "body_width": 140,
     },
 }
@@ -181,6 +190,17 @@ def _geometry_frame(stage: str) -> dict:
     return {
         "head_center": [g.hx + g.hw // 2, g.hy + g.hh // 2],
         "head_width": g.hw,
+        "face_center": [g.hx + g.hw // 2, g.hy + g.hh // 2],
+        "face_width": g.hw,
+        "headwear_center": [g.hx + g.hw // 2, g.hy],
+        "headwear_width": g.hw,
+        "neck_center": [g.hx + g.hw // 2, g.hy + g.hh + g.cell // 4],
+        "neck_width": g.hw,
+        "chest_center": [
+            g.hx + g.hw // 2,
+            g.hy + g.hh + int(1.2 * g.cell),
+        ],
+        "chest_width": g.hw,
         "body_center": [g.x0 + g.body_w // 2, g.body_top + (FLOOR_Y - g.body_top) // 2],
         "body_width": g.body_w,
     }
@@ -206,6 +226,30 @@ def _load_anchors(component_path: Path, stage: str) -> dict:
         _image_cache[key] = cached
     if cached:
         anchors.update(cached)
+    else:
+        return anchors
+    # Old or third-party sidecars may only carry the original head/body
+    # frame. Derive safe semantic mounts from that frame while allowing
+    # authored sidecars to override every value independently.
+    head_x, head_y = anchors["head_center"]
+    head_width = anchors["head_width"]
+    body_x, body_y = anchors["body_center"]
+    semantic_defaults = {
+        "face_center": [head_x, head_y],
+        "face_width": head_width,
+        "headwear_center": [head_x, round(head_y - head_width / 2)],
+        "headwear_width": head_width,
+        "neck_center": [head_x, round(head_y + head_width * 0.55)],
+        "neck_width": head_width,
+        "chest_center": [
+            round((head_x + body_x) / 2),
+            round(head_y + (body_y - head_y) * 0.48),
+        ],
+        "chest_width": head_width,
+    }
+    for key, value in semantic_defaults.items():
+        if key not in cached:
+            anchors[key] = value
     return anchors
 
 
@@ -233,11 +277,51 @@ def _fit_layer(
     )
 
 
+def _normalized_face_source(layer: Image.Image, source: dict) -> dict:
+    """Center authored face content and normalize differently sized moods."""
+    reference_width = source.get("face_content_width")
+    reference_height = source.get("face_content_height")
+    if not reference_width or not reference_height:
+        return source
+    bbox = (
+        layer.getchannel("A")
+        .point(lambda value: 255 if value > 20 else 0)
+        .getbbox()
+    )
+    if bbox is None:
+        return source
+    content_width = bbox[2] - bbox[0]
+    content_height = bbox[3] - bbox[1]
+    fitted_width = (
+        content_width + 2 if content_width > reference_width else reference_width
+    )
+    fitted_height = (
+        content_height + 2
+        if content_height > reference_height
+        else reference_height
+    )
+    footprint_scale = max(
+        fitted_width / reference_width,
+        fitted_height / reference_height,
+    )
+    normalized = dict(source)
+    normalized["face_center"] = [
+        (bbox[0] + bbox[2]) / 2,
+        (bbox[1] + bbox[3]) / 2,
+    ]
+    normalized["face_width"] = source["face_width"] * footprint_scale
+    return normalized
+
+
 def _fit_to_target(layer: Image.Image, source: dict, target: dict, kind: str) -> Image.Image:
     """Map a layer from the frame it was authored/drawn in onto the
-    creature's actual frame. kind is "head" (face/front) or "body"
-    (back/detail)."""
-    src_c, src_w = source[f"{kind}_center"], source[f"{kind}_width"]
+    creature's actual frame. Mood-specific face mounts share the authored
+    face source frame."""
+    source_kind = "face" if kind.startswith("face_") else kind
+    if source_kind == "face":
+        source = _normalized_face_source(layer, source)
+    src_c = source[f"{source_kind}_center"]
+    src_w = source[f"{source_kind}_width"]
     tgt_c, tgt_w = target[f"{kind}_center"], target[f"{kind}_width"]
     scale = tgt_w / src_w if src_w else 1.0
     return _fit_layer(
@@ -245,6 +329,33 @@ def _fit_to_target(layer: Image.Image, source: dict, target: dict, kind: str) ->
         scale=scale,
         pivot=tuple(src_c),
         translate=(tgt_c[0] - src_c[0], tgt_c[1] - src_c[1]),
+    )
+
+
+def _fit_ground_to_target(
+    layer: Image.Image, source: dict, target: dict
+) -> Image.Image:
+    """Fit floor art to the creature's width without moving it off FLOOR_Y."""
+    source_x = source["body_center"][0]
+    source_width = source["body_width"]
+    target_x = target["body_center"][0]
+    target_width = target["body_width"]
+    scale = target_width / source_width if source_width else 1.0
+    if abs(scale - 1.0) < 0.01 and source_x == target_x:
+        return layer
+    inverse = 1.0 / scale
+    return layer.transform(
+        (CARD_WIDTH, CARD_HEIGHT),
+        Image.AFFINE,
+        (
+            inverse,
+            0.0,
+            source_x - target_x * inverse,
+            0.0,
+            1.0,
+            0.0,
+        ),
+        resample=Image.BICUBIC,
     )
 
 
@@ -265,7 +376,7 @@ def _accessory_layer(
         source = geometry
     if layer is None:
         return None
-    kind = "head" if get_accessory(accessory_id).anchor == "head" else "body"
+    kind = get_accessory(accessory_id).anchor
     return _fit_to_target(layer, source, target, kind)
 
 
@@ -284,9 +395,9 @@ def compose_pet_card(
     per slot. Returns io.BytesIO of the finished PNG.
 
     Frames: disk components are authored in the AUTHORING frame; procedural
-    layers draw in the geometry frame. Anchored layers (face/front to the
-    head, back/detail to the body) are mapped from their source frame onto
-    the creature's target frame, so any face fits any body.
+    layers draw in the geometry frame. Face, headwear, neckwear, and chest
+    accessories use independent semantic mounts; front features still use
+    the head and back/detail layers use the body.
     """
     authoring = _authoring_frame(stage)
     geometry = _geometry_frame(stage)
@@ -310,7 +421,18 @@ def compose_pet_card(
         if layer is None:
             layer = render_layer(slot, species_id, stage, mood, seed)
             source = geometry
-        if layer is not None and slot in ("face", "front"):
+        if layer is not None and slot == "ground":
+            layer = _fit_ground_to_target(layer, source, target)
+        elif layer is not None and slot == "face":
+            mood_mount = f"face_{mood}"
+            kind = (
+                mood_mount
+                if f"{mood_mount}_center" in target
+                and f"{mood_mount}_width" in target
+                else "face"
+            )
+            layer = _fit_to_target(layer, source, target, kind)
+        elif layer is not None and slot == "front":
             layer = _fit_to_target(layer, source, target, "head")
         elif layer is not None and slot in ("back", "detail"):
             layer = _fit_to_target(layer, source, target, "body")

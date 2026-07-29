@@ -108,7 +108,10 @@ class TestAdopt:
             weights = kwargs["weights"]
         assert status.pet.species == "rama"
         by_id = dict(zip(species_ids, weights, strict=True))
-        assert by_id["common_cama"] == 2000
+        assert by_id["common_cama"] == 1500
+        assert by_id["embergear_cama"] == 1500
+        assert by_id["riverglow_cama"] == 750
+        assert by_id["prismwool_cama"] == 225
         assert by_id["rama"] == 100
         assert sum(weights) == 10_000
 
@@ -562,14 +565,14 @@ class TestGacha:
         assert service.pet_repo.get_active_pet(100, TEST_GUILD_ID).accessory == "red_bow"
 
     def test_camadex_counts_hatched_species_only(self, service, clock):
-        assert service.camadex(100, TEST_GUILD_ID) == ([], 10)
+        assert service.camadex(100, TEST_GUILD_ID) == ([], 13)
         pet = adopt_common(service, clock)
         # Still an egg: species not yet revealed.
         assert service.camadex(100, TEST_GUILD_ID)[0] == []
         clock.now = pet.hatched_at + DAY
         raised, total = service.camadex(100, TEST_GUILD_ID)
         assert raised == ["common_cama"]
-        assert total == 10
+        assert total == 13
 
 
 class TestMatchHook:

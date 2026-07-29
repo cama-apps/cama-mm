@@ -115,57 +115,77 @@ class PetSpecies:
 # cama, Rama, was bred in Dubai in 1998 and had a famously poor temperament).
 SPECIES: dict[str, PetSpecies] = {
     "common_cama": PetSpecies(
-        "common_cama", "Common Cama", "common", 2000,
+        "common_cama", "Common Cama", "common", 1500,
         "A camel-llama hybrid of no particular distinction. Its quirk is "
         "having none.",
     ),
     "dromedary_cross": PetSpecies(
-        "dromedary_cross", "Dune Cama", "common", 2000,
+        "dromedary_cross", "Dune Cama", "common", 1500,
         "Takes after its dromedary side: heroic eyelashes, closable "
         "nostrils, and a modest fat reserve where a hump should be.",
         decay_pct=90,
     ),
     "banana_ears": PetSpecies(
-        "banana_ears", "Humming Cama", "common", 2000,
+        "banana_ears", "Humming Cama", "common", 1500,
         "Llama-leaning, with the characteristic banana ears. Hums "
         "constantly. Nobody knows why. It is communication.",
     ),
+    "embergear_cama": PetSpecies(
+        "embergear_cama", "Embergear Cama", "common", 1500,
+        "A brass harness hums beneath soot-dark wool. It gathers speed "
+        "whenever a match gets loud, then insists the tiny exhaust puff "
+        "was a sneeze.",
+        match_feed_bonus=2,
+    ),
     "jopacama": PetSpecies(
-        "jopacama", "Gilded Cama", "uncommon", 1000,
+        "jopacama", "Gilded Cama", "uncommon", 750,
         "Its wool grows in faint coin-shaped whorls. Auditors are "
         "suspicious but can prove nothing.",
         refund_bonus_pp=10,
     ),
     "pudge_cama": PetSpecies(
-        "pudge_cama", "Ravenous Cama", "uncommon", 1000,
+        "pudge_cama", "Ravenous Cama", "uncommon", 750,
         "Round, perpetually famished, and faster at dinner than anything "
         "its size should be. Something metal glints deep in its wool.",
         decay_pct=110,
         restore_pct=110,
     ),
     "courier_cama": PetSpecies(
-        "courier_cama", "Pack Cama", "uncommon", 1000,
+        "courier_cama", "Pack Cama", "uncommon", 750,
         "Saddlebags, a little flag, big anxious eyes. Lives to deliver. "
         "Everyone screams when it dies.",
         match_feed_bonus=5,
     ),
+    "riverglow_cama": PetSpecies(
+        "riverglow_cama", "Riverglow Cama", "uncommon", 750,
+        "Its hooves leave streaks of light on damp ground. It loiters near "
+        "rivers and keeps trying to climb into empty bottles.",
+        salt_lick_pct=125,
+    ),
     "aegis_cama": PetSpecies(
-        "aegis_cama", "Shellback Cama", "rare", 300,
+        "aegis_cama", "Shellback Cama", "rare", 225,
         "Serene, with a faintly glowing shell across its back. Local "
         "legend says it gets one more chance than everything else.",
         has_aegis=True,
     ),
     "invoker_cama": PetSpecies(
-        "invoker_cama", "Mystic Cama", "rare", 300,
+        "invoker_cama", "Mystic Cama", "rare", 225,
         "Violet-robed, insufferably learned. Three small orbs circle its "
         "head. Enjoys salt more than most scholars admit.",
         salt_lick_pct=150,
     ),
     "crystal_cama": PetSpecies(
-        "crystal_cama", "Frostwool Cama", "rare", 300,
+        "crystal_cama", "Frostwool Cama", "rare", 225,
         "Frost-blue wool that never melts. Somehow always finds the "
         "snacks at a discount. A true support.",
         food_cost_pct=90,
+    ),
+    "prismwool_cama": PetSpecies(
+        "prismwool_cama", "Prismwool Cama", "rare", 225,
+        "Its fleece catches light in colors that were not there a moment "
+        "ago. Turning it slightly improves lunch for reasons nobody can "
+        "explain.",
+        restore_pct=105,
     ),
     "rama": PetSpecies(
         "rama", "Rama the First", "legendary", 100,
@@ -246,10 +266,10 @@ class PetAccessory:
     weight: int  # out of the ACCESSORIES total
     emoji: str
     blurb: str
-    # All current accessories are head-anchored (neck/chest items are drawn
-    # just below the head so they track the chin on every body variant).
-    # "body" remains available for future torso/tail cosmetics.
-    anchor: str = "head"
+    # Semantic mount used by the compositor. Each creature sidecar supplies
+    # independent headwear, neck, and chest anchors so unlike body shapes do
+    # not force every accessory through one generic head transform.
+    anchor: str = "headwear"
 
 
 ACCESSORIES: dict[str, PetAccessory] = {
@@ -261,10 +281,10 @@ ACCESSORIES: dict[str, PetAccessory] = {
         "Practical headwear for the discerning grazer."),
     "bell_collar": PetAccessory(
         "bell_collar", "Bell Collar", "common", 250, "🔔",
-        "Now you always know where it is. It hates that."),
+        "Now you always know where it is. It hates that.", anchor="neck"),
     "wool_scarf": PetAccessory(
         "wool_scarf", "Wool Scarf", "uncommon", 90, "🧣",
-        "Wool on wool. Scandalous, cozy."),
+        "Wool on wool. Scandalous, cozy.", anchor="neck"),
     "flower_crown": PetAccessory(
         "flower_crown", "Flower Crown", "uncommon", 90, "🌸",
         "Woven from tombstone-garden flowers. Don't tell it that."),
@@ -273,10 +293,10 @@ ACCESSORIES: dict[str, PetAccessory] = {
         "Immediately becomes the most distinguished animal in the league."),
     "aegis_charm": PetAccessory(
         "aegis_charm", "Aegis Charm", "rare", 30, "🛡️",
-        "A tiny replica. Grants nothing but confidence."),
+        "A tiny replica. Grants nothing but confidence.", anchor="chest"),
     "divine_rapier_pin": PetAccessory(
         "divine_rapier_pin", "Divine Rapier Pin", "legendary", 10, "⚔️",
-        "So shiny it feels like a throw waiting to happen."),
+        "So shiny it feels like a throw waiting to happen.", anchor="chest"),
 }
 
 _FALLBACK_ACCESSORY = PetAccessory("unknown", "Curious Trinket", "common", 0, "🎁", "")

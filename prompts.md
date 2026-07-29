@@ -346,14 +346,16 @@ Pet cards are NOT shipped as full pre-rendered images. The bot composites each c
 ### Component Contract (read before generating anything)
 
 - Every component is a **full-canvas 512x288 RGBA PNG with a transparent background**. Draw the part exactly where it belongs on the card; the compositor alpha-stacks layers in slot order.
-- Anchor metadata is only needed when a CREATURE body's head/torso don't sit exactly in the layout zones below: ship a sidecar `{same name}.json` with `{"head_center": [x, y], "head_width": w, "body_center": [x, y], "body_width": w}` and the compositor shifts/scales faces, trinkets, and detail layers onto it (all six shipped bodies carry one). Non-creature components never need sidecars.
+- Anchor metadata is only needed when a CREATURE body's parts don't sit exactly in the layout zones below. With no sidecar, the compositor keeps the stage's AUTHORING frame defaults. Otherwise, ship `{same name}.json` with any needed complete center/width pairs: legacy `head_center`/`head_width` and `body_center`/`body_width`, plus optional semantic `face_center`/`face_width`, `headwear_center`/`headwear_width`, `neck_center`/`neck_width`, and `chest_center`/`chest_width`. Legacy sidecars that only provide head/body still work: the compositor derives any missing semantic mounts from that frame. Non-creature components never need sidecars.
+- The generic face mount in the AUTHORING frame is center `[256, 68]`, width `64` for adults and center `[256, 100]`, width `80` for babies. A creature sidecar may override an individual mood with a complete `face_{mood}_center`/`face_{mood}_width` pair (for example, `face_hungry_center`/`face_hungry_width`); otherwise that mood falls back to the generic `face_center`/`face_width` mount.
 - Canvas layout guide: floor line at y=248; adult body occupies roughly x176–336, y120–248; adult head roughly x224–288, y40–88. Babies are chibi (bigger head ratio, body low and centered). Render a reference card with `utils/pet_drawing.render_pet_card` to trace exact positions per stage.
 - Layer slots, stacked back → front:
 
 | slot | contents | notes |
 |---|---|---|
 | `backdrop` | scene behind the pet (stable, cave mouth, dusky desert) | opaque allowed |
-| `back` | behind-the-body features: ground shadow, Aegis shell dome, hump | |
+| `ground` | floor shadow and floor-relative effects: Riverglow current, Prismwool glints | resized horizontally to the creature body width; `FLOOR_Y` stays fixed |
+| `back` | body-relative silhouette features behind the creature: Aegis shell dome, hump, Embergear exhaust | |
 | `creature` | the full faceless animal: legs, body, neck, ears, head | the big one |
 | `detail` | on-wool features: coin speckles, saddlebags, royal blanket, hook glint, icicle fringe | |
 | `face` | eyes + muzzle + mouth, **mood-keyed** | one file per mood |
@@ -366,14 +368,14 @@ Pet cards are NOT shipped as full pre-rendered images. The bot composites each c
   - `face` slot only: insert the mood — `{scope}_{mood}_{variant}.png`, mood in `happy` / `neutral` / `hungry`
   - `{variant}`: `01`, `02`, ... — ship several! Each pet's id deterministically picks its variant, so variants = per-pet uniqueness for free.
   - Examples: `adult/creature/any_01.png`, `adult/face/any_happy_02.png`, `adult/detail/rama_01.png`, `baby/front/invoker_cama_01.png`
-- **Tinting:** `any`-scoped parts in the `back`/`creature`/`detail` slots must be authored in **neutral grayscale** — the compositor remaps their luminance onto each species' palette (dark→mid→light ramp). One grayscale creature variant instantly becomes ten species-colored bodies. `any`-scoped `face`/`backdrop`/`front` parts are used as-authored, so keep them palette-neutral (outlines, whites, soft colors).
+- **Tinting:** `any`-scoped parts in the `ground`/`back`/`creature`/`detail` slots must be authored in **neutral grayscale** — the compositor remaps their luminance onto each species' palette (dark→mid→light ramp). One grayscale creature variant instantly becomes 13 species-colored bodies. `any`-scoped `face`/`backdrop`/`front` parts are used as-authored, so keep them palette-neutral (outlines, whites, soft colors).
 - Species-scoped parts are never tinted; author them in the species' colors.
 
 ### Highest-leverage first pack
 
-1. `adult/creature/any_01..03.png` + `baby/creature/any_01..03.png` — 3 grayscale body variants per stage = 30 distinct-looking species-colored bodies per stage.
+1. `adult/creature/any_01..03.png` + `baby/creature/any_01..03.png` — 3 grayscale body variants per stage = 39 distinct-looking species-colored bodies per stage.
 2. `adult/face/any_{mood}_01..02.png` + baby equivalents — the mood system comes alive.
-3. One `detail`/`back`/`front` file per species (below) — the signature silhouettes.
+3. One `ground`/`back`/`detail`/`front` file per species (below) — the signature silhouettes.
 4. `backdrop/any_01..03.png` — scene variety.
 
 ### Creature prompt (any-scoped, grayscale)
@@ -386,7 +388,7 @@ Baby variant: chibi proportions — oversized round head low on a small plump bo
 ### Face prompts (any-scoped, per mood)
 
 ```
-Only the facial features of a cute creature on a fully transparent 512x288 canvas, positioned in the head zone (x224-288, y40-88 for adult): two big dark round eyes with bright white highlights, small pale muzzle with two nostril dots, and
+Only the facial features of a cute creature on a fully transparent 512x288 canvas, positioned on the generic face mount (center [256, 68], width 64 for adult; center [256, 100], width 80 for baby): two big dark round eyes with bright white highlights, small pale muzzle with two nostril dots, and
 - happy: curved open smile, sparkly eyes, two soft pink blush marks
 - neutral: flat little mouth, half-lidded unimpressed camelid eyes
 - hungry: drooping eyelids, sad downturned mouth, one glossy tear under the left eye
@@ -397,25 +399,32 @@ Painterly pixel-art-adjacent, no head or body — features only, floating where 
 
 - `dromedary_cross` — `back`: a modest sandy hump peeking above the back line; heroic double eyelashes could ship as a species face pack.
 - `banana_ears` — `creature` (species-scoped full body): green-tinged wool with oversized curved banana ears tilted outward.
+- `embergear_cama` — `back` + `detail`: a fitted brass harness feeding a small cool cyan core, with a short tapering exhaust puff behind the body.
 - `jopacama` — `detail`: faint gold coin-shaped whorls mirrored across the wool.
 - `pudge_cama` — `detail`: one small gray butcher's hook glinting deep in the flank wool (subtle, mostly hidden).
 - `courier_cama` — `detail`: brown courier saddlebags on both flanks with lighter flaps and a tiny flag.
+- `riverglow_cama` — `ground` + `detail`: a compact luminous droplet mark on the wool plus a shallow hoof-level current; keep it grounded, with no orbiting motes.
 - `aegis_cama` — `back`: a glowing golden Aegis shell dome arcing over the back, soft rim light.
 - `invoker_cama` — `front`: three small glowing orbs (ice blue, violet, ember orange) orbiting above the head.
 - `crystal_cama` — `detail`: ice glints in the wool plus a small icicle fringe hanging from the belly.
+- `prismwool_cama` — `ground` + `detail`: irregular translucent facets across the fleece plus small grounded rainbow glints; it should read as refracted wool, not generic crystal jewelry.
 - `rama` — `detail`: a small red royal blanket with gold trim across the back; species face packs should keep his permanent grumpy brows — Rama never looks fully happy (the real 1998 cama's documented temperament).
 - `common_cama` — deliberately no signature components. Its quirk is having none.
 
 ### Accessory components (trinket gacha)
 
-Named by accessory id (no `any_`/species scoping): `{stage}/accessory/{accessory_id}.png` or `{accessory_id}_{variant}.png`. Authored in color in the AUTHORING frame. ALL accessories are head-anchored (the head is the precisely tracked anchor on every body): hats (red_bow, straw_hat, flower_crown, top_hat) sit on/above the head zone, and neck/chest items (bell_collar, wool_scarf, aegis_charm, divine_rapier_pin) are drawn just BELOW the head zone so they follow the chin on any body. One prompt pattern:
+Named by accessory id (no `any_`/species scoping): `{stage}/accessory/{accessory_id}.png` or `{accessory_id}_{variant}.png`. Author them in color in the AUTHORING frame against their semantic mount: hats (`red_bow`, `straw_hat`, `flower_crown`, `top_hat`) use `headwear`; collars/scarves (`bell_collar`, `wool_scarf`) use `neck`; charms/pins (`aegis_charm`, `divine_rapier_pin`) use `chest`. The compositor maps each mount independently onto the creature.
 
 ```
-ONLY a [red hair bow / straw sun hat / flower crown / black top hat with red band] floating on a fully transparent 512x288 canvas, positioned to sit on top of a creature's head (head zone x224-288, y40-88 for adult; x216-296, y60-130 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
+ONLY a [red hair bow / straw sun hat / flower crown / black top hat with red band] floating on a fully transparent 512x288 canvas, positioned on the headwear mount (center [256, 32], width 64 for adult; center [256, 55], width 80 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
 ```
 
 ```
-ONLY a [leather bell collar / cozy red wool scarf with a hanging tail / small golden Aegis medallion on a cord / tiny silver Divine Rapier lapel pin] floating on a fully transparent 512x288 canvas, positioned at a creature's neck-chest area (upper body zone, around x220-290, y115-150 for adult), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
+ONLY a [leather bell collar / cozy red wool scarf with a hanging tail] floating on a fully transparent 512x288 canvas, positioned on the neck mount (center [256, 100], width 64 for adult; center [256, 138], width 80 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
+```
+
+```
+ONLY a [small golden Aegis medallion on a cord / tiny silver Divine Rapier lapel pin] floating on a fully transparent 512x288 canvas, positioned on the chest mount (center [256, 115], width 64 for adult; center [256, 149], width 80 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
 ```
 
 ### Egg & Tombstone (full cards, not components)
