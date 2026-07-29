@@ -263,18 +263,78 @@ class TestConstantsAndRows:
 
         assert actual == expected
 
-    def test_new_species_preserve_existing_tier_odds(self):
+    def test_species_weights_define_reduced_legendary_odds(self):
         tier_weights = {
             tier: sum(species.weight for species in SPECIES.values() if species.tier == tier)
             for tier in ("common", "uncommon", "rare", "legendary")
         }
 
         assert tier_weights == {
-            "common": 6000,
+            "common": 6050,
             "uncommon": 3000,
             "rare": 900,
-            "legendary": 100,
+            "legendary": 50,
         }
+
+    def test_legendary_species_are_rare_and_varied_across_hatch_paths(self):
+        from domain.pet_constants import (
+            GILDED_TIER_WEIGHTS,
+            PITY_TIER_WEIGHTS,
+            SACRIFICE_TIER_WEIGHTS,
+        )
+
+        legendary_weights = {
+            species.species_id: species.weight
+            for species in SPECIES.values()
+            if species.tier == "legendary"
+        }
+
+        assert legendary_weights == {
+            "rama": 10,
+            "moondrift_cama": 20,
+            "sunspun_cama": 20,
+        }
+        assert GILDED_TIER_WEIGHTS == {
+            "uncommon": 67,
+            "rare": 31,
+            "legendary": 2,
+        }
+        assert PITY_TIER_WEIGHTS == {
+            "uncommon": 81,
+            "rare": 18,
+            "legendary": 1,
+        }
+        assert {
+            key: weights["legendary"]
+            for key, weights in SACRIFICE_TIER_WEIGHTS.items()
+        } == {
+            ("common", False): 1,
+            ("common", True): 2,
+            ("uncommon", False): 3,
+            ("uncommon", True): 4,
+            ("rare", False): 5,
+            ("rare", True): 8,
+            ("legendary", False): 10,
+            ("legendary", True): 13,
+        }
+
+    def test_new_legendary_species_have_distinct_care_quirks(self):
+        expected = {
+            "moondrift_cama": ("Moondrift Cama", "legendary", 80, 100),
+            "sunspun_cama": ("Sunspun Cama", "legendary", 100, 120),
+        }
+
+        actual = {
+            species_id: (
+                get_species(species_id).display_name,
+                get_species(species_id).tier,
+                get_species(species_id).decay_pct,
+                get_species(species_id).restore_pct,
+            )
+            for species_id in expected
+        }
+
+        assert actual == expected
 
     def test_feeds_used_on_resets_across_game_days(self):
         pet = make_pet(feeds_today=4, feed_date="2026-07-25")
