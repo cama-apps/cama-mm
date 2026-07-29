@@ -346,8 +346,8 @@ class TestAccept:
         )
         duelist = accept.value["state"].a
         assert not duelist.is_adult
-        assert duelist.max_hp == 100
-        assert duelist.hp == 100 - (100 - 60) // 5
+        assert duelist.max_hp == 80
+        assert duelist.hp == 80 - (100 - 60) // 5
 
     def test_snapshot_includes_permanent_training_stats(self, service, insert_pet):
         insert_pet(
