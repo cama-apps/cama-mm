@@ -194,6 +194,34 @@ class PetBrawlRepository(BaseRepository):
                 raise ValueError("invalid_fee")
             if (wager == 0) != (fee == 0):
                 raise ValueError("invalid_fee")
+            stale_pending = cursor.execute(
+                f"SELECT {_BRAWL_COLUMNS} FROM pet_brawls "
+                "WHERE guild_id = ? AND status = 'pending' AND expires_at <= ? "
+                "AND (challenger_id IN (?, ?) OR recipient_id IN (?, ?))",
+                (
+                    gid,
+                    now,
+                    challenger_id,
+                    recipient_id,
+                    challenger_id,
+                    recipient_id,
+                ),
+            ).fetchall()
+            for row in stale_pending:
+                stale_brawl = _row_to_brawl(row)
+                cursor.execute(
+                    "UPDATE pet_brawls SET status = 'expired', resolved_at = ? "
+                    "WHERE brawl_id = ? AND guild_id = ? AND status = 'pending' "
+                    "AND expires_at <= ?",
+                    (now, stale_brawl.brawl_id, gid, now),
+                )
+                if cursor.rowcount == 1:
+                    self._refund_escrow(
+                        cursor,
+                        stale_brawl,
+                        prior_status=PetBrawlStatus.PENDING,
+                        actor_id=None,
+                    )
             # One open brawl per player, in either role. A partial unique
             # index can't express the cross-role case, so the invariant is
             # enforced here under BEGIN IMMEDIATE.
