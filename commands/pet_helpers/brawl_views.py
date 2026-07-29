@@ -365,6 +365,11 @@ class PetBrawlBattleView(discord.ui.View):
             rounds,
         )
         if not result.success:
+            await asyncio.to_thread(
+                self.cog.pet_brawl_service.void,
+                session.brawl_id,
+                session.guild_id,
+            )
             await _edit_or_send(
                 self.message,
                 embed=brawl_embeds.build_void_embed(

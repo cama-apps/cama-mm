@@ -730,6 +730,10 @@ class SchemaManager:
                 "create_pet_brawls",
                 self._migration_create_pet_brawls,
             ),
+            (
+                "add_pet_training_and_brawl_wagers",
+                self._migration_add_pet_training_and_brawl_wagers,
+            ),
             # OpenSkill v3: native bounded contribution, durable non-match
             # rating events, parameter fingerprinting, and atomic replay state.
             (
@@ -4984,6 +4988,46 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_pet_brawls_record_loss "
             "ON pet_brawls(loser_pet_id) WHERE status = 'done'"
         )
+
+    def _migration_add_pet_training_and_brawl_wagers(self, cursor) -> None:
+        """Add capped training state and durable optional-brawl settlement data."""
+        for column, definition in (
+            ("training_xp", "INTEGER NOT NULL DEFAULT 0 CHECK (training_xp BETWEEN 0 AND 20)"),
+            ("training_str", "INTEGER NOT NULL DEFAULT 0 CHECK (training_str BETWEEN 0 AND 2)"),
+            ("training_int", "INTEGER NOT NULL DEFAULT 0 CHECK (training_int BETWEEN 0 AND 2)"),
+            ("training_dex", "INTEGER NOT NULL DEFAULT 0 CHECK (training_dex BETWEEN 0 AND 2)"),
+            (
+                "solo_training_sessions",
+                "INTEGER NOT NULL DEFAULT 3 "
+                "CHECK (solo_training_sessions BETWEEN 0 AND 3)",
+            ),
+            ("solo_training_recharged_at", "INTEGER"),
+        ):
+            self._add_column_if_not_exists(cursor, "pets", column, definition)
+        for column, definition in (
+            ("wager", "INTEGER NOT NULL DEFAULT 0 CHECK (wager BETWEEN 0 AND 100)"),
+            ("fee", "INTEGER NOT NULL DEFAULT 0 CHECK (fee >= 0)"),
+            (
+                "challenger_xp_delta",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (challenger_xp_delta BETWEEN 0 AND 2)",
+            ),
+            (
+                "recipient_xp_delta",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (recipient_xp_delta BETWEEN 0 AND 2)",
+            ),
+            (
+                "challenger_stat_gain",
+                "TEXT CHECK (challenger_stat_gain IS NULL OR "
+                "challenger_stat_gain IN ('str', 'int', 'dex'))",
+            ),
+            (
+                "recipient_stat_gain",
+                "TEXT CHECK (recipient_stat_gain IS NULL OR "
+                "recipient_stat_gain IN ('str', 'int', 'dex'))",
+            ),
+            ("personality_event_key", "TEXT"),
+        ):
+            self._add_column_if_not_exists(cursor, "pet_brawls", column, definition)
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:
         self._add_column_if_not_exists(

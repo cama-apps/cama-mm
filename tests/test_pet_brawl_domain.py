@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from domain.models.pet import PetStage
+from domain.models.pet_brawl import PetBrawl
 from domain.pet_brawl import (
     BASE_CRIT_PCT,
     BRAWL_TRAITS,
@@ -30,6 +31,36 @@ from domain.pet_brawl import (
 from domain.pet_constants import SPECIES
 
 
+def test_pet_brawl_economy_and_training_fields_default_to_free_and_unawarded():
+    brawl = PetBrawl(
+        brawl_id=1,
+        guild_id=100,
+        channel_id=5,
+        challenger_id=10,
+        recipient_id=20,
+        challenger_pet_id=1000,
+        recipient_pet_id=None,
+        status="pending",
+        created_at=1_000,
+        expires_at=1_300,
+        resolved_at=None,
+        winner_id=None,
+        winner_pet_id=None,
+        loser_pet_id=None,
+        rounds=None,
+        winner_hunger_delta=0,
+        loser_hunger_delta=0,
+    )
+
+    assert brawl.wager == 0
+    assert brawl.fee == 0
+    assert brawl.challenger_xp_delta == 0
+    assert brawl.recipient_xp_delta == 0
+    assert brawl.challenger_stat_gain is None
+    assert brawl.recipient_stat_gain is None
+    assert brawl.personality_event_key is None
+
+
 class FakeRng:
     """Scripted randint values, consumed in call order."""
 
@@ -52,6 +83,9 @@ def mk(
     hunger=100,
     happy=False,
     aegis_used=0,
+    training_str=0,
+    training_int=0,
+    training_dex=0,
 ):
     return build_duelist(
         pet_id=pet_id,
@@ -62,6 +96,9 @@ def mk(
         hunger=hunger,
         happy=happy,
         aegis_used=aegis_used,
+        training_str=training_str,
+        training_int=training_int,
+        training_dex=training_dex,
     )
 
 
@@ -89,6 +126,12 @@ class TestBuildDuelist:
     def test_unknown_species_uses_fallback(self):
         d = mk("retired_species")
         assert d.tier == "common"
+        assert d.power == 0
+
+    def test_training_stats_are_snapshotted_without_changing_base_power(self):
+        d = mk(training_str=2, training_int=1, training_dex=2)
+
+        assert (d.training_str, d.training_int, d.training_dex) == (2, 1, 2)
         assert d.power == 0
 
 
@@ -127,6 +170,51 @@ class TestBrawlTraits:
 
 
 class TestResolveRound:
+    def test_strength_adds_all_attack_damage_and_extra_stampede_damage(self):
+        spit_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
+        spit, _ = resolve_round(spit_state, SAFE_MOVE, SAFE_MOVE, FakeRng([8, 100, 8, 100]))
+        assert spit.b.hp == 120 - 9
+
+        stampede_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
+        stampede, _ = resolve_round(
+            stampede_state,
+            PetBrawlMove.STAMPEDE,
+            SAFE_MOVE,
+            FakeRng([100, 16, 100, 8, 100]),
+        )
+        assert stampede.b.hp == 120 - 18
+
+    def test_dexterity_improves_general_crit_spit_crit_and_stampede_evasion(self):
+        spit_state = initial_state(mk(name="A", training_dex=1), mk(name="B"))
+        spit, _ = resolve_round(spit_state, SAFE_MOVE, SAFE_MOVE, FakeRng([8, 14, 8, 100]))
+        assert spit.b.hp == 120 - 16
+
+        dodge_state = initial_state(mk(name="A"), mk(name="B", training_dex=1))
+        dodge, _ = resolve_round(
+            dodge_state,
+            PetBrawlMove.STAMPEDE,
+            SAFE_MOVE,
+            FakeRng([37, 8, 100]),
+        )
+        assert dodge.b.hp == 120
+
+    def test_intelligence_reduces_damage_and_improves_hunker(self):
+        state = initial_state(
+            mk(name="A"),
+            replace(mk(name="B", training_int=1), hp=100),
+        )
+        resolved, _ = resolve_round(
+            state,
+            SAFE_MOVE,
+            PetBrawlMove.HUNKER,
+            FakeRng([8, 100, 5]),
+        )
+
+        # Incoming 8 is halved to 4, then INT mitigates 1; Hunker heals 5+1.
+        assert resolved.b.hp == 100 - 3 + 6
+        # Hunker counter is base 5 plus one INT.
+        assert resolved.a.hp == 120 - 6
+
     def test_spit_deals_scripted_damage_both_ways(self):
         state = initial_state(mk(name="A"), mk(name="B"))
         # a: dmg 10, no crit; b: dmg 12, no crit.

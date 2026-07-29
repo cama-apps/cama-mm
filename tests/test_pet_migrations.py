@@ -260,6 +260,29 @@ class TestPetMigrations:
             manager._migration_create_pet_brawls(cursor)
             conn.commit()
 
+    def test_training_and_wager_columns_default_for_legacy_rows(self, repo_db_path):
+        with _connect(repo_db_path) as conn:
+            _insert_pet(conn, 30, 100)
+            conn.execute(
+                "INSERT INTO pet_brawls (guild_id, channel_id, challenger_id, "
+                "recipient_id, challenger_pet_id, status, created_at, expires_at) "
+                "VALUES (100, 5, 30, 31, 10, 'pending', 1000, 1300)"
+            )
+
+            pet = conn.execute(
+                "SELECT training_xp, training_str, training_int, training_dex, "
+                "solo_training_sessions, solo_training_recharged_at "
+                "FROM pets WHERE discord_id = 30 AND guild_id = 100"
+            ).fetchone()
+            brawl = conn.execute(
+                "SELECT wager, fee, challenger_xp_delta, recipient_xp_delta, "
+                "challenger_stat_gain, recipient_stat_gain, personality_event_key "
+                "FROM pet_brawls WHERE challenger_id = 30 AND guild_id = 100"
+            ).fetchone()
+
+            assert tuple(pet) == (0, 0, 0, 0, 3, None)
+            assert tuple(brawl) == (0, 0, 0, 0, None, None, None)
+
     def test_reminder_preferences_pet_column(self, repo_db_path):
         with _connect(repo_db_path) as conn:
             columns = {
