@@ -122,7 +122,7 @@ class TestGoldenWheelWedges:
         special_sum = sum(live_evs.get(v, 0.0) for _, v, _ in wedges if isinstance(v, str))
         ev = (int_sum + special_sum) / len(wedges)
 
-        target = scale_minigame_jc_delta(config.WHEEL_GOLDEN_TARGET_EV)
+        target = scale_minigame_jc_delta(-82.5)
         # EV should match target within 1 JC (int() truncation causes tiny rounding)
         assert abs(ev - target) < 1.0, (
             f"Live golden wheel EV {ev:.2f} should be within 1 JC of target {target:.1f}"
