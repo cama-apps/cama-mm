@@ -357,6 +357,33 @@ class TestWagerEconomy:
             for player_id in (100, 200, 300, 400)
         ) == (100, 100, 100, 100)
 
+    def test_new_challenge_cleans_up_expired_pending_brawl(
+        self, repo_db_path, brawl_repo, insert_pet
+    ):
+        players = seed_player(repo_db_path, 100, 100)
+        seed_player(repo_db_path, 200, 100)
+        seed_player(repo_db_path, 300, 100)
+        stale, challenger_pet, _ = make_pending(
+            brawl_repo, insert_pet, 100, 200, wager=20, fee=1
+        )
+        insert_pet(300)
+
+        replacement = brawl_repo.create_brawl_atomic(
+            TEST_GUILD_ID,
+            555,
+            100,
+            300,
+            challenger_pet,
+            now=NOW + 181,
+            expires_at=NOW + 361,
+        )
+
+        assert brawl_repo.get_brawl(
+            stale.brawl_id, TEST_GUILD_ID
+        ).status == "expired"
+        assert replacement.status == "pending"
+        assert players.get_balance(100, TEST_GUILD_ID) == 100
+
 
 class TestSettlement:
     def hunger_of(self, pet_repo, pet_id, now=NOW + 60):
