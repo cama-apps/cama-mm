@@ -17,6 +17,7 @@ from commands.pet_helpers import embeds as pet_embeds
 from commands.pet_helpers.brawl_views import PetBrawlBattleView
 from domain.models.pet import PetStage
 from domain.pet_brawl import (
+    MAX_ROUNDS,
     SAFE_MOVE,
     PetBrawlMove,
     build_duelist,
@@ -397,6 +398,43 @@ class TestBattleView:
         footer = view.message.edit.await_args.kwargs["embed"].footer.text
         assert "40" in footer
         assert "no jopacoins" not in footer.lower()
+
+    @pytest.mark.asyncio
+    async def test_equal_hp_round_cap_reports_draw_and_refunds_wager(
+        self, brawl_cog
+    ):
+        view, session = await start_battle(brawl_cog, wager=20)
+        session.state = type(session.state)(
+            a=session.state.a,
+            b=session.state.b,
+            round_no=MAX_ROUNDS - 1,
+            winner=None,
+        )
+
+        await press(view, PetBrawlMove.HUNKER)(
+            make_interaction(user_id=CHALLENGER)
+        )
+        await press(view, PetBrawlMove.HUNKER)(
+            make_interaction(user_id=RECIPIENT)
+        )
+
+        assert brawl_status(brawl_cog, session.brawl_id) == "done"
+        assert session.brawl_id not in brawl_cog._brawl_sessions
+        embed = view.message.edit.await_args.kwargs["embed"]
+        assert "draw" in embed.title.lower()
+        assert "refunded" in embed.footer.text.lower()
+        assert (
+            brawl_cog.pet_service.player_repo.get_balance(
+                CHALLENGER, TEST_GUILD_ID
+            )
+            == 100
+        )
+        assert (
+            brawl_cog.pet_service.player_repo.get_balance(
+                RECIPIENT, TEST_GUILD_ID
+            )
+            == 100
+        )
 
     @pytest.mark.asyncio
     async def test_round_resolves_even_if_pick_ack_fails(self, brawl_cog):
