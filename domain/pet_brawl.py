@@ -178,7 +178,7 @@ def brawl_traits(species_id: str) -> BrawlTraits:
 # embed so quirks aren't invisible. Quirkless species are simply absent.
 TRAIT_BLURBS: dict[str, str] = {
     "dromedary_cross": "hardy — shrugs a point off every hit",
-    "jopacama": "insured — loses less hunger in defeat",
+    "jopacama": "insured — loses less fullness in defeat",
     "pudge_cama": "ravenous — hits harder, takes more, heals extra hunkered",
     "crystal_cama": "chilling — enemy Stampedes whiff more often",
     "rama": "royal temper — crits far more often",

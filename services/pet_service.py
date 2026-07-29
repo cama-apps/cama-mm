@@ -771,8 +771,11 @@ class PetService:
     def on_match_win(
         self, winner_ids: list[int], guild_id: int | None
     ) -> list[tuple[Pet, int]]:
-        """Feed each winner's living hatched pet. Returns (pet, amount) pairs
-        for embed flavor. Never raises — match recording must not fail on pets."""
+        """Feed each winner's living hatched pet.
+
+        Returns ``(pet, applied_amount)`` pairs for embed flavor. Never raises
+        — match recording must not fail on pets.
+        """
         results: list[tuple[Pet, int]] = []
         try:
             now = self._now()
@@ -784,6 +787,7 @@ class PetService:
                 amount = MATCH_WIN_HUNGER + get_species(living.species).match_feed_bonus
                 current = living.current_hunger(now, self.decay_per_day)
                 new_hunger = min(MAX_HUNGER, current + amount)
+                applied_amount = new_hunger - current
                 work_units, work_at = self._dig_work_settlement(living, now)
                 applied = self.pet_repo.apply_hunger_top_up(
                     living.pet_id,
@@ -809,7 +813,7 @@ class PetService:
                                 dig_work_units=work_units,
                                 dig_work_at=work_at,
                             ),
-                            amount,
+                            applied_amount,
                         )
                     )
         except Exception:

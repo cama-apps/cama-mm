@@ -356,7 +356,7 @@ class PetFlavorService:
             facts.extend(
                 [
                     f"Mood: {(status.mood.value if status.mood else 'unknown')}",
-                    f"Hunger: {max(0, min(int(status.hunger), 100))}/100",
+                    f"Fullness: {max(0, min(int(status.hunger), 100))}/100",
                     f"Age: {max(0, int(status.age_seconds)) // 86400} days",
                     f"Times fed: {max(0, int(pet.times_fed))}",
                 ]
