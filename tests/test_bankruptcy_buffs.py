@@ -379,6 +379,7 @@ class TestWhiteStipendManaAll:
         client = SimpleNamespace(
             mana_service=env["mana_service"],
             mana_effects_service=env["effects"],
+            player_service=env["player_repo"],
         )
         interaction = SimpleNamespace(
             guild=SimpleNamespace(id=GID, members=[]),
