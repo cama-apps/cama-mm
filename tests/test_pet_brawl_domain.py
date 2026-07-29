@@ -155,6 +155,12 @@ class TestMoveFlavor:
             ("prismwool_cama", PetBrawlMove.SPIT): "Prismatic Spit",
             ("prismwool_cama", PetBrawlMove.STAMPEDE): "Linked Charge",
             ("prismwool_cama", PetBrawlMove.HUNKER): "Wool Ward",
+            ("moondrift_cama", PetBrawlMove.SPIT): "Moonlit Spit",
+            ("moondrift_cama", PetBrawlMove.STAMPEDE): "Tidal Rush",
+            ("moondrift_cama", PetBrawlMove.HUNKER): "Eclipse",
+            ("sunspun_cama", PetBrawlMove.SPIT): "Solar Flare",
+            ("sunspun_cama", PetBrawlMove.STAMPEDE): "Dawn Charge",
+            ("sunspun_cama", PetBrawlMove.HUNKER): "Corona Guard",
         }
 
         assert {
@@ -178,6 +184,10 @@ class TestBrawlTraits:
     def test_unknown_species_falls_back_to_no_traits(self):
         assert brawl_traits("retired_species") == BrawlTraits()
 
+    def test_new_legendary_species_have_distinct_traits(self):
+        assert brawl_traits("moondrift_cama") == BrawlTraits(dodge_bonus_pp=15)
+        assert brawl_traits("sunspun_cama") == BrawlTraits(counter_base=9)
+
     def test_trait_blurbs_cover_exactly_the_quirked_species(self):
         """A typo'd or missing TRAIT_BLURBS key fails silently (the quirk
         line just never renders), so lock it to the quirked trait set."""
@@ -188,6 +198,30 @@ class TestBrawlTraits:
 
 
 class TestResolveRound:
+    def test_moondrift_evades_more_stampedes(self):
+        state = initial_state(mk(name="A"), mk("moondrift_cama", name="B"))
+
+        resolved, _ = resolve_round(
+            state,
+            PetBrawlMove.STAMPEDE,
+            SAFE_MOVE,
+            FakeRng([70, 16, 100, 8, 100]),
+        )
+
+        assert resolved.b.hp == 100
+
+    def test_sunspun_hunkers_with_a_stronger_counter(self):
+        state = initial_state(mk(name="A"), mk("sunspun_cama", name="B"))
+
+        resolved, _ = resolve_round(
+            state,
+            SAFE_MOVE,
+            PetBrawlMove.HUNKER,
+            FakeRng([8, 100, 2]),
+        )
+
+        assert resolved.a.hp == 89
+
     def test_strength_adds_all_attack_damage_and_extra_stampede_damage(self):
         spit_state = initial_state(mk(name="A", training_str=1), mk(name="B"))
         spit, _ = resolve_round(spit_state, SAFE_MOVE, SAFE_MOVE, FakeRng([8, 100, 8, 100]))

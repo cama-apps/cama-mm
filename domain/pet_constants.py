@@ -115,7 +115,7 @@ class PetSpecies:
 # cama, Rama, was bred in Dubai in 1998 and had a famously poor temperament).
 SPECIES: dict[str, PetSpecies] = {
     "common_cama": PetSpecies(
-        "common_cama", "Common Cama", "common", 1500,
+        "common_cama", "Common Cama", "common", 1550,
         "A camel-llama hybrid of no particular distinction. Its quirk is "
         "having none.",
     ),
@@ -188,11 +188,24 @@ SPECIES: dict[str, PetSpecies] = {
         restore_pct=105,
     ),
     "rama": PetSpecies(
-        "rama", "Rama the First", "legendary", 100,
+        "rama", "Rama the First", "legendary", 10,
         "The original. Bred in Dubai in 1998 and described by science as "
         "'a behavioral disappointment, displaying an extremely poor "
         "temperament'. Only five ever existed. Yours spits.",
         spit_one_in=20,
+    ),
+    "moondrift_cama": PetSpecies(
+        "moondrift_cama", "Moondrift Cama", "legendary", 20,
+        "Its fleece drifts between midnight blue and silver even indoors. "
+        "It sleeps through most meals, wakes for moonrise, and leaves tiny "
+        "crescent hoofprints.",
+        decay_pct=80,
+    ),
+    "sunspun_cama": PetSpecies(
+        "sunspun_cama", "Sunspun Cama", "legendary", 20,
+        "Sun-warm threads coil through its fleece. Breakfast vanishes in a "
+        "flash of gold; the satisfied glow lasts much longer.",
+        restore_pct=120,
     ),
 }
 
@@ -203,12 +216,12 @@ _FALLBACK_SPECIES = PetSpecies("unknown", "Cama of Unknown Origin", "common", 0,
 # Gilded Egg: premium adoption with no commons in the pool. Priced as a
 # flat premium ON TOP of the player's current (escalating) adoption fee.
 GILDED_EGG_PREMIUM = 230
-GILDED_TIER_WEIGHTS = {"uncommon": 65, "rare": 30, "legendary": 5}
+GILDED_TIER_WEIGHTS = {"uncommon": 67, "rare": 31, "legendary": 2}
 
 # Pity: after this many consecutive common hatches on standard eggs, the
 # next standard egg rolls from a no-common pool.
 PITY_THRESHOLD = 3
-PITY_TIER_WEIGHTS = {"uncommon": 80, "rare": 18, "legendary": 2}
+PITY_TIER_WEIGHTS = {"uncommon": 81, "rare": 18, "legendary": 1}
 
 TRINKET_COST = 25
 TRINKET_DUPE_REFUND = 10  # net 15 JC sink when the roll is a duplicate
@@ -242,19 +255,19 @@ PET_BRAWL_ACTIVE_TTL_SECONDS = 1800  # sweep voids battles stuck this long
 
 # Upgraded reroll odds keyed by (sacrificed tier, was_adult), values are
 # percentage weights per tier pool. Every entry strictly dominates the
-# standard 60/30/9/1 pool, adult sacrifices dominate baby ones of the same
+# standard 60.5/30/9/0.5 pool, adult sacrifices dominate baby ones of the same
 # tier, and rare+ pools drop commons entirely — you never reroll a rare
 # into a guaranteed-worse pool. The fee side of the brake is that the
 # sacrificed pet still counts toward the escalating adoption fee.
 SACRIFICE_TIER_WEIGHTS: dict[tuple[str, bool], dict[str, int]] = {
-    ("common", False): {"common": 55, "uncommon": 33, "rare": 10, "legendary": 2},
-    ("common", True): {"common": 40, "uncommon": 42, "rare": 15, "legendary": 3},
-    ("uncommon", False): {"common": 30, "uncommon": 45, "rare": 20, "legendary": 5},
-    ("uncommon", True): {"common": 15, "uncommon": 50, "rare": 27, "legendary": 8},
-    ("rare", False): {"uncommon": 55, "rare": 35, "legendary": 10},
-    ("rare", True): {"uncommon": 40, "rare": 45, "legendary": 15},
-    ("legendary", False): {"uncommon": 40, "rare": 40, "legendary": 20},
-    ("legendary", True): {"uncommon": 30, "rare": 45, "legendary": 25},
+    ("common", False): {"common": 55, "uncommon": 33, "rare": 11, "legendary": 1},
+    ("common", True): {"common": 40, "uncommon": 42, "rare": 16, "legendary": 2},
+    ("uncommon", False): {"common": 30, "uncommon": 45, "rare": 22, "legendary": 3},
+    ("uncommon", True): {"common": 15, "uncommon": 50, "rare": 31, "legendary": 4},
+    ("rare", False): {"uncommon": 55, "rare": 40, "legendary": 5},
+    ("rare", True): {"uncommon": 40, "rare": 52, "legendary": 8},
+    ("legendary", False): {"uncommon": 40, "rare": 50, "legendary": 10},
+    ("legendary", True): {"uncommon": 30, "rare": 57, "legendary": 13},
 }
 
 

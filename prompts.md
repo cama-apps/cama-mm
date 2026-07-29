@@ -368,12 +368,12 @@ Pet cards are NOT shipped as full pre-rendered images. The bot composites each c
   - `face` slot only: insert the mood — `{scope}_{mood}_{variant}.png`, mood in `happy` / `neutral` / `hungry`
   - `{variant}`: `01`, `02`, ... — ship several! Each pet's id deterministically picks its variant, so variants = per-pet uniqueness for free.
   - Examples: `adult/creature/any_01.png`, `adult/face/any_happy_02.png`, `adult/detail/rama_01.png`, `baby/front/invoker_cama_01.png`
-- **Tinting:** `any`-scoped parts in the `ground`/`back`/`creature`/`detail` slots must be authored in **neutral grayscale** — the compositor remaps their luminance onto each species' palette (dark→mid→light ramp). One grayscale creature variant instantly becomes 13 species-colored bodies. `any`-scoped `face`/`backdrop`/`front` parts are used as-authored, so keep them palette-neutral (outlines, whites, soft colors).
+- **Tinting:** `any`-scoped parts in the `ground`/`back`/`creature`/`detail` slots must be authored in **neutral grayscale** — the compositor remaps their luminance onto each species' palette (dark→mid→light ramp). One grayscale creature variant instantly becomes 15 species-colored bodies. `any`-scoped `face`/`backdrop`/`front` parts are used as-authored, so keep them palette-neutral (outlines, whites, soft colors).
 - Species-scoped parts are never tinted; author them in the species' colors.
 
 ### Highest-leverage first pack
 
-1. `adult/creature/any_01..03.png` + `baby/creature/any_01..03.png` — 3 grayscale body variants per stage = 39 distinct-looking species-colored bodies per stage.
+1. `adult/creature/any_01..03.png` + `baby/creature/any_01..03.png` — 3 grayscale body variants per stage = 45 distinct-looking species-colored bodies per stage.
 2. `adult/face/any_{mood}_01..02.png` + baby equivalents — the mood system comes alive.
 3. One `ground`/`back`/`detail`/`front` file per species (below) — the signature silhouettes.
 4. `backdrop/any_01..03.png` — scene variety.
@@ -409,6 +409,8 @@ Painterly pixel-art-adjacent, no head or body — features only, floating where 
 - `crystal_cama` — `detail`: ice glints in the wool plus a small icicle fringe hanging from the belly.
 - `prismwool_cama` — `ground` + `detail`: irregular translucent facets across the fleece plus small grounded rainbow glints; it should read as refracted wool, not generic crystal jewelry.
 - `rama` — `detail`: a small red royal blanket with gold trim across the back; species face packs should keep his permanent grumpy brows — Rama never looks fully happy (the real 1998 cama's documented temperament).
+- `moondrift_cama` — `ground` + `detail`: midnight-blue fleece with sparse silver pinpricks and crescent hoofprints drifting away across the floor.
+- `sunspun_cama` — `back` + `detail`: warm gold fleece threaded with pale curls, backed by a soft solar corona and short rays.
 - `common_cama` — deliberately no signature components. Its quirk is having none.
 
 ### Accessory components (trinket gacha)
