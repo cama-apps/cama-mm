@@ -48,7 +48,7 @@ _cache: dict[str, Image.Image] = {}
 
 
 # Pinnacle phase presentation themes. The compact tuple values keep the
-# runtime renderer data-only while giving each boss a distinct motif.
+# runtime renderer data-only while giving each boss a distinct atmosphere.
 PINNACLE_PHASE_THEMES: dict[
     str, tuple[str, tuple[int, int, int], tuple[int, int, int]]
 ] = {
@@ -61,7 +61,60 @@ PINNACLE_PHASE_THEMES: dict[
 }
 
 
-def _draw_pinnacle_motif(
+def _draw_soft_glow(
+    image: Image.Image,
+    center: tuple[int, int],
+    radius: int,
+    color: tuple[int, int, int],
+    alpha: int,
+) -> None:
+    """Composite a feathered glow without covering the source painting."""
+    glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(glow, "RGBA")
+    cx, cy = center
+    draw.ellipse(
+        [cx - radius, cy - radius, cx + radius, cy + radius],
+        fill=(*color, max(0, min(255, alpha))),
+    )
+    glow = glow.filter(ImageFilter.GaussianBlur(max(8, radius // 3)))
+    image.alpha_composite(glow)
+
+
+def _draw_rising_motes(
+    image: Image.Image,
+    theme: str,
+    accent: tuple[int, int, int],
+    highlight: tuple[int, int, int],
+    progress: float,
+    *,
+    count: int,
+) -> None:
+    """Draw sparse, deterministic particles with gentle upward motion."""
+    draw = ImageDraw.Draw(image, "RGBA")
+    rng = random.Random(f"pinnacle:{theme}")
+    w, h = image.size
+    for mote_index in range(count):
+        x = rng.randint(18, w - 18)
+        start_y = rng.randint(h // 3, h + 18)
+        travel = rng.randint(h // 5, h // 2)
+        y = start_y - int(travel * progress)
+        if not -5 <= y <= h + 5:
+            continue
+        radius = rng.choice((1, 1, 2, 2, 3))
+        opacity = rng.randint(55, 105)
+        color = highlight if mote_index % 4 == 0 else accent
+        draw.ellipse(
+            [x - radius, y - radius, x + radius, y + radius],
+            fill=(*color, opacity),
+        )
+        if mote_index % 6 == 0:
+            draw.line(
+                [x - radius - 2, y, x + radius + 2, y],
+                fill=(*highlight, opacity // 2),
+            )
+
+
+def _draw_pinnacle_atmosphere(
     image: Image.Image,
     theme: str,
     accent: tuple[int, int, int],
@@ -70,116 +123,135 @@ def _draw_pinnacle_motif(
     *,
     secret: bool,
 ) -> None:
-    """Draw one compact boss-specific phase motif onto an RGBA image."""
-    draw = ImageDraw.Draw(image, "RGBA")
+    """Draw one restrained boss-specific atmosphere onto an RGBA image."""
     w, h = image.size
-    alpha = 185 if secret else 150
-    accent_rgba = (*accent, alpha)
-    highlight_rgba = (*highlight, min(255, alpha + 45))
-    shift = int(progress * 24)
+    eased = 0.5 - 0.5 * math.cos(progress * math.pi)
+    center, radius, peak_alpha, mote_count = {
+        "crown_fire": ((0.50, 0.29), 54, 50, 18),
+        "crystal_choir": ((0.50, 0.50), 64, 44, 12),
+        "ghost_tunnel": ((0.12 + 0.04 * eased, 0.62), 58, 30, 9),
+        "fortress_siege": ((0.50, 0.38), 78, 46, 22),
+        "map_fold": ((0.50, 0.50), 0, 0, 0),
+        "heat_gear": ((0.50, 0.46), 72, 58, 20),
+    }[theme]
 
-    if theme == "crown_fire":
-        crown_y = 28 + shift // 3
-        draw.polygon(
-            [
-                (w // 2 - 82, crown_y + 42),
-                (w // 2 - 62, crown_y),
-                (w // 2 - 22, crown_y + 29),
-                (w // 2, crown_y - 10),
-                (w // 2 + 22, crown_y + 29),
-                (w // 2 + 62, crown_y),
-                (w // 2 + 82, crown_y + 42),
-            ],
-            fill=accent_rgba,
-            outline=highlight_rgba,
+    if radius:
+        _draw_soft_glow(
+            image,
+            (int(w * center[0]), int(h * center[1])),
+            radius,
+            accent,
+            int(peak_alpha * (0.55 + 0.45 * eased)),
         )
-        for x in range(42, w, 58):
-            flame_h = 22 + ((x + shift) % 28)
-            draw.polygon(
-                [(x - 10, h), (x, h - flame_h), (x + 11, h)],
-                fill=highlight_rgba,
-            )
-    elif theme == "crystal_choir":
-        for idx, x in enumerate(range(44, w, 70)):
-            peak = h - 42 - ((idx * 13 + shift) % 55)
-            draw.polygon(
-                [(x - 18, h), (x, peak), (x + 20, h)],
-                fill=accent_rgba,
-                outline=highlight_rgba,
-            )
-        radius = 42 + shift
-        draw.ellipse(
-            [w // 2 - radius, h // 2 - radius, w // 2 + radius, h // 2 + radius],
-            outline=highlight_rgba,
-            width=5,
+    if mote_count:
+        _draw_rising_motes(
+            image,
+            theme,
+            accent,
+            highlight,
+            progress,
+            count=mote_count,
         )
+
+    if theme == "crystal_choir":
+        draw = ImageDraw.Draw(image, "RGBA")
+        sparkle_points = (
+            (0.19, 0.34), (0.31, 0.19), (0.45, 0.43),
+            (0.58, 0.24), (0.71, 0.39), (0.83, 0.21),
+        )
+        for sparkle_index, (x_ratio, y_ratio) in enumerate(sparkle_points):
+            pulse = 0.5 + 0.5 * math.sin(
+                progress * math.tau + sparkle_index * 1.7,
+            )
+            opacity = 30 + int(60 * pulse)
+            x, y = int(w * x_ratio), int(h * y_ratio)
+            length = 3 + int(3 * pulse)
+            draw.line(
+                [x - length, y, x + length, y],
+                fill=(*highlight, opacity),
+            )
+            draw.line(
+                [x, y - length, x, y + length],
+                fill=(*highlight, opacity),
+            )
     elif theme == "ghost_tunnel":
-        for inset in range(24, 126, 24):
-            draw.arc(
-                [inset, 20 + inset // 3, w - inset, h + 90],
-                190,
-                350,
-                fill=highlight_rgba,
-                width=5,
+        _draw_soft_glow(
+            image,
+            (int(w * (0.88 - 0.04 * eased)), int(h * 0.46)),
+            48,
+            highlight,
+            18,
+        )
+        wisps = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        wisp_draw = ImageDraw.Draw(wisps, "RGBA")
+        drift = int(10 * eased)
+        for offset in (0, 24, 49):
+            wisp_draw.arc(
+                [-70 + offset + drift, 70 + offset, 180 + offset + drift, h + 75],
+                205,
+                326,
+                fill=(*highlight, 42),
+                width=2,
             )
-        ghost_x = 70 + int(progress * (w - 140))
-        draw.ellipse(
-            [ghost_x - 28, 62, ghost_x + 28, 126],
-            fill=accent_rgba,
-            outline=highlight_rgba,
-            width=4,
-        )
-        draw.rectangle([ghost_x - 28, 96, ghost_x + 28, 148], fill=accent_rgba)
-    elif theme == "fortress_siege":
-        wall_y = h - 78
-        draw.rectangle([20, wall_y, w - 20, h], fill=accent_rgba)
-        for x in range(20, w - 20, 52):
-            draw.rectangle([x, wall_y - 24, x + 28, wall_y], fill=accent_rgba)
-        for x in range(-60 + shift * 4, w, 118):
-            draw.line([x, 12, x + 96, wall_y], fill=highlight_rgba, width=6)
-            draw.ellipse([x - 6, 5, x + 10, 21], fill=highlight_rgba)
+        image.alpha_composite(wisps.filter(ImageFilter.GaussianBlur(2)))
     elif theme == "map_fold":
-        fold_x = w // 2 + int((progress - 0.5) * 70)
-        draw.polygon(
-            [(22, 28), (fold_x, 12), (fold_x - 18, h - 20), (30, h - 38)],
-            fill=accent_rgba,
-            outline=highlight_rgba,
+        survey = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        survey_draw = ImageDraw.Draw(survey, "RGBA")
+        sweep_x = int(-40 + (w + 80) * eased)
+        survey_draw.line(
+            [sweep_x - 58, 0, sweep_x + 26, h],
+            fill=(*highlight, 58),
+            width=2,
         )
-        draw.polygon(
-            [(fold_x, 12), (w - 28, 38), (w - 20, h - 28), (fold_x - 18, h - 20)],
-            fill=(*highlight, alpha // 2),
-            outline=highlight_rgba,
+        survey_draw.line(
+            [sweep_x - 76, 0, sweep_x + 8, h],
+            fill=(*accent, 30),
+            width=1,
         )
-        for y in range(54, h, 48):
-            draw.line([35, y, w - 35, y - 12], fill=highlight_rgba, width=3)
+        for node_index, y in enumerate((48, 103, 158, 217)):
+            x = sweep_x - 42 + node_index * 20
+            survey_draw.ellipse(
+                [x - 3, y - 3, x + 3, y + 3],
+                outline=(*highlight, 70),
+                width=1,
+            )
+        image.alpha_composite(survey.filter(ImageFilter.GaussianBlur(1)))
     elif theme == "heat_gear":
-        cx, cy = w // 2, h // 2
-        radius = 62 + int(progress * 12)
-        draw.ellipse(
-            [cx - radius, cy - radius, cx + radius, cy + radius],
-            outline=highlight_rgba,
-            width=12,
-        )
-        draw.ellipse(
-            [cx - 25, cy - 25, cx + 25, cy + 25],
-            fill=accent_rgba,
-            outline=highlight_rgba,
-            width=5,
-        )
-        angle_offset = progress * math.tau
-        for tooth in range(10):
-            angle = angle_offset + tooth * math.tau / 10
-            x1 = cx + int((radius - 4) * math.cos(angle))
-            y1 = cy + int((radius - 4) * math.sin(angle))
-            x2 = cx + int((radius + 23) * math.cos(angle))
-            y2 = cy + int((radius + 23) * math.sin(angle))
-            draw.line([x1, y1, x2, y2], fill=accent_rgba, width=10)
-        for y in (36, 66, 96):
-            draw.arc([30, y, w - 30, y + 70], 195, 345, fill=highlight_rgba, width=4)
+        cx, cy = w // 2, int(h * 0.46)
+        heat = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        heat_draw = ImageDraw.Draw(heat, "RGBA")
+        spread = 52 + int(8 * eased)
+        for arc_offset in (0, 16):
+            heat_draw.arc(
+                [
+                    cx - spread - arc_offset,
+                    cy - 28 - arc_offset,
+                    cx + spread + arc_offset,
+                    cy + 34 + arc_offset,
+                ],
+                202,
+                338,
+                fill=(*highlight, 40 - arc_offset),
+                width=2,
+            )
+        image.alpha_composite(heat.filter(ImageFilter.GaussianBlur(2)))
 
     if secret:
-        for y in range(8, h, 22):
-            draw.line([0, y + shift % 9, w, y], fill=(*highlight, 42), width=2)
+        _draw_soft_glow(
+            image,
+            (w // 2, h // 2),
+            68,
+            highlight,
+            24 + int(16 * eased),
+        )
+        _draw_rising_motes(
+            image,
+            f"{theme}:secret",
+            accent,
+            highlight,
+            progress,
+            count=8,
+        )
 
 
 def _pinnacle_phase_base(
@@ -196,8 +268,8 @@ def _pinnacle_phase_base(
     if secret:
         accent, highlight = (117, 33, 170), (70, 255, 226)
     color_layer = Image.new("RGBA", base.size, (*accent, 255))
-    base = Image.blend(ImageEnhance.Color(base).enhance(0.72), color_layer, 0.17)
-    base = ImageEnhance.Contrast(base).enhance(1.12)
+    base = Image.blend(ImageEnhance.Color(base).enhance(0.82), color_layer, 0.09)
+    base = ImageEnhance.Contrast(base).enhance(1.07)
     return base, (effect, accent, highlight)
 
 
@@ -212,7 +284,7 @@ def draw_pinnacle_phase2(
         source, boss_id, secret=secret,
     )
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    _draw_pinnacle_motif(
+    _draw_pinnacle_atmosphere(
         overlay, effect, accent, highlight, 0.55, secret=secret,
     )
     rendered = Image.alpha_composite(base, overlay)
@@ -240,15 +312,16 @@ def animate_pinnacle_phase3(
     rgb_frames: list[Image.Image] = []
     for frame_idx in range(8):
         progress = frame_idx / 7
-        pulsed = ImageEnhance.Brightness(base).enhance(0.82 + progress * 0.28)
+        eased = 0.5 - 0.5 * math.cos(progress * math.pi)
+        pulsed = ImageEnhance.Brightness(base).enhance(0.96 + eased * 0.06)
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        _draw_pinnacle_motif(
+        _draw_pinnacle_atmosphere(
             overlay, effect, accent, highlight, progress, secret=secret,
         )
         rgb_frames.append(Image.alpha_composite(pulsed, overlay).convert("RGB"))
 
-    palette = rgb_frames[0].quantize(
-        colors=48,
+    palette = rgb_frames[len(rgb_frames) // 2].quantize(
+        colors=64,
         method=Image.Quantize.MEDIANCUT,
         dither=Image.Dither.NONE,
     )
