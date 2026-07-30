@@ -79,7 +79,7 @@ LUMINOSITY_REFILL_PER_DAY: int = 20
 # Prestige Constants
 # ---------------------------------------------------------------------------
 
-MAX_PRESTIGE: int = 10
+MAX_PRESTIGE: int = 20
 
 PRESTIGE_CROWNS: dict[int, str] = {
     0: "",
@@ -93,6 +93,7 @@ PRESTIGE_CROWNS: dict[int, str] = {
     8: "\U0001f525",         # fire
     9: "\U0001f30c",         # milky way
     10: "\U0001f5a4",        # black heart
+    **dict.fromkeys(range(11, MAX_PRESTIGE + 1), "\U0001f5a4"),
 }
 
 RELIC_SLOTS_BASE: int = 1  # relic_slots = min(prestige_level + RELIC_SLOTS_BASE, RELIC_SLOTS_MAX)
