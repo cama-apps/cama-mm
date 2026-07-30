@@ -354,6 +354,40 @@ async def test_stale_repost_keeps_afk_player_who_confirmed_old_check(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stale_repost_never_prunes_recent_join_even_if_classified_afk(
+    monkeypatch,
+):
+    """The destructive sweep must independently honor recent-join grace.
+
+    A failed Discord member lookup classifies the player as AFK before status
+    and recency can be considered. That classification may affect the display,
+    but it must not eject someone who joined only nine minutes ago.
+    """
+    env = _setup(
+        monkeypatch,
+        regular={1: ONLINE, 2: OFFLINE},
+        present={1},
+    )
+    env.lobby.player_join_times[2] = time.time() - 9 * 60
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    _make_stale(env)
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok"
+    assert info["pruned_count"] == 0
+    assert 2 in env.lobby.players
+    assert not any(
+        "Removed (away during ready check)" in text for text in _ping_texts(env)
+    )
+
+
+@pytest.mark.asyncio
 async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
     """Prune AFK non-responders; keep the trigger-er, active, and reacted."""
     env = _setup(

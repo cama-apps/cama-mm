@@ -30,7 +30,7 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 logger = logging.getLogger("cama_bot.commands.lobby")
 
 # Players who joined within this window are considered active regardless of status
-RECENT_JOIN_THRESHOLD = 5 * 60  # 5 minutes
+RECENT_JOIN_THRESHOLD = 10 * 60  # 10 minutes
 
 # A ready check older than this is stale: the next /readycheck deletes the
 # buried original and posts a fresh one (resetting ✅ confirmations and pruning
@@ -1429,6 +1429,16 @@ class LobbyCommands(commands.Cog):
                     pid
                     for pid in list(current_lobby_set)
                     if player_data.get(pid, {}).get("group") == "afk"
+                    # Classification can say AFK when an invisible member is
+                    # reported offline or when Discord member lookup fails.
+                    # Enforce the recent-join grace period again at the actual
+                    # destructive boundary so those signals cannot eject a
+                    # player who only just joined.
+                    and (
+                        lobby.player_join_times.get(pid) is None
+                        or (now - lobby.player_join_times[pid])
+                        >= RECENT_JOIN_THRESHOLD
+                    )
                     and pid not in old_reacted
                     and pid != invoker_id
                 ]
