@@ -588,7 +588,7 @@ class TestCommandHandlers:
 
         content = feed_interaction.followup.send.await_args.kwargs["content"]
         assert "munches the Tango" in content
-        assert "Hunger " in content and " → **100**" in content
+        assert "Fullness " in content and " → **100**" in content
         assert "Snack acquired. Tail-wag protocol engaged." in content
 
     @pytest.mark.asyncio
@@ -721,8 +721,23 @@ def test_living_status_embed_shows_passive_mining_progress():
         now=pet.hatched_at + DAY,
     )
 
+    fullness = next(field for field in embed.fields if field.name == "Fullness")
+    assert fullness.value == "`██████░░░░` 55/100"
     mining = next(field for field in embed.fields if field.name == "Mining")
     assert mining.value == "12.5/36 blocks banked · +8/day"
+
+
+def test_food_ui_describes_positive_fullness():
+    from commands.pet import FOOD_CHOICES
+    from commands.pet_helpers.embeds import build_shop_embed
+
+    assert all(
+        "fullness" in choice.name and "hunger" not in choice.name
+        for choice in FOOD_CHOICES
+    )
+    shop = build_shop_embed({}, "common_cama", balance=100)
+    food_details = [field.value for field in shop.fields[:3]]
+    assert all("fullness" in detail and "hunger" not in detail for detail in food_details)
 
 
 class TestStatusViewButtons:

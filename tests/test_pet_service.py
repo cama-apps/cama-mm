@@ -108,11 +108,13 @@ class TestAdopt:
             weights = kwargs["weights"]
         assert status.pet.species == "rama"
         by_id = dict(zip(species_ids, weights, strict=True))
-        assert by_id["common_cama"] == 1500
+        assert by_id["common_cama"] == 1550
         assert by_id["embergear_cama"] == 1500
         assert by_id["riverglow_cama"] == 750
         assert by_id["prismwool_cama"] == 225
-        assert by_id["rama"] == 100
+        assert by_id["rama"] == 10
+        assert by_id["moondrift_cama"] == 20
+        assert by_id["sunspun_cama"] == 20
         assert sum(weights) == 10_000
 
     def test_unregistered_player_rejected(self, service, clock):
@@ -565,14 +567,14 @@ class TestGacha:
         assert service.pet_repo.get_active_pet(100, TEST_GUILD_ID).accessory == "red_bow"
 
     def test_camadex_counts_hatched_species_only(self, service, clock):
-        assert service.camadex(100, TEST_GUILD_ID) == ([], 13)
+        assert service.camadex(100, TEST_GUILD_ID) == ([], 15)
         pet = adopt_common(service, clock)
         # Still an egg: species not yet revealed.
         assert service.camadex(100, TEST_GUILD_ID)[0] == []
         clock.now = pet.hatched_at + DAY
         raised, total = service.camadex(100, TEST_GUILD_ID)
         assert raised == ["common_cama"]
-        assert total == 13
+        assert total == 15
 
 
 class TestMatchHook:
@@ -591,6 +593,15 @@ class TestMatchHook:
         pet = adopt_common(service, clock)
         clock.now = pet.hatched_at  # full
         service.on_match_win([100], TEST_GUILD_ID)
+        assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
+
+    def test_win_reports_only_fullness_actually_applied(self, service, clock):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + DAY // 4  # fullness 95
+
+        fed = service.on_match_win([100], TEST_GUILD_ID)
+
+        assert fed[0][1] == 5
         assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
 
     def test_win_returns_post_top_up_anchors(self, service, clock):

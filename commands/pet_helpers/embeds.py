@@ -244,7 +244,7 @@ def _build_living_embed(
         mood_text += " (🧂 pampered)"
     embed.add_field(name="Mood", value=mood_text, inline=True)
     embed.add_field(
-        name="Hunger",
+        name="Fullness",
         value=f"`{hunger_bar(status.hunger)}` {status.hunger}/100",
         inline=False,
     )
@@ -344,7 +344,7 @@ def build_shop_embed(
         discount = " (discounted!)" if cost < food.cost else ""
         embed.add_field(
             name=f"{food.emoji} {food.display_name} — {cost} {JOPACOIN_EMOTE}{discount}",
-            value=f"+{food.restore} hunger · owned ×{supplies.get(item_id, 0)}\n_{food.blurb}_",
+            value=f"+{food.restore} fullness · owned ×{supplies.get(item_id, 0)}\n_{food.blurb}_",
             inline=False,
         )
     lick_cost = food_cost(species_id, SALT_LICK.item_id)

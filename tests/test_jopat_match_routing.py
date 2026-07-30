@@ -10,6 +10,51 @@ from services.neon_degen_service import NeonDegenService, NeonResult
 
 
 @pytest.mark.asyncio
+async def test_pet_match_hook_reports_fullness_gain() -> None:
+    pet = SimpleNamespace(name="Blep", species="common_cama")
+    pet_service = SimpleNamespace(
+        on_match_win=Mock(return_value=[(pet, 10)]),
+    )
+    bot = Mock(pet_service=pet_service)
+    bot.get_cog.return_value = None
+    interaction = Mock()
+    interaction.followup.send = AsyncMock()
+    cog = MatchCommands(bot, Mock(), Mock(), Mock())
+
+    await cog._run_pet_match_hooks(
+        interaction,
+        guild_id=10,
+        record_result={"winning_player_ids": [1]},
+    )
+
+    content = interaction.followup.send.await_args.args[0]
+    assert "munches +10 fullness in celebration" in content
+
+
+@pytest.mark.asyncio
+async def test_pet_match_hook_calls_out_already_full_pet() -> None:
+    pet = SimpleNamespace(name="Blep", species="common_cama")
+    pet_service = SimpleNamespace(
+        on_match_win=Mock(return_value=[(pet, 0)]),
+    )
+    bot = Mock(pet_service=pet_service)
+    bot.get_cog.return_value = None
+    interaction = Mock()
+    interaction.followup.send = AsyncMock()
+    cog = MatchCommands(bot, Mock(), Mock(), Mock())
+
+    await cog._run_pet_match_hooks(
+        interaction,
+        guild_id=10,
+        record_result={"winning_player_ids": [1]},
+    )
+
+    content = interaction.followup.send.await_args.args[0]
+    assert "munches a victory snack — already full" in content
+    assert "+0 fullness" not in content
+
+
+@pytest.mark.asyncio
 async def test_post_match_debrief_uses_base_chance_for_ordinary_match(
     monkeypatch,
 ) -> None:

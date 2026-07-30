@@ -71,10 +71,33 @@ class TestRenderPetCard:
                 "embergear_cama",
                 "riverglow_cama",
                 "prismwool_cama",
+                "moondrift_cama",
+                "sunspun_cama",
             )
         }
 
         assert len(set(renders.values())) == len(renders)
+
+    def test_legendary_species_have_signature_layers(self):
+        common_ground = render_layer(
+            "ground", "common_cama", "adult", "neutral", seed=17
+        )
+        moon_ground = render_layer(
+            "ground", "moondrift_cama", "adult", "neutral", seed=17
+        )
+        common_back = render_layer(
+            "back", "common_cama", "adult", "neutral", seed=17
+        )
+        sun_back = render_layer(
+            "back", "sunspun_cama", "adult", "neutral", seed=17
+        )
+
+        assert common_ground is not None
+        assert moon_ground is not None
+        assert common_back is not None
+        assert sun_back is not None
+        assert moon_ground.tobytes() != common_ground.tobytes()
+        assert sun_back.tobytes() != common_back.tobytes()
 
     def test_riverglow_uses_grounded_effect_instead_of_floating_orbs(self):
         front = render_layer("front", "riverglow_cama", "adult", "neutral", seed=17)

@@ -137,7 +137,10 @@ class TestBrawlCommand:
     async def test_happy_path_posts_challenge(self, brawl_cog):
         view, kwargs = await issue_challenge(brawl_cog)
         assert "challenge" in kwargs["embed"].title.lower()
-        assert "No coin" in kwargs["embed"].footer.text
+        assert (
+            kwargs["embed"].footer.text
+            == "No coin at stake — fullness and honor only."
+        )
         assert brawl_status(brawl_cog, view.brawl.brawl_id) == "pending"
 
     @pytest.mark.asyncio
@@ -516,6 +519,74 @@ class TestRoundOnePrimer:
         field_names = [f.name for f in embed.fields]
         assert "How it works" in field_names
         assert "Quirks" not in field_names
+
+    def test_jopacama_quirk_describes_fullness_insurance(self):
+        state = initial_state(
+            _duelist("jopacama", "Gilded", CHALLENGER, 1),
+            _duelist("common_cama", "Plain", RECIPIENT, 2),
+        )
+
+        embed = brawl_embeds.build_battle_embed(state, (), {})
+
+        quirks = next(field for field in embed.fields if field.name == "Quirks")
+        assert "loses less fullness in defeat" in quirks.value
+        assert "hunger" not in quirks.value
+
+    def test_result_describes_fullness_stakes(self):
+        winner = _duelist("common_cama", "Winner", CHALLENGER, 1)
+        loser = _duelist("common_cama", "Loser", RECIPIENT, 2)
+        embed, _file = brawl_embeds.build_result_embed(
+            {
+                "winner": winner,
+                "loser": loser,
+                "records": {},
+                "winner_delta": 10,
+                "loser_delta": -15,
+            },
+            rounds=3,
+            final_log=(),
+        )
+
+        assert "fullness +10" in embed.description
+        assert "fullness -15" in embed.description
+        assert "fullness and honor" in embed.footer.text
+
+    def test_zero_delta_result_does_not_guess_why_fullness_was_unchanged(self):
+        winner = _duelist("common_cama", "Winner", CHALLENGER, 1)
+        loser = _duelist("common_cama", "Loser", RECIPIENT, 2)
+        embed, _file = brawl_embeds.build_result_embed(
+            {
+                "winner": winner,
+                "loser": loser,
+                "records": {},
+                "winner_delta": 0,
+                "loser_delta": 0,
+            },
+            rounds=3,
+            final_log=(),
+        )
+
+        assert "gets no fullness from this victory" in embed.description
+        assert "loses no fullness from this defeat" in embed.description
+        assert "too well-fed" not in embed.description
+        assert "too hungry" not in embed.description
+
+    def test_draw_result_describes_unchanged_fullness(self):
+        a = _duelist("common_cama", "First", CHALLENGER, 1)
+        b = _duelist("common_cama", "Second", RECIPIENT, 2)
+
+        embed, _file = brawl_embeds.build_result_embed(
+            {
+                "draw": True,
+                "duelists": (a, b),
+                "records": {},
+            },
+            rounds=8,
+            final_log=(),
+        )
+
+        assert "No fullness, records, or training XP change." in embed.description
+        assert "hunger" not in embed.description.lower()
 
     @pytest.mark.asyncio
     async def test_failed_settlement_immediately_voids_and_refunds_wager(
