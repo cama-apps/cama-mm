@@ -253,20 +253,25 @@ class DigService(
     ) -> tuple[int, int, int, int, int, int]:
         """Resolve a boss win's JC payout in one place.
 
-        Applies the daily economy event to the base reward, positive-JC
-        scaling, then the bankruptcy debuff on the combined total. Shared by
+        Applies the daily economy event to the generated base reward and wager
+        profit, positive-JC scaling to the base, then the bankruptcy debuff on
+        the combined total. Shared by
         ``fight_boss``, ``_resolve_duel_outcome``, and
         ``_finalize_pinnacle_outcome`` so the three win paths cannot drift.
 
         Returns ``(gross_base, scaled_base, gross_payout, net_payout,
-        bankruptcy_penalty)``.
+        bankruptcy_penalty, vanity_tax)``.
         """
         gross_base = self._apply_daily_economy_reward(guild_id, base_reward)
         scaled_base = scale_positive_dig_jc(gross_base)
-        gross_payout = gross_base + wager_profit
+        event_wager_profit = self._apply_daily_economy_reward(
+            guild_id,
+            wager_profit,
+        )
+        gross_payout = gross_base + event_wager_profit
         net_payout, bankruptcy_penalty, vanity_tax = (
             self._apply_jc_profit_policies(
-                discord_id, guild_id, scaled_base + wager_profit
+                discord_id, guild_id, scaled_base + event_wager_profit
             )
         )
         return (
@@ -993,7 +998,11 @@ class DigService(
 
             # Relic: Gambler's Charm — bonus JC for surviving the cave-in
             cave_in_gross_jc += gamblers_charm_gross_bonus
-            cave_in_jc = scale_positive_dig_jc(cave_in_gross_jc)
+            cave_in_event_jc = self._apply_daily_economy_reward(
+                guild_id,
+                cave_in_gross_jc,
+            )
+            cave_in_jc = scale_positive_dig_jc(cave_in_event_jc)
             cave_in_balance_delta += cave_in_jc
 
             # Mutation: second_wind — flag for next dig advance bonus

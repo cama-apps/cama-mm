@@ -549,6 +549,51 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
         return to the available Jopacoin Reserve under an auditable ledger
         context. With no active proposal this is an idempotent no-op.
         """
+        return self._cancel_for_voting_restriction_atomic(
+            guild_id,
+            proposal_outcome="monetary_recovery",
+            ledger_reason=(
+                "Jopacoin Reserve proposal cancelled for monetary recovery; "
+                "locked funds returned"
+            ),
+            ledger_metadata={},
+        )
+
+    def cancel_for_economy_edict_atomic(
+        self,
+        guild_id: int | None,
+        *,
+        event_id: int,
+        event_name: str,
+        severity: int,
+    ) -> dict[str, int] | None:
+        """Atomically cancel an active ballot for a severe economy edict."""
+        level = ("I", "II", "III", "IV", "V")[
+            max(1, min(5, int(severity))) - 1
+        ]
+        return self._cancel_for_voting_restriction_atomic(
+            guild_id,
+            proposal_outcome="economy_edict",
+            ledger_reason=(
+                "Jopacoin Reserve proposal cancelled by "
+                f"{event_name} — Level {level}; locked funds returned"
+            ),
+            ledger_metadata={
+                "event_id": int(event_id),
+                "event_name": str(event_name),
+                "severity": int(severity),
+            },
+        )
+
+    def _cancel_for_voting_restriction_atomic(
+        self,
+        guild_id: int | None,
+        *,
+        proposal_outcome: str,
+        ledger_reason: str,
+        ledger_metadata: dict,
+    ) -> dict[str, int] | None:
+        """Shared atomic cancellation for Reserve-voting restrictions."""
         normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
         with self.atomic_transaction() as conn:
@@ -570,7 +615,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 cursor,
                 guild_id=normalized_guild,
                 proposal_id=proposal_id,
-                proposal_outcome="monetary_recovery",
+                proposal_outcome=proposal_outcome,
                 finalized_at=now,
             )
 
@@ -584,7 +629,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(
-                    "Active Reserve proposal changed during monetary-recovery cancellation"
+                    "Active Reserve proposal changed during voting-restriction cancellation"
                 )
 
             cursor.execute(
@@ -598,12 +643,10 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                     source="disburse",
                     related_type="disbursement",
                     related_id=proposal_id,
-                    reason=(
-                        "Jopacoin Reserve proposal cancelled for monetary recovery; "
-                        "locked funds returned"
-                    ),
+                    reason=ledger_reason,
                     metadata={
-                        "proposal_outcome": "monetary_recovery",
+                        **ledger_metadata,
+                        "proposal_outcome": proposal_outcome,
                         "fund_amount": fund_amount,
                     },
                 )

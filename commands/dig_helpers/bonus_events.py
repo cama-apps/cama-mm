@@ -163,12 +163,18 @@ class DigTriviaView(discord.ui.View):
         guild_id: int,
         question: TriviaQuestion,
         player_service: Any,
+        correct_jc: int | None = None,
     ) -> None:
         super().__init__(timeout=TRIVIA_ANSWER_TIMEOUT_SECONDS)
         self.user_id = user_id
         self.guild_id = guild_id
         self.question = question
         self.player_service = player_service
+        self.correct_jc = (
+            scale_positive_dig_jc(15)
+            if correct_jc is None
+            else max(0, int(correct_jc))
+        )
         self.resolved = False
         self.message: discord.Message | None = None
 
@@ -231,7 +237,7 @@ class DigTriviaView(discord.ui.View):
 
     async def _settle(self, *, correct: bool, timed_out: bool) -> discord.Embed:
         gross_jc = 15 if correct else -5
-        delta = scale_positive_dig_jc(gross_jc)
+        delta = self.correct_jc if correct else gross_jc
         metadata = {"correct": correct, "timed_out": timed_out}
         if gross_jc > 0:
             metadata.update({
@@ -300,7 +306,16 @@ class DigTriviaView(discord.ui.View):
                 pass
 
 
-def _question_embed(question: TriviaQuestion) -> discord.Embed:
+def _question_embed(
+    question: TriviaQuestion,
+    *,
+    correct_jc: int | None = None,
+) -> discord.Embed:
+    correct_jc = (
+        scale_positive_dig_jc(15)
+        if correct_jc is None
+        else max(0, int(correct_jc))
+    )
     embed = discord.Embed(
         title="⛏️ Unearthed in the Mine — Dota 2 Trivia",
         description=(
@@ -321,7 +336,7 @@ def _question_embed(question: TriviaQuestion) -> discord.Embed:
         embed.set_thumbnail(url=question.image_url)
     embed.set_footer(
         text=(
-            f"+{scale_positive_dig_jc(15)} JC correct • -5 JC wrong or timeout • "
+            f"+{correct_jc} JC correct • -5 JC wrong or timeout • "
             f"{TRIVIA_ANSWER_TIMEOUT_SECONDS}s"
         ),
     )
@@ -384,15 +399,26 @@ async def send_dig_bonus(
         question = await asyncio.to_thread(generate_question, 0, [])
         if question is None:
             raise RuntimeError("No Dota trivia question could be generated")
+        guild_id = interaction.guild.id
+        event_correct_jc = 15
+        economy_event_service = getattr(bot, "economy_event_service", None)
+        if economy_event_service is not None:
+            event_correct_jc = await asyncio.to_thread(
+                economy_event_service.adjust_reward,
+                guild_id,
+                event_correct_jc,
+            )
+        correct_jc = scale_positive_dig_jc(event_correct_jc)
         view = DigTriviaView(
             user_id=interaction.user.id,
-            guild_id=interaction.guild.id,
+            guild_id=guild_id,
             question=question,
             player_service=bot.player_service,
+            correct_jc=correct_jc,
         )
         message = await safe_followup(
             interaction,
-            embed=_question_embed(question),
+            embed=_question_embed(question, correct_jc=correct_jc),
             view=view,
         )
         view.message = message

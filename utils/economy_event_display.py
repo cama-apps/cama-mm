@@ -70,6 +70,9 @@ def _event_effect_lines(effects: EconomyEventEffects) -> list[str]:
     if prediction_parts:
         lines.append(f"📈 Prediction markets: {', '.join(prediction_parts)}.")
 
+    if effects.reserve_voting_disabled:
+        lines.append("🏛️ Jopacoin Reserve allocation voting is suspended.")
+
     if not lines:
         lines.append("⚖️ Payouts and market conditions remain at their normal strength.")
     return lines
@@ -113,8 +116,8 @@ def build_public_economy_event_embed(
             color=0x7F8C8D,
         )
 
-    severity = max(1, min(3, int(event.get("severity", 1))))
-    level = ("I", "II", "III")[severity - 1]
+    severity = max(1, min(5, int(event.get("severity", 1))))
+    level = ("I", "II", "III", "IV", "V")[severity - 1]
     direction = str(event.get("direction") or "neutral")
     icon, color, edict = {
         "deflationary": ("🌑", 0xD94B4B, "A deflationary edict grips the server."),
@@ -129,7 +132,12 @@ def build_public_economy_event_embed(
         if ends_at is not None
         else "Active until the next 10 AM Pacific rollover."
     )
-    effects = EconomyEventEffects.from_mapping(event.get("effects"))
+    raw_effects = dict(event.get("effects") or {})
+    raw_effects.setdefault(
+        "reserve_voting_disabled",
+        direction == "deflationary" and severity >= 3,
+    )
+    effects = EconomyEventEffects.from_mapping(raw_effects)
 
     embed = discord.Embed(
         title=f"{icon} {event['name']} — Level {level}",
@@ -146,7 +154,12 @@ def build_public_economy_event_embed(
         value=_immediate_effect_text(effects),
         inline=False,
     )
-    embed.set_footer(text="The treasury watches. The edict endures.")
+    embed.set_footer(
+        text=(
+            "The treasury watches. Bands follow the rolling 7-day change "
+            "around a 2% annual target."
+        )
+    )
     if icon_url:
         embed.set_thumbnail(url=icon_url)
     return embed

@@ -57,6 +57,7 @@ class _FakeDisburseService:
         "in monetary recovery mode."
     )
     MONETARY_RECOVERY_CODE = "monetary_recovery"
+    ECONOMY_EDICT_CODE = "economy_edict"
     METHODS = (
         "even",
         "proportional",
@@ -88,13 +89,29 @@ class _FakeDisburseService:
         proposal: _Proposal | None = None,
         individual_votes: list[dict] | None = None,
         voting_enabled: bool = True,
+        voting_restriction: dict | None = None,
     ):
         self.proposal = proposal
         self.individual_votes = individual_votes or []
         self.voting_enabled = voting_enabled
+        self.voting_restriction = voting_restriction
         self.reset_called = False
         self.force_execute_called = False
         self.set_message_calls: list[tuple[int | None, int, int]] = []
+
+    def get_voting_restriction(self, guild_id: int | None):
+        if not self.voting_enabled:
+            return {
+                "code": self.MONETARY_RECOVERY_CODE,
+                "reason": self.MONETARY_RECOVERY_REASON,
+            }
+        return self.voting_restriction
+
+    def can_propose(self, guild_id: int | None):
+        restriction = self.get_voting_restriction(guild_id)
+        if restriction:
+            return False, restriction["code"]
+        return True, ""
 
     def get_proposal(self, guild_id: int | None):
         return self.proposal
@@ -375,6 +392,27 @@ async def test_disburse_execute_rejects_during_monetary_recovery(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_disburse_propose_names_active_economy_edict():
+    service = _FakeDisburseService(
+        voting_restriction={
+            "code": "economy_edict",
+            "reason": (
+                "Jopacoin Reserve allocation voting is suspended by "
+                "Ravage — Level III."
+            ),
+        }
+    )
+    cog = SimpleNamespace(disburse_service=service)
+    interaction = _FakeInteraction()
+
+    await actions.disburse_propose(cog, interaction, TEST_GUILD_ID)
+
+    message = interaction.response.messages[0]
+    assert message["content"].endswith("Ravage — Level III.")
+    assert message["ephemeral"] is True
+
+
+@pytest.mark.asyncio
 async def test_vote_button_rejects_clearly_during_monetary_recovery():
     service = _FakeDisburseService(
         proposal=_Proposal(),
@@ -387,6 +425,28 @@ async def test_vote_button_rejects_clearly_during_monetary_recovery():
 
     message = interaction.response.messages[0]
     assert "monetary recovery mode" in message["content"]
+    assert message["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_vote_button_names_active_economy_edict_before_registration():
+    service = _FakeDisburseService(
+        proposal=_Proposal(),
+        voting_restriction={
+            "code": "economy_edict",
+            "reason": (
+                "Jopacoin Reserve allocation voting is suspended by "
+                "Ravage — Level III."
+            ),
+        },
+    )
+    view = DisburseVoteView(service, SimpleNamespace())
+    interaction = _FakeInteraction()
+
+    await view._handle_vote(interaction, "even", "Even Split")
+
+    message = interaction.response.messages[0]
+    assert message["content"].endswith("Ravage — Level III.")
     assert message["ephemeral"] is True
 
 

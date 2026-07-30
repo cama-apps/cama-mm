@@ -70,7 +70,8 @@ class PrestigeMixin:
             return self._error("Tunnel must be at least 10 blocks deep to abandon.")
 
         gross_refund = int(depth * 0.1)
-        refund = scale_positive_dig_jc(gross_refund)
+        event_refund = self._apply_daily_economy_reward(guild_id, gross_refund)
+        refund = scale_positive_dig_jc(event_refund)
         return self._ok(
             refund=refund,
             gross_refund=gross_refund,
@@ -197,7 +198,11 @@ class PrestigeMixin:
         from services.dig_constants import RELICS, TROPHY_RELIC_IDS
 
         prestige_gross_jc = 1000
-        prestige_jc_grant = scale_positive_dig_jc(prestige_gross_jc)
+        prestige_event_jc = self._apply_daily_economy_reward(
+            guild_id,
+            prestige_gross_jc,
+        )
+        prestige_jc_grant = scale_positive_dig_jc(prestige_event_jc)
         # Relics are unique and signature trophies are carve-only — exclude
         # owned relics and trophies from the grant pool.
         owned = {
@@ -329,7 +334,8 @@ class PrestigeMixin:
             return self._error("You can only abandon once every 24 hours.")
 
         gross_refund = int(depth * 0.1)
-        refund = scale_positive_dig_jc(gross_refund)
+        event_refund = self._apply_daily_economy_reward(guild_id, gross_refund)
+        refund = scale_positive_dig_jc(event_refund)
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
 
         # Reset tunnel + refund + audit log commit together. The old flow

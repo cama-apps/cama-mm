@@ -35,9 +35,20 @@ async def disburse_propose(
                 "A disbursement vote is already active. Use `/economy disburse` and choose status to see it.",
                 ephemeral=True,
             )
-        elif reason == cog.disburse_service.MONETARY_RECOVERY_CODE:
+        elif reason in {
+            cog.disburse_service.MONETARY_RECOVERY_CODE,
+            cog.disburse_service.ECONOMY_EDICT_CODE,
+        }:
+            restriction = await asyncio.to_thread(
+                cog.disburse_service.get_voting_restriction,
+                guild_id,
+            )
             await interaction.response.send_message(
-                cog.disburse_service.MONETARY_RECOVERY_REASON,
+                (
+                    restriction["reason"]
+                    if restriction
+                    else cog.disburse_service.MONETARY_RECOVERY_REASON
+                ),
                 ephemeral=True,
             )
         elif reason.startswith("insufficient_fund:"):
@@ -83,12 +94,15 @@ async def disburse_status(
     cog: BettingCommands, interaction: discord.Interaction, guild_id: int | None
 ) -> None:
     """Show current proposal status, replacing the old message to keep it visible."""
+    restriction = await asyncio.to_thread(
+        cog.disburse_service.get_voting_restriction,
+        guild_id,
+    )
     proposal = await asyncio.to_thread(cog.disburse_service.get_proposal, guild_id)
     if not proposal:
-        if not getattr(cog.disburse_service, "voting_enabled", True):
+        if restriction:
             await interaction.response.send_message(
-                cog.disburse_service.MONETARY_RECOVERY_REASON
-                + " There is no active allocation ballot.",
+                restriction["reason"] + " There is no active allocation ballot.",
                 ephemeral=True,
             )
             return
@@ -114,14 +128,10 @@ async def disburse_status(
     embed = build_disburse_embed(proposal)
     view = (
         DisburseVoteView(cog.disburse_service, cog)
-        if getattr(cog.disburse_service, "voting_enabled", True)
+        if not restriction
         else None
     )
-    content = (
-        None
-        if getattr(cog.disburse_service, "voting_enabled", True)
-        else cog.disburse_service.MONETARY_RECOVERY_REASON
-    )
+    content = restriction["reason"] if restriction else None
     await interaction.response.send_message(content=content, embed=embed, view=view)
 
     # Update stored message reference to point to the new message
@@ -199,9 +209,13 @@ async def disburse_execute(
         )
         return
 
-    if not getattr(cog.disburse_service, "voting_enabled", True):
+    restriction = await asyncio.to_thread(
+        cog.disburse_service.get_voting_restriction,
+        guild_id,
+    )
+    if restriction:
         await interaction.response.send_message(
-            cog.disburse_service.MONETARY_RECOVERY_REASON,
+            restriction["reason"],
             ephemeral=True,
         )
         return

@@ -644,6 +644,91 @@ def test_economy_ledger_migration_backfills_existing_balances(tmp_path):
     ]
 
 
+def test_economy_event_severity_migration_preserves_history_and_allows_level_five(
+    tmp_path,
+):
+    db_path = str(tmp_path / "legacy-economy-event-severity.db")
+    manager = SchemaManager(db_path)
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO economy_daily_events (
+                guild_id, event_date, name, hero, direction, severity,
+                target_effect_jc, forecast_flow_jc, expected_effect_jc,
+                monetary_stock_before, effects, announcement,
+                starts_at, ends_at, created_at, announced_at
+            )
+            VALUES (
+                123, '2026-07-28', 'Legacy Edict', 'Doom', 'deflationary', 3,
+                -30, 40, -30, 1000, '{}', 'Legacy announcement',
+                100, 200, 90, 110
+            )
+            """
+        )
+        conn.execute("DROP INDEX idx_economy_events_active")
+        conn.execute(
+            "ALTER TABLE economy_daily_events RENAME TO economy_daily_events_level_five"
+        )
+        current_sql = conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'economy_daily_events_level_five'
+            """
+        ).fetchone()[0]
+        legacy_sql = current_sql.replace(
+            "economy_daily_events_level_five", "economy_daily_events"
+        ).replace("BETWEEN 1 AND 5", "BETWEEN 1 AND 3")
+        conn.execute(legacy_sql)
+        columns = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(economy_daily_events_level_five)")
+        ]
+        column_list = ", ".join(columns)
+        conn.execute(
+            f"""
+            INSERT INTO economy_daily_events ({column_list})
+            SELECT {column_list}
+            FROM economy_daily_events_level_five
+            """
+        )
+        conn.execute("DROP TABLE economy_daily_events_level_five")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("expand_economy_event_severity_levels",),
+        )
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        legacy = conn.execute(
+            """
+            SELECT event_id, name, severity, announced_at
+            FROM economy_daily_events
+            WHERE guild_id = 123
+            """
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO economy_daily_events (
+                guild_id, event_date, name, hero, direction, severity,
+                target_effect_jc, forecast_flow_jc, expected_effect_jc,
+                monetary_stock_before, effects, announcement,
+                starts_at, ends_at, created_at
+            )
+            VALUES (
+                123, '2026-07-29', 'Level Five Edict', 'Doom', 'deflationary', 5,
+                -50, 60, -50, 1000, '{}', 'Level five announcement',
+                200, 300, 190
+            )
+            """
+        )
+
+    assert legacy == (1, "Legacy Edict", 3, 110)
+
+
 def test_followup_ledger_backfill_accounts_for_existing_deltas(tmp_path):
     db_path = str(tmp_path / "test.db")
     mgr = SchemaManager(db_path)

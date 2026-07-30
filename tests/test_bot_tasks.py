@@ -1447,26 +1447,20 @@ async def test_concurrent_readycheck_completion_retries_after_failed_delivery(
     assert send_attempts == 2
 
 
-async def test_economy_event_loop_enforces_moratorium_before_activation(bot_module):
-    """Each wake unlocks recovery ballots before sizing the day's event."""
+async def test_economy_event_loop_does_not_pause_disbursement_voting(bot_module):
+    """Direction comes from the rolling band without a static recovery mode."""
     guild = SimpleNamespace(id=42)
     order: list[str] = []
     disburse_service = MagicMock()
     economy_service = MagicMock()
 
-    def enforce(guild_id):
-        assert guild_id == guild.id
-        order.append("moratorium")
-        return {"cancelled": False}
-
     def ensure(guild_id):
         assert guild_id == guild.id
-        assert order == ["moratorium"]
         order.append("event")
-        return ({"name": "Ravage", "direction": "deflationary"}, True)
+        return (None, False)
 
-    disburse_service.enforce_voting_moratorium.side_effect = enforce
     economy_service.ensure_daily_event.side_effect = ensure
+    economy_service.get_reserve_voting_restriction.return_value = None
     economy_service.seconds_until_next_trigger.return_value = 900
 
     with (
@@ -1489,17 +1483,56 @@ async def test_economy_event_loop_enforces_moratorium_before_activation(bot_modu
             economy_service,
             create=True,
         ),
-        patch.object(bot_module, "ECONOMY_RECOVERY_MODE", True),
-        patch.object(bot_module, "_announce_economy_event", AsyncMock()) as announce,
         patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
     ):
         await bot_module._economy_event_loop()
 
-    assert order == ["moratorium", "event"]
-    announce.assert_awaited_once_with(
-        guild, {"name": "Ravage", "direction": "deflationary"}
-    )
+    assert order == ["event"]
+    disburse_service.enforce_voting_moratorium.assert_not_called()
     sleep.assert_awaited_once_with(900)
+
+
+async def test_economy_event_loop_cancels_ballot_for_severe_deflationary_edict(
+    bot_module,
+):
+    guild = SimpleNamespace(id=42)
+    event = {"event_id": 7, "name": "Ravage"}
+    restriction = {"event_id": 7, "name": "Ravage", "severity": 3}
+    economy_service = MagicMock()
+    economy_service.ensure_daily_event.return_value = (event, True)
+    economy_service.get_reserve_voting_restriction.return_value = restriction
+    economy_service.pending_announcement_slot.return_value = None
+    economy_service.seconds_until_next_trigger.return_value = 900
+    disburse_service = MagicMock()
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(
+            bot_module.bot,
+            "economy_event_service",
+            economy_service,
+            create=True,
+        ),
+        patch.object(
+            bot_module.bot,
+            "disburse_service",
+            disburse_service,
+            create=True,
+        ),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await bot_module._economy_event_loop()
+
+    economy_service.get_reserve_voting_restriction.assert_called_once_with(
+        guild.id
+    )
+    disburse_service.enforce_voting_restriction.assert_called_once_with(guild.id)
 
 
 @pytest.mark.parametrize(
@@ -1530,7 +1563,6 @@ async def test_economy_event_loop_wakes_at_interval_or_trigger_whichever_is_firs
             new_callable=lambda: property(lambda _self: [guild]),
         ),
         patch.object(bot_module.bot, "economy_event_service", economy_service, create=True),
-        patch.object(bot_module, "ECONOMY_RECOVERY_MODE", False),
         patch.object(bot_module, "ECONOMY_EVENT_WAKE_SECONDS", configured_wake),
         patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
     ):
@@ -1538,6 +1570,47 @@ async def test_economy_event_loop_wakes_at_interval_or_trigger_whichever_is_firs
 
     economy_service.seconds_until_next_trigger.assert_called_once_with()
     sleep.assert_awaited_once_with(expected_sleep)
+
+
+async def test_economy_event_loop_posts_and_stamps_second_daily_announcement(
+    bot_module,
+):
+    guild = SimpleNamespace(id=42)
+    event = {"event_id": 7, "name": "Ravage"}
+    economy_service = MagicMock()
+    economy_service.ensure_daily_event.return_value = (event, False)
+    economy_service.pending_announcement_slot.return_value = "reminder"
+    economy_service.seconds_until_next_trigger.return_value = 900
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(
+            bot_module.bot,
+            "economy_event_service",
+            economy_service,
+            create=True,
+        ),
+        patch.object(
+            bot_module,
+            "_announce_economy_event",
+            AsyncMock(return_value=True),
+        ) as announce,
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await bot_module._economy_event_loop()
+
+    announce.assert_awaited_once_with(guild, event)
+    economy_service.mark_event_reminder_announced.assert_called_once_with(
+        guild.id,
+        event["event_id"],
+    )
+    economy_service.mark_event_announced.assert_not_called()
 
 
 async def test_economy_event_announcement_uses_shared_public_embed(bot_module):
@@ -1578,7 +1651,10 @@ async def test_economy_event_announcement_uses_shared_public_embed(bot_module):
     assert embed.title == "🌑 Ravage — Level III"
     assert "24% lower" in embed.fields[0].value
     assert "300 JC" in embed.fields[1].value
-    assert embed.footer.text == "The treasury watches. The edict endures."
+    assert embed.footer.text == (
+        "The treasury watches. Bands follow the rolling 7-day change "
+        "around a 2% annual target."
+    )
 
 
 async def test_economy_event_announcement_logs_when_prediction_cog_missing(

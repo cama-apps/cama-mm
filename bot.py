@@ -50,7 +50,6 @@ from config import (
     ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
     ECONOMY_EVENT_WAKE_SECONDS,
     ECONOMY_EVENTS_ENABLED,
-    ECONOMY_RECOVERY_MODE,
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
     LLM_API_KEY,
@@ -295,45 +294,55 @@ async def _announce_economy_event(guild: discord.Guild, event: dict) -> bool:
 
 
 async def _economy_event_loop() -> None:
-    """Enforce recovery governance and activate one idempotent event per day."""
+    """Activate one rolling-band economy event per day."""
     await bot.wait_until_ready()
     logger.info(
-        "economy event loop started (wake=%ss trigger=%02d:00 Pacific recovery=%s events=%s)",
+        "economy event loop started (wake=%ss trigger=%02d:00 Pacific events=%s)",
         ECONOMY_EVENT_WAKE_SECONDS,
         ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
-        ECONOMY_RECOVERY_MODE,
         ECONOMY_EVENTS_ENABLED,
     )
     while not bot.is_closed():
         for guild in list(bot.guilds):
             try:
-                if ECONOMY_RECOVERY_MODE:
-                    result = await asyncio.to_thread(
-                        bot.disburse_service.enforce_voting_moratorium,
-                        guild.id,
-                    )
-                    if result.get("cancelled"):
-                        logger.info(
-                            "recovery moratorium returned %s JC for guild=%s proposal=%s",
-                            result.get("fund_amount_returned"),
-                            guild.id,
-                            result.get("proposal_id"),
-                        )
                 event, _created = await asyncio.to_thread(
                     bot.economy_event_service.ensure_daily_event,
                     guild.id,
                 )
-                # Announce any active event that has not been announced yet —
-                # not just freshly created ones — so a failed announcement is
-                # retried on the next wake instead of being lost.
-                if event and not event.get("announced_at"):
+                restriction = await asyncio.to_thread(
+                    bot.economy_event_service.get_reserve_voting_restriction,
+                    guild.id,
+                )
+                if isinstance(restriction, dict):
+                    cancellation = await asyncio.to_thread(
+                        bot.disburse_service.enforce_voting_restriction,
+                        guild.id,
+                    )
+                    if cancellation["cancelled"]:
+                        logger.info(
+                            "reserve ballot cancelled by economy edict "
+                            "guild=%s event=%s proposal=%s returned=%s",
+                            guild.id,
+                            restriction["event_id"],
+                            cancellation["proposal_id"],
+                            cancellation["fund_amount_returned"],
+                        )
+                # Durable stamps make the initial post and its 12-hour
+                # reminder independently retryable after delivery failures.
+                announcement_slot = (
+                    bot.economy_event_service.pending_announcement_slot(event)
+                    if event
+                    else None
+                )
+                if announcement_slot:
                     announced = await _announce_economy_event(guild, event)
                     if announced:
-                        await asyncio.to_thread(
-                            bot.economy_event_service.mark_event_announced,
-                            guild.id,
-                            event["event_id"],
+                        marker = (
+                            bot.economy_event_service.mark_event_announced
+                            if announcement_slot == "initial"
+                            else bot.economy_event_service.mark_event_reminder_announced
                         )
+                        await asyncio.to_thread(marker, guild.id, event["event_id"])
             except Exception:  # noqa: BLE001
                 logger.exception("economy event wake failed for guild=%s", guild.id)
         sleep_seconds = ECONOMY_EVENT_WAKE_SECONDS
@@ -561,7 +570,6 @@ def _init_services():
         leverage_tiers=LEVERAGE_TIERS,
         garnishment_percentage=GARNISHMENT_PERCENTAGE,
         economy_events_enabled=ECONOMY_EVENTS_ENABLED,
-        economy_recovery_mode=ECONOMY_RECOVERY_MODE,
         llm_api_key=LLM_API_KEY,
         ai_model=AI_MODEL,
         ai_timeout_seconds=AI_TIMEOUT_SECONDS,
@@ -1202,9 +1210,9 @@ async def on_ready():
         _duel_challenge_task.add_done_callback(
             _log_task_exit("duel_challenges")
         )
-    if (
-        ECONOMY_EVENTS_ENABLED or ECONOMY_RECOVERY_MODE
-    ) and (_economy_event_task is None or _economy_event_task.done()):
+    if ECONOMY_EVENTS_ENABLED and (
+        _economy_event_task is None or _economy_event_task.done()
+    ):
         _economy_event_task = bot.loop.create_task(
             _supervised_loop("economy_events", _economy_event_loop)
         )

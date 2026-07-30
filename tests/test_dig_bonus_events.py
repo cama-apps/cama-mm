@@ -688,6 +688,48 @@ async def test_send_dig_bonus_posts_one_standalone_trivia_question():
 
 
 @pytest.mark.asyncio
+async def test_send_dig_trivia_freezes_active_edict_reward_for_display_and_settlement():
+    from commands.dig_helpers.bonus_events import send_dig_bonus
+
+    question = _trivia_question()
+    player_service = MagicMock()
+    economy_service = MagicMock()
+    economy_service.adjust_reward.side_effect = (
+        lambda _guild_id, amount: amount * 2
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1, display_name="Digger"),
+        guild=SimpleNamespace(id=99),
+        followup=SimpleNamespace(send=AsyncMock(return_value=MagicMock())),
+        channel=MagicMock(),
+    )
+    bot = SimpleNamespace(
+        player_service=player_service,
+        economy_event_service=economy_service,
+    )
+
+    with patch(
+        "commands.dig_helpers.bonus_events.generate_question",
+        return_value=question,
+        create=True,
+    ):
+        await send_dig_bonus(bot, interaction, "trivia")
+
+    sent_embed = interaction.followup.send.call_args.kwargs["embed"]
+    sent_view = interaction.followup.send.call_args.kwargs["view"]
+    answer_interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1),
+        response=SimpleNamespace(edit_message=AsyncMock()),
+    )
+    await sent_view.answer(answer_interaction, 1)
+
+    assert "+20 JC" in sent_embed.footer.text
+    result_embed = answer_interaction.response.edit_message.call_args.kwargs["embed"]
+    assert result_embed.title == "⛏️ Unearthed Rune Tablet — Correct! +20 JC"
+    assert player_service.adjust_balance.call_args.args[:3] == (1, 99, 20)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("result_kind", ["normal", "boss", "boon", "choice"])
 async def test_dig_result_dispatch_runs_bonus_after_existing_ui(result_kind):
     from commands.dig import DigCommands

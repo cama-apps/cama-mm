@@ -2012,16 +2012,22 @@ class TestSabotage:
 
         # Victim sets a trap so the attacker's attempt is blocked.
         dig_service.set_trap(10001, guild_id)
+        economy_service = MagicMock()
+        economy_service.adjust_reward.side_effect = (
+            lambda _guild_id, amount: amount * 2
+        )
+        dig_service.economy_event_service = economy_service
 
         victim_balance_before = player_repository.get_balance(10001, guild_id)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result.get("trapped")
         victim_balance_after = player_repository.get_balance(10001, guild_id)
-        # Trap_steal (cost*2) + victim tip (max(25, cost//2)). Victim gain is
-        # strictly larger than the bare trap_steal, which is what the buff is for.
         cost = max(5, 200 // 5)
-        bare_trap_credit = cost
-        assert victim_balance_after - victim_balance_before > bare_trap_credit
+        gross_tip = max(25, cost // 2)
+        economy_service.adjust_reward.assert_called_once_with(guild_id, gross_tip)
+        assert victim_balance_after - victim_balance_before == (
+            cost + scale_positive_dig_jc(gross_tip * 2)
+        )
 
 
 class TestTrap:

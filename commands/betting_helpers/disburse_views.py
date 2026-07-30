@@ -99,9 +99,13 @@ class DisburseVoteView(discord.ui.View):
         """Handle a vote button press."""
         guild_id = interaction.guild.id if interaction.guild else None
 
-        if not getattr(self.disburse_service, "voting_enabled", True):
+        restriction = await asyncio.to_thread(
+            self.disburse_service.get_voting_restriction,
+            guild_id,
+        )
+        if restriction:
             await interaction.response.send_message(
-                self.disburse_service.MONETARY_RECOVERY_REASON,
+                restriction["reason"],
                 ephemeral=True,
             )
             return

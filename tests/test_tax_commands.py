@@ -119,6 +119,7 @@ def _global_silence_status() -> dict:
         "bet_payout_multiplier": 0.97,
         "prediction_depth_multiplier": 0.16,
         "prediction_spread_ticks_delta": 6,
+        "reserve_voting_disabled": True,
     }
     return {
         "policy": {
@@ -205,11 +206,33 @@ def test_public_event_embed_is_high_level_theatrical_and_explains_indirect_effec
     assert "3% lower" in text
     assert "thinner" not in text
     assert "6 ticks wider" in text
+    assert "Reserve allocation voting is suspended" in text
     assert "No JC moved when this spell activated" in text
     assert "Forecast unmanaged flow" not in text
     assert "Target event effect" not in text
     assert "124,464" not in text
     assert validate_embed(embed) == []
+
+
+def test_public_event_embed_supports_level_five_and_explains_policy_window():
+    status = _global_silence_status()
+    status["event"]["severity"] = 5
+
+    embed = tax_commands._build_public_event_embed(status)
+    text = _embed_text(embed)
+
+    assert embed.title == "🌑 Global Silence — Level V"
+    assert "2% annual target" in text
+    assert "rolling 7-day change" in text
+
+
+def test_legacy_severe_deflationary_edict_still_displays_voting_suspension():
+    status = _global_silence_status()
+    status["event"]["effects"].pop("reserve_voting_disabled")
+
+    text = _embed_text(tax_commands._build_public_event_embed(status))
+
+    assert "Reserve allocation voting is suspended" in text
 
 
 def test_public_event_embed_names_immediate_reserve_and_wallet_actions():

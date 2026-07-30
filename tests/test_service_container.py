@@ -1,6 +1,7 @@
 """Tests for ServiceContainer."""
 
 
+import time
 from inspect import signature
 
 from infrastructure.service_container import ServiceContainer
@@ -61,6 +62,55 @@ class TestServiceContainerInitialization:
         container = ServiceContainer(repo_db_path, llm_api_key="sentinel-key")
         assert container.llm_api_key == "sentinel-key"
         assert removed.isdisjoint(vars(container))
+
+    def test_economy_controller_has_no_static_recovery_switch(self, repo_db_path):
+        parameters = signature(ServiceContainer).parameters
+
+        assert "economy_recovery_mode" not in parameters
+
+        container = ServiceContainer(repo_db_path, economy_events_enabled=True)
+        container.initialize()
+
+        assert container._components["disburse_service"].voting_enabled is True
+        assert (
+            container._components["economy_event_service"]
+            .ensure_policy(123)["mode"]
+            == "normal"
+        )
+
+    def test_severe_persisted_edict_dynamically_disables_reserve_voting(
+        self,
+        repo_db_path,
+    ):
+        container = ServiceContainer(repo_db_path, economy_events_enabled=True)
+        container.initialize()
+        economy = container._components["economy_event_service"]
+        now = int(time.time())
+        event_date = economy._event_date_for_timestamp(now)
+        container._components["economy_event_repo"].activate_event_atomic(
+            123,
+            {
+                "event_date": event_date,
+                "name": "Ravage",
+                "hero": "Tidehunter",
+                "direction": "deflationary",
+                "severity": 3,
+                "target_effect_jc": 0,
+                "forecast_flow_jc": 0,
+                "expected_effect_jc": 0,
+                "monetary_stock_before": 0,
+                "effects": {"reserve_voting_disabled": True},
+                "announcement": "A tidal shock hits the economy.",
+                "starts_at": now - 1,
+                "ends_at": now + 60,
+                "created_at": now,
+            },
+        )
+
+        assert container._components["disburse_service"].can_propose(123) == (
+            False,
+            "economy_edict",
+        )
 
     def test_llm_api_key_is_passed_to_ai_service(self, repo_db_path, monkeypatch):
         """AIService receives the configured LLM API key unchanged."""

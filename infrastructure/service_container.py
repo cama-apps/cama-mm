@@ -39,7 +39,6 @@ class ServiceContainer:
         leverage_tiers: list[int] | None = None,
         garnishment_percentage: float = 1.0,
         economy_events_enabled: bool = False,
-        economy_recovery_mode: bool = False,
         llm_api_key: str | None = None,
         ai_model: str = "groq/qwen/qwen3.6-27b",
         dig_llm_enabled: bool = True,
@@ -57,7 +56,6 @@ class ServiceContainer:
         self.leverage_tiers = leverage_tiers or [2, 3, 5]
         self.garnishment_percentage = garnishment_percentage
         self.economy_events_enabled = economy_events_enabled
-        self.economy_recovery_mode = economy_recovery_mode
         self.llm_api_key = llm_api_key
         self.ai_model = ai_model
         self.dig_llm_enabled = dig_llm_enabled
@@ -230,7 +228,6 @@ class ServiceContainer:
         c["economy_event_service"] = EconomyEventService(
             c["economy_event_repo"],
             enabled=self.economy_events_enabled,
-            recovery_mode=self.economy_recovery_mode,
         )
         c["betting_service"] = BettingService(
             bet_repo=c["bet_repo"],
@@ -247,7 +244,9 @@ class ServiceContainer:
             c["disburse_repo"],
             c["player_repo"],
             c["loan_repo"],
-            voting_enabled=not self.economy_recovery_mode,
+            reserve_voting_restriction_provider=(
+                c["economy_event_service"].get_reserve_voting_restriction
+            ),
         )
         c["gambling_stats_service"] = GamblingStatsService(
             bet_repo=c["bet_repo"],

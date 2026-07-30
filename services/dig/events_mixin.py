@@ -389,6 +389,8 @@ class EventsMixin:
                 tunnel_updates["depth"] = max(0, depth + depth_delta)
             jc_delta = scale_minigame_jc_delta(jc_delta)
             gross_jc = jc_delta if jc_delta > 0 else None
+            if jc_delta > 0:
+                jc_delta = self._apply_daily_economy_reward(guild_id, jc_delta)
             jc_delta = scale_positive_dig_jc(jc_delta)
 
             # JC + depth + audit log commit together so a crash can't credit
@@ -729,6 +731,7 @@ class EventsMixin:
                 penalty_jc=int(splash_cfg.get("penalty_jc", 0)),
                 mode=splash_cfg.get("mode", "burn"),
                 protection_service=getattr(self, "protection_service", None),
+                reward_adjuster=self._apply_daily_economy_reward,
                 event_key_prefix=(
                     f"dig-event:{guild_id}:{discord_id}:{event_id}:{uuid.uuid4().hex}"
                 ),

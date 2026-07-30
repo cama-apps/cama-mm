@@ -19,8 +19,6 @@ from config import (
     ECONOMY_EVENTS_ENABLED,
     ECONOMY_INFLATION_CEILING,
     ECONOMY_NORMAL_ANNUAL_RATE,
-    ECONOMY_RECOVERY_ANNUAL_RATE,
-    ECONOMY_RECOVERY_MODE,
 )
 from domain.models.economy_event import (
     NEUTRAL_ECONOMY_EFFECTS,
@@ -29,6 +27,14 @@ from domain.models.economy_event import (
 from repositories.economy_event_repository import EconomyEventRepository
 
 _EVENT_TIMEZONE = ZoneInfo("America/Los_Angeles")
+_SECOND_ANNOUNCEMENT_DELAY_SECONDS = 12 * 60 * 60
+_SEVERITY_INTENSITY = {
+    1: 0.5,
+    2: 1.0,
+    3: 1.5,
+    4: 2.25,
+    5: 3.0,
+}
 
 
 @dataclass(frozen=True)
@@ -159,8 +165,6 @@ class EconomyEventService:
         repository: EconomyEventRepository,
         *,
         enabled: bool = ECONOMY_EVENTS_ENABLED,
-        recovery_mode: bool = ECONOMY_RECOVERY_MODE,
-        recovery_annual_rate: float = ECONOMY_RECOVERY_ANNUAL_RATE,
         normal_annual_rate: float = ECONOMY_NORMAL_ANNUAL_RATE,
         inflation_ceiling: float = ECONOMY_INFLATION_CEILING,
         lookback_days: int = ECONOMY_EVENT_LOOKBACK_DAYS,
@@ -170,8 +174,6 @@ class EconomyEventService:
     ):
         self.repository = repository
         self.enabled = bool(enabled)
-        self.recovery_mode = bool(recovery_mode)
-        self.recovery_annual_rate = min(-0.0001, float(recovery_annual_rate))
         self.normal_annual_rate = min(
             float(inflation_ceiling), max(-0.99, float(normal_annual_rate))
         )
@@ -226,14 +228,10 @@ class EconomyEventService:
         return max(0, int(math.ceil(next_local.timestamp() - now)))
 
     def ensure_policy(self, guild_id: int | None, *, now: int | None = None) -> dict:
-        mode = "recovery" if self.recovery_mode else "normal"
-        target = (
-            self.recovery_annual_rate if mode == "recovery" else self.normal_annual_rate
-        )
         return self.repository.ensure_policy_state(
             guild_id,
-            mode=mode if self.enabled else "disabled",
-            target_annual_rate=target,
+            mode="normal" if self.enabled else "disabled",
+            target_annual_rate=self.normal_annual_rate,
             inflation_ceiling=self.inflation_ceiling,
             now=now,
         )
@@ -247,6 +245,31 @@ class EconomyEventService:
             return NEUTRAL_ECONOMY_EFFECTS
         return EconomyEventEffects.from_mapping(event.get("effects"))
 
+    def get_reserve_voting_restriction(
+        self,
+        guild_id: int | None,
+        *,
+        now: int | float | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the active severe deflationary edict, if voting is suspended."""
+        if not self.enabled:
+            return None
+        now = float(now if now is not None else time.time())
+        event_date = self._event_date_for_timestamp(now)
+        event = self.repository.get_event_for_date(guild_id, event_date)
+        if (
+            not event
+            or event.get("direction") != "deflationary"
+            or int(event.get("severity", 1)) < 3
+            or not int(event["starts_at"]) <= now < int(event["ends_at"])
+        ):
+            return None
+        return {
+            "event_id": int(event["event_id"]),
+            "name": str(event["name"]),
+            "severity": int(event["severity"]),
+        }
+
     def adjust_reward(self, guild_id: int | None, amount: int) -> int:
         """Apply the active event to a positive opt-in reward."""
         if amount <= 0:
@@ -255,15 +278,21 @@ class EconomyEventService:
         return max(0, int(float(amount) * multiplier + 0.5))
 
     @staticmethod
-    def _severity_for_correction(required_effect: int, deadband: int) -> int:
-        """Map the policy-correction magnitude to a stable event level."""
-        unit = max(1, int(deadband))
-        magnitude = abs(int(required_effect))
-        if magnitude <= unit * 5:
-            return 1
-        if magnitude <= unit * 15:
-            return 2
-        return 3
+    def _band_for_weekly_deviation(weekly_deviation: float) -> tuple[str, int]:
+        """Map seven-day target deviation to direction and public level."""
+        magnitude = abs(float(weekly_deviation))
+        if magnitude <= 0.05:
+            return "neutral", 1
+        direction = "deflationary" if weekly_deviation > 0 else "boon"
+        if magnitude <= 0.10:
+            return direction, 1
+        if magnitude <= 0.20:
+            return direction, 2
+        if magnitude <= 0.40:
+            return direction, 3
+        if magnitude <= 0.80:
+            return direction, 4
+        return direction, 5
 
     def ensure_daily_event(
         self,
@@ -297,22 +326,37 @@ class EconomyEventService:
         before = self.repository.capture_balance_sheet(guild_id)
         monetary_stock = int(before["monetary_stock"])
         self.repository.reconcile_prior_event(guild_id, event_date, monetary_stock)
-        forecast = self.repository.forecast_daily_flow(
-            guild_id, lookback_days=self.lookback_days, now=now
+        trends = self.repository.get_monetary_trends(
+            guild_id,
+            current_stock=monetary_stock,
+            now=now,
         )
         target_rate = float(policy["target_annual_rate"])
-        target_daily_change = int(
-            round(monetary_stock * (math.pow(1.0 + target_rate, 1.0 / 365.0) - 1.0))
-        )
-        required_effect = target_daily_change - forecast
-        deadband = max(5, int(round(abs(monetary_stock) * 0.0001)))
-        if required_effect < -deadband:
-            direction = "deflationary"
-        elif required_effect > deadband:
-            direction = "boon"
+        weekly_trend = trends.get("7d")
+        if weekly_trend:
+            elapsed_days = max(1.0, float(weekly_trend["elapsed_days"]))
+            actual_period_rate = float(weekly_trend["period_rate"])
+            target_period_rate = math.pow(
+                1.0 + target_rate,
+                elapsed_days / 365.0,
+            ) - 1.0
+            weekly_deviation = actual_period_rate - target_period_rate
+            direction, severity = self._band_for_weekly_deviation(
+                weekly_deviation
+            )
+            actual_change = int(weekly_trend["change_jc"])
+            target_change = int(
+                round(int(weekly_trend["anchor_stock"]) * target_period_rate)
+            )
+            required_effect = int(
+                round((target_change - actual_change) / elapsed_days)
+            )
+            observed_daily_flow = int(round(actual_change / elapsed_days))
         else:
             direction = "neutral"
-        severity = self._severity_for_correction(required_effect, deadband)
+            severity = 1
+            required_effect = 0
+            observed_daily_flow = 0
 
         volumes = self.repository.get_surface_daily_volumes(
             guild_id, lookback_days=self.lookback_days, now=now
@@ -335,7 +379,7 @@ class EconomyEventService:
 
         starts_at, ends_at = self._event_window(event_date)
         announcement = self._announcement_text(
-            template, severity, effects, required_effect, forecast
+            template, severity, effects, required_effect, observed_daily_flow
         )
         event, created = self.repository.activate_event_atomic(
             guild_id,
@@ -346,7 +390,7 @@ class EconomyEventService:
                 "direction": template.direction,
                 "severity": severity,
                 "target_effect_jc": required_effect,
-                "forecast_flow_jc": forecast,
+                "forecast_flow_jc": observed_daily_flow,
                 "expected_effect_jc": expected,
                 "monetary_stock_before": monetary_stock,
                 "effects": effects,
@@ -367,6 +411,28 @@ class EconomyEventService:
     ) -> None:
         """Record that an event's public announcement was delivered."""
         self.repository.mark_event_announced(guild_id, event_id, now=now)
+
+    def mark_event_reminder_announced(
+        self, guild_id: int | None, event_id: int, *, now: int | None = None
+    ) -> None:
+        self.repository.mark_event_reminder_announced(guild_id, event_id, now=now)
+
+    @staticmethod
+    def pending_announcement_slot(
+        event: dict[str, Any],
+        *,
+        now: int | float | None = None,
+    ) -> str | None:
+        """Return the initial or 12-hour reminder slot still due for an event."""
+        if not event.get("announced_at"):
+            return "initial"
+        if event.get("reminder_announced_at"):
+            return None
+        now = float(now if now is not None else time.time())
+        reminder_at = int(event["starts_at"]) + _SECOND_ANNOUNCEMENT_DELAY_SECONDS
+        if reminder_at <= now < int(event["ends_at"]):
+            return "reminder"
+        return None
 
     def get_policy_status(self, guild_id: int | None) -> dict[str, Any]:
         now = int(time.time())
@@ -401,7 +467,9 @@ class EconomyEventService:
         }
 
     def format_event(self, event: dict[str, Any]) -> tuple[str, str]:
-        level = ("I", "II", "III")[max(1, min(3, int(event["severity"]))) - 1]
+        level = ("I", "II", "III", "IV", "V")[
+            max(1, min(5, int(event["severity"]))) - 1
+        ]
         effects = EconomyEventEffects.from_mapping(event.get("effects"))
         lines = [event.get("announcement") or "The economy has shifted."]
         direct = []
@@ -421,19 +489,21 @@ class EconomyEventService:
         severity: int,
         balance_sheet: dict[str, int | float],
     ) -> dict[str, Any]:
+        intensity = _SEVERITY_INTENSITY[max(1, min(5, int(severity)))]
+
         def multiplier(step: float, *, low: float = 0.25, high: float = 2.0) -> float:
-            return round(min(high, max(low, 1.0 + step * severity)), 4)
+            return round(min(high, max(low, 1.0 + step * intensity)), 4)
 
         available = max(0, int(balance_sheet["reserve_available"]))
         burn_pct = min(
             self.max_reserve_burn_pct,
-            max(0.0, template.reserve_burn_step * severity),
+            max(0.0, template.reserve_burn_step * intensity),
         )
         wallet_burn_rate = min(
             self.max_wallet_burn_pct,
-            max(0.0, template.wallet_burn_step * severity),
+            max(0.0, template.wallet_burn_step * intensity),
         )
-        release_pct = max(0.0, template.reserve_release_step * severity)
+        release_pct = max(0.0, template.reserve_release_step * intensity)
         return {
             "reward_multiplier": multiplier(template.reward_step),
             "gamba_win_multiplier": multiplier(template.gamba_win_step),
@@ -443,10 +513,15 @@ class EconomyEventService:
                 template.prediction_payout_step, low=0.9, high=1.1
             ),
             "prediction_depth_multiplier": 1.0,
-            "prediction_spread_ticks_delta": template.spread_step * severity,
+            "prediction_spread_ticks_delta": int(
+                round(template.spread_step * intensity)
+            ),
             "reserve_burn_jc": int(available * burn_pct),
             "reserve_release_jc": int(available * release_pct),
             "wallet_burn_rate": round(wallet_burn_rate, 6),
+            "reserve_voting_disabled": (
+                template.direction == "deflationary" and int(severity) >= 3
+            ),
         }
 
     @staticmethod
@@ -486,7 +561,7 @@ class EconomyEventService:
         severity: int,
         effects: dict[str, Any],
         required_effect: int,
-        forecast: int,
+        observed_daily_flow: int,
     ) -> str:
         lines = [template.flavor]
         if effects["reserve_burn_jc"]:
@@ -527,9 +602,9 @@ class EconomyEventService:
         if prediction_parts:
             lines.append(f"Prediction markets: {', '.join(prediction_parts)}.")
         lines.append(
-            f"Policy target: **{required_effect:+,} JC** after a "
-            f"**{forecast:+,} JC/day** unmanaged-flow forecast."
+            f"Observed 7-day stock movement: **{observed_daily_flow:+,} JC/day**."
         )
-        if severity == 3:
+        lines.append(f"Today's target correction: **{required_effect:+,} JC**.")
+        if severity == 5:
             lines.append("**Aghanim's Scepter intensity is active.**")
         return "\n".join(lines)

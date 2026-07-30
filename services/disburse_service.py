@@ -10,7 +10,9 @@ import math
 import random
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from config import DISBURSE_MIN_FUND, DISBURSE_QUORUM_PERCENTAGE, LOTTERY_ACTIVITY_DAYS
 from repositories.disburse_repository import DisburseRepository
@@ -78,6 +80,7 @@ class DisburseService:
         "in monetary recovery mode."
     )
     MONETARY_RECOVERY_CODE = "monetary_recovery"
+    ECONOMY_EDICT_CODE = "economy_edict"
 
     def __init__(
         self,
@@ -87,6 +90,9 @@ class DisburseService:
         min_fund: int | None = None,
         quorum_percentage: float | None = None,
         voting_enabled: bool = True,
+        reserve_voting_restriction_provider: (
+            Callable[[int | None], dict[str, Any] | None] | None
+        ) = None,
     ):
         self.disburse_repo = disburse_repo
         self.player_repo = player_repo
@@ -98,6 +104,9 @@ class DisburseService:
         # Defaults to enabled so direct construction and existing deployments
         # keep their current behavior unless recovery mode is explicitly opted in.
         self.voting_enabled = voting_enabled
+        self.reserve_voting_restriction_provider = (
+            reserve_voting_restriction_provider
+        )
         # Per-guild serialization lock for execute/force_execute/reset paths.
         # Prevents the reserve-then-distribute sequence (add_to_nonprofit_fund
         # followed by complete_and_disburse_atomic) from interleaving between two
@@ -118,10 +127,37 @@ class DisburseService:
                 self._guild_locks[normalized] = lock
             return lock
 
-    def _require_voting_enabled(self) -> None:
-        """Reject reserve-governance mutations while recovery mode is active."""
+    def get_voting_restriction(
+        self,
+        guild_id: int | None,
+    ) -> dict[str, Any] | None:
+        """Return the active static or edict-driven voting restriction."""
         if not self.voting_enabled:
-            raise ValueError(self.MONETARY_RECOVERY_REASON)
+            return {
+                "code": self.MONETARY_RECOVERY_CODE,
+                "reason": self.MONETARY_RECOVERY_REASON,
+            }
+        if self.reserve_voting_restriction_provider is None:
+            return None
+        edict = self.reserve_voting_restriction_provider(guild_id)
+        if not edict:
+            return None
+        severity = max(1, min(5, int(edict["severity"])))
+        level = ("I", "II", "III", "IV", "V")[severity - 1]
+        return {
+            **edict,
+            "code": self.ECONOMY_EDICT_CODE,
+            "reason": (
+                "Jopacoin Reserve allocation voting is suspended by "
+                f"{edict['name']} — Level {level}."
+            ),
+        }
+
+    def _require_voting_enabled(self, guild_id: int | None) -> None:
+        """Reject reserve-governance mutations while a restriction is active."""
+        restriction = self.get_voting_restriction(guild_id)
+        if restriction:
+            raise ValueError(str(restriction["reason"]))
 
     def can_propose(self, guild_id: int | None) -> tuple[bool, str]:
         """
@@ -130,8 +166,9 @@ class DisburseService:
         Returns:
             (allowed, reason) - reason is empty string if allowed
         """
-        if not self.voting_enabled:
-            return False, self.MONETARY_RECOVERY_CODE
+        restriction = self.get_voting_restriction(guild_id)
+        if restriction:
+            return False, str(restriction["code"])
 
         # Check for existing active proposal
         existing = self.disburse_repo.get_active_proposal(guild_id)
@@ -160,7 +197,7 @@ class DisburseService:
 
     def _create_proposal_locked(self, guild_id: int | None) -> DisburseProposal:
         """Inner create; must be called with the guild lock held."""
-        self._require_voting_enabled()
+        self._require_voting_enabled(guild_id)
         can, reason = self.can_propose(guild_id)
         if not can:
             raise ValueError(f"Cannot create proposal: {reason}")
@@ -247,7 +284,7 @@ class DisburseService:
             dict with vote state and quorum info
         """
         with self._get_guild_lock(guild_id):
-            self._require_voting_enabled()
+            self._require_voting_enabled(guild_id)
 
             if method not in self.METHODS:
                 raise ValueError(f"Invalid method: {method}")
@@ -329,7 +366,7 @@ class DisburseService:
             dict with disbursement details
         """
         with self._get_guild_lock(guild_id):
-            self._require_voting_enabled()
+            self._require_voting_enabled(guild_id)
             # Re-check quorum INSIDE the lock so a late vote cannot cause a
             # second caller to re-enter the distribution path after the first
             # one has already reserved / started executing.
@@ -530,7 +567,7 @@ class DisburseService:
             ValueError if no active proposal or no votes cast
         """
         with self._get_guild_lock(guild_id):
-            self._require_voting_enabled()
+            self._require_voting_enabled(guild_id)
             proposal = self.get_proposal(guild_id)
             if not proposal:
                 raise ValueError("No active proposal")
@@ -578,6 +615,39 @@ class DisburseService:
         """
         with self._get_guild_lock(guild_id):
             result = self.disburse_repo.cancel_for_monetary_recovery_atomic(guild_id)
+            if result is None:
+                return {
+                    "cancelled": False,
+                    "proposal_id": None,
+                    "fund_amount_returned": 0,
+                }
+            return {
+                "cancelled": True,
+                "proposal_id": result["proposal_id"],
+                "fund_amount_returned": result["fund_amount_returned"],
+            }
+
+    def enforce_voting_restriction(self, guild_id: int | None) -> dict:
+        """Cancel an active ballot when the current policy suspends voting."""
+        with self._get_guild_lock(guild_id):
+            restriction = self.get_voting_restriction(guild_id)
+            if not restriction:
+                return {
+                    "cancelled": False,
+                    "proposal_id": None,
+                    "fund_amount_returned": 0,
+                }
+            if restriction["code"] == self.MONETARY_RECOVERY_CODE:
+                result = self.disburse_repo.cancel_for_monetary_recovery_atomic(
+                    guild_id
+                )
+            else:
+                result = self.disburse_repo.cancel_for_economy_edict_atomic(
+                    guild_id,
+                    event_id=int(restriction["event_id"]),
+                    event_name=str(restriction["name"]),
+                    severity=int(restriction["severity"]),
+                )
             if result is None:
                 return {
                     "cancelled": False,
