@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import discord
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from utils import dig_assets, dig_drawing
 from utils.dig_assets import (
@@ -42,6 +42,7 @@ PINNACLE_BOSS_IDS = (
     "pale_surveyor",
     "lantern_engine",
 )
+MAX_STRONGLY_CHANGED_FRACTION = 0.05
 NEW_PINNACLE_BOSS_ASSET_IDS = (
     "bastion_below",
     "pale_surveyor",
@@ -59,6 +60,27 @@ def _clear_pinnacle_phase_state() -> None:
     dig_assets._pinnacle_phase_art_cache.clear()
     getattr(dig_assets, "_pinnacle_phase_art_inflight", {}).clear()
     getattr(dig_assets, "_pinnacle_phase_art_failures", set()).clear()
+
+
+def _strongly_changed_fraction(
+    actual: Image.Image,
+    reference: Image.Image,
+    *,
+    threshold: int = 55,
+) -> float:
+    difference = ImageChops.difference(
+        actual.convert("RGB"),
+        reference.convert("RGB"),
+    )
+    red, green, blue = difference.split()
+    max_channel_delta = ImageChops.lighter(
+        ImageChops.lighter(red, green),
+        blue,
+    )
+    histogram = max_channel_delta.histogram()
+    changed_pixels = sum(histogram[threshold + 1:])
+    return changed_pixels / (actual.width * actual.height)
+
 
 # =============================================================================
 # dig_drawing tests
@@ -148,12 +170,91 @@ class TestPinnaclePhaseDrawing:
 
         assert set(dig_drawing.PINNACLE_PHASE_THEMES) == set(PINNACLE_BOSS_IDS)
         assert len(set(normal_outputs.values())) == len(PINNACLE_BOSS_IDS)
-        assert (
-            dig_drawing.draw_pinnacle_phase2(
-                source, "forgotten_king", secret=True,
-            ).getvalue()
-            != normal_outputs["forgotten_king"]
+
+    @pytest.mark.parametrize("boss_id", PINNACLE_BOSS_IDS)
+    def test_secret_palette_changes_both_pinnacle_phases(self, boss_id):
+        source = (
+            ASSETS_DIR / "bosses" / f"{boss_id}_encounter.png"
+        ).read_bytes()
+
+        normal_phase2 = dig_drawing.draw_pinnacle_phase2(source, boss_id)
+        secret_phase2 = dig_drawing.draw_pinnacle_phase2(
+            source,
+            boss_id,
+            secret=True,
         )
+        normal_phase3 = dig_drawing.animate_pinnacle_phase3(source, boss_id)
+        secret_phase3 = dig_drawing.animate_pinnacle_phase3(
+            source,
+            boss_id,
+            secret=True,
+        )
+
+        assert normal_phase2.getvalue() != secret_phase2.getvalue()
+        assert normal_phase3.getvalue() != secret_phase3.getvalue()
+
+    @pytest.mark.parametrize("boss_id", PINNACLE_BOSS_IDS)
+    @pytest.mark.parametrize("secret", (False, True), ids=("normal", "secret"))
+    def test_pinnacle_effects_preserve_the_source_art(self, boss_id, secret):
+        source = (
+            ASSETS_DIR / "bosses" / f"{boss_id}_encounter.png"
+        ).read_bytes()
+        with Image.open(io.BytesIO(source)) as source_image:
+            reference = source_image.convert("RGB").resize(
+                (512, 288),
+                Image.Resampling.LANCZOS,
+            )
+
+        phase2_buffer = dig_drawing.draw_pinnacle_phase2(
+            source,
+            boss_id,
+            secret=secret,
+        )
+        assert len(phase2_buffer.getvalue()) <= 512 * 1024
+        with Image.open(phase2_buffer) as phase2_image:
+            phase2 = phase2_image.convert("RGB")
+        assert (
+            _strongly_changed_fraction(phase2, reference)
+            < MAX_STRONGLY_CHANGED_FRACTION
+        )
+
+        phase3_buffer = dig_drawing.animate_pinnacle_phase3(
+            source,
+            boss_id,
+            secret=secret,
+        )
+        assert len(phase3_buffer.getvalue()) <= 750 * 1024
+        with Image.open(phase3_buffer) as phase3:
+            assert phase3.n_frames == 8
+            for frame_index in range(phase3.n_frames):
+                phase3.seek(frame_index)
+                assert (
+                    _strongly_changed_fraction(
+                        phase3.convert("RGB"),
+                        reference,
+                    )
+                    < MAX_STRONGLY_CHANGED_FRACTION
+                )
+
+    @pytest.mark.parametrize("boss_id", PINNACLE_BOSS_IDS)
+    @pytest.mark.parametrize("secret", (False, True), ids=("normal", "secret"))
+    def test_pinnacle_phase3_effects_are_deterministic(self, boss_id, secret):
+        source = (
+            ASSETS_DIR / "bosses" / f"{boss_id}_encounter.png"
+        ).read_bytes()
+
+        first = dig_drawing.animate_pinnacle_phase3(
+            source,
+            boss_id,
+            secret=secret,
+        )
+        second = dig_drawing.animate_pinnacle_phase3(
+            source,
+            boss_id,
+            secret=secret,
+        )
+
+        assert first.getvalue() == second.getvalue()
 
 
 class TestDrawEventScene:
