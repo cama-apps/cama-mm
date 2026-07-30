@@ -2272,7 +2272,7 @@ class TestShuffleDraftRedirect:
         monkeypatch.setattr(
             match_cog,
             "_select_shuffle_roster",
-            AsyncMock(return_value=(ready_ids, [], [], nonresponder_ids)),
+            AsyncMock(return_value=(ready_ids, [], [], nonresponder_ids, {})),
         )
         interaction = _FakeInteraction(guild_id)
 
@@ -2313,7 +2313,7 @@ class TestShuffleDraftRedirect:
         monkeypatch.setattr(
             match_cog,
             "_select_shuffle_roster",
-            AsyncMock(return_value=(player_ids, [], [], [])),
+            AsyncMock(return_value=(player_ids, [], [], [], {})),
         )
 
         interaction = _FakeInteraction(guild_id)

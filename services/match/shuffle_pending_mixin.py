@@ -154,6 +154,7 @@ class ShufflePendingMixin:
         rating_system: str = "glicko",
         shuffle_mode: str = "balanced",
         excluded_conditional_ids: list[int] | None = None,
+        lobby_wait_minutes: dict[int, int] | None = None,
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -165,6 +166,7 @@ class ShufflePendingMixin:
             rating_system: "glicko" or "openskill" - determines which rating system is used for balancing
             shuffle_mode: "balanced" or "region" - determines team-shape preference
             excluded_conditional_ids: Conditional lobby players not selected for this match
+            lobby_wait_minutes: Whole minutes each player has waited in the current lobby
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
@@ -263,6 +265,7 @@ class ShufflePendingMixin:
                 avoids=avoids,
                 deals=deals,
                 low_priority_ids=low_priority_ids,
+                lobby_wait_minutes=lobby_wait_minutes,
             )
         else:
             team1, team2 = shuffler.shuffle(
@@ -375,6 +378,10 @@ class ShufflePendingMixin:
         ]
         rating_spread_penalty = shuffler._calculate_rating_spread_penalty(selected_values)
         lobby_rating_bonus = shuffler._calculate_lobby_rating_bonus(selected_values)
+        lobby_wait_bonus = shuffler._calculate_lobby_wait_bonus(
+            selected_players_list,
+            lobby_wait_minutes,
+        )
 
         goodness_score = (
             value_diff
@@ -388,6 +395,7 @@ class ShufflePendingMixin:
             + region_split_penalty
             + rating_spread_penalty
             - lobby_rating_bonus
+            - lobby_wait_bonus
         )
 
         # Calculate Glicko-2 win probability for Radiant
