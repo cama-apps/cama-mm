@@ -413,18 +413,22 @@ class TestLobbyReadycheckSnapshot:
         mgr = LobbyManagerService(FakeLobbyRepo())
         lobby = mgr.get_or_create_lobby(creator_id=1)
         lobby.players.update({1, 2})
+        lobby.player_join_times.update({1: 100.5, 2: 200.5})
         mgr.set_readycheck_state(111, 222, {1, 2}, {})
         mgr.add_readycheck_reaction(1, "<@1>")
 
-        player_ids, readycheck = mgr.get_lobby_readycheck_snapshot()
+        player_ids, join_times, readycheck = mgr.get_lobby_readycheck_snapshot()
 
         assert set(player_ids) == {1, 2}
+        assert join_times == {1: 100.5, 2: 200.5}
         assert readycheck == (111, {1})
 
         lobby.players.add(3)
+        lobby.player_join_times[1] = 999.5
         mgr.add_readycheck_reaction(2, "<@2>")
 
         assert set(player_ids) == {1, 2}
+        assert join_times == {1: 100.5, 2: 200.5}
         assert readycheck == (111, {1})
 
     def test_lobby_mutation_cannot_interleave_with_snapshot(self):
@@ -459,7 +463,7 @@ class TestLobbyReadycheckSnapshot:
                 leave_future.result(timeout=0.05)
 
             release_iteration.set()
-            player_ids, readycheck = snapshot_future.result(timeout=1)
+            player_ids, _join_times, readycheck = snapshot_future.result(timeout=1)
             assert leave_future.result(timeout=1) is True
 
         assert set(player_ids) == set(range(1, 11))

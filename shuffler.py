@@ -228,6 +228,22 @@ class BalancedShuffler:
         """Return the average team rating total divided by 100."""
         return sum(player_values) / 2 / 100
 
+    @staticmethod
+    def _calculate_lobby_wait_bonus(
+        players: list[Player],
+        lobby_wait_minutes: dict[int, int] | None,
+    ) -> float:
+        """Return the selected players' total whole minutes in the lobby."""
+        if not lobby_wait_minutes:
+            return 0.0
+        return float(
+            sum(
+                lobby_wait_minutes.get(player.discord_id, 0)
+                for player in players
+                if player.discord_id is not None
+            )
+        )
+
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
         """
         Calculate the sum of role matchup deltas between two teams.
@@ -437,6 +453,7 @@ class BalancedShuffler:
         deals: list | None = None,
         low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
+        lobby_wait_minutes: dict[int, int] | None = None,
     ) -> tuple[Team, Team, list[Player], float]:
         """
         Greedy snake-draft shuffle for initial upper bound in branch and bound.
@@ -449,6 +466,7 @@ class BalancedShuffler:
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
+            lobby_wait_minutes: Whole lobby wait minutes keyed by Discord ID
 
 
         Returns:
@@ -562,6 +580,7 @@ class BalancedShuffler:
         ]
         rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
         lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
+        lobby_wait_bonus = self._calculate_lobby_wait_bonus(selected, lobby_wait_minutes)
 
         total_score = (
             base_score
@@ -571,6 +590,7 @@ class BalancedShuffler:
             + low_priority_penalty
             + rating_spread_penalty
             - lobby_rating_bonus
+            - lobby_wait_bonus
         )
 
         return team1, team2, excluded, total_score
@@ -1288,6 +1308,7 @@ class BalancedShuffler:
         deals: list | None = None,
         low_priority_ids: set[int] | None = None,
         rng: random.Random | None = None,
+        lobby_wait_minutes: dict[int, int] | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Shuffle players into two balanced teams when there are more than 10 players.
@@ -1304,6 +1325,7 @@ class BalancedShuffler:
                                to sit out.
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
+            lobby_wait_minutes: Whole lobby wait minutes keyed by Discord ID
 
 
         Returns:
@@ -1340,6 +1362,7 @@ class BalancedShuffler:
                 avoids=avoids,
                 deals=deals,
                 low_priority_ids=low_priority_ids,
+                lobby_wait_minutes=lobby_wait_minutes,
             )
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
@@ -1423,6 +1446,10 @@ class BalancedShuffler:
             selected_values = [self._player_value(p, scoring_context) for p in selected_players]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
+            lobby_wait_bonus = self._calculate_lobby_wait_bonus(
+                selected_players,
+                lobby_wait_minutes,
+            )
 
             # Penalties that are constant across every team split of this combination.
             combo_penalty = (
@@ -1431,6 +1458,7 @@ class BalancedShuffler:
                 + low_priority_penalty
                 + rating_spread_penalty
                 - lobby_rating_bonus
+                - lobby_wait_bonus
             )
             rd_priority = self._calculate_rd_priority(selected_players)
 
@@ -1528,6 +1556,7 @@ class BalancedShuffler:
         avoids: list | None = None,
         deals: list | None = None,
         low_priority_ids: set[int] | None = None,
+        lobby_wait_minutes: dict[int, int] | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Branch and bound shuffle optimized for 14 players.
@@ -1541,6 +1570,7 @@ class BalancedShuffler:
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
+            lobby_wait_minutes: Whole lobby wait minutes keyed by Discord ID
 
 
         Returns:
@@ -1564,6 +1594,7 @@ class BalancedShuffler:
             deals=deals,
             low_priority_ids=low_priority_ids,
             _scoring_context=scoring_context,
+            lobby_wait_minutes=lobby_wait_minutes,
         )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
 
@@ -1660,12 +1691,17 @@ class BalancedShuffler:
             selected_value_list = [player_values[i] for i in selected_indices]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_value_list)
+            lobby_wait_bonus = self._calculate_lobby_wait_bonus(
+                selected_players,
+                lobby_wait_minutes,
+            )
             combo_penalty = (
                 exclusion_penalty
                 + deal_split_penalty
                 + low_priority_penalty
                 + rating_spread_penalty
                 - lobby_rating_bonus
+                - lobby_wait_bonus
             )
             rd_priority = self._calculate_rd_priority(selected_players)
             combo_lower_bound = combo_penalty - rd_priority
