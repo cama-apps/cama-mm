@@ -165,6 +165,7 @@ def test_lobby_readycheck_snapshot_loads_players_from_atomic_manager_snapshot():
     lobby_manager = LobbyManagerService(FakeLobbyRepo())
     lobby = lobby_manager.get_or_create_lobby(creator_id=1)
     lobby.players.update({1, 2})
+    lobby.player_join_times.update({1: 100.5, 2: 200.5})
     lobby_manager.set_readycheck_state(111, 222, {1, 2}, {})
     lobby_manager.add_readycheck_reaction(1, "<@1>")
     player_repo = MagicMock()
@@ -172,12 +173,13 @@ def test_lobby_readycheck_snapshot_loads_players_from_atomic_manager_snapshot():
     player_repo.get_by_ids.return_value = players
     service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
 
-    player_ids, loaded_players, readycheck = (
+    player_ids, loaded_players, join_times, readycheck = (
         service.get_lobby_players_and_readycheck_snapshot(guild_id=0)
     )
 
     assert set(player_ids) == {1, 2}
     assert loaded_players == players
+    assert join_times == {1: 100.5, 2: 200.5}
     assert readycheck == (111, {1})
     player_repo.get_by_ids.assert_called_once_with(player_ids, 0)
 

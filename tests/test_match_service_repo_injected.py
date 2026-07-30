@@ -80,6 +80,64 @@ def test_goodness_adds_500_per_active_low_priority_player(repo_db_path):
     )
 
 
+def test_goodness_subtracts_selected_players_lobby_wait_minutes(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 10)
+    lobby_wait_minutes = {
+        player_id: index + 1 for index, player_id in enumerate(player_ids)
+    }
+
+    baseline = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    waited = service.shuffle_players(
+        player_ids,
+        guild_id=TEST_GUILD_ID,
+        lobby_wait_minutes=lobby_wait_minutes,
+    )
+
+    assert waited["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        -sum(lobby_wait_minutes.values())
+    )
+
+
+def test_goodness_adds_230_for_selected_last_match_player(
+    repo_db_path,
+    monkeypatch,
+):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 10)
+
+    monkeypatch.setattr(
+        match_repo,
+        "get_last_match_participant_ids",
+        lambda _guild_id: set(),
+    )
+    baseline = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    monkeypatch.setattr(
+        match_repo,
+        "get_last_match_participant_ids",
+        lambda _guild_id: {player_ids[0]},
+    )
+    penalized = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    assert penalized["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        230.0
+    )
+
+
 def test_shuffle_uses_three_database_connections(repo_db_path, monkeypatch):
     """Player data plus metadata should share one of the three shuffle reads."""
     player_repo = PlayerRepository(repo_db_path)
