@@ -51,6 +51,36 @@ def test_pool_shuffle_prefers_excluding_low_priority_player():
     assert {player.discord_id for player in excluded} == {100}
 
 
+@pytest.mark.parametrize(("player_count", "long_waiter_id"), [(11, 109), (14, 100)])
+def test_pool_shuffle_includes_player_with_longer_lobby_wait(
+    player_count: int,
+    long_waiter_id: int,
+):
+    players = [
+        Player(
+            name=f"Player{i}",
+            discord_id=100 + i,
+            mmr=1500,
+            preferred_roles=["1", "2", "3", "4", "5"],
+        )
+        for i in range(player_count)
+    ]
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        exclusion_penalty_weight=0.0,
+        recent_match_penalty_weight=0.0,
+        rd_priority_weight=0.0,
+    )
+
+    team1, team2, _ = shuffler.shuffle_from_pool(
+        players,
+        lobby_wait_minutes={long_waiter_id: 30},
+    )
+
+    selected_ids = {player.discord_id for player in team1.players + team2.players}
+    assert long_waiter_id in selected_ids
+
+
 class TestPlayer:
     """Test Player class functionality."""
 

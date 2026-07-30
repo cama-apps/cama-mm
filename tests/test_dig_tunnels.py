@@ -96,6 +96,23 @@ class TestPrestige:
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert not result["success"]
 
+    @pytest.mark.parametrize(("current_level", "new_level"), [(10, 11), (19, 20)])
+    def test_prestige_can_advance_beyond_p10(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+        current_level, new_level,
+    ):
+        """Prestige progression continues through the new P20 ceiling."""
+        self._setup_prestige_ready(
+            dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+        )
+        dig_repo.update_tunnel(10001, guild_id, prestige_level=current_level)
+
+        result = dig_service.prestige(10001, guild_id, "advance_boost")
+
+        assert result["success"]
+        assert result["prestige_level"] == new_level
+        assert dig_repo.get_tunnel(10001, guild_id)["prestige_level"] == new_level
+
     def test_prestige_bosses_respawn(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss progress resets."""
         self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
@@ -244,9 +261,9 @@ class TestTunnelNameKey:
 class TestExpandedPrestige:
     """Verify extended prestige and pickaxes."""
 
-    def test_max_prestige_is_10(self):
+    def test_max_prestige_is_20(self):
         from services.dig_constants import MAX_PRESTIGE
-        assert MAX_PRESTIGE == 10
+        assert MAX_PRESTIGE == 20
 
     def test_pickaxe_tiers_define_full_ladder(self):
         from services.dig_constants import _PICKAXE_TIERS_DEF

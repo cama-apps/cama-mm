@@ -203,14 +203,14 @@ class LobbyService:
 
     def get_lobby_players_and_readycheck_snapshot(
         self, guild_id: int | None = None
-    ) -> tuple[list[int], list, tuple[int, set[int]] | None] | None:
+    ) -> tuple[list[int], list, dict[int, float], tuple[int, set[int]] | None] | None:
         snapshot = self.lobby_manager.get_lobby_readycheck_snapshot(guild_id=guild_id)
         if snapshot is None:
             return None
 
-        player_ids, readycheck = snapshot
+        player_ids, player_join_times, readycheck = snapshot
         players = self.player_repo.get_by_ids(player_ids, guild_id)
-        return player_ids, players, readycheck
+        return player_ids, players, player_join_times, readycheck
 
     def get_readycheck_player_data(
         self, guild_id: int | None = None

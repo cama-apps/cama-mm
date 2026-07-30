@@ -519,7 +519,7 @@ class MatchCommands(commands.Cog):
 
     async def _select_shuffle_roster(
         self, guild_id: int | None
-    ) -> tuple[list[int], list, list[int], list[int]] | None:
+    ) -> tuple[list[int], list, list[int], list[int], dict[int, float]] | None:
         """Treat nonresponders as transient conditionals after ten confirmations."""
         snapshot = await asyncio.to_thread(
             self.lobby_service.get_lobby_players_and_readycheck_snapshot,
@@ -528,14 +528,16 @@ class MatchCommands(commands.Cog):
         if snapshot is None:
             return None
 
-        player_ids, players, readycheck = snapshot
+        player_ids, players, player_join_times, readycheck = snapshot
         if readycheck is None:
-            return select_players_for_shuffle(player_ids, players, [], [])
+            roster = select_players_for_shuffle(player_ids, players, [], [])
+            return (*roster, player_join_times)
 
         _, confirmed_ids = readycheck
         confirmed_lobby_ids = set(player_ids) & confirmed_ids
         if len(confirmed_lobby_ids) < self.lobby_service.ready_threshold:
-            return select_players_for_shuffle(player_ids, players, [], [])
+            roster = select_players_for_shuffle(player_ids, players, [], [])
+            return (*roster, player_join_times)
 
         selected_ids = [
             player_id for player_id in player_ids if player_id in confirmed_lobby_ids
@@ -548,7 +550,12 @@ class MatchCommands(commands.Cog):
         excluded_ids = [
             player_id for player_id in player_ids if player_id not in confirmed_lobby_ids
         ]
-        return selected_ids, selected_players, [], excluded_ids
+        selected_join_times = {
+            player_id: player_join_times[player_id]
+            for player_id in selected_ids
+            if player_id in player_join_times
+        }
+        return selected_ids, selected_players, [], excluded_ids, selected_join_times
 
     async def _execute_shuffle(
         self,
@@ -576,6 +583,7 @@ class MatchCommands(commands.Cog):
             players,
             _conditional_player_ids_included,
             excluded_conditional_ids,
+            player_join_times,
         ) = roster
         regular_count = len(player_ids)
 
@@ -663,13 +671,19 @@ class MatchCommands(commands.Cog):
             rs = "openskill"
 
         is_openskill_shuffle = rs == "openskill"
+        shuffle_timestamp = time.time()
+        lobby_wait_minutes = {
+            player_id: max(0, int((shuffle_timestamp - joined_at) / 60))
+            for player_id, joined_at in player_join_times.items()
+        }
 
         try:
             result = await asyncio.to_thread(
                 functools.partial(self.match_service.shuffle_players,
                     player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs,
                     shuffle_mode=team_mode,
-                    excluded_conditional_ids=excluded_conditional_ids)
+                    excluded_conditional_ids=excluded_conditional_ids,
+                    lobby_wait_minutes=lobby_wait_minutes)
             )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)

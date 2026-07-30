@@ -278,8 +278,8 @@ class LobbyManagerService:
 
     def get_lobby_readycheck_snapshot(
         self, guild_id: int | None = None
-    ) -> tuple[list[int], tuple[int, set[int]] | None] | None:
-        """Copy the open lobby roster and current confirmations atomically."""
+    ) -> tuple[list[int], dict[int, float], tuple[int, set[int]] | None] | None:
+        """Copy the open lobby roster, join times, and confirmations atomically."""
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
             lobby = self.lobbies.get(normalized)
@@ -287,6 +287,11 @@ class LobbyManagerService:
                 return None
 
             player_ids = list(lobby.players)
+            player_join_times = {
+                player_id: lobby.player_join_times[player_id]
+                for player_id in player_ids
+                if player_id in lobby.player_join_times
+            }
             message_id = self.readycheck_message_ids.get(normalized)
             readycheck = (
                 None
@@ -296,7 +301,7 @@ class LobbyManagerService:
                     set(self.readycheck_reacted.get(normalized, {})),
                 )
             )
-            return player_ids, readycheck
+            return player_ids, player_join_times, readycheck
 
     def get_readycheck_player_data(self, guild_id: int | None = None) -> dict[int, dict]:
         return self.readycheck_player_data.get(self._normalize_guild_id(guild_id), {})

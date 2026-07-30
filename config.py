@@ -143,7 +143,7 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)
-    "recent_match_penalty_weight": 210.0,
+    "recent_match_penalty_weight": 230.0,
 }
 
 NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 4)
