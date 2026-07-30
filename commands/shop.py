@@ -1344,32 +1344,6 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
-        # Neon Degen Terminal hook (soft avoid purchase)
-        try:
-            neon = get_neon_service(self.bot)
-            if neon:
-                neon_result = await neon.on_soft_avoid(
-                    user_id, guild_id,
-                    cost=cost,
-                    games=SOFT_AVOID_GAMES,
-                )
-                if neon_result:
-                    msg = None
-                    if neon_result.text_block:
-                        msg = await interaction.channel.send(neon_result.text_block)
-                    elif neon_result.footer_text:
-                        msg = await interaction.channel.send(neon_result.footer_text)
-                    if msg:
-                        async def _del_neon(m, d):
-                            try:
-                                await asyncio.sleep(d)
-                                await m.delete()
-                            except Exception as e:
-                                logger.debug("Failed to delete neon message: %s", e)
-                        asyncio.create_task(_del_neon(msg, 60))
-        except Exception as e:
-            logger.debug("Failed to send neon soft avoid result: %s", e)
-
     async def _handle_package_deal(
         self,
         interaction: discord.Interaction,

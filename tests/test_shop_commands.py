@@ -621,7 +621,8 @@ async def test_handle_soft_avoid_prices_from_teammate_winrate(monkeypatch):
     player_service.get_player.side_effect = [object(), object()]
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
-    monkeypatch.setattr("commands.shop.get_neon_service", lambda _bot: None)
+    get_neon_service = MagicMock()
+    monkeypatch.setattr("commands.shop.get_neon_service", get_neon_service)
 
     commands = ShopCommands(bot, player_service)
     interaction = _make_interaction(guild_id=9000)
@@ -642,6 +643,7 @@ async def test_handle_soft_avoid_prices_from_teammate_winrate(monkeypatch):
         cost=429,
         games=10,
     )
+    get_neon_service.assert_not_called()
 
 
 @pytest.mark.asyncio
