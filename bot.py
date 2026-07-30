@@ -598,6 +598,7 @@ EXTENSIONS = [
     "commands.predictions",
     "commands.duel",
     "commands.tax",
+    "commands.blame_luke",
     "commands.ask",
     "commands.profile",
     "commands.draft",

@@ -290,6 +290,34 @@ class PlayerService:
         )
         return self.player_repo.get_balance(discord_id, guild_id)
 
+    def try_spend(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> bool:
+        """Atomically spend ``amount`` JC without allowing an overdraft."""
+        if amount < 0:
+            raise ValueError("Spend amount cannot be negative")
+        return self.player_repo.try_debit(
+            discord_id,
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
+
     def try_purchase_pingedash(
         self,
         discord_id: int,

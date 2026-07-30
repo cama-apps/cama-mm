@@ -195,6 +195,23 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def try_debit(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> bool:
+        """Atomically debit a non-negative amount when sufficient funds exist."""
+        ...
+
+    @abstractmethod
     def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod

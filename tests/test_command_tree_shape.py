@@ -131,6 +131,7 @@ def test_commands_use_approved_consolidated_paths():
         "/admin lowprio remove",
         "/admin lowprio status",
         "/admin lowprio list",
+        "/blameluke",
     }
     retired_paths = {
         "/dig resetcooldown",
@@ -160,7 +161,7 @@ def test_commands_use_approved_consolidated_paths():
 def test_command_tree_stays_within_discord_limits():
     _, top_level_count, direct_option_counts = _all_registration_shapes()
 
-    assert top_level_count == 42
+    assert top_level_count == 43
     assert top_level_count <= 100
     assert all(count <= 25 for count in direct_option_counts.values())
     assert direct_option_counts["/dig"] == 22
