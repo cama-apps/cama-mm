@@ -1464,6 +1464,7 @@ class BossCombatMixin:
             ) = self._net_boss_payout(
                 discord_id, guild_id, base_reward, wager_profit
             )
+            wager_profit = gross_payout - gross_base_reward
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
@@ -3070,6 +3071,7 @@ class BossCombatMixin:
             ) = self._net_boss_payout(
                 discord_id, guild_id, base_reward, wager_profit
             )
+            wager_profit = gross_payout - gross_base_reward
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out

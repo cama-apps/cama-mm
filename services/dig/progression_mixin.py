@@ -923,8 +923,16 @@ class ProgressionMixin:
             target_jc_bonus = 10
         helper_gross_jc = helper_jc_bonus
         target_gross_jc = target_jc_bonus
-        helper_jc_bonus = scale_positive_dig_jc(helper_gross_jc)
-        target_jc_bonus = scale_positive_dig_jc(target_gross_jc)
+        helper_event_jc = self._apply_daily_economy_reward(
+            guild_id,
+            helper_gross_jc,
+        )
+        target_event_jc = self._apply_daily_economy_reward(
+            guild_id,
+            target_gross_jc,
+        )
+        helper_jc_bonus = scale_positive_dig_jc(helper_event_jc)
+        target_jc_bonus = scale_positive_dig_jc(target_event_jc)
 
         # Target depth + helper cooldown + helper reward + audit log commit
         # together. The old flow committed each step individually and could
@@ -1026,7 +1034,11 @@ class ProgressionMixin:
         # consumed when present. In both cases the would-be victim gets a
         # small JC tip — defending feels like a win, not a non-event.
         victim_block_tip_gross = max(25, cost // 2)
-        victim_block_tip = scale_positive_dig_jc(victim_block_tip_gross)
+        victim_block_tip_event_jc = self._apply_daily_economy_reward(
+            guild_id,
+            victim_block_tip_gross,
+        )
+        victim_block_tip = scale_positive_dig_jc(victim_block_tip_event_jc)
         protection_service = getattr(self, "protection_service", None)
         if protection_service is not None:
             try:
@@ -1354,8 +1366,12 @@ class ProgressionMixin:
                     attacker_steal_gross_jc = max(
                         1, int(target_depth * steal_pct * 0.5)
                     )
+                    attacker_steal_event_jc = self._apply_daily_economy_reward(
+                        guild_id,
+                        attacker_steal_gross_jc,
+                    )
                     attacker_steal_jc = scale_positive_dig_jc(
-                        attacker_steal_gross_jc
+                        attacker_steal_event_jc
                     )
                     self.player_repo.add_balance(
                         actor_id,
@@ -1386,7 +1402,11 @@ class ProgressionMixin:
         vendetta_bonus = 0
         if self._has_relic(target_id, guild_id, "vendetta_coin"):
             vendetta_bonus_gross = 5
-            vendetta_bonus = scale_positive_dig_jc(vendetta_bonus_gross)
+            vendetta_bonus_event_jc = self._apply_daily_economy_reward(
+                guild_id,
+                vendetta_bonus_gross,
+            )
+            vendetta_bonus = scale_positive_dig_jc(vendetta_bonus_event_jc)
             reflect_amount = max(1, int(damage * 0.5))
             try:
                 # Reflect via an atomic, floored debit so a relic proc can't

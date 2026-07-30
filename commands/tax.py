@@ -902,8 +902,9 @@ def _build_policy_embed(status: dict) -> discord.Embed:
         embed.add_field(
             name=f"Active event: {event['name']} (Level {event['severity']})",
             value=(
-                f"Forecast unmanaged flow: **{int(event['forecast_flow_jc']):+,} JC/day**\n"
-                f"Target event effect: **{int(event['target_effect_jc']):+,} JC**\n"
+                "Observed 7-day stock movement: "
+                f"**{int(event['forecast_flow_jc']):+,} JC/day**\n"
+                f"Today's target correction: **{int(event['target_effect_jc']):+,} JC**\n"
                 f"Projected daily impact: **{int(event['expected_effect_jc']):+,} JC**\n"
                 f"Immediate supply change: {immediate}"
             ),

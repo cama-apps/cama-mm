@@ -269,7 +269,6 @@ def test_daily_controller_is_idempotent_and_exposes_effects(
     service = EconomyEventService(
         repo,
         enabled=True,
-        recovery_mode=True,
         lookback_days=7,
         max_reserve_burn_pct=0.03,
         max_wallet_burn_pct=0.0025,
@@ -292,7 +291,7 @@ def test_daily_controller_is_idempotent_and_exposes_effects(
 
 def test_disabled_service_returns_neutral_effects(repo_db_path):
     repo, _ = _seed_economy(repo_db_path)
-    service = EconomyEventService(repo, enabled=False, recovery_mode=False)
+    service = EconomyEventService(repo, enabled=False)
 
     event, created = service.ensure_daily_event(TEST_GUILD_ID)
 
@@ -301,37 +300,169 @@ def test_disabled_service_returns_neutral_effects(repo_db_path):
     assert service.get_effects(TEST_GUILD_ID).reward_multiplier == 1.0
 
 
+def test_policy_targets_two_percent_without_a_recovery_override(repo_db_path):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=True)
+
+    policy = service.ensure_policy(TEST_GUILD_ID, now=1_000)
+
+    assert policy["mode"] == "normal"
+    assert policy["target_annual_rate"] == pytest.approx(0.02)
+
+
+def test_active_level_three_deflationary_edict_suspends_reserve_voting(
+    repo_db_path,
+):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=True, trigger_hour_local=10)
+    now = _local_timestamp(2026, 7, 18, 12)
+    payload = _event_payload("2026-07-18", 2_500)
+    payload.update(
+        severity=3,
+        starts_at=_local_timestamp(2026, 7, 18, 10),
+        ends_at=_local_timestamp(2026, 7, 19, 10),
+    )
+    event, _ = repo.activate_event_atomic(TEST_GUILD_ID, payload)
+
+    restriction = service.get_reserve_voting_restriction(
+        TEST_GUILD_ID,
+        now=now,
+    )
+
+    assert restriction == {
+        "event_id": event["event_id"],
+        "name": "Ravage",
+        "severity": 3,
+    }
+
+
 @pytest.mark.parametrize(
-    ("required_effect", "deadband", "expected_severity"),
+    ("direction", "severity", "active", "enabled"),
     (
-        (0, 5, 1),
-        (5, 5, 1),
-        (25, 5, 1),
-        (26, 5, 2),
-        (75, 5, 2),
-        (76, 5, 3),
-        (-76, 5, 3),
+        ("deflationary", 2, True, True),
+        ("boon", 5, True, True),
+        ("deflationary", 5, False, True),
+        ("deflationary", 5, True, False),
     ),
 )
-def test_severity_follows_correction_magnitude(
-    required_effect, deadband, expected_severity
+def test_nonrestrictive_or_inactive_edict_keeps_reserve_voting_open(
+    repo_db_path,
+    direction,
+    severity,
+    active,
+    enabled,
+):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=enabled, trigger_hour_local=10)
+    now = _local_timestamp(2026, 7, 18, 12)
+    payload = _event_payload("2026-07-18", 2_500)
+    payload.update(
+        direction=direction,
+        severity=severity,
+        starts_at=_local_timestamp(2026, 7, 18, 10),
+        ends_at=(
+            _local_timestamp(2026, 7, 19, 10)
+            if active
+            else now - 1
+        ),
+    )
+    repo.activate_event_atomic(TEST_GUILD_ID, payload)
+
+    assert (
+        service.get_reserve_voting_restriction(TEST_GUILD_ID, now=now)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("weekly_deviation", "expected_direction", "expected_severity"),
+    (
+        (-0.800001, "boon", 5),
+        (-0.80, "boon", 4),
+        (-0.40, "boon", 3),
+        (-0.20, "boon", 2),
+        (-0.10, "boon", 1),
+        (-0.05, "neutral", 1),
+        (0.00, "neutral", 1),
+        (0.05, "neutral", 1),
+        (0.050001, "deflationary", 1),
+        (0.10, "deflationary", 1),
+        (0.100001, "deflationary", 2),
+        (0.20, "deflationary", 2),
+        (0.200001, "deflationary", 3),
+        (0.40, "deflationary", 3),
+        (0.400001, "deflationary", 4),
+        (0.80, "deflationary", 4),
+        (0.800001, "deflationary", 5),
+    ),
+)
+def test_weekly_deviation_selects_broad_directional_band(
+    weekly_deviation, expected_direction, expected_severity
 ):
     assert (
-        EconomyEventService._severity_for_correction(required_effect, deadband)
-        == expected_severity
+        EconomyEventService._band_for_weekly_deviation(weekly_deviation)
+        == (expected_direction, expected_severity)
     )
 
 
-def test_controller_scores_only_the_flow_selected_severity(repo_db_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("severity", "expected_reward_multiplier"),
+    (
+        (1, 0.925),
+        (2, 0.85),
+        (3, 0.775),
+        (4, 0.6625),
+        (5, 0.55),
+    ),
+)
+def test_five_levels_add_granularity_without_exceeding_old_maximum(
+    repo_db_path,
+    severity,
+    expected_reward_multiplier,
+):
     repo, _ = _seed_economy(repo_db_path)
-    service = EconomyEventService(
-        repo,
-        enabled=True,
-        recovery_mode=True,
-        lookback_days=7,
+    service = EconomyEventService(repo, enabled=True)
+    doom = next(template for template in _EVENT_CATALOG if template.name == "Doom")
+    balance_sheet = repo.capture_balance_sheet(TEST_GUILD_ID)
+
+    effects = service._effects_for(doom, severity, balance_sheet)
+
+    assert effects["reward_multiplier"] == expected_reward_multiplier
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected_disabled"),
+    ((2, False), (3, True), (5, True)),
+)
+def test_only_severe_deflationary_edicts_disable_reserve_voting(
+    repo_db_path,
+    severity,
+    expected_disabled,
+):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=True)
+    doom = next(template for template in _EVENT_CATALOG if template.name == "Doom")
+
+    effects = service._effects_for(
+        doom,
+        severity,
+        repo.capture_balance_sheet(TEST_GUILD_ID),
     )
+
+    assert effects["reserve_voting_disabled"] is expected_disabled
+
+
+def test_controller_scores_only_the_weekly_band_severity(repo_db_path, monkeypatch):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=True, lookback_days=7)
     now = _local_timestamp(2026, 7, 18, 10)
-    monkeypatch.setattr(repo, "forecast_daily_flow", lambda *args, **kwargs: 1_000)
+    old_sheet = repo.capture_balance_sheet(TEST_GUILD_ID)
+    repo.save_snapshot(
+        TEST_GUILD_ID,
+        "2026-07-11",
+        {**old_sheet, "monetary_stock": 1_000},
+        captured_at=now - 7 * 86400,
+    )
     monkeypatch.setattr(
         repo,
         "get_surface_daily_volumes",
@@ -360,8 +491,38 @@ def test_controller_scores_only_the_flow_selected_severity(repo_db_path, monkeyp
 
     assert created is True
     assert event["direction"] == "deflationary"
-    assert event["severity"] == 3
-    assert set(seen_severities) == {3}
+    assert event["severity"] == 5
+    assert set(seen_severities) == {5}
+
+
+def test_controller_uses_a_neutral_edict_until_seven_day_history_exists(
+    repo_db_path,
+    monkeypatch,
+):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(repo, enabled=True, lookback_days=7)
+    now = _local_timestamp(2026, 7, 18, 10)
+    monkeypatch.setattr(
+        repo,
+        "get_surface_daily_volumes",
+        lambda *args, **kwargs: {
+            "reward_credits": 0.0,
+            "gamba_credits": 0.0,
+            "gamba_debits": 0.0,
+            "bet_payouts": 0.0,
+            "prediction_payouts": 0.0,
+        },
+    )
+
+    event, created = service.ensure_daily_event(
+        TEST_GUILD_ID,
+        now=now,
+        event_date="2026-07-18",
+    )
+
+    assert created is True
+    assert event["direction"] == "neutral"
+    assert event["severity"] == 1
 
 
 def test_legacy_prediction_depth_effect_is_neutralized():
@@ -392,12 +553,24 @@ def test_event_announcement_omits_fixed_prediction_depth():
         severity=2,
         effects=effects,
         required_effect=-100,
-        forecast=100,
+        observed_daily_flow=100,
     )
 
     assert "depth" not in announcement
     assert "resolution **-1.0%**" in announcement
     assert "spread **+2 ticks**" in announcement
+    assert "Observed 7-day stock movement: **+100 JC/day**." in announcement
+    assert "forecast" not in announcement.lower()
+
+
+def test_format_event_supports_level_five():
+    service = EconomyEventService(repository=None, enabled=True)
+    event = _event_payload("2026-07-29", 1000)
+    event["severity"] = 5
+
+    title, _ = service.format_event(event)
+
+    assert title == "Ravage — Level V"
 
 
 def test_pre_trigger_missing_prior_card_stays_neutral(repo_db_path):
@@ -581,3 +754,30 @@ def test_mark_event_announced_stamps_once(repo_db_path):
     # Retries keep the original announcement timestamp.
     service.mark_event_announced(TEST_GUILD_ID, event["event_id"], now=2222)
     assert repo.get_event_for_date(TEST_GUILD_ID, date)["announced_at"] == 1111
+
+
+def test_event_has_one_initial_and_one_twelve_hour_reminder_slot(repo_db_path):
+    repo, _ = _seed_economy(repo_db_path)
+    date = get_game_date()
+    before = repo.capture_balance_sheet(TEST_GUILD_ID)
+    payload = _event_payload(date, int(before["monetary_stock"]))
+    payload["starts_at"] = 1_000
+    payload["ends_at"] = 87_400
+    event, _ = repo.activate_event_atomic(TEST_GUILD_ID, payload)
+    service = EconomyEventService(repo, enabled=True)
+
+    assert service.pending_announcement_slot(event, now=1_000) == "initial"
+
+    service.mark_event_announced(TEST_GUILD_ID, event["event_id"], now=1_001)
+    event = repo.get_event_for_date(TEST_GUILD_ID, date)
+    assert service.pending_announcement_slot(event, now=44_199) is None
+    assert service.pending_announcement_slot(event, now=44_200) == "reminder"
+
+    service.mark_event_reminder_announced(
+        TEST_GUILD_ID,
+        event["event_id"],
+        now=44_201,
+    )
+    event = repo.get_event_for_date(TEST_GUILD_ID, date)
+    assert event["reminder_announced_at"] == 44_201
+    assert service.pending_announcement_slot(event, now=44_202) is None

@@ -744,9 +744,98 @@ class SchemaManager:
                 "openskill_v3_durable_native_replay",
                 self._migration_openskill_v3_durable_native_replay,
             ),
+            (
+                "add_economy_event_reminder_announced_at",
+                self._migration_add_economy_event_reminder_announced_at,
+            ),
+            (
+                "expand_economy_event_severity_levels",
+                self._migration_expand_economy_event_severity_levels,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "economy_daily_events",
+            "reminder_announced_at",
+            "INTEGER",
+        )
+
+    def _migration_expand_economy_event_severity_levels(self, cursor) -> None:
+        """Allow the five policy bands while preserving existing event history."""
+        row = cursor.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'economy_daily_events'
+            """
+        ).fetchone()
+        if row is None or "BETWEEN 1 AND 5" in str(row[0]):
+            return
+
+        cursor.execute("DROP INDEX IF EXISTS idx_economy_events_active")
+        cursor.execute(
+            """
+            CREATE TABLE economy_daily_events_severity_v2 (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                name TEXT NOT NULL,
+                hero TEXT NOT NULL,
+                direction TEXT NOT NULL
+                    CHECK(direction IN ('deflationary', 'neutral', 'boon')),
+                severity INTEGER NOT NULL CHECK(severity BETWEEN 1 AND 5),
+                target_effect_jc INTEGER NOT NULL,
+                forecast_flow_jc INTEGER NOT NULL,
+                expected_effect_jc INTEGER NOT NULL,
+                direct_effect_jc INTEGER NOT NULL DEFAULT 0,
+                actual_stock_change_jc INTEGER,
+                monetary_stock_before INTEGER NOT NULL,
+                effects TEXT NOT NULL,
+                announcement TEXT NOT NULL,
+                starts_at INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                announced_at INTEGER,
+                reminder_announced_at INTEGER,
+                UNIQUE(guild_id, event_date)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO economy_daily_events_severity_v2 (
+                event_id, guild_id, event_date, name, hero, direction, severity,
+                target_effect_jc, forecast_flow_jc, expected_effect_jc,
+                direct_effect_jc, actual_stock_change_jc, monetary_stock_before,
+                effects, announcement, starts_at, ends_at, created_at,
+                announced_at, reminder_announced_at
+            )
+            SELECT
+                event_id, guild_id, event_date, name, hero, direction, severity,
+                target_effect_jc, forecast_flow_jc, expected_effect_jc,
+                direct_effect_jc, actual_stock_change_jc, monetary_stock_before,
+                effects, announcement, starts_at, ends_at, created_at,
+                announced_at, reminder_announced_at
+            FROM economy_daily_events
+            """
+        )
+        cursor.execute("DROP TABLE economy_daily_events")
+        cursor.execute(
+            """
+            ALTER TABLE economy_daily_events_severity_v2
+            RENAME TO economy_daily_events
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX idx_economy_events_active
+            ON economy_daily_events(guild_id, starts_at, ends_at)
+            """
+        )
 
     def _migration_openskill_v3_durable_native_replay(self, cursor) -> None:
         """Back-calculate durable OpenSkill v3 state atomically."""
@@ -1641,9 +1730,9 @@ class SchemaManager:
             """
             CREATE TABLE IF NOT EXISTS economy_policy_state (
                 guild_id INTEGER PRIMARY KEY,
-                mode TEXT NOT NULL DEFAULT 'recovery'
+                mode TEXT NOT NULL DEFAULT 'normal'
                     CHECK(mode IN ('recovery', 'normal', 'disabled')),
-                target_annual_rate REAL NOT NULL DEFAULT -0.035,
+                target_annual_rate REAL NOT NULL DEFAULT 0.02,
                 inflation_ceiling REAL NOT NULL DEFAULT 0.02,
                 recovery_started_at INTEGER,
                 stable_since INTEGER,
@@ -1690,7 +1779,7 @@ class SchemaManager:
                 hero TEXT NOT NULL,
                 direction TEXT NOT NULL
                     CHECK(direction IN ('deflationary', 'neutral', 'boon')),
-                severity INTEGER NOT NULL CHECK(severity BETWEEN 1 AND 3),
+                severity INTEGER NOT NULL CHECK(severity BETWEEN 1 AND 5),
                 target_effect_jc INTEGER NOT NULL,
                 forecast_flow_jc INTEGER NOT NULL,
                 expected_effect_jc INTEGER NOT NULL,
@@ -1702,6 +1791,7 @@ class SchemaManager:
                 starts_at INTEGER NOT NULL,
                 ends_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
+                reminder_announced_at INTEGER,
                 UNIQUE(guild_id, event_date)
             )
             """

@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -9,6 +9,12 @@ from repositories.dig_repository import DigRepository
 from services.dig_constants import BOSS_BOUNDARIES, PINNACLE_DEPTH
 from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService
+
+
+def _doubling_economy_service() -> MagicMock:
+    service = MagicMock()
+    service.adjust_reward.side_effect = lambda _guild_id, amount: amount * 2
+    return service
 
 
 @pytest.mark.parametrize(
@@ -147,19 +153,22 @@ def test_legacy_event_reward_is_scaled_once_and_audited(
         },
     }
     monkeypatch.setattr(dig_service_module, "EVENT_POOL", [event])
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
 
     result = service.resolve_event(
         player_id, guild_id, event["id"], "inspect"
     )
 
-    assert result["jc_delta"] == 10
+    economy_service.adjust_reward.assert_called_once_with(guild_id, 15)
+    assert result["jc_delta"] == scale_positive_dig_jc(30)
     action = service.dig_repo.get_recent_actions(
         player_id,
         guild_id,
         limit=1,
         action_type="event",
     )[0]
-    assert action["jc_delta"] == 10
+    assert action["jc_delta"] == scale_positive_dig_jc(30)
     assert '"gross_jc": 15' in action["detail"]
     assert '"reward_multiplier": 0.65' in action["detail"]
 
@@ -190,6 +199,7 @@ def test_slow_drip_tracks_gross_cap_but_credits_scaled_reward(
         DigRepository(repo_db_path),
         player_repository,
         slow_drip_repo=slow_drip_repo,
+        economy_event_service=_doubling_economy_service(),
     )
     monkeypatch.setattr(service, "_has_relic", lambda *_args: True)
     monkeypatch.setattr("services.dig.gear_mixin.time.time", lambda: 2_200)
@@ -200,14 +210,17 @@ def test_slow_drip_tracks_gross_cap_but_credits_scaled_reward(
         last_dig_at=None,
     )
 
-    assert credited == 7
+    assert credited == scale_positive_dig_jc(20)
+    service.economy_event_service.adjust_reward.assert_called_once_with(guild_id, 10)
     slow_drip_repo.add_claim.assert_called_once_with(
         player_id,
         guild_id,
         service._get_game_date(),
         10,
     )
-    assert player_repository.get_balance(player_id, guild_id) == 107
+    assert player_repository.get_balance(player_id, guild_id) == (
+        100 + scale_positive_dig_jc(20)
+    )
 
 
 def test_deterministic_dig_outcome_scales_full_positive_payout_before_sinks(
@@ -340,6 +353,8 @@ def test_cave_in_scales_combined_positive_reward_once(
         last_dig_at=0,
         mutations=json.dumps([{"id": "cave_in_loot"}]),
     )
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
     balance_before = player_repository.get_balance(player_id, guild_id)
     monkeypatch.setattr(
         service,
@@ -361,8 +376,9 @@ def test_cave_in_scales_combined_positive_reward_once(
 
     assert result["cave_in"] is True
     # Lucky Rubble (1) + Gambler's Charm (4) is one 5-JC cave-in mint.
+    economy_service.adjust_reward.assert_called_once_with(guild_id, 5)
     assert player_repository.get_balance(player_id, guild_id) == (
-        balance_before + scale_positive_dig_jc(5)
+        balance_before + scale_positive_dig_jc(10)
     )
 
 
@@ -396,23 +412,28 @@ def test_prestige_grant_is_scaled_and_audited(
         max_depth=PINNACLE_DEPTH,
         boss_progress=json.dumps(defeated),
     )
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
 
     result = service.prestige(player_id, guild_id, "advance_boost")
 
-    assert result["prestige_grant"]["jc"] == 650
-    assert player_repository.get_balance(player_id, guild_id) == balance_before + 650
+    economy_service.adjust_reward.assert_called_once_with(guild_id, 1000)
+    assert result["prestige_grant"]["jc"] == scale_positive_dig_jc(2000)
+    assert player_repository.get_balance(player_id, guild_id) == (
+        balance_before + scale_positive_dig_jc(2000)
+    )
     action = service.dig_repo.get_recent_actions(
         player_id,
         guild_id,
         limit=1,
         action_type="prestige",
     )[0]
-    assert action["jc_delta"] == 650
+    assert action["jc_delta"] == scale_positive_dig_jc(2000)
     assert '"gross_jc": 1000' in action["detail"]
     assert '"reward_multiplier": 0.65' in action["detail"]
 
 
-def test_abandon_preview_and_refund_use_scaled_positive_reward(
+def test_abandon_preview_and_refund_apply_edict_before_positive_reward_scaling(
     repo_db_path,
     player_repository,
     guild_id: int,
@@ -432,25 +453,31 @@ def test_abandon_preview_and_refund_use_scaled_positive_reward(
     service.dig(player_id, guild_id)
     service.dig_repo.update_tunnel(player_id, guild_id, depth=100, max_depth=100)
     balance_before = player_repository.get_balance(player_id, guild_id)
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
 
     preview = service.preview_abandon(player_id, guild_id)
     result = service.abandon_tunnel(player_id, guild_id)
 
-    assert preview["refund"] == 7
+    assert economy_service.adjust_reward.call_args_list == [
+        call(guild_id, 10),
+        call(guild_id, 10),
+    ]
+    assert preview["refund"] == 13
     assert preview["gross_refund"] == 10
-    assert result["refund"] == 7
-    assert player_repository.get_balance(player_id, guild_id) == balance_before + 7
+    assert result["refund"] == 13
+    assert player_repository.get_balance(player_id, guild_id) == balance_before + 13
     action = service.dig_repo.get_recent_actions(
         player_id,
         guild_id,
         limit=1,
         action_type="abandon",
     )[0]
-    assert action["jc_delta"] == 7
+    assert action["jc_delta"] == 13
     assert '"gross_jc": 10' in action["detail"]
 
 
-def test_pinnacle_reward_scales_base_but_not_wager_profit(
+def test_pinnacle_reward_applies_edict_to_base_and_wager_profit(
     repo_db_path,
     player_repository,
     guild_id: int,
@@ -486,6 +513,8 @@ def test_pinnacle_reward_scales_base_but_not_wager_profit(
         pinnacle_phase=3,
     )
     tunnel = dict(service.dig_repo.get_tunnel(player_id, guild_id))
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
     monkeypatch.setattr(
         service,
         "_roll_pinnacle_relic",
@@ -520,8 +549,12 @@ def test_pinnacle_reward_scales_base_but_not_wager_profit(
         now=1_000_000,
     )
 
-    expected = scale_positive_dig_jc(500) + result["wager_payout"]
-    assert result["gross_payout"] == 500 + result["wager_payout"]
+    assert economy_service.adjust_reward.call_count == 2
+    authored_wager_profit = economy_service.adjust_reward.call_args_list[1].args[1]
+    economy_service.adjust_reward.assert_any_call(guild_id, 500)
+    assert result["wager_payout"] == authored_wager_profit * 2
+    expected = scale_positive_dig_jc(1000) + result["wager_payout"]
+    assert result["gross_payout"] == 1000 + result["wager_payout"]
     assert result["payout"] == expected
     assert player_repository.get_balance(player_id, guild_id) == balance_before + expected
     action = service.dig_repo.get_recent_actions(
@@ -531,9 +564,9 @@ def test_pinnacle_reward_scales_base_but_not_wager_profit(
         action_type="pinnacle_fight",
     )[0]
     detail = json.loads(action["detail"])
-    assert detail["gross_jc"] == 500
-    assert detail["gross_payout"] == 500 + result["wager_payout"]
-    assert detail["scaled_base_jc"] == scale_positive_dig_jc(500)
+    assert detail["gross_jc"] == 1000
+    assert detail["gross_payout"] == 1000 + result["wager_payout"]
+    assert detail["scaled_base_jc"] == scale_positive_dig_jc(1000)
     assert detail["wager_payout"] == result["wager_payout"]
     assert detail["reward_multiplier"] == 0.65
 
@@ -561,6 +594,8 @@ def test_help_rewards_scale_minted_bonuses_for_both_players(
     service.dig(helper_id, guild_id)
     service.dig(target_id, guild_id)
     service.dig_repo.update_tunnel(helper_id, guild_id, last_dig_at=0)
+    economy_service = _doubling_economy_service()
+    service.economy_event_service = economy_service
     helper_before = player_repository.get_balance(helper_id, guild_id)
     target_before = player_repository.get_balance(target_id, guild_id)
     monkeypatch.setattr(
@@ -573,7 +608,15 @@ def test_help_rewards_scale_minted_bonuses_for_both_players(
 
     result = service.help_tunnel(helper_id, target_id, guild_id)
 
-    assert result["mentor_helper_bonus"] == 7
-    assert result["mentor_target_bonus"] == 7
-    assert player_repository.get_balance(helper_id, guild_id) == helper_before + 7
-    assert player_repository.get_balance(target_id, guild_id) == target_before + 7
+    assert economy_service.adjust_reward.call_args_list == [
+        call(guild_id, 11),
+        call(guild_id, 10),
+    ]
+    assert result["mentor_helper_bonus"] == scale_positive_dig_jc(22)
+    assert result["mentor_target_bonus"] == scale_positive_dig_jc(20)
+    assert player_repository.get_balance(helper_id, guild_id) == (
+        helper_before + scale_positive_dig_jc(22)
+    )
+    assert player_repository.get_balance(target_id, guild_id) == (
+        target_before + scale_positive_dig_jc(20)
+    )

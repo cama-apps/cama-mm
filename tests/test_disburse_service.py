@@ -649,6 +649,107 @@ class TestMonetaryRecoveryMoratorium:
         assert recovery_entries == 1
 
 
+class TestEconomyEdictVotingRestriction:
+    """Severe deflationary edicts dynamically suspend Reserve governance."""
+
+    @staticmethod
+    def _restriction_provider(_guild_id):
+        return {
+            "event_id": 7,
+            "name": "Ravage",
+            "severity": 3,
+        }
+
+    def test_active_edict_blocks_all_governance_mutations(
+        self,
+        disburse_service,
+        disburse_repo,
+        player_repo,
+        loan_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        restricted = DisburseService(
+            disburse_repo=disburse_repo,
+            player_repo=player_repo,
+            loan_repo=loan_repo,
+            min_fund=100,
+            quorum_percentage=0.40,
+            reserve_voting_restriction_provider=self._restriction_provider,
+        )
+
+        assert restricted.can_propose(TEST_GUILD_ID) == (
+            False,
+            "economy_edict",
+        )
+        for operation in (
+            lambda: restricted.create_proposal(TEST_GUILD_ID),
+            lambda: restricted.add_vote(TEST_GUILD_ID, 1004, "even"),
+            lambda: restricted.execute_disbursement(TEST_GUILD_ID),
+            lambda: restricted.force_execute(TEST_GUILD_ID),
+        ):
+            with pytest.raises(
+                ValueError,
+                match="Ravage — Level III",
+            ):
+                operation()
+
+        assert restricted.get_proposal(TEST_GUILD_ID).proposal_id == proposal.proposal_id
+
+    def test_active_edict_cancels_and_refunds_open_ballot_once(
+        self,
+        disburse_service,
+        disburse_repo,
+        player_repo,
+        loan_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        restricted = DisburseService(
+            disburse_repo=disburse_repo,
+            player_repo=player_repo,
+            loan_repo=loan_repo,
+            min_fund=100,
+            quorum_percentage=0.40,
+            reserve_voting_restriction_provider=self._restriction_provider,
+        )
+
+        result = restricted.enforce_voting_restriction(TEST_GUILD_ID)
+
+        assert result == {
+            "cancelled": True,
+            "proposal_id": proposal.proposal_id,
+            "fund_amount_returned": 300,
+        }
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 300
+        ballots = _archived_ballots(disburse_repo, proposal.proposal_id)
+        assert {row["proposal_outcome"] for row in ballots} == {"economy_edict"}
+        with sqlite3.connect(disburse_repo.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ledger = conn.execute(
+                """
+                SELECT reason, metadata
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND account_type = 'nonprofit'
+                  AND related_id = ?
+                  AND reason LIKE '%Ravage%'
+                """,
+                (TEST_GUILD_ID, proposal.proposal_id),
+            ).fetchall()
+        assert len(ledger) == 1
+        assert "Level III" in ledger[0]["reason"]
+        assert '"event_id": 7' in ledger[0]["metadata"]
+        assert '"proposal_outcome": "economy_edict"' in ledger[0]["metadata"]
+
+        assert restricted.enforce_voting_restriction(TEST_GUILD_ID)["cancelled"] is False
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 300
+
+
 class TestDisbursementHistory:
     """Test disbursement history tracking."""
 

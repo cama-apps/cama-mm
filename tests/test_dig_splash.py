@@ -363,6 +363,7 @@ class TestSplashGrantMode:
         _register(player_repository, 10001, balance=100)
         _register(player_repository, 10002, balance=100)
         monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+        reward_adjuster = MagicMock(side_effect=lambda _guild_id, amount: amount * 2)
 
         result = resolve_splash(
             player_repo=player_repository,
@@ -374,14 +375,15 @@ class TestSplashGrantMode:
             victim_count=1,
             penalty_jc=10,
             mode="grant",
+            reward_adjuster=reward_adjuster,
         )
         assert result.mode == "grant"
         assert len(result.victims) == 1
         vid, amount = result.victims[0]
         assert vid == 10002
-        assert amount == scale_positive_dig_jc(
-            scale_minigame_jc_delta(10)
-        )
+        gross = scale_minigame_jc_delta(10)
+        reward_adjuster.assert_called_once_with(TEST_GUILD_ID, gross)
+        assert amount == scale_positive_dig_jc(gross * 2)
         # Recipient balance goes UP.
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == 100 + amount
 
@@ -417,6 +419,7 @@ class TestSplashStealMode:
         _register(player_repository, 10001, balance=100)
         _register(player_repository, 10002, balance=100)
         monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+        reward_adjuster = MagicMock(side_effect=lambda _guild_id, amount: amount * 2)
 
         result = resolve_splash(
             player_repo=player_repository,
@@ -428,8 +431,10 @@ class TestSplashStealMode:
             victim_count=1,
             penalty_jc=10,
             mode="steal",
+            reward_adjuster=reward_adjuster,
         )
 
+        reward_adjuster.assert_not_called()
         expected = scale_minigame_jc_delta(10)
         assert result.victims == [(10002, expected)]
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100 + expected

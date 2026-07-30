@@ -344,6 +344,7 @@ def resolve_splash(
     mode: str = "burn",
     protection_service=None,
     event_key_prefix: str | None = None,
+    reward_adjuster=None,
 ) -> SplashResult:
     """Select targets and move JC — burn from each (default) or grant to each.
 
@@ -376,6 +377,8 @@ def resolve_splash(
     )
     grant_gross_jc = scaled_penalty_jc if mode == "grant" else None
     if mode == "grant":
+        if reward_adjuster is not None:
+            scaled_penalty_jc = reward_adjuster(guild_id, scaled_penalty_jc)
         scaled_penalty_jc = scale_positive_dig_jc(scaled_penalty_jc)
     if scaled_penalty_jc <= 0:
         return SplashResult(

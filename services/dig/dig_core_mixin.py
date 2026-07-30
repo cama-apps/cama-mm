@@ -834,7 +834,11 @@ class DigCoreMixin:
             if gamblers_charm_bonus > 0:
                 cave_in_jc += gamblers_charm_bonus
             cave_in_gross_jc = cave_in_jc
-            cave_in_jc = scale_positive_dig_jc(cave_in_gross_jc)
+            cave_in_event_jc = self._apply_daily_economy_reward(
+                guild_id,
+                cave_in_gross_jc,
+            )
+            cave_in_jc = scale_positive_dig_jc(cave_in_event_jc)
 
             if p["mutation_fx"].get("post_cave_in_advance"):
                 tunnel_updates["temp_buffs"] = json.dumps({
@@ -1386,8 +1390,12 @@ class DigCoreMixin:
                 loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
                 loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
                 cave_in_gross_jc = random.randint(loot_min, loot_max)
+                cave_in_event_jc = self._apply_daily_economy_reward(
+                    guild_id,
+                    cave_in_gross_jc,
+                )
                 cave_in_balance_delta += scale_positive_dig_jc(
-                    cave_in_gross_jc
+                    cave_in_event_jc
                 )
             else:
                 cave_in_gross_jc = 0

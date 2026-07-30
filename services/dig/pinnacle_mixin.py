@@ -1150,6 +1150,7 @@ class PinnacleMixin:
             ) = self._net_boss_payout(
                 discord_id, guild_id, jc_reward, wager_payout
             )
+            wager_payout = gross_payout - gross_base_reward
             relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {

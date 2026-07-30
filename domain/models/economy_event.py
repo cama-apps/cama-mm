@@ -21,6 +21,7 @@ class EconomyEventEffects:
     reserve_release_jc: int = 0
     wallet_burn_rate: float = 0.0
     wallet_burn_jc: int = 0
+    reserve_voting_disabled: bool = False
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> EconomyEventEffects:
@@ -43,6 +44,9 @@ class EconomyEventEffects:
             reserve_release_jc=int(raw.get("reserve_release_jc", 0)),
             wallet_burn_rate=float(raw.get("wallet_burn_rate", 0.0)),
             wallet_burn_jc=int(raw.get("wallet_burn_jc", 0)),
+            reserve_voting_disabled=bool(
+                raw.get("reserve_voting_disabled", False)
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:

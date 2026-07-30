@@ -228,7 +228,8 @@ class GearMixin:
             )  # 0.5/min ≈ 1 per 2 min
             if gross_credit <= 0:
                 return 0
-            credit = scale_positive_dig_jc(gross_credit)
+            event_credit = self._apply_daily_economy_reward(guild_id, gross_credit)
+            credit = scale_positive_dig_jc(event_credit)
             # Record the claim before crediting: if the credit write fails, the
             # daily cap is already consumed (player just misses out) rather than
             # leaving the claim unrecorded and re-claimable.

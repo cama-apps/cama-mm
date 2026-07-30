@@ -784,6 +784,23 @@ class EconomyEventRepository(BaseRepository):
                 (now, gid, int(event_id)),
             )
 
+    def mark_event_reminder_announced(
+        self, guild_id: int | None, event_id: int, *, now: int | None = None
+    ) -> None:
+        """Stamp the second daily announcement without duplicating retries."""
+        gid = self.normalize_guild_id(guild_id)
+        now = int(now if now is not None else time.time())
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE economy_daily_events
+                SET reminder_announced_at = ?
+                WHERE guild_id = ? AND event_id = ?
+                    AND reminder_announced_at IS NULL
+                """,
+                (now, gid, int(event_id)),
+            )
+
     def reconcile_prior_event(
         self, guild_id: int | None, event_date: str, current_stock: int
     ) -> None:
