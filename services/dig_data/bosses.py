@@ -1426,6 +1426,288 @@ BOSS_PHASE3: dict[int, BossPhase3Def] = {
 # another boss's phase identity. Any boss without an entry here falls back to the
 # depth-keyed dictionaries above via the resolvers.
 BOSS_PHASE2_BY_ID: dict[str, BossPhase2Def] = {
+    # --- depth 25 -----------------------------------------------------------
+    "grothak": BossPhase2Def(
+        depth=25,
+        name="Grothak the Undying",
+        title="Skeletal Wrath",
+        dialogue=[
+            "You... thought that would STOP me?! I shed my flesh like a coat!",
+            "Back again, and so am I. Bones don't tire, worm.",
+            "At this point my chiropractor is just a necromancer.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "pudge": BossPhase2Def(
+        depth=25,
+        name="The Butcher, Unstitched",
+        title="The Seams Come Apart",
+        dialogue=[
+            "You cut the stitches! Now there's MORE of me to hook you with!",
+            "Fresh meat comes apart. So do I. Mine goes back together.",
+            "Every scar on me was somebody's last dig. Say hello.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "ogre_magi": BossPhase2Def(
+        depth=25,
+        name="The Twin-Skulled, Of One Mind",
+        title="Both Heads Agree",
+        dialogue=[
+            "Left head remembered! Right head is FURIOUS about it!",
+            "We had a meeting. Unanimous. You die.",
+            "Two heads. One plan. Finally. Took a beating to get here.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    # --- depth 50 -----------------------------------------------------------
+    "crystalia": BossPhase2Def(
+        depth=50,
+        name="Crystalia Shattered",
+        title="The Thousand Reflections",
+        dialogue=[
+            "You broke me! But every shard is a NEW me! Geometry is ETERNAL!",
+            "Which one is real? Trick question. They ALL are.",
+            "I have become a fractal. Please send help.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "crystal_maiden": BossPhase2Def(
+        depth=50,
+        name="The Frostbinder, Thawless",
+        title="The Mana Came Back",
+        dialogue=[
+            "My mana regenerated. Do you understand what that means for you?",
+            "I was being polite about the cold. I'm done being polite.",
+            "Hair's already ruined. Nothing left to protect.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "tusk": BossPhase2Def(
+        depth=50,
+        name="The Ice Warlord, Off the Leash",
+        title="He Found More Snow",
+        dialogue=[
+            "Found more snow. Guess whose problem that is.",
+            "The snowball was the warm-up. This is the kick.",
+            "You ever been yeeted TWICE? Today's your day.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    # --- depth 75 -----------------------------------------------------------
+    "magmus_rex": BossPhase2Def(
+        depth=75,
+        name="Magmus Unbound",
+        title="The Living Eruption",
+        dialogue=[
+            "My SHELL was holding me BACK! I AM THE VOLCANO NOW!",
+            "Cancel my PTO. This is PERSONAL.",
+            "I'm literally just lava in a vaguely angry shape at this point.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "doom": BossPhase2Def(
+        depth=75,
+        name="The Deathbringer, Unsealed",
+        title="The End Stops Waiting",
+        dialogue=[
+            "The silence is over. So is the patience.",
+            "I have been the end for a long time. You have been brief.",
+            "No more work week. Only the work.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    "lina": BossPhase2Def(
+        depth=75,
+        name="The Scorchwitch, Overheated",
+        title="She Stopped Rationing",
+        dialogue=[
+            "Fingers are warm now. Told you they would be.",
+            "I was rationing. That was my mistake, not yours.",
+            "The one-shot didn't take. Fine. We'll do it loudly.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    # --- depth 100 ----------------------------------------------------------
+    "void_warden": BossPhase2Def(
+        depth=100,
+        name="The Void Unraveled",
+        title="What Lies Beyond Nothing",
+        dialogue=[
+            "Oh. You wanted to see what's UNDER the void? Fine. FINE.",
+            "I found myself. I hate it. Now you'll meet it too.",
+            "Turns out the point was violence. Who knew!",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "spectre": BossPhase2Def(
+        depth=100,
+        name="The Dread Shade, Manifest",
+        title="The Wound Opens",
+        dialogue=[
+            "You noticed. That is the first thing you have gotten right.",
+            "I stopped being behind you. That should worry you more.",
+            "We are the same wound. I am the deeper part.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "void_spirit": BossPhase2Def(
+        depth=100,
+        name="The Astral Echo, Converged",
+        title="All Seven Tunnels At Once",
+        dialogue=[
+            "I stopped stepping sideways. Now I'm just here. All of me.",
+            "Seven tunnels. I brought the other six.",
+            "This dimension was the worst one. I'm fixing that.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    # --- depth 150 ----------------------------------------------------------
+    "sporeling_sovereign": BossPhase2Def(
+        depth=150,
+        name="The Sporeling Collective",
+        title="We Are Legion",
+        dialogue=[
+            "We were being POLITE before. We are done being polite.",
+            "Every spore is us. Every us is hungry.",
+            "You cannot kill a democracy of mushrooms!",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "aegis_warden": BossPhase2Def(
+        depth=150,
+        name="The Aegis Warden, Returned",
+        title="The Receipt Comes Due",
+        dialogue=[
+            "Round one is settled. The shield disagrees with the outcome.",
+            "I said you brought one life. I brought the spare.",
+            "Death was a formality. Consider it filed.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "broodmother": BossPhase2Def(
+        depth=150,
+        name="The Nestmother, Hatching",
+        title="They Woke Up Hungry",
+        dialogue=[
+            "You stepped on the nursery. They felt that.",
+            "I asked you not to run. Now they're excited.",
+            "Half of them still have no names. They'll take yours.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "treant_protector": BossPhase2Def(
+        depth=150,
+        name="The Elder Grove, Deeper Rooted",
+        title="The Rings Close In",
+        dialogue=[
+            "You dig. I grow. I told you one of us was patient.",
+            "Roots reached your tunnel a season ago. You only now noticed.",
+            "Another ring. Another grudge. They stack the same way.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    # --- depth 200 ----------------------------------------------------------
+    "chronofrost": BossPhase2Def(
+        depth=200,
+        name="Chronofrost Paradox",
+        title="The Time That Bites Back",
+        dialogue=[
+            "I have already lost this fight. I am correcting that now.",
+            "You are three seconds behind me and always will be.",
+            "I remember killing you. Let me get the details right this time.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "faceless_void": BossPhase2Def(
+        depth=200,
+        name="The Timeless One, Unbound",
+        title="The Cooldown Ends",
+        dialogue=[
+            "I saw this coming. I also saw what I do next.",
+            "The moment froze. You kept moving. That was generous of me.",
+            "My timing was never the problem. Yours was.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "heartspire": BossPhase2Def(
+        depth=200,
+        name="The Heartspire, Quickening",
+        title="The Climb Beats Faster",
+        dialogue=[
+            "Your intent changed. So did the rhythm. Keep up.",
+            "I counted your block. I counted your panic. Panic is winning.",
+            "The route shortens when the heart dislikes you. It dislikes you.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "weaver": BossPhase2Def(
+        depth=200,
+        name="The Skitterwing, Unpicking",
+        title="One Thread Already Pulled",
+        dialogue=[
+            "I pulled one thread. Check your hands. Check them again.",
+            "I had not finished stitching. Now I am not going to.",
+            "Time-lapse away. I have already unpicked where you land.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    # --- depth 275 ----------------------------------------------------------
+    "nameless_depth": BossPhase2Def(
+        depth=275,
+        name="The Name Reclaimed",
+        title="[DATA EXPUNGED]",
+        dialogue=[
+            "I remember my name now. Would you like to hear yours?",
+            "You were always going to become me. This is just the paperwork.",
+            "The hollow was never empty. It was waiting for the right shape.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "emberwright": BossPhase2Def(
+        depth=275,
+        name="The Emberwright, White-Hot",
+        title="The Forge Takes a Deeper Breath",
+        dialogue=[
+            "Good. The metal was still cold. Now it is not.",
+            "I hammer light until it bites. You are the anvil test.",
+            "Stand closer. The forge improves what survives it. Briefly.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "oracle": BossPhase2Def(
+        depth=275,
+        name="The Blindfolded Seer, Unblinded",
+        title="The Coin Lands Wrong",
+        dialogue=[
+            "I took the blindfold off. It was never for my benefit.",
+            "I told you both sides lose. You picked anyway.",
+            "You are still choosing. That is the funny part.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "terrorblade": BossPhase2Def(
+        depth=275,
+        name="The Sundered Prince, Reflected",
+        title="The Mirror Steps Out",
+        dialogue=[
+            "I offered you a trade. Here is the other half of the offer.",
+            "The reflection was resting. It has had enough rest.",
+            "You wanted theater. This is the second act.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "underlord": BossPhase2Def(
+        depth=275,
+        name="The Pit Lord, Descended",
+        title="The Pit Comes With Him",
+        dialogue=[
+            "You are not the first to make me stand up. That is the compliment.",
+            "I don't negotiate. I said I have a pit for that. We're in it.",
+            "Weakness is inefficiency. You have been very inefficient.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
     "cairn_general": BossPhase2Def(
         depth=150,
         name="The Cairn General, Reformed",
@@ -1517,6 +1799,186 @@ BOSS_PHASE2_BY_ID: dict[str, BossPhase2Def] = {
 }
 
 BOSS_PHASE3_BY_ID: dict[str, BossPhase3Def] = {
+    # --- depth 100 ----------------------------------------------------------
+    "void_warden": BossPhase3Def(
+        depth=100,
+        name="The Void Itself",
+        title="There Was Never Anything Here",
+        dialogue=[
+            "There is no warden. There was never a warden. Only the guarding.",
+            "You dug down to find nothing. Congratulations. It found you.",
+            "I stopped existing three phases ago. This is momentum.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "spectre": BossPhase3Def(
+        depth=100,
+        name="The Wound Itself",
+        title="It Was Never a Blade",
+        dialogue=[
+            "There is no dagger. There never was. There is only the cut.",
+            "You have been bleeding since you entered. I did not hurry.",
+            "I do not haunt this depth. I am what it does to you.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "void_spirit": BossPhase3Def(
+        depth=100,
+        name="Every Dimension At Once",
+        title="There Is No Sideways Left",
+        dialogue=[
+            "I checked the other realities. You lose in all of them.",
+            "Stepping sideways needs somewhere to step. I have closed it.",
+            "You are not fighting me. You are fighting the tourism.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    # --- depth 150 ----------------------------------------------------------
+    "sporeling_sovereign": BossPhase3Def(
+        depth=150,
+        name="The Hivemind Awoken",
+        title="Every Spore Speaks At Once",
+        dialogue=[
+            "WE ARE THE DEPTH. THE DEPTH IS US. YOU ARE VISITING.",
+            "Every breath you took down here made more of us.",
+            "You have been inhaling the boss fight for ten minutes.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    "aegis_warden": BossPhase3Def(
+        depth=150,
+        name="The Second Life",
+        title="The Shield Spends Itself",
+        dialogue=[
+            "Every digger the shield returned is standing behind me.",
+            "I am not guarding it anymore. I am spending it.",
+            "You cannot outlast a thing that keeps its own reserve.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    "broodmother": BossPhase3Def(
+        depth=150,
+        name="Nine Hundred At Once",
+        title="The Whole Brood Answers",
+        dialogue=[
+            "The web was the polite introduction. Meet the family.",
+            "You are not in a tunnel. You are in the nest. You have been.",
+            "Nine hundred. I stopped counting. They did not.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    "treant_protector": BossPhase3Def(
+        depth=150,
+        name="The Whole Forest",
+        title="Every Root Was Listening",
+        dialogue=[
+            "You were never fighting a tree. You were standing in one.",
+            "The grove has one memory and your name is in it.",
+            "Cut me down. The forest takes a century off. You have not got one.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    # --- depth 200 ----------------------------------------------------------
+    "chronofrost": BossPhase3Def(
+        depth=200,
+        name="Chronofrost Rewound",
+        title="The Loop That Forgot Itself",
+        dialogue=[
+            "We have fought this exact fight four hundred times. I am bored.",
+            "Every time you win, I simply go back. Ask yourself what that means.",
+            "This is not the first loop. It is not the last. It is just loud.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "faceless_void": BossPhase3Def(
+        depth=200,
+        name="The Moment That Never Ends",
+        title="The Chronosphere Closes",
+        dialogue=[
+            "I stopped the moment. I have no plans to restart it.",
+            "You are inside the pause. Everything else has moved on.",
+            "There is no after for you to reach. I have been there.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "heartspire": BossPhase3Def(
+        depth=200,
+        name="The Whole Climb",
+        title="Every Floor Answers At Once",
+        dialogue=[
+            "Every floor had intent. They have all arrived together.",
+            "You climbed down into the muscle. It is contracting.",
+            "The score is settled at the top. You will not see the top.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "weaver": BossPhase3Def(
+        depth=200,
+        name="The Thread Pulled Whole",
+        title="Nothing Was Ever Woven",
+        dialogue=[
+            "I unpicked the tunnel. You are standing on the memory of it.",
+            "Everything you did, I have taken back out. Neatly.",
+            "There is no thread left to follow. That was the last one.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    # --- depth 275 ----------------------------------------------------------
+    "nameless_depth": BossPhase3Def(
+        depth=275,
+        name="The Final Erasure",
+        title="[REDACTED] [REDACTED] [REDACTED]",
+        dialogue=[
+            "I have forgotten what I was. Now I will forget what you are.",
+            "There is no bottom. There is only the part where you stop.",
+            "You become a story told by the rocks. Be a good story.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "emberwright": BossPhase3Def(
+        depth=275,
+        name="The Forge Itself",
+        title="Every Spark Grew Teeth",
+        dialogue=[
+            "I stopped working the ember. The ember started working me.",
+            "Every spark I ever struck came back with a mouth.",
+            "Light was the raw material. You were the commission.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "oracle": BossPhase3Def(
+        depth=275,
+        name="The Outcome Already Chosen",
+        title="It Was Decided Before You Dug",
+        dialogue=[
+            "You are not fighting me. You are catching up to me.",
+            "The coin stopped spinning long ago. I let you watch it.",
+            "Every bad bet you have made was this one, in advance.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "terrorblade": BossPhase3Def(
+        depth=275,
+        name="Both Halves At Once",
+        title="The Sundering Runs Both Ways",
+        dialogue=[
+            "I traded lives with myself. There is no worse one left to give you.",
+            "Both halves. Neither tired. Do the arithmetic.",
+            "Cleave yourself out of this. I will wait. I am in two places.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "underlord": BossPhase3Def(
+        depth=275,
+        name="The Pit Itself",
+        title="There Was Never a Floor",
+        dialogue=[
+            "You stopped fighting me a while ago. Now you fight the hole.",
+            "I dug this. Every day. For exactly this.",
+            "The pit got bored. Then it got hungry. Then it got you.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
     "cairn_general": BossPhase3Def(
         depth=150,
         name="The Buried Host",
