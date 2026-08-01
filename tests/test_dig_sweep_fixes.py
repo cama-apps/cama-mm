@@ -350,3 +350,107 @@ class TestLanternStubDailyRestoreIdempotent:
         assert second == 55
         assert "lantern_stub_restored" not in lum_info2
         assert dig_repo.get_tunnel(10001, TEST_GUILD_ID)["luminosity"] == 55
+
+
+class TestSabotageBlockTipIsFundedNotMinted:
+    """Every shield-block tip must come out of the attacker, never thin air.
+
+    The three block branches (protection shield, manashop ward, aegis charge)
+    each credited the victim while charging the attacker nothing. The ward
+    branch is the worst: has_pvp_immunity is a pure read with no dedup, it
+    returns before the 12h cooldown check, and /dig sabotage has no command
+    cooldown — so an attacker could mint JC to a warded ally on every call.
+
+    The tip is scaled by the dig reward multiplier before being capped at
+    the attempt cost, so a block may burn the remainder. Burning matches
+    the existing duplicate-block branch; minting was the defect.
+    """
+
+    @staticmethod
+    def _setup(dig_service, dig_repo, player_repository, monkeypatch):
+        _register(player_repository, 10001, balance=500)  # actor
+        _register(player_repository, 10002, balance=500)  # target
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=100)
+        dig_service.protection_service = None
+
+    def test_protection_shield_block_conserves_jc(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        self._setup(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_service.protection_service = SimpleNamespace(
+            block_non_jc_attack=lambda victim_id, guild_id, *, actor_id, event_key: (
+                SimpleNamespace(blocked=True, duplicate=False, source="counterspell")
+            ),
+        )
+        actor_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        target_before = player_repository.get_balance(10002, TEST_GUILD_ID)
+
+        result = dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+
+        actor_delta = player_repository.get_balance(10001, TEST_GUILD_ID) - actor_before
+        target_delta = player_repository.get_balance(10002, TEST_GUILD_ID) - target_before
+        assert result["success"]
+        assert actor_delta < 0, "the attacker must pay for the attempt"
+        assert target_delta > 0, "the defender should still be tipped"
+        assert target_delta <= -actor_delta, (
+            f"tip not funded by the attacker: attacker {actor_delta}, "
+            f"victim +{target_delta}"
+        )
+        assert actor_delta + target_delta <= 0, (
+            f"JC minted: attacker {actor_delta}, victim +{target_delta}"
+        )
+
+    def test_manashop_ward_block_conserves_jc_on_every_call(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        self._setup(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_service.buff_service = SimpleNamespace(
+            has_pvp_immunity=lambda discord_id, guild_id: True,
+            consume_aegis_charge=lambda discord_id, guild_id: False,
+        )
+        actor_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        target_before = player_repository.get_balance(10002, TEST_GUILD_ID)
+
+        # Repeat it: this branch has no dedup and no cooldown in front of it.
+        for _ in range(5):
+            dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+
+        actor_delta = player_repository.get_balance(10001, TEST_GUILD_ID) - actor_before
+        target_delta = player_repository.get_balance(10002, TEST_GUILD_ID) - target_before
+        assert target_delta > 0, "the warded defender should still be tipped"
+        assert target_delta <= -actor_delta, (
+            f"tip not funded by the attacker: attacker {actor_delta}, "
+            f"victim +{target_delta}"
+        )
+        assert actor_delta + target_delta <= 0, (
+            f"JC minted over 5 spammed attempts: attacker {actor_delta}, "
+            f"victim +{target_delta}"
+        )
+
+    def test_aegis_charge_block_conserves_jc(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        self._setup(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_service.buff_service = SimpleNamespace(
+            has_pvp_immunity=lambda discord_id, guild_id: False,
+            consume_aegis_charge=lambda discord_id, guild_id: True,
+        )
+        actor_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        target_before = player_repository.get_balance(10002, TEST_GUILD_ID)
+
+        result = dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+
+        actor_delta = player_repository.get_balance(10001, TEST_GUILD_ID) - actor_before
+        target_delta = player_repository.get_balance(10002, TEST_GUILD_ID) - target_before
+        assert result["success"]
+        assert target_delta > 0, "the defender should still be tipped"
+        assert target_delta <= -actor_delta, (
+            f"tip not funded by the attacker: attacker {actor_delta}, "
+            f"victim +{target_delta}"
+        )
+        assert actor_delta + target_delta <= 0, (
+            f"JC minted: attacker {actor_delta}, victim +{target_delta}"
+        )

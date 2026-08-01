@@ -839,11 +839,16 @@ class ProgressionMixin:
 
         # Debit + tunnel pickaxe_tier flip commit together so a crash between
         # the two cannot charge the player with no upgrade applied.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-cost,
-            tunnel_updates={"pickaxe_tier": next_tier_idx},
-        )
+        # balance_cost, not balance_delta: the debit must be conditional on
+        # affording it, or two concurrent upgrades both pass the read above.
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_cost=cost,
+                tunnel_updates={"pickaxe_tier": next_tier_idx},
+            )
+        except ValueError:
+            return self._error(f"Costs {cost} JC but you no longer have it.")
         # Mirror the upgrade into dig_gear so equipped weapon stays in sync.
         # These writes are not folded into the atomic block above: the gear
         # tables have their own equip-uniqueness invariants and at most we
@@ -1055,57 +1060,33 @@ class ProgressionMixin:
                 logger.exception("Failed to resolve sabotage protection")
             else:
                 if protection.blocked:
-                    awarded_tip = 0 if protection.duplicate else victim_block_tip
-                    attempt_cost = 0
-                    if not awarded_tip:
-                        # Repeat attempt inside the shield window: no tip for
-                        # the victim, but the attempt still costs and is
-                        # logged — probing the shield isn't free or invisible.
-                        attempt_cost = cost
-                        self.dig_repo.atomic_sabotage(
-                            actor_id=actor_id,
-                            target_id=target_id,
-                            guild_id=guild_id,
-                            target_depth_delta=0,
-                            actor_jc_cost=cost,
-                            log_detail={
-                                "target_id": target_id,
-                                "absorbed": True,
-                                "duplicate_block": True,
-                                "cost": cost,
-                                "victim_tip": 0,
-                                "protection_source": protection.source,
-                            },
-                        )
-                    if awarded_tip:
-                        self.player_repo.add_balance(
-                            target_id,
-                            guild_id,
-                            awarded_tip,
-                            source="dig",
-                            actor_id=actor_id,
-                            related_type="sabotage_block",
-                            related_id=actor_id,
-                            reason="dig sabotage White shield block tip",
-                            metadata={
-                                "tip": awarded_tip,
-                                "gross_jc": victim_block_tip_gross,
-                                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
-                                "protection_source": protection.source,
-                            },
-                        )
-                        self.dig_repo.log_action(
-                            discord_id=actor_id,
-                            guild_id=guild_id,
-                            action_type="sabotage",
-                            details=json.dumps({
-                                "target_id": target_id,
-                                "absorbed": True,
-                                "cost": 0,
-                                "victim_tip": awarded_tip,
-                                "protection_source": protection.source,
-                            }),
-                        )
+                    # The block tip is funded by the attacker, never minted.
+                    # It used to be a bare credit with attempt_cost = 0, so
+                    # every distinct attacker could mint one tip per shield
+                    # window at no cost. Capping at `cost` and paying it from
+                    # the attacker's debit in one txn keeps it a transfer.
+                    awarded_tip = (
+                        0 if protection.duplicate else min(victim_block_tip, cost)
+                    )
+                    attempt_cost = cost
+                    self.dig_repo.atomic_sabotage(
+                        actor_id=actor_id,
+                        target_id=target_id,
+                        guild_id=guild_id,
+                        target_depth_delta=0,
+                        actor_jc_cost=cost,
+                        target_jc_credit=awarded_tip,
+                        log_detail={
+                            "target_id": target_id,
+                            "absorbed": True,
+                            "duplicate_block": bool(protection.duplicate),
+                            "cost": cost,
+                            "victim_tip": awarded_tip,
+                            "gross_jc": victim_block_tip_gross,
+                            "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                            "protection_source": protection.source,
+                        },
+                    )
                     return self._ok(
                         cost=attempt_cost,
                         damage=0,
@@ -1123,53 +1104,58 @@ class ProgressionMixin:
         if self.buff_service is not None:
             try:
                 if self.buff_service.has_pvp_immunity(target_id, guild_id):
-                    self.player_repo.add_balance(
-                        target_id,
-                        guild_id,
-                        victim_block_tip,
-                        source="dig",
+                    # Funded by the attacker, not minted. has_pvp_immunity is a
+                    # pure read with no dedup, this branch returns before the
+                    # 12h cooldown check, and /dig sabotage has no command
+                    # cooldown — so the old bare credit let an attacker mint
+                    # this tip to a warded ally on every single invocation.
+                    ward_tip = min(victim_block_tip, cost)
+                    self.dig_repo.atomic_sabotage(
                         actor_id=actor_id,
-                        related_type="sabotage_block",
-                        related_id=actor_id,
-                        reason="dig sabotage ward block tip",
-                        metadata={
-                            "tip": victim_block_tip,
+                        target_id=target_id,
+                        guild_id=guild_id,
+                        target_depth_delta=0,
+                        actor_jc_cost=cost,
+                        target_jc_credit=ward_tip,
+                        log_detail={
+                            "target_id": target_id,
+                            "absorbed": True,
+                            "cost": cost,
+                            "victim_tip": ward_tip,
                             "gross_jc": victim_block_tip_gross,
                             "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                            "protection_source": "ward",
                         },
                     )
                     return self._error(
                         "Your target is shielded by an active manashop ward — "
                         "the sabotage was repelled before you could land it. "
-                        f"They pocketed {victim_block_tip} JC for the trouble."
+                        f"The attempt cost you {cost} JC and they pocketed "
+                        f"{ward_tip} JC for the trouble."
                     )
                 if self.buff_service.consume_aegis_charge(target_id, guild_id):
-                    # Charge absorbed — log the wasted attempt and refund cost.
-                    self.player_repo.add_balance(
-                        target_id,
-                        guild_id,
-                        victim_block_tip,
-                        source="dig",
+                    # Charge absorbed. The tip is funded by the attacker's
+                    # debit in the same txn rather than credited out of nowhere.
+                    aegis_tip = min(victim_block_tip, cost)
+                    self.dig_repo.atomic_sabotage(
                         actor_id=actor_id,
-                        related_type="sabotage_block",
-                        related_id=actor_id,
-                        reason="dig sabotage aegis block tip",
-                        metadata={
-                            "tip": victim_block_tip,
+                        target_id=target_id,
+                        guild_id=guild_id,
+                        target_depth_delta=0,
+                        actor_jc_cost=cost,
+                        target_jc_credit=aegis_tip,
+                        log_detail={
+                            "target_id": target_id,
+                            "absorbed": True,
+                            "cost": cost,
+                            "victim_tip": aegis_tip,
                             "gross_jc": victim_block_tip_gross,
                             "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                            "protection_source": "aegis",
                         },
                     )
-                    self.dig_repo.log_action(
-                        discord_id=actor_id, guild_id=guild_id,
-                        action_type="sabotage",
-                        details=json.dumps({
-                            "target_id": target_id, "absorbed": True, "cost": 0,
-                            "victim_tip": victim_block_tip,
-                        }),
-                    )
                     return self._ok(
-                        cost=0,
+                        cost=cost,
                         damage=0,
                         target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
                         trap_triggered=False,

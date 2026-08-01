@@ -167,12 +167,17 @@ class DigInventoryService:
             return _error(f"Costs {price} JC but you only have {balance} JC.")
 
         # Debit + inventory insert commit together so a crash can't leave
-        # the player charged with no item added to inventory.
-        item_id = self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-price,
-            add_inventory_item=item_type,
-        )
+        # the player charged with no item added to inventory. balance_cost (not
+        # balance_delta) so the debit is conditional on affording it — the read
+        # above is a fast path two concurrent buys can both pass.
+        try:
+            item_id = self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_cost=price,
+                add_inventory_item=item_type,
+            )
+        except ValueError:
+            return _error(f"Costs {price} JC but you no longer have it.")
         if auto_queue and item_id is not None:
             self.dig_repo.queue_item(item_id)
 
@@ -375,16 +380,20 @@ class DigInventoryService:
             if balance < cost:
                 return _error(f"Trap costs {cost} JC but you only have {balance} JC.")
 
-        # Debit (if any) + trap fields commit together.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-cost if cost else 0,
-            tunnel_updates={
-                "trap_active": 1,
-                "trap_free_today": trap_free_today + 1,
-                "trap_date": today,
-            },
-        )
+        # Debit (if any) + trap fields commit together. balance_cost keeps the
+        # debit conditional so two concurrent traps cannot both pass the check.
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_cost=cost if cost else 0,
+                tunnel_updates={
+                    "trap_active": 1,
+                    "trap_free_today": trap_free_today + 1,
+                    "trap_date": today,
+                },
+            )
+        except ValueError:
+            return _error(f"Trap costs {cost} JC but you no longer have it.")
 
         return _ok(cost=cost, message="Trap set!")
 
@@ -402,11 +411,15 @@ class DigInventoryService:
 
         now = int(time.time())
         # Debit + insurance window set together: the old two-step flow could
-        # leave the player charged with no insurance applied.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-cost,
-            tunnel_updates={"insured_until": now + 86400},  # 24h
-        )
+        # leave the player charged with no insurance applied. balance_cost keeps
+        # the debit conditional so concurrent buys cannot overdraft.
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_cost=cost,
+                tunnel_updates={"insured_until": now + 86400},  # 24h
+            )
+        except ValueError:
+            return _error(f"Insurance costs {cost} JC but you no longer have it.")
 
         return _ok(cost=cost, expires_at=now + 86400)
