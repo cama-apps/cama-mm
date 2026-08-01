@@ -312,10 +312,6 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 - `WHEEL_COOLDOWN_SECONDS` - Time between spins (default: 24 hours)
 - `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
-**Draft Mode:**
-- `PLAYER_STAKE_POOL_SIZE` - Total auto-liquidity for drafts
-- `SPECTATOR_POOL_PLAYER_CUT` - Winner share of spectator pool
-
 **Rating:**
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_PENALTY` - Team balancing penalties
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets

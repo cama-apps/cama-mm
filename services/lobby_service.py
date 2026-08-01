@@ -272,10 +272,6 @@ class LobbyService:
         players = self.player_repo.get_by_ids(player_ids, guild_id)
         return player_ids, players
 
-    def get_conditional_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
-        """Return an empty roster for the deprecated conditional queue."""
-        return [], []
-
     def build_lobby_embed(self, lobby: Lobby, guild_id: int | None = None) -> object | None:
         if not lobby:
             return None

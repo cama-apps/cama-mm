@@ -42,15 +42,6 @@ class BankruptcyDeclaration:
     new_balance: int
 
 
-@dataclass
-class PenaltyApplication:
-    """Result of applying penalty to winnings."""
-
-    original: int
-    penalized: int
-    penalty_applied: int
-
-
 class BankruptcyService:
     """
     Handles bankruptcy declarations and penalties.

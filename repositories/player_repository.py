@@ -782,35 +782,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
             return (row["last_match_date"], row["created_at"])
 
-    def get_last_match_dates(self, discord_ids: list[int], guild_id: int) -> dict[int, str | None]:
-        """
-        Get last_match_date for multiple players.
-
-        Args:
-            discord_ids: List of Discord user IDs
-            guild_id: Guild ID to filter by
-
-        Returns:
-            Dict mapping discord_id to last_match_date (ISO string or None)
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        if not discord_ids:
-            return {}
-
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            placeholders = ",".join("?" * len(discord_ids))
-            cursor.execute(
-                f"""
-                SELECT discord_id, last_match_date
-                FROM players
-                WHERE discord_id IN ({placeholders}) AND guild_id = ?
-                """,
-                discord_ids + [guild_id],
-            )
-            rows = cursor.fetchall()
-            return {row["discord_id"]: row["last_match_date"] for row in rows}
-
     def get_game_count(self, discord_id: int, guild_id: int) -> int:
         """Return total games played (wins + losses)."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -2254,30 +2225,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     [(pid, guild_id) for pid in losing_ids],
                 )
 
-    def update_glicko_ratings_bulk(
-        self, updates: list[tuple[int, float, float, float]], guild_id: int
-    ) -> int:
-        """
-        Bulk update Glicko ratings in a single transaction.
-
-        updates: List of (discord_id, rating, rd, volatility)
-        Returns number of rows updated.
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        if not updates:
-            return 0
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.executemany(
-                """
-                UPDATE players
-                SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                [(rating, rd, vol, pid, guild_id) for pid, rating, rd, vol in updates],
-            )
-            return cursor.rowcount
-
     def get_exclusion_counts(self, discord_ids: list[int], guild_id: int) -> dict[int, int]:
         """Get exclusion counts for multiple players."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -2830,23 +2777,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
             return cursor.rowcount > 0
-
-    def get_first_calibrated_at(self, discord_id: int, guild_id: int) -> int | None:
-        """
-        Get the Unix timestamp when the player first became calibrated.
-
-        Returns:
-            Unix timestamp or None if never calibrated
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT first_calibrated_at FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, guild_id),
-            )
-            row = cursor.fetchone()
-            return row["first_calibrated_at"] if row and row["first_calibrated_at"] else None
 
     def get_registered_player_count(self, guild_id: int) -> int:
         """

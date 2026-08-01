@@ -854,25 +854,6 @@ class PlayerService:
         """
         self.player_repo.update_glicko_rating(discord_id, guild_id, rating, rd, volatility)
 
-    def sync_openskill_mu_to_display_rating(
-        self,
-        discord_id: int,
-        guild_id: int,
-        display_rating: float,
-    ) -> None:
-        """Keep an explicit admin rating override aligned across both systems."""
-        glicko = self.player_repo.get_glicko_rating(discord_id, guild_id)
-        if glicko is None:
-            raise ValueError("Player has no Glicko rating")
-        self.update_both_display_rating(
-            discord_id,
-            guild_id,
-            display_rating,
-            glicko[1],
-            glicko[2],
-            reason="admin_rating_override",
-        )
-
     def update_both_display_rating(
         self,
         discord_id: int,

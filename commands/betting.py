@@ -40,9 +40,6 @@ from commands.betting_helpers.bet_messaging import (
     send_betting_reminder as _send_betting_reminder_helper,
 )
 from commands.betting_helpers.bet_messaging import (
-    update_embed_betting_field as _update_embed_betting_field_helper,
-)
-from commands.betting_helpers.bet_messaging import (
     update_shuffle_message_wagers as _update_shuffle_message_wagers_helper,
 )
 from commands.betting_helpers.disburse_actions import (
@@ -588,12 +585,6 @@ class BettingCommands(commands.Cog):
     ) -> None:
         """Refresh the shuffle message's wager field with current totals."""
         await _update_shuffle_message_wagers_helper(self, guild_id, pending_match_id)
-
-    async def _update_embed_betting_field(
-        self, channel_id: int, message_id: int, field_name: str, field_value: str
-    ) -> None:
-        """Helper to update the betting field in an embed message."""
-        await _update_embed_betting_field_helper(self, channel_id, message_id, field_name, field_value)
 
     async def _send_betting_reminder(
         self,

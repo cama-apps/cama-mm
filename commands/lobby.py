@@ -574,22 +574,6 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to remove user lobby reactions: {exc}")
 
-    async def _update_lobby_message(self, interaction: discord.Interaction, lobby) -> None:
-        guild_id = interaction.guild.id if interaction.guild else None
-        message_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_message_id, guild_id=guild_id
-        )
-        if not message_id:
-            return
-        try:
-            channel = interaction.channel
-            message = channel.get_partial_message(message_id)
-            embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
-            if embed:
-                await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        except Exception as exc:
-            logger.warning(f"Failed to update lobby message: {exc}")
-
     async def _sync_lobby_displays(
         self,
         lobby,

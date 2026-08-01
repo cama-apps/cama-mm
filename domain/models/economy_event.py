@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -48,9 +48,5 @@ class EconomyEventEffects:
                 raw.get("reserve_voting_disabled", False)
             ),
         )
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
 
 NEUTRAL_ECONOMY_EFFECTS = EconomyEventEffects()

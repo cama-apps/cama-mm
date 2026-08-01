@@ -3521,43 +3521,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_os_baseline_for_match(
-        self, match_id: int, guild_id: int | None = None
-    ) -> dict[int, tuple[float, float]]:
-        """
-        Get os_mu_before/os_sigma_before from rating_history for Phase 2 recalculation.
-
-        This retrieves the baseline OpenSkill values that were stored during Phase 1
-        (equal-weight update at match recording). Phase 2 uses these as the starting
-        point for fantasy-weighted recalculation.
-
-        Args:
-            match_id: The match ID to look up
-
-        Returns:
-            Dict mapping discord_id -> (os_mu_before, os_sigma_before)
-            Empty dict if no baseline data exists
-        """
-        normalized_guild = self.normalize_guild_id(guild_id) if guild_id is not None else None
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            query = """
-                SELECT discord_id, os_mu_before, os_sigma_before
-                FROM rating_history
-                WHERE match_id = ?
-                  AND os_mu_before IS NOT NULL
-                  AND os_sigma_before IS NOT NULL
-            """
-            params: list[int] = [match_id]
-            if normalized_guild is not None:
-                query += " AND guild_id = ?"
-                params.append(normalized_guild)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            return {
-                row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"]) for row in rows
-            }
-
     def get_full_rating_history_for_match(self, match_id: int) -> list[dict]:
         """
         Get all rating history entries for a specific match with full snapshot data.

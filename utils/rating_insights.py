@@ -622,25 +622,6 @@ def compute_player_calibration(
     )
 
 
-async def get_os_win_probability(
-    match_source: Any,
-    os_system: CamaOpenSkillSystem,
-    match_id: int | None,
-    team_number: int | None,
-    guild_id: int | None = None,
-) -> float | None:
-    """Fetch the OpenSkill expected win probability for a player's match side.
-
-    ``match_source`` is anything exposing ``get_os_ratings_for_match`` (the
-    match service or repository). Returns ``None`` when the match has no
-    OpenSkill ratings or the team number is unknown.
-    """
-    if not match_id or match_source is None:
-        return None
-    os_ratings = await asyncio.to_thread(match_source.get_os_ratings_for_match, match_id, guild_id)
-    return _os_win_probability_from_ratings(os_system, os_ratings, team_number)
-
-
 def _os_win_probability_from_ratings(
     os_system: CamaOpenSkillSystem,
     os_ratings: dict[str, list[tuple[float, float]]],
