@@ -454,3 +454,84 @@ class TestSabotageBlockTipIsFundedNotMinted:
         assert actor_delta + target_delta <= 0, (
             f"JC minted: attacker {actor_delta}, victim +{target_delta}"
         )
+
+
+class TestDigConsumablesCommitAtomically:
+    """A dig that fails at its commit must not keep effects nor destroy items."""
+
+    @staticmethod
+    def _ready_digger(dig_service, dig_repo, player_repository, monkeypatch):
+        _register(player_repository, 10001, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=20)
+
+    def test_failed_dig_keeps_neither_the_item_nor_its_charges(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Charge grants used to be written before the commit that burns the item.
+
+        Any later failure kept the charges and rolled the row deletion back, so
+        the player held both the hard hat and its +3 charges, repeatably.
+        """
+        self._ready_digger(dig_service, dig_repo, player_repository, monkeypatch)
+        assert dig_service.buy_item(10001, TEST_GUILD_ID, "hard_hat")["success"]
+        item_row = dig_repo.get_inventory(10001, TEST_GUILD_ID)[0]
+        dig_repo.queue_item(item_row["id"])
+
+        charges_before = dig_repo.get_tunnel(10001, TEST_GUILD_ID)["hard_hat_charges"] or 0
+
+        # Fail the dig at its final commit, after the grants were resolved.
+        real_commit = dig_repo.atomic_tunnel_balance_update
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("commit failed")
+
+        dig_repo.atomic_tunnel_balance_update = boom
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 100_000)
+        try:
+            with pytest.raises(RuntimeError):
+                dig_service.dig(10001, TEST_GUILD_ID)
+        finally:
+            dig_repo.atomic_tunnel_balance_update = real_commit
+
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        assert (tunnel["hard_hat_charges"] or 0) == charges_before, (
+            "charges were granted despite the dig failing"
+        )
+        still_held = [
+            i for i in dig_repo.get_inventory(10001, TEST_GUILD_ID)
+            if i["item_type"] == "hard_hat"
+        ]
+        assert still_held, "the item was destroyed by a dig that never committed"
+
+    def test_sonar_pulse_bought_while_one_is_pending_is_not_destroyed(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Queuing a pulse while a skip is pending burned two charges for one skip."""
+        self._ready_digger(dig_service, dig_repo, player_repository, monkeypatch)
+        # A skip is already primed from an earlier pulse.
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, sonar_skip_pending=1)
+
+        assert dig_service.buy_item(10001, TEST_GUILD_ID, "sonar_pulse")["success"]
+        pulse = [
+            i for i in dig_repo.get_inventory(10001, TEST_GUILD_ID)
+            if i["item_type"] == "sonar_pulse"
+        ][0]
+        dig_repo.queue_item(pulse["id"])
+
+        # 0.15 sits above the shallow cave-in chance (Dirt 0.05 / Stone 0.10)
+        # and below the ~0.22 event chance, so this dig rolls an event without
+        # collapsing — a cave-in returns early and never reaches the skip.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 100_000)
+        monkeypatch.setattr(random, "random", lambda: 0.15)
+        result = dig_service.dig(10001, TEST_GUILD_ID)
+
+        assert result.get("sonar_skipped") is True, (
+            "test is vacuous unless the pending skip was actually consumed"
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        assert int(tunnel["sonar_skip_pending"] or 0) == 1, (
+            "the pulse queued this dig was cleared by the skip it did not cause"
+        )

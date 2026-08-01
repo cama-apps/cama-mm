@@ -573,7 +573,13 @@ class TestCoreDig:
             "_apply_mana_yield_variance",
             lambda did, gid, jc, **kwargs: 1,
         )
-        monkeypatch.setattr(dig_service, "_calculate_daily_streak", lambda did, gid, tunnel, today: (30, False))
+        # (streak, charm_used, charm_row_id) — the row id is burned in the
+        # dig's atomic commit rather than deleted up front.
+        monkeypatch.setattr(
+            dig_service,
+            "_calculate_daily_streak",
+            lambda did, gid, tunnel, today: (30, False, None),
+        )
         monkeypatch.setattr(
             dig_service,
             "_aggregate_perk_effects",

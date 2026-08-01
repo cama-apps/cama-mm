@@ -397,18 +397,31 @@ class DigCoreMixin:
             pet_name=pet_name,
         )
 
-    def _consume_streak_charm(self, discord_id: int, guild_id) -> bool:
-        """Consume one passive Streak Charm if the player has one."""
+    def _find_streak_charm_row_id(self, discord_id: int, guild_id) -> int | None:
+        """Return the row id of one passive Streak Charm, without deleting it.
+
+        Read-only for the same reason as ``_resolve_queued_items``: the caller
+        folds the id into the dig's final atomic commit via
+        ``consume_inventory_item_ids``. Deleting here destroyed the charm
+        whenever the dig later raised (tunnel-state or pet-work conflict,
+        insufficient funds) and rolled back the streak it paid for.
+        """
         inventory = self.dig_repo.get_inventory(discord_id, guild_id) or []
-        if not any(i.get("item_type") == "streak_charm" for i in inventory):
-            return False
-        self.dig_repo.remove_inventory_item(discord_id, guild_id, "streak_charm")
-        return True
+        for item in inventory:
+            if item.get("item_type") == "streak_charm":
+                return item.get("id")
+        return None
 
     def _calculate_daily_streak(
         self, discord_id: int, guild_id, tunnel: dict, today: str
-    ) -> tuple[int, bool]:
-        """Return today's streak value and whether a Streak Charm was consumed."""
+    ) -> tuple[int, bool, int | None]:
+        """Return today's streak, whether a Streak Charm paid for it, and that
+        charm's inventory row id.
+
+        The row id is returned rather than deleted so the caller can burn it in
+        the dig's final atomic commit — the charm and the streak it buys have to
+        commit or roll back together.
+        """
         streak = tunnel.get("streak_days", 0) or 0
         streak_last = tunnel.get("streak_last_date")
         today_dt = datetime.datetime.strptime(today, "%Y-%m-%d")
@@ -416,16 +429,14 @@ class DigCoreMixin:
         grace_day = (today_dt - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
 
         if streak_last == yesterday:
-            return streak + 1, False
+            return streak + 1, False, None
         if streak_last == today:
-            return streak, False
-        if (
-            streak_last == grace_day
-            and streak > 0
-            and self._consume_streak_charm(discord_id, guild_id)
-        ):
-            return streak + 1, True
-        return 1, False
+            return streak, False, None
+        if streak_last == grace_day and streak > 0:
+            charm_row_id = self._find_streak_charm_row_id(discord_id, guild_id)
+            if charm_row_id is not None:
+                return streak + 1, True, charm_row_id
+        return 1, False, None
 
     def _resolve_queued_items(
         self, discord_id: int, guild_id
@@ -1080,7 +1091,7 @@ class DigCoreMixin:
         jc_earned += milestone_bonus
 
         # Streak
-        streak, streak_charm_used = self._calculate_daily_streak(
+        streak, streak_charm_used, streak_charm_row_id = self._calculate_daily_streak(
             discord_id, guild_id, tunnel, today
         )
         streak_bonus = 0
@@ -1212,7 +1223,10 @@ class DigCoreMixin:
                 "current_run_events": run_events_count,
             },
             balance_cost=paid_charge.cost,
-            consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+            consume_inventory_item_ids=[
+                *(p.get("consumed_item_row_ids") or []),
+                *([streak_charm_row_id] if streak_charm_row_id is not None else []),
+            ],
             require_tunnel_state=paid_charge.guard or None,
             pet_work_claim=pet_work_claim,
         )
@@ -1311,6 +1325,7 @@ class DigCoreMixin:
             # leave depth lost without the matching injury/balance change.
             cave_in_tunnel_updates: dict = {
                 **paid_charge.tunnel_updates,
+                **p.get("charge_tunnel_updates", {}),
             }
             cave_in_balance_delta = 0
             # Enforce game-rule constraints
@@ -1526,7 +1541,7 @@ class DigCoreMixin:
             jc_earned += milestone_bonus
 
             # Streak (deterministic bookkeeping)
-            streak, streak_charm_used = self._calculate_daily_streak(
+            streak, streak_charm_used, streak_charm_row_id = self._calculate_daily_streak(
                 discord_id, guild_id, tunnel, today
             )
             streak_bonus = 0
@@ -1652,6 +1667,7 @@ class DigCoreMixin:
                 vanity_tax=dig_vanity_tax,
                 tunnel_updates={
                     **paid_charge.tunnel_updates,
+                    **p.get("charge_tunnel_updates", {}),
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                     "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1662,7 +1678,10 @@ class DigCoreMixin:
                     "current_run_events": run_events_count,
                 },
                 balance_cost=paid_charge.cost,
-                consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+                consume_inventory_item_ids=[
+                    *(p.get("consumed_item_row_ids") or []),
+                    *([streak_charm_row_id] if streak_charm_row_id is not None else []),
+                ],
                 require_tunnel_state=paid_charge.guard or None,
                 pet_work_claim=pet_work_claim,
             )
