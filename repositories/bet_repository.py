@@ -743,7 +743,22 @@ class BetRepository(BaseRepository, IBetRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            if pending_match_id is not None:
+            if pending_match_id is not None and since_ts is not None:
+                # Same legacy clause the settlement, refund, and per-match bet
+                # queries use: bets predating pending_match_id still settle
+                # against this match, so the pool totals and the odds derived
+                # from them have to count them too.
+                cursor.execute(
+                    """
+                    SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL
+                          AND (pending_match_id = ? OR (pending_match_id IS NULL AND bet_time >= ?))
+                    GROUP BY team_bet_on
+                    """,
+                    (normalized_guild, pending_match_id, since_ts),
+                )
+            elif pending_match_id is not None:
                 cursor.execute(
                     """
                     SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total

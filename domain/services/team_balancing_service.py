@@ -53,7 +53,14 @@ class TeamBalancingService:
         return team.get_team_value(self.use_glicko, self.off_role_multiplier)
 
 
-    def calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
+    def calculate_role_matchup_delta(
+        self,
+        team1: Team,
+        team2: Team,
+        *,
+        use_openskill: bool = False,
+        use_jopacoin: bool = False,
+    ) -> float:
         """
         Calculate the sum of role matchup deltas between two teams.
 
@@ -67,42 +74,38 @@ class TeamBalancingService:
         Args:
             team1: First team
             team2: Second team
+            use_openskill: Score with OpenSkill ratings instead of Glicko
+            use_jopacoin: Score with jopacoin balances instead of ratings
+
+        The rating-system flags must match the ones the teams were built with.
+        Omitting them scored the lanes in Glicko while the team values used
+        OpenSkill/jopacoin, mixing two scales in one balance breakdown.
 
         Returns:
             Sum of deltas across the five critical matchups
         """
-        # Get players and their effective values for each role
-        _, team1_carry_value = team1.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier
-        )
-        _, team1_offlane_value = team1.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier
-        )
-        _, team1_mid_value = team1.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier
-        )
-        _, team1_pos4_value = team1.get_player_by_role(
-            "4", self.use_glicko, self.off_role_multiplier
-        )
-        _, team1_pos5_value = team1.get_player_by_role(
-            "5", self.use_glicko, self.off_role_multiplier
-        )
 
-        _, team2_carry_value = team2.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier
-        )
-        _, team2_offlane_value = team2.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier
-        )
-        _, team2_mid_value = team2.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier
-        )
-        _, team2_pos4_value = team2.get_player_by_role(
-            "4", self.use_glicko, self.off_role_multiplier
-        )
-        _, team2_pos5_value = team2.get_player_by_role(
-            "5", self.use_glicko, self.off_role_multiplier
-        )
+        def role_value(team: Team, role: str) -> float:
+            _, value = team.get_player_by_role(
+                role,
+                self.use_glicko,
+                self.off_role_multiplier,
+                use_openskill=use_openskill,
+                use_jopacoin=use_jopacoin,
+            )
+            return value
+
+        team1_carry_value = role_value(team1, "1")
+        team1_offlane_value = role_value(team1, "3")
+        team1_mid_value = role_value(team1, "2")
+        team1_pos4_value = role_value(team1, "4")
+        team1_pos5_value = role_value(team1, "5")
+
+        team2_carry_value = role_value(team2, "1")
+        team2_offlane_value = role_value(team2, "3")
+        team2_mid_value = role_value(team2, "2")
+        team2_pos4_value = role_value(team2, "4")
+        team2_pos5_value = role_value(team2, "5")
 
         # Calculate the five critical matchups
         carry_vs_offlane_1 = abs(team1_carry_value - team2_offlane_value)

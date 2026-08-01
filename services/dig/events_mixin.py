@@ -144,6 +144,7 @@ class EventsMixin:
                         "desperate_option": next_def.get("desperate_option"),
                         "boon_options": next_def.get("boon_options"),
                         "buff_on_success": next_def.get("buff_on_success"),
+                        "ascii_art": next_def.get("ascii_art"),
                         "rarity": next_def.get("rarity", "common"),
                         "chained": True,
                     }
@@ -181,6 +182,7 @@ class EventsMixin:
             "desperate_option": event.get("desperate_option"),
             "boon_options": event.get("boon_options"),
             "buff_on_success": event.get("buff_on_success"),
+            "ascii_art": event.get("ascii_art"),
             "rarity": event.get("rarity", "common"),
             "chained": True,
         }
@@ -288,6 +290,7 @@ class EventsMixin:
             "desperate_option": event.get("desperate_option"),
             "boon_options": event.get("boon_options"),
             "buff_on_success": event.get("buff_on_success"),
+            "ascii_art": event.get("ascii_art"),
             "rarity": event.get("rarity", "common"),
         }
 

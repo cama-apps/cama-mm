@@ -2112,6 +2112,12 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                             """,
                             (refund, h["discord_id"], guild_id),
                         )
+                        # A silent no-op here (holder's player row deleted)
+                        # would destroy the refund while still reporting the
+                        # holder as refunded. Fail the cancel instead, as
+                        # settlement does for the same case.
+                        if cursor.rowcount != 1:
+                            raise ValueError("Refund recipient not found.")
                     finally:
                         self._clear_economy_ledger_context(cursor)
                     total_refunded += refund

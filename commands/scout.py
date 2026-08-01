@@ -492,9 +492,26 @@ class ScoutCommands(commands.Cog):
             return
 
         all_ids = list(dict.fromkeys(radiant_ids + dire_ids + flat_ids))
-        steam_map = await asyncio.to_thread(self.player_service.get_steam_ids_bulk, all_ids)
         players_obj = await asyncio.to_thread(self.player_service.get_by_ids, all_ids, guild_id)
         name_map = {p.discord_id: p.name for p in players_obj}
+
+        # Steam accounts are deliberately global rather than per-guild, so an
+        # arbitrary snowflake typed into `players` would surface a non-member's
+        # Dotabuff link. Keep only players registered in this guild — that also
+        # keeps their steam ids out of the lookup below.
+        radiant_ids = [pid for pid in radiant_ids if pid in name_map]
+        dire_ids = [pid for pid in dire_ids if pid in name_map]
+        flat_ids = [pid for pid in flat_ids if pid in name_map]
+        all_ids = [pid for pid in all_ids if pid in name_map]
+
+        if not (flat_ids or radiant_ids or dire_ids):
+            await safe_followup(
+                interaction,
+                content="No registered players found in this server for that input.",
+            )
+            return
+
+        steam_map = await asyncio.to_thread(self.player_service.get_steam_ids_bulk, all_ids)
 
         embed = discord.Embed(
             title=f"Dotabuff Links — {source_label}" if source_label else "Dotabuff Links",

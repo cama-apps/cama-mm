@@ -1217,8 +1217,14 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
-            if pending_match:
+            # get_last_shuffle returns None when *multiple* pending matches
+            # exist, not just when there are none, so asking it here let the
+            # guard fall open in exactly the concurrent-match case it protects.
+            pending_matches = await asyncio.to_thread(
+                match_service.state_service.get_all_pending_matches, guild_id
+            )
+            if pending_matches:
+                pending_match = pending_matches[0]
                 if can_respond:
                     jump_url = pending_match.shuffle_message_jump_url
                     message_text = "❌ There's a pending match that needs to be recorded!"
