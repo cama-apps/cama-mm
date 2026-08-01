@@ -538,9 +538,13 @@ async def test_handle_announce_success_deducts_balance(monkeypatch):
 
     await commands._handle_announce(interaction, target=target)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id, None, -SHOP_ANNOUNCE_TARGET_COST
-    )
+    # Conditional debit, not adjust_balance: the read-then-adjust pair let two
+    # purchases inside the rate-limit window both pass the check and overdraft.
+    player_service.try_spend.assert_called_once()
+    args, kwargs = player_service.try_spend.call_args
+    assert args[:3] == (interaction.user.id, None, SHOP_ANNOUNCE_TARGET_COST)
+    assert kwargs["source"] == "shop_announce"
+    player_service.adjust_balance.assert_not_called()
     interaction.followup.send.assert_awaited_once()
     kwargs = interaction.followup.send.call_args.kwargs
     assert "embed" in kwargs
@@ -595,9 +599,13 @@ async def test_handle_jopa_coin_success_deducts_balance():
 
     await commands._handle_jopa_coin(interaction)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id, None, -SHOP_JOPA_COIN_COST
-    )
+    # Conditional debit, not adjust_balance: the read-then-adjust pair let two
+    # purchases inside the rate-limit window both pass the check and overdraft.
+    player_service.try_spend.assert_called_once()
+    args, kwargs = player_service.try_spend.call_args
+    assert args[:3] == (interaction.user.id, None, SHOP_JOPA_COIN_COST)
+    assert kwargs["source"] == "shop_jopa_coin"
+    player_service.adjust_balance.assert_not_called()
     interaction.response.defer.assert_awaited()
     interaction.followup.send.assert_awaited()
     embed = interaction.followup.send.call_args.kwargs["embed"]
@@ -1167,9 +1175,13 @@ async def test_handle_mystery_gift_success_deducts_20k():
 
     await commands._handle_mystery_gift(interaction)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id, None, -SHOP_NEW_MYSTERY_GIFT_COST
-    )
+    # Conditional debit, not adjust_balance: the read-then-adjust pair let two
+    # purchases inside the rate-limit window both pass the check and overdraft.
+    player_service.try_spend.assert_called_once()
+    args, kwargs = player_service.try_spend.call_args
+    assert args[:3] == (interaction.user.id, None, SHOP_NEW_MYSTERY_GIFT_COST)
+    assert kwargs["source"] == "shop_mystery_gift"
+    player_service.adjust_balance.assert_not_called()
     interaction.response.defer.assert_awaited()
     interaction.followup.send.assert_awaited()
     embed = interaction.followup.send.call_args.kwargs["embed"]
@@ -2137,3 +2149,39 @@ async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
     assert len(player_service.adjust_balance.call_args_list) == 2  # unchanged
     player_service.log_double_or_nothing.assert_called_once()  # unchanged
     player_service.set_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_announce_aborts_when_balance_vanishes_before_the_debit(monkeypatch):
+    """A purchase whose funds disappear after the check must not deliver the item.
+
+    The balance read is only a friendly fast path — the shop rate limit allows
+    3 actions per 60s, so two purchases could both pass it and overdraft. The
+    conditional debit is the authoritative gate.
+    """
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(
+        wins=10, losses=5, jopacoin_balance=500, glicko_rating=1500.0
+    )
+    # Check passes...
+    player_service.get_balance.return_value = SHOP_ANNOUNCE_TARGET_COST + 10
+    # ...but the funds are gone by the time the debit runs.
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    monkeypatch.setattr("commands.shop.random.choice", lambda _items: "Test message")
+    monkeypatch.setattr("commands.shop.get_hero_color", lambda _hero_id: None)
+    monkeypatch.setattr("commands.shop.get_hero_image_url", lambda _hero_id: None)
+
+    await commands._handle_announce(interaction, target=target)
+
+    player_service.try_spend.assert_called_once()
+    player_service.adjust_balance.assert_not_called()
+    # No announcement embed — the purchase did not go through.
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs.get("embed") is None
+    assert "no longer have" in kwargs.get("content", "")

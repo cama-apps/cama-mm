@@ -645,9 +645,27 @@ class ShopCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        # Deduct cost
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-        new_balance = balance - cost
+        # Deduct cost. Conditional debit, not adjust_balance: the balance read
+        # above is a fast path for the friendly message, and two purchases can
+        # both pass it inside the shop rate-limit window and overdraft.
+        if not await asyncio.to_thread(
+            self.player_service.try_spend,
+            user_id,
+            guild_id,
+            cost,
+            source="shop_announce",
+            actor_id=user_id,
+            reason="shop announcement purchase",
+        ):
+            await safe_followup(
+                interaction,
+                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                ephemeral=True,
+            )
+            return
+        new_balance = await asyncio.to_thread(
+            self.player_service.get_balance, user_id, guild_id
+        )
 
         # Build stats comparison for targeted flex
         buyer_stats = await self._get_flex_stats(user_id, guild_id)
@@ -904,7 +922,21 @@ class ShopCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+        if not await asyncio.to_thread(
+            self.player_service.try_spend,
+            user_id,
+            guild_id,
+            cost,
+            source="shop_jopa_coin",
+            actor_id=user_id,
+            reason="Jopa Coin(TM) purchase",
+        ):
+            await safe_followup(
+                interaction,
+                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(
             title="🪙 Jopa Coin(TM) Minted!",
@@ -943,7 +975,21 @@ class ShopCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+        if not await asyncio.to_thread(
+            self.player_service.try_spend,
+            user_id,
+            guild_id,
+            cost,
+            source="shop_mystery_gift",
+            actor_id=user_id,
+            reason="Mystery Gift purchase",
+        ):
+            await safe_followup(
+                interaction,
+                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(
             title="🎁 Mystery Gift Redeemed!",

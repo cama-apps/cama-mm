@@ -36,7 +36,15 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
 
         Sets PRAGMA query_only = ON to prevent any write operations.
         """
-        conn = sqlite3.connect(self.db_path)
+        # Must match BaseRepository.get_connection: without uri=, a URI db_path
+        # (the file:memdb_...?mode=memory form) opens a new on-disk file whose
+        # name is the literal URI instead of the shared database.
+        conn = sqlite3.connect(
+            self.db_path,
+            uri=self.db_path.startswith("file:"),
+            check_same_thread=not self.db_path.startswith("file:"),
+            timeout=5.0,
+        )
         conn.row_factory = sqlite3.Row
         try:
             # Enable read-only mode at the connection level
@@ -84,7 +92,15 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
         """
         gid = int(guild_id)
         scoped_tables = self.get_guild_scoped_tables()
-        conn = sqlite3.connect(self.db_path)
+        # Must match BaseRepository.get_connection: without uri=, a URI db_path
+        # (the file:memdb_...?mode=memory form) opens a new on-disk file whose
+        # name is the literal URI instead of the shared database.
+        conn = sqlite3.connect(
+            self.db_path,
+            uri=self.db_path.startswith("file:"),
+            check_same_thread=not self.db_path.startswith("file:"),
+            timeout=5.0,
+        )
         conn.row_factory = sqlite3.Row
         try:
             for table in scoped_tables:

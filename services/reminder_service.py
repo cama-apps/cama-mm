@@ -51,6 +51,74 @@ class ReminderService:
         new_state = not prefs.get(f"{reminder_type}_enabled", False)
         return self.set_preference(discord_id, guild_id, reminder_type, new_state)
 
+    async def arm_preference(
+        self,
+        bot: "commands.Bot",
+        discord_id: int,
+        guild_id: int,
+        reminder_type: str,
+    ) -> None:
+        """Schedule the reminder already owed to a user who just enabled it.
+
+        Every other ``schedule_*`` call site fires on an *action* (a spin, a
+        dig, a trivia session), so enabling a preference mid-cooldown used to
+        arm nothing: the user got no DM for the cooldown they were already in
+        and had to wait for their next action or a bot restart. This does for
+        one user what ``reschedule_all`` does for everyone at startup.
+        """
+        from config import TRIVIA_COOLDOWN_SECONDS, WHEEL_COOLDOWN_SECONDS
+
+        guild_id = 0 if guild_id is None else guild_id
+        now = int(time.time())
+
+        if reminder_type == "pet":
+            await self._reschedule_pet_warnings(bot, guild_id, [discord_id], now)
+            return
+
+        if reminder_type == "dig":
+            if self._dig_service is None:
+                return
+            ready_times = await asyncio.to_thread(
+                self._dig_service.get_free_dig_ready_times_bulk,
+                [discord_id],
+                guild_id,
+                now=now,
+            )
+            if discord_id not in ready_times:
+                return
+            await self.reconcile_dig_reminder(
+                bot,
+                discord_id,
+                guild_id,
+                now=now,
+                ready_at=ready_times[discord_id],
+                preference_enabled=True,
+            )
+            return
+
+        anchors = {
+            "wheel": ("last_wheel_spin", WHEEL_COOLDOWN_SECONDS, self.schedule_wheel_reminder),
+            "trivia": ("last_trivia_session", TRIVIA_COOLDOWN_SECONDS, self.schedule_trivia_reminder),
+        }
+        anchor = anchors.get(reminder_type)
+        if anchor is None:
+            # "lobby" and "betting" reminders are event-driven, with nothing
+            # pending to arm at the moment the preference flips on.
+            return
+
+        timestamp_field, cooldown, schedule = anchor
+        timestamps = await asyncio.to_thread(
+            self._player_repo.get_reminder_timestamps_bulk,
+            [discord_id],
+            guild_id,
+        )
+        last_at = timestamps.get(discord_id, {}).get(timestamp_field)
+        if last_at is None:
+            return
+        ready_at = last_at + cooldown
+        if ready_at > now:
+            schedule(bot, discord_id, guild_id, ready_at, preference_enabled=True)
+
     def get_lobby_subscriber_ids(self, guild_id: int) -> list[int]:
         return self._notification_repo.get_enabled_users_for_type(guild_id, "lobby")
 
