@@ -46,11 +46,22 @@ PAGE_SIZE = 12  # players per page on the guild board
 class ManaAllView(discord.ui.View):
     """Paginated view for the guild mana board."""
 
-    def __init__(self, pages: list[discord.Embed]):
+    def __init__(self, pages: list[discord.Embed], user_id: int | None = None):
         super().__init__(timeout=300)
         self.pages = pages
+        self.user_id = user_id
         self.current = 0
         self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the invoker may page this public message."""
+        if self.user_id is None or interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who ran this command can page it.",
+            ephemeral=True,
+        )
+        return False
 
     def _sync_buttons(self) -> None:
         self.prev_btn.disabled = self.current == 0
@@ -135,7 +146,7 @@ class ManaCommands(commands.Cog):
             if len(pages) == 1:
                 await safe_followup(interaction, embed=pages[0])
             else:
-                view = ManaAllView(pages)
+                view = ManaAllView(pages, user_id=interaction.user.id)
                 await safe_followup(interaction, embed=pages[0], view=view)
             return
 

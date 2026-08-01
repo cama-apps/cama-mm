@@ -906,7 +906,19 @@ class PetService:
                             guild_id, week_key,
                         )
                         continue
-                    raise
+                    # Isolate the guild rather than aborting the sweep. Letting
+                    # this out of sweep() dropped the whole tick's hatch, death
+                    # and evolution announcements — for every guild — until the
+                    # one bad window cleared.
+                    logger.exception(
+                        "Pet refund failed for guild %s %s; continuing sweep",
+                        guild_id, week_key,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Pet refund failed for guild %s %s; continuing sweep",
+                        guild_id, week_key,
+                    )
         return self.pet_repo.get_unannounced_refunds()
 
     def _pay_guild_refunds(

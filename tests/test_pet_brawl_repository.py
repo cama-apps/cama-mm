@@ -668,3 +668,55 @@ class TestRecords:
         assert batch[pet_b] == (1, 1)
         assert batch[777] == (0, 0)
         assert brawl_repo.get_records_for([], TEST_GUILD_ID) == {}
+
+
+class TestSweepSurvivesADeletedPlayer:
+    """One purged account must not strand every wagered brawl in the guild."""
+
+    def test_sweep_still_refunds_others_when_a_payee_row_is_gone(
+        self, brawl_repo, repo_db_path, insert_pet,
+    ):
+        """sweep_stale runs every stale brawl in one transaction.
+
+        A refund to a deleted player row raised RuntimeError, aborting the
+        whole transaction — so no stale brawl was ever expired or refunded
+        again, on every tick, for that guild.
+        """
+        seed_player(repo_db_path, 100, 500)   # challenger, about to be deleted
+        seed_player(repo_db_path, 200, 500)
+        seed_player(repo_db_path, 300, 500)   # unrelated challenger
+        seed_player(repo_db_path, 400, 500)
+
+        doomed, _, _ = make_pending(
+            brawl_repo, insert_pet, 100, 200, wager=50, fee=5,
+        )
+        healthy, _, _ = make_pending(
+            brawl_repo, insert_pet, 300, 400, wager=40, fee=4,
+        )
+
+        players = PlayerRepository(repo_db_path)
+        balance_before = players.get_balance(300, TEST_GUILD_ID)
+
+        # The challenger's account is purged while their challenge is pending.
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.execute(
+                "DELETE FROM players WHERE discord_id = ? AND guild_id = ?",
+                (100, TEST_GUILD_ID),
+            )
+
+        result = brawl_repo.sweep_stale(NOW + 10_000, active_ttl_seconds=1800)
+
+        assert result["expired"] == 2, "both stale challenges must be swept"
+        # The healthy challenger got their escrow back.
+        assert players.get_balance(300, TEST_GUILD_ID) == balance_before + 44
+        # The unpayable escrow was parked, not destroyed.
+        with sqlite3.connect(repo_db_path) as conn:
+            fund = conn.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (TEST_GUILD_ID,),
+            ).fetchone()
+        assert fund is not None and fund[0] >= 55, (
+            "the purged player's escrow should be forfeited to the fund"
+        )
+        assert brawl_repo.get_brawl(doomed.brawl_id, TEST_GUILD_ID).status == "expired"
+        assert brawl_repo.get_brawl(healthy.brawl_id, TEST_GUILD_ID).status == "expired"

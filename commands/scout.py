@@ -51,6 +51,7 @@ class TeamContext(NamedTuple):
 class ScoutView(discord.ui.View):
     """Paginated view for scout reports."""
 
+
     def __init__(
         self,
         all_heroes: list[dict],
@@ -59,8 +60,10 @@ class ScoutView(discord.ui.View):
         total_matches: int,
         title: str,
         timeout: int = 840,
+        user_id: int | None = None,
     ):
         super().__init__(timeout=timeout)
+        self.user_id = user_id
         self.all_heroes = all_heroes
         self.player_names = player_names
         self.player_count = player_count
@@ -70,6 +73,16 @@ class ScoutView(discord.ui.View):
         self.total_pages = max(1, (len(all_heroes) + HEROES_PER_PAGE - 1) // HEROES_PER_PAGE)
         self.message: discord.Message | None = None
         self._update_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the invoker may page this public message."""
+        if self.user_id is None or interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who ran this command can page it.",
+            ephemeral=True,
+        )
+        return False
 
     def _update_buttons(self):
         """Update button states based on current page."""
@@ -416,6 +429,7 @@ class ScoutCommands(commands.Cog):
                 player_count=len(player_ids),
                 total_matches=scout_data.get("total_matches", 0),
                 title=title,
+                user_id=interaction.user.id,
             )
 
             embed, file = await view._generate_embed_and_file()
