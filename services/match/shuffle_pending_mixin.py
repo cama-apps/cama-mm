@@ -288,7 +288,9 @@ class ShufflePendingMixin:
         team1_off_roles = team1.get_off_role_count()
         team2_off_roles = team2.get_off_role_count()
         off_role_penalty = (team1_off_roles + team2_off_roles) * shuffler.off_role_flat_penalty
-        role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(team1, team2)
+        role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(
+            team1, team2, use_openskill=use_openskill, use_jopacoin=use_jopacoin
+        )
         weighted_role_matchup_delta = (
             role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
         )

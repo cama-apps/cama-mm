@@ -1567,6 +1567,7 @@ class DigCoreMixin:
                         "desperate_option": pool_event.get("desperate_option"),
                         "boon_options": pool_event.get("boon_options"),
                         "buff_on_success": pool_event.get("buff_on_success"),
+                        "ascii_art": pool_event.get("ascii_art"),
                         "rarity": pool_event.get("rarity", "common"),
                     }
                     if sonar_skip_active_this_dig:

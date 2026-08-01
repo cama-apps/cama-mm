@@ -1248,7 +1248,7 @@ class TestResetLobbyDedicatedChannel:
 
         bot = MagicMock()
         # No pending match and no active draft, so resetlobby proceeds.
-        bot.match_service.get_last_shuffle.return_value = None
+        bot.match_service.state_service.get_all_pending_matches.return_value = []
         bot.draft_state_manager = None
 
         lobby_service = MagicMock()

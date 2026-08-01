@@ -74,3 +74,32 @@ async def test_event_result_embed_surfaces_gear_drop_details():
     assert "Diamond dig bonuses; +2 boss damage; -8% hit chance." in gear_field.value
     assert "Stored in your gear inventory" in gear_field.value
     assert "`/dig gear`" in gear_field.value
+
+
+def test_event_payload_projections_carry_ascii_art():
+    """The ASCII art the UI renders must survive the service-layer projection.
+
+    ``commands/dig.py`` renders ``event_data["ascii_art"]``, but the payload
+    projections in the service layer listed their keys explicitly and left
+    ``ascii_art`` out, so the art on 71 events was never displayed.
+    """
+    import inspect
+
+    from services.dig import dig_core_mixin, events_mixin
+    from services.dig_constants import EVENT_POOL
+
+    events_with_art = [event for event in EVENT_POOL if event.get("ascii_art")]
+    assert events_with_art, "EVENT_POOL should carry ascii_art for some events"
+
+    # Every place that builds the event payload handed to the views must
+    # forward the key, otherwise the art silently disappears again.
+    # "safe_option" marks an event payload specifically (artifact and boss
+    # payloads carry "rarity" too, but never a safe option).
+    for module in (events_mixin, dig_core_mixin):
+        source = inspect.getsource(module)
+        event_projections = source.count('"safe_option": ')
+        art_projections = source.count('"ascii_art": ')
+        assert art_projections >= event_projections, (
+            f"{module.__name__} builds {event_projections} event payload(s) but "
+            f"only {art_projections} forward ascii_art"
+        )

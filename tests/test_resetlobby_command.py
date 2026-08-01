@@ -114,13 +114,22 @@ async def test_resetlobby_allows_creator(monkeypatch):
     assert "Lobby reset" in interaction.followup.messages[0]["content"]
 
 
+def _match_service_with_pending(*states):
+    """A match_service double whose state_service reports these pending matches."""
+
+    class FakeStateService:
+        def get_all_pending_matches(self, _guild_id):
+            return list(states)
+
+    class PendingMatchService:
+        state_service = FakeStateService()
+
+    return PendingMatchService()
+
+
 @pytest.mark.asyncio
 async def test_resetlobby_blocks_pending_match(monkeypatch):
     from domain.models.pending_match_state import PendingMatchState
-
-    class PendingMatchService:
-        def get_last_shuffle(self, _guild_id):
-            return PendingMatchState(shuffle_message_jump_url="http://example.com")
 
     _, lobby_service = make_lobby_service()
     lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
@@ -129,12 +138,48 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
 
+    match_service = _match_service_with_pending(
+        PendingMatchState(shuffle_message_jump_url="http://example.com")
+    )
     cog = LobbyCommands(
-        make_bot(match_service=PendingMatchService()), lobby_service, FakePlayerService()
+        make_bot(match_service=match_service), lobby_service, FakePlayerService()
     )
     await invoke_reset(cog, interaction)
 
     assert lobby_service.get_lobby(guild_id=123) is not None, "Should not reset when a match is pending"
+    assert interaction.followup.messages
+    assert "pending match" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_blocks_when_multiple_matches_are_pending(monkeypatch):
+    """The guard must hold for concurrent matches, not just a single one.
+
+    It used to ask get_last_shuffle, which returns None when *multiple* pending
+    matches exist — so the guard fell open in exactly the concurrent-match case,
+    archiving the thread and wiping metadata /record and /abort rely on.
+    """
+    from domain.models.pending_match_state import PendingMatchState
+
+    _, lobby_service = make_lobby_service()
+    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    interaction = FakeInteraction(user_id=1)
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
+
+    match_service = _match_service_with_pending(
+        PendingMatchState(pending_match_id=1, shuffle_message_jump_url="http://example.com/1"),
+        PendingMatchState(pending_match_id=2, shuffle_message_jump_url="http://example.com/2"),
+    )
+    cog = LobbyCommands(
+        make_bot(match_service=match_service), lobby_service, FakePlayerService()
+    )
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(guild_id=123) is not None, (
+        "Should not reset while two matches are pending"
+    )
     assert interaction.followup.messages
     assert "pending match" in interaction.followup.messages[0]["content"]
 

@@ -1256,7 +1256,7 @@ class DigCommands(commands.Cog):
             active_route = route_status.get("active_route")
             if isinstance(active_route, dict):
                 embed.add_field(
-                    name=f"Route â€” {active_route.get('name', 'Unknown')}",
+                    name=f"Route — {active_route.get('name', 'Unknown')}",
                     value=active_route.get("description", ""),
                     inline=False,
                 )
