@@ -344,9 +344,10 @@ class TriviaView(discord.ui.View):
                                 "Trivia tithe transfer failed; tithe skipped.",
                                 exc_info=True,
                             )
-            self.session.total_jc += jc
-
-            # Award jopacoin (only when jc > 0)
+            # Award jopacoin (only when jc > 0) BEFORE claiming it in the
+            # running total or the embed. Crediting first meant a failed
+            # payout still told the player "+N JC" and inflated the session
+            # total they are shown at the end.
             if jc > 0:
                 try:
                     player_service = self.cog.bot.player_service
@@ -364,6 +365,8 @@ class TriviaView(discord.ui.View):
                     )
                 except Exception:
                     logger.exception("Failed to award trivia JC")
+                    jc = 0
+            self.session.total_jc += jc
 
             correct_embed = _correct_embed(
                 self.question,

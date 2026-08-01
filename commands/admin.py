@@ -794,9 +794,20 @@ class AdminCommands(commands.Cog):
                         ephemeral=True,
                     )
                     return
-                await asyncio.to_thread(
-                    self.loan_service.subtract_from_nonprofit_fund, guild_id, abs_amount
-                )
+                try:
+                    await asyncio.to_thread(
+                        self.loan_service.subtract_from_nonprofit_fund, guild_id, abs_amount
+                    )
+                except ValueError:
+                    # A stipend or bounty drained the reserve between the read
+                    # above and this write; without this the interaction was
+                    # never answered.
+                    await interaction.response.send_message(
+                        "❌ The Jopacoin Reserve was drawn down while this ran. "
+                        "Check the balance and try again.",
+                        ephemeral=True,
+                    )
+                    return
                 new_balance = await asyncio.to_thread(
                     self.loan_service.get_nonprofit_fund, guild_id
                 )
@@ -825,7 +836,21 @@ class AdminCommands(commands.Cog):
             self.player_service.get_balance, user.id, guild_id
         )
         new_balance = await asyncio.to_thread(
-            self.player_service.adjust_balance, user.id, guild_id, amount
+            functools.partial(
+                self.player_service.adjust_balance,
+                user.id,
+                guild_id,
+                amount,
+                # Without attribution the ledger trigger records a generic
+                # balance_update with a NULL actor, indistinguishable from an
+                # automated adjustment in /profile's economy history.
+                source="admin_givecoin",
+                actor_id=interaction.user.id,
+                related_type="admin_adjustment",
+                related_id=user.id,
+                reason="admin balance adjustment",
+                metadata={"amount": amount},
+            )
         )
 
         action = "gave" if amount >= 0 else "took"

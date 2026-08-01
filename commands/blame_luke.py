@@ -28,16 +28,30 @@ class BlameLukeView(discord.ui.View):
         self.player_service = player_service
 
     async def _refund(self, *, user_id: int, guild_id: int) -> None:
-        await asyncio.to_thread(
-            self.player_service.adjust_balance,
-            user_id,
-            guild_id,
-            BLAME_LUKE_COST,
-            source="blame_luke_refund",
-            actor_id=user_id,
-            related_type="blame_luke",
-            reason="Blame Luke delivery refund",
-        )
+        """Return the cost after a failed delivery.
+
+        Never raises: every call site is already on a failure path (an expired
+        interaction, a send that did not land), and letting this escape left
+        the clicker down the cost *and* surfaced a second error. The charge
+        path has always been guarded this way.
+        """
+        try:
+            await asyncio.to_thread(
+                self.player_service.adjust_balance,
+                user_id,
+                guild_id,
+                BLAME_LUKE_COST,
+                source="blame_luke_refund",
+                actor_id=user_id,
+                related_type="blame_luke",
+                reason="Blame Luke delivery refund",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to refund Blame Luke user_id=%s guild_id=%s",
+                user_id,
+                guild_id,
+            )
 
     @discord.ui.button(
         label="Blame Luke",

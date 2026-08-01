@@ -81,12 +81,49 @@ class PetBrawlRepository(BaseRepository):
             cursor.execute(sql, params)
             if cursor.rowcount != 1:
                 if require_nonnegative:
+                    # A guarded debit that matched nothing means the player
+                    # cannot cover it — that is a real, caller-handled refusal.
                     raise ValueError(error_code)
+                if delta > 0 and not self._player_row_exists(cursor, player_id, brawl.guild_id):
+                    # Credit owed to a player whose row is gone (purged
+                    # account). Forfeit it to the nonprofit fund instead of
+                    # raising: this runs inside sweep_stale's single
+                    # transaction over every stale brawl, so one dead row used
+                    # to abort the whole sweep — every tick, forever — leaving
+                    # all wagered brawls in that guild permanently unrefunded.
+                    # Mirrors pay_refunds_atomic's handling of the same case.
+                    self._forfeit_to_nonprofit(cursor, brawl.guild_id, delta)
+                    return
                 raise RuntimeError(
                     "A pet-brawl participant balance could not be updated."
                 )
         finally:
             self._clear_economy_ledger_context(cursor)
+
+    @staticmethod
+    def _player_row_exists(cursor: sqlite3.Cursor, player_id: int, guild_id: int | None) -> bool:
+        return cursor.execute(
+            "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+            (player_id, guild_id),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _forfeit_to_nonprofit(cursor: sqlite3.Cursor, guild_id: int | None, amount: int) -> None:
+        """Park coins that have no payee left, rather than destroying them."""
+        cursor.execute(
+            """
+            UPDATE nonprofit_fund
+            SET total_collected = total_collected + ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE guild_id = ?
+            """,
+            (amount, guild_id),
+        )
+        if cursor.rowcount == 0:
+            cursor.execute(
+                "INSERT INTO nonprofit_fund (guild_id, total_collected) VALUES (?, ?)",
+                (guild_id, amount),
+            )
 
     def _refund_escrow(
         self,
