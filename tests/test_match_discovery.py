@@ -363,7 +363,12 @@ class TestMatchDiscoveryService:
             call.args[0] for call in mock_opendota_api.get_player_matches.call_args_list
         } == set(range(1001, 1011))
         match_repo.get_match_participants_bulk.assert_called_once_with([1, 2], 0)
-        player_repo.get_steam_ids_bulk.assert_called_once_with(list(range(1, 11)))
+        # Guild-scoped, matching the enrichment path: guild_id controls the
+        # legacy steam_id column fallback, so an unscoped lookup correlated
+        # matches against accounts enrichment would then refuse to validate.
+        player_repo.get_steam_ids_bulk.assert_called_once_with(
+            list(range(1, 11)), guild_id=0,
+        )
         match_repo.get_match.assert_not_called()
         match_repo.get_match_participants.assert_not_called()
 
