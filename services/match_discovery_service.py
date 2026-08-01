@@ -89,7 +89,12 @@ class MatchDiscoveryService:
                 for participant in participants
             )
         )
-        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+        # Scoped like the enrichment path. guild_id controls the legacy
+        # steam_id column fallback, so omitting it correlated matches
+        # against accounts enrichment then refused to validate.
+        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(
+            discord_ids, guild_id=normalized_guild,
+        )
 
         for match in unenriched:
             match_id = match["match_id"]
@@ -164,7 +169,9 @@ class MatchDiscoveryService:
         # Get all steam_ids for participants (supports multiple per player)
         discord_ids = [p["discord_id"] for p in participants]
         if discord_to_steam_ids is None:
-            discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+            discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(
+                discord_ids, guild_id=guild_id if guild_id is not None else 0,
+            )
 
         # Flatten all steam_ids and track which discord_id each came from
         steam_ids = []
