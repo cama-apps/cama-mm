@@ -14,6 +14,7 @@ import asyncio
 import functools
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import discord
@@ -102,12 +103,34 @@ def _chunk_message_lines(
     return chunks or [""]
 
 
+async def _send_with_optional_file(
+    send: Callable[..., Awaitable[Any]],
+    *,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+    file: discord.File | None = None,
+) -> Any:
+    """Send content with a decorative file, retrying text/embed-only on failure."""
+    kwargs: dict[str, Any] = {"content": content}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if file is None:
+        return await send(**kwargs)
+    try:
+        return await send(**kwargs, file=file)
+    except discord.HTTPException as e:
+        logger.warning("Attachment send failed; retrying without it: %s", e)
+        return await send(**kwargs)
+
+
 def _build_resolution_announcement_chunks(
     prediction_id: int,
     outcome: str,
     participants: list[dict],
     bankruptcy_total: int,
     vanity_tax_total: int,
+    *,
+    question: str | None = None,
 ) -> list[str]:
     # One consolidated line per participant showing what they spent (cost basis
     # across both sides), the yes/no contract split, what they won, and the net.
@@ -122,6 +145,7 @@ def _build_resolution_announcement_chunks(
     lines = [
         f"📈 Market #{prediction_id} resolved **{outcome.upper()}** — "
         f"{n_up} up, {n_down} down.",
+        *([f'"{question}"'] if question else []),
         *(body or ["No participants."]),
     ]
     if bankruptcy_total > 0:
@@ -769,30 +793,40 @@ class PredictionCommands(commands.Cog):
         return embed
 
     _MENTION_RE = re.compile(r"<@!?(\d+)>")
+    _ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 
-    def _resolve_mentions_for_chart(self, text: str, guild_id: int | None) -> str:
-        """Replace ``<@id>`` / ``<@!id>`` with ``@displayname`` for the PNG title.
+    def _resolve_mentions_for_display(self, text: str, guild_id: int | None) -> str:
+        """Render mention markup as non-notifying display text.
 
-        PIL renders the title verbatim, so a question like "will <@627> win?"
-        leaks the raw mention syntax otherwise. Falls back to ``@unknown`` when
-        the user isn't cached.
+        User and role mentions become their cached names. Broadcast mentions
+        are escaped so a quoted market question cannot notify the channel.
         """
-        if not text or "<@" not in text:
+        if not text:
             return text
-        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        get_guild = getattr(self.bot, "get_guild", None)
+        guild = get_guild(int(guild_id)) if guild_id and get_guild else None
 
-        def _repl(match: re.Match) -> str:
+        def _user_repl(match: re.Match) -> str:
             user_id = int(match.group(1))
             if guild is not None:
                 member = guild.get_member(user_id)
                 if member is not None:
                     return f"@{member.display_name}"
-            user = self.bot.get_user(user_id)
+            get_user = getattr(self.bot, "get_user", None)
+            user = get_user(user_id) if get_user else None
             if user is not None:
                 return f"@{user.display_name}"
             return "@unknown"
 
-        return self._MENTION_RE.sub(_repl, text)
+        def _role_repl(match: re.Match) -> str:
+            role_id = int(match.group(1))
+            get_role = getattr(guild, "get_role", None)
+            role = get_role(role_id) if get_role else None
+            return f"@{role.name}" if role is not None else "@unknown-role"
+
+        text = self._MENTION_RE.sub(_user_repl, text)
+        text = self._ROLE_MENTION_RE.sub(_role_repl, text)
+        return discord.utils.escape_mentions(text)
 
     async def render_market_chart_file(self, view: dict) -> discord.File | None:
         """Render the per-market fair-history chart as a discord.File.
@@ -800,14 +834,19 @@ class PredictionCommands(commands.Cog):
         Returns None on render failure so embed updates aren't blocked by a
         chart bug.
         """
-        market_id = view.get("prediction_id")
-        if market_id is None:
-            return None
-        guild_id = int(view.get("guild_id") or 0)
-        created_at = int(view.get("created_at") or 0)
-        question = view.get("question") or None
-        title = self._resolve_mentions_for_chart(question, guild_id) if question else None
+        market_id = None
         try:
+            market_id = view.get("prediction_id")
+            if market_id is None:
+                return None
+            guild_id = int(view.get("guild_id") or 0)
+            created_at = int(view.get("created_at") or 0)
+            question = view.get("question") or None
+            title = (
+                self._resolve_mentions_for_display(question, guild_id)
+                if question
+                else None
+            )
             snapshots = await asyncio.to_thread(
                 self.prediction_service.prediction_repo.get_fair_history,
                 market_id,
@@ -822,10 +861,10 @@ class PredictionCommands(commands.Cog):
                     title=title,
                 )
             )
+            return discord.File(chart_bytes, filename=f"predict_{market_id}.png")
         except Exception as e:
             logger.warning("Failed to render market chart for %s: %s", market_id, e)
             return None
-        return discord.File(chart_bytes, filename=f"predict_{market_id}.png")
 
     def _build_resolved_embed(self, view: dict) -> discord.Embed:
         outcome = (view.get("outcome") or "?").upper()
@@ -958,10 +997,12 @@ class PredictionCommands(commands.Cog):
         if ch is None:
             return
         try:
-            # discord.py rejects ``file=None`` (expects MISSING), so only pass it
-            # through when a chart was actually rendered.
-            extra = {"file": file} if file is not None else {}
-            await ch.send(content=content, embed=embed, **extra)
+            await _send_with_optional_file(
+                ch.send,
+                content=content,
+                embed=embed,
+                file=file,
+            )
         except discord.Forbidden:
             logger.debug("No permission to post in #%s", ch.name)
         except Exception as e:
@@ -1109,13 +1150,13 @@ class PredictionCommands(commands.Cog):
 
     async def _guild_owns_market(
         self, interaction: discord.Interaction, prediction_id: int
-    ) -> bool:
-        """Confirm a market belongs to the interaction's guild.
+    ) -> dict | None:
+        """Return a market owned by the interaction's guild, or ``None``.
 
         ``prediction_id`` is a global auto-increment PK, so an admin action keyed
         only on it would let an admin in guild B resolve/cancel/inspect guild A's
         market. Fetch the market and compare guilds; on mismatch, send an
-        ephemeral error and return False. Assumes the interaction was already
+        ephemeral error and return ``None``. Assumes the interaction was already
         deferred.
         """
         guild_id = interaction.guild.id if interaction.guild else None
@@ -1129,8 +1170,8 @@ class PredictionCommands(commands.Cog):
                 interaction,
                 content=f"❌ Market #{prediction_id} not found in this server.",
             )
-            return False
-        return True
+            return None
+        return pred
 
     # -- /predict resolve ---
 
@@ -1157,7 +1198,8 @@ class PredictionCommands(commands.Cog):
             return
         if not await safe_defer(interaction):
             return
-        if not await self._guild_owns_market(interaction, prediction_id):
+        pred = await self._guild_owns_market(interaction, prediction_id)
+        if pred is None:
             return
 
         try:
@@ -1185,9 +1227,19 @@ class PredictionCommands(commands.Cog):
             participants,
             bankruptcy_total,
             vanity_tax_total,
+            question=self._resolve_mentions_for_display(
+                pred.get("question", ""),
+                pred.get("guild_id"),
+            ),
         )
-        for chunk in announce_chunks:
-            await safe_followup(interaction, content=chunk)
+        chart_file = await self.render_market_chart_file(pred) if pred else None
+        send_followup = functools.partial(safe_followup, interaction)
+        for index, chunk in enumerate(announce_chunks):
+            await _send_with_optional_file(
+                send_followup,
+                content=chunk,
+                file=chart_file if index == 0 else None,
+            )
 
         # Rare neon celebration for the biggest market winner (best-effort).
         if biggest and biggest.get("payout"):
@@ -1207,9 +1259,6 @@ class PredictionCommands(commands.Cog):
                 logger.debug("prediction big-win neon failed", exc_info=True)
 
         # Update market embed + archive thread
-        pred = await asyncio.to_thread(
-            self.prediction_service.get_prediction, prediction_id
-        )
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
@@ -1219,8 +1268,13 @@ class PredictionCommands(commands.Cog):
                 await ensure_thread_writable(thread)
                 await self.refresh_market_embed(prediction_id)
                 try:
-                    for chunk in announce_chunks:
-                        await thread.send(chunk)
+                    chart_file = await self.render_market_chart_file(pred)
+                    for index, chunk in enumerate(announce_chunks):
+                        await _send_with_optional_file(
+                            thread.send,
+                            content=chunk,
+                            file=chart_file if index == 0 else None,
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to post resolve announcement: {e}")
                 try:
@@ -1232,8 +1286,13 @@ class PredictionCommands(commands.Cog):
 
         # Gamba channel announcement
         if interaction.guild:
-            for chunk in announce_chunks:
-                await self.announce_to_gamba(interaction.guild, chunk)
+            chart_file = await self.render_market_chart_file(pred) if pred else None
+            for index, chunk in enumerate(announce_chunks):
+                await self.announce_to_gamba(
+                    interaction.guild,
+                    chunk,
+                    file=chart_file if index == 0 else None,
+                )
 
     # -- /predict rollback ---
 
