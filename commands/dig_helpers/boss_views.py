@@ -115,6 +115,25 @@ async def _send_boss_victory_neon(interaction, *, result, user_id, guild_id) -> 
         logger.debug("Boss victory neon failed", exc_info=True)
 
 
+def _release_parent(modal) -> None:
+    """Hand the encounter buttons back after a dismissed or rejected modal.
+
+    The encounter view used to be stopped the moment its modal was sent, so
+    pressing Escape — or typing an invalid risk tier — left the still-visible
+    Fight and Retreat buttons dead and forced a fresh /dig go.
+    """
+    parent = getattr(modal, "parent_view", None)
+    if parent is not None:
+        parent._engaged = False
+
+
+def _finish_parent(modal) -> None:
+    """Retire the encounter view once its fight actually started resolving."""
+    parent = getattr(modal, "parent_view", None)
+    if parent is not None:
+        parent.stop()
+
+
 class BossWagerModal(discord.ui.Modal):
     """Modal for entering boss fight wager details."""
 
@@ -141,6 +160,7 @@ class BossWagerModal(discord.ui.Modal):
         guild_id: int | None,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
+        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(title="Boss Fight Wager")
         self.dig_service = dig_service
@@ -148,7 +168,11 @@ class BossWagerModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.dig_flavor_service = dig_flavor_service
         self.on_boss_resolved = on_boss_resolved
+        self.parent_view = parent_view
         self.result = None
+
+    async def on_timeout(self) -> None:
+        _release_parent(self)
 
     async def on_submit(self, interaction: discord.Interaction):
         tier = self.risk_tier.value.strip().lower()
@@ -156,11 +180,13 @@ class BossWagerModal(discord.ui.Modal):
             await interaction.response.send_message(
                 "Invalid risk tier. Choose: cautious, bold, or reckless.", ephemeral=True
             )
+            _release_parent(self)
             return
 
         try:
             amount = int(self.wager.value)
         except ValueError:
+            _release_parent(self)
             await interaction.response.send_message(
                 "Invalid wager amount. Please enter a number.", ephemeral=True
             )
@@ -172,6 +198,7 @@ class BossWagerModal(discord.ui.Modal):
             )
             return
 
+        _finish_parent(self)
         await safe_defer(interaction, thinking=True)
         try:
             self.result = _wrap(await asyncio.to_thread(
@@ -394,6 +421,7 @@ class BossRiskModal(discord.ui.Modal):
         guild_id: int | None,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
+        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(title="Boss Phase Risk")
         self.dig_service = dig_service
@@ -401,6 +429,10 @@ class BossRiskModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.dig_flavor_service = dig_flavor_service
         self.on_boss_resolved = on_boss_resolved
+        self.parent_view = parent_view
+
+    async def on_timeout(self) -> None:
+        _release_parent(self)
 
     async def on_submit(self, interaction: discord.Interaction):
         tier = self.risk_tier.value.strip().lower()
@@ -408,8 +440,10 @@ class BossRiskModal(discord.ui.Modal):
             await interaction.response.send_message(
                 "Invalid risk tier. Choose: cautious, bold, or reckless.", ephemeral=True
             )
+            _release_parent(self)
             return
 
+        _finish_parent(self)
         await safe_defer(interaction, thinking=True)
         try:
             await _resolve_phase_fight_without_modal(
@@ -535,7 +569,11 @@ async def _post_phase_transition_followup(
     phase_number = 3 if getattr(result, "phase3_incoming", False) else 2
     next_boss_id = getattr(next_info, "boss_id", "") or getattr(result, "boss_id", "")
     display_name, display_dialogue, secret_phase = (
-        _resolve_boss_encounter_presentation(next_info, phase=phase_number)
+        _resolve_boss_encounter_presentation(
+            next_info,
+            phase=phase_number,
+            seed_key=f"{user_id}:{getattr(next_info, 'boss_id', '')}:{phase_number}",
+        )
     )
 
     encounter_embed = discord.Embed(
@@ -580,8 +618,14 @@ def _resolve_boss_encounter_presentation(
     boss_info,
     *,
     phase: int | None = None,
+    seed_key: str | None = None,
 ) -> tuple[str, str, bool]:
-    """Return display copy and secret-state for one boss encounter."""
+    """Return display copy and secret-state for one boss encounter.
+
+    ``seed_key`` pins the secret-phase roll to one encounter. It was rolled
+    fresh on every render, so re-running /dig go flipped the same pinnacle
+    fight between its secret and normal presentation.
+    """
     display_name = getattr(boss_info, "name", "Unknown Boss")
     display_dialogue = getattr(boss_info, "dialogue", "")
     boss_id = getattr(boss_info, "boss_id", "")
@@ -599,7 +643,7 @@ def _resolve_boss_encounter_presentation(
             PINNACLE_SECRET_PHASE_CHANCE,
         )
 
-        secret_rng = random.Random()
+        secret_rng = random.Random(seed_key) if seed_key else random.Random()
         if secret_rng.random() >= PINNACLE_SECRET_PHASE_CHANCE:
             return display_name, display_dialogue, False
         phase_def = PINNACLE_BOSSES[boss_id].phases[2]
@@ -1054,6 +1098,7 @@ class BossDuelView(discord.ui.View):
         wager: int,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
+        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(timeout=120)
         self.dig_service = dig_service
@@ -1268,6 +1313,7 @@ class BossEncounterView(discord.ui.View):
         has_lantern: bool = False,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
+        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -1313,9 +1359,11 @@ class BossEncounterView(discord.ui.View):
                 self.guild_id,
                 dig_flavor_service=self.dig_flavor_service,
                 on_boss_resolved=self.on_boss_resolved,
+                parent_view=self,
             )
             await interaction.response.send_modal(modal)
-            self.stop()
+            # Deliberately not stopped here: the modal releases or retires this
+            # view, so dismissing it leaves the buttons usable.
             return
         # Multi-phase carry: a prior phase win locked the original wager onto
         # this boss. Skip the wager modal — the carried stake rides forward.
@@ -1342,9 +1390,10 @@ class BossEncounterView(discord.ui.View):
             self.guild_id,
             dig_flavor_service=self.dig_flavor_service,
             on_boss_resolved=self.on_boss_resolved,
+            parent_view=self,
         )
         await interaction.response.send_modal(modal)
-        self.stop()
+        # Deliberately not stopped here — see above.
 
     @discord.ui.button(label="Retreat", style=discord.ButtonStyle.secondary, emoji="\U0001f3c3")
     async def retreat(self, interaction: discord.Interaction, button: discord.ui.Button):

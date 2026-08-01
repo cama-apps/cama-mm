@@ -727,3 +727,47 @@ class TestHallOfFame:
         assert len(hof["entries"]) == 1
         assert hof["entries"][0]["discord_id"] == 10001
         assert hof["entries"][0]["best_run_score"] > 0
+
+
+class TestPrestigeMutationRollIsStable:
+    """The mutation a player is shown must be the mutation they get.
+
+    can_prestige rolls to build the confirmation embed and prestige() rolled
+    again to apply, so the forced mutation applied was not the one displayed —
+    and with no explicit pick, choices[0] came from the unseen roll too.
+    """
+
+    def test_same_attempt_rolls_the_same_mutations(self, dig_service):
+        seed = dig_service._prestige_mutation_seed(4242, 99, 8)
+        first_forced, first_choices = dig_service._roll_mutations_for_prestige(seed)
+        second_forced, second_choices = dig_service._roll_mutations_for_prestige(seed)
+
+        assert first_forced == second_forced
+        assert [c["id"] for c in first_choices] == [c["id"] for c in second_choices]
+
+    def test_different_players_and_levels_roll_independently(self, dig_service):
+        base = dig_service._roll_mutations_for_prestige(
+            dig_service._prestige_mutation_seed(4242, 99, 8)
+        )
+        other_player = dig_service._roll_mutations_for_prestige(
+            dig_service._prestige_mutation_seed(4243, 99, 8)
+        )
+        next_level = dig_service._roll_mutations_for_prestige(
+            dig_service._prestige_mutation_seed(4242, 99, 9)
+        )
+
+        rolled = [
+            (forced["id"], tuple(c["id"] for c in choices))
+            for forced, choices in (base, other_player, next_level)
+        ]
+        assert len(set(rolled)) == len(rolled), (
+            "seeds must not collapse different players/levels onto one roll"
+        )
+
+    def test_unseeded_roll_still_varies(self, dig_service):
+        """Callers without a seed keep the old random behaviour."""
+        random.seed(7)
+        rolls = {
+            dig_service._roll_mutations_for_prestige()[0]["id"] for _ in range(40)
+        }
+        assert len(rolls) > 1
