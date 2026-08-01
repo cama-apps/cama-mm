@@ -1586,6 +1586,91 @@ class TestLatePrestigeBossPool:
         assert phase3 != BOSS_PHASE3[depth]
 
 
+class TestEveryBossOwnsItsPhaseIdentity:
+    """No boss may present another boss's phase name or dialogue.
+
+    The depth-keyed BOSS_PHASE2/BOSS_PHASE3 tables were authored for the
+    original boss at each depth. Every later boss added at a shared depth fell
+    through to them, so fighting The Butcher announced "Grothak the Undying
+    Emerges!" and quoted Grothak's skeleton jokes. 18 bosses were affected.
+    """
+
+    @staticmethod
+    def _tables():
+        from services.dig_data.bosses import (
+            BOSS_PHASE2,
+            BOSS_PHASE2_BY_ID,
+            BOSS_PHASE3,
+            BOSS_PHASE3_BY_ID,
+            BOSSES_BY_ID,
+            get_phase2_for,
+            get_phase3_for,
+        )
+
+        return (
+            BOSSES_BY_ID,
+            (("phase 2", BOSS_PHASE2, BOSS_PHASE2_BY_ID, get_phase2_for),
+             ("phase 3", BOSS_PHASE3, BOSS_PHASE3_BY_ID, get_phase3_for)),
+        )
+
+    def test_no_boss_borrows_another_bosses_phase(self):
+        """A new boss at an existing depth must author its own phase defs."""
+        bosses_by_id, tables = self._tables()
+
+        for label, depth_table, by_id, _resolve in tables:
+            borrowing = sorted(
+                boss_id
+                for boss_id, boss in bosses_by_id.items()
+                if depth_table.get(boss.depth) is not None and boss_id not in by_id
+            )
+            assert not borrowing, (
+                f"{label}: {borrowing} fall through to the depth default and would "
+                f"announce another boss's name and dialogue"
+            )
+
+    def test_phase_names_are_unique_across_bosses(self):
+        bosses_by_id, tables = self._tables()
+
+        for label, _depth_table, _by_id, resolve in tables:
+            seen: dict[str, list[str]] = {}
+            for boss_id, boss in bosses_by_id.items():
+                phase = resolve(boss_id, boss.depth)
+                if phase is None:
+                    continue
+                seen.setdefault(phase.name, []).append(boss.name)
+            collisions = {name: who for name, who in seen.items() if len(who) > 1}
+            assert not collisions, f"{label} name shared by several bosses: {collisions}"
+
+    def test_phase_defs_match_their_boss_and_keep_the_tier_penalty(self):
+        """Content-only change: depth and win-odds penalty stay tier-consistent."""
+        bosses_by_id, tables = self._tables()
+
+        for label, _depth_table, by_id, _resolve in tables:
+            penalties_by_depth: dict[int, set[float]] = {}
+            for boss_id, phase in by_id.items():
+                boss = bosses_by_id.get(boss_id)
+                if boss is None:
+                    continue
+                assert phase.depth == boss.depth, (
+                    f"{label} for {boss_id} declares depth {phase.depth}, "
+                    f"boss is at {boss.depth}"
+                )
+                assert phase.name and phase.title, f"{label} for {boss_id} is missing text"
+                assert len(phase.dialogue) == 3, (
+                    f"{label} for {boss_id} has {len(phase.dialogue)} lines, expected 3"
+                )
+                assert phase.win_odds_penalty < 0, (
+                    f"{label} for {boss_id} must make the fight harder"
+                )
+                penalties_by_depth.setdefault(boss.depth, set()).add(phase.win_odds_penalty)
+
+            for depth, penalties in penalties_by_depth.items():
+                assert len(penalties) <= 2, (
+                    f"{label} at depth {depth} has scattered penalties {sorted(penalties)}; "
+                    "phase difficulty should track the tier, not the individual boss"
+                )
+
+
 class TestLatePrestigeBossLocking:
     """_ensure_boss_locked must respect prestige_required when rolling a boss."""
 
