@@ -1690,8 +1690,18 @@ class _FakeFollowup:
     def __init__(self):
         self.messages: list[dict] = []
 
-    async def send(self, content=None, embed=None, ephemeral=None, allowed_mentions=None, view=None):
-        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+    async def send(
+        self,
+        content=None,
+        embed=None,
+        file=None,
+        ephemeral=None,
+        allowed_mentions=None,
+        view=None,
+    ):
+        self.messages.append(
+            {"content": content, "embed": embed, "file": file, "ephemeral": ephemeral}
+        )
 
 
 class _FakeResponse:
@@ -1713,12 +1723,14 @@ class _FakeResponse:
 class _FakeThread:
     def __init__(self, *, archived: bool = False, locked: bool = False):
         self.sent: list[str] = []
+        self.send_kwargs: list[dict] = []
         self.edits: list[dict] = []
         self.archived = archived
         self.locked = locked
 
-    async def send(self, content=None, embed=None):
+    async def send(self, content=None, embed=None, file=None):
         self.sent.append(content if content is not None else "<embed>")
+        self.send_kwargs.append({"content": content, "embed": embed, "file": file})
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -1764,8 +1776,13 @@ def patched_cog_helpers(monkeypatch):
     monkeypatch.setattr(pmod, "require_gamba_channel", _ok)
     monkeypatch.setattr(pmod, "safe_defer", AsyncMock(return_value=True))
 
-    async def _fwup(interaction, content=None, embed=None, ephemeral=None):
-        await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+    async def _fwup(interaction, content=None, embed=None, file=None, ephemeral=None):
+        await interaction.followup.send(
+            content=content,
+            embed=embed,
+            file=file,
+            ephemeral=ephemeral,
+        )
 
     monkeypatch.setattr(pmod, "safe_followup", _fwup)
     return monkeypatch
@@ -1946,6 +1963,253 @@ async def test_resolve_announces_all_winners_and_losers(
     # No participant is double-listed (the old winners/losers split is gone).
     assert announce.count("<@101>") == 1
     assert announce.count("<@201>") == 1
+
+
+async def test_resolve_names_market_in_announcement(
+    prediction_service, patched_cog_helpers
+):
+    """The settlement headline identifies the market without requiring another command."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will the chart ship?",
+        initial_fair=50,
+    )["prediction_id"]
+    cog = _make_cog(prediction_service)
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+
+    await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+
+    headline = interaction.followup.messages[0]["content"]
+    assert '"Will the chart ship?"' in headline
+
+
+async def test_resolve_does_not_depend_on_a_post_settlement_market_read(
+    prediction_service, patched_cog_helpers
+):
+    """Once payouts commit, the captured market metadata is enough to announce."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will one lookup be enough?",
+        initial_fair=50,
+    )["prediction_id"]
+    original_get_prediction = prediction_service.get_prediction
+    lookup_count = 0
+
+    def fail_redundant_lookup(prediction_id):
+        nonlocal lookup_count
+        lookup_count += 1
+        if lookup_count > 1:
+            raise RuntimeError("database unavailable after settlement")
+        return original_get_prediction(prediction_id)
+
+    patched_cog_helpers.setattr(
+        prediction_service,
+        "get_prediction",
+        fail_redundant_lookup,
+    )
+    cog = _make_cog(prediction_service)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+
+    try:
+        await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+    except RuntimeError as exc:
+        pytest.fail(f"post-settlement lookup blocked the announcement: {exc}")
+
+    pred = prediction_service.prediction_repo.get_prediction(pid)
+    assert pred["status"] == "resolved"
+    assert '"Will one lookup be enough?"' in interaction.followup.messages[0]["content"]
+
+
+async def test_resolve_neutralizes_mentions_in_market_name(
+    prediction_service, patched_cog_helpers
+):
+    """Quoting a market name must not replay its Discord notifications."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will @everyone and @here back <@123> or <@&456>?",
+        initial_fair=50,
+    )["prediction_id"]
+    member = SimpleNamespace(display_name="Player")
+    role = SimpleNamespace(name="Favorites")
+    guild = SimpleNamespace(
+        id=TEST_GUILD_ID,
+        text_channels=[],
+        get_member=lambda user_id: member if user_id == 123 else None,
+        get_role=lambda role_id: role if role_id == 456 else None,
+    )
+    cog = _make_cog(prediction_service)
+    cog.bot.get_guild = lambda guild_id: guild if guild_id == TEST_GUILD_ID else None
+    cog.bot.get_user = lambda _user_id: None
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild = guild
+
+    await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+
+    headline = interaction.followup.messages[0]["content"]
+    assert (
+        '"Will @\u200beveryone and @\u200bhere back @Player or @Favorites?"'
+        in headline
+    )
+    assert "<@" not in headline
+
+
+async def test_resolve_attaches_chart_to_each_announcement_surface(
+    prediction_service, patched_cog_helpers
+):
+    """The command reply, market thread, and gamba post each receive a usable chart."""
+    from commands import predictions as pmod
+
+    class _FakeGambaChannel:
+        name = "gamba"
+
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        async def send(self, content=None, embed=None, file=None):
+            self.messages.append({"content": content, "embed": embed, "file": file})
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will every surface get a chart?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.prediction_repo.update_prediction_discord_ids(
+        pid,
+        thread_id=12345,
+    )
+
+    command_chart = object()
+    thread_chart = object()
+    gamba_chart = object()
+    thread = _FakeThread()
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(
+        side_effect=[command_chart, thread_chart, gamba_chart]
+    )
+    gamba = _FakeGambaChannel()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild.text_channels = [gamba]
+
+    await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+
+    assert interaction.followup.messages[0]["file"] is command_chart
+    assert thread.send_kwargs[0]["file"] is thread_chart
+    assert gamba.messages[0]["file"] is gamba_chart
+
+
+async def test_resolve_retries_complete_text_when_chart_uploads_fail(
+    patched_cog_helpers,
+):
+    """Missing attachment permission must not drop settlement chunks anywhere."""
+    from commands import predictions as pmod
+
+    def attachment_forbidden():
+        response = SimpleNamespace(status=403, reason="Forbidden")
+        return discord.Forbidden(response, "Missing Attach Files permission")
+
+    class _AttachmentRejectingThread(_FakeThread):
+        async def send(self, content=None, embed=None, file=None):
+            if file is not None:
+                raise attachment_forbidden()
+            await super().send(content=content, embed=embed)
+
+    class _AttachmentRejectingGamba:
+        name = "gamba"
+
+        def __init__(self):
+            self.messages: list[str] = []
+
+        async def send(self, content=None, embed=None, file=None):
+            if file is not None:
+                raise attachment_forbidden()
+            self.messages.append(content or "")
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    participants = [
+        {
+            "discord_id": 10_000 + i,
+            "yes_contracts": 0,
+            "no_contracts": 1,
+            "cost_basis": 900,
+            "payout": 0,
+            "profit": -900,
+        }
+        for i in range(80)
+    ]
+    prediction_service = MagicMock()
+    prediction_service.resolve_orderbook.return_value = {"participants": participants}
+    prediction_service.get_prediction.return_value = {
+        "prediction_id": 42,
+        "guild_id": TEST_GUILD_ID,
+        "question": "Will every chunk survive?",
+        "thread_id": 12345,
+    }
+
+    followup_messages: list[str] = []
+
+    async def attachment_rejecting_followup(
+        interaction, *, content=None, embed=None, file=None, ephemeral=None
+    ):
+        if file is not None:
+            raise attachment_forbidden()
+        followup_messages.append(content or "")
+
+    patched_cog_helpers.setattr(
+        pmod,
+        "safe_followup",
+        attachment_rejecting_followup,
+    )
+
+    thread = _AttachmentRejectingThread()
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(
+        side_effect=[object(), object(), object()]
+    )
+    gamba = _AttachmentRejectingGamba()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild.text_channels = [gamba]
+
+    try:
+        await cog.resolve.callback(cog, interaction, 42, SimpleNamespace(value="yes"))
+    except discord.HTTPException as exc:
+        pytest.fail(f"chart failure blocked settlement text: {exc}")
+
+    assert len(followup_messages) > 1
+    assert thread.sent == followup_messages
+    assert gamba.messages == followup_messages
+    complete_announcement = "\n".join(followup_messages)
+    assert '"Will every chunk survive?"' in complete_announcement
+    assert "<@10000>" in complete_announcement
+    assert "<@10079>" in complete_announcement
 
 
 async def test_rollback_admin_only(patched_cog_helpers):
@@ -2723,6 +2987,52 @@ def test_market_chart_renders_for_zero_one_and_many_snapshots():
     series = [(created_at + 3600 * i, 30 + i * 5) for i in range(8)]
     bytes_many = draw_market_fair_history(market_id=3, snapshots=series, created_at=created_at)
     assert bytes_many.getbuffer().nbytes > 0
+
+
+async def test_market_chart_metadata_failure_returns_none(prediction_service):
+    """Bad persisted metadata cannot block callers that treat charts as decorative."""
+    cog = _make_cog(prediction_service)
+
+    try:
+        chart = await cog.render_market_chart_file(
+            {
+                "prediction_id": 1,
+                "guild_id": TEST_GUILD_ID,
+                "created_at": "not-a-timestamp",
+            }
+        )
+    except ValueError as exc:
+        pytest.fail(f"chart metadata failure escaped its best-effort boundary: {exc}")
+
+    assert chart is None
+
+
+async def test_market_chart_file_construction_failure_returns_none(
+    prediction_service, monkeypatch
+):
+    """A Discord attachment construction failure degrades to no chart."""
+    from commands import predictions as pmod
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will file construction stay optional?",
+        initial_fair=50,
+    )["prediction_id"]
+    pred = prediction_service.get_prediction(pid)
+    cog = _make_cog(prediction_service)
+
+    def fail_file_construction(*_args, **_kwargs):
+        raise ValueError("invalid attachment")
+
+    monkeypatch.setattr(pmod.discord, "File", fail_file_construction)
+
+    try:
+        chart = await cog.render_market_chart_file(pred)
+    except ValueError as exc:
+        pytest.fail(f"chart file failure escaped its best-effort boundary: {exc}")
+
+    assert chart is None
 
 
 def test_fair_history_backfill_from_levels_groups_by_utc_day(prediction_repo, prediction_service):
