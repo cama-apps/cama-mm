@@ -453,7 +453,9 @@ def test_phase3_secret_roll_changes_only_presentation(
     monkeypatch.setattr(
         boss_data, "PINNACLE_SECRET_PHASE_CHANCE", 0.10, raising=False,
     )
-    monkeypatch.setattr(bv.random, "Random", lambda: FixedRandom())
+    # Random(seed_key) now pins the roll to one encounter, so the stub
+    # has to accept the seed argument.
+    monkeypatch.setattr(bv.random, "Random", lambda *_a: FixedRandom())
     load_phase_art = AsyncMock(
         side_effect=lambda *args, **kwargs: discord.File(
             io.BytesIO(b"phase"), filename="pinnacle_phase_3.gif",
@@ -1095,3 +1097,55 @@ def test_unauthorized_duplicate_and_nonfight_actions_do_not_notify(monkeypatch):
         callback.assert_not_awaited()
 
     asyncio.run(scenario())
+
+
+def test_pinnacle_secret_phase_is_stable_for_one_encounter(monkeypatch):
+    """Re-rendering the same encounter must not re-roll its secret phase.
+
+    The roll used an unseeded Random on every render, so re-running /dig go at
+    a pinnacle phase-3 fight flipped the same encounter between its secret and
+    normal title, dialogue and art.
+    """
+    import commands.dig_helpers.boss_views as bv
+    import services.dig_data.bosses as boss_data
+
+    phases = (
+        SimpleNamespace(secret_title=None, secret_dialogue=()),
+        SimpleNamespace(secret_title=None, secret_dialogue=()),
+        SimpleNamespace(
+            secret_title="The King Behind the Crown",
+            secret_dialogue=("The crown remembers.", "No court remains."),
+        ),
+    )
+    monkeypatch.setattr(
+        boss_data, "PINNACLE_BOSSES",
+        {"forgotten_king": SimpleNamespace(phases=phases)},
+    )
+    monkeypatch.setattr(
+        boss_data, "PINNACLE_SECRET_PHASE_CHANCE", 0.5, raising=False,
+    )
+
+    boss_info = SimpleNamespace(
+        name="The Last Breath of Kings",
+        dialogue="Last breath.",
+        boss_id="forgotten_king",
+        is_pinnacle=True,
+        phase=3,
+    )
+
+    renders = {
+        bv._resolve_boss_encounter_presentation(
+            boss_info, seed_key="4242:forgotten_king:3"
+        )
+        for _ in range(12)
+    }
+    assert len(renders) == 1, f"same encounter rendered {len(renders)} different ways"
+
+    # Different players must still roll independently.
+    per_player = {
+        bv._resolve_boss_encounter_presentation(
+            boss_info, seed_key=f"{uid}:forgotten_king:3"
+        )[2]
+        for uid in range(40)
+    }
+    assert per_player == {True, False}, "the seed collapsed every player onto one outcome"

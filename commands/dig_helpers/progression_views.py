@@ -278,10 +278,23 @@ class MutationSelectionView(discord.ui.View):
 class DigGuideView(discord.ui.View):
     """Paginated guide with Previous/Next buttons."""
 
-    def __init__(self):
+    def __init__(self, user_id: int | None = None):
         super().__init__(timeout=180)
+        self.user_id = user_id
         self.current = 0
         self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the invoker may page. The message is public, so without this
+        anyone could flip someone else's guide out from under them."""
+        if self.user_id is None or interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who opened this guide can page it. "
+            "Run `/dig guide` for your own copy.",
+            ephemeral=True,
+        )
+        return False
 
     def _sync_buttons(self) -> None:
         self.prev_btn.disabled = self.current == 0

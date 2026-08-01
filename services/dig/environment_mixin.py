@@ -382,10 +382,20 @@ class EnvironmentMixin:
                     combined[key] = combined.get(key, 0) + value
         return combined
 
-    def _roll_mutations_for_prestige(self) -> tuple[dict, list[dict]]:
-        """Roll mutations for P8+: 1 forced random + 3 choices to pick 1 from."""
+    def _roll_mutations_for_prestige(
+        self, seed: str | None = None,
+    ) -> tuple[dict, list[dict]]:
+        """Roll mutations for P8+: 1 forced random + 3 choices to pick 1 from.
+
+        ``seed`` makes the roll deterministic for one prestige attempt. The
+        confirmation embed and the prestige that follows it each roll their own
+        set, so an unseeded roll showed the player one forced mutation and
+        applied a different one (and picked ``choices[0]`` from the unseen set
+        when no explicit choice was made). Seeding on (player, guild, target
+        level) also stops the options being re-rolled by reopening the panel.
+        """
         pool = list(MUTATIONS_POOL)
-        random.shuffle(pool)
+        (random.Random(seed) if seed is not None else random).shuffle(pool)
         forced = pool[0]
         remaining = [m for m in pool[1:] if m.id != forced.id]
         choices = remaining[:3]

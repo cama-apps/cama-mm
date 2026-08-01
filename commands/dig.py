@@ -684,7 +684,14 @@ class DigCommands(commands.Cog):
             self.dig_service.has_scout_lantern, interaction.user.id, guild_id,
         )
         display_name, display_dialogue, secret_phase = (
-            _resolve_boss_encounter_presentation(boss_info)
+            _resolve_boss_encounter_presentation(
+                boss_info,
+                seed_key=(
+                    f"{interaction.user.id}:"
+                    f"{getattr(boss_info, 'boss_id', '')}:"
+                    f"{getattr(boss_info, 'phase', 0)}"
+                ),
+            )
         )
         embed = discord.Embed(
             title=f"Boss Encountered: {display_name}!",
@@ -2706,7 +2713,7 @@ class DigCommands(commands.Cog):
         if not player:
             return
 
-        view = DigGuideView()
+        view = DigGuideView(user_id=interaction.user.id)
         await interaction.response.send_message(embed=GUIDE_PAGES[0], view=view)
 
 

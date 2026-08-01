@@ -222,7 +222,9 @@ async def test_resumed_pinnacle_encounter_uses_phase_presentation(
         def choice(self, values):
             return values[-1]
 
-    monkeypatch.setattr(boss_views.random, "Random", lambda: FixedRandom())
+    # Random(seed_key) now pins the roll to one encounter, so the stub has to
+    # accept the seed argument.
+    monkeypatch.setattr(boss_views.random, "Random", lambda *_a: FixedRandom())
     phase_art = discord.File(io.BytesIO(b"phase"), filename=filename)
     monkeypatch.setattr(
         dig_assets,

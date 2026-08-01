@@ -1821,6 +1821,27 @@ class BossCombatMixin:
                 name_by_id.get(gear_id, "a piece of gear")
                 for gear_id in stale_broken_ids
             ]
+            # Forfeit the abandoned stake. The wager is only settled when a
+            # duel resolves, so discarding the row used to forgive it outright:
+            # a player could wager, receive a mid-fight prompt, let the view die
+            # (a bot restart kills it — the 120s auto-pick is process-local),
+            # and restart the fight for free with the stake never at risk.
+            stale_wager = int(stale.get("wager") or 0)
+            if stale_wager > 0:
+                forfeit = -self._clamp_loss_debit(
+                    discord_id, guild_id, -stale_wager,
+                )
+                self.dig_repo.atomic_tunnel_balance_update(
+                    discord_id, guild_id,
+                    balance_delta=-forfeit,
+                    log_detail={
+                        "boundary": at_boss,
+                        "abandoned_duel": True,
+                        "wager_forfeit": forfeit,
+                        "boss_id": stale.get("boss_id"),
+                    },
+                    log_action_type="boss_duel_abandoned",
+                )
             self.dig_repo.clear_active_duel(discord_id, guild_id)
 
         # Pinnacle uses its own resolver — no mid-fight prompts (yet).
@@ -3338,6 +3359,15 @@ class BossCombatMixin:
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
 
+        # Claim the exact state this retreat is resolving. Without it two
+        # racing Retreat clicks both read the same depth and carried wager and
+        # each applied the block loss and the forfeit debit — the buttons are
+        # only disabled client-side. Mirrors the win/loss paths' guard.
+        retreat_guard = {
+            "depth": tunnel.get("depth"),
+            "boss_progress": tunnel.get("boss_progress"),
+        }
+
         loss = random.randint(RETREAT_BLOCK_LOSS_MIN, RETREAT_BLOCK_LOSS_MAX)
         new_depth = max(0, depth - loss)
 
@@ -3369,19 +3399,23 @@ class BossCombatMixin:
         # without the atomic helper a crash between the boss_progress wipe
         # and the JC debit would let the player keep both phase-1 progress
         # and the full carried wager.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-carried_forfeit if carried_forfeit > 0 else 0,
-            tunnel_updates={
-                "depth": new_depth,
-                "boss_progress": json.dumps(boss_progress),
-            },
-            log_detail={
-                "boundary": at_boss, "loss": loss,
-                "carried_wager_forfeit": carried_forfeit,
-            },
-            log_action_type="boss_retreat",
-        )
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=-carried_forfeit if carried_forfeit > 0 else 0,
+                tunnel_updates={
+                    "depth": new_depth,
+                    "boss_progress": json.dumps(boss_progress),
+                },
+                require_tunnel_state=retreat_guard,
+                log_detail={
+                    "boundary": at_boss, "loss": loss,
+                    "carried_wager_forfeit": carried_forfeit,
+                },
+                log_action_type="boss_retreat",
+            )
+        except TunnelStateConflictError:
+            return self._boss_resolution_conflict_result(discord_id, guild_id)
 
         return self._ok(
             boundary=at_boss,

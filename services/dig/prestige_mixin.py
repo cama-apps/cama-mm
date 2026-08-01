@@ -131,7 +131,9 @@ class PrestigeMixin:
         # Prepare mutation choices if P8+
         mutation_info = None
         if can and (prestige_level + 1) >= 8:
-            forced, choices = self._roll_mutations_for_prestige()
+            forced, choices = self._roll_mutations_for_prestige(
+                self._prestige_mutation_seed(discord_id, guild_id, prestige_level + 1),
+            )
             mutation_info = {"forced": forced, "choices": choices}
 
         return self._ok(
@@ -142,6 +144,11 @@ class PrestigeMixin:
             run_score=run_score,
             mutation_info=mutation_info,
         )
+
+    @staticmethod
+    def _prestige_mutation_seed(discord_id: int, guild_id, target_level: int) -> str:
+        """Stable seed for one prestige attempt's mutation roll."""
+        return f"prestige-mutations:{guild_id}:{discord_id}:{target_level}"
 
     def prestige(self, discord_id: int, guild_id, perk_choice: str,
                   mutation_choice: str | None = None) -> dict:
@@ -181,7 +188,11 @@ class PrestigeMixin:
         mutations_json = None
         mutation_info = None
         if prestige_level >= 8:
-            forced, choices = self._roll_mutations_for_prestige()
+            # Same seed the confirmation embed used, so the player gets the
+            # mutation they were actually shown.
+            forced, choices = self._roll_mutations_for_prestige(
+                self._prestige_mutation_seed(discord_id, guild_id, prestige_level),
+            )
             active_mutations = [forced]
             if mutation_choice and MUTATION_BY_ID.get(mutation_choice):
                 chosen = {"id": mutation_choice,
