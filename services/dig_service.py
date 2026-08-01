@@ -390,57 +390,51 @@ class DigService(
 
     def _grant_dig_item_charges(
         self, discord_id: int, guild_id, tunnel: dict, now: int, item_flags: dict,
+        tunnel_updates: dict,
     ) -> None:
         """Apply the charge-granting consumables resolved for this dig.
 
-        Each grants its effect to both the DB row and the in-memory ``tunnel``
-        dict (so the rest of the dig sees it): hard hat (+3 cave-in-prevention
-        charges), grappling hook (+5 cushion charges), sonar pulse (primes the
-        skip flag for the NEXT dig), reinforcement (48h window), void bait
-        (+3 double-event digs). Side effects only.
+        Each grants its effect to the in-memory ``tunnel`` dict (so the rest of
+        the dig sees it) and stages the column write in ``tunnel_updates``:
+        hard hat (+3 cave-in-prevention charges), grappling hook (+5 cushion
+        charges), sonar pulse (primes the skip flag for the NEXT dig),
+        reinforcement (48h window), void bait (+3 double-event digs).
+
+        Staged rather than written immediately: the queued inventory rows that
+        pay for these are only deleted in the dig's final atomic commit, so a
+        standalone write here survived a later failure (a tunnel-state or
+        pet-work conflict, or insufficient funds) that rolled the deletion back
+        — leaving the player holding both the item and its effect, repeatably.
         """
         # Hard hat: grant 3 charges of full cave-in prevention
         if item_flags["has_hard_hat"]:
             existing_charges = tunnel.get("hard_hat_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                hard_hat_charges=existing_charges + 3,
-            )
+            tunnel_updates["hard_hat_charges"] = existing_charges + 3
             tunnel["hard_hat_charges"] = existing_charges + 3
 
         # Grappling Hook: grant 5 charges that cushion the next cave-ins
         # (zero block_loss + no stun). Stacks across purchases.
         if item_flags["has_grappling_hook"]:
             existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                grappling_hook_charges=existing_gh + 5,
-            )
+            tunnel_updates["grappling_hook_charges"] = existing_gh + 5
             tunnel["grappling_hook_charges"] = existing_gh + 5
 
         # Sonar Pulse: prime the skip flag — it fires on the NEXT dig, not
         # this one (the dig where the item is consumed just sets the flag).
         if item_flags["has_sonar_pulse"]:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, sonar_skip_pending=1,
-            )
+            tunnel_updates["sonar_skip_pending"] = 1
             tunnel["sonar_skip_pending"] = 1
 
         # Reinforcement: 48h window — half sabotage damage + cave-in block_loss cap
         if item_flags["has_reinforcement"]:
             reinforced_until_ts = now + 48 * 3600
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                reinforced_until=reinforced_until_ts,
-            )
+            tunnel_updates["reinforced_until"] = reinforced_until_ts
+            tunnel["reinforced_until"] = reinforced_until_ts
 
         # Void Bait: double event chance for next 3 digs
         if item_flags["has_void_bait"]:
             existing_vb = tunnel.get("void_bait_digs", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                void_bait_digs=existing_vb + 3,
-            )
+            tunnel_updates["void_bait_digs"] = existing_vb + 3
             tunnel["void_bait_digs"] = existing_vb + 3
 
     def _charge_paid_dig_or_block(
@@ -661,7 +655,9 @@ class DigService(
         # tunnel before we touch it.
         sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
 
-        self._grant_dig_item_charges(discord_id, guild_id, tunnel, now, _item_flags)
+        self._grant_dig_item_charges(
+            discord_id, guild_id, tunnel, now, _item_flags, deferred_tunnel_updates,
+        )
 
         # 7. Get layer info
         layer = self._get_layer(depth_before)
@@ -873,16 +869,15 @@ class DigService(
 
         # Hard hat charges prevent cave-in entirely. Each absorb drains
         # 10 luminosity — the helmet keeps you safe, but the cavern remembers.
-        # Single atomic update so a crash can't decrement the charge without
-        # also paying the luminosity cost.
+        # Staged into the dig's single commit (not written here) so the charge
+        # spend, the luminosity cost, and the queued-item burn that granted the
+        # charges all commit or roll back together.
         if hard_hat_charges > 0:
             cave_in = False
             luminosity = max(0, luminosity - 10)
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                hard_hat_charges=hard_hat_charges - 1,
-                luminosity=luminosity,
-            )
+            deferred_tunnel_updates["hard_hat_charges"] = hard_hat_charges - 1
+            deferred_tunnel_updates["luminosity"] = luminosity
+            tunnel["hard_hat_charges"] = hard_hat_charges - 1
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] = lum_info.get("drained", 0) + 10
         else:
@@ -1278,7 +1273,7 @@ class DigService(
         jc_earned += milestone_bonus
 
         # 15. Update streak
-        streak, streak_charm_used = self._calculate_daily_streak(
+        streak, streak_charm_used, streak_charm_row_id = self._calculate_daily_streak(
             discord_id, guild_id, tunnel, today
         )
 
@@ -1459,13 +1454,20 @@ class DigService(
             final_tunnel_updates["relic_trim_notice"] = 0
         if void_bait_charge_used:
             final_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
-        if sonar_skip_consumed:
+        if sonar_skip_consumed and not _item_flags["has_sonar_pulse"]:
             # Clear only when we actually skipped an event this dig. The
             # priming dig sets the flag without clearing, and a primed flag
             # waits across event-less digs until something to skip shows up.
+            #
+            # Not when a Sonar Pulse was also queued this dig: that pulse just
+            # primed the flag for the NEXT dig, and clearing here consumed two
+            # charges to deliver one skip.
             final_tunnel_updates["sonar_skip_pending"] = 0
 
         pet_work_claim, pet_name = self._claim_pet_work(pet_work, pet_dig_bonus)
+        if streak_charm_row_id is not None:
+            # Burn the charm in the same txn as the streak it bought.
+            consumed_item_row_ids = [*consumed_item_row_ids, streak_charm_row_id]
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
@@ -1666,7 +1668,12 @@ class DigService(
         # Sonar Pulse flag persists across digs — snapshot pre-grant.
         sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
 
-        self._grant_dig_item_charges(discord_id, guild_id, tunnel, now, _item_flags)
+        # Staged, not written: apply_dig_outcome folds these into the same
+        # atomic commit that deletes the queued item rows paying for them.
+        charge_tunnel_updates: dict = {}
+        self._grant_dig_item_charges(
+            discord_id, guild_id, tunnel, now, _item_flags, charge_tunnel_updates,
+        )
 
         # Layer, luminosity, weather, buffs
         layer = self._get_layer(depth_before)
@@ -2084,6 +2091,7 @@ class DigService(
             "sabotage_sympathy": sabotage_sympathy,
             "help_event_bonus": help_event_bonus,
             "overgrowth_active": overgrowth_active,
+            "charge_tunnel_updates": charge_tunnel_updates,
         }
         return None, preconditions
 
