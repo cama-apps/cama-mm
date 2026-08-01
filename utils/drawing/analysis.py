@@ -19,7 +19,7 @@ from utils.drawing._common import (
     _get_text_size,
     _heatmap_contest_rate,
     _heatmap_winrate,
-    get_pyplot,
+    new_figure,
 )
 from utils.drawing.heroes import _get_hero_images_batch
 
@@ -35,11 +35,10 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
     Returns:
         BytesIO containing the PNG image
     """
-    plt = get_pyplot()
 
     if len(match_data) < window:
         # Return error image
-        fig, ax = plt.subplots(figsize=(8, 4), facecolor=DISCORD_BG)
+        fig, ax = new_figure(figsize=(8, 4), facecolor=DISCORD_BG)
         ax.set_facecolor(DISCORD_DARKER)
         ax.text(0.5, 0.5, f"Need at least {window} matches for trend analysis",
                 ha="center", va="center", color="white", fontsize=14)
@@ -47,11 +46,10 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
         ax.set_yticks([])
         fp = BytesIO()
         fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-        plt.close(fig)
         fp.seek(0)
         return fp
 
-    fig, ax = plt.subplots(figsize=(8, 4), facecolor=DISCORD_BG)
+    fig, ax = new_figure(figsize=(8, 4), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
 
     # Calculate rolling accuracy
@@ -89,11 +87,10 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
               labelcolor="white", fontsize=9)
     ax.grid(True, alpha=0.2, color=DISCORD_GREY)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     fp = BytesIO()
     fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-    plt.close(fig)
     fp.seek(0)
     return fp
 
@@ -118,10 +115,10 @@ def draw_advantage_graph(
     if not gold_adv and not xp_adv:
         return None
 
-    plt = get_pyplot()
     import numpy as np
+    from matplotlib.ticker import FuncFormatter
 
-    fig, ax = plt.subplots(figsize=(8, 3.5), facecolor=DISCORD_BG)
+    fig, ax = new_figure(figsize=(8, 3.5), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
 
     has_legend = False
@@ -152,7 +149,7 @@ def draw_advantage_graph(
             fontsize=9, va="bottom", ha="left", alpha=0.7)
 
     # Format y-axis with "k" suffix
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(
+    ax.yaxis.set_major_formatter(FuncFormatter(
         lambda v, _: f"{v / 1000:.0f}k" if abs(v) >= 1000 else f"{v:.0f}"
     ))
 
@@ -172,11 +169,10 @@ def draw_advantage_graph(
         ax.legend(loc="upper right", facecolor=DISCORD_DARKER, edgecolor="#4F545C",
                   labelcolor="white", fontsize=9)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     fp = BytesIO()
     fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-    plt.close(fig)
     fp.seek(0)
     return fp
 

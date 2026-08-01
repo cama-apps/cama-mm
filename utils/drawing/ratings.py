@@ -17,7 +17,7 @@ from utils.drawing._common import (
     DISCORD_YELLOW,
     _get_font,
     _get_text_size,
-    get_pyplot,
+    new_figure,
 )
 
 
@@ -250,20 +250,18 @@ def draw_rating_distribution(
     Returns:
         BytesIO containing the PNG image
     """
-    plt = get_pyplot()
     import numpy as np
     from scipy import stats
 
     if not ratings:
         # Return empty image if no data
-        fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
+        fig, ax = new_figure(figsize=(6.5, 4), facecolor="#36393F")
         ax.set_facecolor("#2F3136")
         ax.text(0.5, 0.5, "No rating data", ha="center", va="center", color="white", fontsize=14)
         ax.set_xticks([])
         ax.set_yticks([])
         fp = BytesIO()
         fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor="#36393F")
-        plt.close(fig)
         fp.seek(0)
         return fp
 
@@ -286,7 +284,7 @@ def draw_rating_distribution(
         _shapiro_stat, shapiro_p = None, None
 
     # Create figure with Discord-like dark theme
-    fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
+    fig, ax = new_figure(figsize=(6.5, 4), facecolor="#36393F")
     ax.set_facecolor("#2F3136")
 
     # Plot histogram with more granular bins (100-point bins)
@@ -359,12 +357,11 @@ def draw_rating_distribution(
         bbox={"boxstyle": "round,pad=0.3", "facecolor": "#2F3136", "edgecolor": "#4F545C", "alpha": 0.9},
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # Save to BytesIO
     fp = BytesIO()
     fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor="#36393F")
-    plt.close(fig)
     fp.seek(0)
     return fp
 
@@ -385,9 +382,8 @@ def draw_calibration_curve(
     Returns:
         BytesIO containing the PNG image
     """
-    plt = get_pyplot()
 
-    fig, ax = plt.subplots(figsize=(6.5, 5), facecolor=DISCORD_BG)
+    fig, ax = new_figure(figsize=(6.5, 5), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
 
     # Perfect calibration line
@@ -434,11 +430,10 @@ def draw_calibration_curve(
     # Add grid for easier reading
     ax.grid(True, alpha=0.2, color=DISCORD_GREY)
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     fp = BytesIO()
     fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-    plt.close(fig)
     fp.seek(0)
     return fp
 
@@ -453,11 +448,10 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
     Returns:
         BytesIO containing the PNG image
     """
-    plt = get_pyplot()
 
     if "error" in comparison_data:
         # Return error image
-        fig, ax = plt.subplots(figsize=(6.5, 4), facecolor=DISCORD_BG)
+        fig, ax = new_figure(figsize=(6.5, 4), facecolor=DISCORD_BG)
         ax.set_facecolor(DISCORD_DARKER)
         ax.text(0.5, 0.5, comparison_data["error"], ha="center", va="center",
                 color="white", fontsize=14)
@@ -465,14 +459,13 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
         ax.set_yticks([])
         fp = BytesIO()
         fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-        plt.close(fig)
         fp.seek(0)
         return fp
 
     glicko = comparison_data["glicko"]
     openskill = comparison_data["openskill"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(10, 4), facecolor=DISCORD_BG)
+    fig, axes = new_figure(figsize=(10, 4), facecolor=DISCORD_BG, nrows=1, ncols=3)
 
     metrics = [
         ("Brier Score\n(Lower = Better)", "brier_score", True),
@@ -524,10 +517,9 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
         color="white", fontsize=12, fontweight="bold", y=1.02,
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     fp = BytesIO()
     fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
-    plt.close(fig)
     fp.seek(0)
     return fp
