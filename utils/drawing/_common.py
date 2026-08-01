@@ -228,6 +228,9 @@ def get_pyplot():
     The bot renders charts to PNG bytes only; without pinning the backend,
     matplotlib may pick an interactive one (e.g. TkAgg) and crash on hosts
     without a display or Tk installed.
+
+    Prefer :func:`new_figure` for anything that produces a chart — pyplot keeps
+    every figure it creates in a process-global registry.
     """
     import matplotlib
 
@@ -235,3 +238,29 @@ def get_pyplot():
     import matplotlib.pyplot as plt
 
     return plt
+
+
+def new_figure(*, figsize, facecolor, nrows=1, ncols=1):
+    """Return ``(figure, axes)`` for a chart, detached from pyplot.
+
+    ``plt.subplots`` registers the figure in pyplot's process-global Gcf, so it
+    lives until an explicit ``plt.close``. Every chart here closed only on its
+    success path, so any exception in between — a singular KDE covariance, a
+    failed savefig — retained the figure forever in this long-lived process.
+
+    A bare ``Figure`` is never registered: it is reclaimed by refcounting, so
+    no close is needed and no failure path can leak. It also keeps chart
+    rendering off pyplot's global state, which matters because these run in
+    executor threads via ``asyncio.to_thread``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+
+    figure = Figure(figsize=figsize, facecolor=facecolor)
+    # Attach the Agg canvas explicitly so savefig never has to guess.
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    FigureCanvasAgg(figure)
+    return figure, figure.subplots(nrows, ncols)

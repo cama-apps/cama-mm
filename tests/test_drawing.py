@@ -500,3 +500,47 @@ class TestDrawGambaChart:
         assert isinstance(result, BytesIO)
         img = Image.open(result)
         assert img.format == "PNG"
+
+
+class TestChartsDoNotLeakFigures:
+    """Charts must not retain figures in pyplot's process-global registry.
+
+    Every chart created its figure with plt.subplots and closed it only on the
+    success path, so any exception in between retained it forever in this
+    long-lived process. draw_rating_distribution reaches a singular KDE
+    covariance whenever a guild's rated players all sit on the same seeded
+    rating, which raises before the close.
+    """
+
+    @staticmethod
+    def _fignums():
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        return plt.get_fignums()
+
+    def test_successful_render_registers_no_figure(self):
+        from utils.drawing.ratings import draw_rating_distribution
+
+        before = len(self._fignums())
+        out = draw_rating_distribution([1400, 1500, 1520, 1600, 1700, 1450])
+        assert out is not None and out.getvalue()
+        assert len(self._fignums()) == before
+
+    def test_failed_render_registers_no_figure(self):
+        from numpy.linalg import LinAlgError
+
+        from utils.drawing.ratings import draw_rating_distribution
+
+        before = len(self._fignums())
+        failures = 0
+        for _ in range(3):
+            # Identical ratings -> singular covariance in the KDE.
+            try:
+                draw_rating_distribution([1500] * 8)
+            except LinAlgError:
+                failures += 1
+        assert failures == 3, "expected the singular-covariance failure path"
+        assert len(self._fignums()) == before, (
+            "a failed chart render leaked a figure into pyplot's registry"
+        )
