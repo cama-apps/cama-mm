@@ -5,7 +5,6 @@ Handles team value calculations and balance scoring.
 """
 
 from domain.models.team import Team
-from domain.services.role_assignment_service import RoleAssignmentService
 
 
 class TeamBalancingService:
@@ -38,7 +37,6 @@ class TeamBalancingService:
         self.off_role_multiplier = off_role_multiplier
         self.off_role_flat_penalty = off_role_flat_penalty
         self.role_matchup_delta_weight = role_matchup_delta_weight
-        self.role_service = RoleAssignmentService()
 
     def calculate_team_value(self, team: Team) -> float:
         """

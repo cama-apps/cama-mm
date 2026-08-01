@@ -11,8 +11,6 @@ from domain.models.duel import (
 )
 from domain.pet_evolution import PetActivity
 
-MIN_WAGER = 500
-MAX_WAGER = 1000
 RESPONSE_SECONDS = 7 * 86400
 CHALLENGER_COOLDOWN_SECONDS = 30 * 86400
 RECIPIENT_COOLDOWN_SECONDS = 7 * 86400

@@ -47,15 +47,6 @@ ROLE_ORDER = [
     "Jungler",    # Near top-left
 ]
 
-# Colors per draft position for the scout report heatmap.
-POSITION_COLORS = {
-    1: "#FF9800",  # Orange - Carry
-    2: "#9C27B0",  # Purple - Mid
-    3: "#4CAF50",  # Green - Offlane
-    4: "#00BCD4",  # Cyan - Soft Support
-    5: "#2196F3",  # Blue - Hard Support
-}
-
 
 # ─── Font + size helpers ───────────────────────────────────────────────────
 

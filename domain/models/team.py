@@ -184,18 +184,6 @@ class Team:
 
         return roles
 
-    def get_role_distribution_summary(self) -> dict[str, int]:
-        """
-        Get simplified role distribution (cores vs supports).
-
-        Returns:
-            Dictionary with core/support/unknown counts
-        """
-        distribution = self.get_role_distribution()
-        cores = distribution["1"] + distribution["2"] + distribution["3"]
-        supports = distribution["4"] + distribution["5"]
-        return {"cores": cores, "supports": supports, "unknown": distribution["unknown"]}
-
     def get_player_by_role(
         self,
         role: str,

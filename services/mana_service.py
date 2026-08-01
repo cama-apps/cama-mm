@@ -142,26 +142,6 @@ class ManaService:
         """
         return self.mana_repo.is_mana_consumed(discord_id, guild_id)
 
-    def assign_all_daily_mana(
-        self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None
-    ) -> list[dict]:
-        """Assign today's mana to every registered player who hasn't been assigned yet.
-
-        Args:
-            guild_id: Guild to process.
-            ash_fan_ids: Discord IDs that have an "ash" role (checked by the command layer).
-
-        Returns:
-            One :meth:`assign_daily_mana` result dict (plus ``discord_id``) per
-            player who was freshly assigned by this call, so the command layer
-            can run once-per-claim side effects (e.g. the White stipend)
-            exactly as the self-claim path does.
-        """
-        new_assignments, _ = self.assign_all_daily_mana_with_board(
-            guild_id, ash_fan_ids=ash_fan_ids
-        )
-        return new_assignments
-
     def assign_all_daily_mana_with_board(
         self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None
     ) -> tuple[list[dict], list[dict]]:

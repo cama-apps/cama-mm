@@ -280,10 +280,6 @@ SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 300)
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours
 WHEEL_LOSE_PENALTY_COOLDOWN = _parse_int("WHEEL_LOSE_PENALTY_COOLDOWN", 432000)  # 5 days for LOSE
-WHEEL_BANKRUPT_PENALTY = _parse_int("WHEEL_BANKRUPT_PENALTY", 100)
-WHEEL_MAX_REWARD = _parse_int("WHEEL_MAX_REWARD", 100)
-WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of spin frames
-WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
 WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -27.5)  # Target expected value per spin
 # Bankrupt wheel target EV: positive so the wheel pays out on average — easier
 # escape. Trimmed from +25 to +12 once the Mario Kart deflation trio landed; the
@@ -477,22 +473,6 @@ RECALIBRATION_INITIAL_VOLATILITY = _parse_float(
     "RECALIBRATION_INITIAL_VOLATILITY", 0.06
 )  # Volatility to reset to
 
-# Player Stake Pool configuration (draft mode auto-liquidity)
-PLAYER_STAKE_POOL_SIZE = _parse_int(
-    "PLAYER_STAKE_POOL_SIZE", 50
-)  # Total auto-liquidity pool (5 per drafted player)
-PLAYER_STAKE_PER_PLAYER = _parse_int(
-    "PLAYER_STAKE_PER_PLAYER", 5
-)  # Auto-liquidity per drafted player
-PLAYER_STAKE_ENABLED = _parse_bool("PLAYER_STAKE_ENABLED", True)  # Enable stake pool in draft mode
-STAKE_WIN_PROB_MIN = _parse_float("STAKE_WIN_PROB_MIN", 0.10)  # Clamp to prevent extreme odds
-STAKE_WIN_PROB_MAX = _parse_float("STAKE_WIN_PROB_MAX", 0.90)
-
-# Spectator Pool configuration
-SPECTATOR_POOL_PLAYER_CUT = _parse_float(
-    "SPECTATOR_POOL_PLAYER_CUT", 0.10
-)  # 10% to winning players
-
 # Match Enrichment configuration
 ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int(
     "ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200
@@ -505,12 +485,8 @@ ENRICHMENT_RETRY_DELAYS = _parse_int_list(
 )  # Exponential backoff delays (seconds)
 
 # Wrapped (monthly summary) configuration
-WRAPPED_ENABLED = _parse_bool("WRAPPED_ENABLED", True)
 WRAPPED_MIN_GAMES = _parse_int("WRAPPED_MIN_GAMES", 3)  # Min games to appear in wrapped
 WRAPPED_MIN_BETS = _parse_int("WRAPPED_MIN_BETS", 3)  # Min bets for betting awards
-WRAPPED_CHECK_INTERVAL_HOURS = _parse_int(
-    "WRAPPED_CHECK_INTERVAL_HOURS", 12
-)  # Hours between checks (12-24)
 
 # Prediction market (order-book mechanic) configuration
 PREDICTION_CONTRACT_VALUE = _parse_int(
@@ -602,7 +578,6 @@ WHITE_BANKRUPT_STIPEND = _parse_int("WHITE_BANKRUPT_STIPEND", 5)
 # Neon Degen Terminal Easter Egg configuration
 NEON_DEGEN_ENABLED = _parse_bool("NEON_DEGEN_ENABLED", True)
 NEON_LAYER1_CHANCE = _parse_float("NEON_LAYER1_CHANCE", 0.35)  # Subtle text triggers
-NEON_LAYER2_CHANCE = _parse_float("NEON_LAYER2_CHANCE", 0.70)  # Medium ASCII art triggers
 NEON_LLM_CHANCE = _parse_float("NEON_LLM_CHANCE", 0.60)  # Chance of LLM commentary on Layer 2+
 NEON_COOLDOWN_SECONDS = _parse_int("NEON_COOLDOWN_SECONDS", 60)  # Per-user cooldown
 NEON_MVP_CHANCE = _parse_float("NEON_MVP_CHANCE", 0.35)  # One roll per enriched match

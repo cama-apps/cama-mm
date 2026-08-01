@@ -103,10 +103,6 @@ class Pet:
     def from_row(cls, row: Mapping[str, Any]) -> Pet:
         return cls(**dict(row))
 
-    @property
-    def is_alive(self) -> bool:
-        return self.died_at is None
-
     def _decay_pct(self) -> int:
         return get_species(self.species).decay_pct
 

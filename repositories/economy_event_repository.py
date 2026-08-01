@@ -89,33 +89,6 @@ class EconomyEventRepository(BaseRepository):
             ).fetchone()
         return dict(row) if row else {}
 
-    def set_policy_mode(
-        self,
-        guild_id: int | None,
-        *,
-        mode: str,
-        target_annual_rate: float,
-        now: int | None = None,
-    ) -> None:
-        if mode not in {"recovery", "normal", "disabled"}:
-            raise ValueError(f"Invalid economy policy mode: {mode}")
-        gid = self.normalize_guild_id(guild_id)
-        now = int(now if now is not None else time.time())
-        with self.connection() as conn:
-            conn.execute(
-                """
-                UPDATE economy_policy_state
-                SET mode = ?, target_annual_rate = ?,
-                    recovery_started_at = CASE
-                        WHEN ? = 'recovery' THEN COALESCE(recovery_started_at, ?)
-                        ELSE recovery_started_at
-                    END,
-                    updated_at = ?
-                WHERE guild_id = ?
-                """,
-                (mode, float(target_annual_rate), mode, now, now, gid),
-            )
-
     def capture_balance_sheet(self, guild_id: int | None) -> dict[str, int | float]:
         """Return the reconciled stock used by the monetary controller."""
         gid = self.normalize_guild_id(guild_id)
@@ -484,36 +457,6 @@ class EconomyEventRepository(BaseRepository):
             "top_decile_share": sum(balances[-top_decile_count:]) / total,
             "gini": min(1.0, max(0.0, gini)),
         }
-
-    def forecast_daily_flow(
-        self, guild_id: int | None, *, lookback_days: int, now: int | None = None
-    ) -> int:
-        """Estimate unmanaged daily creation from attributed recent flows."""
-        gid = self.normalize_guild_id(guild_id)
-        now = int(now if now is not None else time.time())
-        cutoff = now - max(1, int(lookback_days)) * 86400
-        placeholders = ",".join("?" for _ in self._DIRECT_FLOW_SOURCES)
-        with self.connection() as conn:
-            ledger = conn.execute(
-                f"""
-                SELECT COALESCE(SUM(delta), 0) AS net
-                FROM economy_ledger_entries
-                WHERE guild_id = ? AND created_at >= ?
-                  AND source IN ({placeholders})
-                """,
-                (gid, cutoff, *self._DIRECT_FLOW_SOURCES),
-            ).fetchone()
-            prediction = conn.execute(
-                """
-                SELECT COALESCE(SUM(-lp_pnl), 0) AS net
-                FROM predictions
-                WHERE guild_id = ? AND status = 'resolved'
-                  AND resolved_at >= ?
-                """,
-                (gid, cutoff),
-            ).fetchone()
-        total = int(ledger["net"] or 0) + int(prediction["net"] or 0)
-        return int(round(total / max(1, int(lookback_days))))
 
     def get_surface_daily_volumes(
         self, guild_id: int | None, *, lookback_days: int, now: int | None = None
