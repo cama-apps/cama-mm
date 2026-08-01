@@ -1349,3 +1349,77 @@ class TestFlavorEvents:
 
         for event_name in expected_events:
             assert hasattr(FlavorEvent, event_name), f"Missing event: {event_name}"
+
+
+class TestSQLValidatorWildcardAndJoinBypasses:
+    """Regressions for validator holes that exposed PII through `/ask`."""
+
+    def test_rejects_wildcard_in_any_projection_position(self):
+        """`SELECT 1, *` is as wide as `SELECT *` and must be rejected too.
+
+        The old guard only matched a `*` adjacent to SELECT, so prefixing any
+        expression slipped a full wildcard past the column blocklist.
+        """
+        service = _validator_service()
+
+        for query in [
+            "SELECT 1, * FROM players",
+            "SELECT 1, p.* FROM players p",
+            "SELECT (SELECT 1), * FROM players",
+            "SELECT wins, * FROM players",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Wildcard must be rejected: {query}"
+            assert "select *" in error.lower()
+
+    def test_allows_star_that_is_not_a_wildcard_column(self):
+        """COUNT(*) and multiplication must stay legal."""
+        service = _validator_service()
+
+        for query in [
+            "SELECT COUNT(*) FROM players",
+            "SELECT wins * 2 FROM players",
+            "SELECT COUNT(*) AS c FROM players ORDER BY c LIMIT 5",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert is_valid, f"Should stay allowed: {query} ({error})"
+
+    def test_rejects_blocked_table_reached_through_a_comma_join(self):
+        """`FROM a, b` is a join; every item must face the table blocklist.
+
+        player_steam_ids has no guild_id, so the per-guild temp views never
+        shadow it — a comma join returned every guild's steam ids.
+        """
+        service = _validator_service()
+
+        for query in [
+            "SELECT wins FROM players, player_steam_ids",
+            "SELECT 1, * FROM players, player_steam_ids",
+            "SELECT wins FROM players, soft_avoids",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Comma join must not bypass the blocklist: {query}"
+            assert "not allowed" in error.lower()
+
+    def test_comma_outside_the_from_clause_is_not_read_as_a_table(self):
+        """Only FROM-clause commas are join items — GROUP BY/ORDER BY are not."""
+        service = _validator_service()
+
+        query = (
+            "SELECT wins, losses FROM players "
+            "WHERE wins > 3 GROUP BY wins, losses ORDER BY wins, losses LIMIT 5"
+        )
+        is_valid, error = service._validate_sql(query)
+        assert is_valid, f"Should stay allowed: {error}"
+
+    def test_rejects_pragma_table_valued_functions(self):
+        """pragma_table_info() reaches PRAGMA data without the PRAGMA keyword."""
+        service = _validator_service()
+
+        for query in [
+            "SELECT name FROM pragma_table_info('soft_avoids')",
+            "SELECT name FROM pragma_database_list",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"pragma_* must be rejected: {query}"
+            assert "not allowed" in error.lower()

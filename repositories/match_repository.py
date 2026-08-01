@@ -880,21 +880,28 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 results.append(payload)
             return results
 
-    def get_pending_match_by_id(self, pending_match_id: int) -> dict | None:
+    def get_pending_match_by_id(self, pending_match_id: int, guild_id: int | None) -> dict | None:
         """
-        Get a specific pending match by its ID.
+        Get a specific pending match by its ID, scoped to a guild.
+
+        ``guild_id`` is required: pending match ids are globally unique, so
+        looking one up without it lets a caller in one guild resolve another
+        guild's pending match (and bet against it).
 
         Args:
             pending_match_id: The pending match ID
+            guild_id: Guild the match must belong to
 
         Returns:
             The pending match payload with pending_match_id included, or None
         """
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT pending_match_id, guild_id, payload FROM pending_matches WHERE pending_match_id = ?",
-                (pending_match_id,),
+                "SELECT pending_match_id, guild_id, payload FROM pending_matches "
+                "WHERE pending_match_id = ? AND guild_id = ?",
+                (pending_match_id, normalized),
             )
             row = cursor.fetchone()
             if not row:
@@ -3649,6 +3656,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 )
 
             # 2. Apply new Glicko ratings.
+            #
+            # Only when this match is still the player's latest rated match.
+            # The recomputation upstream starts from this match's
+            # ``rating_before``, so writing it back for a player who has played
+            # since would rewind their live rating to this match's post-values
+            # and silently discard every later match's rating change. Unlike
+            # OpenSkill — which is repaired by the full replay that runs after
+            # the correction — Glicko has no replay, so a clobber here is
+            # unrecoverable. Same guard as ``apply_openskill_phase2_atomic``.
+            # The corrected match's rating_history row is still rewritten below,
+            # so the history stays accurate for the match that was corrected.
             if glicko_updates:
                 cursor.executemany(
                     """
@@ -3656,9 +3674,28 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM rating_history rh
+                          JOIN matches later
+                            ON later.match_id = rh.match_id
+                           AND later.guild_id = rh.guild_id
+                          JOIN matches target
+                            ON target.match_id = ?
+                           AND target.guild_id = players.guild_id
+                          WHERE rh.discord_id = players.discord_id
+                            AND rh.guild_id = players.guild_id
+                            AND (
+                                later.match_date > target.match_date
+                                OR (
+                                    later.match_date = target.match_date
+                                    AND later.match_id > target.match_id
+                                )
+                            )
+                      )
                     """,
                     [
-                        (rating, rd, vol, pid, normalized_guild)
+                        (rating, rd, vol, pid, normalized_guild, match_id)
                         for pid, rating, rd, vol in glicko_updates
                     ],
                 )

@@ -169,3 +169,18 @@ def test_update_pending_match_correct_guild_succeeds(match_repo):
     matches = match_repo.get_pending_matches(GUILD_A)
     assert len(matches) == 1
     assert matches[0].get("updated") is True
+
+
+def test_get_pending_match_by_id_guild_guard(match_repo):
+    """A pending match must not be readable from another guild by its id.
+
+    Pending match ids are globally unique, so an unscoped by-id lookup let a
+    user in guild B resolve (and bet against) guild A's pending match.
+    """
+    match_id = match_repo.save_pending_match(GUILD_A, {"original": True})
+
+    assert match_repo.get_pending_match_by_id(match_id, GUILD_B) is None
+
+    payload = match_repo.get_pending_match_by_id(match_id, GUILD_A)
+    assert payload is not None
+    assert payload.get("original") is True

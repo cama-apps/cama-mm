@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from commands.match import MatchCommands
+from domain.models.pending_match_state import PendingMatchState
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -92,5 +93,29 @@ async def test_shuffle_preconditions_reject_non_admin_outside_lobby(monkeypatch)
     assert result is None
     interaction.followup.send.assert_awaited_once_with(
         "❌ Only admins or players in the current lobby can shuffle.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shuffle_preconditions_reject_player_already_in_pending_match(monkeypatch):
+    """The pending-match branch reads a PendingMatchState, which has no .get()."""
+    lobby = _ready_lobby(players=range(1, 11))
+    cog = _make_cog(lobby, monkeypatch=monkeypatch)
+    cog.match_service.state_service.get_pending_match_for_player.return_value = (
+        PendingMatchState(
+            pending_match_id=77,
+            shuffle_message_jump_url="https://discord.com/channels/1/2/3",
+        )
+    )
+    interaction = _make_interaction(1)
+
+    result = await cog._validate_shuffle_preconditions(interaction, TEST_GUILD_ID)
+
+    assert result is None
+    interaction.followup.send.assert_awaited_once_with(
+        "❌ You're already in a pending match (Match #77)! "
+        "[View your match](https://discord.com/channels/1/2/3) "
+        "and use `/record` to complete it first.",
         ephemeral=True,
     )

@@ -454,8 +454,8 @@ class MatchCommands(commands.Cog):
             interaction.user.id,
         )
         if player_match:
-            pending_match_id = player_match.get("pending_match_id")
-            jump_url = player_match.get("shuffle_message_jump_url")
+            pending_match_id = player_match.pending_match_id
+            jump_url = player_match.shuffle_message_jump_url
             message_text = f"❌ You're already in a pending match (Match #{pending_match_id})!"
             if jump_url:
                 message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."

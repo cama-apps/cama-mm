@@ -242,7 +242,7 @@ def test_settlement_zeroes_persisted_seed_before_retry(services):
     betting_service.settle_bets(308, TEST_GUILD_ID, "radiant", pending_state=pending)
     assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 100
 
-    payload = match_repo.get_pending_match_by_id(pending.pending_match_id)
+    payload = match_repo.get_pending_match_by_id(pending.pending_match_id, TEST_GUILD_ID)
     reloaded = PendingMatchState.from_dict(payload)
     assert reloaded.bet_seed_reserved == 0
     assert reloaded.bet_seed_radiant == 0
@@ -372,7 +372,7 @@ def test_abort_refund_zeroes_persisted_seed_before_retry(services):
     assert refunded == 0
     assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 40
 
-    payload = match_repo.get_pending_match_by_id(pending.pending_match_id)
+    payload = match_repo.get_pending_match_by_id(pending.pending_match_id, TEST_GUILD_ID)
     reloaded = PendingMatchState.from_dict(payload)
     assert reloaded.bet_seed_reserved == 0
     assert reloaded.bet_seed_radiant == 0

@@ -958,3 +958,89 @@ def test_win_bonus_reversal_marks_rows_and_never_double_debits(correction_servic
             player_repo.get_balance(pid, TEST_GUILD_ID)
             == before[pid] - JOPACOIN_WIN_REWARD
         )
+
+
+class TestCorrectionDoesNotRewindLaterMatches:
+    """Correcting an older match must not clobber ratings earned since."""
+
+    def test_correcting_older_match_preserves_current_glicko(self, correction_services):
+        """A second match's rating gains survive a correction of the first match.
+
+        The correction recomputes Glicko from the corrected match's
+        ``rating_before``. Writing that back for a player who has played since
+        would rewind their live rating to match #1's post-values and discard
+        match #2 entirely — and unlike OpenSkill there is no Glicko replay to
+        repair it.
+        """
+        match_service = correction_services["match_service"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=7000)
+
+        # Match 1 — recorded with radiant winning (the result we later correct).
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending1 = match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        first = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        first_match_id = first["match_id"]
+
+        # Match 2 — played afterwards by the same roster.
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        ratings_after_two_matches = {
+            pid: player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
+            for pid in player_ids
+        }
+
+        # Correct match 1 — the stale one.
+        match_service.correct_match_result(
+            match_id=first_match_id,
+            new_winning_team="dire",
+            guild_id=TEST_GUILD_ID,
+            corrected_by=99999,
+        )
+
+        for pid in player_ids:
+            assert player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating == pytest.approx(
+                ratings_after_two_matches[pid]
+            ), (
+                f"Player {pid}'s live rating was rewound by correcting an older "
+                "match, discarding match 2's rating change"
+            )
+
+        # The corrected match's own history row must still reflect the new result.
+        history = correction_services["match_repo"].get_rating_history_for_match(first_match_id)
+        by_id = {row["discord_id"]: row for row in history}
+        for pid in pending1.dire_team_ids:
+            assert by_id[pid]["won"] == 1, "corrected history must show dire winning"
+
+    def test_correcting_latest_match_still_updates_glicko(self, correction_services):
+        """The guard must not block the normal case: correcting the last match."""
+        match_service = correction_services["match_service"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=7100)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        before = {
+            pid: player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
+            for pid in player_ids
+        }
+
+        match_service.correct_match_result(
+            match_id=result["match_id"],
+            new_winning_team="dire",
+            guild_id=TEST_GUILD_ID,
+            corrected_by=99999,
+        )
+
+        for pid in pending.radiant_team_ids:
+            assert player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating < before[pid], (
+                f"Player {pid} won then was corrected to a loss; rating must drop"
+            )

@@ -809,8 +809,8 @@ class IMatchRepository(ABC):
         ...
 
     @abstractmethod
-    def get_pending_match_by_id(self, pending_match_id: int) -> dict | None:
-        """Get a specific pending match by its ID."""
+    def get_pending_match_by_id(self, pending_match_id: int, guild_id: int | None) -> dict | None:
+        """Get a specific pending match by its ID, scoped to the given guild."""
         ...
 
     @abstractmethod
