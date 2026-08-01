@@ -56,12 +56,26 @@ class ReminderToggleView(discord.ui.View):
 
     def _make_callback(self, rtype: str):
         async def callback(interaction: discord.Interaction) -> None:
-            await asyncio.to_thread(
+            now_enabled = await asyncio.to_thread(
                 self.cog.reminder_service.toggle_preference,
                 self.discord_id,
                 self.guild_id,
                 rtype,
             )
+            if now_enabled:
+                # Arm the cooldown the user is already sitting in; otherwise the
+                # reminder only starts working after their next spin/dig/session.
+                try:
+                    await self.cog.reminder_service.arm_preference(
+                        self.cog.bot, self.discord_id, self.guild_id, rtype
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to arm %s reminder for discord_id=%d guild_id=%d",
+                        rtype,
+                        self.discord_id,
+                        self.guild_id,
+                    )
             prefs = await asyncio.to_thread(
                 self.cog.reminder_service.get_preferences,
                 self.discord_id,

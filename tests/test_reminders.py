@@ -861,3 +861,73 @@ class TestDigReminder:
         finally:
             reminder_service._cancel_task(2, TEST_GUILD_ID_2, "wheel")
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class TestArmPreferenceOnEnable:
+    """Enabling a reminder mid-cooldown must arm the reminder already owed."""
+
+    @pytest.mark.asyncio
+    async def test_arm_preference_schedules_pending_wheel_cooldown(
+        self, reminder_service, player_repo_mock, mock_bot
+    ):
+        """Turning Gamba on 3h into a 24h cooldown must schedule that DM.
+
+        Every schedule_* call site fires on an action (a spin), so enabling the
+        preference used to arm nothing — the user got no DM for the cooldown
+        they were already in.
+        """
+        from config import WHEEL_COOLDOWN_SECONDS
+
+        discord_id = 4242
+        spun_at = int(time.time()) - 3 * 3600
+        player_repo_mock.get_last_wheel_spin.return_value = spun_at
+
+        reminder_service.set_preference(discord_id, TEST_GUILD_ID, "wheel", True)
+        assert not reminder_service._tasks, "no task should exist before arming"
+
+        await reminder_service.arm_preference(mock_bot, discord_id, TEST_GUILD_ID, "wheel")
+
+        key = (discord_id, TEST_GUILD_ID, "wheel")
+        assert key in reminder_service._tasks, "enabling must arm the pending cooldown"
+
+        reminder_service._tasks[key].cancel()
+        assert WHEEL_COOLDOWN_SECONDS > 0
+
+    @pytest.mark.asyncio
+    async def test_arm_preference_is_a_noop_with_no_pending_cooldown(
+        self, reminder_service, player_repo_mock, mock_bot
+    ):
+        """A user who has never spun has nothing owed, so nothing is scheduled."""
+        discord_id = 4243
+        player_repo_mock.get_last_wheel_spin.return_value = None
+
+        reminder_service.set_preference(discord_id, TEST_GUILD_ID, "wheel", True)
+        await reminder_service.arm_preference(mock_bot, discord_id, TEST_GUILD_ID, "wheel")
+
+        assert (discord_id, TEST_GUILD_ID, "wheel") not in reminder_service._tasks
+
+    @pytest.mark.asyncio
+    async def test_arm_preference_ignores_elapsed_cooldown(
+        self, reminder_service, player_repo_mock, mock_bot
+    ):
+        """A cooldown that already expired needs no reminder."""
+        from config import WHEEL_COOLDOWN_SECONDS
+
+        discord_id = 4244
+        player_repo_mock.get_last_wheel_spin.return_value = (
+            int(time.time()) - WHEEL_COOLDOWN_SECONDS - 60
+        )
+
+        reminder_service.set_preference(discord_id, TEST_GUILD_ID, "wheel", True)
+        await reminder_service.arm_preference(mock_bot, discord_id, TEST_GUILD_ID, "wheel")
+
+        assert (discord_id, TEST_GUILD_ID, "wheel") not in reminder_service._tasks
+
+    @pytest.mark.asyncio
+    async def test_arm_preference_ignores_event_driven_types(
+        self, reminder_service, mock_bot
+    ):
+        """lobby/betting reminders are event-driven; nothing is owed on enable."""
+        for rtype in ("lobby", "betting"):
+            await reminder_service.arm_preference(mock_bot, 4245, TEST_GUILD_ID, rtype)
+        assert not reminder_service._tasks
