@@ -451,11 +451,13 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Clear any pending match if one was created from the draft
-        if self.match_service:
-            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
-            if pending_state and pending_state.is_draft:
-                await asyncio.to_thread(self.match_service.clear_last_shuffle, guild_id)
+        # Deliberately no pending-match cleanup here. A draft that is still
+        # active has not created a pending match yet (``_complete_draft``
+        # creates it and then always clears the draft state in its ``finally``),
+        # so any draft-created pending match found from here belongs to an
+        # *earlier* completed draft whose match is being played, with live bets.
+        # Clearing it stranded those bets — see the guild-wide clear in
+        # ``MatchStateService.clear_last_shuffle`` when no id is passed.
 
         # Clear the draft state and stop the old draft's live view so its
         # timeout cannot fire against a future draft.

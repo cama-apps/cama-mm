@@ -107,7 +107,7 @@ class MatchStateService:
                 if state:
                     return state
                 # Try to load from DB
-                row = self.match_repo.get_pending_match_by_id(pending_match_id)
+                row = self.match_repo.get_pending_match_by_id(pending_match_id, guild_id)
                 state = _row_to_state(row)
                 if state:
                     if normalized not in self._last_shuffle_by_guild:

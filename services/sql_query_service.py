@@ -123,6 +123,26 @@ DANGEROUS_KEYWORDS: set[str] = {
     "REINDEX",
 }
 
+# A projected column that is a wildcard: bare `*` or `alias.*`.
+_WILDCARD_COLUMN_RE = re.compile(r"(?:\w+\s*\.\s*)?\*")
+
+_WORD_RE = re.compile(r"\w+")
+
+# Keywords that end a FROM clause's comma-separated item list.
+_FROM_CLAUSE_TERMINATORS = frozenset(
+    {
+        "where", "group", "order", "having", "limit", "offset", "window",
+        "union", "intersect", "except",
+        "join", "inner", "left", "right", "full", "cross", "natural",
+        "on", "using",
+    }
+)
+
+# Table-name prefixes that are never queryable. `sqlite_*` exposes the schema
+# and `pragma_*` table-valued functions (e.g. pragma_table_info('x')) reach
+# PRAGMA data without ever using the PRAGMA keyword the blocklist matches.
+_FORBIDDEN_TABLE_PREFIXES = ("sqlite_", "pragma_")
+
 
 @dataclass
 class QueryResult:
@@ -523,10 +543,15 @@ class SQLQueryService:
         if len(statements) > 1:
             return False, "Multiple statements not allowed"
 
-        # 4. Reject SELECT * — wildcard bypasses the column blocklist and
-        # would expose PII columns like discord_id and steam_id.
-        # Matches `SELECT *` and `SELECT table.*` (including DISTINCT/ALL).
-        if re.search(r"\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?(?:\w+\s*\.\s*)?\*", masked_upper):
+        # 4. Reject a `*` result column — the wildcard bypasses the column
+        # blocklist and would expose PII columns like discord_id and steam_id.
+        # Checked per projected column rather than only next to SELECT, because
+        # `SELECT 1, * FROM players` is just as wide as `SELECT *`.
+        # `COUNT(*)` stays legal: _projection_lists keeps only depth-0 text, so
+        # a `*` inside a function call never reaches here. Arithmetic (`wins *
+        # 2`) stays legal because only a *whole* column of `*` or `alias.*` is
+        # a wildcard.
+        if self._has_wildcard_projection(masked.lower()):
             return False, "SELECT * is not allowed; list explicit columns"
 
         # 4b. Reject schema-qualified references (main./temp.). Guild isolation is
@@ -545,7 +570,10 @@ class SQLQueryService:
             return False, "Could not verify table guild scoping"
         tables = self._extract_tables(masked)
         for table in tables:
-            if table.lower() in blocked_tables_lower:
+            lowered_table = table.lower()
+            if lowered_table.startswith(_FORBIDDEN_TABLE_PREFIXES):
+                return False, f"Table not allowed: {table}"
+            if lowered_table in blocked_tables_lower:
                 return False, f"Table not allowed: {table}"
 
         # 6. Extract and check for blocked columns in every SELECT projection
@@ -663,29 +691,77 @@ class SQLQueryService:
             projections.append("".join(buf))
         return projections
 
+    @staticmethod
+    def _has_wildcard_projection(masked_lower: str) -> bool:
+        """True if any SELECT projects a bare ``*`` or ``alias.*`` column."""
+        for projection in SQLQueryService._projection_lists(masked_lower):
+            for column in projection.split(","):
+                if _WILDCARD_COLUMN_RE.fullmatch(column.strip()):
+                    return True
+        return False
+
+    @staticmethod
+    def _from_clause_tables(masked_lower: str) -> list[str]:
+        """Table names in every FROM clause, including comma (cross) joins.
+
+        ``FROM a, b`` is a join, so every item has to be validated — matching
+        only the first name let a comma join reach tables the blocklist exists
+        to keep out (e.g. the guild-less ``player_steam_ids``). The scan stops
+        at the keyword that ends the FROM clause so a comma in ``GROUP BY x, y``
+        is not mistaken for another table.
+        """
+        tables: list[str] = []
+        n = len(masked_lower)
+
+        for match in re.finditer(r"\bfrom\b", masked_lower):
+            depth = 0
+            index = item_start = match.end()
+            while index < n:
+                char = masked_lower[index]
+                if char == "(":
+                    depth += 1
+                    index += 1
+                    continue
+                if char == ")":
+                    if depth == 0:
+                        break  # closing paren of an enclosing subquery
+                    depth -= 1
+                    index += 1
+                    continue
+                if depth == 0:
+                    if char == ",":
+                        tables.append(masked_lower[item_start:index])
+                        index += 1
+                        item_start = index
+                        continue
+                    at_word_start = not (
+                        masked_lower[index - 1].isalnum() or masked_lower[index - 1] == "_"
+                    )
+                    if at_word_start:
+                        word = _WORD_RE.match(masked_lower, index)
+                        if word and word.group(0) in _FROM_CLAUSE_TERMINATORS:
+                            break
+                index += 1
+            tables.append(masked_lower[item_start:index])
+
+        names = []
+        for item in tables:
+            name = _WORD_RE.search(item)
+            if name:
+                names.append(name.group(0))
+        return names
+
     def _extract_tables(self, sql: str) -> list[str]:
         """
         Extract table names from SQL query.
 
-        Only extracts from FROM and JOIN clauses - table aliases in
-        column references (e.g., p.column) are not treated as tables.
+        Covers FROM clauses (including comma joins) and explicit JOINs. Table
+        aliases in column references (e.g., p.column) are not treated as tables.
         """
-        tables = []
-
-        # Pattern for FROM and JOIN clauses
-        # Handles: FROM table, FROM table AS alias, JOIN table, etc.
-        patterns = [
-            r"\bFROM\s+(\w+)",
-            r"\bJOIN\s+(\w+)",
-        ]
-
-        sql_upper = sql.upper()
-
-        for pattern in patterns:
-            matches = re.findall(pattern, sql_upper)
-            tables.extend(matches)
-
-        return list(set(tables))
+        lowered = sql.lower()
+        tables = self._from_clause_tables(lowered)
+        tables.extend(re.findall(r"\bjoin\s+(\w+)", lowered))
+        return list({table.upper() for table in tables})
 
     def _check_blocked_columns(self, masked_sql: str) -> list[str]:
         """
