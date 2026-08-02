@@ -1128,6 +1128,7 @@ class ProgressionMixin:
                             "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                             "protection_source": "ward",
                         },
+                        log_action_type="sabotage_ward_blocked",
                     )
                     return self._error(
                         "Your target is shielded by an active manashop ward — "
@@ -1167,7 +1168,7 @@ class ProgressionMixin:
                         insurance_applied=False,
                         damage_reduced=True,
                         absorbed_by_aegis=True,
-                        victim_tip=victim_block_tip,
+                        victim_tip=aegis_tip,
                     )
             except Exception:
                 logger.debug("PvP immunity / aegis check failed", exc_info=True)

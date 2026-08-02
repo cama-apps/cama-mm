@@ -1169,7 +1169,16 @@ class DigRepository(BaseRepository, IDigRepository):
                     actor_id=discord_id,
                     related_type=log_action_type,
                     related_id=self._ledger_related_id(log_detail),
-                    reason="paid dig cost",
+                    # "paid dig cost" only describes the dig's own charge. The
+                    # purchase paths route through balance_cost too, and used
+                    # to get their reason from _ledger_balance_reason via
+                    # balance_delta — keep that wording so their ledger entries
+                    # do not change meaning.
+                    reason=(
+                        "paid dig cost"
+                        if log_action_type == "dig"
+                        else self._ledger_balance_reason(log_action_type, -balance_cost)
+                    ),
                     metadata=log_detail,
                 )
                 try:

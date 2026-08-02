@@ -4710,3 +4710,28 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             row = cursor.fetchone()
             return row["match_count"] if row else 0
+
+    def get_win_bonus_credited_ids(self, match_id: int, guild_id: int | None) -> set[int]:
+        """Players whose win bonus for this match is already recorded as paid.
+
+        The economy ledger row is written by the balance trigger inside the
+        same transaction as the credit, so its presence is an atomic record
+        that the money moved. The match_participants.win_bonus_jc snapshot is
+        written in a *separate* transaction, so a crash in between left a paid
+        player looking unpaid and a retry paid them twice.
+        """
+        normalized = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT account_id
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND account_type = 'player'
+                  AND related_type = 'match_win_bonus'
+                  AND related_id = ?
+                  AND account_id IS NOT NULL
+                """,
+                (normalized, str(match_id)),
+            ).fetchall()
+        return {int(row["account_id"]) for row in rows}

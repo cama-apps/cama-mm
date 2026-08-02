@@ -100,30 +100,34 @@ class PetBrawlRepository(BaseRepository):
         finally:
             self._clear_economy_ledger_context(cursor)
 
-    @staticmethod
-    def _player_row_exists(cursor: sqlite3.Cursor, player_id: int, guild_id: int | None) -> bool:
+    def _player_row_exists(
+        self, cursor: sqlite3.Cursor, player_id: int, guild_id: int | None,
+    ) -> bool:
         return cursor.execute(
             "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
-            (player_id, guild_id),
+            (player_id, self.normalize_guild_id(guild_id)),
         ).fetchone() is not None
 
-    @staticmethod
-    def _forfeit_to_nonprofit(cursor: sqlite3.Cursor, guild_id: int | None, amount: int) -> None:
-        """Park coins that have no payee left, rather than destroying them."""
+    def _forfeit_to_nonprofit(
+        self, cursor: sqlite3.Cursor, guild_id: int | None, amount: int,
+    ) -> None:
+        """Park coins that have no payee left, rather than destroying them.
+
+        Same upsert every other nonprofit credit uses. The guild id must be
+        normalized: nonprofit_fund.guild_id is an INTEGER PRIMARY KEY, i.e. a
+        rowid alias, so a NULL would be silently auto-assigned a bogus id
+        instead of failing.
+        """
         cursor.execute(
             """
-            UPDATE nonprofit_fund
-            SET total_collected = total_collected + ?,
+            INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                total_collected = total_collected + excluded.total_collected,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE guild_id = ?
             """,
-            (amount, guild_id),
+            (self.normalize_guild_id(guild_id), amount),
         )
-        if cursor.rowcount == 0:
-            cursor.execute(
-                "INSERT INTO nonprofit_fund (guild_id, total_collected) VALUES (?, ?)",
-                (guild_id, amount),
-            )
 
     def _refund_escrow(
         self,

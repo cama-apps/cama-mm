@@ -49,4 +49,5 @@ class EconomyEventEffects:
             ),
         )
 
+
 NEUTRAL_ECONOMY_EFFECTS = EconomyEventEffects()

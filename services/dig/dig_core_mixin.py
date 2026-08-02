@@ -749,6 +749,11 @@ class DigCoreMixin:
         This is the fallback path when the DM is unavailable.  It mirrors
         steps 9-22 of the original ``dig()`` method.
         """
+        # Charge grants resolved by _compute_preconditions, plus every charge
+        # spend below. Staged rather than written immediately so they commit
+        # with the queued-item deletion that paid for them, and so a spend
+        # computed after a grant is not overwritten by that grant.
+        staged_tunnel_updates: dict = dict(p.get("charge_tunnel_updates") or {})
         discord_id = p["discord_id"]
         guild_id = p["guild_id"]
         now = p["now"]
@@ -763,11 +768,8 @@ class DigCoreMixin:
         if p["hard_hat_prevents"]:
             cave_in = False
             luminosity_after_hh = max(0, luminosity_after_hh - 10)
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                hard_hat_charges=p["hard_hat_charges"] - 1,
-                luminosity=luminosity_after_hh,
-            )
+            staged_tunnel_updates["hard_hat_charges"] = p["hard_hat_charges"] - 1
+            staged_tunnel_updates["luminosity"] = luminosity_after_hh
             p["lum_info"]["luminosity_after"] = luminosity_after_hh
             p["lum_info"]["drained"] = p["lum_info"].get("drained", 0) + 10
         else:
@@ -810,9 +812,8 @@ class DigCoreMixin:
             if grappling_hook_charges > 0:
                 block_loss = 0
                 grappling_absorbed = True
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    grappling_hook_charges=grappling_hook_charges - 1,
+                staged_tunnel_updates["grappling_hook_charges"] = (
+                    grappling_hook_charges - 1
                 )
             elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
@@ -827,6 +828,7 @@ class DigCoreMixin:
 
             tunnel_updates: dict = {
                 **paid_charge.tunnel_updates,
+                **staged_tunnel_updates,
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
@@ -1135,9 +1137,7 @@ class DigCoreMixin:
         void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
         void_bait_charge_used = void_bait_digs > 0
         if void_bait_charge_used:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
-            )
+            staged_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
         event = None
         sonar_skip_consumed = False
         sonar_skip_active_this_dig = bool(p.get("sonar_skip_active_this_dig"))
@@ -1186,9 +1186,7 @@ class DigCoreMixin:
         if sonar_skip_consumed and event_preview is None:
             event_preview = event_preview_skipped
         if sonar_skip_consumed:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, sonar_skip_pending=0,
-            )
+            staged_tunnel_updates["sonar_skip_pending"] = 0
 
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
@@ -1213,6 +1211,7 @@ class DigCoreMixin:
             vanity_tax=dig_vanity_tax,
             tunnel_updates={
                 **paid_charge.tunnel_updates,
+                **staged_tunnel_updates,
                 "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                 "max_depth": max(prev_max_depth, new_depth),
                 "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1295,6 +1294,9 @@ class DigCoreMixin:
         DB writes.  Returns the standard result dict for the embed builder.
         """
         p = preconditions
+        # See _execute_deterministic_outcome: grants plus spends, staged so the
+        # atomic commit carries the net value and the item burn rides with it.
+        staged_tunnel_updates: dict = dict(p.get("charge_tunnel_updates") or {})
         discord_id = p["discord_id"]
         guild_id = p["guild_id"]
         now = p["now"]
@@ -1310,11 +1312,8 @@ class DigCoreMixin:
         if p["hard_hat_prevents"]:
             cave_in = False
             luminosity_after_hh = max(0, int(p["luminosity"]) - 10)
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                hard_hat_charges=p["hard_hat_charges"] - 1,
-                luminosity=luminosity_after_hh,
-            )
+            staged_tunnel_updates["hard_hat_charges"] = p["hard_hat_charges"] - 1
+            staged_tunnel_updates["luminosity"] = luminosity_after_hh
             p["lum_info"]["luminosity_after"] = luminosity_after_hh
             p["lum_info"]["drained"] = p["lum_info"].get("drained", 0) + 10
 
@@ -1325,7 +1324,7 @@ class DigCoreMixin:
             # leave depth lost without the matching injury/balance change.
             cave_in_tunnel_updates: dict = {
                 **paid_charge.tunnel_updates,
-                **p.get("charge_tunnel_updates", {}),
+                **staged_tunnel_updates,
             }
             cave_in_balance_delta = 0
             # Enforce game-rule constraints
@@ -1597,9 +1596,7 @@ class DigCoreMixin:
             # Void bait decrement
             void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
             if void_bait_digs > 0:
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
-                )
+                staged_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
 
             # Lantern / Sonar preview + boss scout
             event_preview = None
@@ -1627,9 +1624,7 @@ class DigCoreMixin:
             if sonar_skip_consumed and event_preview is None:
                 event_preview = event_preview_skipped
             if sonar_skip_consumed:
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id, sonar_skip_pending=0,
-                )
+                staged_tunnel_updates["sonar_skip_pending"] = 0
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
@@ -1667,7 +1662,7 @@ class DigCoreMixin:
                 vanity_tax=dig_vanity_tax,
                 tunnel_updates={
                     **paid_charge.tunnel_updates,
-                    **p.get("charge_tunnel_updates", {}),
+                    **staged_tunnel_updates,
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                     "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,

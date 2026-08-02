@@ -389,13 +389,33 @@ class VotingCorrectionMixin:
 
             win_bonus_awarded: dict[int, int] = {}
             can_snapshot = hasattr(self.match_repo, "update_participant_bonus_jc")
+            # The win_bonus_jc snapshot below is written in its own transaction,
+            # so a crash between the credit and the snapshot left a paid player
+            # looking unpaid and a retry paid them twice. The economy ledger row
+            # is written by the balance trigger inside the credit's own
+            # transaction, so it cannot disagree with the money.
+            already_credited: set[int] = set()
+            if hasattr(self.match_repo, "get_win_bonus_credited_ids"):
+                already_credited = self.match_repo.get_win_bonus_credited_ids(
+                    match_id, guild_id,
+                )
             for pid in new_winner_ids:
                 stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
                 if stored is not None and int(stored) > 0:
                     # Already paid by an earlier, partially-failed run of this
                     # same correction.
                     continue
-                awards = self.betting_service.award_win_bonus([pid], guild_id)
+                if stored is None and pid in already_credited:
+                    # Paid by an earlier run whose snapshot never landed.
+                    #
+                    # Only when the snapshot is absent. A snapshot of 0 means a
+                    # reversal already took the bonus back, and the ledger still
+                    # holds that original credit — skipping on it would leave a
+                    # re-correction's winner permanently unpaid.
+                    continue
+                awards = self.betting_service.award_win_bonus(
+                    [pid], guild_id, match_id=match_id,
+                )
                 result = awards.get(pid, {})
                 delta = int(result.get("net", 0)) + int(result.get("garnished", 0))
                 win_bonus_awarded[pid] = delta

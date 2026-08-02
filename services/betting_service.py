@@ -396,7 +396,8 @@ class BettingService:
         return distributions
 
     def award_win_bonus(
-        self, winning_ids: list[int], guild_id: int | None = None
+        self, winning_ids: list[int], guild_id: int | None = None,
+        *, match_id: int | None = None,
     ) -> dict[int, dict[str, int]]:
         """
         Reward winners with additional jopacoins.
@@ -407,7 +408,23 @@ class BettingService:
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
-        results = self._award_with_penalties(winning_ids, JOPACOIN_WIN_REWARD, guild_id)
+        # Attribute the credit to its match. The ledger row lands in the same
+        # transaction as the balance change, so it is an atomic record that
+        # this player has already been paid for this match — which a retry of
+        # a partially-failed correction can check before paying again.
+        ledger = (
+            {
+                "source": "match_win_bonus",
+                "related_type": "match_win_bonus",
+                "related_id": match_id,
+                "reason": "match win bonus",
+            }
+            if match_id is not None
+            else None
+        )
+        results = self._award_with_penalties(
+            winning_ids, JOPACOIN_WIN_REWARD, guild_id, ledger=ledger,
+        )
 
         # Decrement after awarding so the final required win is still reduced.
         if self.bankruptcy_service and winning_ids:
@@ -546,7 +563,8 @@ class BettingService:
         return results
 
     def _award_with_penalties(
-        self, player_ids: list[int], reward_amount: int, guild_id: int | None = None
+        self, player_ids: list[int], reward_amount: int, guild_id: int | None = None,
+        *, ledger: dict | None = None,
     ) -> dict[int, dict[str, int]]:
         """
         Award jopacoins to players, applying garnishment then bankruptcy penalty.
@@ -608,6 +626,7 @@ class BettingService:
                 guild_id=guild_id,
                 bankruptcy_penalty_rates=bankruptcy_penalty_rates,
                 vanity_tax_rates=vanity_tax_rates,
+                **(ledger or {}),
             )
         else:
             award_results = self.player_repo.add_balances_with_garnishment(
@@ -622,6 +641,7 @@ class BettingService:
                 guild_id,
                 garnishment_rate=0.0,
                 vanity_tax_rates=vanity_tax_rates,
+                **(ledger or {}),
             )
 
         for pid, garn in zip(player_ids, award_results, strict=True):

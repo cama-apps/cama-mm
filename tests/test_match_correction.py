@@ -1044,3 +1044,72 @@ class TestCorrectionDoesNotRewindLaterMatches:
             assert player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating < before[pid], (
                 f"Player {pid} won then was corrected to a loss; rating must drop"
             )
+
+
+class TestWinBonusIsNotPaidTwiceOnRetry:
+    """A correction that dies between the credit and its snapshot must not repay.
+
+    award_win_bonus credits the balance, then update_participant_bonus_jc
+    records how much — in a separate transaction. A crash in between left the
+    player looking unpaid, so re-running the correction paid them again. The
+    economy ledger row is written by the balance trigger inside the credit's
+    own transaction, so it is the marker that cannot disagree with the money.
+    """
+
+    def test_ledger_marks_the_bonus_as_paid_within_the_credit_transaction(
+        self, correction_services,
+    ):
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        match_repo = correction_services["match_repo"]
+
+        pid = 8100
+        _create_players(player_repo, start_id=pid, count=1)
+
+        assert match_repo.get_win_bonus_credited_ids(4242, TEST_GUILD_ID) == set()
+
+        betting_service.award_win_bonus([pid], TEST_GUILD_ID, match_id=4242)
+
+        assert match_repo.get_win_bonus_credited_ids(4242, TEST_GUILD_ID) == {pid}, (
+            "the credit left no atomic record that it happened"
+        )
+        # Scoped to the match it was paid for.
+        assert match_repo.get_win_bonus_credited_ids(4243, TEST_GUILD_ID) == set()
+
+    def test_correction_retry_does_not_repay_a_credited_winner(
+        self, correction_services,
+    ):
+        """Simulate the crash: credit lands, snapshot never does."""
+        match_service = correction_services["match_service"]
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        match_repo = correction_services["match_repo"]
+
+        player_ids = _create_players(player_repo, start_id=8200)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        # A previous correction attempt paid this dire player, then died before
+        # writing the win_bonus_jc snapshot.
+        victim = pending.dire_team_ids[0]
+        betting_service.award_win_bonus([victim], TEST_GUILD_ID, match_id=match_id)
+        balance_after_first_payment = player_repo.get_balance(victim, TEST_GUILD_ID)
+        # The original recording already credited the radiant winners for this
+        # match, so the set holds them too; what matters is that our victim is
+        # now recorded as paid.
+        assert victim in match_repo.get_win_bonus_credited_ids(match_id, TEST_GUILD_ID)
+
+        # The admin re-runs the correction. The snapshot is still NULL.
+        match_service.correct_match_result(
+            match_id=match_id,
+            new_winning_team="dire",
+            guild_id=TEST_GUILD_ID,
+            corrected_by=99999,
+        )
+
+        assert player_repo.get_balance(victim, TEST_GUILD_ID) == balance_after_first_payment, (
+            "the win bonus was paid a second time on the correction retry"
+        )

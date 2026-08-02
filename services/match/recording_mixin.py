@@ -88,7 +88,9 @@ class RecordingMixin:
             if not bonuses_claimed:
                 return distributions
 
-            win_awards = self.betting_service.award_win_bonus(winning_ids, guild_id)
+            win_awards = self.betting_service.award_win_bonus(
+                winning_ids, guild_id, match_id=match_id,
+            )
             _accumulate(win_awards)
             if excluded_player_ids:
                 _accumulate(
