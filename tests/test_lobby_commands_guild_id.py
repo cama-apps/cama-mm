@@ -39,6 +39,7 @@ class FakeFollowup:
             "content": content,
             "ephemeral": ephemeral,
             "embed": embed,
+            "allowed_mentions": allowed_mentions,
         })
 
 
@@ -263,6 +264,76 @@ def make_services(player_repo=None):
 def monkeypatch_safe_defer(monkeypatch):
     """Mock safe_defer to return True."""
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+
+
+@pytest.mark.asyncio
+async def test_readycheck_command_mirrors_ping_to_invocation_channel(
+    monkeypatch_safe_defer,
+):
+    _, lobby_service, player_service, _ = make_services()
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(channel=interaction.channel), lobby_service, player_service)
+    cog._execute_readycheck = AsyncMock(
+        return_value=(
+            "ok",
+            {
+                "message_jump_url": "https://discord.com/channels/123/999/789",
+                "is_refresh": False,
+                "pruned_count": 0,
+                "mention_ids": [2, 3],
+                "readycheck_channel_id": 999,
+            },
+        )
+    )
+
+    await cog.readycheck.callback(cog, interaction)
+
+    assert len(interaction.followup.messages) == 1
+    followup = interaction.followup.messages[0]
+    assert followup["content"] == (
+        "⚔️ **Ready check!** <@2> <@3>\n"
+        "[React in the lobby thread](https://discord.com/channels/123/999/789)"
+    )
+    assert followup["ephemeral"] is False
+    assert followup["embed"] is None
+    allowed_users = followup["allowed_mentions"].users
+    assert [user.id for user in allowed_users] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_readycheck_command_does_not_duplicate_ping_in_lobby_thread(
+    monkeypatch_safe_defer,
+):
+    _, lobby_service, player_service, _ = make_services()
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel.id = 999
+    cog = LobbyCommands(FakeBot(channel=interaction.channel), lobby_service, player_service)
+    cog._execute_readycheck = AsyncMock(
+        return_value=(
+            "ok",
+            {
+                "message_jump_url": "https://discord.com/channels/123/999/789",
+                "is_refresh": True,
+                "pruned_count": 0,
+                "mention_ids": [2, 3],
+                "readycheck_channel_id": 999,
+            },
+        )
+    )
+
+    await cog.readycheck.callback(cog, interaction)
+
+    assert interaction.followup.messages == [
+        {
+            "content": (
+                "✅ Ready check refreshed! "
+                "[View](https://discord.com/channels/123/999/789)"
+            ),
+            "ephemeral": True,
+            "embed": None,
+            "allowed_mentions": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
