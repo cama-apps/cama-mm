@@ -143,6 +143,11 @@ class PinnacleMixin:
             "phase_total": 3,
             "carried_wager": carried[0] if carried else None,
             "luminosity_display": self._luminosity_combat_display(tunnel),
+            # Identifies THIS engagement. The secret-phase roll seeds on it so
+            # re-rendering the same encounter is stable while a new one rolls
+            # again — seeding on (player, boss, phase) alone turned a 10%
+            # per-encounter chance into a permanent per-player verdict.
+            "encounter_key": str(entry.get("last_engaged_at") or ""),
         }
 
     def _scout_pinnacle_boss(

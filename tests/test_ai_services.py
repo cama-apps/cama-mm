@@ -1423,3 +1423,68 @@ class TestSQLValidatorWildcardAndJoinBypasses:
             is_valid, error = service._validate_sql(query)
             assert not is_valid, f"pragma_* must be rejected: {query}"
             assert "not allowed" in error.lower()
+
+
+class TestSQLValidatorSetQuantifierAndJoinChains:
+    """Regressions from hardening the validator itself.
+
+    Rewriting the wildcard check per-projection closed `SELECT 1, *` but
+    dropped the DISTINCT/ALL handling the previous regex had. Parsing the FROM
+    clause for comma joins stopped at the first join keyword, so a comma join
+    written after an explicit JOIN skipped the table blocklist entirely.
+    """
+
+    def test_rejects_wildcard_behind_a_set_quantifier(self):
+        service = _validator_service()
+
+        for query in [
+            "SELECT DISTINCT * FROM players",
+            "SELECT ALL * FROM players",
+            "SELECT DISTINCT p.* FROM players p",
+            "SELECT ALL p.* FROM players p",
+            "SELECT DISTINCT*FROM players",
+            "SELECT   distinct   p . *   FROM players p",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"set quantifier hid a wildcard: {query}"
+            assert "select *" in error.lower()
+
+    def test_set_quantifier_on_real_columns_still_allowed(self):
+        service = _validator_service()
+
+        for query in [
+            "SELECT DISTINCT wins FROM players",
+            "SELECT DISTINCT wins, losses FROM players",
+            "SELECT ALL wins FROM players",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert is_valid, f"should stay allowed: {query} ({error})"
+
+    def test_rejects_comma_join_written_after_an_explicit_join(self):
+        """`FROM a JOIN b ON x, c` — SQLite treats the comma as a join too."""
+        service = _validator_service()
+
+        for query in [
+            "SELECT 1 FROM players p JOIN matches m ON 1=1, player_steam_ids s",
+            "SELECT 1 FROM players p LEFT JOIN matches m ON 1=1, player_steam_ids s",
+            "SELECT 1 FROM players p INNER JOIN matches m ON 1=1, player_steam_ids s",
+            "SELECT 1 FROM players p CROSS JOIN matches m, player_steam_ids s",
+            "SELECT 1 FROM players p JOIN matches m USING (x), player_steam_ids s",
+            "SELECT 1 FROM players p JOIN matches m ON 1=1, sqlite_master",
+            "SELECT t.name FROM players p JOIN players q ON 1=1, pragma_table_info('players') t",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"comma join after JOIN bypassed the blocklist: {query}"
+            assert "not allowed" in error.lower()
+
+    def test_join_chains_without_a_comma_join_still_allowed(self):
+        service = _validator_service()
+
+        query = (
+            "SELECT p.wins FROM players p "
+            "JOIN matches m ON m.match_id = p.wins "
+            "LEFT JOIN players q ON q.wins = p.wins "
+            "WHERE p.wins > 1 GROUP BY p.wins ORDER BY p.wins LIMIT 5"
+        )
+        is_valid, error = service._validate_sql(query)
+        assert is_valid, f"should stay allowed: {error}"

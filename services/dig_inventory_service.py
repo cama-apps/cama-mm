@@ -176,7 +176,9 @@ class DigInventoryService:
                 balance_cost=price,
                 add_inventory_item=item_type,
             )
-        except ValueError:
+        except ValueError as exc:
+            if str(exc) != "insufficient_funds":
+                raise
             return _error(f"Costs {price} JC but you no longer have it.")
         if auto_queue and item_id is not None:
             self.dig_repo.queue_item(item_id)
@@ -392,7 +394,9 @@ class DigInventoryService:
                     "trap_date": today,
                 },
             )
-        except ValueError:
+        except ValueError as exc:
+            if str(exc) != "insufficient_funds":
+                raise
             return _error(f"Trap costs {cost} JC but you no longer have it.")
 
         return _ok(cost=cost, message="Trap set!")
@@ -419,7 +423,9 @@ class DigInventoryService:
                 balance_cost=cost,
                 tunnel_updates={"insured_until": now + 86400},  # 24h
             )
-        except ValueError:
+        except ValueError as exc:
+            if str(exc) != "insufficient_funds":
+                raise
             return _error(f"Insurance costs {cost} JC but you no longer have it.")
 
         return _ok(cost=cost, expires_at=now + 86400)

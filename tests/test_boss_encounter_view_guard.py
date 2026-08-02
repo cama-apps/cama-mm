@@ -1149,3 +1149,57 @@ def test_pinnacle_secret_phase_is_stable_for_one_encounter(monkeypatch):
         for uid in range(40)
     }
     assert per_player == {True, False}, "the seed collapsed every player onto one outcome"
+
+    # And a NEW encounter for the SAME player must re-roll. Without an
+    # encounter component the seed turned a per-encounter chance into a
+    # permanent verdict: a given player would either always or never see it.
+    per_encounter = {
+        bv._resolve_boss_encounter_presentation(
+            boss_info, seed_key=f"4242:forgotten_king:3:{engaged_at}"
+        )[2]
+        for engaged_at in range(1_000_000, 1_000_060)
+    }
+    assert per_encounter == {True, False}, (
+        "the same player gets the same verdict on every encounter; the roll is "
+        "no longer per-encounter"
+    )
+
+
+def test_every_modal_rejection_path_releases_the_encounter_view():
+    """A rejected wager modal must hand the encounter buttons back.
+
+    The view is no longer stopped when the modal is sent, so any validation
+    return that forgets _release_parent leaves the visible Fight/Retreat
+    buttons dead and forces a fresh /dig go — the exact soft-lock this
+    replaced. One path (negative wager) originally missed it.
+    """
+    import ast
+    import inspect
+
+    import commands.dig_helpers.boss_views as bv
+
+    source = inspect.getsource(bv)
+    tree = ast.parse(source)
+    lines = source.split("\n")
+
+    offenders = []
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef) and "Modal" in n.name]:
+        for fn in [f for f in cls.body
+                   if isinstance(f, ast.AsyncFunctionDef) and f.name == "on_submit"]:
+            defer_line = next(
+                (n.lineno for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "safe_defer"),
+                None,
+            )
+            assert defer_line, f"{cls.name}.on_submit no longer defers; update this test"
+            for node in ast.walk(fn):
+                # Returns before the defer are rejections: nothing has been
+                # resolved yet, so the view must be handed back.
+                if isinstance(node, ast.Return) and node.lineno < defer_line:
+                    window = "\n".join(lines[max(0, node.lineno - 8):node.lineno])
+                    if "_release_parent" not in window:
+                        offenders.append(f"{cls.name}.on_submit return at line {node.lineno}")
+
+    assert not offenders, (
+        "modal rejection paths that strand the encounter view: " + ", ".join(offenders)
+    )

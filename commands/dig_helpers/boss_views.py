@@ -115,6 +115,12 @@ async def _send_boss_victory_neon(interaction, *, result, user_id, guild_id) -> 
         logger.debug("Boss victory neon failed", exc_info=True)
 
 
+# How long a wager modal may sit open before the encounter view is handed
+# back. Dismissing a modal is silent on Discord's side, so without this the
+# view would stay engaged until its own timeout.
+BOSS_MODAL_TIMEOUT_SECONDS = 600
+
+
 def _release_parent(modal) -> None:
     """Hand the encounter buttons back after a dismissed or rejected modal.
 
@@ -162,7 +168,10 @@ class BossWagerModal(discord.ui.Modal):
         on_boss_resolved: BossResolvedCallback | None = None,
         parent_view: discord.ui.View | None = None,
     ):
-        super().__init__(title="Boss Fight Wager")
+        # Bounded so on_timeout can actually fire: Discord sends no event
+        # when a modal is dismissed, so this is the only signal that
+        # releases the encounter view after an abandoned modal.
+        super().__init__(title="Boss Fight Wager", timeout=BOSS_MODAL_TIMEOUT_SECONDS)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
@@ -196,6 +205,7 @@ class BossWagerModal(discord.ui.Modal):
             await interaction.response.send_message(
                 "Wager must be non-negative.", ephemeral=True
             )
+            _release_parent(self)
             return
 
         _finish_parent(self)
@@ -423,7 +433,10 @@ class BossRiskModal(discord.ui.Modal):
         on_boss_resolved: BossResolvedCallback | None = None,
         parent_view: discord.ui.View | None = None,
     ):
-        super().__init__(title="Boss Phase Risk")
+        # Bounded so on_timeout can actually fire: Discord sends no event
+        # when a modal is dismissed, so this is the only signal that
+        # releases the encounter view after an abandoned modal.
+        super().__init__(title="Boss Phase Risk", timeout=BOSS_MODAL_TIMEOUT_SECONDS)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
@@ -572,7 +585,10 @@ async def _post_phase_transition_followup(
         _resolve_boss_encounter_presentation(
             next_info,
             phase=phase_number,
-            seed_key=f"{user_id}:{getattr(next_info, 'boss_id', '')}:{phase_number}",
+            seed_key=(
+                f"{user_id}:{getattr(next_info, 'boss_id', '')}:{phase_number}:"
+                f"{getattr(next_info, 'encounter_key', '')}"
+            ),
         )
     )
 
@@ -1098,7 +1114,6 @@ class BossDuelView(discord.ui.View):
         wager: int,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
-        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(timeout=120)
         self.dig_service = dig_service
@@ -1313,7 +1328,6 @@ class BossEncounterView(discord.ui.View):
         has_lantern: bool = False,
         dig_flavor_service=None,
         on_boss_resolved: BossResolvedCallback | None = None,
-        parent_view: discord.ui.View | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service

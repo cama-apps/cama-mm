@@ -162,28 +162,6 @@ class Team:
         optimal_assignments = self.get_all_optimal_role_assignments()
         return optimal_assignments[0]
 
-    def get_role_distribution(self) -> dict[str, int]:
-        """
-        Get role distribution based on primary preferred roles.
-
-        Returns:
-            Dictionary with role counts
-        """
-        roles = dict.fromkeys(self.ROLES, 0)
-        roles["unknown"] = 0
-
-        for player in self.players:
-            if player.preferred_roles and len(player.preferred_roles) > 0:
-                primary_role = player.preferred_roles[0]
-                if primary_role in roles:
-                    roles[primary_role] += 1
-                else:
-                    roles["unknown"] += 1
-            else:
-                roles["unknown"] += 1
-
-        return roles
-
     def get_player_by_role(
         self,
         role: str,
