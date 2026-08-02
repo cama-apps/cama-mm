@@ -91,8 +91,21 @@ class GarnishmentService:
         guild_id: int | None = None,
         bankruptcy_penalty_rates: dict[int, float] | None = None,
         vanity_tax_rates: dict[int, float] | None = None,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> list[dict[str, int]]:
-        """Add the same income to multiple players in one transaction."""
+        """Add the same income to multiple players in one transaction.
+
+        The ledger attribution is forwarded so a caller can identify these
+        credits later. The ledger row is written by the balance trigger inside
+        the same transaction as the credit, which makes it a reliable
+        "already paid" marker for retryable flows.
+        """
         penalty_rates = bankruptcy_penalty_rates or {}
         return self.player_repo.add_balances_with_garnishment(
             [
@@ -102,4 +115,10 @@ class GarnishmentService:
             guild_id,
             self.garnishment_rate,
             vanity_tax_rates=vanity_tax_rates,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
         )

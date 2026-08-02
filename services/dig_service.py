@@ -426,10 +426,15 @@ class DigService(
             tunnel["sonar_skip_pending"] = 1
 
         # Reinforcement: 48h window — half sabotage damage + cave-in block_loss cap
+        #
+        # Deliberately NOT mirrored into the in-memory tunnel, unlike the other
+        # grants. The cave-in block-loss cap reads ``reinforced_until`` from
+        # this dict later in the same dig, so mirroring it would silently start
+        # capping the dig the reinforcement was queued on — a buff, not a
+        # refactor. The staged write still persists the window for later digs,
+        # which is exactly what the immediate write it replaced did.
         if item_flags["has_reinforcement"]:
-            reinforced_until_ts = now + 48 * 3600
-            tunnel_updates["reinforced_until"] = reinforced_until_ts
-            tunnel["reinforced_until"] = reinforced_until_ts
+            tunnel_updates["reinforced_until"] = now + 48 * 3600
 
         # Void Bait: double event chance for next 3 digs
         if item_flags["has_void_bait"]:
@@ -944,10 +949,14 @@ class DigService(
             if grappling_hook_charges > 0:
                 block_loss = 0
                 grappling_absorbed = True
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    grappling_hook_charges=grappling_hook_charges - 1,
+                # Staged, not written: the cave-in commit starts from
+                # deferred_tunnel_updates, which may already hold this dig's
+                # +5 grant. An immediate write here was overwritten by that
+                # grant, so the absorb on the dig a hook is queued was free.
+                deferred_tunnel_updates["grappling_hook_charges"] = (
+                    grappling_hook_charges - 1
                 )
+                tunnel["grappling_hook_charges"] = grappling_hook_charges - 1
             # Void-Touched pickaxe: salvage 1 block on cave-in
             elif pickaxe_tier >= 7:
                 block_loss = max(1, block_loss - 1)

@@ -51,7 +51,6 @@ class TeamContext(NamedTuple):
 class ScoutView(discord.ui.View):
     """Paginated view for scout reports."""
 
-
     def __init__(
         self,
         all_heroes: list[dict],
@@ -287,7 +286,9 @@ class ScoutCommands(commands.Cog):
         """
         Build one display line per player listing their Dotabuff profile link(s).
 
-        Players with no linked Steam account are still listed, with a note.
+        Players with no linked Steam account are still listed, with a note;
+        so are mentions that are not registered in this guild, whose steam
+        ids are never looked up.
 
         Args:
             discord_ids: Players to render, in display order
@@ -299,6 +300,11 @@ class ScoutCommands(commands.Cog):
         """
         lines: list[str] = []
         for did in discord_ids:
+            if did not in name_map:
+                # Not registered in this guild. Their steam id is deliberately
+                # never looked up, so there is no link to show.
+                lines.append(f"<@{did}> — not registered in this server")
+                continue
             name = name_map.get(did) or f"<@{did}>"
             steam_ids = steam_map.get(did) or []
             if not steam_ids:
@@ -511,21 +517,17 @@ class ScoutCommands(commands.Cog):
 
         # Steam accounts are deliberately global rather than per-guild, so an
         # arbitrary snowflake typed into `players` would surface a non-member's
-        # Dotabuff link. Keep only players registered in this guild — that also
-        # keeps their steam ids out of the lookup below.
-        radiant_ids = [pid for pid in radiant_ids if pid in name_map]
-        dire_ids = [pid for pid in dire_ids if pid in name_map]
-        flat_ids = [pid for pid in flat_ids if pid in name_map]
-        all_ids = [pid for pid in all_ids if pid in name_map]
-
-        if not (flat_ids or radiant_ids or dire_ids):
-            await safe_followup(
-                interaction,
-                content="No registered players found in this server for that input.",
+        # Dotabuff link. Look up steam ids only for players registered in THIS
+        # guild. The others are still rendered — dropping them outright made a
+        # mention silently vanish — just without a link to disclose.
+        registered_ids = [pid for pid in all_ids if pid in name_map]
+        steam_map = (
+            await asyncio.to_thread(
+                self.player_service.get_steam_ids_bulk, registered_ids,
             )
-            return
-
-        steam_map = await asyncio.to_thread(self.player_service.get_steam_ids_bulk, all_ids)
+            if registered_ids
+            else {}
+        )
 
         embed = discord.Embed(
             title=f"Dotabuff Links — {source_label}" if source_label else "Dotabuff Links",

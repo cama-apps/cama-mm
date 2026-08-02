@@ -633,3 +633,133 @@ class TestAbandonedDuelForfeit:
         assert not entry.get("carried_wager"), (
             "the forfeited stake is still carried and will be charged again"
         )
+
+
+class TestConsumableChargeParityAcrossDigPaths:
+    """The deterministic path must spend and grant charges like live dig().
+
+    Charge grants are staged into the dig's atomic commit. The deterministic
+    mirror never merged them (queued items were deleted with no effect) and
+    still wrote its own spends immediately, so the staged pre-spend grant
+    overwrote them and the absorb was free.
+    """
+
+    CHARGE_COLUMNS = (
+        "hard_hat_charges", "grappling_hook_charges", "sonar_skip_pending",
+        "reinforced_until", "void_bait_digs",
+    )
+
+    @staticmethod
+    def _dig_with_item(dig_service, dig_repo, player_repository, monkeypatch,
+                       discord_id, item, roll, deterministic):
+        _register(player_repository, discord_id, balance=5000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(discord_id, TEST_GUILD_ID)
+        dig_repo.update_tunnel(discord_id, TEST_GUILD_ID, depth=20)
+        assert dig_service.buy_item(discord_id, TEST_GUILD_ID, item)["success"]
+        row = [
+            i for i in dig_repo.get_inventory(discord_id, TEST_GUILD_ID)
+            if i["item_type"] == item
+        ][0]
+        dig_repo.queue_item(row["id"])
+
+        monkeypatch.setattr(time, "time", lambda: 1_200_000)
+        monkeypatch.setattr(random, "random", lambda: roll)
+        if deterministic:
+            terminal, pre = dig_service.dig_with_preconditions(
+                discord_id, TEST_GUILD_ID,
+            )
+            assert terminal is None, terminal
+            dig_service._execute_deterministic_outcome(pre)
+        else:
+            dig_service.dig(discord_id, TEST_GUILD_ID)
+
+        tunnel = dig_repo.get_tunnel(discord_id, TEST_GUILD_ID)
+        return {c: tunnel[c] for c in TestConsumableChargeParityAcrossDigPaths.CHARGE_COLUMNS}
+
+    @pytest.mark.parametrize(
+        "item",
+        ["reinforcement", "sonar_pulse", "grappling_hook", "void_bait", "hard_hat"],
+    )
+    @pytest.mark.parametrize(("roll", "label"), [(0.99, "no_cave_in"), (0.001, "cave_in")])
+    def test_charge_columns_match_the_live_path(
+        self, dig_service, dig_repo, player_repository, monkeypatch, item, roll, label,
+    ):
+        live = self._dig_with_item(
+            dig_service, dig_repo, player_repository, monkeypatch,
+            40001, item, roll, deterministic=False,
+        )
+        determ = self._dig_with_item(
+            dig_service, dig_repo, player_repository, monkeypatch,
+            40002, item, roll, deterministic=True,
+        )
+        assert live == determ, (
+            f"{item} ({label}): deterministic path diverged from live dig() — "
+            f"live={live} deterministic={determ}"
+        )
+
+
+class TestWardBlockDoesNotBurnTheSabotageCooldown:
+    """A ward-blocked attempt must not lock the attacker out of the target.
+
+    The ward branch returns before the 12h per-target cooldown check. Logging
+    it as a plain "sabotage" meant every blocked attempt renewed the attacker's
+    own lockout, so a cheap ward became permanent sabotage immunity — and it
+    inflated the 7-day same-target count that drives the reveal.
+    """
+
+    def test_ward_block_leaves_the_target_still_sabotageable(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository, 10001, balance=500)
+        _register(player_repository, 10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=100)
+        dig_service.protection_service = None
+
+        warded = {"on": True}
+        dig_service.buff_service = SimpleNamespace(
+            has_pvp_immunity=lambda discord_id, guild_id: warded["on"],
+            consume_aegis_charge=lambda discord_id, guild_id: False,
+        )
+
+        blocked = dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+        assert blocked["success"] is False
+
+        # The ward drops; the attacker must not be locked out by their own
+        # blocked attempt.
+        warded["on"] = False
+        follow_up = dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+
+        assert "last 12 hours" not in (follow_up.get("error") or ""), (
+            "a ward-blocked attempt burned the attacker's 12h cooldown"
+        )
+
+    def test_ward_block_is_still_audited(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Excluding it from the cooldown scan must not make it invisible."""
+        _register(player_repository, 10001, balance=500)
+        _register(player_repository, 10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=100)
+        dig_service.protection_service = None
+        dig_service.buff_service = SimpleNamespace(
+            has_pvp_immunity=lambda discord_id, guild_id: True,
+            consume_aegis_charge=lambda discord_id, guild_id: False,
+        )
+
+        dig_service.sabotage_tunnel(10001, 10002, TEST_GUILD_ID)
+
+        logged = dig_repo.get_recent_actions(
+            10001, TEST_GUILD_ID, action_type="sabotage_ward_blocked", hours=1,
+        )
+        assert logged, "the blocked attempt must still be recorded"
+        detail = json.loads(logged[0].get("detail") or "{}")
+        assert detail.get("target_id") == 10002
+        assert detail.get("protection_source") == "ward"

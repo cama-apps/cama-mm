@@ -705,10 +705,18 @@ class TestBuildLinkLines:
         lines = self._cog()._build_link_lines([300], {300: "Carol"}, {300: []})
         assert lines == ["**Carol** — no linked Steam account"]
 
-    def test_unknown_name_falls_back_to_mention(self):
-        """A player missing from the name map is shown as a Discord mention."""
+    def test_unregistered_player_is_listed_without_a_link(self):
+        """Absence from the name map means "not registered in this guild".
+
+        Steam accounts are global, so such a player may well have a linked
+        account — from another server. Rendering it here disclosed a
+        non-member's Dotabuff profile to anyone who typed their snowflake.
+        They stay visible so the mention does not silently vanish, but with no
+        link; the caller no longer looks their steam id up at all.
+        """
         lines = self._cog()._build_link_lines([400], {}, {400: [444]})
-        assert lines == ["**<@400>** — [Dotabuff](https://www.dotabuff.com/players/444)"]
+        assert lines == ["<@400> — not registered in this server"]
+        assert "dotabuff" not in lines[0].lower()
 
 
 class TestAddPlayerField:
