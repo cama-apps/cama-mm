@@ -126,15 +126,22 @@ DANGEROUS_KEYWORDS: set[str] = {
 # A projected column that is a wildcard: bare `*` or `alias.*`.
 _WILDCARD_COLUMN_RE = re.compile(r"(?:\w+\s*\.\s*)?\*")
 
+# `SELECT DISTINCT *` / `SELECT ALL *`: the set quantifier sits inside the
+# projection text, so it has to come off before the wildcard test.
+_SET_QUANTIFIER_RE = re.compile(r"^(?:distinct|all)\b\s*")
+
 _WORD_RE = re.compile(r"\w+")
 
 # Keywords that end a FROM clause's comma-separated item list.
+#
+# Join keywords are deliberately NOT terminators. SQLite treats `,` as a join
+# operator, so `FROM a JOIN b ON x, c` is legal and `c` is a real table
+# reference — stopping the scan at `join` would walk straight past it and let
+# `c` skip the blocklist entirely.
 _FROM_CLAUSE_TERMINATORS = frozenset(
     {
         "where", "group", "order", "having", "limit", "offset", "window",
         "union", "intersect", "except",
-        "join", "inner", "left", "right", "full", "cross", "natural",
-        "on", "using",
     }
 )
 
@@ -696,7 +703,10 @@ class SQLQueryService:
         """True if any SELECT projects a bare ``*`` or ``alias.*`` column."""
         for projection in SQLQueryService._projection_lists(masked_lower):
             for column in projection.split(","):
-                if _WILDCARD_COLUMN_RE.fullmatch(column.strip()):
+                # Strip a leading DISTINCT/ALL: it belongs to the SELECT, not
+                # to the column, and leaving it attached hid `DISTINCT *`.
+                stripped = _SET_QUANTIFIER_RE.sub("", column.strip())
+                if _WILDCARD_COLUMN_RE.fullmatch(stripped):
                     return True
         return False
 
@@ -746,7 +756,13 @@ class SQLQueryService:
 
         names = []
         for item in tables:
-            name = _WORD_RE.search(item)
+            stripped = item.strip()
+            if stripped.startswith("("):
+                # A subquery or parenthesised join: it has no table name of its
+                # own, and the tables inside it are picked up by this scan's
+                # own pass over their nested FROM.
+                continue
+            name = _WORD_RE.search(stripped)
             if name:
                 names.append(name.group(0))
         return names

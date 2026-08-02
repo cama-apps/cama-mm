@@ -1715,6 +1715,51 @@ class BossCombatMixin:
         at_boss = self._at_boss_boundary(depth, boss_progress)
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
+
+        # Settle any abandoned paused duel FIRST. Its stake is only charged
+        # when a duel resolves, so an unsettled row forgave the wager outright:
+        # wager, take a mid-fight prompt, lose the view (a restart kills it —
+        # the 120s auto-pick is process-local), then refight for free.
+        #
+        # Claimed atomically (read-and-delete) rather than read-then-clear, so
+        # two concurrent starts — or a racing resume — cannot forfeit the same
+        # stake twice. Settled before the new wager is validated so the forfeit
+        # counts against what the player can afford; validating first let them
+        # stake a balance the forfeit was about to consume, which made the
+        # follow-up fight a free bet (a loss clamps to zero, a win still pays).
+        stale = self.dig_repo.claim_active_duel(discord_id, guild_id)
+        abandoned_wager_forfeit = 0
+        if stale is not None:
+            stale_wager = int(stale.get("wager") or 0)
+            if stale_wager > 0:
+                abandoned_wager_forfeit = -self._clamp_loss_debit(
+                    discord_id, guild_id, -stale_wager,
+                )
+                # A pinnacle carry rides that same stake. Drop the markers, or
+                # the forfeited wager is charged a second time when the next
+                # phase resolves.
+                carry_cleared = self._has_carried_wager_markers(
+                    boss_progress, at_boss,
+                )
+                if carry_cleared:
+                    self._clear_carried_wager(boss_progress, at_boss)
+                self.dig_repo.atomic_tunnel_balance_update(
+                    discord_id, guild_id,
+                    balance_delta=-abandoned_wager_forfeit,
+                    tunnel_updates=(
+                        {"boss_progress": json.dumps(boss_progress)}
+                        if carry_cleared else None
+                    ),
+                    log_detail={
+                        "boundary": at_boss,
+                        "abandoned_duel": True,
+                        "wager_forfeit": abandoned_wager_forfeit,
+                        "boss_id": stale.get("boss_id"),
+                    },
+                    log_action_type="boss_duel_abandoned",
+                )
+                if carry_cleared:
+                    tunnel["boss_progress"] = json.dumps(boss_progress)
         # Multi-phase carry: a prior phase win locks the original wager + risk
         # onto the boss_progress entry. The next phase fight rides the same
         # stake — caller args are ignored when a carry is present.
@@ -1777,7 +1822,6 @@ class BossCombatMixin:
         # Capture transitions now because later ticks only report each newly
         # broken piece once.
         stale_gear_broken_names: list[str] = []
-        stale = self.dig_repo.get_active_duel(discord_id, guild_id)
         if stale is not None:
             stale_snapshot_ids: list[int] = []
             try:
@@ -1821,28 +1865,6 @@ class BossCombatMixin:
                 name_by_id.get(gear_id, "a piece of gear")
                 for gear_id in stale_broken_ids
             ]
-            # Forfeit the abandoned stake. The wager is only settled when a
-            # duel resolves, so discarding the row used to forgive it outright:
-            # a player could wager, receive a mid-fight prompt, let the view die
-            # (a bot restart kills it — the 120s auto-pick is process-local),
-            # and restart the fight for free with the stake never at risk.
-            stale_wager = int(stale.get("wager") or 0)
-            if stale_wager > 0:
-                forfeit = -self._clamp_loss_debit(
-                    discord_id, guild_id, -stale_wager,
-                )
-                self.dig_repo.atomic_tunnel_balance_update(
-                    discord_id, guild_id,
-                    balance_delta=-forfeit,
-                    log_detail={
-                        "boundary": at_boss,
-                        "abandoned_duel": True,
-                        "wager_forfeit": forfeit,
-                        "boss_id": stale.get("boss_id"),
-                    },
-                    log_action_type="boss_duel_abandoned",
-                )
-            self.dig_repo.clear_active_duel(discord_id, guild_id)
 
         # Pinnacle uses its own resolver — no mid-fight prompts (yet).
         if self._is_pinnacle_depth(at_boss):
@@ -1853,6 +1875,8 @@ class BossCombatMixin:
                 result["gear_broken"] = list(dict.fromkeys(
                     stale_gear_broken_names + list(result.get("gear_broken") or [])
                 ))
+            if abandoned_wager_forfeit:
+                result["abandoned_wager_forfeit"] = abandoned_wager_forfeit
             return result
 
         # Ensure a specific boss is locked for this tunnel at this tier.
@@ -2070,6 +2094,7 @@ class BossCombatMixin:
                 }
                 self.dig_repo.save_active_duel(discord_id, guild_id, state)
                 return self._ok(
+                    abandoned_wager_forfeit=abandoned_wager_forfeit or None,
                     pending_prompt=self._serialize_prompt(mechanic),
                     boss_id=boss.boss_id,
                     boss_name=boss.name,
@@ -2131,6 +2156,8 @@ class BossCombatMixin:
             result["gear_broken"] = list(dict.fromkeys(
                 stale_gear_broken_names + list(result.get("gear_broken") or [])
             ))
+        if abandoned_wager_forfeit:
+            result["abandoned_wager_forfeit"] = abandoned_wager_forfeit
         return result
 
     def resume_boss_duel(

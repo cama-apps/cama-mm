@@ -535,3 +535,101 @@ class TestDigConsumablesCommitAtomically:
         assert int(tunnel["sonar_skip_pending"] or 0) == 1, (
             "the pulse queued this dig was cleared by the skip it did not cause"
         )
+
+
+class TestAbandonedDuelForfeit:
+    """An abandoned paused duel forfeits its stake exactly once, up front.
+
+    The wager is only charged when a duel resolves, so an unsettled row used to
+    forgive it. Settling it introduced three sharper problems, all covered here:
+    forfeiting the same stake twice, letting the player stake money the forfeit
+    was about to take, and charging a pinnacle carry twice.
+    """
+
+    @staticmethod
+    def _at_boss(dig_service, dig_repo, player_repository, monkeypatch, balance=1000):
+        _register(player_repository, 10001, balance=balance)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=BOSS_BOUNDARIES[0])
+
+    @staticmethod
+    def _park_stale_duel(dig_repo, wager, boss_id="grothak"):
+        dig_repo.save_active_duel(10001, TEST_GUILD_ID, {
+            "boss_id": boss_id, "tier": 25, "mechanic_id": "x",
+            "risk_tier": "bold", "wager": wager,
+            "player_hp": 10, "boss_hp": 10, "round_num": 1,
+            "rng_state": "{}", "player_hit": 0.5, "player_dmg": 2,
+            "boss_hit": 0.5, "boss_dmg": 2,
+        })
+
+    def test_stale_duel_is_claimed_atomically_not_read_then_cleared(self):
+        """The abandoned row must be read-and-deleted in one step.
+
+        Reading it, debiting the stake, then deleting it as a separate step
+        lets two concurrent starts — or a resume racing a start — forfeit the
+        same stake twice, and a process death in between re-forfeits it on the
+        next /dig boss. That death is exactly the scenario this settles.
+
+        Asserted structurally: the race needs real concurrency to observe, but
+        using the atomic claim is what makes it impossible.
+        """
+        import inspect
+
+        from services.dig.combat_mixin import BossCombatMixin
+
+        source = inspect.getsource(BossCombatMixin.start_boss_duel)
+        assert "claim_active_duel" in source, (
+            "start_boss_duel must claim the paused duel atomically"
+        )
+        assert "get_active_duel" not in source, (
+            "start_boss_duel still reads the paused duel non-atomically; the "
+            "stake can be forfeited twice"
+        )
+
+    def test_forfeit_is_charged_before_the_new_wager_is_validated(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Otherwise the follow-up fight is a free bet.
+
+        Validating first let the player stake their whole balance while a
+        forfeit was pending: the forfeit then drained them to zero, a loss
+        clamps at zero, and a win still pays the full multiplier.
+        """
+        self._at_boss(dig_service, dig_repo, player_repository, monkeypatch, balance=1000)
+        self._park_stale_duel(dig_repo, wager=1000)
+
+        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "bold", 1000)
+
+        # Either the wager is refused for want of funds, or it was resized to
+        # what remains after the forfeit — never the full pre-forfeit balance.
+        wager = result.get("wager", 0) if isinstance(result, dict) else 0
+        assert not result.get("success") or wager < 1000, (
+            f"staked {wager} JC that the pending forfeit was about to consume"
+        )
+
+    def test_pinnacle_carry_is_not_charged_twice(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Forfeiting the stake must drop the carry markers riding on it."""
+        self._at_boss(dig_service, dig_repo, player_repository, monkeypatch, balance=5000)
+        progress = {
+            str(BOSS_BOUNDARIES[0]): {
+                "boss_id": "grothak", "status": "phase1_defeated",
+                "carried_wager": 500, "carried_risk_tier": "bold",
+            }
+        }
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID, boss_progress=json.dumps(progress),
+        )
+        self._park_stale_duel(dig_repo, wager=500)
+
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "bold", 0)
+
+        entry = json.loads(
+            dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"] or "{}"
+        ).get(str(BOSS_BOUNDARIES[0]), {})
+        assert not entry.get("carried_wager"), (
+            "the forfeited stake is still carried and will be charged again"
+        )

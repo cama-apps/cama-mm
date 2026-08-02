@@ -847,7 +847,9 @@ class ProgressionMixin:
                 balance_cost=cost,
                 tunnel_updates={"pickaxe_tier": next_tier_idx},
             )
-        except ValueError:
+        except ValueError as exc:
+            if str(exc) != "insufficient_funds":
+                raise
             return self._error(f"Costs {cost} JC but you no longer have it.")
         # Mirror the upgrade into dig_gear so equipped weapon stays in sync.
         # These writes are not folded into the atomic block above: the gear

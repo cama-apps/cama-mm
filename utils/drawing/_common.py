@@ -222,24 +222,6 @@ def draw_x_axis_labels(
         )
 
 
-def get_pyplot():
-    """Import pyplot lazily with the headless Agg backend forced.
-
-    The bot renders charts to PNG bytes only; without pinning the backend,
-    matplotlib may pick an interactive one (e.g. TkAgg) and crash on hosts
-    without a display or Tk installed.
-
-    Prefer :func:`new_figure` for anything that produces a chart — pyplot keeps
-    every figure it creates in a process-global registry.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    return plt
-
-
 def new_figure(*, figsize, facecolor, nrows=1, ncols=1):
     """Return ``(figure, axes)`` for a chart, detached from pyplot.
 

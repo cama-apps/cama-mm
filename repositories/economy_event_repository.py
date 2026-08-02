@@ -13,32 +13,6 @@ from repositories.base_repository import BaseRepository, safe_json_loads
 class EconomyEventRepository(BaseRepository):
     """Guild-scoped policy state, snapshots, event cards, and direct actions."""
 
-    _DIRECT_FLOW_SOURCES = (
-        "dig",
-        "gamba",
-        "hostile_loss",
-        "balance_update",
-        "nonprofit_update",
-        "bankruptcy",
-        "manashop",
-        "manashop_buff",
-        "loan",
-        "loan_repayment",
-        "shop",
-        "trivia",
-        "player_trivia",
-        "mana_reward",
-        "match_streak",
-        "pingedash",
-        "pingedkevin",
-        "mana_protection",
-        "bet",
-        "bet_settlement",
-        "bet_refund",
-        "dota_bet_seed",
-        "dota_bet_seed_return",
-    )
-
     def ensure_policy_state(
         self,
         guild_id: int | None,

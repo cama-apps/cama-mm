@@ -689,7 +689,8 @@ class DigCommands(commands.Cog):
                 seed_key=(
                     f"{interaction.user.id}:"
                     f"{getattr(boss_info, 'boss_id', '')}:"
-                    f"{getattr(boss_info, 'phase', 0)}"
+                    f"{getattr(boss_info, 'phase', 0)}:"
+                    f"{getattr(boss_info, 'encounter_key', '')}"
                 ),
             )
         )
