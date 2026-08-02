@@ -1317,11 +1317,29 @@ class LobbyCommands(commands.Cog):
             )
         elif status == "ok":
             verb = "refreshed" if info.get("is_refresh") else "posted"
-            await safe_followup(
-                interaction,
-                content=f"✅ Ready check {verb}! [View]({info['message_jump_url']})",
-                ephemeral=True,
-            )
+            mention_ids = info.get("mention_ids", [])
+            invocation_channel_id = getattr(interaction.channel, "id", None)
+            if (
+                mention_ids
+                and invocation_channel_id != info.get("readycheck_channel_id")
+            ):
+                tags = " ".join(f"<@{user_id}>" for user_id in mention_ids)
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"⚔️ **Ready check!** {tags}\n"
+                        f"[React in the lobby thread]({info['message_jump_url']})"
+                    ),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[discord.Object(id=user_id) for user_id in mention_ids]
+                    ),
+                )
+            else:
+                await safe_followup(
+                    interaction,
+                    content=f"✅ Ready check {verb}! [View]({info['message_jump_url']})",
+                    ephemeral=True,
+                )
         else:  # "error"
             await safe_followup(
                 interaction,
@@ -1348,7 +1366,8 @@ class LobbyCommands(commands.Cog):
                 | "no_guild" | "error"
         info contents:
             ok        -> {"message_jump_url": str, "is_refresh": bool,
-                          "pruned_count": int}
+                          "pruned_count": int, "mention_ids": list[int],
+                          "readycheck_channel_id": int}
             cooldown  -> {"retry_after_seconds": int}
             (others)  -> {}
         """
@@ -1530,6 +1549,8 @@ class LobbyCommands(commands.Cog):
                 "message_jump_url": msg.jump_url,
                 "is_refresh": True,
                 "pruned_count": 0,
+                "mention_ids": mention_ids,
+                "readycheck_channel_id": msg.channel.id,
             }
 
         # Post to lobby thread (target_channel is guaranteed to exist here)
@@ -1578,6 +1599,8 @@ class LobbyCommands(commands.Cog):
             "message_jump_url": msg.jump_url,
             "is_refresh": False,
             "pruned_count": len(pruned_ids),
+            "mention_ids": mention_ids,
+            "readycheck_channel_id": msg.channel.id,
         }
 
 

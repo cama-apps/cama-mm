@@ -222,9 +222,16 @@ async def test_trigger_er_auto_counted_ready(monkeypatch):
     """Running the check confirms the trigger-er; they aren't pinged."""
     env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
 
-    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
 
     reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert status == "ok"
+    assert info["mention_ids"] == [2]
+    assert info["readycheck_channel_id"] == THREAD_ID
     assert 1 in reacted  # invoker auto-readied
     ping = " ".join(_ping_texts(env))
     assert "<@2>" in ping and "<@1>" not in ping  # invoker excluded from the ping
