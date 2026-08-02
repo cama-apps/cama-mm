@@ -53,6 +53,29 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     assert recorded["winning_team"] in (1, 2)
 
 
+def test_shuffle_accounts_for_all_fifteen_players(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 15)
+
+    result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    selected_ids = {
+        player.discord_id
+        for team in (result["radiant_team"], result["dire_team"])
+        for player in team.players
+    }
+    excluded_ids = set(result["excluded_ids"])
+    assert selected_ids | excluded_ids == set(player_ids)
+    assert len(excluded_ids) == 5
+
+
 def test_goodness_adds_500_per_active_low_priority_player(repo_db_path):
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)

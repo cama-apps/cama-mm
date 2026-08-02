@@ -413,7 +413,7 @@ class TestDraftService:
         assert result.captain2_rating == 1600.0
 
     def test_select_captains_not_enough_players(self):
-        """Raises an error when the final pool cannot supply two captains."""
+        """Raises an error when the candidate pool cannot supply two captains."""
         service = DraftService()
         ratings = {100: 1500.0}
 
@@ -729,7 +729,7 @@ class TestSpecifiedCaptains:
     """Tests for specified captain handling."""
 
     def test_select_captains_both_specified_from_eligible_pool(self):
-        """DraftService.select_captains picks from the final player pool provided."""
+        """DraftService.select_captains honors captains from the candidate pool."""
         service = DraftService()
         ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}
         selected = [1, 2]
@@ -758,25 +758,6 @@ class TestSpecifiedCaptains:
             assert result.captain1_id != result.captain2_id
             assert result.captain1_id in player_ids
             assert result.captain2_id in player_ids
-
-    def test_shuffle_redirect_threshold(self):
-        """The Immortal Draft auto-redirect fires at regular_count >= 15.
-
-        Uses the production Lobby domain model to confirm the boundary:
-        14 regular players does NOT meet the >= 15 threshold;
-        15 regular players DOES.
-        """
-        from datetime import datetime
-
-        lobby_below = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        for i in range(1, 15):  # 14 regular players
-            lobby_below.add_player(i)
-        assert lobby_below.get_player_count() < 15, "14 players should be below threshold"
-
-        lobby_at = Lobby(lobby_id=2, created_by=999, created_at=datetime.now())
-        for i in range(1, 16):  # 15 regular players
-            lobby_at.add_player(i)
-        assert lobby_at.get_player_count() >= 15, "15 players should meet threshold"
 
     def test_lobby_player_count_ignores_legacy_conditional_players(self):
         from datetime import datetime
@@ -1442,9 +1423,18 @@ class TestExecuteDraft:
         assert "Started by" not in (embed.footer.text or "")
 
     async def test_succeeds_with_sixteen_players(self, player_repository):
-        """A full lobby needs no opt-ins and selects captains from the final pool."""
+        """The closest full-lobby pair is forced into the selected pool."""
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 16)
+        ratings = [1000.0, 1001.0] + [1500.0 + index * 100 for index in range(14)]
+        for player_id, rating in zip(player_ids, ratings, strict=True):
+            player_repository.update_glicko_rating(
+                player_id,
+                guild_id,
+                rating,
+                80.0,
+                0.06,
+            )
         exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
 
         cog = _make_draft_cog(player_repository)
@@ -1458,8 +1448,8 @@ class TestExecuteDraft:
         assert state.phase == DraftPhase.WINNER_CHOICE
         # 2 captains + 8 drafted players
         assert len(state.player_pool_ids) == 10
-        assert set(state.player_pool_ids) == set(player_ids[-10:])
-        assert {state.captain1_id, state.captain2_id} == set(player_ids[-2:])
+        assert set(state.player_pool_ids) == set(player_ids[:2] + player_ids[-8:])
+        assert {state.captain1_id, state.captain2_id} == set(player_ids[:2])
         # 16 lobby players - 10 selected = 6 excluded, with no overlap
         assert len(state.excluded_player_ids) == 6
         assert not (set(state.player_pool_ids) & set(state.excluded_player_ids))
@@ -1647,9 +1637,9 @@ class TestExecuteDraft:
         self, player_repository
     ):
         guild_id = TEST_GUILD_ID
-        player_ids = _register_draft_players(player_repository, guild_id, 17)
-        regular_ids = player_ids[:15]
-        conditional_ids = player_ids[15:]
+        player_ids = _register_draft_players(player_repository, guild_id, 18)
+        regular_ids = player_ids[:16]
+        conditional_ids = player_ids[16:]
         exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
         cog = _make_draft_cog(player_repository)
         interaction = _FakeInteraction(guild_id)
@@ -2252,12 +2242,55 @@ class TestPreDraftChoiceDoubleClick:
 
 
 class TestShuffleDraftRedirect:
-    """/shuffle hands lobbies of >=15 players to Immortal Draft."""
+    """/shuffle hands lobbies of more than 15 players to Immortal Draft."""
+
+    async def test_fifteen_players_continue_to_normal_shuffle(self, monkeypatch):
+        guild_id = TEST_GUILD_ID
+        player_ids = list(range(60001, 60016))
+        lobby = _make_lobby(player_ids)
+        draft_cog = MagicMock()
+        draft_cog._execute_draft = AsyncMock(return_value=True)
+        bot = MagicMock()
+        bot.get_cog.return_value = draft_cog
+        match_service = MagicMock()
+        match_service.state_service.get_all_pending_player_ids.return_value = {
+            player_ids[0]
+        }
+        player_service = MagicMock()
+        player_service.get_player.return_value = None
+        match_cog = MatchCommands(
+            bot,
+            MagicMock(),
+            match_service,
+            player_service,
+        )
+        monkeypatch.setattr(
+            match_cog,
+            "_validate_shuffle_preconditions",
+            AsyncMock(return_value=lobby),
+        )
+        monkeypatch.setattr(
+            match_cog,
+            "_select_shuffle_roster",
+            AsyncMock(return_value=(player_ids, [], [], [], {})),
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        await match_cog._execute_shuffle(
+            interaction,
+            interaction.guild,
+            guild_id,
+            None,
+        )
+
+        assert interaction.followup.messages[-1].content.startswith(
+            "❌ Cannot shuffle:"
+        )
 
     async def test_redirect_passes_readycheck_roster_overrides(self, monkeypatch):
         guild_id = TEST_GUILD_ID
-        ready_ids = list(range(60001, 60016))
-        nonresponder_ids = [60016, 60017]
+        ready_ids = list(range(60001, 60017))
+        nonresponder_ids = [60017, 60018]
         lobby = _make_lobby(ready_ids + nonresponder_ids)
         draft_cog = MagicMock()
         draft_cog._execute_draft = AsyncMock(return_value=True)
@@ -2292,7 +2325,7 @@ class TestShuffleDraftRedirect:
         )
 
     async def test_redirects_without_adding_a_duplicate_message(self, monkeypatch):
-        """A >=15-player /shuffle runs _execute_draft and adds no message of
+        """A 16-player /shuffle runs _execute_draft and adds no message of
         its own — even on failure, since _execute_draft owns its messaging."""
         guild_id = TEST_GUILD_ID
         draft_cog = MagicMock()
@@ -2303,8 +2336,8 @@ class TestShuffleDraftRedirect:
 
         match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
 
-        player_ids = list(range(60001, 60016))
-        lobby = _make_lobby(player_ids)  # 15 regular players
+        player_ids = list(range(60001, 60017))
+        lobby = _make_lobby(player_ids)  # 16 regular players
         monkeypatch.setattr(
             match_cog,
             "_validate_shuffle_preconditions",
