@@ -706,28 +706,35 @@ class DraftCommands(commands.Cog):
             "⚙️ Building the Immortal Draft player pool…"
         )
 
-        forced_captain_ids = [
+        specified_captain_ids = [
             captain_id
             for captain_id in (specified_captain1_id, specified_captain2_id)
             if captain_id is not None
         ]
+        captain_candidate_ids = list(regular_players)
+        for captain_id in specified_captain_ids:
+            if captain_id not in captain_candidate_ids:
+                captain_candidate_ids.append(captain_id)
 
         try:
+            captain_pair = await asyncio.to_thread(
+                self.draft_service.select_captains,
+                player_pool_ids=captain_candidate_ids,
+                player_ratings=player_ratings,
+                specified_captain1=specified_captain1_id,
+                specified_captain2=specified_captain2_id,
+            )
             pool_result = await asyncio.to_thread(
                 self.draft_service.select_player_pool,
                 regular_player_ids=regular_players,
                 conditional_player_ids=conditional_players,
                 exclusion_counts=exclusion_counts,
                 player_ratings=player_ratings,
-                forced_include_ids=forced_captain_ids,
+                forced_include_ids=[
+                    captain_pair.captain1_id,
+                    captain_pair.captain2_id,
+                ],
                 pool_size=DRAFT_POOL_SIZE,
-            )
-            captain_pair = await asyncio.to_thread(
-                self.draft_service.select_captains,
-                player_pool_ids=pool_result.selected_ids,
-                player_ratings=player_ratings,
-                specified_captain1=specified_captain1_id,
-                specified_captain2=specified_captain2_id,
             )
         except ValueError as e:
             logger.warning("Immortal Draft setup failed — %s", e)

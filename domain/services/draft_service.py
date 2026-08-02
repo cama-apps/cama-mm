@@ -56,7 +56,7 @@ class DraftService:
         specified_captain2: int | None = None,
     ) -> CaptainPair:
         """
-        Select two captains from the final player pool.
+        Select two captains from the available candidate pool.
 
         Algorithm:
         - If both captains specified, use them
@@ -64,7 +64,7 @@ class DraftService:
         - If neither specified, select the pool pair closest in Glicko rating
 
         Args:
-            player_pool_ids: Final Immortal Draft player pool IDs
+            player_pool_ids: Player IDs eligible for automatic captain selection
             player_ratings: Dict mapping player ID to rating
             specified_captain1: Optional pre-specified captain
             specified_captain2: Optional pre-specified captain
@@ -191,15 +191,15 @@ class DraftService:
         """
         Select players for the draft pool by exclusion factor, then Glicko.
 
-        Regular players fill the pool before conditional players. Manually
-        specified captains are always included, even when conditional.
+        Regular players fill the pool before conditional players. Selected
+        captains are always included, even when manually chosen from conditionals.
 
         Args:
             regular_player_ids: Regular lobby player IDs in lobby order
             conditional_player_ids: Conditional player IDs in lobby order
             exclusion_counts: Dict mapping player ID to exclusion count
             player_ratings: Dict mapping player ID to Glicko rating
-            forced_include_ids: Captain override IDs that must be included
+            forced_include_ids: Captain IDs that must be included
             pool_size: Target pool size (default 10)
 
         Returns:

@@ -215,10 +215,11 @@ class ShufflePendingMixin:
         if len(players) < 10:
             raise ValueError("Need at least 10 players to shuffle.")
 
-        # Cap to 14 for performance (C(14,10)=1001 stays within sampling limit)
-        if len(players) > 14:
-            players = players[:14]
-            player_ids = player_ids[:14]
+        # /shuffle redirects rosters above 15 to Immortal Draft. Keep all 15
+        # players here so every normal-shuffle participant is accounted for.
+        if len(players) > 15:
+            players = players[:15]
+            player_ids = player_ids[:15]
 
         # Shuffler expects name->count mapping; this is internal to shuffler only
         exclusion_counts = {

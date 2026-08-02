@@ -587,8 +587,8 @@ class MatchCommands(commands.Cog):
         ) = roster
         regular_count = len(player_ids)
 
-        # 15 or more regular (non-conditional) players → force Immortal Draft
-        if regular_count >= 15:
+        # More than 15 regular (non-conditional) players → force Immortal Draft
+        if regular_count > 15:
             draft_cog = self.bot.get_cog("DraftCommands")
             if not draft_cog:
                 await interaction.followup.send(
