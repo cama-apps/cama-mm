@@ -87,3 +87,4 @@ class DuelDueResult:
     challenge: DuelChallenge
     remaining_seconds: int = 0
     ping_recipient: bool = False
+    claimed_reminder_at: int | None = None

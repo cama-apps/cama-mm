@@ -824,6 +824,7 @@ class DuelChallengeRepository(BaseRepository):
                 challenge=claimed,
                 remaining_seconds=remaining_seconds,
                 ping_recipient=remaining_seconds <= 48 * 3600,
+                claimed_reminder_at=challenge.next_reminder_at,
             )
 
     def claim_unresolved_reminder_atomic(
@@ -869,4 +870,38 @@ class DuelChallengeRepository(BaseRepository):
             )
             if claimed is None:
                 raise RuntimeError("Claimed unresolved duel reminder could not be read.")
-            return DuelDueResult(kind=DuelDueKind.UNRESOLVED, challenge=claimed)
+            return DuelDueResult(
+                kind=DuelDueKind.UNRESOLVED,
+                challenge=claimed,
+                claimed_reminder_at=challenge.next_reminder_at,
+            )
+
+    def rearm_reminder_atomic(
+        self,
+        challenge_id: int,
+        guild_id: int,
+        expected_status: DuelStatus,
+        expected_next_reminder_at: int,
+        retry_at: int,
+    ) -> bool:
+        """Restore a claimed reminder only if its claim state is unchanged."""
+        if expected_status not in {DuelStatus.PENDING, DuelStatus.ACCEPTED}:
+            return False
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE duel_challenges
+                SET next_reminder_at = ?
+                WHERE challenge_id = ? AND guild_id = ? AND status = ?
+                  AND next_reminder_at = ?
+                """,
+                (
+                    retry_at,
+                    challenge_id,
+                    guild_id,
+                    expected_status.value,
+                    expected_next_reminder_at,
+                ),
+            )
+            return cursor.rowcount == 1

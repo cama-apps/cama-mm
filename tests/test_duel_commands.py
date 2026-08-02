@@ -35,6 +35,25 @@ CHALLENGER_ID = 1
 RECIPIENT_ID = 2
 
 
+def make_text_channel(
+    channel_id: int,
+    *,
+    guild: SimpleNamespace | None = None,
+    can_send: bool = True,
+):
+    guild = guild or SimpleNamespace(
+        id=GUILD_ID,
+        me=SimpleNamespace(id=55),
+    )
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = channel_id
+    channel.name = "dota-mm"
+    channel.guild = guild
+    channel.permissions_for.return_value = SimpleNamespace(send_messages=can_send)
+    channel.send = AsyncMock()
+    return channel
+
+
 def test_trial_by_combat_rules_match_agreed_format():
     assert TRIAL_BY_COMBAT_RULES == (
         "Mirror matchups: both duelists play the same hero each game.\n"
@@ -107,14 +126,14 @@ def interaction(message, recipient):
         edit_message=AsyncMock(),
     )
     followup = SimpleNamespace(send=AsyncMock(return_value=message))
-    channel = SimpleNamespace(
-        id=CHANNEL_ID,
-        fetch_message=AsyncMock(return_value=message),
-        get_partial_message=MagicMock(return_value=message),
-        send=AsyncMock(return_value=message),
-    )
+    guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=55))
+    channel = make_text_channel(CHANNEL_ID, guild=guild)
+    guild.text_channels = [channel]
+    channel.fetch_message = AsyncMock(return_value=message)
+    channel.get_partial_message = MagicMock(return_value=message)
+    channel.send = AsyncMock(return_value=message)
     return SimpleNamespace(
-        guild=SimpleNamespace(id=GUILD_ID),
+        guild=guild,
         channel=channel,
         channel_id=CHANNEL_ID,
         user=recipient,
@@ -158,6 +177,7 @@ def bot(duel_service, flavor_service, interaction):
         duel_flavor_service=flavor_service,
         get_channel=MagicMock(return_value=interaction.channel),
         fetch_channel=AsyncMock(return_value=interaction.channel),
+        get_guild=MagicMock(return_value=interaction.guild),
         add_cog=AsyncMock(),
         add_view=MagicMock(),
     )
@@ -714,6 +734,88 @@ async def test_unresolved_daily_reminder_pings_both_participants(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("kind", "status"),
+    [
+        (DuelDueKind.REMINDER, DuelStatus.PENDING),
+        (DuelDueKind.UNRESOLVED, DuelStatus.ACCEPTED),
+    ],
+)
+async def test_due_reminders_post_in_main_channel_not_origin(
+    cog, bot, duel_service, interaction, kind, status
+):
+    main_channel_id = 999
+    main_channel = make_text_channel(main_channel_id, guild=interaction.guild)
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    challenge = make_challenge(
+        status=status,
+        trial_type=(
+            DuelTrial.TRIAL_BY_COMBAT
+            if status is DuelStatus.ACCEPTED
+            else None
+        ),
+    )
+    duel_service.get_challenge.return_value = challenge
+    result = DuelDueResult(
+        kind=kind,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_resolves_dota_mm_by_name_with_no_channel_setting(
+    cog, bot, duel_service, interaction
+):
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    main_channel.name = "dota-mm"
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    bot.get_guild = MagicMock(return_value=interaction.guild)
+    challenge = make_challenge()
+    duel_service.get_challenge.return_value = challenge
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_falls_back_to_origin_when_dota_mm_is_unavailable(
+    cog, duel_service, interaction
+):
+    interaction.channel.name = "gamba"
+    challenge = make_challenge()
+    duel_service.get_challenge.return_value = challenge
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    interaction.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("kind", "stale_status"),
     [
         (DuelDueKind.UNRESOLVED, DuelStatus.RESOLVED),
@@ -746,31 +848,25 @@ async def test_stale_claimed_reminder_is_not_delivered(
 
 
 @pytest.mark.asyncio
-async def test_transient_channel_failure_defers_reminder_claims(
-    cog, bot, duel_service
+async def test_missing_dota_mm_channel_uses_origin_for_reminder_claims(
+    cog, bot, duel_service, interaction
 ):
-    bot.get_channel.return_value = None
-    bot.fetch_channel.side_effect = discord.HTTPException(
-        SimpleNamespace(status=500, reason="error"),
-        "gateway hiccup",
-    )
+    interaction.channel.name = "gamba"
     duel_service.process_due.return_value = None
 
     await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
 
     duel_service.process_due.assert_called_once_with(
-        7, GUILD_ID, 1_700_432_000, claim_reminders=False
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
     )
 
 
 @pytest.mark.asyncio
-async def test_permanently_missing_channel_still_claims_reminders(
-    cog, bot, duel_service
+async def test_duplicate_dota_mm_channels_use_origin_for_reminder_claims(
+    cog, duel_service, interaction
 ):
-    bot.get_channel.return_value = None
-    bot.fetch_channel.side_effect = discord.NotFound(
-        MagicMock(status=404),
-        "channel deleted",
+    interaction.guild.text_channels.append(
+        make_text_channel(999, guild=interaction.guild, can_send=False)
     )
     duel_service.process_due.return_value = None
 
@@ -779,6 +875,112 @@ async def test_permanently_missing_channel_still_claims_reminders(
     duel_service.process_due.assert_called_once_with(
         7, GUILD_ID, 1_700_432_000, claim_reminders=True
     )
+
+
+@pytest.mark.asyncio
+async def test_dota_mm_channel_allows_reminder_claims_without_configuration(
+    cog, duel_service
+):
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_main_channel_from_different_guild_uses_origin_for_reminder_claims(
+    cog, bot, duel_service
+):
+    channel = make_text_channel(
+        999,
+        guild=SimpleNamespace(id=GUILD_ID + 1, me=SimpleNamespace(id=55)),
+    )
+    channel.guild.text_channels = [channel]
+    bot.get_guild.return_value = channel.guild
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_is_not_delivered_to_another_guild(
+    cog, bot, interaction
+):
+    other_guild_channel = make_text_channel(
+        999,
+        guild=SimpleNamespace(id=GUILD_ID + 1, me=SimpleNamespace(id=55)),
+    )
+    other_guild_channel.guild.text_channels = [other_guild_channel]
+    bot.get_guild.return_value = other_guild_channel.guild
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    other_guild_channel.send.assert_not_awaited()
+    interaction.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_channel", ["guildless", "non_text", "no_send"])
+async def test_invalid_main_channel_uses_origin_for_reminder_claims(
+    cog, bot, duel_service, invalid_channel
+):
+    if invalid_channel == "guildless":
+        channel = SimpleNamespace(id=999, name="dota-mm", send=AsyncMock())
+    elif invalid_channel == "non_text":
+        channel = SimpleNamespace(
+            id=999,
+            name="dota-mm",
+            guild=SimpleNamespace(id=GUILD_ID),
+            send=AsyncMock(),
+        )
+    else:
+        guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=55))
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.id = 999
+        channel.name = "dota-mm"
+        channel.guild = guild
+        channel.permissions_for.return_value = SimpleNamespace(send_messages=False)
+    bot.get_guild.return_value.text_channels = [channel]
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_uses_origin_without_main_send_permission(
+    cog, bot, interaction
+):
+    guild = bot.get_guild.return_value
+    main_channel = make_text_channel(999, guild=guild, can_send=False)
+    guild.text_channels = [main_channel]
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    main_channel.send.assert_not_awaited()
+    interaction.channel.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -798,32 +1000,35 @@ async def test_earlier_daily_reminder_suppresses_recipient_ping(cog, bot):
 
 
 @pytest.mark.asyncio
-async def test_due_delivery_fetches_channel_after_cache_miss(cog, bot, interaction):
+async def test_due_expiry_fetches_origin_channel_after_cache_miss(cog, bot, interaction):
     bot.get_channel.return_value = None
+    challenge = make_challenge(status=DuelStatus.EXPIRED, next_reminder_at=None)
     result = DuelDueResult(
-        kind=DuelDueKind.REMINDER,
-        challenge=make_challenge(),
-        remaining_seconds=48 * 3600,
-        ping_recipient=True,
+        kind=DuelDueKind.EXPIRED,
+        challenge=challenge,
     )
 
     await cog.deliver_due_result(result)
 
-    bot.fetch_channel.assert_awaited_once_with(CHANNEL_ID)
+    assert bot.fetch_channel.await_count == 2
+    assert all(
+        awaited.args == (CHANNEL_ID,)
+        for awaited in bot.fetch_channel.await_args_list
+    )
     interaction.channel.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_due_channel_fetch_failure_logs_challenge_guild_and_channel(
+async def test_due_expiry_channel_fetch_failure_logs_challenge_guild_and_channel(
     cog, bot, caplog
 ):
+    bot.get_guild.return_value.text_channels = []
     bot.get_channel.return_value = None
     bot.fetch_channel.side_effect = discord.DiscordException("forbidden")
+    challenge = make_challenge(status=DuelStatus.EXPIRED, next_reminder_at=None)
     result = DuelDueResult(
-        kind=DuelDueKind.REMINDER,
-        challenge=make_challenge(),
-        remaining_seconds=48 * 3600,
-        ping_recipient=True,
+        kind=DuelDueKind.EXPIRED,
+        challenge=challenge,
     )
 
     with caplog.at_level(logging.WARNING, logger="cama_bot.commands.duel"):
@@ -857,6 +1062,60 @@ async def test_due_channel_send_failure_logs_challenge_guild_and_channel(
 
 
 @pytest.mark.asyncio
+async def test_due_reminder_falls_back_to_origin_after_main_send_failure(
+    cog, bot, duel_service, interaction
+):
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    main_channel.send.side_effect = discord.DiscordException("forbidden")
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    challenge = make_challenge()
+    duel_service.get_challenge.return_value = challenge
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    delivered = await cog.deliver_due_result(result)
+
+    assert delivered
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_stops_fallback_when_status_changes_after_send_failure(
+    cog, duel_service, interaction
+):
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    main_channel.send.side_effect = discord.DiscordException("forbidden")
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    challenge = make_challenge()
+    duel_service.get_challenge.side_effect = [
+        challenge,
+        challenge,
+        make_challenge(status=DuelStatus.ACCEPTED),
+    ]
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    delivered = await cog.deliver_due_result(result)
+
+    assert not delivered
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_due_challenge_claims_off_loop_and_delivers(cog, duel_service):
     result = DuelDueResult(
         kind=DuelDueKind.REMINDER,
@@ -873,6 +1132,53 @@ async def test_process_due_challenge_claims_off_loop_and_delivers(cog, duel_serv
         7, GUILD_ID, 1_700_432_000, claim_reminders=True
     )
     cog.deliver_due_result.assert_awaited_once_with(result)
+
+
+@pytest.mark.asyncio
+async def test_process_due_challenge_rearms_reminder_after_send_failure(
+    cog, bot, duel_service
+):
+    challenge = make_challenge(next_reminder_at=1_700_518_400)
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+        claimed_reminder_at=1_700_432_000,
+    )
+    duel_service.process_due.return_value = result
+    bot.get_guild.return_value.text_channels[0].send.side_effect = (
+        discord.DiscordException("forbidden")
+    )
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.rearm_reminder.assert_called_once_with(result)
+
+
+@pytest.mark.asyncio
+async def test_process_due_challenge_does_not_rearm_after_origin_fallback(
+    cog, bot, duel_service, interaction
+):
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    main_channel.send.side_effect = discord.DiscordException("forbidden")
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    challenge = make_challenge(next_reminder_at=1_700_518_400)
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=challenge,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+        claimed_reminder_at=1_700_432_000,
+    )
+    duel_service.process_due.return_value = result
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    origin_channel.send.assert_awaited_once()
+    duel_service.rearm_reminder.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -911,6 +1217,100 @@ async def test_due_expiry_edits_original_and_posts_without_mentions(
     sent = channel.send.await_args
     assert "declined in cowardice by silence" in sent.kwargs["content"]
     _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
+
+
+@pytest.mark.asyncio
+async def test_due_expiry_announcement_prefers_main_channel(
+    cog, bot, interaction
+):
+    main_channel_id = 999
+    main_channel = make_text_channel(main_channel_id, guild=interaction.guild)
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    bot.get_channel.side_effect = lambda channel_id: (
+        main_channel if channel_id == main_channel_id else origin_channel
+    )
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=None,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+
+    await cog.deliver_due_result(result)
+
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_not_awaited()
+    origin_channel.get_partial_message.assert_called_once_with(challenge.message_id)
+
+
+@pytest.mark.asyncio
+async def test_due_expiry_does_not_edit_origin_channel_from_another_guild(
+    cog, bot, interaction
+):
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    interaction.guild.text_channels = [main_channel]
+    other_guild = SimpleNamespace(
+        id=GUILD_ID + 1,
+        me=SimpleNamespace(id=55),
+    )
+    other_guild_channel = make_text_channel(CHANNEL_ID, guild=other_guild)
+    other_guild_channel.get_partial_message.return_value = SimpleNamespace(
+        edit=AsyncMock()
+    )
+    bot.get_channel.return_value = other_guild_channel
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=None,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+
+    delivered = await cog.deliver_due_result(result)
+
+    assert delivered
+    main_channel.send.assert_awaited_once()
+    other_guild_channel.get_partial_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_due_expiry_announcement_falls_back_to_origin_channel(
+    cog, interaction
+):
+    interaction.channel.name = "gamba"
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=None,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+
+    await cog.deliver_due_result(result)
+
+    interaction.channel.send.assert_awaited_once()
+    interaction.channel.get_partial_message.assert_called_once_with(
+        challenge.message_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_due_expiry_announcement_falls_back_after_main_send_failure(
+    cog, interaction
+):
+    origin_channel = interaction.channel
+    origin_channel.name = "gamba"
+    main_channel = make_text_channel(999, guild=interaction.guild)
+    main_channel.send.side_effect = discord.DiscordException("forbidden")
+    interaction.guild.text_channels = [origin_channel, main_channel]
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=None,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+
+    delivered = await cog.deliver_due_result(result)
+
+    assert delivered
+    main_channel.send.assert_awaited_once()
+    origin_channel.send.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

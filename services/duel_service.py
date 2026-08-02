@@ -7,6 +7,7 @@ from domain.models.duel import (
     DuelDueKind,
     DuelDueResult,
     DuelResolution,
+    DuelStatus,
     DuelTrial,
 )
 from domain.pet_evolution import PetActivity
@@ -151,3 +152,22 @@ class DuelService:
         except ValueError:
             return None
         return DuelDueResult(DuelDueKind.EXPIRED, expired)
+
+    def rearm_reminder(self, result: DuelDueResult) -> bool:
+        expected_status = {
+            DuelDueKind.REMINDER: DuelStatus.PENDING,
+            DuelDueKind.UNRESOLVED: DuelStatus.ACCEPTED,
+        }.get(result.kind)
+        if (
+            expected_status is None
+            or result.claimed_reminder_at is None
+            or result.challenge.next_reminder_at is None
+        ):
+            return False
+        return self.repo.rearm_reminder_atomic(
+            result.challenge.challenge_id,
+            result.challenge.guild_id,
+            expected_status,
+            result.challenge.next_reminder_at,
+            result.claimed_reminder_at,
+        )

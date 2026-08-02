@@ -867,6 +867,92 @@ def test_reminder_claim_catches_up_to_next_daily_boundary(duel_fixture):
     assert not claimed.ping_recipient
 
 
+def test_reminder_claim_preserves_claimed_schedule_for_delivery_retry(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    now = challenge.created_at + 3 * DAY
+
+    claimed = repo.claim_reminder_atomic(challenge.challenge_id, GUILD_ID, now)
+
+    assert claimed.claimed_reminder_at == challenge.next_reminder_at
+
+
+def test_failed_delivery_rearms_claimed_reminder_atomically(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    claimed = repo.claim_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.next_reminder_at,
+    )
+
+    restored = repo.rearm_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        DuelStatus.PENDING,
+        claimed.challenge.next_reminder_at,
+        claimed.claimed_reminder_at,
+    )
+
+    assert restored
+    stored = repo.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.next_reminder_at == challenge.next_reminder_at
+
+
+def test_rearm_does_not_overwrite_a_changed_duel_status(duel_fixture):
+    repo, _, challenge = duel_fixture(wager=500, recipient_balance=500)
+    claimed = repo.claim_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.next_reminder_at,
+    )
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.recipient_id,
+        DuelTrial.TRIAL_BY_COMBAT,
+        challenge.next_reminder_at,
+        challenge.recipient_id,
+    )
+
+    restored = repo.rearm_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        DuelStatus.PENDING,
+        claimed.challenge.next_reminder_at,
+        claimed.claimed_reminder_at,
+    )
+
+    assert not restored
+    stored = repo.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.next_reminder_at == accepted.next_reminder_at
+
+
+def test_rearm_does_not_overwrite_a_newer_reminder_schedule(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    claimed = repo.claim_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.next_reminder_at,
+    )
+    newer_schedule = claimed.challenge.next_reminder_at + 60
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute(
+            "UPDATE duel_challenges SET next_reminder_at = ? WHERE challenge_id = ?",
+            (newer_schedule, challenge.challenge_id),
+        )
+
+    restored = repo.rearm_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        DuelStatus.PENDING,
+        claimed.challenge.next_reminder_at,
+        claimed.claimed_reminder_at,
+    )
+
+    assert not restored
+    stored = repo.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.next_reminder_at == newer_schedule
+
+
 def test_only_one_concurrent_reminder_claim_succeeds(duel_fixture):
     repo, _, challenge = duel_fixture()
     now = challenge.created_at + DAY
@@ -928,6 +1014,19 @@ def test_unresolved_claim_bumps_to_next_daily_boundary(duel_fixture):
         repo.claim_unresolved_reminder_atomic(accepted.challenge_id, GUILD_ID, now)
         is None
     )
+
+
+def test_unresolved_claim_preserves_claimed_schedule_for_delivery_retry(
+    duel_fixture,
+):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+    now = accepted.responded_at + 3 * DAY + 500
+
+    claimed = repo.claim_unresolved_reminder_atomic(
+        accepted.challenge_id, GUILD_ID, now
+    )
+
+    assert claimed.claimed_reminder_at == accepted.next_reminder_at
 
 
 def test_unresolved_claim_keeps_the_stored_reminder_grid(duel_fixture):
