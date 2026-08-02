@@ -272,6 +272,36 @@ def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
     duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
 
 
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [
+        (DuelDueKind.REMINDER, DuelStatus.PENDING),
+        (DuelDueKind.UNRESOLVED, DuelStatus.ACCEPTED),
+    ],
+)
+def test_service_rearms_failed_reminder_claim(duel_repo_mock, kind, status):
+    result = SimpleNamespace(
+        kind=kind,
+        challenge=SimpleNamespace(
+            challenge_id=7,
+            guild_id=GUILD_ID,
+            next_reminder_at=NOW + 2 * DAY,
+        ),
+        claimed_reminder_at=NOW + DAY,
+    )
+    duel_repo_mock.rearm_reminder_atomic.return_value = True
+    service = DuelService(duel_repo_mock)
+
+    assert service.rearm_reminder(result)
+    duel_repo_mock.rearm_reminder_atomic.assert_called_once_with(
+        7,
+        GUILD_ID,
+        status,
+        NOW + 2 * DAY,
+        NOW + DAY,
+    )
+
+
 def test_service_process_due_returns_none_for_stale_challenge(duel_repo_mock):
     duel_repo_mock.claim_reminder_atomic.return_value = None
     duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None

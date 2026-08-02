@@ -24,6 +24,8 @@ from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.duel")
 
+MAIN_CHANNEL_NAME = "dota-mm"
+
 _RECOVERY_EDIT_CONCURRENCY = 5
 
 TRIAL_DETAILS = {
@@ -440,31 +442,30 @@ class DuelCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def deliver_due_result(self, result: DuelDueResult) -> None:
+    async def deliver_due_result(self, result: DuelDueResult) -> bool:
         """Deliver an already-claimed reminder or expiry result."""
         challenge = result.challenge
-        channel = await self._get_channel(challenge.channel_id)
-        if channel is None:
+        channels = await self._get_lifecycle_channels(challenge)
+        if not channels:
             logger.warning(
                 "duel lifecycle channel unavailable challenge=%s guild=%s channel=%s",
                 challenge.challenge_id,
                 challenge.guild_id,
                 challenge.channel_id,
             )
-            return
-        if result.kind is not DuelDueKind.EXPIRED:
-            expected_status = (
-                DuelStatus.PENDING
-                if result.kind is DuelDueKind.REMINDER
-                else DuelStatus.ACCEPTED
-            )
+            return False
+        expected_status = {
+            DuelDueKind.REMINDER: DuelStatus.PENDING,
+            DuelDueKind.UNRESOLVED: DuelStatus.ACCEPTED,
+        }.get(result.kind)
+        if expected_status is not None:
             current = await asyncio.to_thread(
                 self.duel_service.get_challenge,
                 challenge.challenge_id,
                 challenge.guild_id,
             )
             if current is None or current.status is not expected_status:
-                return
+                return False
         event = {
             DuelDueKind.REMINDER: DuelFlavorEvent.REMINDER,
             DuelDueKind.EXPIRED: DuelFlavorEvent.EXPIRED,
@@ -522,18 +523,29 @@ class DuelCommands(commands.Cog):
                 if result.ping_recipient
                 else discord.AllowedMentions.none()
             )
-        try:
-            await channel.send(
-                content=content,
-                allowed_mentions=allowed_mentions,
-            )
-        except discord.DiscordException:
-            logger.exception(
-                "Unable to deliver duel lifecycle message challenge=%s guild=%s channel=%s",
-                challenge.challenge_id,
-                challenge.guild_id,
-                challenge.channel_id,
-            )
+        for channel in channels:
+            if expected_status is not None:
+                current = await asyncio.to_thread(
+                    self.duel_service.get_challenge,
+                    challenge.challenge_id,
+                    challenge.guild_id,
+                )
+                if current is None or current.status is not expected_status:
+                    return False
+            try:
+                await channel.send(
+                    content=content,
+                    allowed_mentions=allowed_mentions,
+                )
+                return True
+            except discord.DiscordException:
+                logger.exception(
+                    "Unable to deliver duel lifecycle message challenge=%s guild=%s channel=%s",
+                    challenge.challenge_id,
+                    challenge.guild_id,
+                    channel.id,
+                )
+        return False
 
     async def process_due_challenge(
         self,
@@ -547,7 +559,7 @@ class DuelCommands(commands.Cog):
         )
         if challenge is None:
             return
-        deferred = await self._channel_transiently_unavailable(challenge.channel_id)
+        deferred = not await self._get_lifecycle_channels(challenge)
         result = await asyncio.to_thread(
             self.duel_service.process_due,
             challenge_id,
@@ -557,28 +569,72 @@ class DuelCommands(commands.Cog):
         )
         if result is None:
             return
-        await self.deliver_due_result(result)
-
-    async def _channel_transiently_unavailable(self, channel_id: int) -> bool:
-        """True only for channel failures worth retrying on the next wake.
-
-        A reminder claim burns that day's ping, so a transient fetch failure
-        defers claiming instead. NotFound and Forbidden are permanent — the
-        claim proceeds normally rather than re-checking a dead channel every
-        wake."""
-        if self.bot.get_channel(channel_id) is not None:
-            return False
+        delivered = False
         try:
-            await self.bot.fetch_channel(channel_id)
-        except (discord.NotFound, discord.Forbidden):
-            return False
-        except discord.DiscordException:
-            logger.exception(
-                "Duel channel fetch failed; deferring reminder claim for channel %s",
-                channel_id,
+            delivered = await self.deliver_due_result(result)
+        finally:
+            if result.kind is not DuelDueKind.EXPIRED and not delivered:
+                await asyncio.to_thread(self.duel_service.rearm_reminder, result)
+
+    async def _get_lifecycle_channels(self, challenge: DuelChallenge) -> list:
+        """Resolve unique, same-guild delivery targets in fallback order."""
+        main_channel = self._get_main_channel(challenge.guild_id)
+        origin_channel = await self._get_channel(challenge.channel_id)
+        channels = []
+        channel_ids = set()
+        for channel in (main_channel, origin_channel):
+            channel_id = getattr(channel, "id", None)
+            channel_guild = getattr(channel, "guild", None)
+            if (
+                channel is None
+                or channel_id in channel_ids
+                or channel_guild is None
+                or channel_guild.id != challenge.guild_id
+            ):
+                continue
+            channels.append(channel)
+            channel_ids.add(channel_id)
+        return channels
+
+    def _get_main_channel(self, guild_id: int) -> discord.TextChannel | None:
+        """Resolve the guild's unique dota-mm text channel from the cache."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            logger.warning("Duel reminder guild unavailable; guild=%s", guild_id)
+            return None
+        matches = [
+            channel
+            for channel in guild.text_channels
+            if isinstance(channel, discord.TextChannel)
+            and channel.name == MAIN_CHANNEL_NAME
+        ]
+        if len(matches) != 1:
+            logger.warning(
+                "Expected one #%s text channel; guild=%s matches=%s",
+                MAIN_CHANNEL_NAME,
+                guild_id,
+                len(matches),
             )
-            return True
-        return False
+            return None
+        channel = matches[0]
+        if not self._can_send_reminder(channel, guild_id):
+            logger.warning(
+                "Cannot send duel reminders in #%s; guild=%s channel=%s",
+                MAIN_CHANNEL_NAME,
+                guild_id,
+                channel.id,
+            )
+            return None
+        return channel
+
+    @staticmethod
+    def _can_send_reminder(channel, guild_id: int) -> bool:
+        if not isinstance(channel, discord.TextChannel):
+            return False
+        guild = channel.guild
+        if guild.id != guild_id or guild.me is None:
+            return False
+        return channel.permissions_for(guild.me).send_messages
 
     def build_challenge_embed(
         self,
@@ -785,7 +841,8 @@ class DuelCommands(commands.Cog):
         if challenge.message_id is None:
             return
         channel = await self._get_channel(challenge.channel_id)
-        if channel is None:
+        channel_guild = getattr(channel, "guild", None)
+        if channel_guild is None or channel_guild.id != challenge.guild_id:
             return
         try:
             message = channel.get_partial_message(challenge.message_id)

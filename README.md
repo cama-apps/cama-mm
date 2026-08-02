@@ -236,7 +236,10 @@ View leaderboard with multiple ranking types.
 - `/dig` — Tunnel digging minigame: 25 player subcommands (`go`, `gear`, `shop`, `buy`, `use`, `inventory`, `artifacts`, `insure`, `trap`, `sabotage`, `gift`, `flex`, `prestige`, `weather`, `abandon`, `leaderboard`, `halloffame`, `guide`, `help`, `info`, and the `/dig miner` build system: `about`, `autobuy`, `build`, `profile`, `respec`) plus `/dig admin resetcooldown|forceevent|setdepth`. Gated to the configured dig channel.
 - `/pet` — Cama pet care: `adopt`, `status`, `feed`, `shop`, `buy`, `rename`, `trinket`, `brawl` (challenge someone to a pet brawl), `altar` (sacrifice your cama for a better egg), `graveyard`, `leaderboard`. Requires `PET_CHANNEL_ID`.
 - `/mafia` — Daily Mafia: `join`, `role`, `act`, `vote`, `remind`, `status`, `bounty`, `history`, `leaderboard`, `info`, `optin`, `optout`, plus `/mafia admin start|stop|abort`. Runs in the dedicated mafia channel.
-- `/duel` — Challenges of honor: `issue`, `respond`, `list`, `resolve`
+- `/duel` — Challenges of honor: `issue`, `respond`, `list`, `resolve`. Pending,
+  unresolved, and expiry announcements prefer the guild's unique `#dota-mm`
+  text channel and fall back to the originating channel. The original challenge
+  message is updated in place.
 - `/tax` — Jopacoin economy and Tax Man tools: `audit`, `policy`, `player`, `ledger`, `event`, `fine`, `vanity` (check the nickname vanity tax), `bankruptcy`, `resetcooldown`
 - `/mana` — Check your daily mana land assignment
 - `/trivia` — Dota 2 trivia with four difficulty tiers that escalate with your streak (heroes, items, abilities, facets, voicelines). Four options per question with a 15-second timer; a correct answer awards 1 JC plus streak bonuses, a wrong answer resets the streak. 6-hour cooldown.
