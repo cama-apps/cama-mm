@@ -5,11 +5,11 @@ Streak-based adjustments apply a delta multiplier to Glicko-2 rating updates
 when players are on win/loss streaks of 3+ games. This helps correct ratings
 faster when a player's skill has changed.
 
-Multiplier formula: 1.0 + 0.20 * max(0, streak_length - 2)
+Multiplier formula: 1.0 + 0.25 * max(0, streak_length - 2)
 - Streaks 1-2: 1.00x (normal)
-- Streak 3: 1.20x (+20%)
-- Streak 4: 1.40x (+40%)
-- Streak 5: 1.60x (+60%)
+- Streak 3: 1.25x (+25%)
+- Streak 4: 1.50x (+50%)
+- Streak 5: 1.75x (+75%)
 - etc. (uncapped)
 """
 
@@ -47,45 +47,45 @@ class TestStreakMultiplierCalculation:
         assert streak_length == 2
         assert multiplier == 1.0
 
-    def test_three_game_streak_returns_multiplier_1_20(self, rating_system):
-        """A 3-game streak returns 1.20x multiplier."""
+    def test_three_game_streak_returns_multiplier_1_25(self, rating_system):
+        """A 3-game streak returns 1.25x multiplier."""
         # 2 previous wins + current win = 3-game streak
         recent_outcomes = [True, True]
         streak_length, multiplier = rating_system.calculate_streak_multiplier(
             recent_outcomes, won=True
         )
         assert streak_length == 3
-        assert multiplier == pytest.approx(1.20)
+        assert multiplier == pytest.approx(1.25)
 
-    def test_four_game_streak_returns_multiplier_1_40(self, rating_system):
-        """A 4-game streak returns 1.40x multiplier."""
+    def test_four_game_streak_returns_multiplier_1_50(self, rating_system):
+        """A 4-game streak returns 1.50x multiplier."""
         # 3 previous wins + current win = 4-game streak
         recent_outcomes = [True, True, True]
         streak_length, multiplier = rating_system.calculate_streak_multiplier(
             recent_outcomes, won=True
         )
         assert streak_length == 4
-        assert multiplier == pytest.approx(1.40)
+        assert multiplier == pytest.approx(1.50)
 
-    def test_five_game_streak_returns_multiplier_1_60(self, rating_system):
-        """A 5-game streak returns 1.60x multiplier."""
+    def test_five_game_streak_returns_multiplier_1_75(self, rating_system):
+        """A 5-game streak returns 1.75x multiplier."""
         # 4 previous wins + current win = 5-game streak
         recent_outcomes = [True, True, True, True]
         streak_length, multiplier = rating_system.calculate_streak_multiplier(
             recent_outcomes, won=True
         )
         assert streak_length == 5
-        assert multiplier == pytest.approx(1.60)
+        assert multiplier == pytest.approx(1.75)
 
-    def test_ten_game_streak_returns_multiplier_2_60(self, rating_system):
-        """A 10-game streak returns 2.60x multiplier (uncapped)."""
+    def test_ten_game_streak_returns_multiplier_3_00(self, rating_system):
+        """A 10-game streak returns 3.00x multiplier (uncapped)."""
         # 9 previous wins + current win = 10-game streak
         recent_outcomes = [True] * 9
         streak_length, multiplier = rating_system.calculate_streak_multiplier(
             recent_outcomes, won=True
         )
         assert streak_length == 10
-        assert multiplier == pytest.approx(2.60)
+        assert multiplier == pytest.approx(3.00)
 
     def test_loss_streak_works_same_as_win_streak(self, rating_system):
         """Loss streaks also get multiplied when continuing."""
@@ -95,7 +95,7 @@ class TestStreakMultiplierCalculation:
             recent_outcomes, won=False
         )
         assert streak_length == 4
-        assert multiplier == pytest.approx(1.40)
+        assert multiplier == pytest.approx(1.50)
 
     def test_streak_broken_returns_multiplier_1(self, rating_system):
         """A loss that breaks a win streak gets no boost."""
@@ -139,7 +139,7 @@ class TestStreakMultiplierCalculation:
             recent_outcomes, won=True  # Win continues the streak to 4
         )
         assert streak_length == 4
-        assert multiplier == pytest.approx(1.40)
+        assert multiplier == pytest.approx(1.50)
 
     def test_empty_history_returns_streak_of_1(self, rating_system):
         """First game ever returns streak of 1."""
@@ -153,7 +153,7 @@ class TestStreakMultiplierCalculation:
     def test_config_constants_have_expected_values(self):
         """Verify config constants are set correctly."""
         assert STREAK_THRESHOLD == 3
-        assert pytest.approx(0.20) == STREAK_MULTIPLIER_PER_GAME
+        assert pytest.approx(0.25) == STREAK_MULTIPLIER_PER_GAME
 
 
 class TestStreakInRatingUpdate:
@@ -337,7 +337,7 @@ class TestStreakIntegration:
         return CamaRatingSystem()
 
     def test_win_streak_amplifies_rating_gain(self, rating_system):
-        """Verify a 5-game win streak results in ~1.60x rating delta."""
+        """Verify a 5-game win streak results in ~1.75x rating delta."""
         from glicko2 import Player
 
         # Create balanced teams
@@ -354,7 +354,7 @@ class TestStreakIntegration:
         )
         base_delta = team1_no_streak[0][0] - team1_player.rating
 
-        # With 5-game streak (multiplier = 1.60 at 20% per game)
+        # With 5-game streak (multiplier = 1.75 at 25% per game)
         # Recreate fresh players since glicko2 mutates them
         team1_player = Player(rating=1500, rd=100, vol=0.06)
         team2_player = Player(rating=1500, rd=100, vol=0.06)
@@ -363,15 +363,15 @@ class TestStreakIntegration:
 
         team1_with_streak, _ = rating_system.update_ratings_after_match(
             team1_players, team2_players, winning_team=1,
-            streak_multipliers={1: 1.60}
+            streak_multipliers={1: 1.75}
         )
         streak_delta = team1_with_streak[0][0] - 1500
 
-        # Streak delta should be ~1.60x the base delta
-        assert streak_delta == pytest.approx(base_delta * 1.60, rel=0.01)
+        # Streak delta should be ~1.75x the base delta
+        assert streak_delta == pytest.approx(base_delta * 1.75, rel=0.01)
 
     def test_loss_streak_amplifies_rating_loss(self, rating_system):
-        """Verify a 4-game loss streak results in ~1.40x rating loss."""
+        """Verify a 4-game loss streak results in ~1.50x rating loss."""
         from glicko2 import Player
 
         team1_player = Player(rating=1500, rd=100, vol=0.06)
@@ -387,7 +387,7 @@ class TestStreakIntegration:
         )
         base_delta = team1_no_streak[0][0] - team1_player.rating  # Negative
 
-        # With 4-game loss streak (multiplier = 1.40 at 20% per game)
+        # With 4-game loss streak (multiplier = 1.50 at 25% per game)
         team1_player = Player(rating=1500, rd=100, vol=0.06)
         team2_player = Player(rating=1500, rd=100, vol=0.06)
         team1_players = [(team1_player, 1)]
@@ -395,12 +395,12 @@ class TestStreakIntegration:
 
         team1_with_streak, _ = rating_system.update_ratings_after_match(
             team1_players, team2_players, winning_team=2,  # Team 1 loses
-            streak_multipliers={1: 1.40}
+            streak_multipliers={1: 1.50}
         )
         streak_delta = team1_with_streak[0][0] - 1500
 
-        # Streak delta should be ~1.40x the base delta (both negative)
-        assert streak_delta == pytest.approx(base_delta * 1.40, rel=0.01)
+        # Streak delta should be ~1.50x the base delta (both negative)
+        assert streak_delta == pytest.approx(base_delta * 1.50, rel=0.01)
 
 
 class TestRatingHistoryStreakColumns:

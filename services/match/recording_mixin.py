@@ -597,6 +597,9 @@ class RecordingMixin:
                         "os_sigma_after": pre.get("os_sigma_after"),
                         "streak_length": pre.get("streak_length"),
                         "streak_multiplier": pre.get("streak_multiplier"),
+                        "streak_multiplier_per_game": (
+                            self.rating_system.streak_multiplier_per_game
+                        ),
                     }
                 )
 

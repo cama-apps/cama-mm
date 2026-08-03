@@ -574,9 +574,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         os_mu_before, os_mu_after, os_sigma_before, os_sigma_after,
                         fantasy_weight, os_algorithm_version,
                         os_algorithm_fingerprint,
-                        streak_length, streak_multiplier
+                        streak_length, streak_multiplier,
+                        streak_multiplier_per_game
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -601,6 +602,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             openskill_fingerprint,
                             row.get("streak_length"),
                             row.get("streak_multiplier"),
+                            row.get("streak_multiplier_per_game", 0.20),
                         )
                         for row in rating_history_rows
                     ],
@@ -3549,7 +3551,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_mu_after,
                     os_sigma_before,
                     os_sigma_after,
-                    fantasy_weight
+                    fantasy_weight,
+                    streak_multiplier_per_game
                 FROM rating_history
                 WHERE match_id = ?
                 """,

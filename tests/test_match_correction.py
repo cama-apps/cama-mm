@@ -857,6 +857,73 @@ class TestMatchCorrection:
             slen, mult = expected_streaks[pid]
             assert stored_streaks[pid] == (slen, pytest.approx(mult))
 
+    def test_correction_preserves_recording_time_streak_rate_after_config_change(
+        self, correction_services, monkeypatch
+    ):
+        """A later balance change must not rewrite an older match's rating curve."""
+        import rating_system as rating_system_module
+
+        match_service = correction_services["match_service"]
+        match_repo = correction_services["match_repo"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=11500)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        dire_ids = pending.dire_team_ids
+
+        for pid in dire_ids:
+            for _ in range(3):
+                match_repo.add_rating_history(
+                    pid,
+                    TEST_GUILD_ID,
+                    rating=1500.0,
+                    won=True,
+                )
+
+        monkeypatch.setattr(
+            rating_system_module,
+            "STREAK_MULTIPLIER_PER_GAME",
+            0.20,
+        )
+        match_service.add_record_submission(
+            TEST_GUILD_ID,
+            99999,
+            "radiant",
+            is_admin=True,
+        )
+        match_id = match_service.record_match(
+            "radiant",
+            guild_id=TEST_GUILD_ID,
+        )["match_id"]
+
+        monkeypatch.setattr(
+            rating_system_module,
+            "STREAK_MULTIPLIER_PER_GAME",
+            0.25,
+        )
+        match_service.correct_match_result(
+            match_id,
+            "dire",
+            TEST_GUILD_ID,
+            corrected_by=1,
+        )
+
+        conn = sqlite3.connect(correction_services["db_path"])
+        rows = conn.execute(
+            "SELECT discord_id, streak_length, streak_multiplier "
+            "FROM rating_history WHERE match_id = ?",
+            (match_id,),
+        ).fetchall()
+        conn.close()
+        stored_streaks = {
+            discord_id: (streak_length, streak_multiplier)
+            for discord_id, streak_length, streak_multiplier in rows
+        }
+
+        for pid in dire_ids:
+            assert stored_streaks[pid] == (4, pytest.approx(1.40))
+
 
 def test_correction_finishes_after_partial_win_bonus_failure(correction_services):
     """A failure while awarding corrected winners must abort BEFORE the
