@@ -6,7 +6,7 @@ from config import VANITY_TAX_RATE
 
 
 class VanityTaxService:
-    """Apply a 5% profit tax to guild members without a server nickname."""
+    """Apply a 10% profit tax to guild members without a server nickname."""
 
     TAX_RATE = VANITY_TAX_RATE
 
@@ -54,6 +54,5 @@ class VanityTaxService:
             return 0
         if discord_id not in self._taxable_by_guild.get(guild_id, ()):
             return 0
-        # Floor keeps tiny profits untaxed; the 5% rate (up from 1%) is what
-        # makes the tax visible at this economy's payout sizes.
+        # Floor keeps profits under 10 JC untaxed at the default 10% rate.
         return int(profit * self.TAX_RATE)

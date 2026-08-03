@@ -306,7 +306,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 - `LOAN_COOLDOWN_SECONDS`, `LOAN_MAX_AMOUNT`, `LOAN_FEE_RATE` - Loan system
 - `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES` - Bankruptcy settings (default penalty: 3 games)
 - `TIP_FEE_RATE` - Tipping fee (default: 1%)
-- `VANITY_TAX_RATE` - Profit tax on members without a server nickname (default: 5%)
+- `VANITY_TAX_RATE` - Profit tax on members without a server nickname (default: 10%)
 - `DISBURSE_MIN_FUND`, `DISBURSE_QUORUM_PERCENTAGE` - Disbursement voting
 - `PINGEDASH_TARGET_USER_ID`, `PINGEDKEVIN_TARGET_USER_ID` - Discord user IDs
   targeted by the paid `/shop pingedash` and `/shop pingedkevin` commands

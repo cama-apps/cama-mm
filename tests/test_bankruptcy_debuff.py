@@ -216,10 +216,10 @@ class TestBettingDebuff:
             125, TEST_GUILD_ID, "radiant", pending_state=pending
         )
 
-        # House payout is 200: the 100 stake is returned untaxed and 5% of
+        # House payout is 200: the 100 stake is returned untaxed and 10% of
         # the 100 profit is sunk.
-        assert dist["vanity_taxes"][bettor] == 5
-        assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 598
+        assert dist["vanity_taxes"][bettor] == 10
+        assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 593
         with player_repo.connection() as conn:
             row = conn.execute(
                 "SELECT delta FROM economy_ledger_entries "
@@ -228,7 +228,7 @@ class TestBettingDebuff:
                 (TEST_GUILD_ID, bettor),
             ).fetchone()
         assert row is not None
-        assert row["delta"] == -5
+        assert row["delta"] == -10
 
     def test_vanity_tax_is_included_in_bet_history_and_aggregate_pnl(
         self, repos, bankruptcy_service
@@ -260,12 +260,12 @@ class TestBettingDebuff:
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         history = bet_repo.get_player_bet_history(bettor, TEST_GUILD_ID)
-        assert sum(row["profit"] for row in history) == 95  # 5% tax
+        assert sum(row["profit"] for row in history) == 90  # 10% tax
 
         metrics = bet_repo.get_bulk_gambling_metrics(
             TEST_GUILD_ID, [bettor]
         )
-        assert metrics[bettor]["net_pnl"] == 95
+        assert metrics[bettor]["net_pnl"] == 90
 
         summary = bet_repo.get_guild_gambling_summary(
             TEST_GUILD_ID, min_bets=1
@@ -273,7 +273,7 @@ class TestBettingDebuff:
         bettor_summary = next(
             row for row in summary if row["discord_id"] == bettor
         )
-        assert bettor_summary["net_pnl"] == 95
+        assert bettor_summary["net_pnl"] == 90
 
 
 # --------------------------------------------------------------------------- #
@@ -369,7 +369,7 @@ class TestDigDebuff:
 
         assert dig_service._apply_jc_profit_policies(
             pid, TEST_GUILD_ID, 250
-        ) == (238, 0, 12)  # 5% of the 250 profit
+        ) == (225, 0, 25)  # 10% of the 250 profit
 
     def test_dig_atomic_credit_audits_vanity_tax(self, repos):
         pid = 7004

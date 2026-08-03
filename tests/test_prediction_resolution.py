@@ -397,7 +397,7 @@ def test_resolve_orderbook_vanity_tax_is_audited_and_rollback_safe(
     )
 
     gross_payout = 5 * PREDICTION_CONTRACT_VALUE * 10
-    tax = int((gross_payout - cost) * 0.05)
+    tax = int((gross_payout - cost) * 0.10)
     assert tax > 0
     winner = next(w for w in result["winners"] if w["discord_id"] == 1)
     assert winner["vanity_tax"] == tax
