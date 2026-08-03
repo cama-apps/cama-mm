@@ -1,7 +1,7 @@
 """Interactive views for pet brawls.
 
 Two stages share one public message: the challenge (accept / decline /
-withdraw) and the battle (three move buttons, both owners picking secretly).
+withdraw) and the battle (five move buttons, both owners picking secretly).
 Views are stateless renderers over a cog-held ``PetBrawlSession`` — the
 persisted row only tracks lifecycle, so a bot restart voids the fight
 harmlessly (stakes are hunger-only and settle at the very end).
@@ -46,6 +46,8 @@ _MOVE_BUTTONS = (
     (PetBrawlMove.SPIT, "Spit"),
     (PetBrawlMove.STAMPEDE, "Stampede"),
     (PetBrawlMove.HUNKER, "Hunker Down"),
+    (PetBrawlMove.FEINT, "Feint"),
+    (PetBrawlMove.SIDESTEP, "Sidestep"),
 )
 
 

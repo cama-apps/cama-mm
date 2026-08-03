@@ -311,6 +311,33 @@ def press(view, move: PetBrawlMove):
 
 class TestBattleView:
     @pytest.mark.asyncio
+    async def test_battle_offers_five_moves_and_explains_training_stats(
+        self, brawl_cog
+    ):
+        view, _ = await start_battle(brawl_cog)
+
+        offered_moves = {
+            child.custom_id.rsplit(":", 1)[-1] for child in view.children
+        }
+        assert offered_moves == {
+            "spit",
+            "stampede",
+            "hunker",
+            "feint",
+            "sidestep",
+        }
+
+        embed = view.message.edit.await_args.kwargs["embed"]
+        how_it_works = next(
+            field.value for field in embed.fields if field.name == "How it works"
+        )
+        assert "Feint" in how_it_works
+        assert "Sidestep" in how_it_works
+        assert "STR" in how_it_works
+        assert "INT" in how_it_works
+        assert "DEX" in how_it_works
+
+    @pytest.mark.asyncio
     async def test_stranger_cannot_fight(self, brawl_cog):
         view, _ = await start_battle(brawl_cog)
         inter = make_interaction(user_id=STRANGER)
