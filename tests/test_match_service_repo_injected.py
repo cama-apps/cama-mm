@@ -290,7 +290,7 @@ def test_record_applies_deferred_exclusion_factor_updates(repo_db_path):
 
 
 def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
-    """Ensure goodness_score uses the weighted role delta (0.19 default)."""
+    """Ensure goodness_score weights both lane and same-role parity."""
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     service = MatchService(
@@ -345,11 +345,13 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
     # value diff = |6500 - 6800| = 300
-    # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.19 -> 95
+    # lane delta = sum(100, 400, 0, 0, 0) = 500
+    # role parity = sum(600, 0, 900, 0, 0) = 1500
+    # combined parity = 2000; weighted by 0.17 -> 340
     # rating spread = (2000 - 1000) / 10 = 100
     # off-role penalty and exclusion penalty = 0
     # lobby rating bonus = average team total / 100 = 13,300 / 2 / 100 = 66.5
-    assert result["goodness_score"] == pytest.approx(428.5)
+    assert result["goodness_score"] == pytest.approx(673.5)
 
 
 def test_openskill_falls_back_to_glicko_when_player_missing_os_mu(repo_db_path):

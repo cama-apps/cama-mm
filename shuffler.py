@@ -141,7 +141,7 @@ class BalancedShuffler:
             consider_roles: Whether to consider role distribution
             off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
             off_role_flat_penalty: Flat penalty per off-role player added to team value difference (see SHUFFLER_SETTINGS)
-            role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
+            role_matchup_delta_weight: Weight applied to lane and role parity deltas when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
             use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
             use_jopacoin: Whether to use jopacoin balance instead of ratings (default False)
@@ -771,6 +771,14 @@ class BalancedShuffler:
             + abs(t2_values[3] - t1_values[4])
         )
 
+    @staticmethod
+    def _role_parity_delta_from_metrics(
+        team1: _RoleAssignmentMetrics,
+        team2: _RoleAssignmentMetrics,
+    ) -> float:
+        """Calculate the same-role delta from precomputed effective values."""
+        return sum(abs(t1 - t2) for t1, t2 in zip(team1.role_values, team2.role_values))
+
     def _optimize_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -866,10 +874,17 @@ class BalancedShuffler:
                     + abs_value(t1_soft_support - t2_hard_support)
                     + abs_value(t2_soft_support - t1_hard_support)
                 )
+                role_parity_delta = (
+                    abs_value(t1_carry - t2_carry)
+                    + abs_value(t1_mid - t2_mid)
+                    + abs_value(t1_offlane - t2_offlane)
+                    + abs_value(t1_soft_support - t2_soft_support)
+                    + abs_value(t1_hard_support - t2_hard_support)
+                )
                 total_score = (
                     value_diff
                     + off_role_penalty
-                    + role_matchup_delta * role_matchup_delta_weight
+                    + (role_matchup_delta + role_parity_delta) * role_matchup_delta_weight
                     - rd_priority
                 )
                 if total_score < best_score:
@@ -969,7 +984,16 @@ class BalancedShuffler:
                     + abs(t1_soft_support - t2_hard_support)
                     + abs(t2_soft_support - t1_hard_support)
                 )
-                weighted_role_delta = role_matchup_delta * role_matchup_delta_weight
+                role_parity_delta = (
+                    abs(t1_carry - t2_carry)
+                    + abs(t1_mid - t2_mid)
+                    + abs(t1_offlane - t2_offlane)
+                    + abs(t1_soft_support - t2_soft_support)
+                    + abs(t1_hard_support - t2_hard_support)
+                )
+                weighted_role_delta = (
+                    role_matchup_delta + role_parity_delta
+                ) * role_matchup_delta_weight
                 total_score = (
                     value_diff
                     + off_role_penalty
@@ -998,7 +1022,7 @@ class BalancedShuffler:
 
         Args:
             entries: List of matchup tuples, each
-                (score, value_diff, off_penalty, role_delta, excl_penalty,
+                (score, value_diff, off_penalty, parity_penalty, excl_penalty,
                  t1_val, t2_val, t1_off, t2_off, excluded, t1, t2),
                 sorted ascending by score.
             header: Heading line printed above the matchups.
@@ -1013,7 +1037,7 @@ class BalancedShuffler:
             score,
             value_diff,
             off_penalty,
-            role_delta,
+            parity_penalty,
             excl_penalty,
             t1_val,
             t2_val,
@@ -1029,11 +1053,11 @@ class BalancedShuffler:
             if show_exclusions:
                 logger.info(
                     f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, "
-                    f"Role Matchup Delta: {role_delta:.1f}, Exclusion Penalty: {excl_penalty:.1f})"
+                    f"Parity Penalty: {parity_penalty:.1f}, Exclusion Penalty: {excl_penalty:.1f})"
                 )
             else:
                 logger.info(
-                    f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, Role Matchup Delta: {role_delta:.1f})"
+                    f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, Parity Penalty: {parity_penalty:.1f})"
                 )
             logger.info(
                 f"  Team 1 Value: {t1_val:.1f} | Team 2 Value: {t2_val:.1f} | Diff: {abs(t1_val - t2_val):.1f}"
@@ -1107,6 +1131,10 @@ class BalancedShuffler:
             team2_off_roles = team2_metrics.off_role_count
             off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
             role_matchup_delta = self._role_matchup_delta_from_metrics(team1_metrics, team2_metrics)
+            role_parity_delta = self._role_parity_delta_from_metrics(team1_metrics, team2_metrics)
+            parity_penalty = (
+                role_matchup_delta + role_parity_delta
+            ) * self.role_matchup_delta_weight
             total_off_roles = team1_off_roles + team2_off_roles
 
             # Track this matchup (normalized 12-tuple shape shared with shuffle_from_pool;
@@ -1116,7 +1144,7 @@ class BalancedShuffler:
                     total_score,
                     value_diff,
                     off_role_penalty,
-                    role_matchup_delta,
+                    parity_penalty,
                     0.0,
                     team1_value,
                     team2_value,
@@ -1214,7 +1242,7 @@ class BalancedShuffler:
             _rd_priority=rd_priority,
         )
 
-        # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
+        # base_score includes: value_diff + off-role and parity penalties - rd_priority + avoid/deal penalties
         # We need to add exclusion_penalty, recent_match_penalty, deal_split_penalty, and rating_spread_penalty
         total_score = base_score + combo_penalty + recent_penalty
 
@@ -1228,13 +1256,17 @@ class BalancedShuffler:
         team2_off_roles = team2_metrics.off_role_count
         off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
         role_matchup_delta = self._role_matchup_delta_from_metrics(team1_metrics, team2_metrics)
+        role_parity_delta = self._role_parity_delta_from_metrics(team1_metrics, team2_metrics)
+        parity_penalty = (
+            role_matchup_delta + role_parity_delta
+        ) * self.role_matchup_delta_weight
         total_off_roles = team1_off_roles + team2_off_roles
 
         log_entry = (
             total_score,
             value_diff,
             off_role_penalty,
-            role_matchup_delta,
+            parity_penalty,
             exclusion_penalty,
             team1_value,
             team2_value,
