@@ -19,9 +19,10 @@ from config import (
     INITIAL_GLICKO_RD,
 )
 from domain.low_priority_constants import LOW_PRIORITY_REQUIRED_WINS
+from domain.models.lobby import LobbyKind
 from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
-from utils.formatting import ROLE_EMOJIS, format_betting_display
+from utils.formatting import ROLE_EMOJIS
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -1412,11 +1413,19 @@ class AdminCommands(commands.Cog):
 
     @admin.command(
         name="extendbetting",
-        description="Extend the betting window for the current match (Admin only)",
+        description="Extend the betting window for a pending match (Admin only)",
     )
-    @app_commands.describe(minutes="Number of minutes to extend betting (1-60)")
+    @app_commands.describe(
+        minutes="Number of minutes to extend betting (1-60)",
+        pending_match_id="Pending match ID to extend",
+    )
     @require_guild
-    async def extendbetting(self, interaction: discord.Interaction, minutes: int):
+    async def extendbetting(
+        self,
+        interaction: discord.Interaction,
+        minutes: int,
+        pending_match_id: int,
+    ):
         """Admin command to extend the betting window for an active match."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -1443,11 +1452,15 @@ class AdminCommands(commands.Cog):
 
         guild_id = interaction.guild.id
 
-        # Check for pending match
-        pending_state = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
+        # Get the explicitly selected pending match.
+        pending_state = await asyncio.to_thread(
+            match_service.get_last_shuffle,
+            guild_id,
+            pending_match_id,
+        )
         if not pending_state:
             await interaction.response.send_message(
-                "❌ No active match to extend betting for.",
+                f"❌ Pending match {pending_match_id} was not found.",
                 ephemeral=True,
             )
             return
@@ -1475,80 +1488,54 @@ class AdminCommands(commands.Cog):
         # Cancel existing and reschedule betting reminder tasks
         match_cog = self.bot.get_cog("MatchCommands")
         if match_cog:
-            match_cog._cancel_betting_tasks(guild_id)
+            match_cog._cancel_betting_tasks(
+                guild_id,
+                pending_match_id=pending_state.pending_match_id,
+            )
             # Schedule new reminders with the updated lock time
-            await match_cog._schedule_betting_reminders(guild_id, new_lock_until)
+            await match_cog._schedule_betting_reminders(
+                guild_id,
+                new_lock_until,
+                pending_match_id=pending_state.pending_match_id,
+                lobby_kind=(
+                    LobbyKind.normalize(pending_state.lobby_kind)
+                    if pending_state.lobby_kind is not None
+                    else None
+                ),
+            )
 
-        # Update the shuffle embed if we can find it
-        message_id = pending_state.shuffle_message_id
-        channel_id = pending_state.shuffle_channel_id
+        # Refresh the primary, command-channel, and thread copies together.
         embed_updated = False
-
-        if message_id and channel_id:
+        betting_cog = self.bot.get_cog("BettingCommands")
+        if betting_cog and hasattr(betting_cog, "_update_shuffle_message_wagers"):
             try:
-                channel = self.bot.get_channel(channel_id)
-                if channel:
-                    message = await channel.fetch_message(message_id)
-                    if message and message.embeds:
-                        embed = message.embeds[0].copy()
-
-                        # Find and update the betting field
-                        betting_service = getattr(self.bot, "betting_service", None)
-                        totals = {"radiant": 0, "dire": 0}
-                        betting_mode = pending_state.betting_mode
-
-                        if betting_service:
-                            totals = await asyncio.to_thread(
-                                functools.partial(
-                                    betting_service.get_pot_odds,
-                                    guild_id,
-                                    pending_state=pending_state,
-                                )
-                            )
-
-                        new_field_name, new_field_value = format_betting_display(
-                            totals["radiant"],
-                            totals["dire"],
-                            betting_mode,
-                            new_lock_until,
-                            seed_radiant=pending_state.bet_seed_radiant,
-                            seed_dire=pending_state.bet_seed_dire,
-                            seed_bonus=pending_state.bet_seed_bonus,
-                        )
-
-                        # Find and replace the betting field. Both modes name it
-                        # via format_betting_display ("💰 Pool Betting" /
-                        # "💰 House Betting (1:1)"), so match on "Betting"; keep
-                        # the legacy "Wagers" term for older embeds.
-                        new_fields: list[tuple[str, str, bool]] = []
-                        for field in embed.fields:
-                            if "Betting" in field.name or "Wagers" in field.name:
-                                new_fields.append((new_field_name, new_field_value, False))
-                            else:
-                                new_fields.append((field.name, field.value, field.inline))
-
-                        embed.clear_fields()
-                        for name, value, inline in new_fields:
-                            embed.add_field(name=name, value=value, inline=inline)
-
-                        await message.edit(embed=embed)
-                        embed_updated = True
+                await betting_cog._update_shuffle_message_wagers(
+                    guild_id,
+                    pending_match_id=pending_state.pending_match_id,
+                )
+                embed_updated = True
             except Exception as exc:
-                logger.warning(f"Failed to update shuffle embed after extending betting: {exc}")
+                logger.warning(
+                    "Failed to update match embeds after extending betting: %s",
+                    exc,
+                )
 
         # Send public announcement
         jump_url = pending_state.shuffle_message_jump_url or ""
         jump_link = f" [View match]({jump_url})" if jump_url else ""
 
         await interaction.response.send_message(
-            f"⏰ **Betting window extended by {minutes} minute(s)!** "
+            f"⏰ **{LobbyKind.normalize(pending_state.lobby_kind).label} / "
+            f"Match #{pending_state.pending_match_id} — betting window extended by "
+            f"{minutes} minute(s)!** "
             f"Closes <t:{new_lock_until}:R>.{jump_link}"
         )
 
         status_note = " (embed updated)" if embed_updated else ""
         logger.info(
             f"Admin {interaction.user.id} ({interaction.user}) extended betting by {minutes} min "
-            f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
+            f"for pending match {pending_match_id} in guild {guild_id}. "
+            f"New lock: {new_lock_until}{status_note}"
         )
 
     @admin.command(

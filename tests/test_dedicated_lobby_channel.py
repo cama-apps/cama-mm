@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from domain.models.lobby import LobbyKind
 from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
@@ -272,6 +273,63 @@ class TestLobbyServiceOriginChannelId:
 
 class TestGetLobbyTargetChannelHelper:
     """Test _get_lobby_target_channel helper method."""
+
+    @pytest.mark.asyncio
+    async def test_lowskill_lobby_uses_its_dedicated_channel(self):
+        """Whine & Cheese must prefer its own configured channel."""
+        from commands.lobby import LobbyCommands
+
+        regular_channel = MagicMock()
+        lowskill_channel = MagicMock()
+        bot = MagicMock()
+        bot.get_channel.side_effect = {
+            11111: regular_channel,
+            22222: lowskill_channel,
+        }.get
+        cog = LobbyCommands(bot, MagicMock(), MagicMock())
+        interaction = MagicMock()
+
+        with (
+            patch("commands.lobby.LOBBY_CHANNEL_ID", 11111),
+            patch(
+                "commands.lobby.LOWSKILL_LOBBY_CHANNEL_ID",
+                22222,
+                create=True,
+            ),
+        ):
+            channel = await cog._get_lobby_target_channel(
+                interaction,
+                LobbyKind.LOWSKILL,
+            )
+
+        assert channel is lowskill_channel
+
+    @pytest.mark.asyncio
+    async def test_lowskill_lobby_falls_back_to_regular_lobby_channel(self):
+        """An unset low-skill override must retain regular lobby routing."""
+        from commands.lobby import LobbyCommands
+
+        regular_channel = MagicMock()
+        bot = MagicMock()
+        bot.get_channel.return_value = regular_channel
+        cog = LobbyCommands(bot, MagicMock(), MagicMock())
+        interaction = MagicMock()
+
+        with (
+            patch("commands.lobby.LOBBY_CHANNEL_ID", 11111),
+            patch(
+                "commands.lobby.LOWSKILL_LOBBY_CHANNEL_ID",
+                None,
+                create=True,
+            ),
+        ):
+            channel = await cog._get_lobby_target_channel(
+                interaction,
+                LobbyKind.LOWSKILL,
+            )
+
+        assert channel is regular_channel
+        bot.get_channel.assert_called_once_with(11111)
 
     @pytest.mark.asyncio
     async def test_returns_interaction_channel_when_no_config(self):
@@ -576,6 +634,24 @@ class TestConfigEnvVar:
     def test_lobby_channel_id_parsing_strips_whitespace(self):
         """Surrounding whitespace is stripped before parsing."""
         assert self._parse_via_config("  123456789  ") == 123456789
+
+    def test_lowskill_lobby_channel_id_parsing_valid_int(self):
+        """The low-skill channel override accepts a Discord channel ID."""
+        import importlib
+
+        import config as config_module
+
+        original = os.environ.get("LOWSKILL_LOBBY_CHANNEL_ID")
+        try:
+            os.environ["LOWSKILL_LOBBY_CHANNEL_ID"] = "  987654321  "
+            importlib.reload(config_module)
+            assert config_module.LOWSKILL_LOBBY_CHANNEL_ID == 987654321
+        finally:
+            if original is None:
+                os.environ.pop("LOWSKILL_LOBBY_CHANNEL_ID", None)
+            else:
+                os.environ["LOWSKILL_LOBBY_CHANNEL_ID"] = original
+            importlib.reload(config_module)
 
 
 class TestGetLobbyTargetChannelEdgeCases:
@@ -1140,7 +1216,7 @@ class TestNotifyLobbyRally:
 
         assert result is True
         reaction_channel.send.assert_awaited_once()
-        assert (1, 2) in cooldowns
+        assert (1, LobbyKind.OPEN, 2) in cooldowns
 
 
 class TestShuffleDedicatedChannel:
@@ -1253,7 +1329,10 @@ class TestResetLobbyDedicatedChannel:
 
         lobby_service = MagicMock()
         lobby_service.get_lobby_channel_id.return_value = lobby_channel_id
+        lobby_service.get_lobby_message_id.return_value = 321
         lobby_service.get_lobby.return_value = MagicMock(created_by=12345)
+        lobby_service.has_in_flight_lobby_players.return_value = False
+        lobby_service.lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
 
         cog = LobbyCommands(bot, lobby_service, MagicMock())
 
@@ -1269,14 +1348,14 @@ class TestResetLobbyDedicatedChannel:
     async def _run_resetlobby(cog, interaction):
         """Invoke the real resetlobby callback with Discord-side helpers mocked.
 
-        Returns the mock for safe_unpin_all_bot_messages, whose call argument
-        is the channel the production code resolved.
+        Returns the mock for safe_unpin_message, whose call arguments identify
+        the channel and tracked lobby message the production code resolved.
         """
         unpin_mock = AsyncMock(return_value=0)
         with (
             patch("commands.lobby.safe_defer", AsyncMock(return_value=True)),
             patch("commands.lobby.safe_followup", AsyncMock()),
-            patch("commands.lobby.safe_unpin_all_bot_messages", unpin_mock),
+            patch("commands.lobby.safe_unpin_message", unpin_mock),
             patch.object(cog, "_update_channel_message_closed", AsyncMock()),
             patch.object(cog, "_archive_lobby_thread", AsyncMock()),
         ):
@@ -1297,8 +1376,8 @@ class TestResetLobbyDedicatedChannel:
 
         # The production code must resolve the dedicated channel and unpin there.
         bot.get_channel.assert_called_once_with(100)
-        unpin_mock.assert_awaited_once_with(dedicated_channel, bot.user)
-        lobby_service.reset_lobby.assert_called_once_with(1)
+        unpin_mock.assert_awaited_once_with(dedicated_channel, 321)
+        lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)
 
     @pytest.mark.asyncio
     async def test_resetlobby_falls_back_to_interaction_channel(self):
@@ -1314,8 +1393,8 @@ class TestResetLobbyDedicatedChannel:
         # Production tried the dedicated channel, then fell back to the
         # interaction channel for the unpin.
         bot.fetch_channel.assert_awaited_once_with(100)
-        unpin_mock.assert_awaited_once_with(interaction.channel, bot.user)
-        lobby_service.reset_lobby.assert_called_once_with(1)
+        unpin_mock.assert_awaited_once_with(interaction.channel, 321)
+        lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)
 
     @pytest.mark.asyncio
     async def test_resetlobby_uses_interaction_channel_when_no_dedicated(self):
@@ -1329,8 +1408,8 @@ class TestResetLobbyDedicatedChannel:
         # No dedicated channel configured: the interaction channel is used
         # directly, without any channel lookup.
         bot.get_channel.assert_not_called()
-        unpin_mock.assert_awaited_once_with(interaction.channel, bot.user)
-        lobby_service.reset_lobby.assert_called_once_with(1)
+        unpin_mock.assert_awaited_once_with(interaction.channel, 321)
+        lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)
 
 
 class TestSchemaMigration:

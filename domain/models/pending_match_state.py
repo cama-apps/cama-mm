@@ -53,6 +53,9 @@ class PendingMatchState:
     is_openskill_shuffle: bool = False
     is_draft: bool = False
     balancing_rating_system: str = "glicko"
+    # Source lobby for lifecycle isolation. None identifies legacy pending rows
+    # whose source cannot be determined safely.
+    lobby_kind: str | None = None
 
     # Reserve-backed betting seed. Pool mode uses radiant/dire seed shares;
     # house mode uses a neutral bonus pool.

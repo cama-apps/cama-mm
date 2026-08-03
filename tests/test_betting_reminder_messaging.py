@@ -11,6 +11,7 @@ import pytest
 
 import commands.betting_helpers.bet_messaging as bm
 from commands.betting_helpers.bet_messaging import send_betting_reminder
+from domain.models.lobby import LobbyKind
 
 LOCK_TS = 1_700_000_000
 
@@ -26,6 +27,7 @@ def _make_cog():
         betting_mode="pool",
         bet_lock_until=LOCK_TS,
         pending_match_id=1,
+        lobby_kind=LobbyKind.OPEN.value,
         bet_seed_radiant=0,
         bet_seed_dire=0,
         bet_seed_bonus=0,
@@ -60,6 +62,27 @@ def _scoped_user_ids(send_mock):
     am = send_mock.call_args.kwargs["allowed_mentions"]
     assert am.everyone is False and am.roles is False
     return {obj.id for obj in am.users}
+
+
+@pytest.mark.parametrize("reminder_type", ["warning", "last_call", "closed"])
+@pytest.mark.asyncio
+async def test_reminder_identifies_lobby_and_pending_match(reminder_type):
+    cog, channel = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
+    pending.pending_match_id = 42
+    pending.lobby_kind = LobbyKind.LOWSKILL.value
+
+    await send_betting_reminder(
+        cog,
+        1,
+        reminder_type=reminder_type,
+        lock_until=LOCK_TS,
+        pending_match_id=42,
+    )
+
+    content = channel.send.await_args.args[0]
+    assert LobbyKind.LOWSKILL.display_name in content
+    assert "Match #42" in content
 
 
 @pytest.mark.asyncio

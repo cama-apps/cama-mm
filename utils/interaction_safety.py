@@ -237,14 +237,27 @@ async def send_public_or_ephemeral(
 
 
 async def update_lobby_message_closed(
-    bot, lobby_service, reason: str = "Lobby Closed", guild_id: int | None = None
+    bot,
+    lobby_service,
+    reason: str = "Lobby Closed",
+    guild_id: int | None = None,
+    lobby_kind=None,
 ) -> None:
     """Update the channel message embed to show lobby/match is closed.
 
     Shared between match and lobby commands to avoid duplication.
     """
-    message_id = lobby_service.get_lobby_message_id(guild_id=guild_id)
-    channel_id = lobby_service.get_lobby_channel_id(guild_id=guild_id)
+    from domain.models.lobby import LobbyKind
+
+    kind = LobbyKind.normalize(lobby_kind)
+    message_id = lobby_service.get_lobby_message_id(
+        guild_id=guild_id,
+        lobby_kind=kind,
+    )
+    channel_id = lobby_service.get_lobby_channel_id(
+        guild_id=guild_id,
+        lobby_kind=kind,
+    )
     if not message_id or not channel_id:
         return
 
@@ -256,8 +269,8 @@ async def update_lobby_message_closed(
 
         import discord
         embed = discord.Embed(
-            title=f"\U0001f6ab {reason}",
-            description="This lobby has been closed.",
+            title=f"\U0001f6ab {kind.label} — {reason}",
+            description=f"{kind.display_name} has been closed.",
             color=discord.Color.dark_grey(),
         )
         await message.edit(embed=embed, view=None)

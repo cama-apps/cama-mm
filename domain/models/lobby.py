@@ -7,6 +7,52 @@ to maintain clean architecture (domain should not depend on infrastructure).
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+
+
+class LobbyKind(str, Enum):
+    """Stable matchmaking lobby kinds."""
+
+    OPEN = "open"
+    LOWSKILL = "lowskill"
+
+    @property
+    def lobby_id(self) -> int:
+        return 1 if self is LobbyKind.OPEN else 2
+
+    @property
+    def display_name(self) -> str:
+        return (
+            "All You Can Feed"
+            if self is LobbyKind.OPEN
+            else "Whine & Cheese"
+        )
+
+    @property
+    def emoji(self) -> str:
+        return "🍽️" if self is LobbyKind.OPEN else "🧀"
+
+    @property
+    def label(self) -> str:
+        return f"{self.emoji} {self.display_name}"
+
+    @property
+    def eligibility_text(self) -> str:
+        return (
+            "Open to all ratings"
+            if self is LobbyKind.OPEN
+            else "Glicko below 1400"
+        )
+
+    @classmethod
+    def normalize(cls, value: "LobbyKind | str | None") -> "LobbyKind":
+        if value is None:
+            return cls.OPEN
+        return value if isinstance(value, cls) else cls(value)
+
+    @classmethod
+    def from_lobby_id(cls, lobby_id: int) -> "LobbyKind":
+        return cls.LOWSKILL if lobby_id == cls.LOWSKILL.lobby_id else cls.OPEN
 
 
 @dataclass
@@ -17,6 +63,7 @@ class Lobby:
     created_by: int  # Discord ID of creator
     created_at: datetime
     guild_id: int = 0  # Normalized guild id; 0 for DMs or single-guild tests
+    kind: LobbyKind = LobbyKind.OPEN
     players: set[int] = field(default_factory=set)
     # Retained only so lobby rows written before Frogling's deprecation can be read.
     conditional_players: set[int] = field(default_factory=set)
@@ -86,6 +133,7 @@ class Lobby:
         return {
             "lobby_id": self.lobby_id,
             "guild_id": self.guild_id,
+            "kind": self.kind.value,
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(),
             "players": list(self.players),
@@ -107,6 +155,10 @@ class Lobby:
         return cls(
             lobby_id=data.get("lobby_id", 1),
             guild_id=data.get("guild_id", 0),
+            kind=LobbyKind.normalize(
+                data.get("kind")
+                or LobbyKind.from_lobby_id(data.get("lobby_id", 1))
+            ),
             created_by=data.get("created_by", 0),
             created_at=created_at_dt,
             players=players,

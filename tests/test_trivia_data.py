@@ -125,11 +125,28 @@ class TestDataLoading:
 
     def test_hero_armor_at_level1(self):
         """armor_at_level1 = base_armor + agility_base / 6, present on all heroes."""
+        from dotabase_integration import Hero, dotabase_session
+
         heroes = load_heroes()
         assert all(h.armor_at_level1 is not None for h in heroes)
-        # Anti-Mage: base_armor=2, agi_base=25 → 2 + 25/6 = 6.1667 (dotabase 7.8.11 data)
         am = next(h for h in heroes if h.localized_name == "Anti-Mage")
-        assert abs(am.armor_at_level1 - 6.1667) < 0.01
+        with dotabase_session() as session:
+            raw_am = session.query(Hero).filter(Hero.id == am.id).one()
+            expected = raw_am.base_armor + raw_am.attr_agility_base / 6
+        assert am.armor_at_level1 == pytest.approx(expected, abs=0.0001)
+
+    def test_loaders_release_database_connections(self):
+        from dotabase_integration import _ENGINE
+
+        loaders = [load_heroes, load_abilities, load_items, load_voicelines, load_facets]
+        for loader in loaders:
+            loader.cache_clear()
+        checked_out_before = _ENGINE.pool.checkedout()
+
+        for loader in loaders:
+            loader()
+
+        assert _ENGINE.pool.checkedout() == checked_out_before
 
     def test_load_abilities_excludes_internal_names(self):
         """Abilities with underscores in localized_name are internal and should be filtered."""

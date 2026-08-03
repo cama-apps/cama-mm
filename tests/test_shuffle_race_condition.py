@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from domain.models.lobby import LobbyKind
 from services.lobby_manager_service import LobbyManagerService
 from tests.fakes.lobby_repo import FakeLobbyRepo
 
@@ -116,8 +117,8 @@ class TestShuffleLockPreventsRace:
         await lock.acquire()
 
         # Set lock time to >60 seconds ago (simulate stale lock)
-        normalized = guild_id if guild_id is not None else 0
-        lobby_manager._shuffle_lock_times[normalized] = time.time() - 70  # 70 seconds ago
+        key = (guild_id, LobbyKind.OPEN)
+        lobby_manager._shuffle_lock_times[key] = time.time() - 70  # 70 seconds ago
 
         # Check for stale lock should replace it with a fresh one
         was_stale = lobby_manager._check_stale_lock(guild_id)
@@ -179,15 +180,27 @@ class TestShuffleLockPreventsRace:
     async def test_clear_lock_time_removes_entry(self, lobby_manager):
         """Verify that clear_lock_time removes the time entry."""
         guild_id = 66666
-        normalized = guild_id
+        key = (guild_id, LobbyKind.OPEN)
 
         # Record a lock time
         lobby_manager.record_lock_acquired(guild_id)
-        assert normalized in lobby_manager._shuffle_lock_times
+        assert key in lobby_manager._shuffle_lock_times
 
         # Clear it
         lobby_manager.clear_lock_time(guild_id)
-        assert normalized not in lobby_manager._shuffle_lock_times
+        assert key not in lobby_manager._shuffle_lock_times
+
+    @pytest.mark.asyncio
+    async def test_shuffle_locks_are_per_lobby_kind(self, lobby_manager):
+        guild_id = 88888
+
+        open_lock = lobby_manager.get_shuffle_lock(guild_id, LobbyKind.OPEN)
+        lowskill_lock = lobby_manager.get_shuffle_lock(
+            guild_id,
+            LobbyKind.LOWSKILL,
+        )
+
+        assert open_lock is not lowskill_lock
 
     @pytest.mark.asyncio
     async def test_clear_lock_time_handles_missing_entry(self, lobby_manager):

@@ -16,6 +16,38 @@ from utils.embeds import (
     create_match_summary_embed,
     format_player_list,
 )
+
+
+def test_lobby_embed_uses_public_lowskill_identity():
+    from domain.models.lobby import Lobby, LobbyKind
+
+    lobby = Lobby(
+        lobby_id=LobbyKind.LOWSKILL.lobby_id,
+        created_by=1,
+        created_at=datetime.now(),
+        kind=LobbyKind.LOWSKILL,
+    )
+
+    embed = create_lobby_embed(lobby, players=[], player_ids=[])
+
+    assert embed.title == "🧀 Whine & Cheese"
+    assert embed.description.startswith("Glicko below 1400\n")
+
+
+def test_lobby_embed_uses_public_open_identity():
+    from domain.models.lobby import Lobby, LobbyKind
+
+    lobby = Lobby(
+        lobby_id=LobbyKind.OPEN.lobby_id,
+        created_by=1,
+        created_at=datetime.now(),
+        kind=LobbyKind.OPEN,
+    )
+
+    embed = create_lobby_embed(lobby, players=[], player_ids=[])
+
+    assert embed.title == "🍽️ All You Can Feed"
+    assert embed.description.startswith("Open to all ratings\n")
 from utils.formatting import TOMBSTONE_EMOJI
 
 
