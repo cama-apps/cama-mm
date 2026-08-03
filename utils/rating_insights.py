@@ -571,10 +571,15 @@ def compute_player_calibration(
     # pre-game rating ("rating_before") or it undercounts by one game; fall
     # back to the post-game value for legacy rows without rating_before.
     last_5_delta: float | None = None
-    if len(history) >= 2:
-        baseline = history[4] if len(history) > 5 else history[-1]
-        baseline_rating = baseline.get("rating_before") or baseline.get("rating") or 0
-        last_5_delta = (history[0].get("rating") or 0) - baseline_rating
+    recent_glicko_history = [
+        h for h in history[:5] if h.get("rating") is not None
+    ]
+    if len(recent_glicko_history) >= 2:
+        baseline = recent_glicko_history[-1]
+        baseline_rating = baseline.get("rating_before")
+        if baseline_rating is None:
+            baseline_rating = baseline["rating"]
+        last_5_delta = recent_glicko_history[0]["rating"] - baseline_rating
 
     # Current streak
     streak = 0
