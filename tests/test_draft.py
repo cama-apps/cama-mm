@@ -2401,12 +2401,12 @@ class TestPreDraftChoiceDoubleClick:
         assert "already been made" in rejections[0]["content"]
 
 
-class TestShuffleDraftRedirect:
-    """/shuffle hands lobbies of more than 15 players to Immortal Draft."""
+class TestLargeLobbyShuffle:
+    """/shuffle keeps oversized lobbies on the normal shuffle path."""
 
-    async def test_fifteen_players_continue_to_normal_shuffle(self, monkeypatch):
+    async def test_sixteen_players_continue_to_normal_shuffle(self, monkeypatch):
         guild_id = TEST_GUILD_ID
-        player_ids = list(range(60001, 60016))
+        player_ids = list(range(60001, 60017))
         lobby = _make_lobby(player_ids)
         draft_cog = MagicMock()
         draft_cog._execute_draft = AsyncMock(return_value=True)
@@ -2446,78 +2446,6 @@ class TestShuffleDraftRedirect:
         assert interaction.followup.messages[-1].content.startswith(
             "❌ Cannot shuffle:"
         )
-
-    async def test_redirect_passes_readycheck_roster_overrides(self, monkeypatch):
-        guild_id = TEST_GUILD_ID
-        ready_ids = list(range(60001, 60017))
-        nonresponder_ids = [60017, 60018]
-        lobby = _make_lobby(ready_ids + nonresponder_ids)
-        draft_cog = MagicMock()
-        draft_cog._execute_draft = AsyncMock(return_value=True)
-        bot = MagicMock()
-        bot.get_cog.return_value = draft_cog
-        match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
-        monkeypatch.setattr(
-            match_cog,
-            "_validate_shuffle_preconditions",
-            AsyncMock(return_value=lobby),
-        )
-        monkeypatch.setattr(
-            match_cog,
-            "_select_shuffle_roster",
-            AsyncMock(return_value=(ready_ids, [], [], nonresponder_ids, {})),
-        )
-        interaction = _FakeInteraction(guild_id)
-
-        await match_cog._execute_shuffle(
-            interaction,
-            interaction.guild,
-            guild_id,
-            None,
-        )
-
-        draft_cog._execute_draft.assert_awaited_once_with(
-            interaction,
-            guild_id,
-            lobby,
-            regular_player_ids=ready_ids,
-            conditional_player_ids=nonresponder_ids,
-            lobby_kind=LobbyKind.OPEN,
-        )
-
-    async def test_redirects_without_adding_a_duplicate_message(self, monkeypatch):
-        """A 16-player /shuffle runs _execute_draft and adds no message of
-        its own — even on failure, since _execute_draft owns its messaging."""
-        guild_id = TEST_GUILD_ID
-        draft_cog = MagicMock()
-        # the draft "fails" (returns False) but messaged the user itself
-        draft_cog._execute_draft = AsyncMock(return_value=False)
-        bot = MagicMock()
-        bot.get_cog = MagicMock(return_value=draft_cog)
-
-        match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
-
-        player_ids = list(range(60001, 60017))
-        lobby = _make_lobby(player_ids)  # 16 regular players
-        monkeypatch.setattr(
-            match_cog,
-            "_validate_shuffle_preconditions",
-            AsyncMock(return_value=lobby),
-        )
-        monkeypatch.setattr(
-            match_cog,
-            "_select_shuffle_roster",
-            AsyncMock(return_value=(player_ids, [], [], [], {})),
-        )
-
-        interaction = _FakeInteraction(guild_id)
-        await match_cog._execute_shuffle(interaction, interaction.guild, guild_id, None)
-
-        # the draft was started for the oversized lobby...
-        draft_cog._execute_draft.assert_awaited_once()
-        # ...and match.py posted nothing of its own (the old code added a
-        # misleading "check captain eligibility" message here)
-        assert interaction.followup.messages == []
 
 
 class TestDraftingViewInteractionCheck:

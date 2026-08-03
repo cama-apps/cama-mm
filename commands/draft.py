@@ -757,7 +757,7 @@ class DraftCommands(commands.Cog):
                     pass
 
     # ========================================================================
-    # Core draft execution (reusable by /shuffle auto-redirect)
+    # Core draft execution
     # ========================================================================
 
     async def _execute_draft(
@@ -772,7 +772,7 @@ class DraftCommands(commands.Cog):
         lobby_kind: LobbyKind | str | None = None,
     ) -> bool:
         """
-        Core draft logic, callable from /startdraft or /shuffle auto-redirect.
+        Core draft logic, callable from /startdraft and internal integrations.
 
         Args:
             interaction: The Discord interaction
@@ -780,8 +780,8 @@ class DraftCommands(commands.Cog):
             lobby: The Lobby object
             specified_captain1_id: Optional specified captain 1 ID
             specified_captain2_id: Optional specified captain 2 ID
-            regular_player_ids: Optional transient regular roster from /shuffle
-            conditional_player_ids: Optional transient conditional exclusions from /shuffle
+            regular_player_ids: Optional regular roster override
+            conditional_player_ids: Optional conditional exclusions
 
         Returns:
             True if the draft started, False otherwise. Every failure path
