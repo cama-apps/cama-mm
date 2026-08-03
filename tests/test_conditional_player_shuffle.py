@@ -168,13 +168,11 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
 
 
 @pytest.mark.asyncio
-async def test_ready_responder_count_controls_shuffle_draft_redirect(monkeypatch):
+async def test_readycheck_nonresponders_are_forwarded_to_normal_shuffle(monkeypatch):
     player_ids = list(range(100, 110))
     excluded_ids = list(range(110, 115))
     lobby = SimpleNamespace(get_player_count=lambda: 15)
-    draft_cog = SimpleNamespace(_execute_draft=AsyncMock())
     bot = MagicMock()
-    bot.get_cog.return_value = draft_cog
     match_service = MagicMock()
     match_service.state_service.get_all_pending_player_ids.return_value = set()
     match_service.shuffle_players.side_effect = RuntimeError("stop after service call")
@@ -189,7 +187,6 @@ async def test_ready_responder_count_controls_shuffle_draft_redirect(monkeypatch
 
     await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
 
-    draft_cog._execute_draft.assert_not_awaited()
     match_service.shuffle_players.assert_called_once_with(
         player_ids,
         guild_id=TEST_GUILD_ID,

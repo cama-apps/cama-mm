@@ -676,38 +676,6 @@ class MatchCommands(commands.Cog):
             excluded_conditional_ids,
             player_join_times,
         ) = roster
-        regular_count = len(player_ids)
-
-        # More than 15 regular (non-conditional) players → force Immortal Draft
-        if regular_count > 15:
-            draft_cog = self.bot.get_cog("DraftCommands")
-            if not draft_cog:
-                await interaction.followup.send(
-                    "❌ Draft system not available. Please contact an admin.",
-                )
-                return
-
-            try:
-                # _execute_draft sends its own specific error on every failure
-                # path, so inspecting the return value here would only let us
-                # add a misleading duplicate. The except below covers the
-                # unexpected-exception path.
-                await draft_cog._execute_draft(
-                    interaction,
-                    guild_id,
-                    lobby,
-                    regular_player_ids=player_ids,
-                    conditional_player_ids=excluded_conditional_ids,
-                    lobby_kind=kind,
-                )
-            except Exception as e:
-                logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
-                await interaction.followup.send(
-                    "❌ Immortal Draft failed to start. Error has been logged. "
-                    "Use `/shuffle` or `/draft start` to try again."
-                )
-            return
-
         roster_players = dict(zip(player_ids, players, strict=False))
         roster_players.update(
             {
