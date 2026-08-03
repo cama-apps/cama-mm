@@ -225,8 +225,8 @@ class BalancedShuffler:
 
     @staticmethod
     def _calculate_lobby_rating_bonus(player_values: list[float]) -> float:
-        """Return the average team rating total divided by 100."""
-        return sum(player_values) / 2 / 100
+        """Return the average team rating total divided by 10."""
+        return sum(player_values) / 2 / 10
 
     @staticmethod
     def _calculate_lobby_wait_bonus(
