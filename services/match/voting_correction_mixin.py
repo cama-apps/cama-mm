@@ -12,6 +12,8 @@ from typing import Any
 
 from services.match._common import logger
 
+_LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
+
 
 class VotingCorrectionMixin:
     """VotingCorrectionMixin — see module docstring.
@@ -212,6 +214,12 @@ class VotingCorrectionMixin:
         # fall back to current rating if a snapshot is missing.
         rating_by_id = {e["discord_id"]: e for e in rating_history}
 
+        def _recorded_streak_rate(pid: int) -> float:
+            stored = rating_by_id.get(pid, {}).get("streak_multiplier_per_game")
+            if stored is None:
+                return _LEGACY_STREAK_MULTIPLIER_PER_GAME
+            return float(stored)
+
         # Recompute per-player streak multipliers as-of this match with the
         # CORRECTED result. Recording amplifies Glicko deltas on 3+ game
         # streaks; a correction that ignored them produced different ratings
@@ -226,7 +234,9 @@ class VotingCorrectionMixin:
             outcomes_by_id = get_outcomes_bulk(participant_ids, guild_id, match_id, limit=20)
             for pid in participant_ids:
                 slen, mult = self.rating_system.calculate_streak_multiplier(
-                    outcomes_by_id.get(pid, []), won=pid in new_winner_ids
+                    outcomes_by_id.get(pid, []),
+                    won=pid in new_winner_ids,
+                    streak_multiplier_per_game=_recorded_streak_rate(pid),
                 )
                 streak_multipliers[pid] = mult
                 new_streaks[pid] = (slen, mult)
@@ -236,7 +246,9 @@ class VotingCorrectionMixin:
                     pid, guild_id, match_id, limit=20
                 )
                 slen, mult = self.rating_system.calculate_streak_multiplier(
-                    outcomes, won=pid in new_winner_ids
+                    outcomes,
+                    won=pid in new_winner_ids,
+                    streak_multiplier_per_game=_recorded_streak_rate(pid),
                 )
                 streak_multipliers[pid] = mult
                 new_streaks[pid] = (slen, mult)
