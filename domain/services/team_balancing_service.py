@@ -31,24 +31,37 @@ class TeamBalancingService:
             use_glicko: Whether to use Glicko-2 ratings
             off_role_multiplier: Multiplier for rating when playing off-role
             off_role_flat_penalty: Flat penalty per off-role player
-            role_matchup_delta_weight: Weight applied to lane matchup delta in scores
+            role_matchup_delta_weight: Weight applied to lane and role parity deltas in scores
         """
         self.use_glicko = use_glicko
         self.off_role_multiplier = off_role_multiplier
         self.off_role_flat_penalty = off_role_flat_penalty
         self.role_matchup_delta_weight = role_matchup_delta_weight
 
-    def calculate_team_value(self, team: Team) -> float:
+    def calculate_team_value(
+        self,
+        team: Team,
+        *,
+        use_openskill: bool = False,
+        use_jopacoin: bool = False,
+    ) -> float:
         """
         Calculate total team value with off-role penalties.
 
         Args:
             team: Team to evaluate
+            use_openskill: Score with OpenSkill ratings instead of Glicko
+            use_jopacoin: Score with jopacoin balances instead of ratings
 
         Returns:
             Team value adjusted for role assignments
         """
-        return team.get_team_value(self.use_glicko, self.off_role_multiplier)
+        return team.get_team_value(
+            self.use_glicko,
+            self.off_role_multiplier,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+        )
 
 
     def calculate_role_matchup_delta(
@@ -115,7 +128,39 @@ class TeamBalancingService:
         # Return the sum of all five deltas
         return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
 
-    def calculate_matchup_score(self, team1: Team, team2: Team) -> float:
+    def calculate_role_parity_delta(
+        self,
+        team1: Team,
+        team2: Team,
+        *,
+        use_openskill: bool = False,
+        use_jopacoin: bool = False,
+    ) -> float:
+        """Return the sum of same-role value differences between two teams."""
+
+        def role_value(team: Team, role: str) -> float:
+            _, value = team.get_player_by_role(
+                role,
+                self.use_glicko,
+                self.off_role_multiplier,
+                use_openskill=use_openskill,
+                use_jopacoin=use_jopacoin,
+            )
+            return value
+
+        return sum(
+            abs(role_value(team1, role) - role_value(team2, role))
+            for role in ("1", "2", "3", "4", "5")
+        )
+
+    def calculate_matchup_score(
+        self,
+        team1: Team,
+        team2: Team,
+        *,
+        use_openskill: bool = False,
+        use_jopacoin: bool = False,
+    ) -> float:
         """
         Calculate a score for a matchup (lower is better).
 
@@ -124,22 +169,47 @@ class TeamBalancingService:
         Args:
             team1: First team
             team2: Second team
+            use_openskill: Score with OpenSkill ratings instead of Glicko
+            use_jopacoin: Score with jopacoin balances instead of ratings
 
         Returns:
             Matchup score (lower = more balanced)
         """
-        team1_value = self.calculate_team_value(team1)
-        team2_value = self.calculate_team_value(team2)
+        team1_value = self.calculate_team_value(
+            team1,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+        )
+        team2_value = self.calculate_team_value(
+            team2,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+        )
         value_diff = abs(team1_value - team2_value)
 
         off_role_penalty = (
             team1.get_off_role_count() + team2.get_off_role_count()
         ) * self.off_role_flat_penalty
 
-        # Calculate role matchup delta (sum of deltas across critical matchups)
-        role_matchup_delta = self.calculate_role_matchup_delta(team1, team2)
+        # Calculate lane matchup and same-role parity deltas.
+        role_matchup_delta = self.calculate_role_matchup_delta(
+            team1,
+            team2,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+        )
+        role_parity_delta = self.calculate_role_parity_delta(
+            team1,
+            team2,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+        )
 
-        return value_diff + off_role_penalty + (role_matchup_delta * self.role_matchup_delta_weight)
+        return (
+            value_diff
+            + off_role_penalty
+            + ((role_matchup_delta + role_parity_delta) * self.role_matchup_delta_weight)
+        )
 
 
 

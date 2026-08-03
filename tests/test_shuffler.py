@@ -899,6 +899,10 @@ class TestShuffler:
 class TestRoleMatchupDelta:
     """Tests for the role matchup delta scoring additions."""
 
+    def test_default_role_matchup_delta_weight_is_point_seventeen(self):
+        """Lane and role parity should use the requested shared default weight."""
+        assert BalancedShuffler().role_matchup_delta_weight == pytest.approx(0.17)
+
     def test_role_matchup_delta_calculation(self):
         """Role matchup delta should return the sum of the critical matchups."""
         team1_players = [
@@ -930,11 +934,17 @@ class TestRoleMatchupDelta:
         # sum = 100 + 200 + 0 + 150 + 50 = 500
         assert delta == 500
 
+        role_parity_delta = service.calculate_role_parity_delta(team1, team2)
+        # same roles = |2000-1000| + |1500-1500| + |1200-1900|
+        #            + |1100-1050| + |1000-950| = 1800
+        assert role_parity_delta == 1800
+
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
         # off-role penalty = 0
-        # total should therefore be 400 + 500 = 900
-        assert score == pytest.approx(900)
+        # lane delta = 500; same-role parity delta = 1800
+        # total should therefore be 400 + 500 + 1800 = 2700
+        assert score == pytest.approx(2700)
 
     def test_role_matchup_delta_weight_applied_in_service(self):
         """Weight should scale the matchup delta when computing scores."""
@@ -965,9 +975,49 @@ class TestRoleMatchupDelta:
 
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
-        # weighted role delta = 500 * 0.5 = 250
+        # weighted lane and role deltas = (500 + 1800) * 0.5 = 1150
         # off-role penalty = 0
-        assert score == pytest.approx(650)
+        assert score == pytest.approx(1550)
+
+    def test_matchup_score_uses_requested_jopacoin_values(self):
+        """Every matchup-score component should use the requested rating mode."""
+        roles = ["1", "2", "3", "4", "5"]
+        team1 = Team(
+            [
+                Player(
+                    name=f"Team1Role{role}",
+                    mmr=1500,
+                    preferred_roles=[role],
+                    jopacoin_balance=100,
+                )
+                for role in roles
+            ],
+            role_assignments=roles,
+        )
+        team2 = Team(
+            [
+                Player(
+                    name=f"Team2Role{role}",
+                    mmr=1500,
+                    preferred_roles=[role],
+                    jopacoin_balance=50 if role == "1" else 100,
+                )
+                for role in roles
+            ],
+            role_assignments=roles,
+        )
+        service = TeamBalancingService(
+            use_glicko=False,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.5,
+        )
+
+        assert service.calculate_matchup_score(team1, team2) == pytest.approx(0)
+        # Team-value difference = 50. Lane delta = 50. Role parity = 50.
+        assert service.calculate_matchup_score(
+            team1, team2, use_jopacoin=True
+        ) == pytest.approx(100)
 
     def test_role_matchup_delta_weight_applied_in_shuffler_scoring(self):
         """BalancedShuffler should apply the weight when scoring matchups."""
@@ -1011,10 +1061,53 @@ class TestRoleMatchupDelta:
         )
 
         # value diff = |6500 - 6800| = 300
-        # role delta = sum(|2000-1900|, |1400-1000|, |1500-1500|, |1000-1000|, |1000-1000|)
+        # lane delta = sum(|2000-1900|, |1400-1000|, |1500-1500|, |1000-1000|, |1000-1000|)
         #            = 100 + 400 + 0 + 0 + 0 = 500
-        assert score_full == pytest.approx(800)  # 300 + 500
-        assert score_half == pytest.approx(550)  # 300 + (500 * 0.5)
+        # role parity = |2000-1400| + |1500-1500| + |1000-1900|
+        #             + |1000-1000| + |1000-1000| = 1500
+        assert score_full == pytest.approx(2300)  # 300 + 500 + 1500
+        assert score_half == pytest.approx(1300)  # 300 + ((500 + 1500) * 0.5)
+
+    def test_pool_log_entry_uses_weighted_parity_penalty(self):
+        """Logged parity should be the contribution included in total score."""
+        team1_players = [
+            Player(name="RadiantCarry", mmr=2000, preferred_roles=["1"]),
+            Player(name="RadiantMid", mmr=1500, preferred_roles=["2"]),
+            Player(name="RadiantOfflane", mmr=1000, preferred_roles=["3"]),
+            Player(name="RadiantSoft", mmr=1000, preferred_roles=["4"]),
+            Player(name="RadiantHard", mmr=1000, preferred_roles=["5"]),
+        ]
+        team2_players = [
+            Player(name="DireCarry", mmr=1400, preferred_roles=["1"]),
+            Player(name="DireMid", mmr=1300, preferred_roles=["2"]),
+            Player(name="DireOfflane", mmr=1900, preferred_roles=["3"]),
+            Player(name="DireSoft", mmr=1000, preferred_roles=["4"]),
+            Player(name="DireHard", mmr=1000, preferred_roles=["5"]),
+        ]
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.5,
+        )
+
+        matchup = shuffler._evaluate_pool_matchup(
+            team1_players,
+            team2_players,
+            combo_penalty=0.0,
+            exclusion_penalty=0.0,
+            excluded_names=[],
+            recent_penalty=0.0,
+            rd_priority=0.0,
+            max_assignments_per_team=1,
+            avoids=None,
+            deals=None,
+        )
+
+        # Value diff = 100. Lane delta = 700 and role parity = 1700;
+        # the nonzero mid gap contributes 200 to each parity factor.
+        assert matchup.log_entry[3] == pytest.approx(1200)
+        assert matchup.total_score == pytest.approx(1300)
 
     def test_support_cross_lane_delta_in_shuffler(self):
         """BalancedShuffler should include pos4 vs pos5 cross-lane deltas."""

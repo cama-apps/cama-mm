@@ -289,8 +289,12 @@ class ShufflePendingMixin:
         role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(
             team1, team2, use_openskill=use_openskill, use_jopacoin=use_jopacoin
         )
-        weighted_role_matchup_delta = (
-            role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
+        role_parity_delta = self.team_balancing_service.calculate_role_parity_delta(
+            team1, team2, use_openskill=use_openskill, use_jopacoin=use_jopacoin
+        )
+        weighted_parity_delta = (
+            (role_matchup_delta + role_parity_delta)
+            * self.team_balancing_service.role_matchup_delta_weight
         )
 
         team1_roles = (
@@ -386,7 +390,7 @@ class ShufflePendingMixin:
         goodness_score = (
             value_diff
             + off_role_penalty
-            + weighted_role_matchup_delta
+            + weighted_parity_delta
             + excluded_penalty
             + recent_match_penalty
             + soft_avoid_penalty
