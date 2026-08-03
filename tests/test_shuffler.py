@@ -345,12 +345,30 @@ class TestShuffler:
         assert isinstance(first_result, tuple)
         assert all(isinstance(assignment, tuple) for assignment in first_result)
 
-    def test_lobby_rating_bonus_uses_average_team_total(self):
-        shuffler = BalancedShuffler(use_glicko=False)
+    def test_pool_rating_bonus_keeps_high_rating_outlier(self):
+        ratings = [1000, 1400, 1450, 1475, 1500, 1525, 1550, 1575, 1600, 1650, 2200]
+        players = [
+            Player(
+                name=f"Player{i}",
+                discord_id=i + 1,
+                glicko_rating=rating,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i, rating in enumerate(ratings)
+        ]
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.0,
+            exclusion_penalty_weight=0.0,
+            rd_priority_weight=0.0,
+            recent_match_penalty_weight=0.0,
+            rating_spread_divisor=10.0,
+        )
 
-        bonus = shuffler._calculate_lobby_rating_bonus([1500] * 10)
+        _, _, excluded = shuffler.shuffle_from_pool(players)
 
-        assert bonus == pytest.approx(75)
+        assert [player.glicko_rating for player in excluded] == [1475]
 
     def test_shuffle_exact_10_players(self):
         """Test shuffling with exactly 10 players."""
