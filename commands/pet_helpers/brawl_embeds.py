@@ -115,6 +115,9 @@ def build_battle_embed(
                     for m in PetBrawlMove
                 )
                 + "\nHungry camas start wounded; happy camas hit harder."
+                "\n**Training:** STR boosts attacks (especially Stampede); "
+                "INT reduces incoming damage and improves Hunker; DEX boosts "
+                "crits (especially Spit) and Stampede evasion."
             ),
             inline=False,
         )

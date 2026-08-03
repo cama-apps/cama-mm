@@ -33,8 +33,13 @@ HUNGER_HP_PENALTY_DIV = 5  # start_hp = max_hp - (100 - hunger) // 5
 SPIT_DMG = (8, 16)  # safe move, never misses
 STAMPEDE_DMG = (16, 32)
 STAMPEDE_MISS_PCT = 55
-HUNKER_HEAL = (2, 4)
-HUNKER_DAMAGE_TAKEN_PCT = 50
+STAMPEDE_FEINT_MISS_PCT = 40
+FEINT_DMG = (8, 14)
+FEINT_INTERRUPTED_DAMAGE_PCT = 50
+SIDESTEP_COUNTER_DMG = (6, 10)
+SIDESTEP_DAMAGE_TAKEN_PCT = 25
+HUNKER_HEAL = (5, 8)
+HUNKER_DAMAGE_TAKEN_PCT = 30
 HUNKER_STAMPEDE_DAMAGE_TAKEN_PCT = 60
 BASE_CRIT_PCT = 10  # crit = double damage
 SPITTER_CRIT_PCT = 25  # Rama
@@ -55,24 +60,40 @@ class PetBrawlMove(StrEnum):
     SPIT = "spit"
     STAMPEDE = "stampede"
     HUNKER = "hunker"
+    FEINT = "feint"
+    SIDESTEP = "sidestep"
 
 
 SAFE_MOVE = PetBrawlMove.SPIT
+DIRECT_ATTACKS = frozenset((PetBrawlMove.SPIT, PetBrawlMove.STAMPEDE))
 
 MOVE_EMOJI = {
     PetBrawlMove.SPIT: "💦",
     PetBrawlMove.STAMPEDE: "🐫",
     PetBrawlMove.HUNKER: "🛡️",
+    PetBrawlMove.FEINT: "🎭",
+    PetBrawlMove.SIDESTEP: "🌀",
 }
 
 # Player-facing move explanations, shown in the round-1 battle embed.
 MOVE_BLURBS = {
-    PetBrawlMove.SPIT: "reliable chip damage, never misses.",
+    PetBrawlMove.SPIT: (
+        "reliable chip that never misses; pressures Stampede and Feint."
+    ),
     PetBrawlMove.STAMPEDE: (
-        f"big damage, {STAMPEDE_MISS_PCT}% chance to whiff unless they Hunker."
+        f"big damage; {STAMPEDE_MISS_PCT}% whiff normally, "
+        f"{STAMPEDE_FEINT_MISS_PCT}% into Feint, never into Hunker."
     ),
     PetBrawlMove.HUNKER: (
-        "halve Spit damage, soften Stampede, and heal a little."
+        "soak Spit and recover while waiting out Sidestep; Stampede and "
+        "Feint break the guard."
+    ),
+    PetBrawlMove.FEINT: (
+        "bait Hunker and Sidestep; landed Spit or Stampede halves the trick."
+    ),
+    PetBrawlMove.SIDESTEP: (
+        "take 25% from landed Spit or Stampede and counter; Hunker and Feint "
+        "deny the opening."
     ),
 }
 
@@ -80,6 +101,8 @@ _DEFAULT_MOVE_NAMES = {
     PetBrawlMove.SPIT: "Spit",
     PetBrawlMove.STAMPEDE: "Stampede",
     PetBrawlMove.HUNKER: "Hunker Down",
+    PetBrawlMove.FEINT: "Feint",
+    PetBrawlMove.SIDESTEP: "Sidestep",
 }
 
 # Mechanics are identical for everyone; only the words change. Unknown or
@@ -89,48 +112,78 @@ MOVE_FLAVOR: dict[tuple[str, PetBrawlMove], str] = {
     ("common_cama", PetBrawlMove.SPIT): "Unremarkable Spit",
     ("common_cama", PetBrawlMove.STAMPEDE): "Ordinary Stampede",
     ("common_cama", PetBrawlMove.HUNKER): "Stand There",
+    ("common_cama", PetBrawlMove.FEINT): "Obvious Feint",
+    ("common_cama", PetBrawlMove.SIDESTEP): "Awkward Sidestep",
     ("dromedary_cross", PetBrawlMove.SPIT): "Sandy Spit",
     ("dromedary_cross", PetBrawlMove.STAMPEDE): "Dune Charge",
     ("dromedary_cross", PetBrawlMove.HUNKER): "Close Nostrils",
+    ("dromedary_cross", PetBrawlMove.FEINT): "Mirage Feint",
+    ("dromedary_cross", PetBrawlMove.SIDESTEP): "Dune Drift",
     ("banana_ears", PetBrawlMove.SPIT): "Melodic Spit",
     ("banana_ears", PetBrawlMove.STAMPEDE): "Humming Charge",
     ("banana_ears", PetBrawlMove.HUNKER): "Hum Defensively",
+    ("banana_ears", PetBrawlMove.FEINT): "False Note",
+    ("banana_ears", PetBrawlMove.SIDESTEP): "Rhythm Step",
     ("embergear_cama", PetBrawlMove.SPIT): "Spark Spit",
     ("embergear_cama", PetBrawlMove.STAMPEDE): "Overdrive",
     ("embergear_cama", PetBrawlMove.HUNKER): "Vent Heat",
+    ("embergear_cama", PetBrawlMove.FEINT): "False Start",
+    ("embergear_cama", PetBrawlMove.SIDESTEP): "Quickshift",
     ("jopacama", PetBrawlMove.SPIT): "Coin-Flecked Spit",
     ("jopacama", PetBrawlMove.STAMPEDE): "Market Crash",
     ("jopacama", PetBrawlMove.HUNKER): "Audit Defense",
+    ("jopacama", PetBrawlMove.FEINT): "Market Bluff",
+    ("jopacama", PetBrawlMove.SIDESTEP): "Liquidity Exit",
     ("pudge_cama", PetBrawlMove.SPIT): "Sloppy Spit",
     ("pudge_cama", PetBrawlMove.STAMPEDE): "Dinner Rush",
     ("pudge_cama", PetBrawlMove.HUNKER): "Digest",
+    ("pudge_cama", PetBrawlMove.FEINT): "Fake Dinner",
+    ("pudge_cama", PetBrawlMove.SIDESTEP): "Greasy Shuffle",
     ("courier_cama", PetBrawlMove.SPIT): "Special Delivery",
     ("courier_cama", PetBrawlMove.STAMPEDE): "Rush Delivery",
     ("courier_cama", PetBrawlMove.HUNKER): "Hide Behind Saddlebags",
+    ("courier_cama", PetBrawlMove.FEINT): "Decoy Delivery",
+    ("courier_cama", PetBrawlMove.SIDESTEP): "Express Detour",
     ("riverglow_cama", PetBrawlMove.SPIT): "Charged Spit",
     ("riverglow_cama", PetBrawlMove.STAMPEDE): "River Rush",
     ("riverglow_cama", PetBrawlMove.HUNKER): "Bottle Up",
+    ("riverglow_cama", PetBrawlMove.FEINT): "False Current",
+    ("riverglow_cama", PetBrawlMove.SIDESTEP): "Slipstream",
     ("aegis_cama", PetBrawlMove.SPIT): "Serene Spit",
     ("aegis_cama", PetBrawlMove.STAMPEDE): "Shell Rush",
     ("aegis_cama", PetBrawlMove.HUNKER): "Shell Up",
+    ("aegis_cama", PetBrawlMove.FEINT): "Shell Game",
+    ("aegis_cama", PetBrawlMove.SIDESTEP): "Shield Step",
     ("invoker_cama", PetBrawlMove.SPIT): "Forged Spit",
     ("invoker_cama", PetBrawlMove.STAMPEDE): "Orb-Powered Charge",
     ("invoker_cama", PetBrawlMove.HUNKER): "Quas Ward",
+    ("invoker_cama", PetBrawlMove.FEINT): "Wex Feint",
+    ("invoker_cama", PetBrawlMove.SIDESTEP): "Ghost Walk",
     ("crystal_cama", PetBrawlMove.SPIT): "Frost Spit",
     ("crystal_cama", PetBrawlMove.STAMPEDE): "Blizzard Stampede",
     ("crystal_cama", PetBrawlMove.HUNKER): "Frozen Stance",
+    ("crystal_cama", PetBrawlMove.FEINT): "Ice Decoy",
+    ("crystal_cama", PetBrawlMove.SIDESTEP): "Glacial Step",
     ("prismwool_cama", PetBrawlMove.SPIT): "Prismatic Spit",
     ("prismwool_cama", PetBrawlMove.STAMPEDE): "Linked Charge",
     ("prismwool_cama", PetBrawlMove.HUNKER): "Wool Ward",
+    ("prismwool_cama", PetBrawlMove.FEINT): "Refracted Feint",
+    ("prismwool_cama", PetBrawlMove.SIDESTEP): "Spectrum Shift",
     ("rama", PetBrawlMove.SPIT): "Royal Spit",
     ("rama", PetBrawlMove.STAMPEDE): "Temperamental Rampage",
     ("rama", PetBrawlMove.HUNKER): "Refuse to Cooperate",
+    ("rama", PetBrawlMove.FEINT): "Royal Bluff",
+    ("rama", PetBrawlMove.SIDESTEP): "Majestic Exit",
     ("moondrift_cama", PetBrawlMove.SPIT): "Moonlit Spit",
     ("moondrift_cama", PetBrawlMove.STAMPEDE): "Tidal Rush",
     ("moondrift_cama", PetBrawlMove.HUNKER): "Eclipse",
+    ("moondrift_cama", PetBrawlMove.FEINT): "Moonshadow",
+    ("moondrift_cama", PetBrawlMove.SIDESTEP): "Tidal Step",
     ("sunspun_cama", PetBrawlMove.SPIT): "Solar Flare",
     ("sunspun_cama", PetBrawlMove.STAMPEDE): "Dawn Charge",
     ("sunspun_cama", PetBrawlMove.HUNKER): "Corona Guard",
+    ("sunspun_cama", PetBrawlMove.FEINT): "Dawn Mirage",
+    ("sunspun_cama", PetBrawlMove.SIDESTEP): "Sunbeam Step",
 }
 
 
@@ -273,17 +326,22 @@ def _attack_damage(
     attacker: Duelist,
     defender: Duelist,
     move: PetBrawlMove,
-    defender_hunkers: bool,
+    defender_move: PetBrawlMove,
     rng: random.Random,
 ) -> tuple[int, bool, bool]:
     """Return (damage, landed, crit) for one attack, defender mods applied."""
     atk = brawl_traits(attacker.species_id)
     dfn = brawl_traits(defender.species_id)
-    if move is PetBrawlMove.HUNKER:
+    if move in (PetBrawlMove.HUNKER, PetBrawlMove.SIDESTEP):
         return 0, False, False
-    if move is PetBrawlMove.STAMPEDE and not defender_hunkers:
+    if move is PetBrawlMove.STAMPEDE and defender_move is not PetBrawlMove.HUNKER:
+        base_miss_pct = (
+            STAMPEDE_FEINT_MISS_PCT
+            if defender_move is PetBrawlMove.FEINT
+            else STAMPEDE_MISS_PCT
+        )
         miss_pct = (
-            STAMPEDE_MISS_PCT
+            base_miss_pct
             + dfn.dodge_bonus_pp
             + defender.training_dex * TRAINING_DEX_DODGE_PP
         )
@@ -291,6 +349,8 @@ def _attack_damage(
             return 0, False, False
     if move is PetBrawlMove.STAMPEDE:
         low, high = STAMPEDE_DMG
+    elif move is PetBrawlMove.FEINT:
+        low, high = FEINT_DMG
     else:
         low, high = SPIT_DMG
     strength_damage = attacker.training_str * TRAINING_STR_DAMAGE
@@ -308,13 +368,15 @@ def _attack_damage(
     if crit:
         dmg *= 2
     dmg += atk.damage_dealt_bonus  # Ravenous hits harder...
-    if defender_hunkers:
+    if defender_move is PetBrawlMove.HUNKER and move is not PetBrawlMove.FEINT:
         damage_taken_pct = (
             HUNKER_STAMPEDE_DAMAGE_TAKEN_PCT
             if move is PetBrawlMove.STAMPEDE
             else HUNKER_DAMAGE_TAKEN_PCT
         )
         dmg = -(-(dmg * damage_taken_pct) // 100)
+    elif defender_move is PetBrawlMove.SIDESTEP and move in DIRECT_ATTACKS:
+        dmg = -(-(dmg * SIDESTEP_DAMAGE_TAKEN_PCT) // 100)
     dmg += (
         dfn.damage_taken_mod
         - defender.training_int * TRAINING_INT_MITIGATION
@@ -322,6 +384,33 @@ def _attack_damage(
     if dfn.damage_taken_mod < 0 or defender.training_int:
         dmg = max(1, dmg)
     return dmg, True, crit
+
+
+def _sidestep_counter_damage(
+    attacker: Duelist,
+    defender: Duelist,
+    rng: random.Random,
+) -> tuple[int, bool]:
+    """Return light counter damage after Sidestep catches a direct hit."""
+    atk = brawl_traits(attacker.species_id)
+    dfn = brawl_traits(defender.species_id)
+    dmg = (
+        rng.randint(*SIDESTEP_COUNTER_DMG)
+        + attacker.power
+        + attacker.training_str * TRAINING_STR_DAMAGE
+    )
+    crit_pct = atk.crit_pct + attacker.training_dex * TRAINING_DEX_CRIT_PP
+    crit = rng.randint(1, 100) <= crit_pct
+    if crit:
+        dmg *= 2
+    dmg += atk.damage_dealt_bonus
+    dmg += (
+        dfn.damage_taken_mod
+        - defender.training_int * TRAINING_INT_MITIGATION
+    )
+    if dfn.damage_taken_mod < 0 or defender.training_int:
+        dmg = max(1, dmg)
+    return dmg, crit
 
 
 def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
@@ -346,27 +435,61 @@ def resolve_round(
 
     # Both attacks read the round-start state; damage lands simultaneously.
     dmg_to_b, a_landed, a_crit = _attack_damage(
-        a, b, move_a, move_b is PetBrawlMove.HUNKER, rng
+        a, b, move_a, move_b, rng
     )
     dmg_to_a, b_landed, b_crit = _attack_damage(
-        b, a, move_b, move_a is PetBrawlMove.HUNKER, rng
+        b, a, move_b, move_a, rng
     )
-    heal_a = _hunker_heal(a, rng) if move_a is PetBrawlMove.HUNKER else 0
-    heal_b = _hunker_heal(b, rng) if move_b is PetBrawlMove.HUNKER else 0
+    if move_a is PetBrawlMove.FEINT and move_b in DIRECT_ATTACKS and b_landed:
+        dmg_to_b = -(-(dmg_to_b * FEINT_INTERRUPTED_DAMAGE_PCT) // 100)
+    if move_b is PetBrawlMove.FEINT and move_a in DIRECT_ATTACKS and a_landed:
+        dmg_to_a = -(-(dmg_to_a * FEINT_INTERRUPTED_DAMAGE_PCT) // 100)
+    counter_to_a = 0
+    counter_to_b = 0
+    counter_a_crit = False
+    counter_b_crit = False
+    if move_a is PetBrawlMove.SIDESTEP and move_b in DIRECT_ATTACKS and b_landed:
+        counter_to_b, counter_a_crit = _sidestep_counter_damage(a, b, rng)
+    if move_b is PetBrawlMove.SIDESTEP and move_a in DIRECT_ATTACKS and a_landed:
+        counter_to_a, counter_b_crit = _sidestep_counter_damage(b, a, rng)
+    dmg_to_a += counter_to_a
+    dmg_to_b += counter_to_b
+    heal_a = (
+        _hunker_heal(a, rng)
+        if move_a is PetBrawlMove.HUNKER and move_b is not PetBrawlMove.FEINT
+        else 0
+    )
+    heal_b = (
+        _hunker_heal(b, rng)
+        if move_b is PetBrawlMove.HUNKER and move_a is not PetBrawlMove.FEINT
+        else 0
+    )
 
-    for atk, dfn, move, landed, crit, dmg in (
-        (a, b, move_a, a_landed, a_crit, dmg_to_b),
-        (b, a, move_b, b_landed, b_crit, dmg_to_a),
+    for atk, dfn, move, landed, crit, dmg, counter, counter_crit in (
+        (a, b, move_a, a_landed, a_crit, dmg_to_b - counter_to_b, counter_to_b, counter_a_crit),
+        (b, a, move_b, b_landed, b_crit, dmg_to_a - counter_to_a, counter_to_a, counter_b_crit),
     ):
         label = move_name(atk.species_id, move)
         if move is PetBrawlMove.HUNKER:
             log.append(f"🛡️ **{atk.name}** hunkers down ({label}).")
+        elif move is PetBrawlMove.SIDESTEP:
+            if counter:
+                flourish = " with a CRITICAL counter" if counter_crit else " and counters"
+                log.append(
+                    f"🌀 **{atk.name}** sidesteps{flourish} for {counter}!"
+                )
+            else:
+                log.append(f"🌀 **{atk.name}** sidesteps, but finds no opening.")
         elif not landed:
             log.append(f"💨 **{atk.name}**'s {label} misses entirely!")
         elif crit:
             log.append(f"💥 CRITICAL! **{atk.name}**'s {label} devastates for {dmg}!")
         else:
             log.append(f"{MOVE_EMOJI[move]} **{atk.name}**'s {label} hits for {dmg}.")
+    if move_a is PetBrawlMove.FEINT and move_b is PetBrawlMove.HUNKER:
+        log.append(f"🎭 **{a.name}** breaks **{b.name}**'s guard — no recovery!")
+    if move_b is PetBrawlMove.FEINT and move_a is PetBrawlMove.HUNKER:
+        log.append(f"🎭 **{b.name}** breaks **{a.name}**'s guard — no recovery!")
     if heal_a:
         log.append(f"💚 **{a.name}** recovers {heal_a} HP.")
     if heal_b:
