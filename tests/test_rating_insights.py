@@ -234,3 +234,34 @@ class TestLast5Delta:
         ]
         # Without rating_before the old post-game baseline is the best we have.
         assert _last_5_delta(history) == 40
+
+    def test_openskill_only_rows_do_not_distort_glicko_trend(self):
+        history = [
+            {"rating": None, "rating_before": None},
+            _history_row(1530, 1520),
+            {"rating": None, "rating_before": None},
+            _history_row(1520, 1510),
+        ]
+
+        assert _last_5_delta(history) == 20
+
+    def test_glicko_trend_does_not_reach_past_five_games(self):
+        history = [
+            _history_row(1550, 1540),
+            {"rating": None, "rating_before": None},
+            _history_row(1540, 1530),
+            _history_row(1530, 1520),
+            _history_row(1520, 1510),
+            _history_row(1510, 1500),
+        ]
+
+        assert _last_5_delta(history) == 40
+
+    def test_one_glicko_snapshot_has_no_trend(self):
+        history = [
+            {"rating": None, "rating_before": None},
+            _history_row(1530, 1520),
+            {"rating": None, "rating_before": None},
+        ]
+
+        assert _last_5_delta(history) is None
