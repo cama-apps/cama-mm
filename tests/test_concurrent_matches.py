@@ -14,6 +14,7 @@ import pytest
 from discord import app_commands
 
 from commands.match import MatchCommands
+from domain.models.lobby import LobbyKind
 from domain.pet_evolution import PetInstinct
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
@@ -139,6 +140,36 @@ class TestConcurrentMatchCreation:
         assert pmid1 is not None
         assert pmid2 is not None
         assert pmid1 != pmid2
+
+    def test_pending_matches_retain_source_lobby_kind(self, services):
+        match_service = services["match_service"]
+        player_repo = services["player_repo"]
+        open_players = list(range(3000, 3010))
+        low_players = list(range(4000, 4010))
+        _register_players(player_repo, open_players)
+        _register_players(player_repo, low_players)
+
+        open_result = match_service.shuffle_players(
+            open_players,
+            guild_id=TEST_GUILD_ID,
+            lobby_kind=LobbyKind.OPEN,
+        )
+        low_result = match_service.shuffle_players(
+            low_players,
+            guild_id=TEST_GUILD_ID,
+            lobby_kind=LobbyKind.LOWSKILL,
+        )
+
+        open_state = match_service.get_last_shuffle(
+            TEST_GUILD_ID,
+            pending_match_id=open_result["pending_match_id"],
+        )
+        low_state = match_service.get_last_shuffle(
+            TEST_GUILD_ID,
+            pending_match_id=low_result["pending_match_id"],
+        )
+        assert open_state.lobby_kind == LobbyKind.OPEN.value
+        assert low_state.lobby_kind == LobbyKind.LOWSKILL.value
 
     def test_get_all_pending_matches_returns_both(self, services):
         """get_all_pending_matches returns all concurrent matches."""
@@ -608,6 +639,7 @@ class TestRecordFinalizeThreadIsolation:
             TEST_GUILD_ID, "radiant",
             thread_id=None,
             pending_match_id=state_a.pending_match_id,
+            lobby_kind=state_a.lobby_kind,
         )
 
     async def test_record_chunks_long_final_message_before_thread_finalize(self, services):
@@ -663,6 +695,7 @@ class TestRecordFinalizeThreadIsolation:
             "radiant",
             thread_id=555_222,
             pending_match_id=state.pending_match_id,
+            lobby_kind=state.lobby_kind,
         )
 
     async def test_record_finalizes_thread_even_if_final_followup_send_fails(self, services):
@@ -712,6 +745,7 @@ class TestRecordFinalizeThreadIsolation:
             "radiant",
             thread_id=555_333,
             pending_match_id=state.pending_match_id,
+            lobby_kind=state.lobby_kind,
         )
 
     async def test_record_captures_pet_activity_before_final_followup_send(

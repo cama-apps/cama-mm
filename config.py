@@ -99,6 +99,16 @@ if _lobby_channel_raw:
     except ValueError:
         LOBBY_CHANNEL_ID = None
 
+# Optional Whine & Cheese override. When unset, low-skill lobbies use the
+# regular dedicated lobby channel (and ultimately the command channel).
+LOWSKILL_LOBBY_CHANNEL_ID: int | None = None
+_lowskill_lobby_channel_raw = os.getenv("LOWSKILL_LOBBY_CHANNEL_ID")
+if _lowskill_lobby_channel_raw:
+    try:
+        LOWSKILL_LOBBY_CHANNEL_ID = int(_lowskill_lobby_channel_raw.strip())
+    except ValueError:
+        LOWSKILL_LOBBY_CHANNEL_ID = None
+
 # Dedicated dig channel - if set, public /dig embeds are posted here instead
 # of the command channel. Ephemeral followups (gear panel, info, shop, etc.)
 # stay in the invocation channel regardless.

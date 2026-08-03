@@ -122,6 +122,21 @@ class TestDotaInfoHeroLookup:
         cm = _get_hero_by_name("Crystal Maiden")
         assert cm is not None
         assert len(cm.talents) >= 4
+        assert all(talent.localized_name for talent in cm.talents)
+
+    def test_lookup_helpers_release_database_connections(self):
+        from dotabase_integration import _ENGINE
+
+        _get_all_heroes.cache_clear()
+        _get_all_abilities.cache_clear()
+        checked_out_before = _ENGINE.pool.checkedout()
+
+        _get_all_heroes()
+        _get_all_abilities()
+        _get_hero_by_name("Pudge")
+        _get_ability_by_name("Meat Hook")
+
+        assert _ENGINE.pool.checkedout() == checked_out_before
 
 
 class TestAbilityLookup:

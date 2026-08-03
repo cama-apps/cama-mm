@@ -12,8 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from discord import app_commands
 
 from commands.lobby import LobbyCommands
+from domain.models.lobby import LobbyKind
 from domain.models.player import Player
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
@@ -185,6 +187,9 @@ class FakePlayerRepo:
     def get_by_ids(self, ids, guild_id=None):
         return [self.players.get((id, guild_id)) for id in ids if (id, guild_id) in self.players]
 
+    def get_by_id(self, discord_id, guild_id=None):
+        return self.players.get((discord_id, guild_id))
+
     def get_captain_eligible_players(self, ids, guild_id=None):
         return []
 
@@ -271,6 +276,7 @@ async def test_readycheck_command_mirrors_ping_to_invocation_channel(
     monkeypatch_safe_defer,
 ):
     _, lobby_service, player_service, _ = make_services()
+    lobby_service.lobby_manager.join_lobby(1, guild_id=TEST_GUILD_ID)
     interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
     cog = LobbyCommands(FakeBot(channel=interaction.channel), lobby_service, player_service)
     cog._execute_readycheck = AsyncMock(
@@ -291,7 +297,7 @@ async def test_readycheck_command_mirrors_ping_to_invocation_channel(
     assert len(interaction.followup.messages) == 1
     followup = interaction.followup.messages[0]
     assert followup["content"] == (
-        "⚔️ **Ready check!** <@2> <@3>\n"
+            "⚔️ **🍽️ All You Can Feed ready check!** <@2> <@3>\n"
         "[React in the lobby thread](https://discord.com/channels/123/999/789)"
     )
     assert followup["ephemeral"] is False
@@ -305,6 +311,7 @@ async def test_readycheck_command_does_not_duplicate_ping_in_lobby_thread(
     monkeypatch_safe_defer,
 ):
     _, lobby_service, player_service, _ = make_services()
+    lobby_service.lobby_manager.join_lobby(1, guild_id=TEST_GUILD_ID)
     interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
     interaction.channel.id = 999
     cog = LobbyCommands(FakeBot(channel=interaction.channel), lobby_service, player_service)
@@ -326,7 +333,7 @@ async def test_readycheck_command_does_not_duplicate_ping_in_lobby_thread(
     assert interaction.followup.messages == [
         {
             "content": (
-                "✅ Ready check refreshed! "
+                    "✅ 🍽️ All You Can Feed ready check refreshed! "
                 "[View](https://discord.com/channels/123/999/789)"
             ),
             "ephemeral": True,
@@ -334,6 +341,30 @@ async def test_readycheck_command_does_not_duplicate_ping_in_lobby_thread(
             "allowed_mentions": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_readycheck_command_infers_lowskill_membership(
+    monkeypatch_safe_defer,
+):
+    _, lobby_service, player_service, _ = make_services()
+    lobby_service.lobby_manager.join_lobby(
+        1,
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(channel=interaction.channel), lobby_service, player_service)
+    cog._execute_readycheck = AsyncMock(return_value=("no_thread", {}))
+
+    await cog.readycheck.callback(cog, interaction)
+
+    cog._execute_readycheck.assert_awaited_once_with(
+        interaction.guild,
+        TEST_GUILD_ID,
+        1,
+        lobby_kind="lowskill",
+    )
 
 
 @pytest.mark.asyncio
@@ -359,7 +390,7 @@ async def test_lobby_command_uses_guild_id(monkeypatch_safe_defer):
     assert lobby.created_by == 1
     assert 1 in lobby.players
     assert interaction.followup.messages
-    assert "Lobby created and joined" in interaction.followup.messages[-1]["content"]
+    assert "🍽️ All You Can Feed created and joined" in interaction.followup.messages[-1]["content"]
     reactions = interaction.channel.sent_messages[0].added_reactions
     assert "📋" in reactions
     assert all("frogling" not in reaction for reaction in reactions)
@@ -499,7 +530,7 @@ async def test_new_lobby_optional_decoration_failures_remain_isolated(
     assert message.added_reactions[0] == "⚔️"
     assert "jopacoin" in message.added_reactions[1]
     assert lobby_service.get_lobby_thread_id(guild_id=TEST_GUILD_ID) == 999
-    assert "Lobby created!" in interaction.followup.messages[-1]["content"]
+    assert "🍽️ All You Can Feed created!" in interaction.followup.messages[-1]["content"]
     assert "Failed to pin lobby message: pin failed" in caplog.text
     assert "Failed to add lobby reactions: reaction failed" in caplog.text
 
@@ -582,10 +613,63 @@ async def test_join_command_uses_guild_id(monkeypatch_safe_defer):
     cog = LobbyCommands(bot, lobby_service, player_service)
 
     # This should not raise UnboundLocalError
-    await cog.join.callback(cog, interaction)
+    await cog.join.callback(
+        cog,
+        interaction,
+        app_commands.Choice(name="All You Can Feed", value="open"),
+    )
 
     # Should have sent a response
     assert interaction.followup.messages
+
+
+@pytest.mark.asyncio
+async def test_join_command_defaults_to_open_lobby(monkeypatch_safe_defer):
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+
+    await cog.join.callback(cog, interaction, None)
+
+    assert 1 in lobby_service.get_lobby(
+        guild_id=TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+    ).players
+
+
+@pytest.mark.asyncio
+async def test_join_command_targets_explicit_lowskill_lobby(monkeypatch_safe_defer):
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.lobby_manager.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    )
+    player = player_repo.add_player(1, TEST_GUILD_ID)
+    player.glicko_rating = 1300
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+
+    await cog.join.callback(
+        cog,
+        interaction,
+        app_commands.Choice(name="Whine & Cheese", value="lowskill"),
+    )
+
+    assert 1 in lobby_service.get_lobby(
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    ).players
+    assert lobby_service.get_lobby(
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="open",
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -608,6 +692,58 @@ async def test_leave_command_uses_guild_id(monkeypatch_safe_defer):
 
     # Should have sent a response
     assert interaction.followup.messages
+
+
+@pytest.mark.asyncio
+async def test_leave_command_infers_lowskill_membership(monkeypatch_safe_defer):
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.lobby_manager.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    )
+    player = player_repo.add_player(1, TEST_GUILD_ID)
+    player.glicko_rating = 1300
+    assert lobby_service.join_lobby(
+        1,
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    )[0]
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+
+    await cog.leave.callback(cog, interaction)
+
+    assert 1 not in lobby_service.get_lobby(
+        guild_id=TEST_GUILD_ID,
+        lobby_kind="lowskill",
+    ).players
+
+
+@pytest.mark.asyncio
+async def test_leave_command_blocks_player_reserved_by_shuffle_or_draft(
+    monkeypatch_safe_defer,
+):
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby.add_player(1)
+    assert lobby_service.reserve_lobby_players(
+        [1],
+        TEST_GUILD_ID,
+        "open",
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+
+    await cog.leave.callback(cog, interaction)
+
+    assert 1 in lobby.players
+    assert interaction.followup.messages[-1]["ephemeral"] is True
+    assert "shuffle or draft is in progress" in interaction.followup.messages[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -670,7 +806,11 @@ async def test_join_command_unregistered_player(monkeypatch_safe_defer):
     cog = LobbyCommands(bot, lobby_service, player_service)
 
     # This should not raise UnboundLocalError
-    await cog.join.callback(cog, interaction)
+    await cog.join.callback(
+        cog,
+        interaction,
+        app_commands.Choice(name="All You Can Feed", value="open"),
+    )
 
     # Should have sent an error about registration
     assert interaction.followup.messages
@@ -758,11 +898,17 @@ async def test_join_fans_out_confirmation_and_isolates_maintenance_failure(
     monkeypatch.setattr(bot_module, "notify_lobby_rally", rally)
     monkeypatch.setattr(bot_module, "notify_lobby_ready", AsyncMock())
 
-    command = asyncio.create_task(cog.join.callback(cog, interaction))
+    command = asyncio.create_task(
+        cog.join.callback(
+            cog,
+            interaction,
+            app_commands.Choice(name="All You Can Feed", value="open"),
+        )
+    )
     try:
         await asyncio.wait_for(barrier.all_entered.wait(), timeout=1)
         assert barrier.entered == barrier.expected
-        assert confirmation["content"] == "✅ Joined the lobby!"
+        assert confirmation["content"] == "✅ Joined 🍽️ All You Can Feed!"
     finally:
         barrier.release.set()
     await command
@@ -803,8 +949,9 @@ async def test_leave_fans_out_confirmation_and_isolates_maintenance_failure(
     async def sync_displays(_lobby, _guild_id):
         await barrier.enter("display")
 
-    async def remove_reaction(_user, *, guild_id):
+    async def remove_reaction(_user, *, guild_id, lobby_kind):
         assert guild_id == TEST_GUILD_ID
+        assert lobby_kind.value == "open"
         await barrier.enter("reaction", error=RuntimeError("reaction failed"))
 
     async def post_activity(_thread_id, _user):
@@ -819,7 +966,7 @@ async def test_leave_fans_out_confirmation_and_isolates_maintenance_failure(
     try:
         await asyncio.wait_for(barrier.all_entered.wait(), timeout=1)
         assert barrier.entered == barrier.expected
-        assert confirmation["content"] == "✅ Left the lobby."
+        assert confirmation["content"] == "✅ Left 🍽️ All You Can Feed."
     finally:
         barrier.release.set()
     await command
@@ -957,7 +1104,10 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
     assert fake_channel.fetch_message_calls == []
     assert fake_channel.partial_message_calls == [12345]
     assert len(fake_channel.message.edits) == 1
-    cog.sync_readycheck_with_lobby.assert_awaited_once_with(TEST_GUILD_ID)
+    cog.sync_readycheck_with_lobby.assert_awaited_once_with(
+        TEST_GUILD_ID,
+        lobby.kind,
+    )
 
 
 @pytest.mark.asyncio
@@ -1136,7 +1286,11 @@ class TestGuildIdDefinitionOrder:
         bot = FakeBot()
         cog = LobbyCommands(bot, lobby_service, player_service)
 
-        await cog.join.callback(cog, interaction)
+        await cog.join.callback(
+            cog,
+            interaction,
+            app_commands.Choice(name="All You Can Feed", value="open"),
+        )
 
         # Verify get_player was called with the correct guild_id
         assert any(call[2] == TEST_GUILD_ID for call in call_order if call[0] == "get_player")

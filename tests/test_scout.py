@@ -3,12 +3,14 @@ Tests for the /scout command functionality.
 """
 
 import json
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
 
 from commands.scout import ScoutCommands
+from domain.models.lobby import LobbyKind
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
 
@@ -586,7 +588,10 @@ def _make_scout_cog(
     bot = SimpleNamespace()
     if draft_state_manager is not None:
         bot.draft_state_manager = draft_state_manager
-    lobby_manager = SimpleNamespace(get_lobby=lambda guild_id=None: lobby)
+    lobby_manager = SimpleNamespace(
+        get_lobby=lambda guild_id=None, lobby_kind=None: lobby,
+        get_lobby_kind_for_player=lambda discord_id, guild_id=None: None,
+    )
     return ScoutCommands(bot, match_service, player_service, lobby_manager)
 
 
@@ -599,6 +604,11 @@ def _match_service(radiant, dire):
 def _links_cmd(cog):
     """Return the /scout links Command object from a ScoutCommands cog."""
     return next(c for c in cog.scout.commands if c.name == "links")
+
+
+def _report_cmd(cog):
+    """Return the /scout report Command object from a ScoutCommands cog."""
+    return next(c for c in cog.scout.commands if c.name == "report")
 
 
 class TestResolveTeamContext:
@@ -619,7 +629,7 @@ class TestResolveTeamContext:
         ctx = _make_scout_cog(lobby=lobby)._resolve_team_context(TEST_GUILD_ID)
         assert ctx.split is False
         assert set(ctx.flat) == {5, 6, 7}
-        assert ctx.source_label == "Lobby"
+        assert ctx.source_label == LobbyKind.OPEN.label
 
     def test_lobby_ignores_legacy_conditional_players(self):
         lobby = SimpleNamespace(players={5, 6}, conditional_players={9})
@@ -646,6 +656,57 @@ class TestResolveTeamContext:
         assert ctx.split is True
         assert ctx.source_label == "Active Match"
         assert ctx.flat == [1, 2, 3, 4]
+
+    def test_sibling_pending_match_does_not_hide_invokers_lobby(self):
+        open_match = SimpleNamespace(radiant_team_ids=[1], dire_team_ids=[2])
+        open_lobby = SimpleNamespace(players={1, 2}, kind=LobbyKind.OPEN)
+        lowskill_lobby = SimpleNamespace(players={7, 8}, kind=LobbyKind.LOWSKILL)
+        match_service = SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_pending_match_for_player=lambda guild_id, discord_id: None
+            ),
+            get_last_shuffle=lambda guild_id: open_match,
+        )
+        lobby_manager = SimpleNamespace(
+            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
+                LobbyKind.LOWSKILL if discord_id == 7 else None
+            ),
+            get_lobby=lambda guild_id=None, lobby_kind=None: {
+                LobbyKind.OPEN: open_lobby,
+                LobbyKind.LOWSKILL: lowskill_lobby,
+            }[LobbyKind.normalize(lobby_kind)],
+        )
+        cog = ScoutCommands(SimpleNamespace(), match_service, None, lobby_manager)
+
+        ctx = cog._resolve_team_context(TEST_GUILD_ID, invoking_user_id=7)
+
+        assert set(ctx.flat) == {7, 8}
+        assert ctx.source_label == LobbyKind.LOWSKILL.label
+
+    def test_invokers_pending_match_is_selected_when_two_are_active(self):
+        lowskill_match = SimpleNamespace(
+            radiant_team_ids=[7, 9],
+            dire_team_ids=[8, 10],
+        )
+        match_service = SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_pending_match_for_player=lambda guild_id, discord_id: (
+                    lowskill_match if discord_id == 7 else None
+                )
+            ),
+            get_last_shuffle=lambda guild_id: None,
+        )
+        lobby_manager = SimpleNamespace(
+            get_lobby_kind_for_player=lambda discord_id, guild_id=None: None,
+            get_lobby=lambda guild_id=None, lobby_kind=None: None,
+        )
+        cog = ScoutCommands(SimpleNamespace(), match_service, None, lobby_manager)
+
+        ctx = cog._resolve_team_context(TEST_GUILD_ID, invoking_user_id=7)
+
+        assert ctx.radiant == [7, 9]
+        assert ctx.dire == [8, 10]
+        assert ctx.source_label == "Active Match"
 
 
 class TestResolvePlayerContextRegression:
@@ -679,6 +740,59 @@ class TestResolvePlayerContextRegression:
     def test_no_context_returns_empty_tuple(self):
         """With no context the wrapper returns ([], None)."""
         assert _make_scout_cog()._resolve_player_context(TEST_GUILD_ID) == ([], None)
+
+
+class TestScoutReportLobbyContext:
+    async def test_uses_invokers_whine_and_cheese_roster_and_label(self, monkeypatch):
+        """A Whine & Cheese member scouts that lobby rather than the open lobby."""
+        open_lobby = SimpleNamespace(players={1, 2}, kind=LobbyKind.OPEN)
+        lowskill_lobby = SimpleNamespace(players={7, 8}, kind=LobbyKind.LOWSKILL)
+        lobby_manager = SimpleNamespace(
+            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
+                LobbyKind.LOWSKILL if discord_id == 7 else None
+            ),
+            get_lobby=lambda guild_id=None, lobby_kind=None: {
+                LobbyKind.OPEN: open_lobby,
+                LobbyKind.LOWSKILL: lowskill_lobby,
+            }[LobbyKind.normalize(lobby_kind)],
+        )
+        seen_player_ids = []
+
+        def get_scout_data(player_ids, guild_id, *, limit):
+            seen_player_ids.extend(player_ids)
+            return {
+                "heroes": [{"hero_id": 1, "wins": 1, "losses": 0, "bans": 0}],
+                "total_matches": 1,
+            }
+
+        cog = ScoutCommands(
+            SimpleNamespace(),
+            SimpleNamespace(get_last_shuffle=lambda guild_id: None, get_scout_data=get_scout_data),
+            SimpleNamespace(
+                get_by_ids=lambda player_ids, guild_id: [
+                    SimpleNamespace(discord_id=player_id, name=f"P{player_id}")
+                    for player_id in player_ids
+                ]
+            ),
+            lobby_manager,
+        )
+        followup = AsyncMock(return_value=None)
+        monkeypatch.setattr("commands.scout.safe_defer", AsyncMock(return_value=True))
+        monkeypatch.setattr("commands.scout.safe_followup", followup)
+        monkeypatch.setattr(
+            "commands.scout.draw_scout_report",
+            lambda **kwargs: BytesIO(b"scout"),
+        )
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID),
+            user=SimpleNamespace(id=7),
+        )
+
+        await _report_cmd(cog).callback(cog, interaction)
+
+        assert set(seen_player_ids) == {7, 8}
+        embed = followup.await_args.kwargs["embed"]
+        assert embed.title == f"SCOUT: {LobbyKind.LOWSKILL.label}"
 
 
 class TestBuildLinkLines:

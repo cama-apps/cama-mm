@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from domain.models.lobby import LobbyKind
+
 
 class DraftPhase(Enum):
     """Phases of the draft process."""
@@ -33,6 +35,7 @@ class DraftState:
     """
 
     guild_id: int
+    lobby_kind: LobbyKind = LobbyKind.OPEN
 
     # Pool of 10 players selected for this draft
     player_pool_ids: list[int] = field(default_factory=list)
@@ -259,6 +262,7 @@ class DraftState:
         """Convert to dictionary format for serialization."""
         return {
             "guild_id": self.guild_id,
+            "lobby_kind": self.lobby_kind.value,
             "player_pool_ids": self.player_pool_ids,
             "player_pool_data": self.player_pool_data,
             "excluded_player_ids": self.excluded_player_ids,
@@ -290,7 +294,10 @@ class DraftState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DraftState":
         """Create from dictionary format."""
-        state = cls(guild_id=data["guild_id"])
+        state = cls(
+            guild_id=data["guild_id"],
+            lobby_kind=LobbyKind.normalize(data.get("lobby_kind")),
+        )
         state.player_pool_ids = data.get("player_pool_ids", [])
         state.player_pool_data = data.get("player_pool_data", {})
         state.excluded_player_ids = data.get("excluded_player_ids", [])

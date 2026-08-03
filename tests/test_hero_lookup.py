@@ -2,6 +2,7 @@
 Tests for hero lookup utility.
 """
 
+import utils.hero_lookup as hero_lookup
 from utils.hero_lookup import (
     classify_hero_role,
     get_all_heroes,
@@ -99,3 +100,15 @@ class TestDotabaseBackedHeroMetadata:
         assert classify_hero_role(1) == "Core"
         assert get_hero_roles(5) == ["Support", "Disabler", "Nuker"]
         assert classify_hero_role(5) == "Support"
+
+    def test_metadata_loaders_release_database_connections(self):
+        from dotabase_integration import _ENGINE
+
+        hero_lookup._HERO_INFO_CACHE.clear()
+        hero_lookup._HERO_ROLES_CACHE.clear()
+        checked_out_before = _ENGINE.pool.checkedout()
+
+        hero_lookup._load_hero_info_from_dotabase()
+        hero_lookup._load_hero_roles()
+
+        assert _ENGINE.pool.checkedout() == checked_out_before

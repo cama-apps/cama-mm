@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from domain.models.lobby import LobbyKind
 from utils.drawing import draw_scout_report
 from utils.embeds import COLOR_BLUE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -182,7 +183,11 @@ class ScoutCommands(commands.Cog):
         self.player_service = player_service
         self.lobby_manager = lobby_manager
 
-    def _resolve_team_context(self, guild_id: int | None) -> TeamContext:
+    def _resolve_team_context(
+        self,
+        guild_id: int | None,
+        invoking_user_id: int | None = None,
+    ) -> TeamContext:
         """
         Resolve players from active match/draft/lobby context, keeping teams split.
 
@@ -190,15 +195,35 @@ class ScoutCommands(commands.Cog):
 
         Args:
             guild_id: Guild ID for context lookup
+            invoking_user_id: User whose lobby membership selects the lobby kind
 
         Returns:
             A TeamContext. When no context is found every list is empty and
             ``source_label`` is None.
         """
-        # Priority 1: Pending match (post-shuffle)
+        invoker_lobby_kind = None
+        if invoking_user_id is not None:
+            invoker_lobby_kind = self.lobby_manager.get_lobby_kind_for_player(
+                invoking_user_id,
+                guild_id,
+            )
+
+        # Priority 1: The invoker's pending match (post-shuffle). A guild-wide
+        # fallback is only safe for legacy/internal callers without user context.
         if self.match_service:
             try:
-                last_shuffle = self.match_service.get_last_shuffle(guild_id)
+                state_service = getattr(self.match_service, "state_service", None)
+                if (
+                    invoking_user_id is not None
+                    and state_service is not None
+                    and hasattr(state_service, "get_pending_match_for_player")
+                ):
+                    last_shuffle = state_service.get_pending_match_for_player(
+                        guild_id,
+                        invoking_user_id,
+                    )
+                else:
+                    last_shuffle = self.match_service.get_last_shuffle(guild_id)
                 if last_shuffle:
                     radiant = list(last_shuffle.radiant_team_ids or [])
                     dire = list(last_shuffle.dire_team_ids or [])
@@ -215,6 +240,15 @@ class ScoutCommands(commands.Cog):
             try:
                 draft_state = draft_state_manager.get_state(guild_id)
                 if draft_state:
+                    draft_matches_invoker = (
+                        invoking_user_id is None
+                        or invoker_lobby_kind is None
+                        or LobbyKind.normalize(draft_state.lobby_kind)
+                        is LobbyKind.normalize(invoker_lobby_kind)
+                    )
+                else:
+                    draft_matches_invoker = False
+                if draft_matches_invoker:
                     radiant = list(draft_state.radiant_player_ids or [])
                     dire = list(draft_state.dire_player_ids or [])
                     if radiant or dire:
@@ -230,15 +264,22 @@ class ScoutCommands(commands.Cog):
                 logger.debug("Failed to check draft state", exc_info=True)
 
         # Priority 3: Active lobby
-        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
+        lobby_kind = invoker_lobby_kind or LobbyKind.OPEN
+        lobby = self.lobby_manager.get_lobby(
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
         if lobby and lobby.players:
             player_ids = list(lobby.players)
-            return TeamContext([], [], player_ids, "Lobby", False, "")
+            return TeamContext([], [], player_ids, lobby_kind.label, False, "")
 
         return TeamContext([], [], [], None, False, "")
 
     def _resolve_player_context(
-        self, guild_id: int | None, team_filter: str | None = None
+        self,
+        guild_id: int | None,
+        team_filter: str | None = None,
+        invoking_user_id: int | None = None,
     ) -> tuple[list[int], str | None]:
         """
         Resolve players from active match/lobby context.
@@ -249,11 +290,12 @@ class ScoutCommands(commands.Cog):
         Args:
             guild_id: Guild ID for context lookup
             team_filter: Optional "radiant" or "dire" to filter to specific team
+            invoking_user_id: User whose lobby membership selects the lobby kind
 
         Returns:
             (player_ids, source_label)
         """
-        ctx = self._resolve_team_context(guild_id)
+        ctx = self._resolve_team_context(guild_id, invoking_user_id)
         if not ctx.flat:
             return [], None
         if ctx.split and team_filter == "radiant":
@@ -391,6 +433,7 @@ class ScoutCommands(commands.Cog):
                 self._resolve_player_context,
                 guild_id,
                 team_value,
+                interaction.user.id,
             )
 
         if not player_ids:

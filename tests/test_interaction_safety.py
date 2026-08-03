@@ -224,7 +224,9 @@ async def test_close_lobby_edits_partial_message_without_fetch():
     channel.fetch_message.assert_not_awaited()
     channel.get_partial_message.assert_called_once_with(123)
     message.edit.assert_awaited_once()
-    assert message.edit.await_args.kwargs["embed"].title == "🚫 Lobby Reset"
+    assert message.edit.await_args.kwargs["embed"].title == (
+        "🚫 🍽️ All You Can Feed — Lobby Reset"
+    )
     assert message.edit.await_args.kwargs["view"] is None
 
 

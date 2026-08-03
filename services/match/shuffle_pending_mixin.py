@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 
 from config import BET_LOCK_SECONDS, DOTA_BET_SEED_AMOUNT
+from domain.models.lobby import LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from domain.models.player import Player
 from domain.models.team import Team
@@ -155,6 +156,7 @@ class ShufflePendingMixin:
         shuffle_mode: str = "balanced",
         excluded_conditional_ids: list[int] | None = None,
         lobby_wait_minutes: dict[int, int] | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -167,6 +169,7 @@ class ShufflePendingMixin:
             shuffle_mode: "balanced" or "region" - determines team-shape preference
             excluded_conditional_ids: Conditional lobby players not selected for this match
             lobby_wait_minutes: Whole minutes each player has waited in the current lobby
+            lobby_kind: Source lobby kind for independent lifecycle cleanup
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
@@ -513,6 +516,7 @@ class ShufflePendingMixin:
             betting_mode=betting_mode,
             is_draft=False,
             balancing_rating_system=rating_system,
+            lobby_kind=LobbyKind.normalize(lobby_kind).value,
             effective_avoid_ids=effective_avoid_ids,  # Avoids to decrement on record
             effective_deal_ids=effective_deal_ids,  # Package deals to decrement on record
             exclusion_updates_deferred=True,

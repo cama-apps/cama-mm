@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from config import BET_UNDERDOG_PING_RATIO
+from domain.models.lobby import LobbyKind
 from utils.formatting import format_betting_display
 
 if TYPE_CHECKING:
@@ -247,6 +248,15 @@ async def send_betting_reminder(
         content = f"🔒 **Betting closed!** Final {mode_label} pool — {totals_text}"
     else:
         return
+
+    kind = LobbyKind.normalize(getattr(pending_state, "lobby_kind", None))
+    resolved_match_id = (
+        getattr(pending_state, "pending_match_id", None) or pending_match_id
+    )
+    identity = kind.label
+    if resolved_match_id is not None:
+        identity += f" / Match #{resolved_match_id}"
+    content = f"**{identity}**\n{content}"
 
     # Post to origin channel (stored in shuffle message info, since reset_lobby clears it)
     try:

@@ -421,6 +421,9 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
     refreshed_lobby = MagicMock(status="open", players={member.id})
     refreshed_lobby.get_player_count.return_value = 2
     lobby_service = MagicMock()
+    lobby_service.get_lobby_kind_for_message.return_value = (
+        bot_module.LobbyKind.LOWSKILL
+    )
     lobby_service.get_lobby_message_id.return_value = payload.message_id
     lobby_service.get_lobby.side_effect = [initial_lobby, refreshed_lobby]
     lobby_service.join_lobby.return_value = (True, None, None)
@@ -463,14 +466,71 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
     fetch_user.assert_not_awaited()
     channel.get_partial_message.assert_called_once_with(payload.message_id)
     message.edit.assert_awaited_once()
-    lobby_service.join_lobby.assert_called_once_with(member.id, payload.guild_id)
-    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(payload.guild_id)
+    lobby_service.join_lobby.assert_called_once_with(
+        member.id,
+        payload.guild_id,
+        bot_module.LobbyKind.LOWSKILL,
+    )
+    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(
+        payload.guild_id,
+        lobby_kind=bot_module.LobbyKind.LOWSKILL,
+    )
     notify_rally.assert_awaited_once_with(
         channel,
         None,
         refreshed_lobby,
         payload.guild_id,
+        lobby_kind=bot_module.LobbyKind.LOWSKILL,
     )
+
+
+async def test_sword_reaction_explains_in_flight_lobby_switch(bot_module):
+    member = SimpleNamespace(
+        id=123,
+        mention="<@123>",
+        display_name="Lobby Player",
+    )
+    payload = SimpleNamespace(
+        user_id=member.id,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="⚔️"),
+        member=member,
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_kind_for_message.return_value = (
+        bot_module.LobbyKind.LOWSKILL
+    )
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    lobby_service.get_lobby.return_value = SimpleNamespace(status="open", players=set())
+    lobby_service.join_lobby.return_value = (False, "in_flight", None)
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(preferred_roles=[1])
+    message = SimpleNamespace(remove_reaction=AsyncMock())
+    channel = SimpleNamespace(
+        id=payload.channel_id,
+        get_partial_message=MagicMock(return_value=message),
+        send=AsyncMock(),
+    )
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "player_service", player_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    message.remove_reaction.assert_awaited_once_with(payload.emoji, member)
+    sent = channel.send.await_args.args[0]
+    assert "can't switch lobbies while your current shuffle or draft is in progress" in sent
 
 
 async def test_jopacoin_reaction_uses_gateway_member_without_message_get(bot_module):
@@ -649,8 +709,12 @@ async def test_sword_reaction_remove_uses_partial_message_without_get(bot_module
     lobby_service.leave_lobby.assert_called_once_with(
         payload.user_id,
         payload.guild_id,
+        bot_module.LobbyKind.OPEN,
     )
-    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(payload.guild_id)
+    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(
+        payload.guild_id,
+        lobby_kind=bot_module.LobbyKind.OPEN,
+    )
 
 
 async def test_readycheck_sync_tracks_live_lobby_and_clears_departed_reaction():
@@ -1150,7 +1214,8 @@ async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_c
         await bot_module.on_raw_reaction_add(payload)
 
     origin_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
         "Only players who confirmed ready will be included; everyone else will sit out."
     )
     readycheck_channel.fetch_message.assert_not_awaited()
@@ -1185,7 +1250,8 @@ async def test_readycheck_completion_falls_back_when_origin_channel_fetch_fails(
 
     assert sent is True
     readycheck_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
         "Only players who confirmed ready will be included; everyone else will sit out."
     )
 
@@ -1211,7 +1277,8 @@ async def test_readycheck_completion_falls_back_when_origin_lookup_fails(
 
     assert sent is True
     readycheck_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
         "Only players who confirmed ready will be included; everyone else will sit out."
     )
 
@@ -1262,7 +1329,8 @@ async def test_readycheck_completion_uses_origin_when_source_channel_fetch_fails
         await bot_module.on_raw_reaction_add(payload)
 
     origin_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
         "Only players who confirmed ready will be included; everyone else will sit out."
     )
 

@@ -4,11 +4,12 @@ Tests for the /herogrid command: repository methods, drawing function, and integ
 
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from PIL import Image
 
 from commands.herogrid import HeroGridCommands
+from domain.models.lobby import LobbyKind
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID
@@ -348,6 +349,7 @@ def _make_cog(
         lobby = SimpleNamespace(
             players=set(lobby_players),
             conditional_players=set(conditional_players or []),
+            kind=LobbyKind.OPEN,
         )
         lobby_manager.get_lobby.return_value = lobby
     else:
@@ -383,7 +385,7 @@ class TestResolvePlayerIds:
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == {1, 2, 3}
-        assert label == "Lobby"
+        assert label == LobbyKind.OPEN.label
 
     def test_resolve_lobby_ignores_legacy_conditional_players(self):
         cog = _make_cog(lobby_players=[1, 2], conditional_players=[99])
@@ -391,7 +393,7 @@ class TestResolvePlayerIds:
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
 
         assert set(ids) == {1, 2}
-        assert label == "Lobby"
+        assert label == LobbyKind.OPEN.label
 
     def test_resolve_pending_match_fallback(self):
         """No lobby, pending match exists -> uses match IDs."""
@@ -404,6 +406,27 @@ class TestResolvePlayerIds:
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == set(range(1, 11))
+        assert label == "Active Match"
+
+    def test_resolve_invokers_pending_match_when_two_are_active(self):
+        from domain.models.pending_match_state import PendingMatchState
+
+        pending = PendingMatchState(
+            pending_match_id=22,
+            radiant_team_ids=[7, 9],
+            dire_team_ids=[8, 10],
+            lobby_kind=LobbyKind.LOWSKILL.value,
+        )
+        cog = _make_cog(shuffle_state=None)
+        cog.match_service.state_service.get_pending_match_for_player.return_value = pending
+
+        ids, label = cog._resolve_player_ids(
+            "auto",
+            guild_id=99,
+            invoking_user_id=7,
+        )
+
+        assert ids == [7, 9, 8, 10]
         assert label == "Active Match"
 
     def test_resolve_draft_fallback(self):
@@ -437,7 +460,7 @@ class TestResolvePlayerIds:
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == {1, 2}
-        assert label == "Lobby"
+        assert label == LobbyKind.OPEN.label
 
     def test_draft_state_manager_none(self):
         """No draft_state_manager attr on bot -> gracefully skips draft check."""
@@ -470,6 +493,57 @@ class TestResolvePlayerIds:
         cog = _make_cog()
         ids, _ = cog._resolve_player_ids("lobby", guild_id=99)
         assert ids == []
+
+    async def test_current_lobby_uses_invokers_whine_and_cheese_roster_and_label(
+        self, monkeypatch
+    ):
+        """Current Lobby resolves the invoker's lobby and identifies it in output."""
+        open_lobby = SimpleNamespace(players={1, 2}, kind=LobbyKind.OPEN)
+        lowskill_lobby = SimpleNamespace(players={7, 8}, kind=LobbyKind.LOWSKILL)
+        lobby_manager = SimpleNamespace(
+            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
+                LobbyKind.LOWSKILL if discord_id == 7 else None
+            ),
+            get_lobby=lambda guild_id=None, lobby_kind=None: {
+                LobbyKind.OPEN: open_lobby,
+                LobbyKind.LOWSKILL: lowskill_lobby,
+            }[LobbyKind.normalize(lobby_kind)],
+        )
+        match_service = MagicMock()
+        match_service.get_multi_player_hero_stats.return_value = [
+            {"discord_id": 7, "hero_id": 1, "games": 3, "wins": 2}
+        ]
+        player_service = SimpleNamespace(
+            get_by_ids=lambda player_ids, guild_id: [
+                SimpleNamespace(discord_id=player_id, name=f"P{player_id}")
+                for player_id in player_ids
+            ]
+        )
+        cog = HeroGridCommands(
+            SimpleNamespace(), match_service, player_service, lobby_manager
+        )
+        followup = AsyncMock(return_value=None)
+        monkeypatch.setattr("commands.herogrid.safe_defer", AsyncMock(return_value=True))
+        monkeypatch.setattr("commands.herogrid.safe_followup", followup)
+        monkeypatch.setattr(
+            "commands.herogrid.draw_hero_grid",
+            lambda **kwargs: BytesIO(b"grid"),
+        )
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=99),
+            user=SimpleNamespace(id=7),
+        )
+
+        await HeroGridCommands.herogrid.callback(
+            cog,
+            interaction,
+            source=SimpleNamespace(value="lobby"),
+        )
+
+        requested_ids = match_service.get_multi_player_hero_stats.call_args.args[0]
+        assert set(requested_ids) == {7, 8}
+        embed = followup.await_args.kwargs["embed"]
+        assert embed.title == f"Hero Grid: {LobbyKind.LOWSKILL.label}"
 
 
 # ---------------------------------------------------------------------------
