@@ -956,7 +956,7 @@ async def test_tax_vanity_reports_taxable_status_with_exemption_instructions():
 
     message = interaction.response.messages[-1]
     assert message["ephemeral"] is True
-    assert "5% vanity tax" in message["content"]
+    assert "10% vanity tax" in message["content"]
     assert "Edit Server Profile" in message["content"]
 
 
