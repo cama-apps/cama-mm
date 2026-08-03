@@ -78,8 +78,10 @@ def draw_rating_history_chart(
     # Reverse to chronological order
     data = list(reversed(history))
 
-    # Extract Glicko values
-    glicko_values = [h["rating"] for h in data]
+    # OpenSkill replay can add history rows without a matching Glicko snapshot.
+    glicko_values = [h.get("rating") for h in data]
+    glicko_valid = [value for value in glicko_values if value is not None]
+    has_glicko = bool(glicko_valid)
     won_flags = [h.get("won") for h in data]
 
     # Extract OpenSkill display values (may be None)
@@ -94,12 +96,14 @@ def draw_rating_history_chart(
             os_values.append(None)
 
     # Compute Y ranges with 10% padding
-    glicko_min = min(glicko_values)
-    glicko_max = max(glicko_values)
-    glicko_range = max(glicko_max - glicko_min, 1)
-    glicko_min -= glicko_range * 0.1
-    glicko_max += glicko_range * 0.1
-    glicko_range = glicko_max - glicko_min
+    glicko_min = glicko_max = glicko_range = 0
+    if has_glicko:
+        glicko_min = min(glicko_valid)
+        glicko_max = max(glicko_valid)
+        glicko_range = max(glicko_max - glicko_min, 1)
+        glicko_min -= glicko_range * 0.1
+        glicko_max += glicko_range * 0.1
+        glicko_range = glicko_max - glicko_min
 
     os_min = os_max = os_range = 0
     if has_os:
@@ -124,6 +128,8 @@ def draw_rating_history_chart(
 
     # Helper: Glicko value to pixel Y
     def glicko_to_y(val: float) -> int:
+        if glicko_range == 0:
+            return chart_y + chart_height // 2
         return chart_y + int((glicko_max - val) / glicko_range * chart_height)
 
     # Helper: OpenSkill value to pixel Y
@@ -139,12 +145,13 @@ def draw_rating_history_chart(
         draw.line([(chart_x, gy), (chart_x + chart_width, gy)], fill=grid_color, width=1)
 
     # Left Y-axis labels (Glicko, blue, rounded to nearest 50)
-    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        val = glicko_max - frac * glicko_range
-        label = str(int(round(val / 50) * 50))
-        gy = chart_y + int(frac * chart_height)
-        text_w = _get_text_size(value_font, label)[0]
-        draw.text((chart_x - text_w - 6, gy - 6), label, fill=DISCORD_ACCENT, font=value_font)
+    if has_glicko:
+        for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            val = glicko_max - frac * glicko_range
+            label = str(int(round(val / 50) * 50))
+            gy = chart_y + int(frac * chart_height)
+            text_w = _get_text_size(value_font, label)[0]
+            draw.text((chart_x - text_w - 6, gy - 6), label, fill=DISCORD_ACCENT, font=value_font)
 
     # Right Y-axis labels (OpenSkill display, yellow, rounded to nearest 100)
     if has_os and os_range > 0:
@@ -161,9 +168,12 @@ def draw_rating_history_chart(
 
     # Draw Glicko line (blue, width=2)
     for i in range(n - 1):
-        x1, y1 = idx_to_x(i), glicko_to_y(glicko_values[i])
-        x2, y2 = idx_to_x(i + 1), glicko_to_y(glicko_values[i + 1])
-        draw.line([(x1, y1), (x2, y2)], fill=DISCORD_ACCENT, width=2)
+        v1 = glicko_values[i]
+        v2 = glicko_values[i + 1]
+        if v1 is not None and v2 is not None:
+            x1, y1 = idx_to_x(i), glicko_to_y(v1)
+            x2, y2 = idx_to_x(i + 1), glicko_to_y(v2)
+            draw.line([(x1, y1), (x2, y2)], fill=DISCORD_ACCENT, width=2)
 
     # Draw OpenSkill line (yellow, width=2) — skip None gaps
     if has_os:
@@ -175,11 +185,18 @@ def draw_rating_history_chart(
                 x2, y2 = idx_to_x(i + 1), os_to_y(v2)
                 draw.line([(x1, y1), (x2, y2)], fill=DISCORD_YELLOW, width=2)
 
-    # Draw win/loss dot markers on Glicko line
+    # Draw win/loss markers on the available rating series.
     dot_r = 3 if n > 30 else 4
     for i in range(n):
+        rating = glicko_values[i]
+        os_rating = os_values[i]
+        if rating is not None:
+            py = glicko_to_y(rating)
+        elif os_rating is not None:
+            py = os_to_y(os_rating)
+        else:
+            continue
         px = idx_to_x(i)
-        py = glicko_to_y(glicko_values[i])
         won = won_flags[i]
         if won is None:
             color = DISCORD_GREY
@@ -197,15 +214,17 @@ def draw_rating_history_chart(
     marker_size = 12
 
     # Glicko line swatch (blue)
-    draw.line(
-        [(padding, legend_y + marker_size // 2), (padding + 20, legend_y + marker_size // 2)],
-        fill=DISCORD_ACCENT,
-        width=2,
-    )
-    draw.text((padding + 25, legend_y - 1), "Glicko-2", fill=DISCORD_GREY, font=legend_font)
+    lx = padding
+    if has_glicko:
+        draw.line(
+            [(lx, legend_y + marker_size // 2), (lx + 20, legend_y + marker_size // 2)],
+            fill=DISCORD_ACCENT,
+            width=2,
+        )
+        draw.text((lx + 25, legend_y - 1), "Glicko-2", fill=DISCORD_GREY, font=legend_font)
+        lx += 110
 
     # OpenSkill line swatch (yellow) — only if data exists
-    lx = padding + 110
     if has_os:
         draw.line(
             [(lx, legend_y + marker_size // 2), (lx + 20, legend_y + marker_size // 2)],
@@ -215,20 +234,21 @@ def draw_rating_history_chart(
         draw.text((lx + 25, legend_y - 1), "OpenSkill", fill=DISCORD_GREY, font=legend_font)
         lx += 110
 
-    # Win dot
-    draw.ellipse(
-        [(lx, legend_y), (lx + marker_size, legend_y + marker_size)],
-        fill=DISCORD_GREEN,
-    )
-    draw.text((lx + marker_size + 5, legend_y - 1), "Win", fill=DISCORD_GREY, font=legend_font)
+    if has_glicko or has_os:
+        # Win dot
+        draw.ellipse(
+            [(lx, legend_y), (lx + marker_size, legend_y + marker_size)],
+            fill=DISCORD_GREEN,
+        )
+        draw.text((lx + marker_size + 5, legend_y - 1), "Win", fill=DISCORD_GREY, font=legend_font)
 
-    # Loss dot
-    lx_loss = lx + 60
-    draw.ellipse(
-        [(lx_loss, legend_y), (lx_loss + marker_size, legend_y + marker_size)],
-        fill=DISCORD_RED,
-    )
-    draw.text((lx_loss + marker_size + 5, legend_y - 1), "Loss", fill=DISCORD_GREY, font=legend_font)
+        # Loss dot
+        lx_loss = lx + 60
+        draw.ellipse(
+            [(lx_loss, legend_y), (lx_loss + marker_size, legend_y + marker_size)],
+            fill=DISCORD_RED,
+        )
+        draw.text((lx_loss + marker_size + 5, legend_y - 1), "Loss", fill=DISCORD_GREY, font=legend_font)
 
     # Save to BytesIO
     fp = BytesIO()

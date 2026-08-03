@@ -313,3 +313,76 @@ async def test_rating_loads_population_and_history_concurrently(monkeypatch):
         limit=999,
     )
     player_repo.get_all.assert_called_once_with(456)
+
+
+@pytest.mark.asyncio
+async def test_rating_attaches_chart_with_openskill_only_history_row():
+    player = Player(
+        name="Player",
+        initial_mmr=6000,
+        glicko_rating=1500.0,
+        glicko_rd=100.0,
+        glicko_volatility=0.06,
+    )
+    history = [
+        {
+            "rating": 1500.0,
+            "rating_before": 1490.0,
+            "rd_before": 110.0,
+            "rd_after": 100.0,
+            "volatility_before": 0.06,
+            "volatility_after": 0.06,
+            "expected_team_win_prob": None,
+            "team_number": 1,
+            "won": True,
+            "match_id": 2,
+            "timestamp": "2026-01-02T00:00:00",
+            "lobby_type": "shuffle",
+            "os_mu_before": 25.0,
+            "os_mu_after": 26.0,
+            "os_sigma_before": 8.0,
+            "os_sigma_after": 7.5,
+        },
+        {
+            "rating": None,
+            "rating_before": None,
+            "rd_before": None,
+            "rd_after": None,
+            "volatility_before": None,
+            "volatility_after": None,
+            "expected_team_win_prob": None,
+            "team_number": 2,
+            "won": False,
+            "match_id": 1,
+            "timestamp": "2026-01-01T00:00:00",
+            "lobby_type": "shuffle",
+            "os_mu_before": 24.0,
+            "os_mu_after": 25.0,
+            "os_sigma_before": 8.5,
+            "os_sigma_after": 8.0,
+        },
+    ]
+    player_repo = SimpleNamespace(
+        get_by_id=MagicMock(return_value=player),
+        get_all=MagicMock(return_value=[player]),
+    )
+    match_repo = SimpleNamespace(
+        get_player_rating_history_detailed=MagicMock(return_value=history)
+    )
+    cog = ProfileCommands(
+        SimpleNamespace(player_repo=player_repo, match_repo=match_repo)
+    )
+
+    embed, chart_file = await cog._build_rating_embed(
+        SimpleNamespace(display_name="Player"),
+        123,
+        guild_id=456,
+    )
+
+    try:
+        assert chart_file is not None
+        assert chart_file.filename == "rating_chart.png"
+        assert embed.image.url == "attachment://rating_chart.png"
+    finally:
+        if chart_file is not None:
+            chart_file.close()

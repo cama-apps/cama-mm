@@ -4,9 +4,12 @@ Tests for drawing utilities.
 
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageColor
 
 from utils.drawing import (
+    DISCORD_ACCENT,
+    DISCORD_GREEN,
+    DISCORD_RED,
     draw_advantage_graph,
     draw_attribute_distribution,
     draw_gamba_chart,
@@ -401,6 +404,60 @@ class TestDrawRatingHistoryChart:
         result = draw_rating_history_chart("TestUser", history)
         img = Image.open(result)
         assert img.format == "PNG"
+
+    def test_partial_glicko_data(self):
+        """OpenSkill replay rows without Glicko snapshots still render."""
+        openskill_only = _make_history_entry(rating=1550, won=False, os_mu=38)
+        openskill_only["rating"] = None
+        openskill_only["rating_before"] = None
+        history = [
+            _make_history_entry(rating=1600, won=True, os_mu=40),
+            openskill_only,
+            _make_history_entry(rating=1500, won=True, os_mu=35),
+        ]
+
+        result = draw_rating_history_chart("TestUser", history)
+
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_openskill_only_rows_keep_outcome_markers(self):
+        """Win/loss markers use the available OpenSkill coordinates."""
+        history = [
+            _make_history_entry(rating=1600, won=True, os_mu=40),
+            _make_history_entry(rating=1500, won=False, os_mu=35),
+        ]
+        for entry in history:
+            entry["rating"] = None
+            entry["rating_before"] = None
+
+        result = draw_rating_history_chart("TestUser", history)
+
+        chart = Image.open(result).crop((60, 70, 641, 321))
+        chart_colors = {
+            color for _count, color in chart.getcolors(maxcolors=1_000_000)
+        }
+        assert ImageColor.getrgb(DISCORD_GREEN) + (255,) in chart_colors
+        assert ImageColor.getrgb(DISCORD_RED) + (255,) in chart_colors
+
+    def test_openskill_only_history_hides_glicko_legend(self):
+        """The legend does not advertise a series with no plotted values."""
+        history = [
+            _make_history_entry(rating=1600, won=True, os_mu=40),
+            _make_history_entry(rating=1500, won=False, os_mu=35),
+        ]
+        for entry in history:
+            entry["rating"] = None
+            entry["rating_before"] = None
+
+        result = draw_rating_history_chart("TestUser", history)
+
+        legend = Image.open(result).crop((60, 321, 641, 390))
+        legend_colors = {
+            color for _count, color in legend.getcolors(maxcolors=1_000_000)
+        }
+        assert ImageColor.getrgb(DISCORD_ACCENT) + (255,) not in legend_colors
 
     def test_flat_ratings(self):
         """Test chart with identical ratings (div-by-zero guard)."""
