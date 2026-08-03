@@ -137,8 +137,8 @@ def _load_hero_info_from_dotabase():
     try:
         from dotabase_integration import Hero, dotabase_session
 
-        session = dotabase_session()
-        heroes = session.query(Hero).all()
+        with dotabase_session() as session:
+            heroes = session.query(Hero).all()
         for hero in heroes:
             # Get the CDN slug (e.g., "antimage" from "npc_dota_hero_antimage")
             slug = hero.name if hero.name else ""
@@ -221,8 +221,9 @@ def _load_hero_roles():
     try:
         from dotabase_integration import Hero, dotabase_session
 
-        session = dotabase_session()
-        for hero in session.query(Hero).all():
+        with dotabase_session() as session:
+            heroes = session.query(Hero).all()
+        for hero in heroes:
             if hero.roles:
                 _HERO_ROLES_CACHE[hero.id] = hero.roles.split("|")
             else:

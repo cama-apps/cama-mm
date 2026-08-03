@@ -188,9 +188,16 @@ def create_lobby_embed(
         timestamp_text = "Opened just now"
 
     # Green if ready (total meets threshold), blue if not
+    lobby_kind = getattr(lobby, "kind", None)
+    lobby_name = getattr(lobby_kind, "label", "🍽️ All You Can Feed")
+    eligibility_text = getattr(
+        lobby_kind,
+        "eligibility_text",
+        "Open to all ratings",
+    )
     embed = discord.Embed(
-        title="🎮 Matchmaking Lobby",
-        description=f"Join to play!\n{timestamp_text}",
+        title=lobby_name,
+        description=f"{eligibility_text}\nJoin to play!\n{timestamp_text}",
         color=discord.Color.green() if total_count >= ready_threshold else discord.Color.blue(),
     )
 

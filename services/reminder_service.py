@@ -3,6 +3,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from domain.models.lobby import LobbyKind
+
 if TYPE_CHECKING:
     from discord.ext import commands
 
@@ -381,7 +383,13 @@ class ReminderService:
                 self._cancel_task(discord_id, guild_id, "dig")
 
     async def notify_betting_subscribers(
-        self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
+        self,
+        bot: "commands.Bot",
+        guild_id: int,
+        bet_lock_until: int,
+        *,
+        pending_match_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         subscribers = await asyncio.to_thread(
             self._notification_repo.get_enabled_users_for_type, guild_id, "betting"
@@ -390,8 +398,14 @@ class ReminderService:
             return
         remaining = max(0, bet_lock_until - int(time.time()))
         minutes = remaining // 60
+        match_description = "match"
+        if lobby_kind is not None:
+            match_description = f"{LobbyKind.normalize(lobby_kind).label} match"
+        if pending_match_id is not None:
+            match_description += f" (Match #{pending_match_id})"
         message = (
-            f"A new match has been shuffled! Betting is open for ~{minutes} more minutes. "
+            f"A new {match_description} has been shuffled! "
+            f"Betting is open for ~{minutes} more minutes. "
             "Use `/bet` now!"
         )
         for discord_id in subscribers:

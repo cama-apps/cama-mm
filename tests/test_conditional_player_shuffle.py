@@ -6,6 +6,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import pytest
 
 from commands.match import MatchCommands, select_players_for_shuffle
+from domain.models.lobby import LobbyKind
 from domain.models.player import Player
 from tests.conftest import TEST_GUILD_ID
 
@@ -129,7 +130,8 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
     match_service.state_service.get_all_pending_player_ids.return_value = set()
     match_service.shuffle_players.side_effect = RuntimeError("stop after service call")
     interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
-    cog = MatchCommands(MagicMock(), MagicMock(), match_service, MagicMock())
+    lobby_service = MagicMock()
+    cog = MatchCommands(MagicMock(), lobby_service, match_service, MagicMock())
     monkeypatch.setattr(
         "commands.match.time",
         SimpleNamespace(time=lambda: shuffle_time),
@@ -151,6 +153,17 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
         shuffle_mode="balanced",
         excluded_conditional_ids=[],
         lobby_wait_minutes={100: 30, 101: 0, 102: 0},
+        lobby_kind=LobbyKind.OPEN,
+    )
+    lobby_service.reserve_lobby_players.assert_called_once_with(
+        player_ids,
+        TEST_GUILD_ID,
+        LobbyKind.OPEN,
+    )
+    lobby_service.release_lobby_players.assert_called_once_with(
+        player_ids,
+        TEST_GUILD_ID,
+        LobbyKind.OPEN,
     )
 
 
@@ -185,6 +198,7 @@ async def test_ready_responder_count_controls_shuffle_draft_redirect(monkeypatch
         shuffle_mode="balanced",
         excluded_conditional_ids=excluded_ids,
         lobby_wait_minutes={},
+        lobby_kind=LobbyKind.OPEN,
     )
 
 

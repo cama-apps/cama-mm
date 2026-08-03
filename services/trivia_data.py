@@ -189,8 +189,8 @@ def item_special_value(ability_special: str | None, key_substr: str) -> str | No
 def load_heroes() -> list[HeroData]:
     from dotabase_integration import Hero, dotabase_session
 
-    session = dotabase_session()
-    heroes = session.query(Hero).all()
+    with dotabase_session() as session:
+        heroes = session.query(Hero).all()
     result = []
     for h in heroes:
         str_base = h.attr_strength_base or 0
@@ -233,8 +233,12 @@ def load_abilities() -> list[AbilityData]:
 
     from dotabase_integration import Ability, dotabase_session
 
-    session = dotabase_session()
-    abilities = session.query(Ability).options(joinedload(Ability.hero)).all()
+    with dotabase_session() as session:
+        abilities = (
+            session.query(Ability)
+            .options(joinedload(Ability.hero), joinedload(Ability.talent_links))
+            .all()
+        )
     result = []
     for a in abilities:
         if a.is_talent:
@@ -282,8 +286,8 @@ def get_ability_icon_url_by_name(localized_name: str) -> str | None:
 def load_items() -> list[ItemData]:
     from dotabase_integration import Item, dotabase_session
 
-    session = dotabase_session()
-    items = session.query(Item).all()
+    with dotabase_session() as session:
+        items = session.query(Item).all()
 
     # First pass: filter unavailable items and extract base_level for suffix logic
     raw: list[tuple[Item, int | None]] = []
@@ -332,12 +336,12 @@ def load_voicelines() -> list[VoicelineData]:
     """Load voicelines suitable for trivia (clean, reasonable length)."""
     from dotabase_integration import Response, dotabase_session
 
-    session = dotabase_session()
-    responses = (
-        session.query(Response)
-        .filter(Response.hero_id.isnot(None), Response.text_simple.isnot(None))
-        .all()
-    )
+    with dotabase_session() as session:
+        responses = (
+            session.query(Response)
+            .filter(Response.hero_id.isnot(None), Response.text_simple.isnot(None))
+            .all()
+        )
     result = []
     for r in responses:
         text = (r.text_simple or "").strip()
@@ -357,8 +361,8 @@ def load_facets() -> list[FacetData]:
 
     from dotabase_integration import Hero, dotabase_session
 
-    session = dotabase_session()
-    heroes = session.query(Hero).options(joinedload(Hero.facets)).all()
+    with dotabase_session() as session:
+        heroes = session.query(Hero).options(joinedload(Hero.facets)).all()
     result = []
     for h in heroes:
         if not h.facets:

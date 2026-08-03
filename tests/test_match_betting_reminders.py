@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from commands.match import MatchCommands
+from domain.models.lobby import LobbyKind
 
 
 class _StubMatchService:
@@ -147,3 +148,47 @@ async def test_single_warning_window_marks_it_final(monkeypatch):
     await commands._schedule_betting_reminders(guild_id=1, bet_lock_until=now + 400)
 
     assert _final_warning_flags(commands) == {100: True}
+
+
+def test_reminder_tasks_are_owned_by_pending_match(monkeypatch):
+    commands = _make_commands(monkeypatch)
+    first = MagicMock()
+    second = MagicMock()
+
+    commands._register_betting_tasks(1, [first], pending_match_id=10)
+    commands._register_betting_tasks(1, [second], pending_match_id=11)
+
+    first.cancel.assert_not_called()
+    second.cancel.assert_not_called()
+
+    commands._cancel_betting_tasks(1, pending_match_id=10)
+
+    first.cancel.assert_called_once_with()
+    second.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_notification_receives_match_and_lobby_identity(monkeypatch):
+    commands = _make_commands(monkeypatch)
+    notify_subscribers = MagicMock(return_value=MagicMock())
+    commands.bot.reminder_service = SimpleNamespace(
+        notify_betting_subscribers=notify_subscribers,
+    )
+    monkeypatch.setattr("commands.match._retain_background_task", lambda task: task)
+    now = 8_000_000
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    await commands._schedule_betting_reminders(
+        guild_id=1,
+        bet_lock_until=now + 900,
+        pending_match_id=42,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+    notify_subscribers.assert_called_once_with(
+        commands.bot,
+        1,
+        now + 900,
+        pending_match_id=42,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )

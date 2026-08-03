@@ -15,6 +15,7 @@ from discord.ext import commands
 from commands.checks import require_guild
 from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import DraftPhase, DraftState
+from domain.models.lobby import LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
@@ -87,12 +88,20 @@ class WinnerChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Choose Side", style=discord.ButtonStyle.primary, emoji="🗺️")
     async def choose_side(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_winner_chose_side(interaction, self.guild_id)
+        await self.cog.handle_winner_chose_side(
+            interaction,
+            self.guild_id,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     @discord.ui.button(label="Choose Hero Pick Order", style=discord.ButtonStyle.primary, emoji="⚔️")
     async def choose_hero_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_winner_chose_hero_pick(interaction, self.guild_id)
+        await self.cog.handle_winner_chose_hero_pick(
+            interaction,
+            self.guild_id,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     async def on_timeout(self):
@@ -128,12 +137,24 @@ class SideChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Radiant", style=discord.ButtonStyle.success, emoji="🟢")
     async def choose_radiant(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_side_choice(interaction, self.guild_id, "radiant", self.is_winner)
+        await self.cog.handle_side_choice(
+            interaction,
+            self.guild_id,
+            "radiant",
+            self.is_winner,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     @discord.ui.button(label="Dire", style=discord.ButtonStyle.danger, emoji="🔴")
     async def choose_dire(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_side_choice(interaction, self.guild_id, "dire", self.is_winner)
+        await self.cog.handle_side_choice(
+            interaction,
+            self.guild_id,
+            "dire",
+            self.is_winner,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     async def on_timeout(self):
@@ -169,12 +190,24 @@ class HeroPickOrderView(discord.ui.View):
 
     @discord.ui.button(label="First Pick", style=discord.ButtonStyle.primary, emoji="1️⃣")
     async def choose_first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_hero_pick_choice(interaction, self.guild_id, "first", self.is_winner)
+        await self.cog.handle_hero_pick_choice(
+            interaction,
+            self.guild_id,
+            "first",
+            self.is_winner,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     @discord.ui.button(label="Second Pick", style=discord.ButtonStyle.secondary, emoji="2️⃣")
     async def choose_second(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_hero_pick_choice(interaction, self.guild_id, "second", self.is_winner)
+        await self.cog.handle_hero_pick_choice(
+            interaction,
+            self.guild_id,
+            "second",
+            self.is_winner,
+            expected_state=self.draft_state,
+        )
         self.stop()
 
     async def on_timeout(self):
@@ -209,7 +242,12 @@ class PlayerPickButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view: DraftingView = self.view
-        await view.cog.handle_player_pick(interaction, view.guild_id, self.player_id)
+        await view.cog.handle_player_pick(
+            interaction,
+            view.guild_id,
+            self.player_id,
+            expected_state=view.draft_state,
+        )
 
 
 class SidePreferenceButton(discord.ui.Button):
@@ -236,7 +274,12 @@ class SidePreferenceButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view: DraftingView = self.view
-        await view.cog.handle_side_preference(interaction, view.guild_id, self.side)
+        await view.cog.handle_side_preference(
+            interaction,
+            view.guild_id,
+            self.side,
+            expected_state=view.draft_state,
+        )
 
 
 class ClearPreferenceButton(discord.ui.Button):
@@ -253,7 +296,12 @@ class ClearPreferenceButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view: DraftingView = self.view
-        await view.cog.handle_side_preference(interaction, view.guild_id, None)
+        await view.cog.handle_side_preference(
+            interaction,
+            view.guild_id,
+            None,
+            expected_state=view.draft_state,
+        )
 
 
 class DraftingView(discord.ui.View):
@@ -356,11 +404,57 @@ class DraftCommands(commands.Cog):
             previous.stop()
         self._active_draft_views[guild_id] = view
 
-    def _stop_tracked_draft_view(self, guild_id: int) -> None:
+    def _stop_tracked_draft_view(
+        self,
+        guild_id: int,
+        expected_state: DraftState | None = None,
+    ) -> None:
         """Stop and drop the tracked draft view (restart/cancel/complete)."""
+        view = self._active_draft_views.get(guild_id)
+        if expected_state is not None and (
+            view is not None
+            and getattr(view, "draft_state", None) is not expected_state
+        ):
+            return
         view = self._active_draft_views.pop(guild_id, None)
         if view is not None and not view.is_finished():
             view.stop()
+
+    async def _is_current_draft_state(
+        self,
+        guild_id: int,
+        state: DraftState,
+    ) -> bool:
+        current = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        return current is state
+
+    async def _get_callback_draft_state(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        expected_state: DraftState | None,
+    ) -> DraftState | None:
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        if state is not None and (
+            expected_state is None or state is expected_state
+        ):
+            return state
+        await interaction.response.send_message(
+            "❌ This draft is no longer active — use the controls on the current draft.",
+            ephemeral=True,
+        )
+        return None
+
+    async def _release_draft_players(self, state: DraftState) -> None:
+        """Release the lobby participants owned by a finished draft attempt."""
+        if not state.player_pool_ids:
+            return
+        await asyncio.to_thread(
+            self.lobby_manager.release_lobby_players,
+            state.player_pool_ids,
+            state.guild_id,
+            state.lobby_kind,
+        )
 
     async def _resolve_channel(self, channel_id: int | None, fallback=None):
         """Resolve a persisted channel ID, falling back when it is unavailable."""
@@ -451,6 +545,13 @@ class DraftCommands(commands.Cog):
             )
             return
 
+        if state.phase == DraftPhase.COMPLETE:
+            await interaction.response.send_message(
+                "⏳ Draft results are still being finalized. Please wait.",
+                ephemeral=True,
+            )
+            return
+
         # Deliberately no pending-match cleanup here. A draft that is still
         # active has not created a pending match yet (``_complete_draft``
         # creates it and then always clears the draft state in its ``finally``),
@@ -461,8 +562,13 @@ class DraftCommands(commands.Cog):
 
         # Clear the draft state and stop the old draft's live view so its
         # timeout cannot fire against a future draft.
-        await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
-        self._stop_tracked_draft_view(guild_id)
+        self._stop_tracked_draft_view(guild_id, state)
+        await asyncio.to_thread(
+            self.draft_state_manager.clear_state,
+            guild_id,
+            state,
+        )
+        await self._release_draft_players(state)
 
         # Get user name for the message
         user_name = interaction.user.display_name
@@ -663,6 +769,7 @@ class DraftCommands(commands.Cog):
         specified_captain2_id: int | None = None,
         regular_player_ids: list[int] | None = None,
         conditional_player_ids: list[int] | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> bool:
         """
         Core draft logic, callable from /startdraft or /shuffle auto-redirect.
@@ -681,6 +788,7 @@ class DraftCommands(commands.Cog):
             sends its own user-facing error first, so callers must not post a
             generic failure message when this returns False.
         """
+        kind = LobbyKind.normalize(lobby_kind or getattr(lobby, "kind", None))
         regular_players = (
             list(lobby.players)
             if regular_player_ids is None
@@ -703,7 +811,7 @@ class DraftCommands(commands.Cog):
         exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
 
         progress_message = await interaction.followup.send(
-            "⚙️ Building the Immortal Draft player pool…"
+            f"⚙️ {kind.label}: building the Immortal Draft player pool…"
         )
 
         specified_captain_ids = [
@@ -754,11 +862,36 @@ class DraftCommands(commands.Cog):
             if player_id in conditional_players
         ]
 
+        reserved = await asyncio.to_thread(
+            self.lobby_manager.reserve_lobby_players,
+            pool_result.selected_ids,
+            guild_id,
+            kind,
+        )
+        if not reserved:
+            with contextlib.suppress(Exception):
+                await progress_message.delete()
+            await interaction.followup.send(
+                "❌ The lobby changed while the draft was starting. Please try again.",
+                ephemeral=True,
+            )
+            return False
+
         # Create draft state
         try:
-            state = await asyncio.to_thread(self.draft_state_manager.create_draft, guild_id)
+            state = await asyncio.to_thread(
+                self.draft_state_manager.create_draft,
+                guild_id,
+                kind,
+            )
         except ValueError as e:
             logger.warning("Immortal Draft: could not create draft state — %s", e)
+            await asyncio.to_thread(
+                self.lobby_manager.release_lobby_players,
+                pool_result.selected_ids,
+                guild_id,
+                kind,
+            )
             with contextlib.suppress(Exception):
                 await progress_message.delete()
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
@@ -782,10 +915,12 @@ class DraftCommands(commands.Cog):
                 asyncio.to_thread(
                     self.lobby_manager.get_lobby_channel_id,
                     guild_id=guild_id,
+                    lobby_kind=kind,
                 ),
                 asyncio.to_thread(
                     self.lobby_manager.get_origin_channel_id,
                     guild_id=guild_id,
+                    lobby_kind=kind,
                 ),
             )
             draft_channel = await self._resolve_channel(lobby_channel_id)
@@ -826,7 +961,7 @@ class DraftCommands(commands.Cog):
 
             # Build coinflip result embed
             embed = discord.Embed(
-                title="🎲 IMMORTAL DRAFT",
+                title=f"🎲 IMMORTAL DRAFT — {kind.label}",
                 color=discord.Color.gold(),
             )
             embed.set_footer(text=f"Started by {interaction.user.display_name}")
@@ -881,7 +1016,8 @@ class DraftCommands(commands.Cog):
             # Ping both captains once (will be deleted when first choice is made)
             try:
                 ping_msg = await draft_channel.send(
-                    f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
+                    f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> "
+                    f"{kind.label} draft starting!"
                 )
                 state.captain_ping_message_id = ping_msg.id
             except Exception as e:
@@ -903,8 +1039,13 @@ class DraftCommands(commands.Cog):
             return True
         except Exception:
             logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
-            await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
-            self._stop_tracked_draft_view(guild_id)
+            self._stop_tracked_draft_view(guild_id, state)
+            await asyncio.to_thread(
+                self.draft_state_manager.clear_state,
+                guild_id,
+                state,
+            )
+            await self._release_draft_players(state)
             if ping_msg:
                 with contextlib.suppress(Exception):
                     await ping_msg.delete()
@@ -941,13 +1082,34 @@ class DraftCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
-        await asyncio.to_thread(self.lobby_manager._check_stale_lock, guild_id)
+        lobby_kind = await asyncio.to_thread(
+            self.lobby_manager.get_lobby_kind_for_player,
+            interaction.user.id,
+            guild_id,
+        )
+        if lobby_kind is None:
+            await interaction.followup.send(
+                "❌ Join a lobby before using `/draft start`.",
+                ephemeral=True,
+            )
+            return
 
-        shuffle_lock = await asyncio.to_thread(self.lobby_manager.get_shuffle_lock, guild_id)
+        # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
+        await asyncio.to_thread(
+            self.lobby_manager._check_stale_lock,
+            guild_id,
+            lobby_kind,
+        )
+
+        shuffle_lock = await asyncio.to_thread(
+            self.lobby_manager.get_shuffle_lock,
+            guild_id,
+            lobby_kind,
+        )
         if shuffle_lock.locked():
             await interaction.followup.send(
-                "A shuffle or draft is already being processed. Please wait.",
+                f"A {lobby_kind.label} shuffle or draft is already being processed. "
+                "Please wait.",
                 ephemeral=True,
             )
             return
@@ -956,16 +1118,31 @@ class DraftCommands(commands.Cog):
             await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
         except TimeoutError:
             await interaction.followup.send(
-                "A shuffle or draft is already being processed. Please wait.",
+                f"A {lobby_kind.label} shuffle or draft is already being processed. "
+                "Please wait.",
                 ephemeral=True,
             )
             return
 
-        await asyncio.to_thread(self.lobby_manager.record_lock_acquired, guild_id)
+        await asyncio.to_thread(
+            self.lobby_manager.record_lock_acquired,
+            guild_id,
+            lobby_kind,
+        )
         try:
-            await self._execute_startdraft(interaction, guild_id, captain1, captain2)
+            await self._execute_startdraft(
+                interaction,
+                guild_id,
+                captain1,
+                captain2,
+                lobby_kind=lobby_kind,
+            )
         finally:
-            await asyncio.to_thread(self.lobby_manager.clear_lock_time, guild_id)
+            await asyncio.to_thread(
+                self.lobby_manager.clear_lock_time,
+                guild_id,
+                lobby_kind,
+            )
             shuffle_lock.release()
 
     async def _execute_startdraft(
@@ -974,6 +1151,7 @@ class DraftCommands(commands.Cog):
         guild_id: int | None,
         captain1: discord.Member | None,
         captain2: discord.Member | None,
+        lobby_kind: LobbyKind | str | None = None,
     ):
         """Execute the startdraft logic. Called within the shuffle lock."""
         # Check for existing draft
@@ -989,10 +1167,23 @@ class DraftCommands(commands.Cog):
         # so by the time /startdraft is called, all lobby players are guaranteed to be available.
 
         # Check lobby
-        lobby = await asyncio.to_thread(self.lobby_manager.get_lobby, guild_id=guild_id)
+        kind = LobbyKind.normalize(lobby_kind)
+        lobby = await asyncio.to_thread(
+            self.lobby_manager.get_lobby,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
         if not lobby:
             await interaction.followup.send(
-                "❌ No active lobby. Use `/lobby` to create one first.",
+                f"❌ No active {kind.label} lobby. "
+                "Use `/lobby` to create one first.",
+                ephemeral=True,
+            )
+            return
+
+        if interaction.user.id not in lobby.players:
+            await interaction.followup.send(
+                f"❌ Join {kind.label} before using `/draft start`.",
                 ephemeral=True,
             )
             return
@@ -1001,7 +1192,7 @@ class DraftCommands(commands.Cog):
 
         if player_count < LOBBY_READY_THRESHOLD:
             await interaction.followup.send(
-                f"❌ Need at least {LOBBY_READY_THRESHOLD} players in lobby. "
+                f"❌ {kind.label} needs at least {LOBBY_READY_THRESHOLD} players. "
                 f"Currently have {player_count}.",
                 ephemeral=True,
             )
@@ -1045,19 +1236,34 @@ class DraftCommands(commands.Cog):
             lobby,
             specified_captain1_id=specified_captain1_id,
             specified_captain2_id=specified_captain2_id,
+            lobby_kind=kind,
         )
 
     # ========================================================================
     # Choice Handlers
     # ========================================================================
 
-    async def handle_winner_chose_side(self, interaction: discord.Interaction, guild_id: int):
+    async def handle_winner_chose_side(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        expected_state: DraftState | None = None,
+    ):
         """Handle when coinflip winner chooses to pick side."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
         if state.phase != DraftPhase.WINNER_CHOICE:
             await interaction.response.send_message(
                 "❌ That choice has already been made.", ephemeral=True
@@ -1081,9 +1287,15 @@ class DraftCommands(commands.Cog):
         state.phase = DraftPhase.WINNER_SIDE_CHOICE
 
         winner_name = await self._get_member_name(interaction.guild, state.coinflip_winner_id)
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(
-            title="🎲 IMMORTAL DRAFT",
+            title=f"🎲 IMMORTAL DRAFT — {state.lobby_kind.label}",
             description=f"**{winner_name}** chose to pick **Side**.",
             color=discord.Color.blue(),
         )
@@ -1107,13 +1319,27 @@ class DraftCommands(commands.Cog):
         self._track_draft_view(guild_id, view)
         await interaction.response.edit_message(embed=embed, view=view)
 
-    async def handle_winner_chose_hero_pick(self, interaction: discord.Interaction, guild_id: int):
+    async def handle_winner_chose_hero_pick(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        expected_state: DraftState | None = None,
+    ):
         """Handle when coinflip winner chooses to pick hero order."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
         if state.phase != DraftPhase.WINNER_CHOICE:
             await interaction.response.send_message(
                 "❌ That choice has already been made.", ephemeral=True
@@ -1137,9 +1363,15 @@ class DraftCommands(commands.Cog):
         state.phase = DraftPhase.WINNER_HERO_CHOICE
 
         winner_name = await self._get_member_name(interaction.guild, state.coinflip_winner_id)
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(
-            title="🎲 IMMORTAL DRAFT",
+            title=f"🎲 IMMORTAL DRAFT — {state.lobby_kind.label}",
             description=f"**{winner_name}** chose to pick **Hero Pick Order**.",
             color=discord.Color.blue(),
         )
@@ -1169,11 +1401,15 @@ class DraftCommands(commands.Cog):
         guild_id: int,
         side: str,
         is_winner: bool,
+        expected_state: DraftState | None = None,
     ):
         """Handle side choice (Radiant/Dire)."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         chooser_id = interaction.user.id
@@ -1186,6 +1422,13 @@ class DraftCommands(commands.Cog):
             else state.captain1_id
         )
         loser_name = await self._get_member_name(interaction.guild, loser_id)
+
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
 
         expected_phase = (
             DraftPhase.WINNER_SIDE_CHOICE if is_winner else DraftPhase.LOSER_CHOICE
@@ -1210,7 +1453,7 @@ class DraftCommands(commands.Cog):
             state.phase = DraftPhase.LOSER_CHOICE
 
             embed = discord.Embed(
-                title="🎲 IMMORTAL DRAFT",
+                title=f"🎲 IMMORTAL DRAFT — {state.lobby_kind.label}",
                 description=f"**{chooser_name}** chose **{side.title()}**.",
                 color=discord.Color.green() if side == "radiant" else discord.Color.red(),
             )
@@ -1253,11 +1496,15 @@ class DraftCommands(commands.Cog):
         guild_id: int,
         pick_order: str,
         is_winner: bool,
+        expected_state: DraftState | None = None,
     ):
         """Handle hero pick order choice (First/Second)."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         chooser_id = interaction.user.id
@@ -1270,6 +1517,13 @@ class DraftCommands(commands.Cog):
             else state.captain1_id
         )
         loser_name = await self._get_member_name(interaction.guild, loser_id)
+
+        if not await self._is_current_draft_state(guild_id, state):
+            await interaction.response.send_message(
+                "❌ This draft is no longer active — use the controls on the current draft.",
+                ephemeral=True,
+            )
+            return
 
         expected_phase = (
             DraftPhase.WINNER_HERO_CHOICE if is_winner else DraftPhase.LOSER_CHOICE
@@ -1286,7 +1540,7 @@ class DraftCommands(commands.Cog):
             state.phase = DraftPhase.LOSER_CHOICE
 
             embed = discord.Embed(
-                title="🎲 IMMORTAL DRAFT",
+                title=f"🎲 IMMORTAL DRAFT — {state.lobby_kind.label}",
                 description=f"**{chooser_name}** chose **{pick_order.title()} Pick** for heroes.",
                 color=discord.Color.blue(),
             )
@@ -1392,6 +1646,8 @@ class DraftCommands(commands.Cog):
             logger.debug(f"Captain symmetry hook error: {e}")
 
         # Show draft UI
+        if not await self._is_current_draft_state(guild_id, state):
+            return
         await self._show_draft_ui(interaction, guild_id, state)
 
     async def _show_draft_ui(
@@ -1408,6 +1664,8 @@ class DraftCommands(commands.Cog):
         available_ids = state.available_player_ids
         available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
         available_players.sort(key=_glicko_rating_or_default, reverse=True)
+        if not await self._is_current_draft_state(guild_id, state):
+            return
 
         # Create view with player buttons
         view = DraftingView(
@@ -1515,7 +1773,7 @@ class DraftCommands(commands.Cog):
         second_team = "🔴 Dire" if first_is_radiant else "🟢 Radiant"
 
         embed = discord.Embed(
-            title="⚔️ IMMORTAL DRAFT - Player Selection",
+            title=f"⚔️ IMMORTAL DRAFT — {state.lobby_kind.label} - Player Selection",
             description=(
                 f"**Round {round_number}/4:** {first_team} → {second_team}\n"
                 f"**Team Totals:** 🟢 {state.radiant_rating_total:.0f} • "
@@ -1604,7 +1862,7 @@ class DraftCommands(commands.Cog):
 
             if state.phase == DraftPhase.COMPLETE:
                 # Draft complete - remove buttons and stop the live view
-                self._stop_tracked_draft_view(state.guild_id)
+                self._stop_tracked_draft_view(state.guild_id, state)
                 await message.edit(embed=embed, view=None)
             else:
                 # Still drafting - update with new buttons, sorted by rating
@@ -1637,11 +1895,15 @@ class DraftCommands(commands.Cog):
         interaction: discord.Interaction,
         guild_id: int,
         player_id: int,
+        expected_state: DraftState | None = None,
     ):
         """Handle when a captain picks a player."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         if state.phase != DraftPhase.DRAFTING:
@@ -1670,6 +1932,14 @@ class DraftCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
+        if not await self._is_current_draft_state(guild_id, state):
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    "❌ This draft is no longer active — use the controls on the current draft.",
+                    ephemeral=True,
+                )
+            return
+
         # Attempt to pick the player. safe_defer above yields the event loop, so a
         # second button callback from the same captain (discord.py dispatches each
         # click as its own task) could have advanced the draft in the meantime.
@@ -1685,6 +1955,8 @@ class DraftCommands(commands.Cog):
             return
 
         picked_name = await self._get_member_name(interaction.guild, player_id)
+        if not await self._is_current_draft_state(guild_id, state):
+            return
         picker_team = "Radiant" if player_id in state.radiant_player_ids else "Dire"
 
         logger.info(
@@ -1714,12 +1986,17 @@ class DraftCommands(commands.Cog):
         betting reminders, and posts to the match thread. Behavior-preserving.
         """
         try:
+            kind = LobbyKind.normalize(state.lobby_kind)
             # Capture the lobby thread id up front so the pending match is
             # created already carrying it — /record and /abort use it to
             # rename + archive the thread (reset_lobby below clears it).
             lobby_service = getattr(self.bot, "lobby_service", None)
             thread_id = (
-                await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
+                await asyncio.to_thread(
+                    lobby_service.get_lobby_thread_id,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                )
                 if lobby_service
                 else None
             )
@@ -1727,10 +2004,12 @@ class DraftCommands(commands.Cog):
                 asyncio.to_thread(
                     self.lobby_manager.get_lobby_channel_id,
                     guild_id=guild_id,
+                    lobby_kind=kind,
                 ),
                 asyncio.to_thread(
                     self.lobby_manager.get_origin_channel_id,
                     guild_id=guild_id,
+                    lobby_kind=kind,
                 ),
             )
 
@@ -1745,7 +2024,7 @@ class DraftCommands(commands.Cog):
             if pending_match_id is None:
                 # Failed to create pending match - don't reset lobby, show error
                 embed = discord.Embed(
-                    title="⚠️ Draft Complete - Match Creation Failed",
+                    title=f"⚠️ {kind.label} Draft Complete - Match Creation Failed",
                     description=(
                         "The draft completed but the match could not be created.\n"
                         "This may be a configuration issue. Please contact an admin.\n\n"
@@ -1825,11 +2104,15 @@ class DraftCommands(commands.Cog):
                     logger.warning(f"Failed to create automatic bets for draft: {exc}")
 
             # Reset lobby only after successful match creation
-            await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
+            await asyncio.to_thread(
+                self.lobby_manager.reset_lobby,
+                guild_id,
+                kind,
+            )
 
             from bot import clear_lobby_rally_cooldowns
 
-            clear_lobby_rally_cooldowns(guild_id)
+            clear_lobby_rally_cooldowns(guild_id, lobby_kind=kind)
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
             original_message, lobby_message, origin_message = (
@@ -1881,6 +2164,7 @@ class DraftCommands(commands.Cog):
                         guild_id,
                         pending_state.bet_lock_until if pending_state else None,
                         pending_match_id=pending_state.pending_match_id if pending_state else None,
+                        lobby_kind=kind,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
@@ -1905,8 +2189,13 @@ class DraftCommands(commands.Cog):
                     guild_id, exc_info=True,
                 )
         finally:
-            await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
-            self._stop_tracked_draft_view(guild_id)
+            self._stop_tracked_draft_view(guild_id, state)
+            await asyncio.to_thread(
+                self.draft_state_manager.clear_state,
+                guild_id,
+                state,
+            )
+            await self._release_draft_players(state)
 
     async def _publish_draft_completion(
         self,
@@ -1971,11 +2260,15 @@ class DraftCommands(commands.Cog):
         interaction: discord.Interaction,
         guild_id: int,
         side: str | None,
+        expected_state: DraftState | None = None,
     ):
         """Handle when a player sets their side preference."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
+        state = await self._get_callback_draft_state(
+            interaction,
+            guild_id,
+            expected_state,
+        )
         if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         if state.phase != DraftPhase.DRAFTING:
@@ -2016,7 +2309,11 @@ class DraftCommands(commands.Cog):
             )
 
         # Update the draft message to show new preference
-        if state.draft_message_id and state.draft_channel_id:
+        if (
+            state.draft_message_id
+            and state.draft_channel_id
+            and await self._is_current_draft_state(guild_id, state)
+        ):
             await self._update_draft_message(
                 interaction.guild,
                 state.draft_channel_id,
@@ -2083,6 +2380,7 @@ class DraftCommands(commands.Cog):
             betting_mode="pool",  # Default to pool mode for drafts
             is_draft=True,  # Mark as draft for any special handling
             is_bomb_pot=is_bomb_pot,  # Bomb pot mode for higher stakes
+            lobby_kind=state.lobby_kind.value,
             exclusion_updates_deferred=True,
             full_exclusion_increment_ids=state.full_exclusion_increment_ids,
             half_exclusion_increment_ids=state.half_exclusion_increment_ids,
@@ -2164,17 +2462,28 @@ class DraftCommands(commands.Cog):
 
         # Check for bomb pot
         is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
+        pending_match_label = (
+            f" — Match #{pending_state.pending_match_id}"
+            if pending_state and pending_state.pending_match_id
+            else ""
+        )
 
         # Build embed with bomb pot banner if applicable
         if is_bomb_pot:
             embed = discord.Embed(
-                title="💣 BOMB POT 💣 IMMORTAL DRAFT - Complete!",
+                title=(
+                    f"💣 BOMB POT 💣 IMMORTAL DRAFT — "
+                    f"{state.lobby_kind.label}{pending_match_label} - Complete!"
+                ),
                 description=f"{first_pick_emoji} **{first_hero_team}** picks first in hero draft",
                 color=discord.Color.orange(),
             )
         else:
             embed = discord.Embed(
-                title="⚔️ IMMORTAL DRAFT - Complete!",
+                title=(
+                    f"⚔️ IMMORTAL DRAFT — {state.lobby_kind.label}"
+                    f"{pending_match_label} - Complete!"
+                ),
                 description=f"{first_pick_emoji} **{first_hero_team}** picks first in hero draft",
                 color=discord.Color.gold(),
             )
@@ -2351,6 +2660,7 @@ class DraftCommands(commands.Cog):
         if not thread_id:
             return
 
+        kind = LobbyKind.normalize(getattr(state, "lobby_kind", None))
         try:
             thread = self.bot.get_channel(thread_id)
             if not thread:
@@ -2358,7 +2668,12 @@ class DraftCommands(commands.Cog):
 
             async def rename_thread() -> None:
                 try:
-                    await thread.edit(name="🔒 Draft Complete - Awaiting Results")
+                    await thread.edit(
+                        name=(
+                            f"🔒 {kind.label} Draft Complete - "
+                            "Awaiting Results"
+                        )
+                    )
                 except discord.HTTPException:
                     pass  # Rate limit on thread name changes
 
@@ -2468,8 +2783,13 @@ class DraftCommands(commands.Cog):
         await self._delete_captain_ping_message(state)
 
         # Clear the draft state
-        await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
-        self._stop_tracked_draft_view(guild_id)
+        self._stop_tracked_draft_view(guild_id, state)
+        await asyncio.to_thread(
+            self.draft_state_manager.clear_state,
+            guild_id,
+            state,
+        )
+        await self._release_draft_players(state)
 
         # Try to update the message to show timeout
         if state.draft_message_id and state.draft_channel_id:

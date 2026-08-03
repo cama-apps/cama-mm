@@ -9,6 +9,7 @@ import discord
 import pytest
 
 from commands.match import MatchCommands
+from domain.models.lobby import LobbyKind
 
 
 async def _run_sync(func, *args, **kwargs):
@@ -31,6 +32,7 @@ def _make_cog(
 
     lobby_service = MagicMock()
     lobby_service.get_lobby_channel_id.return_value = lobby_channel.id
+    lobby_service.get_lobby_message_id.return_value = 321
     lobby_service.get_origin_channel_id.return_value = command_channel.id
 
     match_service = MagicMock()
@@ -87,7 +89,7 @@ async def test_publication_sends_overlap_and_confirmation_error_waits_for_posts(
         patch("commands.match.asyncio.to_thread", new=_run_sync),
         patch.object(cog, "_schedule_betting_reminders", new=AsyncMock()),
         patch.object(cog, "_lock_lobby_thread", new=lock_thread),
-        patch("commands.match.safe_unpin_all_bot_messages", new=unpin),
+        patch("commands.match.safe_unpin_message", new=unpin),
         patch.dict("sys.modules", {"bot": fake_bot_module}),
     ):
         finalize_task = asyncio.create_task(
@@ -146,7 +148,7 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
         patch("commands.match.asyncio.to_thread", new=_run_sync),
         patch.object(cog, "_schedule_betting_reminders", new=AsyncMock()),
         patch.object(cog, "_lock_lobby_thread", new=lock_thread),
-        patch("commands.match.safe_unpin_all_bot_messages", new=unpin),
+        patch("commands.match.safe_unpin_message", new=unpin),
         patch.dict("sys.modules", {"bot": fake_bot_module}),
     ):
         await cog._finalize_shuffle(
@@ -154,15 +156,23 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
             guild_id=1,
             embed=discord.Embed(title="Teams"),
             pending_match_id=7,
+            lobby_kind=LobbyKind.LOWSKILL,
         )
 
-    confirmation_send.assert_awaited_once_with("✅ Teams shuffled!", ephemeral=True)
+    confirmation_send.assert_awaited_once_with(
+        "✅ 🧀 Whine & Cheese teams shuffled!",
+        ephemeral=True,
+    )
     assert "Failed to post shuffle to lobby channel: lobby unavailable" in caplog.text
     assert "Failed to post shuffle to command channel: command unavailable" in caplog.text
     match_service.set_shuffle_message_info.assert_not_called()
     lock_thread.assert_awaited_once()
-    unpin.assert_awaited_once_with(lobby_channel, cog.bot.user)
-    lobby_service.reset_lobby.assert_called_once_with(1)
+    unpin.assert_awaited_once_with(lobby_channel, 321)
+    lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.LOWSKILL)
+    fake_bot_module.clear_lobby_rally_cooldowns.assert_called_once_with(
+        1,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
 
 
 @pytest.mark.asyncio
@@ -198,7 +208,7 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
     match_service.set_shuffle_message_info.side_effect = (
         lambda *args, **kwargs: order.append("public_metadata")
     )
-    lobby_service.reset_lobby.side_effect = lambda guild_id: order.append("reset")
+    lobby_service.reset_lobby.side_effect = lambda guild_id, _kind: order.append("reset")
 
     async def lock_thread(*args, **kwargs):
         order.append("thread_started")
@@ -206,8 +216,9 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
         await release_maintenance.wait()
         order.append("thread_metadata_done")
 
-    async def clean_pins(channel, bot_user):
+    async def clean_pins(channel, message_id):
         assert channel is lobby_channel
+        assert message_id == 321
         order.append("pins_started")
         pins_started.set()
         await release_maintenance.wait()
@@ -219,7 +230,7 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
         patch("commands.match.asyncio.to_thread", new=_run_sync),
         patch.object(cog, "_schedule_betting_reminders", new=AsyncMock()),
         patch.object(cog, "_lock_lobby_thread", new=AsyncMock(side_effect=lock_thread)),
-        patch("commands.match.safe_unpin_all_bot_messages", new=AsyncMock(side_effect=clean_pins)),
+        patch("commands.match.safe_unpin_message", new=AsyncMock(side_effect=clean_pins)),
         patch.dict("sys.modules", {"bot": fake_bot_module}),
     ):
         finalize_task = asyncio.create_task(
@@ -247,7 +258,88 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
     assert order.index("pins_done") < order.index("reset")
     bot.fetch_channel.assert_not_awaited()
     bot.get_channel.assert_called_once_with(lobby_channel.id)
-    lobby_service.reset_lobby.assert_called_once_with(1)
+    lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_touch_a_new_or_sibling_lobby():
+    bot = MagicMock()
+    bot.betting_service = None
+    lobby_service = MagicMock()
+    match_service = MagicMock()
+    match_service.state_service.get_last_shuffle.return_value = SimpleNamespace(
+        pending_match_id=7,
+        lobby_kind=LobbyKind.LOWSKILL.value,
+    )
+    interaction = SimpleNamespace(
+        channel=MagicMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    cog = MatchCommands(bot, lobby_service, match_service, MagicMock())
+    update_lobby = AsyncMock()
+    abort_thread = AsyncMock()
+    cog._cancel_betting_tasks = MagicMock()
+
+    with (
+        patch.object(cog, "_update_channel_message_closed", new=update_lobby),
+        patch.object(cog, "_abort_lobby_thread", new=abort_thread),
+        patch("commands.match.safe_unpin_message", new=AsyncMock()) as unpin,
+    ):
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+
+    cog._cancel_betting_tasks.assert_called_once_with(1, pending_match_id=7)
+    update_lobby.assert_not_awaited()
+    unpin.assert_not_awaited()
+    abort_thread.assert_awaited_once_with(1, 7)
+    match_service.state_service.clear_last_shuffle.assert_called_once_with(1, 7)
+
+
+@pytest.mark.asyncio
+async def test_completed_match_thread_retains_source_lobby_label():
+    thread = AsyncMock()
+    bot = MagicMock()
+    bot.get_channel.return_value = thread
+    cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
+
+    with patch("commands.match.asyncio.sleep", new=AsyncMock()):
+        await cog._finalize_lobby_thread(
+            1,
+            "radiant",
+            thread_id=42,
+            pending_match_id=7,
+            lobby_kind=LobbyKind.LOWSKILL.value,
+        )
+
+    thread.send.assert_awaited_once_with(
+        "🏆 **🧀 Whine & Cheese Match Complete - Radiant Victory!**"
+    )
+    thread.edit.assert_awaited_once_with(
+        name="✅ 🧀 Whine & Cheese Match Complete - Radiant Won",
+        archived=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_aborted_match_thread_retains_source_lobby_label():
+    thread = AsyncMock()
+    bot = MagicMock()
+    bot.get_channel.return_value = thread
+    match_service = MagicMock()
+    match_service.get_last_shuffle.return_value = SimpleNamespace(
+        thread_shuffle_thread_id=42,
+        lobby_kind=LobbyKind.LOWSKILL.value,
+    )
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+
+    await cog._abort_lobby_thread(1, pending_match_id=7)
+
+    thread.send.assert_awaited_once_with(
+        "🚫 **🧀 Whine & Cheese Match Aborted** - All bets have been refunded."
+    )
+    thread.edit.assert_awaited_once_with(
+        name="🚫 🧀 Whine & Cheese Match Aborted",
+        archived=True,
+    )
 
 
 @pytest.mark.asyncio

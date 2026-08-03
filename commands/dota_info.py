@@ -34,18 +34,20 @@ def _get_all_heroes() -> list[tuple[str, int]]:
     """Get all hero names and IDs (cached)."""
     from dotabase_integration import Hero, dotabase_session
 
-    session = dotabase_session()
-    heroes = session.query(Hero).all()
+    with dotabase_session() as session:
+        heroes = session.query(Hero).all()
     return [(h.localized_name, h.id) for h in heroes]
 
 
 @lru_cache(maxsize=1)
 def _get_all_abilities() -> list[tuple[str, int]]:
     """Get all ability names and IDs (cached)."""
+    from sqlalchemy.orm import joinedload
+
     from dotabase_integration import Ability, dotabase_session
 
-    session = dotabase_session()
-    abilities = session.query(Ability).all()
+    with dotabase_session() as session:
+        abilities = session.query(Ability).options(joinedload(Ability.talent_links)).all()
     # Filter in Python since is_talent is a computed property
     # Deduplicate by name (some abilities appear multiple times)
     seen = set()
@@ -69,22 +71,21 @@ def _get_hero_by_name(name: str) -> "Hero | None":
 
     from dotabase_integration import Hero, dotabase_session
 
-    session = dotabase_session()
-    # Eagerly load relationships to avoid DetachedInstanceError
-    hero = (
-        session.query(Hero)
-        .options(joinedload(Hero.abilities), joinedload(Hero.talents), joinedload(Hero.facets))
-        .filter(Hero.localized_name.ilike(name))
-        .first()
-    )
-    if hero:
-        return hero
-    # Try alias search - also eagerly load
-    heroes = (
-        session.query(Hero)
-        .options(joinedload(Hero.abilities), joinedload(Hero.talents), joinedload(Hero.facets))
-        .all()
-    )
+    with dotabase_session() as session:
+        load_options = (
+            joinedload(Hero.abilities),
+            joinedload(Hero.talents).joinedload("*"),
+            joinedload(Hero.facets),
+        )
+        hero = (
+            session.query(Hero)
+            .options(*load_options)
+            .filter(Hero.localized_name.ilike(name))
+            .first()
+        )
+        if hero:
+            return hero
+        heroes = session.query(Hero).options(*load_options).all()
     for h in heroes:
         if h.aliases and name.lower() in h.aliases.lower():
             return h
@@ -93,14 +94,20 @@ def _get_hero_by_name(name: str) -> "Hero | None":
 
 def _get_ability_by_name(name: str) -> "Ability | None":
     """Find an ability by localized name (case-insensitive)."""
+    from sqlalchemy.orm import joinedload
+
     from dotabase_integration import Ability, dotabase_session
 
-    session = dotabase_session()
-    # Filter by name first via SQL, then check is_talent in Python
-    abilities = session.query(Ability).filter(Ability.localized_name.ilike(name)).all()
-    for a in abilities:
-        if not a.is_talent:
-            return a
+    with dotabase_session() as session:
+        abilities = (
+            session.query(Ability)
+            .options(joinedload(Ability.talent_links))
+            .filter(Ability.localized_name.ilike(name))
+            .all()
+        )
+        for a in abilities:
+            if not a.is_talent:
+                return a
     return None
 
 

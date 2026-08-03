@@ -22,6 +22,7 @@ from config import (
     OPENSKILL_SHUFFLE_CHANCE,
     STREAMING_BONUS,
 )
+from domain.models.lobby import LobbyKind
 from domain.pet_evolution import PetActivity
 from services.jopat_post_match import JopatPostMatchContext
 from services.lobby_service import LobbyService
@@ -43,7 +44,7 @@ from utils.match_views import EnrichedMatchView
 from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pet_activity import record_pet_activity
-from utils.pin_helpers import safe_unpin_all_bot_messages
+from utils.pin_helpers import safe_unpin_message
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.region import REGION_NAMES, resolve_region, summarize_region
 from utils.streaming import get_streaming_player_ids
@@ -123,14 +124,23 @@ class MatchCommands(commands.Cog):
         self.guild_config_service = guild_config_service
         # bankruptcy_repo kept for embed builders that need bankruptcy status display
         self.bankruptcy_repo = bankruptcy_repo
-        # Track scheduled betting reminder tasks per guild for cleanup
-        self._betting_tasks_by_guild = {}
+        # Track scheduled betting reminder tasks per pending match for cleanup.
+        self._betting_tasks_by_match = {}
 
     async def _update_channel_message_closed(
-        self, reason: str = "Match Aborted", guild_id: int | None = None
+        self,
+        reason: str = "Match Aborted",
+        guild_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         """Update the channel message embed to show lobby/match is closed."""
-        await update_lobby_message_closed(self.bot, self.lobby_service, reason, guild_id=guild_id)
+        await update_lobby_message_closed(
+            self.bot,
+            self.lobby_service,
+            reason,
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
 
     async def _lock_lobby_thread(
         self,
@@ -138,10 +148,14 @@ class MatchCommands(commands.Cog):
         shuffle_embed: discord.Embed = None,
         included_player_ids: list[int] | None = None,
         pending_match_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         """Lock the lobby thread when shuffle occurs and post shuffle results."""
+        kind = LobbyKind.normalize(lobby_kind)
         thread_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+            self.lobby_service.get_lobby_thread_id,
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
         )
         if not thread_id:
             return
@@ -154,7 +168,9 @@ class MatchCommands(commands.Cog):
 
             async def rename_thread() -> None:
                 try:
-                    await thread.edit(name="🔒 Shuffled - Awaiting Results")
+                    await thread.edit(
+                        name=f"🔒 {kind.label} Shuffled - Awaiting Results"
+                    )
                 except discord.HTTPException:
                     pass  # Rate limit on thread name changes
 
@@ -166,7 +182,7 @@ class MatchCommands(commands.Cog):
                     thread_shuffle_msg = await thread.send(embed=shuffle_embed)
                 else:
                     thread_shuffle_msg = await thread.send(
-                        "🔀 **Teams have been shuffled!**\n"
+                        f"🔀 **{kind.label} teams have been shuffled!**\n"
                         "Use `/record` to record the match result."
                     )
 
@@ -211,11 +227,16 @@ class MatchCommands(commands.Cog):
         )
 
     async def _finalize_lobby_thread(
-        self, guild_id: int | None, winning_result: str, *,
+        self,
+        guild_id: int | None,
+        winning_result: str,
+        *,
         thread_id: int | None = None,
         pending_match_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         """Post results to lobby thread and archive it."""
+        kind = LobbyKind.normalize(lobby_kind)
         # Use provided thread_id only - do NOT fallback to lobby_service
         # as that could return a different match's thread in concurrent match scenarios
         if not thread_id:
@@ -225,6 +246,8 @@ class MatchCommands(commands.Cog):
                 pending_match_id=pending_match_id,
             )
             thread_id = pending_state.thread_shuffle_thread_id if pending_state else None
+            if pending_state and lobby_kind is None:
+                kind = LobbyKind.normalize(pending_state.lobby_kind)
         if not thread_id:
             # No thread_id means we can't safely update any thread
             logger.debug("No thread_id available for finalize_lobby_thread")
@@ -237,14 +260,19 @@ class MatchCommands(commands.Cog):
 
             # Post result summary
             winner = "Radiant" if winning_result == "radiant" else "Dire"
-            await thread.send(f"🏆 **Match Complete - {winner} Victory!**")
+            await thread.send(
+                f"🏆 **{kind.label} Match Complete - {winner} Victory!**"
+            )
 
             # Wait before archiving so players can see the result
             await asyncio.sleep(15)
 
             # Update thread name and archive
             try:
-                await thread.edit(name=f"✅ Match Complete - {winner} Won", archived=True)
+                await thread.edit(
+                    name=f"✅ {kind.label} Match Complete - {winner} Won",
+                    archived=True,
+                )
             except discord.Forbidden:
                 await thread.edit(archived=True)
         except Exception as exc:
@@ -262,16 +290,22 @@ class MatchCommands(commands.Cog):
             # No thread_id means we can't safely update any thread
             logger.debug("No thread_id available for abort_lobby_thread")
             return
+        kind = LobbyKind.normalize(pending_state.lobby_kind)
 
         try:
             thread = self.bot.get_channel(thread_id)
             if not thread:
                 thread = await self.bot.fetch_channel(thread_id)
 
-            await thread.send("🚫 **Match Aborted** - All bets have been refunded.")
+            await thread.send(
+                f"🚫 **{kind.label} Match Aborted** - All bets have been refunded."
+            )
 
             try:
-                await thread.edit(name="🚫 Match Aborted", archived=True)
+                await thread.edit(
+                    name=f"🚫 {kind.label} Match Aborted",
+                    archived=True,
+                )
             except discord.Forbidden:
                 await thread.edit(archived=True)
         except Exception as exc:
@@ -419,32 +453,70 @@ class MatchCommands(commands.Cog):
             return
 
         guild_id = guild.id if guild else None
+        lobby_kind = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kind_for_player,
+            interaction.user.id,
+            guild_id,
+        )
+        if lobby_kind is None:
+            await interaction.followup.send(
+                "❌ Join a lobby before using `/shuffle`.",
+                ephemeral=True,
+            )
+            return
 
         # Acquire shuffle lock to prevent race conditions
         lobby_manager = self.lobby_service.lobby_manager
 
         # Check for stale lock (>60s) and release if needed
-        await asyncio.to_thread(lobby_manager._check_stale_lock, guild_id)
+        await asyncio.to_thread(
+            lobby_manager._check_stale_lock,
+            guild_id,
+            lobby_kind,
+        )
 
-        shuffle_lock = await asyncio.to_thread(lobby_manager.get_shuffle_lock, guild_id)
+        shuffle_lock = await asyncio.to_thread(
+            lobby_manager.get_shuffle_lock,
+            guild_id,
+            lobby_kind,
+        )
         try:
             await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
         except TimeoutError:
             await interaction.followup.send(
-                "A shuffle is already in progress. Please wait for it to complete.",
+                f"A {lobby_kind.label} shuffle is already in progress. "
+                "Please wait for it to complete.",
                 ephemeral=True,
             )
             return
 
-        await asyncio.to_thread(lobby_manager.record_lock_acquired, guild_id)
+        await asyncio.to_thread(
+            lobby_manager.record_lock_acquired,
+            guild_id,
+            lobby_kind,
+        )
         try:
-            await self._execute_shuffle(interaction, guild, guild_id, rating_system, mode)
+            await self._execute_shuffle(
+                interaction,
+                guild,
+                guild_id,
+                rating_system,
+                mode,
+                lobby_kind=lobby_kind,
+            )
         finally:
-            await asyncio.to_thread(lobby_manager.clear_lock_time, guild_id)
+            await asyncio.to_thread(
+                lobby_manager.clear_lock_time,
+                guild_id,
+                lobby_kind,
+            )
             shuffle_lock.release()
 
     async def _validate_shuffle_preconditions(
-        self, interaction: discord.Interaction, guild_id: int | None
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        lobby_kind: LobbyKind | str | None = None,
     ):
         """Pre-flight checks for ``/shuffle``. Sends the error message to the user
         and returns ``None`` if anything fails; otherwise returns the active lobby."""
@@ -464,11 +536,15 @@ class MatchCommands(commands.Cog):
             await interaction.followup.send(message_text, ephemeral=True)
             return None
 
+        kind = LobbyKind.normalize(lobby_kind)
         draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        state = None
         if draft_state_manager and await asyncio.to_thread(
             draft_state_manager.has_active_draft, guild_id
         ):
             state = await asyncio.to_thread(draft_state_manager.get_state, guild_id)
+
+        if state and LobbyKind.normalize(state.lobby_kind) is kind:
             user_id = interaction.user.id
 
             is_captain = state and user_id in (state.captain1_id, state.captain2_id)
@@ -491,18 +567,23 @@ class MatchCommands(commands.Cog):
             await interaction.followup.send(msg, ephemeral=True)
             return None
 
-        lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
+        lobby = await asyncio.to_thread(
+            self.lobby_service.get_lobby,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
         if not lobby:
             await interaction.followup.send(
-                "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
+                f"❌ No active {kind.label} lobby. Use `/lobby` to create one!",
+                ephemeral=True,
             )
             return None
 
         user_id = interaction.user.id
         is_in_lobby = user_id in getattr(lobby, "players", set())
-        if not is_in_lobby and not has_admin_permission(interaction):
+        if not is_in_lobby:
             await interaction.followup.send(
-                "❌ Only admins or players in the current lobby can shuffle.",
+                f"❌ Join {kind.label} before using `/shuffle`.",
                 ephemeral=True,
             )
             return None
@@ -510,7 +591,8 @@ class MatchCommands(commands.Cog):
         player_count = lobby.get_player_count()
         if player_count < 10:
             await interaction.followup.send(
-                f"❌ Need at least 10 players in lobby. Currently {player_count}/10.",
+                f"❌ {kind.label} needs at least 10 players. "
+                f"Currently {player_count}/10.",
                 ephemeral=True,
             )
             return None
@@ -518,12 +600,15 @@ class MatchCommands(commands.Cog):
         return lobby
 
     async def _select_shuffle_roster(
-        self, guild_id: int | None
+        self,
+        guild_id: int | None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> tuple[list[int], list, list[int], list[int], dict[int, float]] | None:
         """Treat nonresponders as transient conditionals after ten confirmations."""
         snapshot = await asyncio.to_thread(
             self.lobby_service.get_lobby_players_and_readycheck_snapshot,
             guild_id=guild_id,
+            lobby_kind=lobby_kind,
         )
         if snapshot is None:
             return None
@@ -564,13 +649,19 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         rating_system: app_commands.Choice[str] | None,
         shuffle_mode: app_commands.Choice[str] | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ):
         """Execute the shuffle logic. Called within the shuffle lock."""
-        lobby = await self._validate_shuffle_preconditions(interaction, guild_id)
+        kind = LobbyKind.normalize(lobby_kind)
+        lobby = await self._validate_shuffle_preconditions(
+            interaction,
+            guild_id,
+            lobby_kind=kind,
+        )
         if lobby is None:
             return
 
-        roster = await self._select_shuffle_roster(guild_id)
+        roster = await self._select_shuffle_roster(guild_id, lobby_kind=kind)
         if roster is None:
             await interaction.followup.send(
                 "❌ The lobby changed while starting the shuffle. Please try again.",
@@ -607,14 +698,10 @@ class MatchCommands(commands.Cog):
                     lobby,
                     regular_player_ids=player_ids,
                     conditional_player_ids=excluded_conditional_ids,
+                    lobby_kind=kind,
                 )
             except Exception as e:
                 logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
-                # Clean up any partially-created draft state so it doesn't block
-                # future shuffles/drafts. _execute_draft already clears on failure,
-                # but guard here too in case the raise path changes.
-                if hasattr(draft_cog, "draft_state_manager"):
-                    await asyncio.to_thread(draft_cog.draft_state_manager.clear_state, guild_id)
                 await interaction.followup.send(
                     "❌ Immortal Draft failed to start. Error has been logged. "
                     "Use `/shuffle` or `/draft start` to try again."
@@ -677,24 +764,46 @@ class MatchCommands(commands.Cog):
             for player_id, joined_at in player_join_times.items()
         }
 
-        try:
-            result = await asyncio.to_thread(
-                functools.partial(self.match_service.shuffle_players,
-                    player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs,
-                    shuffle_mode=team_mode,
-                    excluded_conditional_ids=excluded_conditional_ids,
-                    lobby_wait_minutes=lobby_wait_minutes)
-            )
-        except ValueError as exc:
-            logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
-            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-            return
-        except Exception as exc:
-            logger.error(f"Shuffle error: {exc}", exc_info=True)
+        reserved = await asyncio.to_thread(
+            self.lobby_service.reserve_lobby_players,
+            player_ids,
+            guild_id,
+            kind,
+        )
+        if not reserved:
             await interaction.followup.send(
-                "❌ Unexpected error while shuffling. Please try again.", ephemeral=True
+                "❌ The lobby changed while starting the shuffle. Please try again.",
+                ephemeral=True,
             )
             return
+
+        try:
+            try:
+                result = await asyncio.to_thread(
+                    functools.partial(self.match_service.shuffle_players,
+                        player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs,
+                        shuffle_mode=team_mode,
+                        excluded_conditional_ids=excluded_conditional_ids,
+                        lobby_wait_minutes=lobby_wait_minutes,
+                        lobby_kind=kind)
+                )
+            except ValueError as exc:
+                logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
+                await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+                return
+            except Exception as exc:
+                logger.error(f"Shuffle error: {exc}", exc_info=True)
+                await interaction.followup.send(
+                    "❌ Unexpected error while shuffling. Please try again.", ephemeral=True
+                )
+                return
+        finally:
+            await asyncio.to_thread(
+                self.lobby_service.release_lobby_players,
+                player_ids,
+                guild_id,
+                kind,
+            )
 
         radiant_team = result["radiant_team"]
         dire_team = result["dire_team"]
@@ -848,11 +957,13 @@ class MatchCommands(commands.Cog):
         match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
         if is_bomb_pot:
             title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
-            embed_title = f"💣 BOMB POT 💣 {match_label}{title_mode}"
+            embed_title = (
+                f"💣 BOMB POT 💣 {kind.label} — {match_label}{title_mode}"
+            )
             embed_color = discord.Color.orange()
         else:
             title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
-            embed_title = f"{match_label}{title_mode}"
+            embed_title = f"{kind.label} — {match_label}{title_mode}"
             embed_color = discord.Color.blue()
 
         embed = discord.Embed(title=embed_title, color=embed_color)
@@ -991,6 +1102,7 @@ class MatchCommands(commands.Cog):
             guild_id=guild_id,
             embed=embed,
             pending_match_id=pending_match_id,
+            lobby_kind=kind,
         )
 
     async def _finalize_shuffle(
@@ -999,11 +1111,20 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         embed: discord.Embed,
         pending_match_id: int | None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         """Post the shuffle embed, persist its location, schedule reminders,
         lock the lobby thread, unpin, and reset the lobby."""
+        kind = LobbyKind.normalize(lobby_kind)
         lobby_channel_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_channel_id, guild_id=guild_id
+            self.lobby_service.get_lobby_channel_id,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
+        lobby_message_id = await asyncio.to_thread(
+            self.lobby_service.get_lobby_message_id,
+            guild_id=guild_id,
+            lobby_kind=kind,
         )
 
         command_channel_id = interaction.channel.id if interaction.channel else None
@@ -1033,7 +1154,10 @@ class MatchCommands(commands.Cog):
                 return None
 
         async def send_confirmation() -> None:
-            await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ {kind.label} teams shuffled!",
+                ephemeral=True,
+            )
 
         # These sends target independent Discord routes. Await the whole group so
         # a required confirmation failure cannot leave public sends orphaned.
@@ -1054,7 +1178,9 @@ class MatchCommands(commands.Cog):
         # Capture origin_channel_id before reset_lobby clears it (betting reminders need it).
         try:
             origin_channel_id = await asyncio.to_thread(
-                self.lobby_service.get_origin_channel_id, guild_id=guild_id
+                self.lobby_service.get_origin_channel_id,
+                guild_id=guild_id,
+                lobby_kind=kind,
             )
             if message or cmd_message:
                 jump_url = message.jump_url if message and hasattr(message, "jump_url") else None
@@ -1078,7 +1204,12 @@ class MatchCommands(commands.Cog):
             pending_match_id=pending_match_id,
         )
         bet_lock_until = pending_state.bet_lock_until if pending_state else None
-        await self._schedule_betting_reminders(guild_id, bet_lock_until, pending_match_id=pending_match_id)
+        await self._schedule_betting_reminders(
+            guild_id,
+            bet_lock_until,
+            pending_match_id=pending_match_id,
+            lobby_kind=kind,
+        )
 
         included_ids = []
         if pending_state:
@@ -1101,7 +1232,7 @@ class MatchCommands(commands.Cog):
             elif not lobby_channel_id:
                 cleanup_channel = interaction.channel
 
-            await safe_unpin_all_bot_messages(cleanup_channel, self.bot.user)
+            await safe_unpin_message(cleanup_channel, lobby_message_id)
 
         # Thread publication and pin cleanup are independent maintenance paths.
         # Await both before resetting the lobby so thread metadata is persisted.
@@ -1111,6 +1242,7 @@ class MatchCommands(commands.Cog):
                 shuffle_embed=embed,
                 included_player_ids=included_ids,
                 pending_match_id=pending_match_id,
+                lobby_kind=kind,
             ),
             clean_up_lobby_pins(),
             return_exceptions=True,
@@ -1119,10 +1251,14 @@ class MatchCommands(commands.Cog):
             if isinstance(result, BaseException):
                 raise result
 
-        await asyncio.to_thread(self.lobby_service.reset_lobby, guild_id)
+        await asyncio.to_thread(
+            self.lobby_service.reset_lobby,
+            guild_id,
+            kind,
+        )
 
         from bot import clear_lobby_rally_cooldowns
-        clear_lobby_rally_cooldowns(guild_id or 0)
+        clear_lobby_rally_cooldowns(guild_id or 0, lobby_kind=kind)
 
     @app_commands.command(
         name="record",
@@ -1274,6 +1410,7 @@ class MatchCommands(commands.Cog):
         thread_id_for_finalize = (
             pending_state.thread_shuffle_thread_id if pending_state else None
         )
+        lobby_kind_for_finalize = pending_state.lobby_kind if pending_state else None
 
         # Check first-game-of-night BEFORE recording (0 matches since boundary = first game)
         is_first_game = False
@@ -1302,7 +1439,10 @@ class MatchCommands(commands.Cog):
             return
         finally:
             # Cancel any pending betting reminders when recording completes (success or failure)
-            self._cancel_betting_tasks(guild_id)
+            self._cancel_betting_tasks(
+                guild_id,
+                pending_match_id=pending_match_id,
+            )
 
         await self._record_pet_match_activity(guild_id, record_result)
 
@@ -1315,6 +1455,7 @@ class MatchCommands(commands.Cog):
                     guild_id, winning_result,
                     thread_id=thread_id_for_finalize,
                     pending_match_id=pending_match_id,
+                    lobby_kind=lobby_kind_for_finalize,
                 )
             )
         )
@@ -2122,34 +2263,26 @@ class MatchCommands(commands.Cog):
                 )
             except Exception as exc:
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
-        # Cancel any pending betting reminders
-        self._cancel_betting_tasks(guild_id)
-
-        # Update channel message to show closed and archive thread
-        await self._update_channel_message_closed("Match Aborted", guild_id=guild_id)
+        # The source lobby was already closed and reset when the match started.
+        # Only clean up this pending match; a new or sibling lobby may be live now.
+        self._cancel_betting_tasks(guild_id, pending_match_id=pending_match_id)
         await self._abort_lobby_thread(guild_id, pending_match_id)
 
         # Clear only the specific pending match (not all of them)
         await asyncio.to_thread(
             self.match_service.state_service.clear_last_shuffle, guild_id, pending_match_id
         )
-        await safe_unpin_all_bot_messages(interaction.channel, self.bot.user)
-
-        # Don't reset lobby on abort - players can still queue for next game
-        # Only reset lobby after successful shuffle to clear the player list
-
-        # Clear lobby rally cooldowns
-        from bot import clear_lobby_rally_cooldowns
-        clear_lobby_rally_cooldowns(guild_id or 0)
-
         match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
         await interaction.followup.send(
             f"✅ Match aborted{match_id_note}. Bets have been refunded.", ephemeral=False
         )
 
     async def _schedule_betting_reminders(
-        self, guild_id: int | None, bet_lock_until: int | None,
+        self,
+        guild_id: int | None,
+        bet_lock_until: int | None,
         pending_match_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
     ) -> None:
         """
         Schedule betting reminder tasks (5-minute warning and close) for the current shuffle.
@@ -2211,13 +2344,23 @@ class MatchCommands(commands.Cog):
             )
         )
 
-        self._register_betting_tasks(guild_id, tasks)
+        self._register_betting_tasks(
+            guild_id,
+            tasks,
+            pending_match_id=pending_match_id,
+        )
 
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc and guild_id is not None:
             _retain_background_task(
                 asyncio.create_task(
-                    reminder_svc.notify_betting_subscribers(self.bot, guild_id, bet_lock_until)
+                    reminder_svc.notify_betting_subscribers(
+                        self.bot,
+                        guild_id,
+                        bet_lock_until,
+                        pending_match_id=pending_match_id,
+                        lobby_kind=lobby_kind,
+                    )
                 )
             )
 
@@ -2265,16 +2408,39 @@ class MatchCommands(commands.Cog):
                 f"Failed to run betting reminder ({reminder_type}): {exc}", exc_info=True
             )
 
-    def _register_betting_tasks(self, guild_id: int | None, tasks) -> None:
-        """Store reminder tasks for the guild and cancel any existing tasks first."""
-        self._cancel_betting_tasks(guild_id)
+    def _register_betting_tasks(
+        self,
+        guild_id: int | None,
+        tasks,
+        *,
+        pending_match_id: int | None = None,
+    ) -> None:
+        """Store reminder tasks for one pending match."""
+        self._cancel_betting_tasks(guild_id, pending_match_id=pending_match_id)
         normalized = normalize_guild_id(guild_id)
-        self._betting_tasks_by_guild[normalized] = tasks
+        self._betting_tasks_by_match[(normalized, pending_match_id)] = tasks
 
-    def _cancel_betting_tasks(self, guild_id: int | None) -> None:
-        """Cancel any scheduled betting reminder tasks for the guild."""
+    def _cancel_betting_tasks(
+        self,
+        guild_id: int | None,
+        *,
+        pending_match_id: int | None = None,
+    ) -> None:
+        """Cancel reminder tasks for one match, or every guild task if unspecified."""
         normalized = normalize_guild_id(guild_id)
-        tasks = self._betting_tasks_by_guild.pop(normalized, [])
+        if pending_match_id is None:
+            keys = [
+                key
+                for key in self._betting_tasks_by_match
+                if key[0] == normalized
+            ]
+        else:
+            keys = [(normalized, pending_match_id)]
+        tasks = [
+            task
+            for key in keys
+            for task in self._betting_tasks_by_match.pop(key, [])
+        ]
         for task in tasks:
             try:
                 task.cancel()

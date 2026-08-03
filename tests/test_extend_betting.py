@@ -9,9 +9,15 @@ Tests verify that:
 """
 
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 
+from commands.admin import AdminCommands
+from domain.models.lobby import LobbyKind
+from domain.models.pending_match_state import PendingMatchState
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -278,3 +284,98 @@ class TestExtendBetting:
         final_state = match_service.get_last_shuffle(TEST_GUILD_ID)
         assert final_state.bet_lock_until == second_extension
         assert final_state.bet_lock_until >= original_lock + 600  # At least 10 min more
+
+
+@pytest.mark.asyncio
+async def test_command_extends_only_the_selected_pending_match(monkeypatch):
+    """Every command side effect must stay bound to the explicit pending match ID."""
+    guild_id = 77
+    target = PendingMatchState(
+        pending_match_id=22,
+        bet_lock_until=1_000,
+        betting_mode="pool",
+        lobby_kind=LobbyKind.LOWSKILL.value,
+        shuffle_message_id=222,
+        shuffle_channel_id=2_222,
+        shuffle_message_jump_url="https://discord.com/channels/77/2222/222",
+    )
+    sibling = PendingMatchState(
+        pending_match_id=11,
+        bet_lock_until=2_000,
+        betting_mode="house",
+        shuffle_message_id=111,
+        shuffle_channel_id=1_111,
+    )
+
+    match_service = MagicMock()
+    match_service.get_last_shuffle.side_effect = (
+        lambda requested_guild_id, pending_match_id=None: (
+            target
+            if requested_guild_id == guild_id and pending_match_id == target.pending_match_id
+            else None
+        )
+    )
+    betting_service = MagicMock()
+    betting_service.get_pot_odds.return_value = {"radiant": 30, "dire": 20}
+    match_cog = SimpleNamespace(
+        _cancel_betting_tasks=MagicMock(),
+        _schedule_betting_reminders=AsyncMock(),
+    )
+    betting_cog = SimpleNamespace(
+        _update_shuffle_message_wagers=AsyncMock(),
+    )
+
+    embed = discord.Embed()
+    embed.add_field(name="💰 Pool Betting", value="old window", inline=False)
+    message = SimpleNamespace(embeds=[embed], edit=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+    bot = SimpleNamespace(
+        match_service=match_service,
+        betting_service=betting_service,
+        get_cog=MagicMock(
+            side_effect=lambda name: {
+                "MatchCommands": match_cog,
+                "BettingCommands": betting_cog,
+            }.get(name)
+        ),
+        get_channel=MagicMock(return_value=channel),
+    )
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=guild_id),
+        user=SimpleNamespace(id=900, __str__=lambda self: "Admin"),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+    cog = AdminCommands(bot, lobby_service=None, player_service=None)
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
+    monkeypatch.setattr("commands.admin.time.time", lambda: 900)
+
+    await cog.extendbetting.callback(
+        cog,
+        interaction,
+        minutes=5,
+        pending_match_id=target.pending_match_id,
+    )
+
+    assert target.bet_lock_until == 1_300
+    assert sibling.bet_lock_until == 2_000
+    match_service.get_last_shuffle.assert_called_once_with(guild_id, target.pending_match_id)
+    match_service.set_last_shuffle.assert_called_once_with(guild_id, target)
+    match_service._persist_match_state.assert_called_once_with(guild_id, target)
+    match_cog._cancel_betting_tasks.assert_called_once_with(
+        guild_id,
+        pending_match_id=target.pending_match_id,
+    )
+    match_cog._schedule_betting_reminders.assert_awaited_once_with(
+        guild_id,
+        1_300,
+        pending_match_id=target.pending_match_id,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    betting_cog._update_shuffle_message_wagers.assert_awaited_once_with(
+        guild_id,
+        pending_match_id=target.pending_match_id,
+    )
+    sent = interaction.response.send_message.await_args.args[0]
+    assert LobbyKind.LOWSKILL.display_name in sent
+    assert f"Match #{target.pending_match_id}" in sent
+    assert target.shuffle_message_jump_url in sent

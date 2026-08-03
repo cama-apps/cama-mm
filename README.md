@@ -69,7 +69,8 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
      OPENDOTA_API_KEY=your_opendota_key  # unlocks the 1200 req/min rate limit
      DIG_CHANNEL_ID=123456789012345678   # gates /dig commands and routes output to this channel
-     LOBBY_CHANNEL_ID=123456789012345678 # lobby embeds post here instead of the command channel
+     LOBBY_CHANNEL_ID=123456789012345678 # regular lobby embeds post here instead of the command channel
+     LOWSKILL_LOBBY_CHANNEL_ID=234567890123456789 # optional Whine & Cheese channel; defaults to LOBBY_CHANNEL_ID
      PET_CHANNEL_ID=123456789012345678   # REQUIRED for pets: without it the /pet cog is not loaded
      ```
      `DB_PATH` defaults to `cama_shuffle.db`; the API and channel settings are optional.
@@ -286,6 +287,7 @@ Set these in your `.env` file:
 | `OPENDOTA_API_KEY` | None | OpenDota API key for higher rate limits (60→1200 req/min) |
 | `DIG_CHANNEL_ID` | None | Gates `/dig` commands to this channel and routes public dig output there |
 | `LOBBY_CHANNEL_ID` | None | If set, lobby embeds post here instead of the command channel |
+| `LOWSKILL_LOBBY_CHANNEL_ID` | None | Optional Whine & Cheese lobby channel; falls back to `LOBBY_CHANNEL_ID` |
 | `PET_CHANNEL_ID` | None | Gates the entire pets feature: without it the `/pet` cog is not loaded and pet hooks no-op |
 
 ### Advanced Configuration

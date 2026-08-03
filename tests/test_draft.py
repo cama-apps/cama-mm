@@ -13,7 +13,7 @@ import pytest
 from commands.draft import DraftCommands
 from commands.match import MatchCommands
 from domain.models.draft import DraftPhase, DraftState
-from domain.models.lobby import Lobby
+from domain.models.lobby import Lobby, LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
@@ -48,6 +48,7 @@ class TestDraftState:
         assert state.captain1_id is None
         assert state.captain2_id is None
         assert state.current_pick_index == 0
+        assert state.lobby_kind is LobbyKind.OPEN
 
     def test_available_player_ids(self):
         """Available players excludes picked players."""
@@ -206,7 +207,7 @@ class TestDraftState:
 
     def test_to_dict_and_from_dict(self):
         """State can be serialized and deserialized."""
-        state = DraftState(guild_id=123)
+        state = DraftState(guild_id=123, lobby_kind=LobbyKind.LOWSKILL)
         state.captain1_id = 100
         state.captain2_id = 200
         state.phase = DraftPhase.DRAFTING
@@ -216,6 +217,7 @@ class TestDraftState:
         restored = DraftState.from_dict(data)
 
         assert restored.guild_id == 123
+        assert restored.lobby_kind is LobbyKind.LOWSKILL
         assert restored.captain1_id == 100
         assert restored.captain2_id == 200
         assert restored.phase == DraftPhase.DRAFTING
@@ -233,6 +235,7 @@ class TestDraftState:
 
     def test_pending_exclusion_update_metadata_survives_round_trip(self):
         state = PendingMatchState(
+            lobby_kind=LobbyKind.LOWSKILL.value,
             exclusion_updates_deferred=True,
             full_exclusion_increment_ids=[11, 12],
             half_exclusion_increment_ids=[13],
@@ -240,6 +243,7 @@ class TestDraftState:
 
         restored = PendingMatchState.from_dict(state.to_dict())
 
+        assert restored.lobby_kind == LobbyKind.LOWSKILL.value
         assert restored.exclusion_updates_deferred is True
         assert restored.full_exclusion_increment_ids == [11, 12]
         assert restored.half_exclusion_increment_ids == [13]
@@ -305,6 +309,36 @@ class TestDraftStateManager:
         with pytest.raises(ValueError, match="already in progress"):
             manager.create_draft(guild_id=123)
 
+    def test_concurrent_create_draft_allows_exactly_one_winner(self):
+        """The guild-global draft reservation is atomic across worker threads."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        class SlowGetDict(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                time.sleep(0.05)
+                return value
+
+        manager = DraftStateManager()
+        manager._states = SlowGetDict()
+        start = threading.Barrier(2)
+
+        def create_once():
+            start.wait()
+            try:
+                manager.create_draft(guild_id=123)
+            except ValueError:
+                return False
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: create_once(), range(2)))
+
+        assert results.count(True) == 1
+        assert results.count(False) == 1
+
     def test_get_state(self):
         """Can retrieve draft state."""
         manager = DraftStateManager()
@@ -328,24 +362,23 @@ class TestDraftStateManager:
         assert manager.get_state(123) is None
         assert manager.has_active_draft(123) is False
 
-    def test_has_active_draft_complete(self):
-        """Completed draft is not active."""
+    def test_complete_draft_remains_reserved_until_cleanup(self):
+        """Completion publishing owns the guild reservation until it clears."""
         manager = DraftStateManager()
         state = manager.create_draft(guild_id=123)
         state.phase = DraftPhase.COMPLETE
 
-        assert manager.has_active_draft(123) is False
+        assert manager.has_active_draft(123) is True
+        with pytest.raises(ValueError, match="already in progress"):
+            manager.create_draft(guild_id=123)
 
-    def test_create_draft_clears_stale_complete_state(self):
-        """create_draft succeeds when a stale COMPLETE state exists."""
+    def test_identity_checked_cleanup_cannot_delete_newer_draft(self):
         manager = DraftStateManager()
         old_state = manager.create_draft(guild_id=123)
-        old_state.phase = DraftPhase.COMPLETE
-
-        # Should NOT raise — clears the stale COMPLETE state and creates a new one
+        assert manager.clear_state(123, expected_state=old_state) is old_state
         new_state = manager.create_draft(guild_id=123)
-        assert new_state is not old_state
-        assert new_state.phase == DraftPhase.COINFLIP
+
+        assert manager.clear_state(123, expected_state=old_state) is None
         assert manager.get_state(123) is new_state
 
     def test_create_draft_rejects_active_state(self):
@@ -1342,6 +1375,31 @@ def _make_lobby(player_ids):
     return lobby
 
 
+@pytest.mark.asyncio
+async def test_startdraft_command_infers_lowskill_membership(
+    player_repository,
+    monkeypatch,
+):
+    guild_id = TEST_GUILD_ID
+    lobby_manager = MagicMock()
+    lobby_manager.get_lobby_kind_for_player.return_value = LobbyKind.LOWSKILL
+    lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
+    cog = _make_draft_cog(player_repository, lobby_manager=lobby_manager)
+    cog._execute_startdraft = AsyncMock()
+    interaction = _FakeInteraction(guild_id)
+    monkeypatch.setattr("commands.draft.safe_defer", AsyncMock(return_value=True))
+
+    await cog.startdraft.callback(cog, interaction)
+
+    cog._execute_startdraft.assert_awaited_once_with(
+        interaction,
+        guild_id,
+        None,
+        None,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+
 class TestExecuteDraft:
     """Integration tests for DraftCommands._execute_draft.
 
@@ -1357,7 +1415,7 @@ class TestExecuteDraft:
         player_ids = _register_draft_players(player_repository, guild_id, 10)
         captain1, captain2 = player_ids[:2]
         cog = _make_draft_cog(player_repository)
-        state = DraftState(guild_id=guild_id)
+        state = cog.draft_state_manager.create_draft(guild_id)
         state.player_pool_ids = player_ids
         state.player_pool_data = {
             player_id: {"name": f"Player {player_id}", "rating": 1400.0 + index * 30}
@@ -1457,6 +1515,11 @@ class TestExecuteDraft:
         assert set(state.full_exclusion_increment_ids) == set(state.excluded_player_ids)
         assert state.half_exclusion_increment_ids == []
         assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
+        cog.lobby_manager.reserve_lobby_players.assert_called_once_with(
+            state.player_pool_ids,
+            guild_id,
+            LobbyKind.OPEN,
+        )
         # the temporary progress message is removed once setup is complete
         assert len(interaction.followup.messages) == 1
         progress_message = interaction.followup.messages[0]
@@ -1464,7 +1527,7 @@ class TestExecuteDraft:
         # the captain ping is sent first so it renders above the draft embed
         assert len(interaction.channel.sent) == 2
         ping_message, draft_msg = interaction.channel.sent
-        assert "Draft starting!" in ping_message.content
+        assert "🍽️ All You Can Feed draft starting!" in ping_message.content
         assert draft_msg.embed is not None
         assert draft_msg.view is not None
         assert state.draft_message_id == draft_msg.id
@@ -1499,7 +1562,10 @@ class TestExecuteDraft:
         ping_message, draft_message = lobby_channel.sent
         state = cog.draft_state_manager.get_state(guild_id)
         assert state is not None
-        assert ping_message.content == f"<@{state.captain1_id}> <@{state.captain2_id}> Draft starting!"
+        assert ping_message.content == (
+            f"<@{state.captain1_id}> <@{state.captain2_id}> "
+            "🍽️ All You Can Feed draft starting!"
+        )
         assert draft_message.embed is not None
         assert draft_message.embed.footer.text == "Started by Draft Starter"
         assert draft_message.view is not None
@@ -1571,7 +1637,7 @@ class TestExecuteDraft:
         assert state is not None
         assert state.draft_channel_id == interaction.channel.id
         assert len(interaction.channel.sent) == 2
-        assert "Draft starting!" in interaction.channel.sent[0].content
+        assert "🍽️ All You Can Feed draft starting!" in interaction.channel.sent[0].content
         assert interaction.channel.sent[1].embed is not None
 
     async def test_unavailable_lobby_channel_falls_back_to_origin_channel(
@@ -1735,6 +1801,13 @@ class TestExecuteDraft:
         assert interaction.followup.messages[0].deleted is True
         # the already-sent captain ping must not falsely announce a rolled-back draft
         assert interaction.channel.sent[0].deleted is True
+        cog.lobby_manager.release_lobby_players.assert_called_once()
+        released_ids, released_guild_id, released_kind = (
+            cog.lobby_manager.release_lobby_players.call_args.args
+        )
+        assert set(released_ids) == set(player_ids)
+        assert released_guild_id == guild_id
+        assert released_kind is LobbyKind.OPEN
 
 def _make_final_pick_scenario(
     player_repository, guild_id, player_ids, *, bot, match_service, lobby_manager=None
@@ -1782,6 +1855,79 @@ def _make_final_pick_scenario(
 class TestHandlePlayerPick:
     """Regression tests for Discord component handling during active drafting."""
 
+    async def test_stale_pick_callback_cannot_mutate_restarted_draft(
+        self,
+        player_repository,
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        match_service = _FakeDraftMatchService()
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+        )
+        cog, old_state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=bot,
+            match_service=match_service,
+        )
+        cog.draft_state_manager.clear_state(guild_id, old_state)
+        new_state = cog.draft_state_manager.create_draft(guild_id)
+        new_state.phase = DraftPhase.DRAFTING
+        new_state.current_pick_index = 0
+        new_state.player_pool_ids = list(player_ids)
+        new_state.captain1_id = player_ids[0]
+        new_state.captain2_id = player_ids[1]
+        new_state.radiant_captain_id = player_ids[0]
+        new_state.dire_captain_id = player_ids[1]
+        new_state.current_round_first_captain_id = player_ids[0]
+        new_state.radiant_player_ids = [player_ids[0]]
+        new_state.dire_player_ids = [player_ids[1]]
+        interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
+
+        await cog.handle_player_pick(
+            interaction,
+            guild_id,
+            player_ids[2],
+            expected_state=old_state,
+        )
+
+        assert new_state.current_pick_index == 0
+        assert new_state.radiant_player_ids == [player_ids[0]]
+        assert cog.draft_state_manager.get_state(guild_id) is new_state
+
+    async def test_completion_embed_identifies_lobby_and_pending_match(
+        self,
+        player_repository,
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=SimpleNamespace(betting_service=None),
+            match_service=_FakeDraftMatchService(),
+        )
+        state.lobby_kind = LobbyKind.LOWSKILL
+        state.radiant_player_ids.append(player_ids[9])
+        pending = PendingMatchState(
+            pending_match_id=1234,
+            lobby_kind=LobbyKind.LOWSKILL.value,
+        )
+
+        embed = await cog._build_draft_complete_embed(
+            _FakeGuild(guild_id),
+            state,
+            pending,
+        )
+
+        assert LobbyKind.LOWSKILL.display_name in embed.title
+        assert "Match #1234" in embed.title
+
     async def test_pending_match_preserves_conditional_exclusions(self, player_repository):
         """Excluded conditionals retain their half-credit pending-match classification."""
         guild_id = TEST_GUILD_ID
@@ -1816,15 +1962,19 @@ class TestHandlePlayerPick:
 
         match_service = _FakeDraftMatchService()
         lobby_manager = MagicMock()
+        reminder_match_cog = SimpleNamespace(
+            _schedule_betting_reminders=AsyncMock(),
+        )
         bot = SimpleNamespace(
             betting_service=None,
             lobby_service=None,
-            get_cog=lambda _name: None,
+            get_cog=lambda name: reminder_match_cog if name == "MatchCommands" else None,
         )
         cog, state = _make_final_pick_scenario(
             player_repository, guild_id, player_ids,
             bot=bot, match_service=match_service, lobby_manager=lobby_manager,
         )
+        state.lobby_kind = LobbyKind.LOWSKILL
 
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
 
@@ -1840,7 +1990,11 @@ class TestHandlePlayerPick:
         assert match_service.state.pending_match_id == 1234
         assert match_service.message_info["message_id"] == interaction.message.id
         assert match_service.message_info["channel_id"] == interaction.channel.id
-        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.LOWSKILL)
+        assert (
+            reminder_match_cog._schedule_betting_reminders.await_args.kwargs["lobby_kind"]
+            is LobbyKind.LOWSKILL
+        )
 
     async def test_final_pick_edits_lobby_draft_without_duplicate_and_copies_to_origin(
         self, player_repository
@@ -1855,13 +2009,13 @@ class TestHandlePlayerPick:
         stored_origin_channel_id = {"value": origin_channel.id}
         lobby_manager = MagicMock()
         lobby_manager.get_lobby_channel_id.side_effect = (
-            lambda guild_id=None: stored_lobby_channel_id["value"]
+            lambda guild_id=None, lobby_kind=None: stored_lobby_channel_id["value"]
         )
         lobby_manager.get_origin_channel_id.side_effect = (
-            lambda guild_id=None: stored_origin_channel_id["value"]
+            lambda guild_id=None, lobby_kind=None: stored_origin_channel_id["value"]
         )
         lobby_manager.reset_lobby.side_effect = (
-            lambda guild_id=None: (
+            lambda guild_id=None, lobby_kind=None: (
                 stored_lobby_channel_id.update(value=None),
                 stored_origin_channel_id.update(value=None),
             )
@@ -1908,9 +2062,15 @@ class TestHandlePlayerPick:
         assert match_service.message_info["cmd_message_id"] == origin_message.id
         assert match_service.message_info["cmd_channel_id"] == origin_channel.id
         assert match_service.state.origin_channel_id == origin_channel.id
-        lobby_manager.get_lobby_channel_id.assert_called_once_with(guild_id=guild_id)
-        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
-        clear_cooldowns.assert_called_once_with(guild_id)
+        lobby_manager.get_lobby_channel_id.assert_called_once_with(
+            guild_id=guild_id,
+            lobby_kind=LobbyKind.OPEN,
+        )
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.OPEN)
+        clear_cooldowns.assert_called_once_with(
+            guild_id,
+            lobby_kind=LobbyKind.OPEN,
+        )
 
     async def test_lobby_channel_copy_failure_does_not_break_completion(
         self, player_repository
@@ -1963,7 +2123,7 @@ class TestHandlePlayerPick:
         assert match_service.message_info["cmd_message_id"] is None
         assert match_service.message_info["cmd_channel_id"] is None
         assert cog.draft_state_manager.get_state(guild_id) is None
-        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.OPEN)
 
     async def test_final_pick_stores_thread_info_for_record_finalize(self, player_repository):
         """Draft completion must carry the lobby thread id in the pending
@@ -2006,7 +2166,7 @@ class TestHandlePlayerPick:
         bot = SimpleNamespace(
             betting_service=None,
             lobby_service=SimpleNamespace(
-                get_lobby_thread_id=lambda guild_id=None: thread_id
+                get_lobby_thread_id=lambda guild_id=None, lobby_kind=None: thread_id
             ),
             get_cog=lambda _name: None,
             get_channel=lambda cid: thread if cid == thread_id else None,
@@ -2322,6 +2482,7 @@ class TestShuffleDraftRedirect:
             lobby,
             regular_player_ids=ready_ids,
             conditional_player_ids=nonresponder_ids,
+            lobby_kind=LobbyKind.OPEN,
         )
 
     async def test_redirects_without_adding_a_duplicate_message(self, monkeypatch):
@@ -2481,6 +2642,7 @@ class TestDraftCaptainPingCleanup:
         state.captain2_id = captain_id + 1
         state.draft_channel_id = origin_channel.id
         state.captain_ping_message_id = ping_message.id
+        state.player_pool_ids = [captain_id, captain_id + 1]
         interaction = SimpleNamespace(
             guild=_FakeGuild(guild_id),
             user=SimpleNamespace(id=captain_id, display_name="Captain"),
@@ -2494,6 +2656,11 @@ class TestDraftCaptainPingCleanup:
         assert events == ["response", "ping_partial"]
         assert origin_channel.fetch_message_calls == []
         assert cog.draft_state_manager.get_state(guild_id) is None
+        cog.lobby_manager.release_lobby_players.assert_called_once_with(
+            state.player_pool_ids,
+            guild_id,
+            LobbyKind.OPEN,
+        )
 
     async def test_restart_does_not_clear_a_previous_drafts_pending_match(self):
         """A restarting draft never owns a pending match, so it must not clear one.
@@ -2535,6 +2702,29 @@ class TestDraftCaptainPingCleanup:
         cog.match_service.clear_last_shuffle.assert_not_called()
         assert cog.draft_state_manager.get_state(guild_id) is None
 
+    async def test_restart_rejects_draft_while_completion_is_finalizing(self):
+        guild_id = 123
+        captain_id = 456
+        cog = self._make_cog(SimpleNamespace(get_channel=lambda _channel_id: None))
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.captain1_id = captain_id
+        state.captain2_id = captain_id + 1
+        state.phase = DraftPhase.COMPLETE
+        interaction = SimpleNamespace(
+            guild=_FakeGuild(guild_id),
+            user=SimpleNamespace(id=captain_id, display_name="Captain"),
+            channel=_FakeChannel(channel_id=777_022),
+            response=AsyncMock(),
+        )
+
+        await cog.restartdraft.callback(cog, interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "⏳ Draft results are still being finalized. Please wait.",
+            ephemeral=True,
+        )
+        assert cog.draft_state_manager.get_state(guild_id) is state
+
     async def test_timeout_deletes_ping_from_persisted_draft_channel(self):
         guild_id = 123
         origin_channel = _FakeChannel(channel_id=777_012)
@@ -2550,6 +2740,7 @@ class TestDraftCaptainPingCleanup:
         state.draft_channel_id = origin_channel.id
         state.draft_message_id = draft_message.id
         state.captain_ping_message_id = ping_message.id
+        state.player_pool_ids = [456, 457]
 
         await cog._handle_draft_timeout(guild_id)
 
@@ -2558,6 +2749,11 @@ class TestDraftCaptainPingCleanup:
         assert draft_message.embed.title == "⏰ Draft Timed Out"
         assert origin_channel.partial_message_calls == [ping_message.id, draft_message.id]
         assert origin_channel.fetch_message_calls == []
+        cog.lobby_manager.release_lobby_players.assert_called_once_with(
+            state.player_pool_ids,
+            guild_id,
+            LobbyKind.OPEN,
+        )
 
     async def test_live_draft_update_uses_partial_message(self):
         guild_id = 123

@@ -2,12 +2,15 @@
 Tests for the /resetlobby command in LobbyCommands.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from commands.lobby import LobbyCommands
+from domain.models.lobby import LobbyKind
+from services.draft_state_manager import DraftStateManager
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from tests.fakes.lobby_repo import FakeLobbyRepo
@@ -83,6 +86,7 @@ async def test_resetlobby_allows_admin(monkeypatch):
     _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
     lobby.add_player(42)
+    lobby.add_player(1)
     interaction = FakeInteraction(user_id=1)
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
@@ -93,7 +97,7 @@ async def test_resetlobby_allows_admin(monkeypatch):
 
     assert lobby_service.get_lobby(guild_id=123) is None
     assert interaction.followup.messages
-    assert "Lobby reset" in interaction.followup.messages[0]["content"]
+    assert "All You Can Feed reset" in interaction.followup.messages[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -111,7 +115,28 @@ async def test_resetlobby_allows_creator(monkeypatch):
 
     assert lobby_service.get_lobby(guild_id=123) is None
     assert interaction.followup.messages
-    assert "Lobby reset" in interaction.followup.messages[0]["content"]
+    assert "All You Can Feed reset" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_infers_creator_lowskill_membership(monkeypatch):
+    lobby_manager, lobby_service = make_lobby_service()
+    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lowskill_lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind="lowskill",
+    )
+    lowskill_lobby.add_player(7)
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(guild_id=123, lobby_kind="lowskill") is None
+    assert lobby_service.get_lobby(guild_id=123, lobby_kind="open") is not None
 
 
 def _match_service_with_pending(*states):
@@ -132,7 +157,8 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
     from domain.models.pending_match_state import PendingMatchState
 
     _, lobby_service = make_lobby_service()
-    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby.add_player(1)
     interaction = FakeInteraction(user_id=1)
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
@@ -162,7 +188,8 @@ async def test_resetlobby_blocks_when_multiple_matches_are_pending(monkeypatch):
     from domain.models.pending_match_state import PendingMatchState
 
     _, lobby_service = make_lobby_service()
-    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby.add_player(1)
     interaction = FakeInteraction(user_id=1)
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
@@ -185,10 +212,158 @@ async def test_resetlobby_blocks_when_multiple_matches_are_pending(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resetlobby_ignores_pending_match_from_sibling_lobby(monkeypatch):
+    from domain.models.pending_match_state import PendingMatchState
+
+    lobby_manager, lobby_service = make_lobby_service()
+    low_lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    low_lobby.add_player(7)
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    match_service = _match_service_with_pending(
+        PendingMatchState(pending_match_id=1, lobby_kind=LobbyKind.OPEN.value)
+    )
+    cog = LobbyCommands(
+        make_bot(match_service=match_service), lobby_service, FakePlayerService()
+    )
+
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(123, LobbyKind.LOWSKILL) is None
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_ignores_active_draft_from_sibling_lobby(monkeypatch):
+    lobby_manager, lobby_service = make_lobby_service()
+    low_lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    low_lobby.add_player(7)
+    draft_state_manager = DraftStateManager()
+    draft_state_manager.create_draft(123, LobbyKind.OPEN)
+    bot = make_bot(match_service=None)
+    bot.draft_state_manager = draft_state_manager
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(bot, lobby_service, FakePlayerService())
+
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(123, LobbyKind.LOWSKILL) is None
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_blocks_active_draft_from_same_lobby(monkeypatch):
+    lobby_manager, lobby_service = make_lobby_service()
+    low_lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    low_lobby.add_player(7)
+    draft_state_manager = DraftStateManager()
+    draft_state_manager.create_draft(123, LobbyKind.LOWSKILL)
+    bot = make_bot(match_service=None)
+    bot.draft_state_manager = draft_state_manager
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(bot, lobby_service, FakePlayerService())
+
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(123, LobbyKind.LOWSKILL) is not None
+    assert "active draft" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_blocks_in_flight_shuffle_from_same_lobby(monkeypatch):
+    lobby_manager, lobby_service = make_lobby_service()
+    lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind=LobbyKind.OPEN,
+    )
+    lobby.add_player(7)
+    assert lobby_service.reserve_lobby_players(
+        [7],
+        123,
+        LobbyKind.OPEN,
+    )
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(123, LobbyKind.OPEN) is not None
+    assert "shuffle or draft" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_serializes_discord_cleanup_with_match_start(monkeypatch):
+    lobby_manager, lobby_service = make_lobby_service()
+    lobby = lobby_manager.get_or_create_lobby(
+        creator_id=7,
+        guild_id=123,
+        lobby_kind=LobbyKind.OPEN,
+    )
+    lobby.players.update({7, 8})
+    interaction = FakeInteraction(user_id=7)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def blocking_close(*_args, **_kwargs):
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    cog._update_channel_message_closed = blocking_close
+    cog._archive_lobby_thread = AsyncMock()
+
+    reset_task = asyncio.create_task(invoke_reset(cog, interaction))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+
+    async def start_match():
+        lock = lobby_manager.get_shuffle_lock(123, LobbyKind.OPEN)
+        await lock.acquire()
+        try:
+            return lobby_service.reserve_lobby_players(
+                [7, 8],
+                123,
+                LobbyKind.OPEN,
+            )
+        finally:
+            lock.release()
+
+    start_task = asyncio.create_task(start_match())
+    await asyncio.sleep(0)
+    assert not start_task.done()
+
+    release_cleanup.set()
+    await reset_task
+    assert await start_task is False
+    assert lobby_service.get_lobby(123, LobbyKind.OPEN) is None
+
+
+@pytest.mark.asyncio
 async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
     _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=5, guild_id=123)
     lobby.add_player(5)
+    lobby.add_player(6)
     interaction = FakeInteraction(user_id=6)
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
@@ -214,7 +389,7 @@ async def test_resetlobby_new_lobby_is_empty(monkeypatch):
     lobby_service.join_lobby(3, 123)
     assert lobby.get_player_count() == 3
 
-    interaction = FakeInteraction(user_id=99)
+    interaction = FakeInteraction(user_id=1)
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
 

@@ -189,7 +189,8 @@ def _setup(monkeypatch, regular, conditional=None, present=None, guild_id=TEST_G
 
 
 def _make_stale(env):
-    env.mgr.readycheck_created_ats[env.guild_id] = time.time() - 31 * 60
+    key = env.mgr._lobby_key(env.guild_id)
+    env.mgr.readycheck_created_ats[key] = time.time() - 31 * 60
 
 
 def _posted_embed(env):
@@ -310,7 +311,8 @@ async def test_refresh_invoker_reaching_ten_announces_shuffle(monkeypatch):
         sent.content for sent in env.thread.sent[sent_before_refresh:] if sent.content
     ]
     assert (
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+            "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+            "Anyone in this lobby can use `/shuffle` now. "
         "Only players who confirmed ready will be included; everyone else will sit out."
         in refresh_messages
     )

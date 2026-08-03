@@ -22,6 +22,34 @@ def test_lobby_manager_persists_and_recovers_state(repo_db_path):
     assert loaded.created_by == 42
 
 
+def test_lobby_kinds_persist_independently_in_same_guild(repo_db_path):
+    lobby_repo = LobbyRepository(repo_db_path)
+    manager1 = LobbyManager(lobby_repo)
+
+    manager1.get_or_create_lobby(
+        creator_id=10,
+        guild_id=77,
+        lobby_kind="open",
+    )
+    manager1.get_or_create_lobby(
+        creator_id=20,
+        guild_id=77,
+        lobby_kind="lowskill",
+    )
+    assert manager1.join_lobby(101, guild_id=77, lobby_kind="open") == "ok"
+    assert manager1.join_lobby(202, guild_id=77, lobby_kind="lowskill") == "ok"
+
+    manager2 = LobbyManager(lobby_repo)
+
+    open_lobby = manager2.get_lobby(guild_id=77, lobby_kind="open")
+    lowskill_lobby = manager2.get_lobby(guild_id=77, lobby_kind="lowskill")
+    assert open_lobby is not None
+    assert lowskill_lobby is not None
+    assert open_lobby.players == {101}
+    assert lowskill_lobby.players == {202}
+    assert open_lobby.lobby_id != lowskill_lobby.lobby_id
+
+
 def test_lobby_service_join_persists_players(repo_db_path):
     """Test that players joined via LobbyService survive service restart."""
     # Create first service instance

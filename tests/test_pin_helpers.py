@@ -147,3 +147,18 @@ class TestSafeUnpinAllBotMessages:
         unpinned_count = await safe_unpin_all_bot_messages(channel, bot_user)
 
         assert unpinned_count == 0
+
+
+@pytest.mark.asyncio
+async def test_safe_unpin_message_only_targets_tracked_message():
+    from utils.pin_helpers import safe_unpin_message
+
+    tracked = AsyncMock(spec=discord.Message)
+    tracked.unpin = AsyncMock()
+    channel = MagicMock()
+    channel.get_partial_message.return_value = tracked
+
+    assert await safe_unpin_message(channel, 101) is True
+
+    channel.get_partial_message.assert_called_once_with(101)
+    tracked.unpin.assert_awaited_once_with(reason="Cama lobby closed")

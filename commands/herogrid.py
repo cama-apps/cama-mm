@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from domain.models.lobby import LobbyKind
 from utils.drawing import draw_hero_grid
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
@@ -29,7 +30,10 @@ class HeroGridCommands(commands.Cog):
         self.lobby_manager = lobby_manager
 
     def _resolve_player_ids(
-        self, source_value: str, guild_id: int | None
+        self,
+        source_value: str,
+        guild_id: int | None,
+        invoking_user_id: int | None = None,
     ) -> tuple[list[int], str | None]:
         """Resolve player IDs using a priority chain.
 
@@ -41,15 +45,37 @@ class HeroGridCommands(commands.Cog):
             return [p["discord_id"] for p in enriched_players], None
 
         # Priority 1: Active lobby
-        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
+        lobby_kind = LobbyKind.OPEN
+        if invoking_user_id is not None:
+            lobby_kind = (
+                self.lobby_manager.get_lobby_kind_for_player(
+                    invoking_user_id, guild_id
+                )
+                or LobbyKind.OPEN
+            )
+        lobby = self.lobby_manager.get_lobby(
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
         if lobby and lobby.players:
             player_ids = list(lobby.players)
-            return player_ids, "Lobby"
+            return player_ids, lobby_kind.label
 
         # Priority 2: Pending match (post-shuffle)
         if self.match_service is not None:
             try:
-                last_shuffle = self.match_service.get_last_shuffle(guild_id)
+                state_service = getattr(self.match_service, "state_service", None)
+                if (
+                    invoking_user_id is not None
+                    and state_service is not None
+                    and hasattr(state_service, "get_pending_match_for_player")
+                ):
+                    last_shuffle = state_service.get_pending_match_for_player(
+                        guild_id,
+                        invoking_user_id,
+                    )
+                else:
+                    last_shuffle = self.match_service.get_last_shuffle(guild_id)
                 if last_shuffle:
                     radiant_ids = last_shuffle.radiant_team_ids
                     dire_ids = last_shuffle.dire_team_ids
@@ -117,7 +143,10 @@ class HeroGridCommands(commands.Cog):
 
         # Determine player list via priority chain
         player_ids, source_label = await asyncio.to_thread(
-            self._resolve_player_ids, source_value, guild_id
+            self._resolve_player_ids,
+            source_value,
+            guild_id,
+            interaction.user.id,
         )
 
         if not player_ids and source_value == "lobby":

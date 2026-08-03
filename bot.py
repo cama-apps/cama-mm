@@ -60,6 +60,7 @@ from config import (
     MAX_DEBT,
     USE_GLICKO,
 )
+from domain.models.lobby import LobbyKind
 from infrastructure.service_container import ServiceContainer
 from opendota_integration import run_opendota_io
 from services import trivia_data
@@ -94,21 +95,29 @@ _LOBBY_RECONCILE_RETRY_SECONDS = 1
 _container: ServiceContainer | None = None
 
 # Lobby rally notification cooldowns
-# Key: (guild_id, needed_count) -> timestamp
+# Key: (guild_id, lobby_kind, needed_count) -> timestamp
 # Allows independent cooldowns for +2 and +1 notifications
-_lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
+_lobby_rally_cooldowns: dict[tuple[int, LobbyKind, int], float] = {}
 _lobby_rally_lock = asyncio.Lock()
 
 # Lobby ready notification cooldowns
-# Key: guild_id -> timestamp. Guarded by ``_lobby_ready_lock`` so that
+# Key: (guild_id, lobby_kind) -> timestamp. Guarded by ``_lobby_ready_lock`` so that
 # concurrent reaction handlers cannot both pass the cooldown check and
 # double-post the "lobby ready" message.
-_lobby_ready_cooldowns: dict[int, float] = {}
+_lobby_ready_cooldowns: dict[tuple[int, LobbyKind], float] = {}
 _lobby_ready_lock = asyncio.Lock()
 
 # Strong references to fire-and-forget tasks. The event loop only holds
 # tasks weakly, so an unreferenced task can be garbage-collected mid-run.
 _background_tasks: set[asyncio.Task] = set()
+
+
+def _normalize_lobby_kind_or_open(value) -> LobbyKind:
+    """Normalize real lobby state while tolerating legacy test/service doubles."""
+    try:
+        return LobbyKind.normalize(value)
+    except (TypeError, ValueError):
+        return LobbyKind.OPEN
 
 
 def _retain_background_task(task: asyncio.Task) -> asyncio.Task:
@@ -665,9 +674,49 @@ async def update_lobby_message(message, lobby, guild_id=None) -> bool:
     return False
 
 
-def _snapshot_restored_lobbies(lobby_manager) -> list[tuple[int, object]]:
+def _snapshot_restored_lobbies(lobby_manager) -> list[tuple[tuple[int, LobbyKind], object]]:
     """Copy restored lobby entries outside the async command path."""
     return list(lobby_manager.lobbies.items())
+
+
+async def _resolve_lobby_kind_for_message(
+    lobby_service,
+    message_id: int,
+    guild_id: int | None,
+    *,
+    readycheck: bool = False,
+) -> LobbyKind | None:
+    """Resolve message ownership, with an open-lobby fallback for old service doubles."""
+    resolver_name = (
+        "get_lobby_kind_for_readycheck_message"
+        if readycheck
+        else "get_lobby_kind_for_message"
+    )
+    resolver = getattr(lobby_service, resolver_name, None)
+    if callable(resolver):
+        candidate = await asyncio.to_thread(
+            resolver,
+            message_id,
+            guild_id=guild_id,
+        )
+        try:
+            if candidate is not None:
+                return LobbyKind.normalize(candidate)
+        except (TypeError, ValueError):
+            pass
+
+    legacy_getter_name = (
+        "get_readycheck_message_id" if readycheck else "get_lobby_message_id"
+    )
+    legacy_getter = getattr(lobby_service, legacy_getter_name, None)
+    if callable(legacy_getter):
+        legacy_message_id = await asyncio.to_thread(
+            legacy_getter,
+            guild_id=guild_id,
+        )
+        if legacy_message_id == message_id:
+            return LobbyKind.OPEN
+    return None
 
 
 async def _reconcile_persisted_lobby_messages() -> None:
@@ -681,23 +730,29 @@ async def _reconcile_persisted_lobby_messages() -> None:
         _snapshot_restored_lobbies,
         lobby_manager,
     )
-    pending_lobbies = [
-        (guild_id, lobby)
-        for guild_id, lobby in restored_lobbies
-        if lobby.status == "open"
-    ]
+    pending_lobbies = []
+    for key, lobby in restored_lobbies:
+        if lobby.status != "open":
+            continue
+        if isinstance(key, tuple):
+            guild_id, kind = key
+        else:
+            guild_id, kind = key, LobbyKind.OPEN
+        pending_lobbies.append((guild_id, LobbyKind.normalize(kind), lobby))
     for attempt in range(_LOBBY_RECONCILE_MAX_ATTEMPTS):
         failed_lobbies = []
-        for guild_id, lobby in pending_lobbies:
+        for guild_id, kind, lobby in pending_lobbies:
             try:
                 message_id, channel_id = await asyncio.gather(
                     asyncio.to_thread(
                         lobby_service.get_lobby_message_id,
                         guild_id=guild_id,
+                        lobby_kind=kind,
                     ),
                     asyncio.to_thread(
                         lobby_service.get_lobby_channel_id,
                         guild_id=guild_id,
+                        lobby_kind=kind,
                     ),
                 )
                 if not message_id or not channel_id:
@@ -713,7 +768,7 @@ async def _reconcile_persisted_lobby_messages() -> None:
                     guild_id,
                     exc,
                 )
-                failed_lobbies.append((guild_id, lobby))
+                failed_lobbies.append((guild_id, kind, lobby))
                 continue
 
             updated = await update_lobby_message(message, lobby, guild_id)
@@ -739,7 +794,7 @@ async def _reconcile_persisted_lobby_messages() -> None:
                     )
 
             if not updated or not reaction_removed:
-                failed_lobbies.append((guild_id, lobby))
+                failed_lobbies.append((guild_id, kind, lobby))
 
         if not failed_lobbies:
             return
@@ -753,17 +808,35 @@ async def _reconcile_persisted_lobby_messages() -> None:
     )
 
 
-async def notify_lobby_ready(channel, guild_id: int = 0):
+async def notify_lobby_ready(
+    channel,
+    guild_id: int = 0,
+    lobby_kind: LobbyKind | str | None = None,
+):
     """Notify that lobby is ready to shuffle."""
     lobby_service = bot.lobby_service
     if not lobby_service:
         return
+    kind = LobbyKind.normalize(lobby_kind)
+    cooldown_key = (guild_id, kind)
     cooldown_claimed = False
 
     lobby, lobby_message_id, lobby_channel_id = await asyncio.gather(
-        asyncio.to_thread(lobby_service.get_lobby, guild_id=guild_id),
-        asyncio.to_thread(lobby_service.get_lobby_message_id, guild_id=guild_id),
-        asyncio.to_thread(lobby_service.get_lobby_channel_id, guild_id=guild_id),
+        asyncio.to_thread(
+            lobby_service.get_lobby,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        ),
+        asyncio.to_thread(
+            lobby_service.get_lobby_message_id,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        ),
+        asyncio.to_thread(
+            lobby_service.get_lobby_channel_id,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        ),
     )
     if (
         not lobby
@@ -775,8 +848,8 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
 
     try:
         embed = discord.Embed(
-            title="🎮 Lobby Ready!",
-            description="The lobby now has 10 players!",
+            title=f"🎮 {kind.label} Ready!",
+            description=f"{kind.display_name} now has 10 players!",
             color=discord.Color.green(),
         )
         embed.add_field(
@@ -793,7 +866,11 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
         origin_channel_id = (
-            await asyncio.to_thread(lobby_service.get_origin_channel_id, guild_id=guild_id)
+            await asyncio.to_thread(
+                lobby_service.get_origin_channel_id,
+                guild_id=guild_id,
+                lobby_kind=kind,
+            )
         )
         target_channel = channel  # Default to reaction channel
 
@@ -808,15 +885,20 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
 
         async with _lobby_ready_lock:
             now = time.time()
-            last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
+            last_sent = _lobby_ready_cooldowns.get(cooldown_key, 0)
             if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
                 return
 
             current_lobby, current_message_id = await asyncio.gather(
-                asyncio.to_thread(lobby_service.get_lobby, guild_id=guild_id),
+                asyncio.to_thread(
+                    lobby_service.get_lobby,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                ),
                 asyncio.to_thread(
                     lobby_service.get_lobby_message_id,
                     guild_id=guild_id,
+                    lobby_kind=kind,
                 ),
             )
             if (
@@ -829,18 +911,24 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
 
             # Claim the cooldown slot before sending so concurrent handlers for
             # the same lobby generation cannot both announce it.
-            _lobby_ready_cooldowns[guild_id] = now
+            _lobby_ready_cooldowns[cooldown_key] = now
             cooldown_claimed = True
 
         await target_channel.send(embed=embed)
     except Exception as exc:
         # Send failed — release the cooldown slot we claimed so a retry can fire.
         if cooldown_claimed:
-            _lobby_ready_cooldowns.pop(guild_id, None)
+            _lobby_ready_cooldowns.pop(cooldown_key, None)
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
 
-async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
+async def notify_lobby_rally(
+    channel,
+    thread,
+    lobby,
+    guild_id: int,
+    lobby_kind: LobbyKind | str | None = None,
+) -> bool:
     """
     Notify that lobby is almost ready. Returns True if notification was sent.
     Each threshold (+2, +1) has an independent cooldown.
@@ -850,11 +938,14 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
     """
     total = lobby.get_total_count()
     needed = LOBBY_READY_THRESHOLD - total
+    kind = _normalize_lobby_kind_or_open(
+        lobby_kind or getattr(lobby, "kind", None)
+    )
 
     if needed < 1 or needed > 2:
         return False  # Only notify for +1 or +2
 
-    cooldown_key = (guild_id, needed)
+    cooldown_key = (guild_id, kind, needed)
 
     # The lock covers only the check-and-claim so one slow guild's network
     # I/O cannot block rally notifications for every other guild.
@@ -870,7 +961,15 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
         _lobby_rally_cooldowns[cooldown_key] = now
 
     try:
-        sent = await _send_lobby_rally(channel, thread, lobby, guild_id, total, needed)
+        sent = await _send_lobby_rally(
+            channel,
+            thread,
+            lobby,
+            guild_id,
+            total,
+            needed,
+            lobby_kind=kind,
+        )
         if not sent:
             _lobby_rally_cooldowns.pop(cooldown_key, None)
         return sent
@@ -880,8 +979,19 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
         return False
 
 
-async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, needed: int) -> bool:
+async def _send_lobby_rally(
+    channel,
+    thread,
+    lobby,
+    guild_id: int,
+    total: int,
+    needed: int,
+    lobby_kind: LobbyKind | str | None = None,
+) -> bool:
     """Send one claimed near-full notification and ping eligible subscribers."""
+    kind = _normalize_lobby_kind_or_open(
+        lobby_kind or getattr(lobby, "kind", None)
+    )
     try:
         async def load_reaction_subscribers(
             lobby_message_id: int | None,
@@ -943,8 +1053,11 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
             return target_channel
 
         embed = discord.Embed(
-            title="📢 Almost Ready!",
-            description=f"The lobby has **{total}** players — just **+{needed}** more needed!",
+            title=f"📢 {kind.label} Almost Ready!",
+            description=(
+                f"{kind.display_name} has **{total}** players — "
+                f"just **+{needed}** more needed!"
+            ),
             color=discord.Color.orange(),
         )
 
@@ -957,9 +1070,21 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
                 lobby_channel_id,
                 origin_channel_id,
             ) = await asyncio.gather(
-                asyncio.to_thread(bot.lobby_service.get_lobby_message_id, guild_id=guild_id),
-                asyncio.to_thread(bot.lobby_service.get_lobby_channel_id, guild_id=guild_id),
-                asyncio.to_thread(bot.lobby_service.get_origin_channel_id, guild_id=guild_id),
+                asyncio.to_thread(
+                    bot.lobby_service.get_lobby_message_id,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                ),
+                asyncio.to_thread(
+                    bot.lobby_service.get_lobby_channel_id,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                ),
+                asyncio.to_thread(
+                    bot.lobby_service.get_origin_channel_id,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                ),
             )
 
         # Add jump link to lobby embed.
@@ -1035,7 +1160,8 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
             target_result, thread_result = await asyncio.gather(
                 target_send,
                 thread.send(
-                    f"📢 **+{needed}** more player{'s' if needed > 1 else ''} needed!"
+                    f"📢 {kind.label}: **+{needed}** more "
+                    f"player{'s' if needed > 1 else ''} needed!"
                 ),
                 return_exceptions=True,
             )
@@ -1054,12 +1180,26 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
         return False
 
 
-def clear_lobby_rally_cooldowns(guild_id: int) -> None:
-    """Clear lobby rally and ready cooldowns for a guild. Called on /resetlobby and shuffle."""
-    keys_to_remove = [k for k in _lobby_rally_cooldowns if k[0] == guild_id]
+def clear_lobby_rally_cooldowns(
+    guild_id: int,
+    lobby_kind: LobbyKind | str | None = None,
+) -> None:
+    """Clear rally and ready cooldowns for one lobby, or all lobbies in a guild."""
+    kind = LobbyKind.normalize(lobby_kind) if lobby_kind is not None else None
+    keys_to_remove = [
+        key
+        for key in _lobby_rally_cooldowns
+        if key[0] == guild_id and (kind is None or key[1] == kind)
+    ]
     for key in keys_to_remove:
         del _lobby_rally_cooldowns[key]
-    _lobby_ready_cooldowns.pop(guild_id, None)
+    ready_keys_to_remove = [
+        key
+        for key in _lobby_ready_cooldowns
+        if key[0] == guild_id and (kind is None or key[1] == kind)
+    ]
+    for key in ready_keys_to_remove:
+        del _lobby_ready_cooldowns[key]
 
 
 @bot.event
@@ -1310,16 +1450,21 @@ async def on_raw_reaction_add(payload):
     if payload.emoji.name == "✅":
         _init_services()
         payload_guild_id = payload.guild_id
-        rc_msg_id = await asyncio.to_thread(
-            bot.lobby_service.get_readycheck_message_id, guild_id=payload_guild_id
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload_guild_id,
+            readycheck=True,
         )
-        if rc_msg_id and payload.message_id == rc_msg_id:
+        if lobby_kind is not None:
+            rc_msg_id = payload.message_id
             try:
                 added = await asyncio.to_thread(
                     bot.lobby_service.add_readycheck_reaction,
                     payload.user_id,
                     f"<@{payload.user_id}>",
                     guild_id=payload_guild_id,
+                    lobby_kind=lobby_kind,
                     expected_message_id=rc_msg_id,
                 )
                 if added:
@@ -1329,6 +1474,7 @@ async def on_raw_reaction_add(payload):
                             payload_guild_id or 0,
                             rc_msg_id,
                             fallback_channel_id=payload.channel_id,
+                            lobby_kind=lobby_kind,
                         )
                     try:
                         channel = bot.get_channel(payload.channel_id)
@@ -1338,6 +1484,7 @@ async def on_raw_reaction_add(payload):
                             await asyncio.to_thread(
                                 cog.rebuild_readycheck_embed,
                                 guild_id=payload_guild_id,
+                                lobby_kind=lobby_kind,
                                 expected_message_id=rc_msg_id,
                             )
                             if cog
@@ -1358,10 +1505,12 @@ async def on_raw_reaction_add(payload):
     # Handle 🔔 readycheck-shortcut reactions on the lobby embed
     if payload.emoji.name == "🔔":
         _init_services()
-        lobby_message_id = await asyncio.to_thread(
-            bot.lobby_service.get_lobby_message_id, guild_id=payload.guild_id
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload.guild_id,
         )
-        if payload.message_id != lobby_message_id:
+        if lobby_kind is None:
             return
         cog = bot.get_cog("LobbyCommands")
         if not cog:
@@ -1370,7 +1519,12 @@ async def on_raw_reaction_add(payload):
         if not guild:
             return
         try:
-            status, _info = await cog._execute_readycheck(guild, payload.guild_id, payload.user_id)
+            status, _info = await cog._execute_readycheck(
+                guild,
+                payload.guild_id,
+                payload.user_id,
+                lobby_kind=lobby_kind,
+            )
         except Exception as exc:
             logger.error(f"Error running 🔔 readycheck shortcut: {exc}", exc_info=True)
             status = "error"
@@ -1393,11 +1547,12 @@ async def on_raw_reaction_add(payload):
 
     if is_legacy_frogling:
         _init_services()
-        lobby_message_id = await asyncio.to_thread(
-            bot.lobby_service.get_lobby_message_id,
-            guild_id=payload.guild_id,
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload.guild_id,
         )
-        if payload.message_id != lobby_message_id:
+        if lobby_kind is None:
             return
         try:
             channel = bot.get_channel(payload.channel_id)
@@ -1421,13 +1576,19 @@ async def on_raw_reaction_add(payload):
     _init_services()  # Ensure services are initialized
     try:
         payload_guild_id = payload.guild_id
-        lobby_message_id = await asyncio.to_thread(
-            bot.lobby_service.get_lobby_message_id, guild_id=payload_guild_id
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload_guild_id,
         )
-        if payload.message_id != lobby_message_id:
+        if lobby_kind is None:
             return
 
-        lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
+        lobby = await asyncio.to_thread(
+            bot.lobby_service.get_lobby,
+            guild_id=payload_guild_id,
+            lobby_kind=lobby_kind,
+        )
         if not lobby or lobby.status != "open":
             return
 
@@ -1444,7 +1605,9 @@ async def on_raw_reaction_add(payload):
 
         if is_jopacoin:
             thread_id = await asyncio.to_thread(
-                bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
+                bot.lobby_service.get_lobby_thread_id,
+                guild_id=payload_guild_id,
+                lobby_kind=lobby_kind,
             )
             if thread_id:
                 try:
@@ -1513,7 +1676,10 @@ async def on_raw_reaction_add(payload):
             return
 
         success, reason, pending_info = await asyncio.to_thread(
-            bot.lobby_service.join_lobby, payload.user_id, guild_id
+            bot.lobby_service.join_lobby,
+            payload.user_id,
+            guild_id,
+            lobby_kind,
         )
 
         if not success:
@@ -1537,6 +1703,14 @@ async def on_raw_reaction_add(payload):
                 reason_messages = {
                     "lobby_full": "Lobby is full.",
                     "already_joined": "Already in lobby.",
+                    "rating_too_high": (
+                        f"{LobbyKind.LOWSKILL.label} is limited to Glicko below 1400."
+                    ),
+                    "in_other_lobby": "Leave your current lobby before joining another.",
+                    "in_flight": (
+                        "You can't switch lobbies while your current shuffle or draft "
+                        "is in progress."
+                    ),
                 }
                 msg = reason_messages.get(reason, "Could not join lobby.")
                 try:
@@ -1548,18 +1722,27 @@ async def on_raw_reaction_add(payload):
         # Re-fetch the lobby after the join lands so the embed update and
         # readycheck see the post-join roster. The earlier fetch (line ~801)
         # is from before the join, so under concurrent reactions it can lag.
-        lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
+        lobby = await asyncio.to_thread(
+            bot.lobby_service.get_lobby,
+            guild_id=payload_guild_id,
+            lobby_kind=lobby_kind,
+        )
         if not lobby:
             return
 
         await update_lobby_message(message, lobby, payload.guild_id)
         lobby_cog = bot.get_cog("LobbyCommands")
         if lobby_cog:
-            await lobby_cog.sync_readycheck_with_lobby(payload.guild_id)
+            await lobby_cog.sync_readycheck_with_lobby(
+                payload.guild_id,
+                lobby_kind=lobby_kind,
+            )
 
         # Mention user in thread to subscribe them
         thread_id = await asyncio.to_thread(
-            bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
+            bot.lobby_service.get_lobby_thread_id,
+            guild_id=payload_guild_id,
+            lobby_kind=lobby_kind,
         )
         thread = None
         if thread_id:
@@ -1567,16 +1750,26 @@ async def on_raw_reaction_add(payload):
                 thread = bot.get_channel(thread_id)
                 if not thread:
                     thread = await bot.fetch_channel(thread_id)
-                await thread.send(f"✅ {user.mention} joined the lobby!")
+                await thread.send(f"✅ {user.mention} joined {lobby_kind.label}!")
             except Exception as exc:
                 logger.warning(f"Failed to post join activity in thread: {exc}")
 
         # Check for rally notification (+2 or +1 needed)
         if not await asyncio.to_thread(bot.lobby_service.is_ready, lobby):
             guild_id = payload.guild_id or 0
-            await notify_lobby_rally(channel, thread, lobby, guild_id)
+            await notify_lobby_rally(
+                channel,
+                thread,
+                lobby,
+                guild_id,
+                lobby_kind=lobby_kind,
+            )
         else:
-            await notify_lobby_ready(channel, guild_id=payload.guild_id or 0)
+            await notify_lobby_ready(
+                channel,
+                guild_id=payload.guild_id or 0,
+                lobby_kind=lobby_kind,
+            )
     except Exception as exc:
         logger.error(f"Error handling reaction add: {exc}", exc_info=True)
 
@@ -1591,15 +1784,20 @@ async def on_raw_reaction_remove(payload):
     if payload.emoji.name == "✅":
         _init_services()
         payload_guild_id = payload.guild_id
-        rc_msg_id = await asyncio.to_thread(
-            bot.lobby_service.get_readycheck_message_id, guild_id=payload_guild_id
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload_guild_id,
+            readycheck=True,
         )
-        if rc_msg_id and payload.message_id == rc_msg_id:
+        if lobby_kind is not None:
+            rc_msg_id = payload.message_id
             try:
                 removed = await asyncio.to_thread(
                     bot.lobby_service.remove_readycheck_reaction,
                     payload.user_id,
                     guild_id=payload_guild_id,
+                    lobby_kind=lobby_kind,
                     expected_message_id=rc_msg_id,
                 )
                 if removed:
@@ -1608,6 +1806,7 @@ async def on_raw_reaction_remove(payload):
                         await asyncio.to_thread(
                             cog.rebuild_readycheck_embed,
                             guild_id=payload_guild_id,
+                            lobby_kind=lobby_kind,
                             expected_message_id=rc_msg_id,
                         )
                         if cog
@@ -1631,13 +1830,19 @@ async def on_raw_reaction_remove(payload):
     _init_services()  # Ensure services are initialized
     try:
         payload_guild_id = payload.guild_id
-        lobby_message_id = await asyncio.to_thread(
-            bot.lobby_service.get_lobby_message_id, guild_id=payload_guild_id
+        lobby_kind = await _resolve_lobby_kind_for_message(
+            bot.lobby_service,
+            payload.message_id,
+            payload_guild_id,
         )
-        if payload.message_id != lobby_message_id:
+        if lobby_kind is None:
             return
 
-        lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
+        lobby = await asyncio.to_thread(
+            bot.lobby_service.get_lobby,
+            guild_id=payload_guild_id,
+            lobby_kind=lobby_kind,
+        )
         if not lobby or lobby.status != "open":
             return
 
@@ -1647,18 +1852,26 @@ async def on_raw_reaction_remove(payload):
         message = channel.get_partial_message(payload.message_id)
 
         left = await asyncio.to_thread(
-            bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id
+            bot.lobby_service.leave_lobby,
+            payload.user_id,
+            payload_guild_id,
+            lobby_kind,
         )
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)
             lobby_cog = bot.get_cog("LobbyCommands")
             if lobby_cog:
-                await lobby_cog.sync_readycheck_with_lobby(payload.guild_id)
+                await lobby_cog.sync_readycheck_with_lobby(
+                    payload.guild_id,
+                    lobby_kind=lobby_kind,
+                )
 
             # Post leave message in thread
             thread_id = await asyncio.to_thread(
-                bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
+                bot.lobby_service.get_lobby_thread_id,
+                guild_id=payload_guild_id,
+                lobby_kind=lobby_kind,
             )
             if thread_id:
                 try:
@@ -1679,7 +1892,7 @@ async def on_raw_reaction_remove(payload):
                         if not user:
                             user = await bot.fetch_user(payload.user_id)
                         display = user.display_name
-                    await thread.send(f"🚪 {display} left the lobby.")
+                    await thread.send(f"🚪 {display} left {lobby_kind.label}.")
                 except Exception as exc:
                     logger.warning(f"Failed to post leave activity in thread: {exc}")
     except Exception as exc:
