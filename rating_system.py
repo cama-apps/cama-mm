@@ -89,6 +89,11 @@ class CamaRatingSystem:
         """Return True if the player's RD is at or below the calibration threshold."""
         return rd <= CALIBRATION_RD_THRESHOLD
 
+    @property
+    def streak_multiplier_per_game(self) -> float:
+        """Return the rate used when calculating new match streak multipliers."""
+        return STREAK_MULTIPLIER_PER_GAME
+
     @staticmethod
     def apply_rd_decay(rd: float, days_since_last_match: int) -> float:
         """
@@ -205,7 +210,10 @@ class CamaRatingSystem:
         return FixedVolatilityPlayer(rating=rating, rd=rd, vol=volatility)
 
     def calculate_streak_multiplier(
-        self, recent_outcomes: list[bool], won: bool
+        self,
+        recent_outcomes: list[bool],
+        won: bool,
+        streak_multiplier_per_game: float | None = None,
     ) -> tuple[int, float]:
         """
         Calculate current streak length and delta multiplier.
@@ -219,6 +227,7 @@ class CamaRatingSystem:
         Args:
             recent_outcomes: List of recent outcomes (most recent first), True=win
             won: Whether this match was won
+            streak_multiplier_per_game: Historical rate override for match correction
 
         Returns:
             (streak_length, multiplier) - multiplier is 1.0 if streak < 3 or
@@ -250,7 +259,12 @@ class CamaRatingSystem:
         if streak_length < STREAK_THRESHOLD:
             return streak_length, 1.0
 
-        multiplier = 1.0 + STREAK_MULTIPLIER_PER_GAME * (streak_length - 2)
+        rate = (
+            STREAK_MULTIPLIER_PER_GAME
+            if streak_multiplier_per_game is None
+            else streak_multiplier_per_game
+        )
+        multiplier = 1.0 + rate * (streak_length - 2)
         return streak_length, multiplier
 
     def _update_player_rating(

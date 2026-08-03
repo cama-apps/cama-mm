@@ -466,8 +466,8 @@ STREAK_THRESHOLD = _parse_int(
     "STREAK_THRESHOLD", 3
 )  # Min streak length for multiplier (boost applies ON this game)
 STREAK_MULTIPLIER_PER_GAME = _parse_float(
-    "STREAK_MULTIPLIER_PER_GAME", 0.20
-)  # 20% boost per game at/above threshold
+    "STREAK_MULTIPLIER_PER_GAME", 0.25
+)  # 25% boost per game at/above threshold
 
 # OpenSkill rating system configuration
 OPENSKILL_CALIBRATION_SIGMA_THRESHOLD = _parse_float("OPENSKILL_CALIBRATION_SIGMA_THRESHOLD", 4.0)

@@ -165,6 +165,44 @@ def test_schema_manager_initialize_is_idempotent(tmp_path):
     assert applied > 0
 
 
+def test_streak_rate_migration_backfills_legacy_history(tmp_path):
+    """Pre-rate rating rows retain the historical 20% correction curve."""
+    db_path = str(tmp_path / "legacy-streak-rate.db")
+    manager = SchemaManager(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE rating_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                streak_length INTEGER,
+                streak_multiplier REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO rating_history (streak_length, streak_multiplier)
+            VALUES (4, 1.40)
+            """
+        )
+
+        migration = getattr(
+            manager,
+            "_migration_add_streak_multiplier_per_game_to_rating_history",
+            None,
+        )
+        assert migration is not None
+        migration(conn.cursor())
+
+        stored_rate = conn.execute(
+            "SELECT streak_multiplier_per_game FROM rating_history"
+        ).fetchone()[0]
+
+    assert stored_rate == pytest.approx(0.20)
+
+
 def test_wrapped_enrichment_facts_migration_backfills_safely_and_idempotently(
     repo_db_path,
 ):

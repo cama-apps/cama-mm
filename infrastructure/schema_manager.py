@@ -752,9 +752,22 @@ class SchemaManager:
                 "expand_economy_event_severity_levels",
                 self._migration_expand_economy_event_severity_levels,
             ),
+            (
+                "add_streak_multiplier_per_game_to_rating_history",
+                self._migration_add_streak_multiplier_per_game_to_rating_history,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_add_streak_multiplier_per_game_to_rating_history(self, cursor) -> None:
+        """Preserve the rating-streak curve used when each match was recorded."""
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "streak_multiplier_per_game",
+            "REAL NOT NULL DEFAULT 0.20",
+        )
 
     def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:
         self._add_column_if_not_exists(
