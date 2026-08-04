@@ -1060,7 +1060,7 @@ class TestV3TeamBasedExpectedOutcome:
     def rating_system(self):
         return CamaRatingSystem()
 
-    def test_eighty_percent_certainty_moves_about_fifteen_in_even_match(
+    def test_eighty_percent_certainty_moves_about_ten_in_even_match(
         self, rating_system
     ):
         team1 = [
@@ -1078,8 +1078,8 @@ class TestV3TeamBasedExpectedOutcome:
             winning_team=1,
         )
 
-        assert radiant_updates[0][0] - 1500 == pytest.approx(15.0, abs=0.5)
-        assert dire_updates[0][0] - 1500 == pytest.approx(-15.0, abs=0.5)
+        assert radiant_updates[0][0] - 1500 == pytest.approx(10.0, abs=0.5)
+        assert dire_updates[0][0] - 1500 == pytest.approx(-10.0, abs=0.5)
 
     def test_low_rated_player_on_losing_favorite_loses_appropriately(self, rating_system):
         """
