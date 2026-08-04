@@ -1528,6 +1528,48 @@ async def on_raw_reaction_add(payload):
         except Exception as exc:
             logger.error(f"Error running 🔔 readycheck shortcut: {exc}", exc_info=True)
             status = "error"
+        if status == "ok" and _info.get("mention_ids"):
+            try:
+                origin_channel_id = await asyncio.to_thread(
+                    bot.lobby_service.get_origin_channel_id,
+                    guild_id=payload.guild_id,
+                    lobby_kind=lobby_kind,
+                )
+                if (
+                    origin_channel_id
+                    and origin_channel_id != _info.get("readycheck_channel_id")
+                ):
+                    origin_channel = bot.get_channel(origin_channel_id)
+                    if not origin_channel:
+                        origin_channel = await bot.fetch_channel(origin_channel_id)
+                    mention_ids = _info["mention_ids"]
+                    tags = " ".join(f"<@{user_id}>" for user_id in mention_ids)
+                    current_readycheck_message_id = await asyncio.to_thread(
+                        bot.lobby_service.get_readycheck_message_id,
+                        guild_id=payload.guild_id,
+                        lobby_kind=lobby_kind,
+                    )
+                    if current_readycheck_message_id != _info.get(
+                        "readycheck_message_id"
+                    ):
+                        return
+                    await origin_channel.send(
+                        (
+                            f"⚔️ **{lobby_kind.label} ready check!** {tags}\n"
+                            f"[React in the lobby thread]({_info['message_jump_url']})"
+                        ),
+                        allowed_mentions=discord.AllowedMentions(
+                            users=[
+                                discord.Object(id=user_id) for user_id in mention_ids
+                            ]
+                        ),
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Error advertising 🔔 readycheck in origin channel: %s",
+                    exc,
+                    exc_info=True,
+                )
         if status != "ok":
             # Visible feedback that nothing happened — remove only this user's reaction
             try:

@@ -771,13 +771,13 @@ async def test_due_reminders_post_in_main_channel_not_origin(
 
 
 @pytest.mark.asyncio
-async def test_due_reminder_resolves_dota_mm_by_name_with_no_channel_setting(
+async def test_due_reminder_resolves_decorated_dota_mm_by_name(
     cog, bot, duel_service, interaction
 ):
     origin_channel = interaction.channel
     origin_channel.name = "gamba"
     main_channel = make_text_channel(999, guild=interaction.guild)
-    main_channel.name = "dota-mm"
+    main_channel.name = "⚔️dota-mm⚔️"
     interaction.guild.text_channels = [origin_channel, main_channel]
     bot.get_guild = MagicMock(return_value=interaction.guild)
     challenge = make_challenge()

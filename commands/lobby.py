@@ -1949,7 +1949,8 @@ class LobbyCommands(commands.Cog):
         info contents:
             ok        -> {"message_jump_url": str, "is_refresh": bool,
                           "pruned_count": int, "mention_ids": list[int],
-                          "readycheck_channel_id": int}
+                          "readycheck_channel_id": int,
+                          "readycheck_message_id": int}
             cooldown  -> {"retry_after_seconds": int}
             (others)  -> {}
         """
@@ -2161,6 +2162,7 @@ class LobbyCommands(commands.Cog):
                 "pruned_count": 0,
                 "mention_ids": mention_ids,
                 "readycheck_channel_id": msg.channel.id,
+                "readycheck_message_id": msg.id,
             }
 
         # Post to lobby thread (target_channel is guaranteed to exist here)
@@ -2214,6 +2216,7 @@ class LobbyCommands(commands.Cog):
             "pruned_count": len(pruned_ids),
             "mention_ids": mention_ids,
             "readycheck_channel_id": msg.channel.id,
+            "readycheck_message_id": msg.id,
         }
 
 
