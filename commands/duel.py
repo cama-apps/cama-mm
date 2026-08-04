@@ -606,7 +606,7 @@ class DuelCommands(commands.Cog):
             channel
             for channel in guild.text_channels
             if isinstance(channel, discord.TextChannel)
-            and channel.name == MAIN_CHANNEL_NAME
+            and MAIN_CHANNEL_NAME in channel.name
         ]
         if len(matches) != 1:
             logger.warning(

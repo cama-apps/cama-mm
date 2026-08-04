@@ -1006,6 +1006,131 @@ async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch
     message.remove_reaction.assert_awaited_once_with("🔔", user)
 
 
+async def test_successful_readycheck_shortcut_advertises_in_origin_channel(
+    bot_module,
+):
+    from domain.models.lobby import LobbyKind
+
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="🔔"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_kind_for_message.return_value = LobbyKind.OPEN
+    lobby_service.get_readycheck_message_id.return_value = 500
+    lobby_service.get_origin_channel_id.return_value = 300
+    cog = SimpleNamespace(
+        _execute_readycheck=AsyncMock(
+            return_value=(
+                "ok",
+                {
+                    "mention_ids": [2, 3],
+                    "message_jump_url": "https://discord.com/channels/42/400/500",
+                    "readycheck_channel_id": 400,
+                    "readycheck_message_id": 500,
+                },
+            )
+        ),
+    )
+    origin_channel = SimpleNamespace(id=300, send=AsyncMock())
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_guild", return_value=SimpleNamespace(id=42)),
+        patch.object(
+            bot_module.bot,
+            "get_channel",
+            side_effect=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            ),
+        ),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    sent = origin_channel.send.await_args
+    assert sent.args[0] == (
+        "⚔️ **🍽️ All You Can Feed ready check!** <@2> <@3>\n"
+        "[React in the lobby thread](https://discord.com/channels/42/400/500)"
+    )
+    assert {user.id for user in sent.kwargs["allowed_mentions"].users} == {2, 3}
+
+
+@pytest.mark.parametrize(
+    ("origin_channel_id", "replace_during_resolution"),
+    [(300, True), (400, False)],
+    ids=["generation-changes-during-resolution", "origin-is-readycheck-channel"],
+)
+async def test_readycheck_shortcut_suppresses_invalid_origin_advertisement(
+    bot_module,
+    origin_channel_id,
+    replace_during_resolution,
+):
+    from domain.models.lobby import LobbyKind
+
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="🔔"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_kind_for_message.return_value = LobbyKind.OPEN
+    lobby_service.get_readycheck_message_id.return_value = 500
+    lobby_service.get_origin_channel_id.return_value = origin_channel_id
+    cog = SimpleNamespace(
+        _execute_readycheck=AsyncMock(
+            return_value=(
+                "ok",
+                {
+                    "mention_ids": [2],
+                    "message_jump_url": "https://discord.com/channels/42/400/500",
+                    "readycheck_channel_id": 400,
+                    "readycheck_message_id": 500,
+                },
+            )
+        ),
+    )
+    origin_channel = SimpleNamespace(id=origin_channel_id, send=AsyncMock())
+    bot_user = SimpleNamespace(id=999)
+
+    def resolve_origin_channel(_channel_id):
+        if replace_during_resolution:
+            lobby_service.get_readycheck_message_id.return_value = 501
+        return origin_channel
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_guild", return_value=SimpleNamespace(id=42)),
+        patch.object(
+            bot_module.bot,
+            "get_channel",
+            side_effect=resolve_origin_channel,
+        ),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    origin_channel.send.assert_not_awaited()
+
+
 async def test_lobby_ready_notification_recommends_readycheck_before_shuffle(
     bot_module,
 ):
