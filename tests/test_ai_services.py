@@ -981,6 +981,9 @@ class TestSQLQueryService:
         assert "match_bans" in BLOCKED_TABLES
         assert "player_trivia_questions" in BLOCKED_TABLES
         assert "player_trivia_sessions" in BLOCKED_TABLES
+        assert "low_priority_state" in BLOCKED_TABLES
+        assert "lobby_suspensions" in BLOCKED_TABLES
+        assert "moderation_events" in BLOCKED_TABLES
 
     def test_blocked_columns_blocklist(self):
         """Test that sensitive columns are in the blocklist."""

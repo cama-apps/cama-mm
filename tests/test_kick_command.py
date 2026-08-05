@@ -3,7 +3,7 @@ Tests for the /kick command in LobbyCommands.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,9 +13,9 @@ from services.lobby_service import LobbyService
 from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
-async def invoke_kick(cog: LobbyCommands, interaction, player):
+async def invoke_kick(cog: LobbyCommands, interaction, player, reason=None):
     """Invoke the app command callback directly for testing."""
-    return await cog.kick.callback(cog, interaction, player)
+    return await cog.kick.callback(cog, interaction, player, reason=reason)
 
 
 class FakePlayerRepo:
@@ -92,11 +92,19 @@ def make_lobby_service():
     return lobby_manager, LobbyService(lobby_manager, player_repo)
 
 
-def make_bot(channel=None):
+def make_bot(channel=None, moderation_service=None):
     """Create a fake bot with get_channel support."""
-    bot = SimpleNamespace()
+    bot = SimpleNamespace(moderation_service=moderation_service)
     bot.get_channel = lambda cid: channel
     return bot
+
+
+def test_kick_reason_is_optional_and_privately_bounded():
+    parameters = {parameter.name: parameter for parameter in LobbyCommands.kick.parameters}
+
+    assert parameters["reason"].required is False
+    assert parameters["reason"].min_value == 3
+    assert parameters["reason"].max_value == 300
 
 
 @pytest.mark.asyncio
@@ -124,3 +132,68 @@ async def test_kick_removes_reaction_and_updates_message(monkeypatch):
     # Confirmation message should be sent to the admin
     assert interaction.followup.messages
     assert "Kicked" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_creator_who_left_lobby_can_no_longer_kick(monkeypatch):
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=7, guild_id=9000)
+    lobby.add_player(42)
+    interaction = FakeInteraction(user_id=7, guild_id=9000)
+    kicked_player = SimpleNamespace(id=42, mention="<@42>", display_name="Target")
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(make_bot(), lobby_service, FakePlayerService())
+    cog.eject_lobby_player = AsyncMock(return_value=True)
+
+    await invoke_kick(cog, interaction, kicked_player)
+
+    assert 42 in lobby.players
+    cog.eject_lobby_player.assert_not_awaited()
+    assert interaction.followup.messages[-1]["ephemeral"] is True
+    assert "Permission denied" in interaction.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_creator_kick_audits_optional_reason_without_posting_it_publicly(
+    monkeypatch,
+):
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=7, guild_id=9000)
+    lobby.add_player(7)
+    lobby.add_player(42)
+    moderation_service = MagicMock()
+    interaction = FakeInteraction(user_id=7, guild_id=9000)
+    kicked_player = SimpleNamespace(id=42, mention="<@42>", display_name="Target")
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+    cog = LobbyCommands(
+        make_bot(moderation_service=moderation_service),
+        lobby_service,
+        FakePlayerService(),
+    )
+    cog.eject_lobby_player = AsyncMock(return_value=True)
+
+    await invoke_kick(
+        cog,
+        interaction,
+        kicked_player,
+        reason="repeated ready-check griefing",
+    )
+
+    cog.eject_lobby_player.assert_awaited_once()
+    ejection = cog.eject_lobby_player.await_args.kwargs
+    assert "repeated ready-check griefing" not in ejection["public_message"]
+    assert "repeated ready-check griefing" in ejection["dm_message"]
+    moderation_service.record_kick.assert_called_once_with(
+        42,
+        9000,
+        actor_id=7,
+        lobby_kind="open",
+        reason="repeated ready-check griefing",
+        source="creator",
+    )
+    assert interaction.followup.messages[-1]["ephemeral"] is True
+    assert "Kicked <@42>" in interaction.followup.messages[-1]["content"]

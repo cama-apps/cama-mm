@@ -16,16 +16,18 @@ def _interaction(*, admin_id: int = 900, guild_id: int = 77):
     )
 
 
-def _commands(*, player_exists: bool = True):
+def _commands(*, player_exists: bool = True, moderation_service=None):
     player_service = MagicMock()
     player_service.get_player.return_value = object() if player_exists else None
     repo = MagicMock()
+    repo.get_state.return_value = None
     return (
         AdminCommands(
             bot=None,
             lobby_service=None,
             player_service=player_service,
             low_priority_repo=repo,
+            moderation_service=moderation_service,
         ),
         player_service,
         repo,
@@ -42,12 +44,27 @@ def test_low_priority_commands_require_manage_guild_by_default():
         assert command.default_permissions.manage_guild is True
 
 
+def test_lowprio_add_exposes_bounded_configurable_win_count():
+    parameters = {parameter.name: parameter for parameter in AdminCommands.lowprio_add.parameters}
+
+    assert parameters["wins"].default == 3
+    assert parameters["wins"].min_value == 1
+    assert parameters["wins"].max_value == 20
+
+
 @pytest.mark.asyncio
-async def test_lowprio_add_sets_three_win_state_ephemerally(monkeypatch):
-    commands, player_service, repo = _commands()
+async def test_lowprio_add_sets_configurable_wins_and_pending_match_watermark(monkeypatch):
+    moderation_service = MagicMock()
+    moderation_service.get_pending_match_watermark.return_value = 314
+    commands, player_service, repo = _commands(
+        moderation_service=moderation_service,
+    )
     interaction = _interaction()
-    target = SimpleNamespace(id=42, mention="<@42>")
-    repo.set_low_priority.return_value = SimpleNamespace(wins_remaining=3)
+    target = SimpleNamespace(id=42, mention="<@42>", send=AsyncMock())
+    repo.set_low_priority.return_value = SimpleNamespace(
+        wins_required=7,
+        wins_remaining=7,
+    )
     monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
 
     await commands.lowprio_add.callback(
@@ -55,17 +72,35 @@ async def test_lowprio_add_sets_three_win_state_ephemerally(monkeypatch):
         interaction,
         target,
         reason="internal",
+        wins=7,
     )
 
     player_service.get_player.assert_called_once_with(42, 77)
+    moderation_service.get_pending_match_watermark.assert_called_once_with(77)
     repo.set_low_priority.assert_called_once_with(
         42,
         77,
         set_by=900,
         reason="internal",
+        wins_required=7,
+        start_pending_match_id=314,
     )
+    moderation_service.record_low_priority_event.assert_called_once_with(
+        42,
+        77,
+        event_type="lowprio_assign",
+        wins_required=7,
+        wins_remaining=7,
+        pending_match_watermark=314,
+        actor_id=900,
+        reason="internal",
+        source="admin",
+    )
+    target.send.assert_awaited_once()
+    assert "7 wins" in target.send.await_args.args[0]
+    assert "internal" in target.send.await_args.args[0]
     interaction.response.send_message.assert_awaited_once()
-    assert "3 wins required" in interaction.response.send_message.call_args.args[0]
+    assert "7 wins required" in interaction.response.send_message.call_args.args[0]
     assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
 
 
@@ -88,12 +123,22 @@ async def test_lowprio_status_reports_progress_ephemerally(monkeypatch):
     commands, _player_service, repo = _commands()
     interaction = _interaction()
     target = SimpleNamespace(id=42, mention="<@42>")
-    repo.get_state.return_value = SimpleNamespace(active=True, wins_remaining=2)
+    repo.get_state.return_value = SimpleNamespace(
+        active=True,
+        wins_required=5,
+        wins_remaining=2,
+        reason="repeat abandonment",
+        set_by=901,
+        created_at="2026-08-05 12:34:56",
+    )
     monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
 
     await commands.lowprio_status.callback(commands, interaction, target)
 
     repo.get_state.assert_called_once_with(42, 77)
     message = interaction.response.send_message.call_args.args[0]
-    assert "1/3 wins completed (2 remaining)" in message
+    assert "3/5 wins completed (2 remaining)" in message
+    assert "repeat abandonment" in message
+    assert "<@901>" in message
+    assert "2026-08-05 12:34:56" in message
     assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True

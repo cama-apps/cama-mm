@@ -15,6 +15,27 @@ from domain.models.lobby import Lobby, LobbyKind
 from repositories.interfaces import ILobbyRepository
 
 
+class LobbySuspendedError(ValueError):
+    """Raised when a suspended player attempts to create a lobby."""
+
+    def __init__(self, suspension: object):
+        super().__init__("lobby_suspended")
+        self.suspension = suspension
+
+
+class LobbyJoinResult(str):
+    """String-compatible manager result carrying optional suspension context."""
+
+    def __new__(
+        cls,
+        value: str,
+        suspension: object | None = None,
+    ) -> "LobbyJoinResult":
+        result = super().__new__(cls, value)
+        result.suspension = suspension
+        return result
+
+
 class LobbyManagerService:
     """
     Manages per-guild lobbies with persistence.
@@ -29,8 +50,13 @@ class LobbyManagerService:
 
     SHUFFLE_LOCK_TIMEOUT = 60.0  # Auto-release shuffle lock after 60 seconds
 
-    def __init__(self, lobby_repo: ILobbyRepository):
+    def __init__(
+        self,
+        lobby_repo: ILobbyRepository,
+        moderation_service=None,
+    ):
         self.lobby_repo = lobby_repo
+        self.moderation_service = moderation_service
         # Per-guild Discord message metadata
         self.lobby_message_ids: dict[tuple[int, LobbyKind], int] = {}
         self.lobby_channel_ids: dict[tuple[int, LobbyKind], int] = {}
@@ -64,6 +90,32 @@ class LobbyManagerService:
         self._shuffle_locks: dict[tuple[int, LobbyKind], asyncio.Lock] = {}
         self._shuffle_lock_times: dict[tuple[int, LobbyKind], float] = {}
         self._load_state()
+
+    def set_moderation_service(self, moderation_service) -> None:
+        """Install or replace the moderation gate used by lobby mutations."""
+        with self._state_lock:
+            self.moderation_service = moderation_service
+
+    def _get_active_suspension_locked(
+        self,
+        discord_id: int,
+        guild_id: int,
+        lobby_kind: LobbyKind,
+    ) -> object | None:
+        """Return the suspension covering one lobby kind.
+
+        Callers hold ``_state_lock`` so the eligibility check and subsequent
+        membership mutation are one manager-side critical section. The
+        moderation service is responsible for matching both the requested
+        kind and an all-lobbies scope.
+        """
+        if self.moderation_service is None:
+            return None
+        return self.moderation_service.get_active_suspension(
+            discord_id,
+            guild_id,
+            lobby_kind=lobby_kind.value,
+        )
 
     @staticmethod
     def _normalize_guild_id(guild_id: int | None) -> int:
@@ -157,6 +209,14 @@ class LobbyManagerService:
         with self._state_lock:
             current = self.lobbies.get(key)
             if current is None or current.status != "open":
+                if creator_id is not None:
+                    suspension = self._get_active_suspension_locked(
+                        creator_id,
+                        normalized,
+                        kind,
+                    )
+                    if suspension is not None:
+                        raise LobbySuspendedError(suspension)
                 new_lobby = Lobby(
                     lobby_id=kind.lobby_id,
                     guild_id=normalized,
@@ -224,6 +284,20 @@ class LobbyManagerService:
             for player_id in selected_ids:
                 reservation = self._in_flight_player_kinds.get((normalized, player_id))
                 if reservation is not None:
+                    return False
+            # A suspension created before this critical section prevents a
+            # future match from starting. Existing reservations returned
+            # above are deliberately left untouched: they belong to a match
+            # operation that was already in flight when moderation changed.
+            for player_id in selected_ids:
+                if (
+                    self._get_active_suspension_locked(
+                        player_id,
+                        normalized,
+                        kind,
+                    )
+                    is not None
+                ):
                     return False
             for player_id in selected_ids:
                 key = (normalized, player_id)
@@ -299,12 +373,14 @@ class LobbyManagerService:
     ) -> str:
         """Add a player to the lobby under the state lock.
 
-        Returns one of: "ok", "full", "already_joined".
+        Returns a string-compatible result. A ``"lobby_suspended"`` result
+        also exposes the matched record as its ``suspension`` attribute.
         """
         with self._state_lock:
             target_kind = LobbyKind.normalize(lobby_kind)
+            normalized = self._normalize_guild_id(guild_id)
             reservation = self._in_flight_player_kinds.get(
-                (self._normalize_guild_id(guild_id), discord_id)
+                (normalized, discord_id)
             )
             reserved_kind = reservation[0] if reservation else None
             if reserved_kind is not None and reserved_kind is not target_kind:
@@ -312,6 +388,13 @@ class LobbyManagerService:
             current_kind = self.get_lobby_kind_for_player(discord_id, guild_id)
             if current_kind is not None and current_kind is not target_kind:
                 return "in_other_lobby"
+            suspension = self._get_active_suspension_locked(
+                discord_id,
+                normalized,
+                target_kind,
+            )
+            if suspension is not None:
+                return LobbyJoinResult("lobby_suspended", suspension)
             lobby = self.get_or_create_lobby(
                 guild_id=guild_id,
                 lobby_kind=target_kind,

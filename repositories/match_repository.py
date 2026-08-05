@@ -176,6 +176,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         dotabuff_match_id: str | None = None,
         notes: str | None = None,
         lobby_type: str = "shuffle",
+        lobby_kind: str | None = None,
         balancing_rating_system: str = "glicko",
         betting_mode: str = "pool",
     ) -> int:
@@ -207,9 +208,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 INSERT INTO matches (guild_id, team1_players, team2_players, winning_team,
-                                    dotabuff_match_id, notes, lobby_type, balancing_rating_system,
-                                    betting_mode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    dotabuff_match_id, notes, lobby_type, lobby_kind,
+                                    balancing_rating_system, betting_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     guild_id,
@@ -219,6 +220,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     dotabuff_match_id,
                     notes,
                     lobby_type,
+                    lobby_kind,
                     balancing_rating_system,
                     betting_mode,
                 ),
@@ -258,6 +260,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         guild_id: int,
         dotabuff_match_id: str | None,
         lobby_type: str,
+        lobby_kind: str | None = None,
         balancing_rating_system: str,
         betting_mode: str = "pool",
         winning_ids: list[int],
@@ -346,10 +349,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 INSERT INTO matches (
                     guild_id, team1_players, team2_players, winning_team,
-                    dotabuff_match_id, lobby_type, balancing_rating_system,
+                    dotabuff_match_id, lobby_type, lobby_kind, balancing_rating_system,
                     betting_mode, pending_match_id, match_date
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_guild,
@@ -358,6 +361,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     winning_team,
                     dotabuff_match_id,
                     lobby_type,
+                    lobby_kind,
                     balancing_rating_system,
                     betting_mode,
                     pending_match_id,
@@ -405,11 +409,150 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     [(pid, normalized_guild) for pid in losing_ids],
                 )
 
+            # One successfully committed, future, in-scope match advances every
+            # matching lobby suspension exactly once. This runs below the
+            # pending-match idempotency guard, so a retry cannot consume another
+            # match from the term. Matches without durable pending/lobby source
+            # metadata are intentionally ignored.
+            recorded_at = int(time.time())
+            if pending_match_id is not None and lobby_kind is not None:
+                progressing_suspensions = cursor.execute(
+                    """
+                    SELECT discord_id, scope, completion, expires_at,
+                           matches_required, matches_remaining,
+                           pending_match_watermark
+                    FROM lobby_suspensions
+                    WHERE guild_id = ? AND active = 1
+                      AND matches_remaining > 0
+                      AND ? > pending_match_watermark
+                      AND (scope = 'all' OR scope = ?)
+                    """,
+                    (normalized_guild, pending_match_id, lobby_kind),
+                ).fetchall()
+
+                completed_suspensions = []
+                for state in progressing_suspensions:
+                    reaches_zero = int(state["matches_remaining"]) <= 1
+                    completes_now = reaches_zero and (
+                        state["completion"] in ("matches", "either")
+                        or (
+                            state["completion"] == "both"
+                            and state["expires_at"] is not None
+                            and int(state["expires_at"]) <= recorded_at
+                        )
+                    )
+                    if completes_now:
+                        completed_suspensions.append(state)
+
+                cursor.execute(
+                    """
+                    UPDATE lobby_suspensions
+                    SET matches_remaining = MAX(0, matches_remaining - 1),
+                        active = CASE
+                            WHEN matches_remaining <= 1
+                                 AND completion IN ('matches', 'either')
+                                THEN 0
+                            WHEN matches_remaining <= 1
+                                 AND completion = 'both'
+                                 AND expires_at <= ?
+                                THEN 0
+                            ELSE active
+                        END,
+                        revision = revision + 1,
+                        updated_at = ?
+                    WHERE guild_id = ? AND active = 1
+                      AND matches_remaining > 0
+                      AND ? > pending_match_watermark
+                      AND (scope = 'all' OR scope = ?)
+                    """,
+                    (
+                        recorded_at,
+                        recorded_at,
+                        normalized_guild,
+                        pending_match_id,
+                        lobby_kind,
+                    ),
+                )
+
+                if completed_suspensions:
+                    cursor.executemany(
+                        """
+                        INSERT INTO moderation_events (
+                            guild_id, discord_id, event_type, source, actor_id,
+                            reason, scope, completion, expires_at,
+                            matches_required, matches_remaining,
+                            pending_match_watermark, wins_required,
+                            wins_remaining, match_id, created_at
+                        )
+                        VALUES (?, ?, 'complete', 'system', NULL, ?, ?, ?, ?, ?,
+                                0, ?, NULL, NULL, ?, ?)
+                        """,
+                        [
+                            (
+                                normalized_guild,
+                                state["discord_id"],
+                                "Suspension requirements completed",
+                                state["scope"],
+                                state["completion"],
+                                state["expires_at"],
+                                state["matches_required"],
+                                state["pending_match_watermark"],
+                                match_id,
+                                recorded_at,
+                            )
+                            for state in completed_suspensions
+                        ],
+                    )
+
             # A recorded Dota win is the only automatic way out of low
             # priority. This stays inside the match transaction and below the
             # pending-match idempotency guard so retries cannot count twice.
             if winning_ids:
                 placeholders = ",".join("?" * len(winning_ids))
+                completing_low_priority = cursor.execute(
+                    f"""
+                    SELECT discord_id, wins_required, start_pending_match_id
+                    FROM low_priority_state
+                    WHERE guild_id = ? AND active = 1 AND wins_remaining = 1
+                      AND (
+                          start_pending_match_id IS NULL
+                          OR (? IS NOT NULL AND ? > start_pending_match_id)
+                      )
+                      AND discord_id IN ({placeholders})
+                    """,
+                    (
+                        normalized_guild,
+                        pending_match_id,
+                        pending_match_id,
+                        *winning_ids,
+                    ),
+                ).fetchall()
+                if completing_low_priority:
+                    cursor.executemany(
+                        """
+                        INSERT INTO moderation_events (
+                            guild_id, discord_id, event_type, source, actor_id,
+                            reason, scope, completion, expires_at,
+                            matches_required, matches_remaining,
+                            pending_match_watermark, wins_required,
+                            wins_remaining, match_id, created_at
+                        )
+                        VALUES (?, ?, 'lowprio_complete', 'system', NULL, ?,
+                                NULL, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?)
+                        """,
+                        [
+                            (
+                                normalized_guild,
+                                state["discord_id"],
+                                "Required wins completed",
+                                state["start_pending_match_id"],
+                                state["wins_required"],
+                                match_id,
+                                recorded_at,
+                            )
+                            for state in completing_low_priority
+                        ],
+                    )
                 cursor.execute(
                     f"""
                     UPDATE low_priority_state
@@ -417,9 +560,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         active = CASE WHEN wins_remaining <= 1 THEN 0 ELSE 1 END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE guild_id = ? AND active = 1 AND wins_remaining > 0
+                      AND (
+                          start_pending_match_id IS NULL
+                          OR (? IS NOT NULL AND ? > start_pending_match_id)
+                      )
                       AND discord_id IN ({placeholders})
                     """,
-                    (normalized_guild, *winning_ids),
+                    (
+                        normalized_guild,
+                        pending_match_id,
+                        pending_match_id,
+                        *winning_ids,
+                    ),
                 )
 
             # 4. Glicko updates

@@ -42,6 +42,10 @@ BLOCKED_TABLES: set[str] = {
     # Sensitive social information
     "soft_avoids",
     "package_deals",
+    # Moderation state and immutable internal audit reasons/actor IDs
+    "low_priority_state",
+    "lobby_suspensions",
+    "moderation_events",
     # Internal player-trivia state: question_text embeds <@discord_id> mentions
     # and correct_index is a live answer key for in-progress sessions.
     "player_trivia_sessions",

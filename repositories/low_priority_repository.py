@@ -2,7 +2,11 @@
 
 from dataclasses import dataclass
 
-from domain.low_priority_constants import LOW_PRIORITY_REQUIRED_WINS
+from domain.low_priority_constants import (
+    LOW_PRIORITY_MAX_WINS,
+    LOW_PRIORITY_MIN_WINS,
+    LOW_PRIORITY_REQUIRED_WINS,
+)
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import ILowPriorityRepository
 
@@ -11,7 +15,9 @@ from repositories.interfaces import ILowPriorityRepository
 class LowPriorityState:
     discord_id: int
     guild_id: int
+    wins_required: int
     wins_remaining: int
+    start_pending_match_id: int | None
     active: bool
     reason: str | None
     set_by: int
@@ -29,7 +35,9 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
         return LowPriorityState(
             discord_id=row["discord_id"],
             guild_id=row["guild_id"],
+            wins_required=row["wins_required"],
             wins_remaining=row["wins_remaining"],
+            start_pending_match_id=row["start_pending_match_id"],
             active=bool(row["active"]),
             reason=row["reason"],
             set_by=row["set_by"],
@@ -46,8 +54,9 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
         with self.connection() as conn:
             row = conn.execute(
                 """
-                SELECT discord_id, guild_id, wins_remaining, active, reason,
-                       set_by, removed_by, removed_reason, created_at, updated_at
+                SELECT discord_id, guild_id, wins_required, wins_remaining,
+                       start_pending_match_id, active, reason, set_by,
+                       removed_by, removed_reason, created_at, updated_at
                 FROM low_priority_state
                 WHERE discord_id = ? AND guild_id = ?
                 """,
@@ -62,18 +71,41 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
         *,
         set_by: int,
         reason: str | None,
+        wins_required: int = LOW_PRIORITY_REQUIRED_WINS,
+        start_pending_match_id: int | None = None,
     ) -> LowPriorityState:
+        if not isinstance(wins_required, int) or isinstance(wins_required, bool):
+            raise ValueError("wins_required must be an integer")
+        if not LOW_PRIORITY_MIN_WINS <= wins_required <= LOW_PRIORITY_MAX_WINS:
+            raise ValueError(
+                f"wins_required must be between {LOW_PRIORITY_MIN_WINS} "
+                f"and {LOW_PRIORITY_MAX_WINS}"
+            )
+        if (
+            start_pending_match_id is not None
+            and (
+                not isinstance(start_pending_match_id, int)
+                or isinstance(start_pending_match_id, bool)
+                or start_pending_match_id < 0
+            )
+        ):
+            raise ValueError("start_pending_match_id must be a non-negative integer or None")
+
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO low_priority_state (
-                    discord_id, guild_id, wins_remaining, active, reason,
-                    set_by, removed_by, removed_reason, created_at, updated_at
+                    discord_id, guild_id, wins_required, wins_remaining,
+                    start_pending_match_id, active, reason, set_by, removed_by,
+                    removed_reason, created_at, updated_at
                 )
-                VALUES (?, ?, ?, 1, ?, ?, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL, NULL,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    wins_required = excluded.wins_required,
                     wins_remaining = excluded.wins_remaining,
+                    start_pending_match_id = excluded.start_pending_match_id,
                     active = 1,
                     reason = excluded.reason,
                     set_by = excluded.set_by,
@@ -85,15 +117,18 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
                 (
                     discord_id,
                     normalized_guild,
-                    LOW_PRIORITY_REQUIRED_WINS,
+                    wins_required,
+                    wins_required,
+                    start_pending_match_id,
                     reason,
                     set_by,
                 ),
             )
             row = conn.execute(
                 """
-                SELECT discord_id, guild_id, wins_remaining, active, reason,
-                       set_by, removed_by, removed_reason, created_at, updated_at
+                SELECT discord_id, guild_id, wins_required, wins_remaining,
+                       start_pending_match_id, active, reason, set_by,
+                       removed_by, removed_reason, created_at, updated_at
                 FROM low_priority_state
                 WHERE discord_id = ? AND guild_id = ?
                 """,
@@ -151,8 +186,9 @@ class LowPriorityRepository(BaseRepository, ILowPriorityRepository):
         with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT discord_id, guild_id, wins_remaining, active, reason,
-                       set_by, removed_by, removed_reason, created_at, updated_at
+                SELECT discord_id, guild_id, wins_required, wins_remaining,
+                       start_pending_match_id, active, reason, set_by,
+                       removed_by, removed_reason, created_at, updated_at
                 FROM low_priority_state
                 WHERE guild_id = ? AND active = 1 AND wins_remaining > 0
                 ORDER BY discord_id

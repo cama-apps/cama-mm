@@ -96,7 +96,7 @@ The bot will connect to Discord and sync slash commands automatically.
 
 ## Discord Commands
 
-The bot registers **42 top-level commands/groups totaling 169 subcommands**. The
+The bot registers **43 top-level commands/groups totaling 177 command paths**. The
 core flows (lobby/shuffle, draft, match recording, betting) are documented in
 full below; everything else gets a summary — run `/help` in Discord for the
 complete list, and Discord's slash-command autocomplete shows per-option details.
@@ -116,12 +116,13 @@ Leave the matchmaking lobby.
 Check lobby players' online status and ping those who are away.
 
 #### `/kick`
-Kick a player from the lobby.
+Kick a player from the current lobby once. This does not prevent them from rejoining.
 
 **Options:**
 - `player`: The Discord user to kick from the lobby
+- `reason` (optional): Private reason shown to the player and retained in admin history
 
-**Permissions:** Admin or lobby creator only
+**Permissions:** Admin, or the lobby creator while the creator is still in that lobby
 
 #### `/resetlobby`
 Reset the current lobby (clears all players).
@@ -267,7 +268,10 @@ List all available commands with descriptions.
 
 **Permissions:** Admin only (requires Administrator or Manage Server permission, or Discord ID in `ADMIN_USER_IDS`)
 
-- `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`), and `/admin lowprio add|remove|status|list` for restricted matchmaking
+- `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
+- `/admin moderation suspend|lift|status|list|history` — Temporarily block selected lobby kinds by duration, future completed matches, or both, with private reasons and durable history
+- `/admin lowprio add|remove|status|list` — Apply the soft shuffle-selection penalty for 1–20 required wins and inspect its progress
+- `/player lobby status` — Privately view your active lobby suspension and low-priority progress
 - `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
 - `/trivia-reset-cooldown` — Reset a user's trivia cooldown
 

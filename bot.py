@@ -1724,6 +1724,24 @@ async def on_raw_reaction_add(payload):
                     await channel.send(msg, delete_after=15)
                 except Exception:
                     pass
+            elif reason == "lobby_suspended":
+                try:
+                    await channel.send(
+                        f"{user.mention} ❌ You are temporarily restricted from this "
+                        "matchmaking lobby. Check your DMs or use `/player lobby status`.",
+                        delete_after=15,
+                    )
+                except Exception:
+                    pass
+                try:
+                    private_reason = getattr(pending_info, "reason", "Not provided")
+                    await user.send(
+                        "You are temporarily suspended from this matchmaking lobby.\n"
+                        f"Reason: {private_reason}\n"
+                        "Use `/player lobby status` in the server for the exact remaining term."
+                    )
+                except Exception:
+                    pass
             else:
                 reason_messages = {
                     "lobby_full": "Lobby is full.",

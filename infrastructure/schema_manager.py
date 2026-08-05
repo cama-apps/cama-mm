@@ -769,6 +769,22 @@ class SchemaManager:
                 "create_lobby_target_subscriptions",
                 self._migration_create_lobby_target_subscriptions,
             ),
+            (
+                "add_match_lobby_kind_for_moderation",
+                self._migration_add_match_lobby_kind_for_moderation,
+            ),
+            (
+                "create_moderation_tables",
+                self._migration_create_moderation_tables,
+            ),
+            (
+                "add_lobby_suspension_revision",
+                self._migration_add_lobby_suspension_revision,
+            ),
+            (
+                "expand_low_priority_state",
+                self._migration_expand_low_priority_state,
+            ),
         ]
 
     # --- Migrations ---
@@ -797,6 +813,203 @@ class SchemaManager:
                 created_at   INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, target_id, subscriber_id)
             )
+            """
+        )
+
+    def _migration_add_match_lobby_kind_for_moderation(self, cursor) -> None:
+        """Persist the source lobby kind used by match-count suspensions."""
+        self._add_column_if_not_exists(
+            cursor,
+            "matches",
+            "lobby_kind",
+            "TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open', 'lowskill'))",
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_matches_moderation_completion
+            ON matches(guild_id, pending_match_id, lobby_kind)
+            """
+        )
+
+    def _migration_create_moderation_tables(self, cursor) -> None:
+        """Create current lobby suspensions and immutable moderation history."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lobby_suspensions (
+                guild_id                INTEGER NOT NULL DEFAULT 0,
+                discord_id              INTEGER NOT NULL,
+                scope                   TEXT NOT NULL
+                    CHECK(scope IN ('all', 'open', 'lowskill')),
+                completion              TEXT NOT NULL
+                    CHECK(completion IN ('time', 'matches', 'either', 'both')),
+                expires_at              INTEGER,
+                matches_required        INTEGER CHECK(matches_required > 0),
+                matches_remaining       INTEGER CHECK(matches_remaining >= 0),
+                pending_match_watermark INTEGER NOT NULL DEFAULT 0
+                    CHECK(pending_match_watermark >= 0),
+                reason                  TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+                source                  TEXT NOT NULL
+                    CHECK(source IN ('admin', 'vote', 'creator', 'system')),
+                actor_id                INTEGER NOT NULL,
+                revision                INTEGER NOT NULL DEFAULT 1
+                    CHECK(revision > 0),
+                active                  INTEGER NOT NULL DEFAULT 1
+                    CHECK(active IN (0, 1)),
+                created_at              INTEGER NOT NULL,
+                updated_at              INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, discord_id),
+                CHECK(
+                    (completion = 'time'
+                        AND expires_at IS NOT NULL
+                        AND matches_required IS NULL
+                        AND matches_remaining IS NULL)
+                    OR
+                    (completion = 'matches'
+                        AND expires_at IS NULL
+                        AND matches_required IS NOT NULL
+                        AND matches_remaining IS NOT NULL)
+                    OR
+                    (completion IN ('either', 'both')
+                        AND expires_at IS NOT NULL
+                        AND matches_required IS NOT NULL
+                        AND matches_remaining IS NOT NULL)
+                ),
+                CHECK(
+                    matches_remaining IS NULL
+                    OR matches_remaining <= matches_required
+                )
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_lobby_suspensions_active_guild
+            ON lobby_suspensions(guild_id, active, scope, discord_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS moderation_events (
+                event_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id                INTEGER NOT NULL DEFAULT 0,
+                discord_id              INTEGER NOT NULL,
+                event_type              TEXT NOT NULL CHECK(event_type IN (
+                    'suspend', 'replace', 'lift', 'complete', 'kick',
+                    'lowprio_assign', 'lowprio_replace', 'lowprio_clear',
+                    'lowprio_complete'
+                )),
+                source                  TEXT NOT NULL
+                    CHECK(source IN ('admin', 'vote', 'creator', 'system')),
+                actor_id                INTEGER,
+                reason                  TEXT,
+                scope                   TEXT
+                    CHECK(scope IS NULL OR scope IN ('all', 'open', 'lowskill')),
+                completion              TEXT CHECK(
+                    completion IS NULL
+                    OR completion IN ('time', 'matches', 'either', 'both')
+                ),
+                expires_at              INTEGER,
+                matches_required        INTEGER CHECK(matches_required > 0),
+                matches_remaining       INTEGER CHECK(matches_remaining >= 0),
+                pending_match_watermark INTEGER CHECK(pending_match_watermark >= 0),
+                wins_required           INTEGER CHECK(wins_required >= 0),
+                wins_remaining          INTEGER CHECK(wins_remaining >= 0),
+                match_id                INTEGER,
+                created_at              INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_moderation_events_target_history
+            ON moderation_events(guild_id, discord_id, event_id DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_moderation_events_guild_history
+            ON moderation_events(guild_id, event_id DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS moderation_events_no_update
+            BEFORE UPDATE ON moderation_events
+            BEGIN
+                SELECT RAISE(ABORT, 'moderation_events is append-only');
+            END
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS moderation_events_no_delete
+            BEFORE DELETE ON moderation_events
+            BEGIN
+                SELECT RAISE(ABORT, 'moderation_events is append-only');
+            END
+            """
+        )
+
+    def _migration_add_lobby_suspension_revision(self, cursor) -> None:
+        """Version current state so stale reconciliation cannot close a replacement."""
+        self._add_column_if_not_exists(
+            cursor,
+            "lobby_suspensions",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0)",
+        )
+
+    def _migration_expand_low_priority_state(self, cursor) -> None:
+        """Allow configurable wins and ignore matches pending at assignment."""
+        columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(low_priority_state)")
+        }
+        if {"wins_required", "start_pending_match_id"} <= columns:
+            return
+
+        cursor.execute(
+            """
+            CREATE TABLE low_priority_state_v2 (
+                discord_id            INTEGER NOT NULL,
+                guild_id              INTEGER NOT NULL DEFAULT 0,
+                wins_required         INTEGER NOT NULL DEFAULT 3
+                    CHECK(wins_required BETWEEN 1 AND 20),
+                wins_remaining        INTEGER NOT NULL DEFAULT 3
+                    CHECK(wins_remaining BETWEEN 0 AND 20),
+                start_pending_match_id INTEGER CHECK(start_pending_match_id >= 0),
+                active                INTEGER NOT NULL DEFAULT 1
+                    CHECK(active IN (0, 1)),
+                reason                TEXT,
+                set_by                INTEGER NOT NULL,
+                removed_by            INTEGER,
+                removed_reason        TEXT,
+                created_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id),
+                CHECK(wins_remaining <= wins_required)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO low_priority_state_v2 (
+                discord_id, guild_id, wins_required, wins_remaining,
+                start_pending_match_id, active, reason, set_by, removed_by,
+                removed_reason, created_at, updated_at
+            )
+            SELECT
+                discord_id, guild_id, 3, wins_remaining, NULL, active, reason,
+                set_by, removed_by, removed_reason, created_at, updated_at
+            FROM low_priority_state
+            """
+        )
+        cursor.execute("DROP TABLE low_priority_state")
+        cursor.execute("ALTER TABLE low_priority_state_v2 RENAME TO low_priority_state")
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_low_priority_active_guild
+            ON low_priority_state(guild_id, active, wins_remaining)
             """
         )
 

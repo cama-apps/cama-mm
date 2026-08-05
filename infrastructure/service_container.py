@@ -120,6 +120,7 @@ class ServiceContainer:
         from repositories.mafia_repository import MafiaRepository
         from repositories.mana_repository import ManaRepository
         from repositories.match_repository import MatchRepository
+        from repositories.moderation_repository import ModerationRepository
         from repositories.neon_event_repository import NeonEventRepository
         from repositories.notification_repository import NotificationRepository
         from repositories.package_deal_repository import PackageDealRepository
@@ -154,6 +155,7 @@ class ServiceContainer:
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
             "low_priority_repo": LowPriorityRepository(p),
+            "moderation_repo": ModerationRepository(p),
             "llm_request_repo": LLMRequestRepository(p),
             "economy_ledger_repo": EconomyLedgerRepository(p),
             "economy_event_repo": EconomyEventRepository(p),
@@ -185,6 +187,7 @@ class ServiceContainer:
         from services.guild_config_service import GuildConfigService
         from services.loan_service import LoanService
         from services.match_state_service import MatchStateService
+        from services.moderation_service import ModerationService
         from services.opendota_player_service import OpenDotaPlayerService
         from services.package_deal_service import PackageDealService
         from services.pairings_service import PairingsService
@@ -213,6 +216,7 @@ class ServiceContainer:
         c["tip_service"] = TipService(c["tip_repo"])
         c["opendota_player_service"] = OpenDotaPlayerService(c["player_repo"])
         c["match_state_service"] = MatchStateService(c["match_repo"])
+        c["moderation_service"] = ModerationService(c["moderation_repo"])
 
     def _init_economy_services(self) -> None:
         """Services that depend on core services."""
@@ -290,7 +294,10 @@ class ServiceContainer:
 
         c = self._components
         c["player_service"] = PlayerService(c["player_repo"])
-        c["lobby_manager"] = LobbyManagerService(c["lobby_repo"])
+        c["lobby_manager"] = LobbyManagerService(
+            c["lobby_repo"],
+            moderation_service=c["moderation_service"],
+        )
         c["lobby_service"] = LobbyService(
             lobby_manager=c["lobby_manager"],
             player_repo=c["player_repo"],
@@ -298,6 +305,7 @@ class ServiceContainer:
             max_players=self.lobby_max_players,
             bankruptcy_repo=c["bankruptcy_repo"],
             match_state_service=c["match_state_service"],
+            moderation_service=c["moderation_service"],
         )
         c["match_service"] = MatchService(
             player_repo=c["player_repo"],
@@ -678,6 +686,7 @@ class ServiceContainer:
         bot.balance_history_service = c["balance_history_service"]
         bot.guild_config_service = c["guild_config_service"]
         bot.recalibration_service = c["recalibration_service"]
+        bot.moderation_service = c["moderation_service"]
         bot.disburse_service = c["disburse_service"]
         bot.tax_service = c["tax_service"]
         bot.economy_event_service = c["economy_event_service"]

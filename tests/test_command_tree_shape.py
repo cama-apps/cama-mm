@@ -127,10 +127,16 @@ def test_commands_use_approved_consolidated_paths():
         "/matches view",
         "/matches recent",
         "/player lobby autonotify",
+        "/player lobby status",
         "/admin lowprio add",
         "/admin lowprio remove",
         "/admin lowprio status",
         "/admin lowprio list",
+        "/admin moderation suspend",
+        "/admin moderation lift",
+        "/admin moderation status",
+        "/admin moderation list",
+        "/admin moderation history",
         "/blameluke",
     }
     retired_paths = {
@@ -166,4 +172,4 @@ def test_command_tree_stays_within_discord_limits():
     assert all(count <= 25 for count in direct_option_counts.values())
     assert direct_option_counts["/dig"] == 22
     assert direct_option_counts["/player"] == 8
-    assert direct_option_counts["/player lobby"] == 1
+    assert direct_option_counts["/player lobby"] == 2

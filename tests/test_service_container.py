@@ -196,6 +196,7 @@ class TestServiceContainerBotExposure:
             "balance_history_service": "balance_history_service",
             "guild_config_service": "guild_config_service",
             "recalibration_service": "recalibration_service",
+            "moderation_service": "moderation_service",
             "disburse_service": "disburse_service",
             "tax_service": "tax_service",
             "economy_event_service": "economy_event_service",
