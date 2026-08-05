@@ -627,39 +627,6 @@ class DisburseService:
                 "fund_amount_returned": result["fund_amount_returned"],
             }
 
-    def enforce_voting_restriction(self, guild_id: int | None) -> dict:
-        """Cancel an active ballot when the current policy suspends voting."""
-        with self._get_guild_lock(guild_id):
-            restriction = self.get_voting_restriction(guild_id)
-            if not restriction:
-                return {
-                    "cancelled": False,
-                    "proposal_id": None,
-                    "fund_amount_returned": 0,
-                }
-            if restriction["code"] == self.MONETARY_RECOVERY_CODE:
-                result = self.disburse_repo.cancel_for_monetary_recovery_atomic(
-                    guild_id
-                )
-            else:
-                result = self.disburse_repo.cancel_for_economy_edict_atomic(
-                    guild_id,
-                    event_id=int(restriction["event_id"]),
-                    event_name=str(restriction["name"]),
-                    severity=int(restriction["severity"]),
-                )
-            if result is None:
-                return {
-                    "cancelled": False,
-                    "proposal_id": None,
-                    "fund_amount_returned": 0,
-                }
-            return {
-                "cancelled": True,
-                "proposal_id": result["proposal_id"],
-                "fund_amount_returned": result["fund_amount_returned"],
-            }
-
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for display in /economy reserve."""
         return self.disburse_repo.get_last_disbursement(guild_id)

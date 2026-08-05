@@ -126,11 +126,7 @@ async def disburse_status(
 
     # Send new message with embed and voting buttons
     embed = build_disburse_embed(proposal)
-    view = (
-        DisburseVoteView(cog.disburse_service, cog)
-        if not restriction
-        else None
-    )
+    view = DisburseVoteView(cog.disburse_service, cog)
     content = restriction["reason"] if restriction else None
     await interaction.response.send_message(content=content, embed=embed, view=view)
 

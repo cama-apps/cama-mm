@@ -318,24 +318,6 @@ async def _economy_event_loop() -> None:
                     bot.economy_event_service.ensure_daily_event,
                     guild.id,
                 )
-                restriction = await asyncio.to_thread(
-                    bot.economy_event_service.get_reserve_voting_restriction,
-                    guild.id,
-                )
-                if isinstance(restriction, dict):
-                    cancellation = await asyncio.to_thread(
-                        bot.disburse_service.enforce_voting_restriction,
-                        guild.id,
-                    )
-                    if cancellation["cancelled"]:
-                        logger.info(
-                            "reserve ballot cancelled by economy edict "
-                            "guild=%s event=%s proposal=%s returned=%s",
-                            guild.id,
-                            restriction["event_id"],
-                            cancellation["proposal_id"],
-                            cancellation["fund_amount_returned"],
-                        )
                 # Durable stamps make the initial post and its 12-hour
                 # reminder independently retryable after delivery failures.
                 announcement_slot = (

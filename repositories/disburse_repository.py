@@ -559,32 +559,6 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             ledger_metadata={},
         )
 
-    def cancel_for_economy_edict_atomic(
-        self,
-        guild_id: int | None,
-        *,
-        event_id: int,
-        event_name: str,
-        severity: int,
-    ) -> dict[str, int] | None:
-        """Atomically cancel an active ballot for a severe economy edict."""
-        level = ("I", "II", "III", "IV", "V")[
-            max(1, min(5, int(severity))) - 1
-        ]
-        return self._cancel_for_voting_restriction_atomic(
-            guild_id,
-            proposal_outcome="economy_edict",
-            ledger_reason=(
-                "Jopacoin Reserve proposal cancelled by "
-                f"{event_name} — Level {level}; locked funds returned"
-            ),
-            ledger_metadata={
-                "event_id": int(event_id),
-                "event_name": str(event_name),
-                "severity": int(severity),
-            },
-        )
-
     def _cancel_for_voting_restriction_atomic(
         self,
         guild_id: int | None,
