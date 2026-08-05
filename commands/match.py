@@ -325,11 +325,25 @@ class MatchCommands(commands.Cog):
             is_on_role = player.preferred_roles and role in player.preferred_roles
             role_emoji = ROLE_EMOJIS.get(role, "")
             role_name = ROLE_NAMES.get(role, role)
-            rating = (
-                rating_system.rating_to_display(player.glicko_rating)
-                if player.glicko_rating is not None
-                else "N/A"
-            )
+            if balancing_system == "openskill":
+                openskill_system = self.match_service.openskill_system
+                if player.os_mu is None:
+                    rating = "N/A"
+                else:
+                    display_rating = openskill_system.mu_to_display(player.os_mu)
+                    sigma = (
+                        player.os_sigma
+                        if player.os_sigma is not None
+                        else openskill_system.DEFAULT_SIGMA
+                    )
+                    certainty = openskill_system.get_certainty_percentage(sigma)
+                    rating = f"{display_rating} | {certainty:.0f}%"
+            else:
+                rating = (
+                    rating_system.rating_to_display(player.glicko_rating)
+                    if player.glicko_rating is not None
+                    else "N/A"
+                )
 
             name_part = f"**{display_name}**" if is_on_role else display_name
             warn = "" if is_on_role else " ⚠️"
@@ -384,28 +398,67 @@ class MatchCommands(commands.Cog):
             # Fallback: random winner, no details
             return random.choice(winning_ids), {}
 
+        def rating_changes(entry: dict) -> dict[str, float]:
+            """Return every available change in comparable display points."""
+            changes: dict[str, float] = {}
+            rating_before = entry.get("rating_before")
+            rating_after = entry.get("rating")
+            if rating_before is not None and rating_after is not None:
+                changes["glicko"] = rating_after - rating_before
+
+            os_mu_before = entry.get("os_mu_before")
+            os_mu_after = entry.get("os_mu_after")
+            if os_mu_before is not None and os_mu_after is not None:
+                os_system = self.match_service.openskill_system
+                changes["openskill"] = (
+                    os_system.mu_to_display(os_mu_after)
+                    - os_system.mu_to_display(os_mu_before)
+                )
+            return changes
+
+        def event_rating_details(entry: dict) -> dict:
+            changes = rating_changes(entry)
+            if not changes:
+                return {
+                    "rating_change": None,
+                    "rating_change_system": None,
+                    "glicko_rating_change": None,
+                    "openskill_rating_change": None,
+                }
+            system, change = max(changes.items(), key=lambda item: item[1])
+            return {
+                "rating_change": change,
+                "rating_change_system": system,
+                "glicko_rating_change": changes.get("glicko"),
+                "openskill_rating_change": changes.get("openskill"),
+            }
+
         # Check for underdog (lowest expected win probability who won)
         underdog = min(
             winner_data,
-            key=lambda x: x.get("expected_team_win_prob") or 0.5,
+            key=lambda x: (
+                x.get("expected_team_win_prob")
+                if x.get("expected_team_win_prob") is not None
+                else 0.5
+            ),
         )
-        underdog_prob = underdog.get("expected_team_win_prob") or 0.5
+        underdog_prob = underdog.get("expected_team_win_prob")
+        if underdog_prob is None:
+            underdog_prob = 0.5
         if underdog_prob < 0.45:
-            rating_change = (underdog.get("rating") or 0) - (underdog.get("rating_before") or 0)
             return underdog["discord_id"], {
-                "rating_change": rating_change,
+                **event_rating_details(underdog),
                 "expected_win_prob": underdog_prob,
                 "is_underdog": True,
             }
 
-        # Otherwise: biggest rating gainer
+        # Otherwise: biggest display-point gain in either system.
         best_gainer = max(
             winner_data,
-            key=lambda x: (x.get("rating") or 0) - (x.get("rating_before") or 0),
+            key=lambda entry: max(rating_changes(entry).values(), default=float("-inf")),
         )
-        rating_change = (best_gainer.get("rating") or 0) - (best_gainer.get("rating_before") or 0)
         return best_gainer["discord_id"], {
-            "rating_change": rating_change,
+            **event_rating_details(best_gainer),
             "expected_win_prob": best_gainer.get("expected_team_win_prob"),
             "is_big_gainer": True,
         }

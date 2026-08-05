@@ -924,6 +924,113 @@ class TestMatchCorrection:
         for pid in dire_ids:
             assert stored_streaks[pid] == (4, pytest.approx(1.40))
 
+    def test_correction_replay_uses_recorded_streak_rate_for_openskill(
+        self, correction_services, monkeypatch
+    ):
+        """The post-correction replay must retain the match's recorded curve.
+
+        The direct correction update is followed by a full OpenSkill replay, so
+        checking only the intermediate update can miss a replay that overwrites
+        the streak-amplified value. Real prior matches make the streak available
+        to that replay and verify the final player/history values end to end.
+        """
+        import rating_system as rating_system_module
+
+        match_service = correction_services["match_service"]
+        match_repo = correction_services["match_repo"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=11600)
+        target = player_ids[0]
+        recorded_rate = 0.20
+        monkeypatch.setattr(
+            rating_system_module,
+            "STREAK_MULTIPLIER_PER_GAME",
+            recorded_rate,
+        )
+
+        # Give the target three replayable wins. Unlike synthetic history rows,
+        # these matches are part of the chronological OpenSkill rebuild.
+        for _ in range(3):
+            match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+            pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+            target_side = "radiant" if target in pending.radiant_team_ids else "dire"
+            match_service.record_match(target_side, guild_id=TEST_GUILD_ID)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        corrected_side = "radiant" if target in pending.radiant_team_ids else "dire"
+        wrong_side = "dire" if corrected_side == "radiant" else "radiant"
+        match_id = match_service.record_match(
+            wrong_side,
+            guild_id=TEST_GUILD_ID,
+        )["match_id"]
+
+        # A later balance change must not affect correction or its replay.
+        current_rate = 0.25
+        monkeypatch.setattr(
+            rating_system_module,
+            "STREAK_MULTIPLIER_PER_GAME",
+            current_rate,
+        )
+        match_service.correct_match_result(
+            match_id,
+            corrected_side,
+            TEST_GUILD_ID,
+            corrected_by=1,
+        )
+
+        history = match_repo.get_full_rating_history_for_match(match_id)
+        snapshots = {entry["discord_id"]: entry for entry in history}
+        target_snapshot = snapshots[target]
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
+
+        native = match_service.openskill_system.update_ratings_equal_weight(
+            [
+                (
+                    pid,
+                    snapshots[pid]["os_mu_before"],
+                    snapshots[pid]["os_sigma_before"],
+                )
+                for pid in radiant_ids
+            ],
+            [
+                (
+                    pid,
+                    snapshots[pid]["os_mu_before"],
+                    snapshots[pid]["os_sigma_before"],
+                )
+                for pid in dire_ids
+            ],
+            winning_team=1 if corrected_side == "radiant" else 2,
+        )
+        old_mu = target_snapshot["os_mu_before"]
+        native_delta = native[target][0] - old_mu
+        recorded_multiplier = 1.0 + recorded_rate * 2  # fourth consecutive win
+        current_multiplier = 1.0 + current_rate * 2
+        expected_mu = old_mu + native_delta * recorded_multiplier
+        wrong_current_mu = old_mu + native_delta * current_multiplier
+
+        assert target_snapshot["streak_multiplier_per_game"] == pytest.approx(recorded_rate)
+        assert target_snapshot["os_mu_after"] == pytest.approx(expected_mu)
+        assert target_snapshot["os_mu_after"] != pytest.approx(native[target][0])
+        assert target_snapshot["os_mu_after"] != pytest.approx(wrong_current_mu)
+        assert player_repo.get_openskill_rating(target, TEST_GUILD_ID)[0] == pytest.approx(
+            expected_mu
+        )
+
+        with match_repo.connection() as conn:
+            streak = conn.execute(
+                "SELECT streak_length, streak_multiplier "
+                "FROM rating_history WHERE match_id = ? AND discord_id = ?",
+                (match_id, target),
+            ).fetchone()
+        assert (streak["streak_length"], streak["streak_multiplier"]) == (
+            4,
+            pytest.approx(recorded_multiplier),
+        )
+
 
 def test_correction_finishes_after_partial_win_bonus_failure(correction_services):
     """A failure while awarding corrected winners must abort BEFORE the

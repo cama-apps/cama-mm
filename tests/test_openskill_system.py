@@ -5,9 +5,9 @@ Tests cover:
 - Native bounded contribution weights without min/max expansion
 - Asymmetric performance behavior (high FP = more credit on win, less blame on loss)
 - Uncapped native mu and sigma posteriors
+- Post-hoc streak scaling of native mu deltas
 - Inactivity uncertainty decay
 """
-
 
 import pytest
 
@@ -27,7 +27,7 @@ class TestWeightBlending:
         starting_sigma = 8.0
 
         high_fp_player = (1, starting_mu, starting_sigma, 30.0)  # Max FP
-        low_fp_player = (2, starting_mu, starting_sigma, 5.0)   # Min FP
+        low_fp_player = (2, starting_mu, starting_sigma, 5.0)  # Min FP
 
         # Both on winning team 1
         team1_data = [high_fp_player, low_fp_player]
@@ -51,7 +51,7 @@ class TestWeightBlending:
         low_fp_gain = low_fp_new_mu - starting_mu
 
         # The revised absolute-score nudge must remain small.
-        ratio = high_fp_gain / low_fp_gain if low_fp_gain > 0 else float('inf')
+        ratio = high_fp_gain / low_fp_gain if low_fp_gain > 0 else float("inf")
         assert ratio < 1.25, f"FP impact too high: {ratio:.2f}x gain ratio"
         assert ratio > 1.0, f"High FP should still gain more: {ratio:.2f}x"
 
@@ -95,9 +95,7 @@ class TestWeightBlending:
         )
 
         for player_ids in ((1, 2), (3, 4)):
-            weighted_total = sum(
-                weighted[pid][0] - 45.0 for pid in player_ids
-            )
+            weighted_total = sum(weighted[pid][0] - 45.0 for pid in player_ids)
             equal_total = sum(equal[pid][0] - 45.0 for pid in player_ids)
             assert weighted_total != pytest.approx(equal_total)
 
@@ -149,7 +147,7 @@ class TestLossWeightInversion:
 
         # Losing team: high FP and low FP players
         high_fp_loser = (3, starting_mu, starting_sigma, 30.0)  # High FP (played well but lost)
-        low_fp_loser = (4, starting_mu, starting_sigma, 5.0)    # Low FP (contributed to loss)
+        low_fp_loser = (4, starting_mu, starting_sigma, 5.0)  # Low FP (contributed to loss)
         team2_data = [high_fp_loser, low_fp_loser]
 
         results = system.update_ratings_after_match(team1_data, team2_data, winning_team=1)
@@ -185,7 +183,7 @@ class TestLossWeightInversion:
 
 
 class TestNativePosterior:
-    """OpenSkill's native mu and sigma outputs are stored without post-processing."""
+    """The default 1x streak policy preserves OpenSkill's native posterior."""
 
     def test_weighted_update_matches_installed_plackett_luce_exactly(self):
         system = CamaOpenSkillSystem()
@@ -206,18 +204,10 @@ class TestNativePosterior:
             weights=factors,
         )
 
-        assert actual[1][:2] == pytest.approx(
-            (direct[0][0].mu, direct[0][0].sigma)
-        )
-        assert actual[2][:2] == pytest.approx(
-            (direct[0][1].mu, direct[0][1].sigma)
-        )
-        assert actual[3][:2] == pytest.approx(
-            (direct[1][0].mu, direct[1][0].sigma)
-        )
-        assert actual[4][:2] == pytest.approx(
-            (direct[1][1].mu, direct[1][1].sigma)
-        )
+        assert actual[1][:2] == pytest.approx((direct[0][0].mu, direct[0][0].sigma))
+        assert actual[2][:2] == pytest.approx((direct[0][1].mu, direct[0][1].sigma))
+        assert actual[3][:2] == pytest.approx((direct[1][0].mu, direct[1][0].sigma))
+        assert actual[4][:2] == pytest.approx((direct[1][1].mu, direct[1][1].sigma))
 
     def test_uncertain_upset_is_not_capped_at_two_mu(self):
         system = CamaOpenSkillSystem()
@@ -241,6 +231,75 @@ class TestNativePosterior:
 
         assert results[2][0] < system.MIN_MU
         assert system.mu_to_display(results[2][0]) == 0
+
+
+class TestStreakOverlay:
+    """Streaks scale only native mu deltas, preserving the OpenSkill posterior."""
+
+    def test_weighted_update_scales_only_selected_players_mu_delta(self):
+        system = CamaOpenSkillSystem()
+        starting_mu = 40.0
+        team1 = [
+            (1, starting_mu, 5.0, 30.0),
+            (2, starting_mu, 5.0, 5.0),
+        ]
+        team2 = [
+            (3, starting_mu, 5.0, 30.0),
+            (4, starting_mu, 5.0, 5.0),
+        ]
+
+        native = system.update_ratings_after_match(team1, team2, 1)
+        streaked = system.update_ratings_after_match(
+            team1,
+            team2,
+            1,
+            streak_multipliers={1: 1.75, 4: 1.5},
+        )
+
+        assert streaked[1][0] == pytest.approx(starting_mu + (native[1][0] - starting_mu) * 1.75)
+        assert streaked[4][0] == pytest.approx(starting_mu + (native[4][0] - starting_mu) * 1.5)
+        assert streaked[2][0] == native[2][0]
+        assert streaked[3][0] == native[3][0]
+
+        for player_id in (1, 2, 3, 4):
+            assert streaked[player_id][1] == native[player_id][1]
+            assert streaked[player_id][2] == native[player_id][2]
+
+    def test_explicit_one_x_preserves_native_values_exactly(self):
+        system = CamaOpenSkillSystem()
+        team1 = [(1, 42.0, 5.0, 30.0), (2, 38.0, 7.0, 5.0)]
+        team2 = [(3, 45.0, 4.0, 20.0), (4, 35.0, 6.0, 10.0)]
+
+        native = system.update_ratings_after_match(team1, team2, 1)
+        explicit_one = system.update_ratings_after_match(
+            team1,
+            team2,
+            1,
+            streak_multipliers=dict.fromkeys((1, 2, 3, 4), 1.0),
+        )
+
+        assert explicit_one == native
+
+    def test_equal_weight_api_forwards_streak_multipliers(self):
+        system = CamaOpenSkillSystem()
+        starting_mu = 35.0
+        team1 = [(1, starting_mu, 8.0), (2, starting_mu, 8.0)]
+        team2 = [(3, starting_mu, 8.0), (4, starting_mu, 8.0)]
+
+        native = system.update_ratings_equal_weight(team1, team2, 1)
+        streaked = system.update_ratings_equal_weight(
+            team1,
+            team2,
+            1,
+            streak_multipliers={1: 1.75, 3: 1.5},
+        )
+
+        assert streaked[1][0] == pytest.approx(starting_mu + (native[1][0] - starting_mu) * 1.75)
+        assert streaked[3][0] == pytest.approx(starting_mu + (native[3][0] - starting_mu) * 1.5)
+        assert streaked[2] == native[2]
+        assert streaked[4] == native[4]
+        assert streaked[1][1] == native[1][1]
+        assert streaked[3][1] == native[3][1]
 
 
 class TestEqualWeightUpdate:
@@ -384,6 +443,18 @@ def test_algorithm_fingerprint_changes_with_rating_configuration(monkeypatch):
         CamaOpenSkillSystem,
         "PERFORMANCE_STRENGTH",
         CamaOpenSkillSystem.PERFORMANCE_STRENGTH + 0.01,
+    )
+
+    assert CamaOpenSkillSystem.algorithm_fingerprint() != original
+
+
+def test_algorithm_fingerprint_includes_streak_configuration(monkeypatch):
+    original = CamaOpenSkillSystem.algorithm_fingerprint()
+
+    monkeypatch.setattr(
+        CamaOpenSkillSystem,
+        "STREAK_MULTIPLIER_PER_GAME",
+        CamaOpenSkillSystem.STREAK_MULTIPLIER_PER_GAME + 0.01,
     )
 
     assert CamaOpenSkillSystem.algorithm_fingerprint() != original

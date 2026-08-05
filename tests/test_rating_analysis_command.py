@@ -20,6 +20,7 @@ import types
 import pytest
 
 from commands.rating_analysis import RatingAnalysisCommands
+from openskill_rating_system import CamaOpenSkillSystem
 
 # ---------------------------------------------------------------------------
 # Discord interaction shims
@@ -528,6 +529,8 @@ class TestPlayerAction:
                 "os_sigma_after": 4.5,
                 "won": True,
                 "fantasy_weight": 1.5,
+                "streak_length": 3,
+                "streak_multiplier": 1.2,
             }
         ]
         cog = _make_cog(match_service=match_svc, player_service=ps)
@@ -554,8 +557,40 @@ class TestPlayerAction:
         assert "21.00" in names["Ordinal (μ-3σ)"]
         # History rendered
         history_field = names["Recent OpenSkill Changes"]
-        assert "+1.50" in history_field  # mu change
+        assert "+75" in history_field  # display-scale rating change
+        assert "+1.50" not in history_field
         assert "(perf×1.500)" in history_field
+        assert "(streak W3×1.20)" in history_field
+
+    @pytest.mark.asyncio
+    async def test_player_uses_canonical_calibration_helper(self, monkeypatch):
+        monkeypatch.setattr("commands.rating_analysis.has_admin_permission", lambda _: True)
+        calibration_calls = []
+
+        def _is_calibrated(_system, sigma):
+            calibration_calls.append(sigma)
+            return True
+
+        monkeypatch.setattr(CamaOpenSkillSystem, "is_calibrated", _is_calibrated)
+        player_obj = types.SimpleNamespace(glicko_rating=None, glicko_rd=None)
+        ps = StubPlayerService(
+            players={9: player_obj},
+            ratings={9: (20.0, 6.0)},
+        )
+        cog = _make_cog(player_service=ps)
+        interaction = FakeInteraction()
+
+        await cog.ratinganalysis.callback(
+            cog,
+            interaction,
+            "player",
+            FakeMember(9, "Canonical"),
+        )
+
+        embed = interaction.followup.messages[-1]["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        assert "Yes" in fields["Calibrated"]
+        assert calibration_calls == [6.0]
 
     @pytest.mark.asyncio
     async def test_player_with_high_sigma_not_calibrated(self, monkeypatch):

@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from infrastructure.schema_manager import SchemaManager
+from openskill_replay import OPENSKILL_ALGORITHM_VERSION
 from tests.conftest import TEST_GUILD_ID
 
 MIGRATION_NAME = "openskill_v3_durable_native_replay"
@@ -155,13 +156,17 @@ def test_pending_migration_backfills_history_players_and_predictions(
     assert migration is not None
     assert len(players) == 10
     assert all(row["os_mu"] != 999 for row in players)
-    assert all(row["os_rating_version"] == 3 for row in players)
+    assert all(
+        row["os_rating_version"] == OPENSKILL_ALGORITHM_VERSION for row in players
+    )
     assert all(row["os_algorithm_fingerprint"] for row in players)
     assert len(history) == 10
-    assert all(row["os_algorithm_version"] == 3 for row in history)
+    assert all(
+        row["os_algorithm_version"] == OPENSKILL_ALGORITHM_VERSION for row in history
+    )
     assert all(row["os_algorithm_fingerprint"] for row in history)
     assert all(row["fantasy_weight"] is not None for row in history)
-    assert prediction["openskill_algorithm_version"] == 3
+    assert prediction["openskill_algorithm_version"] == OPENSKILL_ALGORITHM_VERSION
     assert prediction["openskill_algorithm_fingerprint"]
     assert prediction["openskill_radiant_win_prob"] == pytest.approx(0.5)
     assert prediction["openskill_raw_radiant_win_prob"] == pytest.approx(0.5)

@@ -16,8 +16,11 @@ from typing import Any
 
 from config import NEW_PLAYER_MMR_DISCOUNT
 from openskill_rating_system import CamaOpenSkillSystem
+from rating_system import CamaRatingSystem
 
-OPENSKILL_ALGORITHM_VERSION = 3
+OPENSKILL_ALGORITHM_VERSION = 4
+_RECENT_OUTCOME_LIMIT = 20
+_LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
 
 
 def _value(record: Any, key: str, default=None):
@@ -72,6 +75,22 @@ def _participant_team(participant: Any) -> int | None:
     return None
 
 
+def _streak_rate(match: Any) -> float:
+    """Return the rating-streak rate recorded for a match.
+
+    Matches recorded before the rate column was introduced used the historical
+    20% curve. Replay inputs without a matching history row therefore use the
+    same legacy value rather than today's configuration.
+    """
+    stored = _value(match, "streak_multiplier_per_game")
+    if stored is None:
+        return _LEGACY_STREAK_MULTIPLIER_PER_GAME
+    try:
+        return float(stored)
+    except (TypeError, ValueError):
+        return _LEGACY_STREAK_MULTIPLIER_PER_GAME
+
+
 @dataclass
 class OpenSkillReplayResult:
     final_ratings: dict[tuple[int, int], tuple[float, float]]
@@ -124,6 +143,8 @@ def replay_openskill(
     algorithm_fingerprint = rating_system.algorithm_fingerprint()
     current: dict[tuple[int, int], tuple[float, float]] = {}
     last_match_at: dict[tuple[int, int], datetime] = {}
+    recent_outcomes: dict[tuple[int, int], list[bool]] = {}
+    streak_system = CamaRatingSystem()
 
     for player in players:
         player_id = int(_value(player, "discord_id"))
@@ -261,6 +282,22 @@ def replay_openskill(
             int(_value(participant, "discord_id")): participant for participant in participants
         }
         all_ids = team1_ids + team2_ids
+        won_by_player = {
+            player_id: team_number == winning_team
+            for team_number, player_ids in ((1, team1_ids), (2, team2_ids))
+            for player_id in player_ids
+        }
+        recorded_streak_rate = _streak_rate(match)
+        streak_multipliers: dict[int, float] = {}
+        for player_id in all_ids:
+            key = (guild_id, player_id)
+            _streak_length, multiplier = streak_system.calculate_streak_multiplier(
+                recent_outcomes.get(key, []),
+                won=won_by_player[player_id],
+                streak_multiplier_per_game=recorded_streak_rate,
+            )
+            streak_multipliers[player_id] = multiplier
+
         complete_fantasy = len(participants_by_id) >= 10 and all(
             player_id in participants_by_id
             and _value(participants_by_id[player_id], "fantasy_points") is not None
@@ -314,6 +351,7 @@ def replay_openskill(
                 team1_data,
                 team2_data,
                 int(winning_team),
+                streak_multipliers=streak_multipliers,
             )
             results = {
                 player_id: (mu, sigma)
@@ -328,6 +366,7 @@ def replay_openskill(
                 [(player_id, *before[player_id]) for player_id in team1_ids],
                 [(player_id, *before[player_id]) for player_id in team2_ids],
                 int(winning_team),
+                streak_multipliers=streak_multipliers,
             )
             factors = dict.fromkeys(all_ids)
             replay.matches_equal_weight += 1
@@ -358,6 +397,9 @@ def replay_openskill(
                         "os_algorithm_fingerprint": algorithm_fingerprint,
                     }
                 )
+                outcomes = recent_outcomes.setdefault(key, [])
+                outcomes.insert(0, won_by_player[player_id])
+                del outcomes[_RECENT_OUTCOME_LIMIT:]
         replay.matches_processed += 1
 
     for guild_id, guild_events in events_by_guild.items():

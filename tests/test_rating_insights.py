@@ -114,6 +114,36 @@ def test_compute_calibration_stats_with_predictions_and_drift():
     assert rating_movement["count"] == 2
     assert rating_movement["avg_delta"] == pytest.approx(15.0, rel=1e-6)
     assert rating_movement["median_delta"] == pytest.approx(15.0, rel=1e-6)
+    assert stats["glicko_rating_movement"] == rating_movement
+    assert stats["openskill_rating_movement"]["count"] == 0
+
+
+def test_compute_calibration_stats_reports_openskill_movement_and_stability_in_display_points():
+    history = [
+        {
+            "os_mu_before": 40.0,
+            "os_mu_after": 40.2,
+            "os_sigma_before": 3.0,
+        },
+        {
+            "os_mu_before": 40.2,
+            "os_mu_after": 41.0,
+            "os_sigma_before": 6.0,
+        },
+    ]
+
+    stats = compute_calibration_stats([], rating_history_entries=history)
+
+    movement = stats["openskill_rating_movement"]
+    assert movement == {
+        "count": 2,
+        "avg_delta": pytest.approx(25.0),
+        "median_delta": pytest.approx(25.0),
+    }
+    stability = stats["openskill_rating_stability"]
+    assert stability["calibrated_avg_delta"] == pytest.approx(10.0)
+    assert stability["uncalibrated_avg_delta"] == pytest.approx(40.0)
+    assert stability["stability_ratio"] == pytest.approx(0.25)
 
 
 def test_compute_calibration_stats_openskill_prediction_quality_from_history():
@@ -265,3 +295,31 @@ class TestLast5Delta:
         ]
 
         assert _last_5_delta(history) is None
+
+    def test_openskill_trend_uses_shared_display_scale(self):
+        history = [
+            {"os_mu_after": 42.0, "os_mu_before": 41.5},
+            {"os_mu_after": 41.5, "os_mu_before": 41.0},
+            {"os_mu_after": 41.0, "os_mu_before": 40.0},
+        ]
+
+        calibration = compute_player_calibration(
+            Player(name="p"), history, [], CamaRatingSystem()
+        )
+
+        assert calibration.openskill_last_5_delta == pytest.approx(100.0)
+
+
+def test_player_streak_does_not_require_glicko_prediction_rows():
+    history = [
+        {"won": True, "expected_team_win_prob": None},
+        {"won": True, "expected_team_win_prob": None},
+        {"won": False, "expected_team_win_prob": None},
+    ]
+
+    calibration = compute_player_calibration(
+        Player(name="p"), history, [], CamaRatingSystem()
+    )
+
+    assert calibration.streak_type == "W"
+    assert calibration.streak == 2

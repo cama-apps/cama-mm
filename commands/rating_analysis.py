@@ -402,13 +402,13 @@ class RatingAnalysisCommands(commands.Cog):
 
         if os_data:
             mu, sigma = os_data
+            os_system = CamaOpenSkillSystem()
             # Calculate ordinal (conservative skill estimate)
-            ordinal = mu - 3 * sigma
+            ordinal = os_system.ordinal(mu, sigma)
             # Use the same canonical OpenSkill display conversion as the
             # leaderboard and team balancer.
-            normalized_rating = CamaOpenSkillSystem.mu_to_display(mu)
-            # Check calibration status (sigma <= 4.0 is calibrated)
-            is_calibrated = sigma <= 4.0
+            normalized_rating = os_system.mu_to_display(mu)
+            is_calibrated = os_system.is_calibrated(sigma)
 
             # Normalized rating for easy comparison
             embed.add_field(
@@ -427,7 +427,11 @@ class RatingAnalysisCommands(commands.Cog):
 
             embed.add_field(
                 name="Calibrated",
-                value="✓ Yes" if is_calibrated else "No (need σ ≤ 4.0)",
+                value=(
+                    "✓ Yes"
+                    if is_calibrated
+                    else f"No (need σ ≤ {os_system.CALIBRATION_THRESHOLD:.1f})"
+                ),
                 inline=True,
             )
 
@@ -458,7 +462,10 @@ class RatingAnalysisCommands(commands.Cog):
             if history:
                 history_lines = []
                 for h in history:
-                    mu_change = h["os_mu_after"] - h["os_mu_before"]
+                    display_change = (
+                        os_system.mu_to_display(h["os_mu_after"])
+                        - os_system.mu_to_display(h["os_mu_before"])
+                    )
                     sigma_change = h["os_sigma_after"] - h["os_sigma_before"]
                     won = h.get("won", None)
                     result_emoji = "🏆" if won else "❌" if won is False else "•"
@@ -467,8 +474,22 @@ class RatingAnalysisCommands(commands.Cog):
                         if h.get("fantasy_weight") is not None
                         else ""
                     )
+                    streak_length = h.get("streak_length")
+                    streak_multiplier = h.get("streak_multiplier")
+                    streak_str = ""
+                    if (
+                        streak_length is not None
+                        and streak_multiplier is not None
+                        and streak_multiplier > 1.0
+                    ):
+                        result = "W" if won else "L" if won is False else ""
+                        streak_str = (
+                            f" (streak {result}{streak_length}"
+                            f"×{streak_multiplier:.2f})"
+                        )
                     history_lines.append(
-                        f"{result_emoji} μ: {mu_change:+.2f}, σ: {sigma_change:+.3f}{weight_str}"
+                        f"{result_emoji} Rating: {display_change:+d}, "
+                        f"σ: {sigma_change:+.3f}{weight_str}{streak_str}"
                     )
                 embed.add_field(
                     name="Recent OpenSkill Changes",

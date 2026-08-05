@@ -1558,6 +1558,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "os_sigma_after": row["os_sigma_after"]
                     if "os_sigma_after" in row.keys()
                     else None,
+                    "fantasy_weight": row["fantasy_weight"]
+                    if "fantasy_weight" in row.keys()
+                    else None,
+                    "streak_length": row["streak_length"]
+                    if "streak_length" in row.keys()
+                    else None,
+                    "streak_multiplier": row["streak_multiplier"]
+                    if "streak_multiplier" in row.keys()
+                    else None,
                 }
                 for row in rows
             ]
@@ -1572,7 +1581,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, rating, rating_before, expected_team_win_prob, won
+                SELECT discord_id, rating, rating_before,
+                       os_mu_before, os_mu_after,
+                       expected_team_win_prob, won
                 FROM rating_history
                 WHERE match_id = ?
             """,
@@ -1584,6 +1595,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "discord_id": row["discord_id"],
                     "rating": row["rating"],
                     "rating_before": row["rating_before"],
+                    "os_mu_before": row["os_mu_before"],
+                    "os_mu_after": row["os_mu_after"],
                     "expected_team_win_prob": row["expected_team_win_prob"],
                     "won": row["won"],
                 }
@@ -1672,8 +1685,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "won": row["won"],
                     "match_id": row["match_id"],
                     "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
+                    "os_mu_after": row["os_mu_after"]
+                    if "os_mu_after" in row.keys()
+                    else None,
                     "os_sigma_before": row["os_sigma_before"]
                     if "os_sigma_before" in row.keys()
+                    else None,
+                    "os_sigma_after": row["os_sigma_after"]
+                    if "os_sigma_after" in row.keys()
                     else None,
                     "timestamp": row["timestamp"],
                 }
@@ -2473,11 +2492,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
             ).fetchall()
             matches = cursor.execute(
                 """
-                SELECT match_id, guild_id, winning_team, match_date,
-                       team1_players, team2_players
-                FROM matches
-                WHERE guild_id = ? AND winning_team IN (1, 2)
-                ORDER BY match_date, match_id
+                SELECT m.match_id, m.guild_id, m.winning_team, m.match_date,
+                       m.team1_players, m.team2_players,
+                       (
+                           SELECT rh.streak_multiplier_per_game
+                           FROM rating_history rh
+                           WHERE rh.guild_id = m.guild_id
+                             AND rh.match_id = m.match_id
+                           ORDER BY rh.id
+                           LIMIT 1
+                       ) AS streak_multiplier_per_game
+                FROM matches m
+                WHERE m.guild_id = ? AND m.winning_team IN (1, 2)
+                ORDER BY m.match_date, m.match_id
                 """,
                 (normalized_guild,),
             ).fetchall()
@@ -3128,39 +3155,101 @@ class MatchRepository(BaseRepository, IMatchRepository):
         """
         Get server-wide rating swing statistics by lobby type.
 
-        Returns list of dicts with:
-        - lobby_type: 'shuffle' or 'draft'
-        - avg_swing: average absolute rating change
-        - games: number of rating changes recorded
-        - actual_win_rate: percentage of games won
-        - expected_win_rate: average expected win probability
+        Glicko and OpenSkill movement are returned in the shared display scale.
+        ``games`` counts matches, while each system has its own non-null sample
+        count. Server win rates describe Radiant, avoiding the old participant-
+        row average that was necessarily 50% for every complete match.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
+                WITH swing_stats AS (
+                    SELECT
+                        COALESCE(m.lobby_type, 'shuffle') AS lobby_type,
+                        AVG(
+                            CASE
+                                WHEN rh.rating_before IS NOT NULL
+                                 AND rh.rating IS NOT NULL
+                                THEN ABS(rh.rating - rh.rating_before)
+                            END
+                        ) AS glicko_avg_swing,
+                        SUM(
+                            CASE
+                                WHEN rh.rating_before IS NOT NULL
+                                 AND rh.rating IS NOT NULL
+                                THEN 1 ELSE 0
+                            END
+                        ) AS glicko_samples,
+                        AVG(
+                            CASE
+                                WHEN rh.os_mu_before IS NOT NULL
+                                 AND rh.os_mu_after IS NOT NULL
+                                THEN ABS(rh.os_mu_after - rh.os_mu_before) * ?
+                            END
+                        ) AS openskill_avg_swing,
+                        SUM(
+                            CASE
+                                WHEN rh.os_mu_before IS NOT NULL
+                                 AND rh.os_mu_after IS NOT NULL
+                                THEN 1 ELSE 0
+                            END
+                        ) AS openskill_samples
+                    FROM rating_history rh
+                    JOIN matches m
+                      ON m.match_id = rh.match_id AND m.guild_id = rh.guild_id
+                    WHERE rh.guild_id = ?
+                    GROUP BY COALESCE(m.lobby_type, 'shuffle')
+                ), match_stats AS (
+                    SELECT
+                        COALESCE(m.lobby_type, 'shuffle') AS lobby_type,
+                        COUNT(*) AS games,
+                        AVG(CASE WHEN m.winning_team = 1 THEN 1.0 ELSE 0.0 END)
+                            AS actual_win_rate,
+                        AVG(mp.expected_radiant_win_prob) AS expected_win_rate,
+                        AVG(mp.openskill_radiant_win_prob)
+                            AS openskill_expected_win_rate
+                    FROM matches m
+                    LEFT JOIN match_predictions mp ON mp.match_id = m.match_id
+                    WHERE m.guild_id = ? AND m.winning_team IN (1, 2)
+                    GROUP BY COALESCE(m.lobby_type, 'shuffle')
+                )
                 SELECT
-                    m.lobby_type,
-                    AVG(ABS(rh.rating - rh.rating_before)) as avg_swing,
-                    COUNT(*) as games,
-                    AVG(CASE WHEN rh.won = 1 THEN 1.0 ELSE 0.0 END) as actual_win_rate,
-                    AVG(rh.expected_team_win_prob) as expected_win_rate
-                FROM rating_history rh
-                JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.guild_id = ? AND rh.rating_before IS NOT NULL
-                GROUP BY m.lobby_type
+                    ms.lobby_type,
+                    ss.glicko_avg_swing,
+                    ss.glicko_samples,
+                    ss.openskill_avg_swing,
+                    ss.openskill_samples,
+                    ms.games,
+                    ms.actual_win_rate,
+                    ms.expected_win_rate,
+                    ms.openskill_expected_win_rate
+                FROM match_stats ms
+                LEFT JOIN swing_stats ss ON ss.lobby_type = ms.lobby_type
+                ORDER BY ms.lobby_type
                 """,
-                (normalized_guild,),
+                (
+                    CamaOpenSkillSystem.DISPLAY_SCALE,
+                    normalized_guild,
+                    normalized_guild,
+                ),
             )
             rows = cursor.fetchall()
             return [
                 {
                     "lobby_type": row["lobby_type"] or "shuffle",
-                    "avg_swing": row["avg_swing"],
+                    "avg_swing": row["glicko_avg_swing"],
+                    "glicko_avg_swing": row["glicko_avg_swing"],
+                    "openskill_avg_swing": row["openskill_avg_swing"],
+                    "glicko_samples": row["glicko_samples"] or 0,
+                    "openskill_samples": row["openskill_samples"] or 0,
                     "games": row["games"],
                     "actual_win_rate": row["actual_win_rate"],
                     "expected_win_rate": row["expected_win_rate"],
+                    "openskill_expected_win_rate": row[
+                        "openskill_expected_win_rate"
+                    ],
                 }
                 for row in rows
             ]
@@ -3171,31 +3260,84 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
         Same return format as get_lobby_type_stats but filtered to one player.
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT
                     m.lobby_type,
-                    AVG(ABS(rh.rating - rh.rating_before)) as avg_swing,
-                    COUNT(*) as games,
+                    AVG(
+                        CASE
+                            WHEN rh.rating_before IS NOT NULL
+                             AND rh.rating IS NOT NULL
+                            THEN ABS(rh.rating - rh.rating_before)
+                        END
+                    ) AS glicko_avg_swing,
+                    SUM(
+                        CASE
+                            WHEN rh.rating_before IS NOT NULL
+                             AND rh.rating IS NOT NULL
+                            THEN 1 ELSE 0
+                        END
+                    ) AS glicko_samples,
+                    AVG(
+                        CASE
+                            WHEN rh.os_mu_before IS NOT NULL
+                             AND rh.os_mu_after IS NOT NULL
+                            THEN ABS(rh.os_mu_after - rh.os_mu_before) * ?
+                        END
+                    ) AS openskill_avg_swing,
+                    SUM(
+                        CASE
+                            WHEN rh.os_mu_before IS NOT NULL
+                             AND rh.os_mu_after IS NOT NULL
+                            THEN 1 ELSE 0
+                        END
+                    ) AS openskill_samples,
+                    COUNT(DISTINCT rh.match_id) as games,
                     AVG(CASE WHEN rh.won = 1 THEN 1.0 ELSE 0.0 END) as actual_win_rate,
-                    AVG(rh.expected_team_win_prob) as expected_win_rate
+                    AVG(rh.expected_team_win_prob) as expected_win_rate,
+                    AVG(
+                        CASE
+                            WHEN rh.team_number = 1
+                                THEN mp.openskill_radiant_win_prob
+                            WHEN rh.team_number = 2
+                                THEN 1.0 - mp.openskill_radiant_win_prob
+                        END
+                    ) AS openskill_expected_win_rate
                 FROM rating_history rh
-                JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.rating_before IS NOT NULL AND rh.discord_id = ? AND rh.guild_id = ?
+                JOIN matches m
+                  ON rh.match_id = m.match_id AND rh.guild_id = m.guild_id
+                LEFT JOIN match_predictions mp ON mp.match_id = rh.match_id
+                WHERE rh.discord_id = ? AND rh.guild_id = ?
+                  AND (
+                      (rh.rating_before IS NOT NULL AND rh.rating IS NOT NULL)
+                      OR (rh.os_mu_before IS NOT NULL AND rh.os_mu_after IS NOT NULL)
+                  )
                 GROUP BY m.lobby_type
                 """,
-                (discord_id, guild_id),
+                (
+                    CamaOpenSkillSystem.DISPLAY_SCALE,
+                    discord_id,
+                    normalized_guild,
+                ),
             )
             rows = cursor.fetchall()
             return [
                 {
                     "lobby_type": row["lobby_type"] or "shuffle",
-                    "avg_swing": row["avg_swing"],
+                    "avg_swing": row["glicko_avg_swing"],
+                    "glicko_avg_swing": row["glicko_avg_swing"],
+                    "openskill_avg_swing": row["openskill_avg_swing"],
+                    "glicko_samples": row["glicko_samples"] or 0,
+                    "openskill_samples": row["openskill_samples"] or 0,
                     "games": row["games"],
                     "actual_win_rate": row["actual_win_rate"],
                     "expected_win_rate": row["expected_win_rate"],
+                    "openskill_expected_win_rate": row[
+                        "openskill_expected_win_rate"
+                    ],
                 }
                 for row in rows
             ]
@@ -3497,7 +3639,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 SELECT rh.os_mu_before, rh.os_mu_after, rh.os_sigma_before, rh.os_sigma_after,
-                       rh.fantasy_weight, rh.won, rh.match_id, m.match_date
+                       rh.fantasy_weight, rh.streak_length, rh.streak_multiplier,
+                       rh.won, rh.match_id, m.match_date
                 FROM rating_history rh
                 JOIN matches m ON rh.match_id = m.match_id
                 WHERE rh.discord_id = ? AND rh.guild_id = ?
@@ -3516,6 +3659,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "os_sigma_before": row["os_sigma_before"],
                     "os_sigma_after": row["os_sigma_after"],
                     "fantasy_weight": row["fantasy_weight"],
+                    "streak_length": row["streak_length"],
+                    "streak_multiplier": row["streak_multiplier"],
                     "won": row["won"],
                     "match_id": row["match_id"],
                     "match_date": row["match_date"],

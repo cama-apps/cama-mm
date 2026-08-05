@@ -756,6 +756,12 @@ class SchemaManager:
                 "add_streak_multiplier_per_game_to_rating_history",
                 self._migration_add_streak_multiplier_per_game_to_rating_history,
             ),
+            # OpenSkill v4: apply the same persisted streak curve as Glicko
+            # during both live updates and chronological replay.
+            (
+                "openskill_v4_streak_replay",
+                self._migration_openskill_v4_streak_replay,
+            ),
         ]
 
     # --- Migrations ---
@@ -768,6 +774,10 @@ class SchemaManager:
             "streak_multiplier_per_game",
             "REAL NOT NULL DEFAULT 0.20",
         )
+
+    def _migration_openskill_v4_streak_replay(self, cursor) -> None:
+        """Rebuild OpenSkill state with the persisted per-match streak curve."""
+        self._migration_openskill_v3_durable_native_replay(cursor)
 
     def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:
         self._add_column_if_not_exists(
@@ -851,7 +861,7 @@ class SchemaManager:
         )
 
     def _migration_openskill_v3_durable_native_replay(self, cursor) -> None:
-        """Back-calculate durable OpenSkill v3 state atomically."""
+        """Back-calculate the current durable OpenSkill state atomically."""
         from openskill_rating_system import CamaOpenSkillSystem
         from openskill_replay import OPENSKILL_ALGORITHM_VERSION, replay_openskill
 
@@ -903,6 +913,10 @@ class SchemaManager:
             "openskill_algorithm_fingerprint",
             "TEXT",
         )
+        # The historical v3 migration is also the reusable replay primitive
+        # for later algorithm versions. Ensure the rate exists before loading
+        # replay inputs so fresh and already-upgraded databases behave alike.
+        self._migration_add_streak_multiplier_per_game_to_rating_history(cursor)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS openskill_rating_events (
@@ -957,11 +971,19 @@ class SchemaManager:
         ).fetchall()
         matches = cursor.execute(
             """
-            SELECT match_id, guild_id, winning_team, match_date,
-                   team1_players, team2_players
-            FROM matches
-            WHERE winning_team IN (1, 2)
-            ORDER BY guild_id, match_date, match_id
+            SELECT m.match_id, m.guild_id, m.winning_team, m.match_date,
+                   m.team1_players, m.team2_players,
+                   (
+                       SELECT rh.streak_multiplier_per_game
+                       FROM rating_history rh
+                       WHERE rh.guild_id = m.guild_id
+                         AND rh.match_id = m.match_id
+                       ORDER BY rh.id
+                       LIMIT 1
+                   ) AS streak_multiplier_per_game
+            FROM matches m
+            WHERE m.winning_team IN (1, 2)
+            ORDER BY m.guild_id, m.match_date, m.match_id
             """
         ).fetchall()
         match_ids = [row["match_id"] for row in matches]
@@ -997,7 +1019,9 @@ class SchemaManager:
         )
         if replay.errors:
             preview = "; ".join(replay.errors[:5])
-            raise RuntimeError(f"OpenSkill v3 replay failed: {preview}")
+            raise RuntimeError(
+                f"OpenSkill v{OPENSKILL_ALGORITHM_VERSION} replay failed: {preview}"
+            )
 
         for history in replay.history_rows:
             cursor.execute(
@@ -1123,7 +1147,8 @@ class SchemaManager:
             """
         )
         logger.info(
-            "OpenSkill v3 replayed %d matches (%d performance, %d equal) and %d player snapshots",
+            "OpenSkill v%d replayed %d matches (%d performance, %d equal) and %d player snapshots",
+            OPENSKILL_ALGORITHM_VERSION,
             replay.matches_processed,
             replay.matches_with_fantasy,
             replay.matches_equal_weight,

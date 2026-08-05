@@ -158,6 +158,8 @@ class TestIndividualCalibrationProfile:
             glicko_rating=1500.0,
             glicko_rd=350.0,
             glicko_volatility=None,
+            os_mu=30.0,
+            os_sigma=3.0,
             initial_mmr=3000,
             discord_id=777,
         )
@@ -165,7 +167,7 @@ class TestIndividualCalibrationProfile:
         player_service = MagicMock()
         player_service.get_player.return_value = player
         player_service.get_all.return_value = [player]
-        player_service.get_openskill_rating.return_value = None
+        player_service.get_openskill_rating.return_value = (30.0, 3.0)
 
         cog = InfoCommands(
             bot=MagicMock(),
@@ -198,6 +200,133 @@ class TestIndividualCalibrationProfile:
         assert profile_field.value.count("**Rating:**") == 1
         assert profile_field.value.count("**Tier:**") == 1
         assert "**RD:** 350" in profile_field.value
+        assert "**OpenSkill:** 250" in profile_field.value
+        assert "64% certain" in profile_field.value
+
+    @pytest.mark.asyncio
+    async def test_recent_match_shows_glicko_and_openskill_display_deltas(self):
+        from commands.info import InfoCommands
+        from domain.models.player import Player
+        from rating_system import CamaRatingSystem
+
+        player = Player(
+            name="Rated",
+            glicko_rating=1510.0,
+            glicko_rd=100.0,
+            glicko_volatility=0.06,
+            os_mu=26.0,
+            os_sigma=4.0,
+            initial_mmr=6000,
+            discord_id=778,
+        )
+        history = [
+            {
+                "rating": 1510.0,
+                "rating_before": 1500.0,
+                "rd_before": 110.0,
+                "rd_after": 100.0,
+                "expected_team_win_prob": 0.55,
+                "team_number": 1,
+                "won": True,
+                "match_id": 42,
+                "lobby_type": "shuffle",
+                "os_mu_before": 25.0,
+                "os_mu_after": 26.0,
+            }
+        ]
+
+        player_service = MagicMock()
+        player_service.get_player.return_value = player
+        player_service.get_all.return_value = [player]
+        player_service.get_openskill_rating.return_value = (26.0, 4.0)
+        match_service = MagicMock()
+        match_service.get_player_rating_history_detailed.return_value = history
+        match_service.get_os_ratings_for_matches.return_value = {}
+        match_service.get_player_lobby_type_stats.return_value = []
+        match_service.get_player_hero_stats_detailed.return_value = []
+        match_service.get_player_fantasy_stats.return_value = None
+
+        cog = InfoCommands(
+            bot=MagicMock(),
+            player_service=player_service,
+            match_service=match_service,
+        )
+        interaction = MagicMock()
+        interaction.guild = MagicMock(id=12345)
+        interaction.followup.send = AsyncMock()
+        user = MagicMock(id=778, display_name="Rated", mention="<@778>")
+
+        await cog._show_individual_calibration(
+            interaction,
+            user,
+            CamaRatingSystem(),
+        )
+
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        recent = next(field for field in embed.fields if "Last 1 Matches" in field.name)
+        assert "Δ G:+10 O:+50" in recent.value
+
+
+class TestDualSystemLobbyReporting:
+    def test_formats_both_swings_samples_and_expectations(self):
+        from commands.info import _format_lobby_stats_line
+
+        line = _format_lobby_stats_line(
+            {
+                "games": 12,
+                "actual_win_rate": 0.6,
+                "expected_win_rate": 0.55,
+                "openskill_expected_win_rate": 0.52,
+                "glicko_avg_swing": 10.0,
+                "glicko_samples": 40,
+                "openskill_avg_swing": 25.0,
+                "openskill_samples": 30,
+            },
+            emoji="🎲",
+            label="Shuffle",
+        )
+
+        assert "G ±10.0 (n=40)" in line
+        assert "O ±25.0 (n=30)" in line
+        assert "Radiant actual 60%" in line
+        assert "G exp 55%" in line
+        assert "O exp 52%" in line
+
+    def test_legacy_avg_swing_falls_back_to_glicko(self):
+        from commands.info import (
+            _format_lobby_stats_line,
+            _format_lobby_swing_summary,
+        )
+
+        assert _format_lobby_swing_summary(
+            {"avg_swing": 12.5, "games": 8}
+        ) == "G ±12.5 (n=8)"
+        line = _format_lobby_stats_line(
+            {"avg_swing": 12.5, "games": 8},
+            emoji="🎲",
+            label="Shuffle",
+        )
+        assert "G exp n/a" in line
+        assert "O exp n/a" in line
+
+    def test_compares_draft_and_shuffle_for_each_system(self):
+        from commands.info import _format_lobby_swing_comparisons
+
+        lines = _format_lobby_swing_comparisons(
+            {
+                "glicko_avg_swing": 10.0,
+                "openskill_avg_swing": 20.0,
+            },
+            {
+                "glicko_avg_swing": 12.5,
+                "openskill_avg_swing": 15.0,
+            },
+        )
+
+        assert lines == [
+            "*G: Draft swings are 25% larger than Shuffle*",
+            "*O: Shuffle swings are 25% larger than Draft*",
+        ]
 
 
 if __name__ == "__main__":

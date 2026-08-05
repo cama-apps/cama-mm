@@ -4,6 +4,8 @@ Tests for the repository layer.
 
 import sqlite3
 
+import pytest
+
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
@@ -1263,6 +1265,8 @@ class TestMatchRepository:
             rating_before=1500,
             expected_team_win_prob=0.55,
             won=True,
+            os_mu_before=40.0,
+            os_mu_after=40.4,
         )
         match_repository.add_rating_history(
             discord_id=6,
@@ -1272,15 +1276,21 @@ class TestMatchRepository:
             rating_before=1500,
             expected_team_win_prob=0.45,
             won=False,
+            os_mu_before=40.0,
+            os_mu_after=39.6,
         )
 
         stats = match_repository.get_lobby_type_stats(TEST_GUILD_ID)
         assert len(stats) == 1
         assert stats[0]["lobby_type"] == "shuffle"
-        assert stats[0]["games"] == 2
+        assert stats[0]["games"] == 1
         assert stats[0]["avg_swing"] == 20.0  # |1520-1500| and |1480-1500| both = 20
-        assert stats[0]["actual_win_rate"] == 0.5  # 1 win, 1 loss
-        assert stats[0]["expected_win_rate"] == 0.5  # (0.55 + 0.45) / 2
+        assert stats[0]["glicko_avg_swing"] == 20.0
+        assert stats[0]["openskill_avg_swing"] == pytest.approx(20.0)
+        assert stats[0]["glicko_samples"] == 2
+        assert stats[0]["openskill_samples"] == 2
+        assert stats[0]["actual_win_rate"] == 1.0  # Radiant won the one match
+        assert stats[0]["expected_win_rate"] is None  # no match prediction seeded
 
     def test_get_lobby_type_stats_both_types(self, match_repository):
         """Test lobby type stats with both shuffle and draft matches."""
@@ -1300,6 +1310,8 @@ class TestMatchRepository:
             rating_before=1500,
             expected_team_win_prob=0.50,
             won=True,
+            os_mu_before=40.0,
+            os_mu_after=40.2,
         )
 
         # Record a draft match with larger swing
@@ -1318,6 +1330,8 @@ class TestMatchRepository:
             rating_before=1520,
             expected_team_win_prob=0.60,
             won=False,
+            os_mu_before=40.2,
+            os_mu_after=39.6,
         )
 
         stats = match_repository.get_lobby_type_stats(TEST_GUILD_ID)
@@ -1327,12 +1341,61 @@ class TestMatchRepository:
         draft_stats = next(s for s in stats if s["lobby_type"] == "draft")
 
         assert shuffle_stats["avg_swing"] == 20.0
+        assert shuffle_stats["openskill_avg_swing"] == pytest.approx(10.0)
         assert shuffle_stats["games"] == 1
         assert shuffle_stats["actual_win_rate"] == 1.0  # Won
 
         assert draft_stats["avg_swing"] == 50.0  # |1470-1520| = 50
+        assert draft_stats["openskill_avg_swing"] == pytest.approx(30.0)
         assert draft_stats["games"] == 1
         assert draft_stats["actual_win_rate"] == 0.0  # Lost
+
+    def test_lobby_type_stats_report_predictions_from_the_correct_side(
+        self, match_repository
+    ):
+        match_id = match_repository.record_match(
+            team1_ids=[1, 2, 3, 4, 5],
+            team2_ids=[6, 7, 8, 9, 10],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+            lobby_type="shuffle",
+        )
+        match_repository.add_rating_history(
+            discord_id=6,
+            guild_id=TEST_GUILD_ID,
+            rating=1490,
+            match_id=match_id,
+            rating_before=1500,
+            expected_team_win_prob=0.30,
+            team_number=2,
+            won=False,
+            os_mu_before=40.0,
+            os_mu_after=39.8,
+        )
+        with match_repository.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO match_predictions (
+                    match_id, expected_radiant_win_prob,
+                    openskill_radiant_win_prob
+                )
+                VALUES (?, 0.70, 0.65)
+                """,
+                (match_id,),
+            )
+
+        server = match_repository.get_lobby_type_stats(TEST_GUILD_ID)[0]
+        assert server["actual_win_rate"] == 1.0
+        assert server["expected_win_rate"] == pytest.approx(0.70)
+        assert server["openskill_expected_win_rate"] == pytest.approx(0.65)
+
+        player = match_repository.get_player_lobby_type_stats(
+            discord_id=6,
+            guild_id=TEST_GUILD_ID,
+        )[0]
+        assert player["actual_win_rate"] == 0.0
+        assert player["expected_win_rate"] == pytest.approx(0.30)
+        assert player["openskill_expected_win_rate"] == pytest.approx(0.35)
 
     def test_get_player_lobby_type_stats_empty(self, match_repository):
         """Test player lobby type stats with no data returns empty list."""
@@ -1359,6 +1422,8 @@ class TestMatchRepository:
             rating_before=1500,
             expected_team_win_prob=0.55,
             won=True,
+            os_mu_before=40.0,
+            os_mu_after=40.6,
         )
 
         # Player 6 rating history
@@ -1378,6 +1443,7 @@ class TestMatchRepository:
         assert stats[0]["lobby_type"] == "shuffle"
         assert stats[0]["games"] == 1
         assert stats[0]["avg_swing"] == 30.0  # |1530-1500| = 30
+        assert stats[0]["openskill_avg_swing"] == pytest.approx(30.0)
         assert stats[0]["actual_win_rate"] == 1.0
 
         # Get stats for player 6
@@ -1385,6 +1451,36 @@ class TestMatchRepository:
         assert len(stats_p6) == 1
         assert stats_p6[0]["avg_swing"] == 10.0  # |1490-1500| = 10
         assert stats_p6[0]["actual_win_rate"] == 0.0
+
+    def test_get_player_lobby_type_stats_includes_openskill_only_history(
+        self, match_repository
+    ):
+        match_id = match_repository.record_match(
+            team1_ids=[1, 2, 3, 4, 5],
+            team2_ids=[6, 7, 8, 9, 10],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+            lobby_type="shuffle",
+        )
+        match_repository.add_rating_history(
+            discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            rating=None,
+            match_id=match_id,
+            won=True,
+            team_number=1,
+            os_mu_before=40.0,
+            os_mu_after=40.5,
+        )
+
+        stats = match_repository.get_player_lobby_type_stats(
+            discord_id=1, guild_id=TEST_GUILD_ID
+        )
+
+        assert stats[0]["avg_swing"] is None
+        assert stats[0]["glicko_samples"] == 0
+        assert stats[0]["openskill_avg_swing"] == pytest.approx(25.0)
+        assert stats[0]["openskill_samples"] == 1
 
     def test_get_player_lobby_type_stats_both_types(self, match_repository):
         """Test player lobby type stats with both shuffle and draft for same player."""
