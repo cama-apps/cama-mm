@@ -210,7 +210,8 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 - `/player roles` — Set preferred roles (1-5) for matchmaking
 - `/player region` — Set your preferred Dota server (US East / US West)
 - `/player exclusion` — Check your exclusion factor
-- `/player lobby autonotify` — Lobby notification preferences
+- `/player lobby autonotify enabled:<true|false>` — Enable or disable persistent public alerts when lobbies reach 8 and 9 players
+- `/player lobby autonotify playername:<player>` — Get one DM the next time that player joins a lobby in this server
 
 #### `/profile`
 View comprehensive player profile with tabbed navigation (Overview, Rating, Economy, Gambling, Predictions, Dota, Teammates). Optional `user` to look up someone else.

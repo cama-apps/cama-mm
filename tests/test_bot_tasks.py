@@ -9,7 +9,7 @@ import datetime as dt
 import inspect
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -447,6 +447,9 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
     )
     bot_user = SimpleNamespace(id=999)
     lobby_cog = SimpleNamespace(sync_readycheck_with_lobby=AsyncMock())
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
 
     with (
         patch.object(
@@ -457,6 +460,12 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
         patch.object(bot_module, "_init_services"),
         patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
         patch.object(bot_module.bot, "player_service", player_service, create=True),
+        patch.object(
+            bot_module.bot,
+            "reminder_service",
+            reminder_service,
+            create=True,
+        ),
         patch.object(bot_module.bot, "get_cog", return_value=lobby_cog),
         patch.object(bot_module.bot, "get_channel", return_value=channel),
         patch.object(bot_module.bot, "get_user") as get_user,
@@ -488,6 +497,109 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
         payload.guild_id,
         lobby_kind=bot_module.LobbyKind.LOWSKILL,
     )
+    reminder_service.notify_lobby_player_subscribers.assert_awaited_once_with(
+        bot_module.bot,
+        member.id,
+        member.display_name,
+        payload.guild_id,
+        lobby_kind=bot_module.LobbyKind.LOWSKILL,
+        join_cutoff_ns=ANY,
+    )
+
+
+async def test_sword_join_retains_target_notification_when_lobby_refetch_disappears(
+    bot_module,
+):
+    """A confirmed join cannot lose its one-shot DMs to a missing refresh."""
+    member = SimpleNamespace(
+        id=123,
+        mention="<@123>",
+        display_name="Lobby Player",
+    )
+    payload = SimpleNamespace(
+        user_id=member.id,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="⚔️"),
+        member=member,
+    )
+    initial_lobby = SimpleNamespace(status="open", players=set())
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_kind_for_message.return_value = (
+        bot_module.LobbyKind.LOWSKILL
+    )
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    lobby_service.get_lobby.side_effect = [initial_lobby, None]
+    lobby_service.join_lobby.return_value = (True, None, None)
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(preferred_roles=[1])
+    message = SimpleNamespace(remove_reaction=AsyncMock())
+    channel = SimpleNamespace(
+        id=payload.channel_id,
+        get_partial_message=MagicMock(return_value=message),
+        send=AsyncMock(),
+    )
+    notification_started = asyncio.Event()
+    release_notification = asyncio.Event()
+
+    async def notify_target(*_args, **_kwargs):
+        notification_started.set()
+        await release_notification.wait()
+        return 1
+
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(side_effect=notify_target)
+    )
+    bot_user = SimpleNamespace(id=999)
+    tasks_before = set(bot_module._background_tasks)
+    retained_tasks = set()
+
+    try:
+        with (
+            patch.object(
+                type(bot_module.bot),
+                "user",
+                new_callable=lambda: property(lambda _self: bot_user),
+            ),
+            patch.object(bot_module, "_init_services"),
+            patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+            patch.object(bot_module.bot, "player_service", player_service, create=True),
+            patch.object(
+                bot_module.bot,
+                "reminder_service",
+                reminder_service,
+                create=True,
+            ),
+            patch.object(bot_module.bot, "get_channel", return_value=channel),
+        ):
+            await bot_module.on_raw_reaction_add(payload)
+            await asyncio.wait_for(notification_started.wait(), timeout=1)
+
+        retained_tasks = set(bot_module._background_tasks) - tasks_before
+        assert len(retained_tasks) == 1
+        reminder_service.notify_lobby_player_subscribers.assert_awaited_once_with(
+            bot_module.bot,
+            member.id,
+            member.display_name,
+            payload.guild_id,
+            lobby_kind=bot_module.LobbyKind.LOWSKILL,
+            join_cutoff_ns=ANY,
+        )
+        lobby_service.get_lobby.assert_called_with(
+            guild_id=payload.guild_id,
+            lobby_kind=bot_module.LobbyKind.LOWSKILL,
+        )
+    finally:
+        release_notification.set()
+        cleanup_tasks = retained_tasks or (
+            set(bot_module._background_tasks) - tasks_before
+        )
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert retained_tasks.isdisjoint(bot_module._background_tasks)
 
 
 async def test_sword_reaction_explains_in_flight_lobby_switch(bot_module):
@@ -520,6 +632,9 @@ async def test_sword_reaction_explains_in_flight_lobby_switch(bot_module):
         send=AsyncMock(),
     )
     bot_user = SimpleNamespace(id=999)
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
 
     with (
         patch.object(
@@ -530,11 +645,18 @@ async def test_sword_reaction_explains_in_flight_lobby_switch(bot_module):
         patch.object(bot_module, "_init_services"),
         patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
         patch.object(bot_module.bot, "player_service", player_service, create=True),
+        patch.object(
+            bot_module.bot,
+            "reminder_service",
+            reminder_service,
+            create=True,
+        ),
         patch.object(bot_module.bot, "get_channel", return_value=channel),
     ):
         await bot_module.on_raw_reaction_add(payload)
 
     message.remove_reaction.assert_awaited_once_with(payload.emoji, member)
+    reminder_service.notify_lobby_player_subscribers.assert_not_awaited()
     sent = channel.send.await_args.args[0]
     assert "can't switch lobbies while your current shuffle or draft is in progress" in sent
 

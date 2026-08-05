@@ -100,3 +100,60 @@ class NotificationRepository(BaseRepository, IReminderRepository):
                 if row[f"{reminder_type}_enabled"]:
                     subscribers[reminder_type].append(row["discord_id"])
         return subscribers
+
+    def add_lobby_target_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Persist one guild-scoped lobby target subscription idempotently."""
+        normalized = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            # Assign the watermark only after this insert owns the database
+            # write lock. A join that committed first can therefore exclude a
+            # later subscription from that already-completed signup event.
+            now = time.time_ns()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO lobby_target_subscriptions (
+                    guild_id, target_id, subscriber_id, created_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (normalized, target_id, subscriber_id, now),
+            )
+            return cursor.rowcount == 1
+
+    def claim_lobby_target_subscribers(
+        self,
+        target_id: int,
+        guild_id: int,
+        created_at_cutoff: int | None = None,
+    ) -> list[int]:
+        """Atomically read and consume subscriptions for a target's next join."""
+        normalized = self.normalize_guild_id(guild_id)
+        cutoff = time.time_ns() if created_at_cutoff is None else created_at_cutoff
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT subscriber_id
+                FROM lobby_target_subscriptions
+                WHERE guild_id = ? AND target_id = ? AND created_at <= ?
+                ORDER BY created_at, subscriber_id
+                """,
+                (normalized, target_id, cutoff),
+            ).fetchall()
+            if not rows:
+                return []
+
+            cursor.execute(
+                """
+                DELETE FROM lobby_target_subscriptions
+                WHERE guild_id = ? AND target_id = ? AND created_at <= ?
+                """,
+                (normalized, target_id, cutoff),
+            )
+            return [int(row["subscriber_id"]) for row in rows]

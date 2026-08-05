@@ -366,6 +366,7 @@ class TestCommandLayerConstraints:
             "narrate_boss_fight",
             "narrate_splash",
             "notify_betting_subscribers",
+            "notify_lobby_player_subscribers",
             "on_100_bets_milestone",
             "on_all_in_bet",
             "on_balance_check",

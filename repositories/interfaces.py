@@ -2356,6 +2356,26 @@ class IReminderRepository(ABC):
         """Load enabled subscribers for several reminder types in one read."""
         ...
 
+    @abstractmethod
+    def add_lobby_target_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Add a one-shot target subscription; return whether it was new."""
+        ...
+
+    @abstractmethod
+    def claim_lobby_target_subscribers(
+        self,
+        target_id: int,
+        guild_id: int,
+        created_at_cutoff: int | None = None,
+    ) -> list[int]:
+        """Atomically claim subscribers created no later than the join cutoff."""
+        ...
+
 
 class IDigGuildModifierRepository(ABC):
     """Guild-wide dig modifiers with expiry (e.g. Helltide bell)."""

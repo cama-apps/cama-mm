@@ -55,6 +55,7 @@ class LobbyCommands(commands.Cog):
         self._readycheck_refresh_locks: dict[
             tuple[int, LobbyKind], asyncio.Lock
         ] = {}
+        self._lobby_player_notification_tasks: set[asyncio.Task] = set()
 
     def rebuild_readycheck_embed(
         self,
@@ -720,6 +721,56 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post leave activity: {exc}")
 
+    async def _deliver_lobby_player_notifications(
+        self,
+        target_id: int,
+        target_display_name: str,
+        guild_id: int,
+        lobby_kind: LobbyKind,
+        join_cutoff_ns: int,
+    ) -> None:
+        """Deliver target DMs without delaying lobby display or public alerts."""
+        reminder_service = getattr(self.bot, "reminder_service", None)
+        if reminder_service is None:
+            return
+        try:
+            await reminder_service.notify_lobby_player_subscribers(
+                self.bot,
+                target_id,
+                target_display_name,
+                guild_id,
+                lobby_kind=lobby_kind,
+                join_cutoff_ns=join_cutoff_ns,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to send one-shot lobby signup DMs for %s: %s",
+                target_id,
+                exc,
+            )
+
+    def _schedule_lobby_player_notifications(
+        self,
+        user: discord.User | discord.Member,
+        guild_id: int | None,
+        lobby_kind: LobbyKind | str | None,
+        join_cutoff_ns: int,
+    ) -> None:
+        """Retain a one-shot notification task for a confirmed lobby join."""
+        if getattr(self.bot, "reminder_service", None) is None:
+            return
+        task = asyncio.create_task(
+            self._deliver_lobby_player_notifications(
+                user.id,
+                user.display_name,
+                guild_id or 0,
+                LobbyKind.normalize(lobby_kind),
+                join_cutoff_ns,
+            )
+        )
+        self._lobby_player_notification_tasks.add(task)
+        task.add_done_callback(self._lobby_player_notification_tasks.discard)
+
     async def _publish_join_activity_and_notifications(
         self,
         lobby,
@@ -881,6 +932,7 @@ class LobbyCommands(commands.Cog):
             return False, "⚠️ Set your preferred roles with `/player roles` to auto-join."
 
         # Attempt to join (pending match check now inside LobbyService)
+        join_cutoff_ns = time.time_ns()
         success, reason, _ = await asyncio.to_thread(
             self.lobby_service.join_lobby,
             user_id,
@@ -903,6 +955,15 @@ class LobbyCommands(commands.Cog):
                     "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress.",
                 )
             return False, None
+
+        # Start the one-shot claim from the known successful mutation. It runs
+        # independently so slow DMs cannot delay or suppress public 8/9 alerts.
+        self._schedule_lobby_player_notifications(
+            interaction.user,
+            guild_id,
+            lobby.kind,
+            join_cutoff_ns,
+        )
 
         # Refresh lobby state
         lobby = await asyncio.to_thread(
@@ -1305,6 +1366,7 @@ class LobbyCommands(commands.Cog):
             return
 
         # Attempt to join (pending match check now inside LobbyService)
+        join_cutoff_ns = time.time_ns()
         success, reason, pending_info = await asyncio.to_thread(
             self.lobby_service.join_lobby,
             interaction.user.id,
@@ -1360,6 +1422,15 @@ class LobbyCommands(commands.Cog):
                     ephemeral=True,
                 )
             return
+
+        # Tie the one-shot notification to the successful join result rather
+        # than the best-effort lobby refresh/publication that follows.
+        self._schedule_lobby_player_notifications(
+            interaction.user,
+            guild_id,
+            lobby_kind,
+            join_cutoff_ns,
+        )
 
         # Refresh lobby state after join
         active_lobby = await asyncio.to_thread(

@@ -31,6 +31,7 @@ def test_schema_manager_initializes_tables(tmp_path):
         "bets",
         "pending_matches",
         "lobby_state",
+        "lobby_target_subscriptions",
         "schema_migrations",
         "economy_ledger_entries",
         "economy_ledger_context",
@@ -145,6 +146,46 @@ def test_schema_manager_adds_lobby_reminder_preference(tmp_path):
     assert "lobby_enabled" in columns
     assert "idx_reminder_prefs_lobby" in indexes
     assert lobby_enabled == 0
+
+
+def test_schema_manager_adds_lobby_target_subscription_table_and_index(tmp_path):
+    """One-shot player watches have their own target-keyed unique index."""
+    db_path = str(tmp_path / "test.db")
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = conn.execute(
+            "PRAGMA table_info(lobby_target_subscriptions)"
+        ).fetchall()
+        indexes = conn.execute(
+            "PRAGMA index_list(lobby_target_subscriptions)"
+        ).fetchall()
+
+        assert [row[1] for row in columns] == [
+            "guild_id",
+            "target_id",
+            "subscriber_id",
+            "created_at",
+        ]
+        assert {row[1]: row[5] for row in columns} == {
+            "guild_id": 1,
+            "target_id": 2,
+            "subscriber_id": 3,
+            "created_at": 0,
+        }
+
+        # SQLite materializes the composite primary key as a unique index.
+        # Its guild/target prefix directly backs the atomic claim lookup.
+        primary_key_index = next(row for row in indexes if row[3] == "pk")
+        assert primary_key_index[2] == 1
+        indexed_columns = conn.execute(
+            f'PRAGMA index_info("{primary_key_index[1]}")'
+        ).fetchall()
+        assert [row[2] for row in indexed_columns] == [
+            "guild_id",
+            "target_id",
+            "subscriber_id",
+        ]
 
 
 def test_schema_manager_initialize_is_idempotent(tmp_path):

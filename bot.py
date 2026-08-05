@@ -1699,6 +1699,7 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
+        join_cutoff_ns = time.time_ns()
         success, reason, pending_info = await asyncio.to_thread(
             bot.lobby_service.join_lobby,
             payload.user_id,
@@ -1742,6 +1743,26 @@ async def on_raw_reaction_add(payload):
                 except Exception:
                     pass
             return
+
+        # Claim and deliver target watches from the confirmed join result, but
+        # keep that work independent of embed updates and public 8/9 alerts.
+        reminder_service = getattr(bot, "reminder_service", None)
+        if reminder_service is not None:
+            notification_task = _retain_background_task(
+                asyncio.create_task(
+                    reminder_service.notify_lobby_player_subscribers(
+                        bot,
+                        user.id,
+                        user.display_name,
+                        payload.guild_id or 0,
+                        lobby_kind=lobby_kind,
+                        join_cutoff_ns=join_cutoff_ns,
+                    )
+                )
+            )
+            notification_task.add_done_callback(
+                _log_task_exit(f"lobby target notification for {user.id}")
+            )
 
         # Re-fetch the lobby after the join lands so the embed update and
         # readycheck see the post-join roster. The earlier fetch (line ~801)

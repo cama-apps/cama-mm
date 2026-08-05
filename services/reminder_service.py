@@ -4,6 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 from domain.models.lobby import LobbyKind
+from utils.formatting import escape_discord_text
 
 if TYPE_CHECKING:
     from discord.ext import commands
@@ -123,6 +124,71 @@ class ReminderService:
 
     def get_lobby_subscriber_ids(self, guild_id: int) -> list[int]:
         return self._notification_repo.get_enabled_users_for_type(guild_id, "lobby")
+
+    def add_lobby_player_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Arm a one-shot DM for the next time ``target_id`` joins a lobby.
+
+        Player-specific subscriptions are stored independently from the
+        persistent public-channel lobby preference exposed by
+        :meth:`get_lobby_subscriber_ids`.
+        """
+        return self._notification_repo.add_lobby_target_subscription(
+            subscriber_id,
+            target_id,
+            guild_id,
+        )
+
+    async def notify_lobby_player_subscribers(
+        self,
+        bot: "commands.Bot",
+        target_id: int,
+        target_display_name: str,
+        guild_id: int,
+        lobby_kind: LobbyKind | str | None = None,
+        join_cutoff_ns: int | None = None,
+    ) -> int:
+        """Consume and deliver one-shot DMs for a player's successful join.
+
+        The repository claim deletes the matching subscriptions atomically.
+        It happens before any Discord I/O so concurrent join handlers cannot
+        notify the same subscriber twice. A claimed subscription is consumed
+        after this single delivery attempt even if the eventual DM fails.
+        ``join_cutoff_ns`` prevents a watch armed after this join starts from being
+        consumed merely because delivery runs in the background.
+
+        Returns the number of subscribers for whom a DM was attempted.
+        """
+        claimed_ids = await asyncio.to_thread(
+            self._notification_repo.claim_lobby_target_subscribers,
+            target_id,
+            guild_id,
+            join_cutoff_ns,
+        )
+        subscriber_ids = list(
+            dict.fromkeys(
+                subscriber_id
+                for subscriber_id in claimed_ids
+                if isinstance(subscriber_id, int) and subscriber_id > 0
+            )
+        )
+        if not subscriber_ids:
+            return 0
+
+        kind = LobbyKind.normalize(lobby_kind)
+        safe_target_name = escape_discord_text(target_display_name)
+        message = (
+            f"🔔 **{safe_target_name}** just joined {kind.label}! "
+            "This one-time lobby notification has now been used."
+        )
+        await asyncio.gather(
+            *(self._dm_user(bot, subscriber_id, message) for subscriber_id in subscriber_ids)
+        )
+        return len(subscriber_ids)
 
     # ------------------------------------------------------------------
     # Scheduling
