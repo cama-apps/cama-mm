@@ -145,6 +145,156 @@ class TestRegistration:
                     f"{anchor_kind} mount {target_center}"
                 )
 
+    def test_head_mounted_overlays_center_on_the_face(self):
+        """Adult hats and floating head effects must follow the visible face."""
+        stage = "adult"
+        for path in pet_compositor._pool(stage, "creature"):
+            anchors = pet_compositor._load_anchors(path, stage)
+            authoring = pet_compositor._authoring_frame(stage)
+            geometry = pet_compositor._geometry_frame(stage)
+            face = render_layer(
+                "face", "common_cama", stage, "happy", seed=1
+            )
+            front = render_layer(
+                "front", "invoker_cama", stage, "happy", seed=1
+            )
+            straw_hat = pet_compositor._accessory_layer(
+                "straw_hat", stage, 1, authoring, geometry, anchors
+            )
+            red_bow = pet_compositor._accessory_layer(
+                "red_bow", stage, 1, authoring, geometry, anchors
+            )
+            assert face is not None
+            assert front is not None
+            assert straw_hat is not None
+            assert red_bow is not None
+
+            fitted_face = pet_compositor._fit_to_target(
+                face, geometry, anchors, "face"
+            )
+            fitted_front = pet_compositor._fit_to_target(
+                front, geometry, anchors, "head"
+            )
+            face_center = _bbox_center(fitted_face)
+            assert face_center is not None
+
+            for name, layer in (
+                ("head effect", fitted_front),
+                ("straw hat", straw_hat),
+                ("red bow", red_bow),
+            ):
+                overlay_center = _bbox_center(layer)
+                assert overlay_center is not None
+                dx = abs(overlay_center[0] - face_center[0])
+                assert dx <= 6, (
+                    f"{name} on {path.name} ({stage}) is horizontally offset "
+                    f"from the face by {dx}px"
+                )
+
+    def test_adult_semantic_accessory_anchors_follow_the_face(self):
+        """Adult accessories must share their body's visible face center."""
+        checked = 0
+        for path in pet_compositor._pool("adult", "creature"):
+            if not path.with_suffix(".json").is_file():
+                continue
+            anchors = pet_compositor._load_anchors(path, "adult")
+            face_x = anchors["face_center"][0]
+            for kind in ("head", "headwear", "neck", "chest"):
+                assert anchors[f"{kind}_center"][0] == face_x, (
+                    f"{path.name}: {kind} anchor is not centered on the face"
+                )
+            checked += 1
+        assert checked >= 3
+
+    def test_courier_detail_centers_on_the_adult_chest(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Courier saddlebags use chest x without changing their body fit."""
+        captured_layers = []
+
+        def capture(layers):
+            captured_layers.append(layers)
+            return layers
+
+        monkeypatch.setattr(pet_compositor, "assemble_card", capture)
+        source = pet_compositor._authoring_frame("adult")
+        detail_pick = pet_compositor._pick_component(
+            "detail", "adult", "courier_cama", "happy", 1
+        )
+        assert detail_pick is not None
+        detail = pet_compositor._load_component(detail_pick[0])
+        assert detail is not None
+
+        covered_creatures = set()
+        for seed in (1, 2, 5):
+            pet_compositor.compose_pet_card("courier_cama", "adult", "happy", seed)
+            fitted_detail = captured_layers[-1][
+                pet_compositor.SLOT_ORDER.index("detail")
+            ]
+            creature_pick = pet_compositor._pick_component(
+                "creature", "adult", "courier_cama", "happy", seed
+            )
+            assert creature_pick is not None
+            covered_creatures.add(creature_pick[0].name)
+            anchors = pet_compositor._load_anchors(creature_pick[0], "adult")
+            body_fitted = pet_compositor._fit_to_target(
+                detail, source, anchors, "body"
+            )
+
+            detail_bbox = fitted_detail.getchannel("A").getbbox()
+            body_bbox = body_fitted.getchannel("A").getbbox()
+            assert detail_bbox is not None
+            assert body_bbox is not None
+            assert detail_bbox[1] == body_bbox[1]
+            assert detail_bbox[3] == body_bbox[3]
+            assert detail_bbox[2] - detail_bbox[0] == body_bbox[2] - body_bbox[0]
+            assert (
+                abs(
+                    (detail_bbox[0] + detail_bbox[2]) / 2
+                    - anchors["chest_center"][0]
+                )
+                <= 1
+            )
+
+        assert covered_creatures == {
+            path.name for path in pet_compositor._pool("adult", "creature")
+        }
+
+    @pytest.mark.parametrize(
+        "species_id", ("crystal_cama", "jopacama", "pudge_cama", "rama")
+    )
+    def test_non_courier_detail_keeps_the_body_fit(
+        self, monkeypatch: pytest.MonkeyPatch, species_id: str
+    ):
+        """Species detail other than courier bags remains body-centered."""
+        captured_layers = []
+
+        def capture(layers):
+            captured_layers.append(layers)
+            return layers
+
+        monkeypatch.setattr(pet_compositor, "assemble_card", capture)
+        source = pet_compositor._authoring_frame("adult")
+        detail_pick = pet_compositor._pick_component(
+            "detail", "adult", species_id, "happy", 1
+        )
+        assert detail_pick is not None
+        detail = pet_compositor._load_component(detail_pick[0])
+        assert detail is not None
+
+        pet_compositor.compose_pet_card(species_id, "adult", "happy", 1)
+        fitted_detail = captured_layers[-1][
+            pet_compositor.SLOT_ORDER.index("detail")
+        ]
+        creature_pick = pet_compositor._pick_component(
+            "creature", "adult", species_id, "happy", 1
+        )
+        assert creature_pick is not None
+        anchors = pet_compositor._load_anchors(creature_pick[0], "adult")
+        assert fitted_detail.tobytes() == pet_compositor._fit_to_target(
+            detail, source, anchors, "body"
+        ).tobytes()
+
     def test_every_accessory_is_visibly_attached_to_every_body(self):
         """Headwear must touch the head; neckwear and pins sit in the wool."""
         expected_mounts = {

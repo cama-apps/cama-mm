@@ -10,7 +10,7 @@ from PIL import Image
 from commands.pet_helpers import embeds as pet_embeds
 from domain.models.pet import Pet, PetMood, PetStage, PetStatus
 from domain.pet_evolution import PetCalling, PetInstinct
-from utils.pet_drawing import render_pet_card
+from utils.pet_drawing import render_evolution_motif, render_pet_card
 
 T0 = 1_800_000_000
 DAY = 86400
@@ -183,3 +183,16 @@ def test_evolution_motifs_are_deterministic_and_change_the_adult_card():
     assert evolved == repeated
     with Image.open(io.BytesIO(evolved)) as image:
         assert image.size == (512, 288)
+
+
+def test_adult_evolution_motif_leaves_the_pet_body_region_clear():
+    motif = render_evolution_motif(
+        PetCalling.PROSPECTOR,
+        PetInstinct.DELVING,
+        PetInstinct.FORTUNE,
+        "adult",
+        seed=7,
+    )
+
+    assert motif is not None
+    assert motif.crop((190, 126, 323, 245)).getbbox() is None
