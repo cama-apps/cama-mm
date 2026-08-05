@@ -436,6 +436,16 @@ def compose_pet_card(
             layer = _fit_to_target(layer, source, target, "head")
         elif layer is not None and slot in ("back", "detail"):
             layer = _fit_to_target(layer, source, target, "body")
+            if slot == "detail" and stage == "adult" and species_id == "courier_cama":
+                layer = _fit_layer(
+                    layer,
+                    scale=1.0,
+                    pivot=(0, 0),
+                    translate=(
+                        target["chest_center"][0] - target["body_center"][0],
+                        0,
+                    ),
+                )
         layers.append(layer)
     if accessory:
         # Trinkets composite above the face, below front features (orbs).

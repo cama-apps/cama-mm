@@ -804,12 +804,6 @@ def render_evolution_motif(
                 width=2,
             )
 
-    # A small two-tone mantle makes the resolved paths part of the pet itself,
-    # while staying compatible with every procedural or authored creature.
-    left = _INSTINCT_COLORS[instinct_values[0]]
-    right = _INSTINCT_COLORS[instinct_values[-1]]
-    draw.arc([190, 126, 322, 244], 18, 162, fill=(*left, 190), width=4)
-    draw.arc([190, 126, 322, 244], 198, 342, fill=(*right, 190), width=4)
     return img
 
 
