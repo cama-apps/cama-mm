@@ -13,6 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from repositories.disburse_repository import DisburseRepository
+from repositories.loan_repository import LoanRepository
+from repositories.player_repository import PlayerRepository
+from services.disburse_service import DisburseService
+from tests.conftest import TEST_GUILD_ID
+
 
 @pytest.fixture
 def bot_module():
@@ -1685,10 +1691,11 @@ async def test_economy_event_loop_does_not_pause_disbursement_voting(bot_module)
     sleep.assert_awaited_once_with(900)
 
 
-async def test_economy_event_loop_cancels_ballot_for_severe_deflationary_edict(
+async def test_economy_event_loop_preserves_ballot_for_severe_deflationary_edict(
     bot_module,
+    repo_db_path,
 ):
-    guild = SimpleNamespace(id=42)
+    guild = SimpleNamespace(id=TEST_GUILD_ID)
     event = {"event_id": 7, "name": "Ravage"}
     restriction = {"event_id": 7, "name": "Ravage", "severity": 3}
     economy_service = MagicMock()
@@ -1696,7 +1703,38 @@ async def test_economy_event_loop_cancels_ballot_for_severe_deflationary_edict(
     economy_service.get_reserve_voting_restriction.return_value = restriction
     economy_service.pending_announcement_slot.return_value = None
     economy_service.seconds_until_next_trigger.return_value = 900
-    disburse_service = MagicMock()
+    restriction_active = False
+
+    def current_restriction(_guild_id):
+        return restriction if restriction_active else None
+
+    disburse_repo = DisburseRepository(repo_db_path)
+    loan_repo = LoanRepository(repo_db_path)
+    player_repo = PlayerRepository(repo_db_path)
+    disburse_service = DisburseService(
+        disburse_repo=disburse_repo,
+        player_repo=player_repo,
+        loan_repo=loan_repo,
+        min_fund=100,
+        quorum_percentage=0.40,
+        reserve_voting_restriction_provider=current_restriction,
+    )
+    player_repo.add(
+        discord_id=1003,
+        discord_username="Voter1",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=3000,
+    )
+    player_repo.add(
+        discord_id=1004,
+        discord_username="Voter2",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=3000,
+    )
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+    proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+    disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+    restriction_active = True
 
     with (
         patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
@@ -1722,10 +1760,18 @@ async def test_economy_event_loop_cancels_ballot_for_severe_deflationary_edict(
     ):
         await bot_module._economy_event_loop()
 
-    economy_service.get_reserve_voting_restriction.assert_called_once_with(
-        guild.id
-    )
-    disburse_service.enforce_voting_restriction.assert_called_once_with(guild.id)
+    preserved = disburse_service.get_proposal(TEST_GUILD_ID)
+    assert preserved is not None
+    assert preserved.proposal_id == proposal.proposal_id
+    assert preserved.votes["even"] == 1
+    assert preserved.total_votes == 1
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+    restriction_active = False
+    resumed = disburse_service.add_vote(TEST_GUILD_ID, 1004, "stimulus")
+    assert resumed["votes"]["even"] == 1
+    assert resumed["votes"]["stimulus"] == 1
+    assert resumed["total_votes"] == 2
 
 
 @pytest.mark.parametrize(

@@ -323,6 +323,32 @@ async def test_disburse_status_replaces_old_message_without_fetch():
 
 
 @pytest.mark.asyncio
+async def test_disburse_status_keeps_resumable_vote_view_during_edict():
+    restriction = {
+        "code": "economy_edict",
+        "reason": (
+            "Jopacoin Reserve allocation voting is suspended by "
+            "Ravage — Level III."
+        ),
+    }
+    service = _FakeDisburseService(
+        proposal=_Proposal(),
+        voting_restriction=restriction,
+    )
+    cog = SimpleNamespace(
+        disburse_service=service,
+        bot=SimpleNamespace(get_channel=lambda _channel_id: None),
+    )
+    interaction = _FakeInteraction()
+
+    await actions.disburse_status(cog, interaction, TEST_GUILD_ID)
+
+    message = interaction.response.messages[0]
+    assert message["content"] == restriction["reason"]
+    assert isinstance(message["view"], DisburseVoteView)
+
+
+@pytest.mark.asyncio
 async def test_update_disburse_message_edits_without_fetch():
     proposal = _Proposal()
     proposal.message_id = 321
