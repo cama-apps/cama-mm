@@ -4,6 +4,7 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 
 from domain.models.lobby import LobbyKind
@@ -135,6 +136,114 @@ class TestNotificationRepository:
         assert notification_repo.get_preferences(1, None)["trivia_enabled"] is True
         assert notification_repo.get_preferences(1, 0)["trivia_enabled"] is True
 
+    def test_lobby_target_subscription_is_idempotent_and_claimed_once(
+        self,
+        notification_repo,
+    ):
+        assert notification_repo.add_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is True
+        assert notification_repo.add_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is False
+
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+        ) == [1]
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+        ) == []
+
+        # Player-target DMs are deliberately separate from persistent public
+        # 8/9-player rally mentions.
+        assert notification_repo.get_preferences(1, TEST_GUILD_ID)[
+            "lobby_enabled"
+        ] is False
+        assert notification_repo.get_enabled_users_for_type(
+            TEST_GUILD_ID,
+            "lobby",
+        ) == []
+
+    def test_lobby_target_subscriptions_support_many_targets_and_subscribers(
+        self,
+        notification_repo,
+    ):
+        assert notification_repo.add_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is True
+        assert notification_repo.add_lobby_target_subscription(
+            1,
+            11,
+            TEST_GUILD_ID,
+        ) is True
+        assert notification_repo.add_lobby_target_subscription(
+            2,
+            10,
+            TEST_GUILD_ID,
+        ) is True
+
+        assert set(
+            notification_repo.claim_lobby_target_subscribers(
+                10,
+                TEST_GUILD_ID,
+            )
+        ) == {1, 2}
+        assert notification_repo.claim_lobby_target_subscribers(
+            11,
+            TEST_GUILD_ID,
+        ) == [1]
+
+    def test_lobby_target_subscription_claim_is_guild_scoped(
+        self,
+        notification_repo,
+    ):
+        notification_repo.add_lobby_target_subscription(1, 10, TEST_GUILD_ID)
+        notification_repo.add_lobby_target_subscription(1, 10, TEST_GUILD_ID_2)
+
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+        ) == [1]
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+        ) == []
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID_2,
+        ) == [1]
+
+    def test_join_cutoff_leaves_subscriptions_created_after_the_join(
+        self,
+        notification_repo,
+    ):
+        """A background claim cannot consume a watch armed after its join."""
+        with patch(
+            "repositories.notification_repository.time.time_ns",
+            side_effect=[100, 200],
+        ):
+            notification_repo.add_lobby_target_subscription(1, 10, TEST_GUILD_ID)
+            notification_repo.add_lobby_target_subscription(2, 10, TEST_GUILD_ID)
+
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+            created_at_cutoff=150,
+        ) == [1]
+        assert notification_repo.claim_lobby_target_subscribers(
+            10,
+            TEST_GUILD_ID,
+            created_at_cutoff=300,
+        ) == [2]
+
 
 # ---------------------------------------------------------------------------
 # ReminderService — preferences
@@ -162,6 +271,114 @@ class TestReminderServicePreferences:
 
         assert reminder_service.set_preference(1, TEST_GUILD_ID, "lobby", False) is False
         assert reminder_service.get_lobby_subscriber_ids(TEST_GUILD_ID) == []
+
+
+class TestLobbyPlayerNotifications:
+    @pytest.mark.asyncio
+    async def test_successful_delivery_consumes_subscription_once(
+        self,
+        reminder_service,
+        mock_bot,
+    ):
+        subscriber = MagicMock(id=1)
+        subscriber.send = AsyncMock()
+        mock_bot.get_user.return_value = subscriber
+        assert reminder_service.add_lobby_player_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is True
+
+        attempted = await reminder_service.notify_lobby_player_subscribers(
+            mock_bot,
+            target_id=10,
+            target_display_name="Target Player",
+            guild_id=TEST_GUILD_ID,
+            lobby_kind=LobbyKind.LOWSKILL,
+        )
+        repeated = await reminder_service.notify_lobby_player_subscribers(
+            mock_bot,
+            target_id=10,
+            target_display_name="Target Player",
+            guild_id=TEST_GUILD_ID,
+            lobby_kind=LobbyKind.LOWSKILL,
+        )
+
+        assert attempted == 1
+        assert repeated == 0
+        subscriber.send.assert_awaited_once()
+        message = subscriber.send.await_args.args[0]
+        assert "Target Player" in message
+        assert LobbyKind.LOWSKILL.label in message
+        assert "one-time" in message
+
+    @pytest.mark.asyncio
+    async def test_target_display_name_is_escaped_in_runtime_dm(
+        self,
+        reminder_service,
+        mock_bot,
+    ):
+        subscriber = MagicMock(id=1)
+        subscriber.send = AsyncMock()
+        mock_bot.get_user.return_value = subscriber
+        reminder_service.add_lobby_player_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        )
+        crafted_name = "**<@123> @everyone [click](https://example.invalid)**"
+
+        await reminder_service.notify_lobby_player_subscribers(
+            mock_bot,
+            target_id=10,
+            target_display_name=crafted_name,
+            guild_id=TEST_GUILD_ID,
+        )
+
+        subscriber.send.assert_awaited_once()
+        message = subscriber.send.await_args.args[0]
+        assert crafted_name not in message
+        assert "<@123>" not in message
+        assert "@everyone" not in message
+        assert "<@\u200b123\\>" in message
+        assert "@\u200beveryone" in message
+        assert "\\*\\*" in message
+        assert "\\[click\\]\\(" in message
+
+    @pytest.mark.asyncio
+    async def test_failed_delivery_still_consumes_subscription(
+        self,
+        reminder_service,
+        mock_bot,
+    ):
+        subscriber = MagicMock(id=1)
+        response = MagicMock(status=403, reason="Forbidden")
+        subscriber.send = AsyncMock(
+            side_effect=discord.Forbidden(response, "Cannot send messages to this user")
+        )
+        mock_bot.get_user.return_value = subscriber
+        reminder_service.add_lobby_player_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        )
+
+        attempted = await reminder_service.notify_lobby_player_subscribers(
+            mock_bot,
+            target_id=10,
+            target_display_name="Target Player",
+            guild_id=TEST_GUILD_ID,
+        )
+        repeated = await reminder_service.notify_lobby_player_subscribers(
+            mock_bot,
+            target_id=10,
+            target_display_name="Target Player",
+            guild_id=TEST_GUILD_ID,
+        )
+
+        assert attempted == 1
+        assert repeated == 0
+        subscriber.send.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -961,3 +1178,56 @@ class TestArmPreferenceOnEnable:
         for rtype in ("lobby", "betting"):
             await reminder_service.arm_preference(mock_bot, 4245, TEST_GUILD_ID, rtype)
         assert not reminder_service._tasks
+
+
+# ---------------------------------------------------------------------------
+# Lobby target subscription concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestLobbyTargetSubscriptionConcurrency:
+    def test_two_concurrent_claimers_have_exactly_one_winner(
+        self,
+        notification_repo,
+    ):
+        """BEGIN IMMEDIATE makes a one-shot subscription consumable once."""
+        subscriber_id = 7001
+        target_id = 7002
+        assert notification_repo.add_lobby_target_subscription(
+            subscriber_id,
+            target_id,
+            TEST_GUILD_ID,
+        )
+
+        repositories = [
+            NotificationRepository(notification_repo.db_path),
+            NotificationRepository(notification_repo.db_path),
+        ]
+        start = threading.Barrier(2)
+        results: list[list[int] | None] = [None, None]
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def claim(index: int) -> None:
+            try:
+                start.wait(timeout=2)
+                results[index] = repositories[index].claim_lobby_target_subscribers(
+                    target_id,
+                    TEST_GUILD_ID,
+                )
+            except BaseException as exc:  # surfaced on the test thread below
+                with errors_lock:
+                    errors.append(exc)
+
+        claimers = [threading.Thread(target=claim, args=(index,)) for index in range(2)]
+        for claimer in claimers:
+            claimer.start()
+        for claimer in claimers:
+            claimer.join(timeout=5)
+
+        assert not any(claimer.is_alive() for claimer in claimers)
+        assert errors == []
+        assert sorted(results, key=lambda claimed: len(claimed or [])) == [
+            [],
+            [subscriber_id],
+        ]

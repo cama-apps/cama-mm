@@ -16,7 +16,7 @@ from config import (
     MMR_MODAL_TIMEOUT_MINUTES,
 )
 from opendota_integration import run_opendota_io
-from utils.formatting import format_role_display
+from utils.formatting import escape_discord_text, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
 
@@ -39,18 +39,20 @@ class RegistrationCommands(commands.Cog):
 
     @player_lobby.command(
         name="autonotify",
-        description="Subscribe to automatic lobby-filling notifications",
+        description="Manage public lobby alerts or watch a player's next signup",
     )
     @app_commands.describe(
         enabled="Enable or disable persistent lobby notifications",
+        playername="DM you once when this player next joins a lobby",
     )
     @require_guild
     async def lobby_autonotify(
         self,
         interaction: discord.Interaction,
-        enabled: bool = True,
+        enabled: bool | None = None,
+        playername: discord.Member | None = None,
     ):
-        """Set the user's persistent lobby-filling notification preference."""
+        """Manage public rally alerts or arm a one-shot player signup DM."""
         if not await safe_defer(interaction, ephemeral=True):
             return
 
@@ -63,6 +65,111 @@ class RegistrationCommands(commands.Cog):
             )
             return
 
+        if playername is not None:
+            if enabled is not None:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        "❌ Choose either `playername` for a one-time DM or `enabled` "
+                        "for public 8/9-player alerts, not both."
+                    ),
+                    ephemeral=True,
+                )
+                return
+            if playername.id == interaction.user.id:
+                await safe_followup(
+                    interaction,
+                    content="❌ You can't subscribe to your own lobby signup.",
+                    ephemeral=True,
+                )
+                return
+            if playername.bot:
+                await safe_followup(
+                    interaction,
+                    content="❌ Bot accounts can't sign up for player lobbies.",
+                    ephemeral=True,
+                )
+                return
+
+            target_name = escape_discord_text(playername.display_name)
+            try:
+                # Discord has no guild permission bit that proves a user accepts
+                # bot DMs. A real send is the only reliable preflight, and the
+                # subscription is persisted only after it succeeds.
+                await interaction.user.send(
+                    "✅ DM check passed for your one-time lobby alert request "
+                    f"about **{target_name}**."
+                )
+            except discord.Forbidden:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        "❌ I can't DM you. Enable direct messages from server members, "
+                        "then try again."
+                    ),
+                    ephemeral=True,
+                )
+                return
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Discord rejected the lobby target DM check for %s: %s",
+                    interaction.user.id,
+                    exc,
+                )
+                await safe_followup(
+                    interaction,
+                    content="❌ I couldn't verify that I can DM you. Try again in a moment.",
+                    ephemeral=True,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Could not validate DMs for lobby target subscriber %s: %s",
+                    interaction.user.id,
+                    exc,
+                )
+                await safe_followup(
+                    interaction,
+                    content="❌ I couldn't verify that I can DM you. Try again in a moment.",
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                created = await asyncio.to_thread(
+                    reminder_service.add_lobby_player_subscription,
+                    interaction.user.id,
+                    playername.id,
+                    interaction.guild.id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Error adding one-shot lobby alert for subscriber %s and target %s: %s",
+                    interaction.user.id,
+                    playername.id,
+                    exc,
+                    exc_info=True,
+                )
+                await safe_followup(
+                    interaction,
+                    content="❌ Your DM check passed, but I couldn't save the alert. Try again later.",
+                    ephemeral=True,
+                )
+                return
+
+            if created:
+                message = (
+                    f"🔔 One-time lobby alert set for **{target_name}**. "
+                    "I'll DM you the next time they join a lobby in this server."
+                )
+            else:
+                message = (
+                    f"🔔 You already have a one-time lobby alert set for **{target_name}**."
+                )
+            await safe_followup(interaction, content=message, ephemeral=True)
+            return
+
+        enabled = True if enabled is None else enabled
         try:
             await asyncio.to_thread(
                 reminder_service.set_preference,

@@ -9,7 +9,7 @@ extracted from interaction.guild.id.
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from discord import app_commands
@@ -263,6 +263,14 @@ def make_services(player_repo=None):
     lobby_service = LobbyService(lobby_manager, player_repo)
     player_service = FakePlayerService(player_repo)
     return lobby_manager, lobby_service, player_service, player_repo
+
+
+async def _drain_lobby_player_notification_tasks(cog: LobbyCommands) -> None:
+    """Await any retained one-shot DM tasks created by a command."""
+    await asyncio.sleep(0)
+    tasks = tuple(cog._lobby_player_notification_tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 @pytest.fixture
@@ -853,6 +861,310 @@ async def test_auto_join_lobby_uses_guild_id(monkeypatch_safe_defer):
 
     # Should have attempted to join (may succeed or fail based on implementation)
     assert isinstance(joined, bool)
+
+
+@pytest.mark.asyncio
+async def test_join_notifies_target_watchers_without_channel_metadata(
+    monkeypatch_safe_defer,
+):
+    """A successful /join delivers the one-shot hook before metadata checks."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
+    bot = FakeBot()
+    bot.reminder_service = reminder_service
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    await cog.join.callback(cog, interaction)
+
+    reminder_service.notify_lobby_player_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_join_notifies_target_watchers_without_channel_metadata():
+    """A successful /lobby auto-join uses the same metadata-independent hook."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
+    bot = FakeBot()
+    bot.reminder_service = reminder_service
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    joined, warning = await cog._auto_join_lobby(interaction, lobby)
+
+    assert joined is True
+    assert warning is None
+    reminder_service.notify_lobby_player_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_join_target_dm_does_not_delay_eight_player_rally(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """A stalled one-shot DM task cannot hold up the public +2 rally ping."""
+    import bot as bot_module
+
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    for player_id in range(10, 17):
+        lobby.add_player(player_id)
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        thread_id=999,
+        embed_message_id=789,
+        guild_id=TEST_GUILD_ID,
+    )
+
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    dm_started = asyncio.Event()
+    release_dm = asyncio.Event()
+    rally_started = asyncio.Event()
+
+    async def stalled_notification(*_args, **_kwargs):
+        dm_started.set()
+        await release_dm.wait()
+        return 1
+
+    notify_subscribers = AsyncMock(side_effect=stalled_notification)
+    bot = FakeBot()
+    bot.reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=notify_subscribers
+    )
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    async def rally(_channel, _thread, current_lobby, _guild_id):
+        assert current_lobby.get_player_count() == 8
+        assert dm_started.is_set()
+        assert not release_dm.is_set()
+        rally_started.set()
+        return True
+
+    monkeypatch.setattr(cog, "_sync_lobby_displays", AsyncMock())
+    monkeypatch.setattr(cog, "_post_join_activity", AsyncMock())
+    monkeypatch.setattr(bot_module, "notify_lobby_rally", rally)
+    monkeypatch.setattr(bot_module, "notify_lobby_ready", AsyncMock())
+
+    command = asyncio.create_task(cog.join.callback(cog, interaction))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(dm_started.wait(), rally_started.wait()),
+            timeout=1,
+        )
+        assert not release_dm.is_set()
+    finally:
+        retained_tasks = tuple(cog._lobby_player_notification_tasks)
+        release_dm.set()
+        await asyncio.wait_for(command, timeout=1)
+        if retained_tasks:
+            await asyncio.gather(*retained_tasks)
+
+    notify_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_join_schedules_target_dm_when_post_join_refresh_disappears(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """A successful slash join schedules its DM before a missing refresh."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    notify_subscribers = AsyncMock(return_value=1)
+    bot = FakeBot()
+    bot.reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=notify_subscribers
+    )
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    get_lobby_calls = 0
+
+    def disappearing_lobby(*_args, **_kwargs):
+        nonlocal get_lobby_calls
+        get_lobby_calls += 1
+        return lobby if get_lobby_calls == 1 else None
+
+    sync_displays = AsyncMock()
+    publish_join = AsyncMock()
+    monkeypatch.setattr(lobby_service, "get_lobby", disappearing_lobby)
+    monkeypatch.setattr(cog, "_sync_lobby_displays", sync_displays)
+    monkeypatch.setattr(
+        cog,
+        "_publish_join_activity_and_notifications",
+        publish_join,
+    )
+
+    await cog.join.callback(cog, interaction)
+    await _drain_lobby_player_notification_tasks(cog)
+
+    assert get_lobby_calls == 2
+    assert 1 in lobby.players
+    sync_displays.assert_awaited_once_with(None, TEST_GUILD_ID)
+    publish_join.assert_awaited_once_with(None, interaction.user, TEST_GUILD_ID)
+    notify_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_join_schedules_target_dm_when_post_join_refresh_disappears(
+    monkeypatch,
+):
+    """A successful auto-join also schedules its DM before a missing refresh."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    notify_subscribers = AsyncMock(return_value=1)
+    bot = FakeBot()
+    bot.reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=notify_subscribers
+    )
+    cog = LobbyCommands(bot, lobby_service, player_service)
+    sync_displays = AsyncMock()
+    publish_join = AsyncMock()
+    monkeypatch.setattr(lobby_service, "get_lobby", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cog, "_sync_lobby_displays", sync_displays)
+    monkeypatch.setattr(
+        cog,
+        "_publish_join_activity_and_notifications",
+        publish_join,
+    )
+
+    joined, warning = await cog._auto_join_lobby(interaction, lobby)
+    await _drain_lobby_player_notification_tasks(cog)
+
+    assert joined is True
+    assert warning is None
+    assert 1 in lobby.players
+    sync_displays.assert_awaited_once_with(None, TEST_GUILD_ID)
+    publish_join.assert_awaited_once_with(
+        None,
+        interaction.user,
+        TEST_GUILD_ID,
+        auto_join=True,
+    )
+    notify_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_join_does_not_notify_target_watchers(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """A rejected /join never publishes the target-player notification hook."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    monkeypatch.setattr(
+        lobby_service,
+        "join_lobby",
+        lambda *_args, **_kwargs: (False, "lobby_full", None),
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
+    bot = FakeBot()
+    bot.reminder_service = reminder_service
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    await cog.join.callback(cog, interaction)
+
+    reminder_service.notify_lobby_player_subscribers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_already_joined_auto_join_does_not_notify_target_watchers():
+    """Viewing /lobby while already joined must not consume a one-shot watch."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    lobby.add_player(1)
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=AsyncMock(return_value=1)
+    )
+    bot = FakeBot()
+    bot.reminder_service = reminder_service
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    joined, warning = await cog._auto_join_lobby(interaction, lobby)
+
+    assert joined is False
+    assert warning is None
+    reminder_service.notify_lobby_player_subscribers.assert_not_awaited()
 
 
 @pytest.mark.asyncio

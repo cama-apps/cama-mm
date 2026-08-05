@@ -5,6 +5,7 @@ Tests for registration command logic.
 
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 from commands.registration import RegistrationCommands
@@ -175,6 +176,67 @@ class TestLobbyAutonotifyCommand:
             ephemeral=True,
         )
         reminder_service.set_preference.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_player_target_checks_dm_before_persisting_subscription(self):
+        trace = []
+        reminder_service = Mock()
+        reminder_service.add_lobby_player_subscription.side_effect = (
+            lambda *_args: trace.append("persist") or True
+        )
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+        interaction.user.send = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: trace.append("dm_check")
+        )
+        target = Mock(id=456, bot=False, display_name="Target Player")
+
+        await cog.lobby_autonotify.callback(
+            cog,
+            interaction,
+            playername=target,
+        )
+
+        assert trace == ["dm_check", "persist"]
+        interaction.user.send.assert_awaited_once()
+        assert "Target Player" in interaction.user.send.await_args.args[0]
+        reminder_service.add_lobby_player_subscription.assert_called_once_with(
+            123,
+            456,
+            TEST_GUILD_ID,
+        )
+        reminder_service.set_preference.assert_not_called()
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "One-time lobby alert set" in kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_player_target_blocked_dm_persists_nothing(self):
+        reminder_service = Mock()
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+        response = Mock(status=403, reason="Forbidden")
+        interaction.user.send = AsyncMock(
+            side_effect=discord.Forbidden(response, "Cannot send messages to this user")
+        )
+        target = Mock(id=456, bot=False, display_name="Target Player")
+
+        await cog.lobby_autonotify.callback(
+            cog,
+            interaction,
+            playername=target,
+        )
+
+        interaction.user.send.assert_awaited_once()
+        reminder_service.add_lobby_player_subscription.assert_not_called()
+        reminder_service.set_preference.assert_not_called()
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "can't DM you" in kwargs["content"]
 
 
 class TestMMRPromptViewSignature:

@@ -762,6 +762,13 @@ class SchemaManager:
                 "openskill_v4_streak_replay",
                 self._migration_openskill_v4_streak_replay,
             ),
+            # Durable one-shot DMs when a specific player next joins a lobby.
+            # This is intentionally separate from reminder_preferences.lobby_enabled,
+            # which controls persistent public rally mentions at 8/9 players.
+            (
+                "create_lobby_target_subscriptions",
+                self._migration_create_lobby_target_subscriptions,
+            ),
         ]
 
     # --- Migrations ---
@@ -778,6 +785,20 @@ class SchemaManager:
     def _migration_openskill_v4_streak_replay(self, cursor) -> None:
         """Rebuild OpenSkill state with the persisted per-match streak curve."""
         self._migration_openskill_v3_durable_native_replay(cursor)
+
+    def _migration_create_lobby_target_subscriptions(self, cursor) -> None:
+        """Store guild-scoped, one-shot lobby-join DM subscriptions."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lobby_target_subscriptions (
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                target_id    INTEGER NOT NULL,
+                subscriber_id INTEGER NOT NULL,
+                created_at   INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, target_id, subscriber_id)
+            )
+            """
+        )
 
     def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:
         self._add_column_if_not_exists(

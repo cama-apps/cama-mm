@@ -28,6 +28,20 @@ JOPACOIN_EMOJI_ID = 954159801049440297
 TOMBSTONE_EMOJI = "🪦"
 
 
+def escape_discord_text(value: str) -> str:
+    """Escape user-controlled text for Discord markdown and neutralize mentions."""
+    markdown_characters = frozenset("\\`*_{}[]()#+-.!|>~")
+    escaped: list[str] = []
+    for character in str(value):
+        if character == "@":
+            escaped.append("@\u200b")
+        elif character in markdown_characters:
+            escaped.append(f"\\{character}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
+
 def format_role_display(role: str) -> str:
     """Return role string with emoji and name (e.g., '⚔️ Carry')."""
     emoji = ROLE_EMOJIS.get(role, "")
