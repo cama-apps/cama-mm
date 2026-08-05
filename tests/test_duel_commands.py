@@ -100,6 +100,25 @@ def make_challenge(**overrides) -> DuelChallenge:
     return DuelChallenge(**values)
 
 
+def test_flavor_details_do_not_expose_discord_ids():
+    challenger_id = 111_222_333_444_555_666
+    recipient_id = 777_888_999_000_111_222
+
+    details = DuelCommands._flavor_details(
+        make_challenge(
+            challenger_id=challenger_id,
+            recipient_id=recipient_id,
+        )
+    )
+
+    assert details["challenger"] == "the challenger"
+    assert details["recipient"] == "the recipient"
+    assert "challenger_id" not in details
+    assert "recipient_id" not in details
+    assert challenger_id not in details.values()
+    assert recipient_id not in details.values()
+
+
 @pytest.fixture
 def challenger():
     return SimpleNamespace(id=CHALLENGER_ID, mention=f"<@{CHALLENGER_ID}>", bot=False)
