@@ -50,6 +50,41 @@ def _get_recent_signup_ids(player_data: dict[int, dict]) -> set[int]:
     }
 
 
+def _private_suspension_message(suspension) -> str:
+    """Describe a restriction only in ephemeral responses or target DMs."""
+    if suspension is None:
+        return "You are temporarily suspended from this matchmaking lobby."
+    raw_scope = getattr(suspension, "scope", "all")
+    scope = str(getattr(raw_scope, "value", raw_scope))
+    scope_text = {
+        "all": "all matchmaking lobbies",
+        "open": LobbyKind.OPEN.label,
+        "lowskill": LobbyKind.LOWSKILL.label,
+    }.get(scope, scope)
+    terms: list[str] = []
+    expires_at = getattr(suspension, "expires_at", None)
+    if expires_at is not None:
+        expiry = int(expires_at)
+        terms.append(f"until <t:{expiry}:F> (<t:{expiry}:R>)")
+    matches_remaining = getattr(suspension, "matches_remaining", None)
+    if matches_remaining is not None:
+        noun = "match" if matches_remaining == 1 else "matches"
+        terms.append(f"{matches_remaining} completed {noun} remaining")
+    completion = str(
+        getattr(
+            getattr(suspension, "completion", None),
+            "value",
+            getattr(suspension, "completion", "either"),
+        )
+    )
+    joiner = " or " if completion == "either" else " and "
+    term_text = joiner.join(terms) if terms else "temporarily"
+    return (
+        f"You are suspended from {scope_text} {term_text}. "
+        f"Reason: {getattr(suspension, 'reason', 'Not provided')}"
+    )
+
+
 class LobbyCommands(commands.Cog):
     """Slash commands for lobby management."""
 
@@ -956,7 +991,7 @@ class LobbyCommands(commands.Cog):
 
         # Attempt to join (pending match check now inside LobbyService)
         join_cutoff_ns = time.time_ns()
-        success, reason, _ = await asyncio.to_thread(
+        success, reason, context = await asyncio.to_thread(
             self.lobby_service.join_lobby,
             user_id,
             guild_id,
@@ -977,6 +1012,8 @@ class LobbyCommands(commands.Cog):
                     False,
                     "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress.",
                 )
+            if reason == "lobby_suspended":
+                return False, f"❌ {_private_suspension_message(context)}"
             return False, None
 
         # Start the one-shot claim from the known successful mutation. It runs
@@ -1062,6 +1099,13 @@ class LobbyCommands(commands.Cog):
                     await safe_followup(
                         interaction,
                         content="❌ Only players below 1400 Glicko can create Whine & Cheese.",
+                        ephemeral=True,
+                    )
+                    return
+                if str(exc) == "lobby_suspended":
+                    await safe_followup(
+                        interaction,
+                        content=f"❌ {_private_suspension_message(getattr(exc, 'suspension', None))}",
                         ephemeral=True,
                     )
                     return
@@ -1221,9 +1265,17 @@ class LobbyCommands(commands.Cog):
         name="kick",
         description="Kick a player from the lobby (Admin or lobby creator only)",
     )
-    @app_commands.describe(player="The player to kick from the lobby")
+    @app_commands.describe(
+        player="The player to kick from the lobby",
+        reason="Optional reason shown privately to the player and admins",
+    )
     @require_guild
-    async def kick(self, interaction: discord.Interaction, player: discord.Member):
+    async def kick(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        reason: app_commands.Range[str, 3, 300] | None = None,
+    ):
         logger.info(f"Kick command: User {interaction.user.id} kicking {player.id}")
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -1255,7 +1307,13 @@ class LobbyCommands(commands.Cog):
             return
 
         is_admin = has_admin_permission(interaction)
-        is_creator = lobby.created_by == interaction.user.id
+        # Lobby ownership is not durable moderation authority. A creator who
+        # has left (or was suspended and evicted) no longer gets to kick people
+        # remotely from the lobby they originally opened.
+        is_creator = (
+            lobby.created_by == interaction.user.id
+            and interaction.user.id in lobby.players
+        )
         if not (is_admin or is_creator):
             await safe_followup(
                 interaction, content="❌ Permission denied. Admin or lobby creator only.",
@@ -1276,11 +1334,26 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        removed = await asyncio.to_thread(
-            self.lobby_service.leave_lobby,
-            player.id,
-            guild_id,
-            lobby_kind,
+        target_name = getattr(player, "display_name", player.mention)
+        actor_name = getattr(
+            interaction.user,
+            "display_name",
+            getattr(interaction.user, "mention", str(interaction.user.id)),
+        )
+        public_message = f"👢 **{target_name}** was kicked by {actor_name}."
+        dm_message = (
+            f"You were kicked from {lobby_kind.label} "
+            f"by {interaction.user.mention}."
+        )
+        if reason:
+            dm_message += f"\nReason: {reason}"
+
+        removed = await self.eject_lobby_player(
+            player,
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+            public_message=public_message,
+            dm_message=dm_message,
         )
         if removed:
             await safe_followup(
@@ -1289,50 +1362,82 @@ class LobbyCommands(commands.Cog):
                 ephemeral=True,
             )
 
-            # Re-fetch lobby after removal so the embed reflects the current state.
-            lobby = await asyncio.to_thread(
-                self.lobby_service.get_lobby,
-                guild_id=guild_id,
-                lobby_kind=lobby_kind,
-            )
-
-            # Update both channel message and thread embed
-            await self._sync_lobby_displays(lobby, guild_id)
-
-            # Remove the kicked player's lobby reaction.
-            await self._remove_user_lobby_reactions(
-                player,
-                guild_id=guild_id,
-                lobby_kind=lobby_kind,
-            )
-
-            # Post kick activity in thread
-            thread_id = await asyncio.to_thread(
-                self.lobby_service.get_lobby_thread_id,
-                guild_id=guild_id,
-                lobby_kind=lobby_kind,
-            )
-            if thread_id:
+            moderation_service = getattr(self.bot, "moderation_service", None)
+            if moderation_service is not None:
                 try:
-                    thread = self.bot.get_channel(thread_id)
-                    if not thread:
-                        thread = await self.bot.fetch_channel(thread_id)
-                    await thread.send(
-                        f"👢 **{player.display_name}** was kicked by {interaction.user.display_name}."
+                    await asyncio.to_thread(
+                        moderation_service.record_kick,
+                        player.id,
+                        guild_id,
+                        actor_id=interaction.user.id,
+                        lobby_kind=lobby_kind.value,
+                        reason=reason,
+                        source="admin" if is_admin else "creator",
                     )
                 except Exception as exc:
-                    logger.warning(f"Failed to post kick activity: {exc}")
-
-            # DM the kicked player
-            try:
-                await player.send(
-                    f"You were kicked from {lobby_kind.label} "
-                    f"by {interaction.user.mention}."
-                )
-            except Exception as e:
-                logger.debug("Failed to DM kicked player: %s", e)
+                    logger.warning("Failed to audit lobby kick: %s", exc)
         else:
             await safe_followup(interaction, content=f"❌ Failed to kick {player.mention}.", ephemeral=True)
+
+    async def eject_lobby_player(
+        self,
+        player: discord.User | discord.Member,
+        *,
+        guild_id: int,
+        lobby_kind: LobbyKind | str,
+        public_message: str,
+        dm_message: str | None,
+    ) -> bool:
+        """Remove one non-reserved player and run shared Discord cleanup.
+
+        Persistent moderation state must be written before calling this helper.
+        A False result means the player was no longer in the lobby or had
+        already been reserved by a shuffle/draft; in-flight matches are never
+        disrupted by a newly issued suspension.
+        """
+        kind = LobbyKind.normalize(lobby_kind)
+        removed = await asyncio.to_thread(
+            self.lobby_service.leave_lobby,
+            player.id,
+            guild_id,
+            kind,
+        )
+        if not removed:
+            return False
+
+        lobby = await asyncio.to_thread(
+            self.lobby_service.get_lobby,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
+        if lobby is not None:
+            await self._sync_lobby_displays(lobby, guild_id)
+        await self._remove_user_lobby_reactions(
+            player,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
+
+        thread_id = await asyncio.to_thread(
+            self.lobby_service.get_lobby_thread_id,
+            guild_id=guild_id,
+            lobby_kind=kind,
+        )
+        if thread_id:
+            try:
+                thread = self.bot.get_channel(thread_id)
+                if not thread:
+                    thread = await self.bot.fetch_channel(thread_id)
+                await thread.send(public_message)
+            except Exception as exc:
+                logger.warning("Failed to post lobby ejection activity: %s", exc)
+
+        if dm_message:
+            try:
+                await player.send(dm_message)
+            except Exception as exc:
+                logger.debug("Failed to DM ejected player: %s", exc)
+        return True
 
     @app_commands.command(name="join", description="Join a matchmaking lobby")
     @app_commands.describe(lobby="Lobby to join")
@@ -1434,6 +1539,12 @@ class LobbyCommands(commands.Cog):
                         "❌ You can’t switch lobbies while your current shuffle "
                         "or draft is in progress."
                     ),
+                    ephemeral=True,
+                )
+            elif reason == "lobby_suspended":
+                await safe_followup(
+                    interaction,
+                    content=f"❌ {_private_suspension_message(pending_info)}",
                     ephemeral=True,
                 )
             else:

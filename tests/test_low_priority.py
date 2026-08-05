@@ -3,6 +3,7 @@
 import sqlite3
 
 from repositories.match_repository import MatchRepository
+from repositories.moderation_repository import ModerationRepository
 from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
@@ -40,6 +41,7 @@ def _record_core_win(
         guild_id=guild_id,
         dotabuff_match_id=None,
         lobby_type="shuffle",
+        lobby_kind="open",
         balancing_rating_system="glicko",
         winning_ids=[winner_id],
         losing_ids=[loser_id],
@@ -72,7 +74,9 @@ def test_schema_creates_low_priority_state(repo_db_path):
     assert set(columns) == {
         "discord_id",
         "guild_id",
+        "wins_required",
         "wins_remaining",
+        "start_pending_match_id",
         "active",
         "reason",
         "set_by",
@@ -201,3 +205,99 @@ def test_retrying_same_pending_match_does_not_double_count_win(repo_db_path):
 
     assert second == first
     assert repo.get_state(winner_id, TEST_GUILD_ID).wins_remaining == 2
+
+
+def test_assignment_ignores_a_match_that_was_already_pending(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    repo = _low_priority_repo(repo_db_path)
+    winner_id = 301
+    loser_id = 302
+    _register(player_repo, winner_id, TEST_GUILD_ID)
+    _register(player_repo, loser_id, TEST_GUILD_ID)
+    existing_pending = match_repo.save_pending_match(
+        TEST_GUILD_ID,
+        {"radiant_team_ids": [winner_id], "dire_team_ids": [loser_id]},
+    )
+    repo.set_low_priority(
+        winner_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason="future wins only",
+        wins_required=2,
+        start_pending_match_id=existing_pending,
+    )
+
+    _record_core_win(
+        match_repo,
+        winner_id=winner_id,
+        loser_id=loser_id,
+        guild_id=TEST_GUILD_ID,
+        pending_match_id=existing_pending,
+    )
+    assert repo.get_state(winner_id, TEST_GUILD_ID).wins_remaining == 2
+
+    future_pending = match_repo.save_pending_match(
+        TEST_GUILD_ID,
+        {"radiant_team_ids": [winner_id], "dire_team_ids": [loser_id]},
+    )
+    _record_core_win(
+        match_repo,
+        winner_id=winner_id,
+        loser_id=loser_id,
+        guild_id=TEST_GUILD_ID,
+        pending_match_id=future_pending,
+    )
+    assert repo.get_state(winner_id, TEST_GUILD_ID).wins_remaining == 1
+
+
+def test_automatic_completion_is_audited_once_with_match_id(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    repo = _low_priority_repo(repo_db_path)
+    moderation_repo = ModerationRepository(repo_db_path)
+    winner_id = 401
+    loser_id = 402
+    _register(player_repo, winner_id, TEST_GUILD_ID)
+    _register(player_repo, loser_id, TEST_GUILD_ID)
+    watermark = match_repo.save_pending_match(
+        TEST_GUILD_ID,
+        {"radiant_team_ids": [winner_id], "dire_team_ids": [loser_id]},
+    )
+    repo.set_low_priority(
+        winner_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason="one future win",
+        wins_required=1,
+        start_pending_match_id=watermark,
+    )
+    pending_id = match_repo.save_pending_match(
+        TEST_GUILD_ID,
+        {"radiant_team_ids": [winner_id], "dire_team_ids": [loser_id]},
+    )
+
+    match_id = _record_core_win(
+        match_repo,
+        winner_id=winner_id,
+        loser_id=loser_id,
+        guild_id=TEST_GUILD_ID,
+        pending_match_id=pending_id,
+    )
+    assert repo.get_state(winner_id, TEST_GUILD_ID).active is False
+    events = moderation_repo.get_history(TEST_GUILD_ID, winner_id)
+    assert len(events) == 1
+    assert events[0].event_type.value == "lowprio_complete"
+    assert events[0].match_id == match_id
+
+    assert (
+        _record_core_win(
+            match_repo,
+            winner_id=winner_id,
+            loser_id=loser_id,
+            guild_id=TEST_GUILD_ID,
+            pending_match_id=pending_id,
+        )
+        == match_id
+    )
+    assert len(moderation_repo.get_history(TEST_GUILD_ID, winner_id)) == 1

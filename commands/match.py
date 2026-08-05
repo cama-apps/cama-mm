@@ -1524,9 +1524,77 @@ class MatchCommands(commands.Cog):
         if match_id:
             _retain_background_task(
                 asyncio.create_task(
+                    self._notify_moderation_completions(
+                        guild,
+                        guild_id,
+                        match_id,
+                    )
+                )
+            )
+            _retain_background_task(
+                asyncio.create_task(
                     self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
                 )
             )
+
+    async def _notify_moderation_completions(
+        self,
+        guild: discord.Guild,
+        guild_id: int,
+        match_id: int,
+    ) -> None:
+        """Best-effort private notices for penalties completed by this match."""
+        moderation_service = getattr(self.bot, "moderation_service", None)
+        if moderation_service is None:
+            return
+        try:
+            events = await asyncio.to_thread(
+                moderation_service.get_completion_events_for_match,
+                guild_id,
+                match_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load moderation completions for match %s: %s",
+                match_id,
+                exc,
+            )
+            return
+
+        for event in events:
+            target = guild.get_member(event.discord_id) if guild is not None else None
+            if target is None:
+                get_user = getattr(self.bot, "get_user", None)
+                target = get_user(event.discord_id) if callable(get_user) else None
+            if target is None:
+                fetch_user = getattr(self.bot, "fetch_user", None)
+                if callable(fetch_user):
+                    try:
+                        target = await fetch_user(event.discord_id)
+                    except Exception:
+                        target = None
+            if target is None:
+                continue
+
+            event_type = str(getattr(event.event_type, "value", event.event_type))
+            if event_type == "lowprio_complete":
+                message = (
+                    f"You completed your low-priority win requirement in match #{match_id}. "
+                    "Your soft matchmaking penalty has been removed."
+                )
+            else:
+                message = (
+                    f"Your matchmaking lobby suspension was completed by match #{match_id}. "
+                    "You may create and join eligible lobbies again."
+                )
+            try:
+                await target.send(message)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to DM moderation completion to %s: %s",
+                    event.discord_id,
+                    exc,
+                )
 
     async def _run_pet_match_hooks(
         self,

@@ -34,6 +34,39 @@ _processed_interactions: dict[str, float] = {}
 _INTERACTION_TTL = 300.0  # 5 minutes
 
 
+def _enum_value(value) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _format_suspension_terms(state) -> str:
+    """Return a private/admin-safe summary of a suspension's remaining term."""
+    parts: list[str] = []
+    expires_at = getattr(state, "expires_at", None)
+    if expires_at is not None:
+        expiry = int(expires_at)
+        parts.append(f"until <t:{expiry}:F> (<t:{expiry}:R>)")
+    matches_remaining = getattr(state, "matches_remaining", None)
+    if matches_remaining is not None:
+        noun = "match" if matches_remaining == 1 else "matches"
+        parts.append(f"{matches_remaining} completed {noun} remaining")
+    if not parts:
+        return "no remaining term"
+    if len(parts) == 1:
+        return parts[0]
+    completion = _enum_value(getattr(state, "completion", "either"))
+    joiner = " or " if completion == "either" else " and "
+    return joiner.join(parts)
+
+
+def _format_suspension_scope(state) -> str:
+    scope = _enum_value(getattr(state, "scope", "all"))
+    return {
+        "all": "all matchmaking lobbies",
+        "open": LobbyKind.OPEN.label,
+        "lowskill": LobbyKind.LOWSKILL.label,
+    }.get(scope, scope)
+
+
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
@@ -48,6 +81,11 @@ class AdminCommands(commands.Cog):
         description="Restricted matchmaking maintenance",
         parent=admin,
     )
+    moderation = app_commands.Group(
+        name="moderation",
+        description="Temporary matchmaking suspensions and audit history",
+        parent=admin,
+    )
 
     def __init__(
         self,
@@ -59,6 +97,7 @@ class AdminCommands(commands.Cog):
         recalibration_service=None,
         match_service=None,
         low_priority_repo=None,
+        moderation_service=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
@@ -68,9 +107,14 @@ class AdminCommands(commands.Cog):
         self.recalibration_service = recalibration_service
         self.match_service = match_service
         self.low_priority_repo = low_priority_repo
+        self.moderation_service = moderation_service
 
     @lowprio.command(name="add", description="Set restricted matchmaking state")
-    @app_commands.describe(user="Player to update", reason="Internal reason")
+    @app_commands.describe(
+        user="Player to update",
+        reason="Reason shown privately to the player and admins",
+        wins="Required wins to clear low priority (1-20)",
+    )
     @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_add(
@@ -78,6 +122,7 @@ class AdminCommands(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member,
         reason: str | None = None,
+        wins: app_commands.Range[int, 1, 20] = LOW_PRIORITY_REQUIRED_WINS,
     ):
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -101,18 +146,69 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
             return
-        state = await asyncio.to_thread(
-            self.low_priority_repo.set_low_priority,
-            user.id,
-            guild_id,
-            set_by=interaction.user.id,
-            reason=reason,
+        previous = await asyncio.to_thread(
+            self.low_priority_repo.get_state, user.id, guild_id
         )
+        watermark = (
+            await asyncio.to_thread(
+                self.moderation_service.get_pending_match_watermark,
+                guild_id,
+            )
+            if self.moderation_service is not None
+            else None
+        )
+        state = await asyncio.to_thread(
+            functools.partial(
+                self.low_priority_repo.set_low_priority,
+                user.id,
+                guild_id,
+                set_by=interaction.user.id,
+                reason=reason,
+                wins_required=int(wins),
+                start_pending_match_id=watermark,
+            )
+        )
+        if self.moderation_service is not None:
+            try:
+                await asyncio.to_thread(
+                    functools.partial(
+                        self.moderation_service.record_low_priority_event,
+                        user.id,
+                        guild_id,
+                        event_type=(
+                            "lowprio_replace"
+                            if previous is not None and previous.active
+                            else "lowprio_assign"
+                        ),
+                        wins_required=state.wins_required,
+                        wins_remaining=state.wins_remaining,
+                        actor_id=interaction.user.id,
+                        reason=reason,
+                        pending_match_watermark=getattr(
+                            state,
+                            "start_pending_match_id",
+                            watermark,
+                        ),
+                        source="admin",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to audit low-priority assignment: %s", exc)
         await interaction.response.send_message(
             f"✅ Updated matchmaking state for {user.mention}. "
             f"{state.wins_remaining} wins required.",
             ephemeral=True,
         )
+        try:
+            message = (
+                f"You were placed in low priority for **{state.wins_required} wins**."
+            )
+            if reason:
+                message += f"\nReason: {reason}"
+            message += "\nUse `/player lobby status` to view your progress."
+            await user.send(message)
+        except Exception as exc:
+            logger.debug("Failed to DM low-priority player %s: %s", user.id, exc)
         logger.info(
             "Admin %s set low-priority state for %s in guild %s",
             interaction.user.id,
@@ -121,7 +217,10 @@ class AdminCommands(commands.Cog):
         )
 
     @lowprio.command(name="remove", description="Clear restricted matchmaking state")
-    @app_commands.describe(user="Player to update", reason="Internal reason")
+    @app_commands.describe(
+        user="Player to update",
+        reason="Reason shown privately to the player and admins",
+    )
     @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_remove(
@@ -149,12 +248,51 @@ class AdminCommands(commands.Cog):
             removed_by=interaction.user.id,
             reason=reason,
         )
+        if removed and self.moderation_service is not None:
+            try:
+                prior_state = await asyncio.to_thread(
+                    self.low_priority_repo.get_state,
+                    user.id,
+                    interaction.guild.id,
+                )
+                await asyncio.to_thread(
+                    functools.partial(
+                        self.moderation_service.record_low_priority_event,
+                        user.id,
+                        interaction.guild.id,
+                        event_type="lowprio_clear",
+                        wins_required=(
+                            prior_state.wins_required
+                            if prior_state is not None
+                            else LOW_PRIORITY_REQUIRED_WINS
+                        ),
+                        wins_remaining=0,
+                        actor_id=interaction.user.id,
+                        reason=reason,
+                        pending_match_watermark=(
+                            prior_state.start_pending_match_id
+                            if prior_state is not None
+                            else None
+                        ),
+                        source="admin",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to audit low-priority removal: %s", exc)
         message = (
             f"✅ Cleared matchmaking state for {user.mention}."
             if removed
             else f"{user.mention} does not have active restricted matchmaking state."
         )
         await interaction.response.send_message(message, ephemeral=True)
+        if removed:
+            try:
+                dm_message = "Your low-priority matchmaking state was cleared."
+                if reason:
+                    dm_message += f"\nReason: {reason}"
+                await user.send(dm_message)
+            except Exception as exc:
+                logger.debug("Failed to DM cleared low-priority player %s: %s", user.id, exc)
 
     @lowprio.command(name="status", description="Show restricted matchmaking state")
     @app_commands.describe(user="Player to inspect")
@@ -179,10 +317,12 @@ class AdminCommands(commands.Cog):
         if state is None or not state.active:
             message = f"{user.mention} does not have active restricted matchmaking state."
         else:
-            completed = LOW_PRIORITY_REQUIRED_WINS - state.wins_remaining
+            completed = state.wins_required - state.wins_remaining
             message = (
-                f"{user.mention}: {completed}/{LOW_PRIORITY_REQUIRED_WINS} "
-                f"wins completed ({state.wins_remaining} remaining)."
+                f"{user.mention}: {completed}/{state.wins_required} "
+                f"wins completed ({state.wins_remaining} remaining).\n"
+                f"Reason: {state.reason or 'Not provided'}\n"
+                f"Issued by: <@{state.set_by}>\nApplied: {state.created_at}"
             )
         await interaction.response.send_message(message, ephemeral=True)
 
@@ -207,10 +347,369 @@ class AdminCommands(commands.Cog):
             message = "No active restricted matchmaking state."
         else:
             message = "\n".join(
-                f"<@{state.discord_id}> — {state.wins_remaining} wins remaining"
+                f"<@{state.discord_id}> — {state.wins_remaining}/"
+                f"{state.wins_required} wins remaining; "
+                f"reason: {state.reason or 'not provided'}; by <@{state.set_by}>; "
+                f"assigned {state.created_at}"
                 for state in states
             )
+        await interaction.response.send_message(message[:2000], ephemeral=True)
+
+    @moderation.command(
+        name="suspend",
+        description="Temporarily block a player from matchmaking lobbies",
+    )
+    @app_commands.describe(
+        player="Player to suspend",
+        duration="Optional duration such as 30m, 2h, 3d, or 1w",
+        matches="Optional number of future completed matches (1-20)",
+        completion="When both terms are set, release on either term or only after both",
+        lobby="Lobby scope; defaults to all lobbies",
+        reason="Reason shown privately to the player and admins",
+    )
+    @app_commands.choices(
+        completion=[
+            app_commands.Choice(name="Either term (first one releases)", value="either"),
+            app_commands.Choice(name="Both terms must be served", value="both"),
+        ],
+        lobby=[
+            app_commands.Choice(name="All lobbies", value="all"),
+            app_commands.Choice(name="All You Can Feed", value="open"),
+            app_commands.Choice(name="Whine & Cheese", value="lowskill"),
+        ],
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def moderation_suspend(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        reason: app_commands.Range[str, 3, 300],
+        duration: str | None = None,
+        matches: app_commands.Range[int, 1, 20] | None = None,
+        completion: app_commands.Choice[str] | None = None,
+        lobby: app_commands.Choice[str] | None = None,
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        if self.moderation_service is None:
+            await interaction.response.send_message(
+                "❌ Matchmaking moderation is unavailable.", ephemeral=True
+            )
+            return
+        if getattr(player, "bot", False):
+            await interaction.response.send_message(
+                "❌ Bot accounts cannot be suspended from player lobbies.",
+                ephemeral=True,
+            )
+            return
+        if duration is None and matches is None:
+            await interaction.response.send_message(
+                "❌ Supply at least one term: `duration` and/or `matches`.",
+                ephemeral=True,
+            )
+            return
+        if duration is not None and matches is not None and completion is None:
+            await interaction.response.send_message(
+                "❌ Choose whether `either` term releases the suspension or `both` are required.",
+                ephemeral=True,
+            )
+            return
+        if (duration is None or matches is None) and completion is not None:
+            await interaction.response.send_message(
+                "❌ `completion` is only used when both duration and matches are supplied.",
+                ephemeral=True,
+            )
+            return
+
+        now = int(time.time())
+        expires_at = None
+        if duration is not None:
+            try:
+                expires_at = self.moderation_service.parse_expiry(duration, now=now)
+            except ValueError as exc:
+                await interaction.response.send_message(
+                    f"❌ {exc}", ephemeral=True
+                )
+                return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        completion_value = (
+            completion.value
+            if completion is not None
+            else "time" if duration is not None else "matches"
+        )
+        scope_value = lobby.value if lobby is not None else "all"
+        guild_id = interaction.guild.id
+        existing = await asyncio.to_thread(
+            self.moderation_service.get_active_suspension,
+            player.id,
+            guild_id,
+        )
+        operation = (
+            self.moderation_service.replace_suspension
+            if existing is not None
+            else self.moderation_service.create_suspension
+        )
+        try:
+            state = await asyncio.to_thread(
+                functools.partial(
+                    operation,
+                    player.id,
+                    guild_id,
+                    actor_id=interaction.user.id,
+                    reason=str(reason),
+                    scope=scope_value,
+                    completion=completion_value,
+                    expires_at=expires_at,
+                    matches=int(matches) if matches is not None else None,
+                    source="admin",
+                    now=now,
+                )
+            )
+        except ValueError as exc:
+            await safe_followup(interaction, content=f"❌ {exc}", ephemeral=True)
+            return
+
+        term_text = _format_suspension_terms(state)
+        scope_text = _format_suspension_scope(state)
+        dm_message = (
+            f"You have been temporarily suspended from {scope_text}.\n"
+            f"Term: {term_text}\nReason: {reason}\n"
+            "Use `/player lobby status` in the server for your current status."
+        )
+        try:
+            await player.send(dm_message)
+        except Exception as exc:
+            logger.debug("Failed to DM suspended player %s: %s", player.id, exc)
+
+        evicted = False
+        current_kind = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kind_for_player,
+            player.id,
+            guild_id,
+        )
+        applies_here = (
+            current_kind is not None
+            and await asyncio.to_thread(
+                self.moderation_service.get_active_suspension,
+                player.id,
+                guild_id,
+                current_kind,
+            )
+            is not None
+        )
+        if applies_here:
+            lobby_cog = self.bot.get_cog("LobbyCommands")
+            if lobby_cog is not None and hasattr(lobby_cog, "eject_lobby_player"):
+                evicted = await lobby_cog.eject_lobby_player(
+                    player,
+                    guild_id=guild_id,
+                    lobby_kind=current_kind,
+                    public_message=(
+                        f"⛔ **{getattr(player, 'display_name', player.mention)}** "
+                        "was temporarily suspended from matchmaking by an admin."
+                    ),
+                    dm_message=None,
+                )
+            else:
+                evicted = await asyncio.to_thread(
+                    self.lobby_service.leave_lobby,
+                    player.id,
+                    guild_id,
+                    current_kind,
+                )
+
+        action = "Replaced the active suspension for" if existing else "Suspended"
+        outcome = " Removed from their lobby." if evicted else ""
+        if applies_here and not evicted:
+            outcome = " Their already-starting match was left intact."
+        await safe_followup(
+            interaction,
+            content=(
+                f"✅ {action} {player.mention} from **{scope_text}**: {term_text}."
+                f"{outcome}\nReason: {reason}"
+            ),
+            ephemeral=True,
+        )
+
+    @moderation.command(name="lift", description="Lift an active lobby suspension")
+    @app_commands.describe(
+        player="Player whose suspension should be lifted",
+        reason="Reason shown privately to the player and admins",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def moderation_lift(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        reason: app_commands.Range[str, 3, 300],
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        if self.moderation_service is None:
+            await interaction.response.send_message(
+                "❌ Matchmaking moderation is unavailable.", ephemeral=True
+            )
+            return
+        lifted = await asyncio.to_thread(
+            functools.partial(
+                self.moderation_service.lift_suspension,
+                player.id,
+                interaction.guild.id,
+                actor_id=interaction.user.id,
+                reason=str(reason),
+                source="admin",
+            )
+        )
+        if lifted is None:
+            await interaction.response.send_message(
+                f"{player.mention} has no active lobby suspension.", ephemeral=True
+            )
+            return
+        try:
+            await player.send(
+                "Your matchmaking lobby suspension has been lifted.\n"
+                f"Reason: {reason}"
+            )
+        except Exception as exc:
+            logger.debug("Failed to DM lifted player %s: %s", player.id, exc)
+        await interaction.response.send_message(
+            f"✅ Lifted {player.mention}'s lobby suspension.\nReason: {reason}",
+            ephemeral=True,
+        )
+
+    @moderation.command(name="status", description="Show one player's lobby suspension")
+    @app_commands.describe(player="Player to inspect")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def moderation_status(
+        self, interaction: discord.Interaction, player: discord.Member
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        state = (
+            await asyncio.to_thread(
+                self.moderation_service.get_active_suspension,
+                player.id,
+                interaction.guild.id,
+            )
+            if self.moderation_service is not None
+            else None
+        )
+        if state is None:
+            message = f"{player.mention} has no active lobby suspension."
+        else:
+            message = (
+                f"**{player.mention}** — {_format_suspension_scope(state)}\n"
+                f"Term: {_format_suspension_terms(state)}\n"
+                f"Reason: {state.reason}\nIssued by: <@{state.actor_id}>\n"
+                f"Applied: <t:{int(state.created_at)}:F>"
+            )
         await interaction.response.send_message(message, ephemeral=True)
+
+    @moderation.command(name="list", description="List active lobby suspensions")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def moderation_list(self, interaction: discord.Interaction):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        states = (
+            await asyncio.to_thread(
+                self.moderation_service.list_active_suspensions,
+                interaction.guild.id,
+            )
+            if self.moderation_service is not None
+            else []
+        )
+        if not states:
+            message = "No active lobby suspensions."
+        else:
+            lines = [
+                f"<@{state.discord_id}> — {_format_suspension_scope(state)}; "
+                f"{_format_suspension_terms(state)}; reason: {state.reason}; "
+                f"by <@{state.actor_id}> at <t:{int(state.created_at)}:f>"
+                for state in states[:10]
+            ]
+            if len(states) > 10:
+                lines.append(f"…and {len(states) - 10} more")
+            message = "\n".join(lines)
+        await interaction.response.send_message(message[:2000], ephemeral=True)
+
+    @moderation.command(name="history", description="Show durable matchmaking moderation history")
+    @app_commands.describe(player="Optional player to filter")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def moderation_history(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member | None = None,
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        events = (
+            await asyncio.to_thread(
+                functools.partial(
+                    self.moderation_service.get_history,
+                    interaction.guild.id,
+                    player.id if player is not None else None,
+                    limit=20,
+                )
+            )
+            if self.moderation_service is not None
+            else []
+        )
+        if not events:
+            message = "No moderation history found."
+        else:
+            lines: list[str] = []
+            for event in events:
+                event_type = _enum_value(event.event_type).replace("_", " ")
+                actor = f" by <@{event.actor_id}>" if event.actor_id else ""
+                created = f"<t:{int(event.created_at)}:f>"
+                reason_text = f" — {event.reason}" if event.reason else ""
+                details: list[str] = [f"source={_enum_value(event.source)}"]
+                if event.scope is not None:
+                    details.append(f"scope={_enum_value(event.scope)}")
+                if event.matches_required is not None:
+                    details.append(
+                        f"matches={event.matches_remaining}/{event.matches_required} remaining"
+                    )
+                if event.wins_required is not None:
+                    details.append(
+                        f"wins={event.wins_remaining}/{event.wins_required} remaining"
+                    )
+                if event.match_id is not None:
+                    details.append(f"match=#{event.match_id}")
+                lines.append(
+                    f"{created} **{event_type}** <@{event.discord_id}>{actor} "
+                    f"({', '.join(details)}){reason_text}"
+                )
+            message = "\n".join(lines)
+        await interaction.response.send_message(message[:2000], ephemeral=True)
 
     @admin.command(name="health", description="Show bot health and since-startup usage (Admin only)")
     async def health(self, interaction: discord.Interaction):
@@ -1984,6 +2483,7 @@ async def setup(bot: commands.Bot):
     recalibration_service = getattr(bot, "recalibration_service", None)
     match_service = getattr(bot, "match_service", None)
     low_priority_repo = getattr(bot, "low_priority_repo", None)
+    moderation_service = getattr(bot, "moderation_service", None)
 
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
@@ -2000,6 +2500,7 @@ async def setup(bot: commands.Bot):
             recalibration_service,
             match_service,
             low_priority_repo,
+            moderation_service,
         )
     )
 

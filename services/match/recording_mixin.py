@@ -656,6 +656,7 @@ class RecordingMixin:
                 guild_id=guild_id,
                 dotabuff_match_id=dotabuff_match_id,
                 lobby_type=lobby_type,
+                lobby_kind=last_shuffle.lobby_kind,
                 balancing_rating_system=balancing_rating_system,
                 betting_mode=betting_mode,
                 winning_ids=winning_ids,

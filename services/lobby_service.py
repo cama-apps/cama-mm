@@ -29,6 +29,7 @@ class LobbyService:
         max_players: int = 12,
         bankruptcy_repo=None,
         match_state_service=None,
+        moderation_service=None,
     ):
         self.player_repo = player_repo
         self.lobby_manager = lobby_manager
@@ -36,6 +37,13 @@ class LobbyService:
         self.max_players = max_players
         self.bankruptcy_repo = bankruptcy_repo
         self.match_state_service = match_state_service
+        self.moderation_service = (
+            moderation_service
+            if moderation_service is not None
+            else getattr(lobby_manager, "moderation_service", None)
+        )
+        if moderation_service is not None:
+            self.lobby_manager.set_moderation_service(moderation_service)
 
     def get_creation_lock(
         self,
@@ -114,7 +122,7 @@ class LobbyService:
         discord_id: int,
         guild_id: int | None = 0,
         lobby_kind: LobbyKind | str | None = None,
-    ) -> tuple[bool, str, PendingMatchState | None]:
+    ) -> tuple[bool, str, PendingMatchState | object | None]:
         """
         Join a player to the lobby.
 
@@ -126,7 +134,8 @@ class LobbyService:
             Tuple of (success, reason, pending_info):
             - success: True if joined, False otherwise
             - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
-            - pending_info: PendingMatchState if blocked by an existing match, None otherwise
+            - pending_info: PendingMatchState for an existing match, the active
+              suspension for ``"lobby_suspended"``, or None otherwise
         """
         # Check if player is in a pending match FIRST
         if self.match_state_service:
@@ -159,6 +168,18 @@ class LobbyService:
             return False, "in_other_lobby", None
         if reason == "in_flight":
             return False, "in_flight", None
+        if reason == "lobby_suspended":
+            suspension = getattr(reason, "suspension", None)
+            # Real manager results carry the exact record fetched inside the
+            # membership lock. This fallback preserves context for older or
+            # test manager implementations that return a plain reason string.
+            if suspension is None and self.moderation_service is not None:
+                suspension = self.moderation_service.get_active_suspension(
+                    discord_id,
+                    guild_id if guild_id is not None else 0,
+                    lobby_kind=kind.value,
+                )
+            return False, "lobby_suspended", suspension
         return False, "already_joined", None
 
     def get_in_flight_lobby_kind_for_player(

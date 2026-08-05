@@ -588,6 +588,10 @@ class IMatchRepository(ABC):
         dire_team_ids: list[int] | None = None,
         dotabuff_match_id: str | None = None,
         notes: str | None = None,
+        lobby_type: str = "shuffle",
+        lobby_kind: str | None = None,
+        balancing_rating_system: str = "glicko",
+        betting_mode: str = "pool",
     ) -> int: ...
 
     @abstractmethod
@@ -619,6 +623,7 @@ class IMatchRepository(ABC):
         guild_id: int,
         dotabuff_match_id: str | None,
         lobby_type: str,
+        lobby_kind: str | None = None,
         balancing_rating_system: str,
         betting_mode: str = "pool",
         winning_ids: list[int],
@@ -1773,6 +1778,8 @@ class ILowPriorityRepository(ABC):
         *,
         set_by: int,
         reason: str | None,
+        wins_required: int = 3,
+        start_pending_match_id: int | None = None,
     ): ...
 
     @abstractmethod
@@ -1790,6 +1797,90 @@ class ILowPriorityRepository(ABC):
 
     @abstractmethod
     def list_active(self, guild_id: int | None = None) -> list: ...
+
+
+class IModerationRepository(ABC):
+    """Persistence for guild-scoped lobby suspensions and audit history."""
+
+    @abstractmethod
+    def get_pending_match_watermark(self, guild_id: int | None) -> int: ...
+
+    @abstractmethod
+    def get_suspension(self, discord_id: int, guild_id: int | None): ...
+
+    @abstractmethod
+    def save_suspension(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        scope: str,
+        completion: str,
+        expires_at: int | None,
+        matches_required: int | None,
+        pending_match_watermark: int | None,
+        reason: str,
+        source: str,
+        actor_id: int,
+        replace: bool,
+        now: int,
+    ): ...
+
+    @abstractmethod
+    def close_suspension(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        event_type: str,
+        source: str,
+        actor_id: int | None,
+        reason: str | None,
+        expected_revision: int,
+        now: int,
+    ): ...
+
+    @abstractmethod
+    def list_suspensions(self, guild_id: int | None, *, active_only: bool = True) -> list: ...
+
+    @abstractmethod
+    def record_event(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        event_type: str,
+        source: str,
+        actor_id: int | None,
+        reason: str | None,
+        scope: str | None = None,
+        completion: str | None = None,
+        expires_at: int | None = None,
+        matches_required: int | None = None,
+        matches_remaining: int | None = None,
+        pending_match_watermark: int | None = None,
+        wins_required: int | None = None,
+        wins_remaining: int | None = None,
+        match_id: int | None = None,
+        now: int,
+    ): ...
+
+    @abstractmethod
+    def get_history(
+        self,
+        guild_id: int | None,
+        discord_id: int | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list: ...
+
+    @abstractmethod
+    def get_completion_events_for_match(
+        self,
+        guild_id: int | None,
+        match_id: int,
+    ) -> list: ...
 
 
 class IDisburseRepository(ABC):
