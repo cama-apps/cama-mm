@@ -30,13 +30,24 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 logger = logging.getLogger("cama_bot.commands.lobby")
 
-# Players who joined within this window are considered active regardless of status
+# Players who joined within this window are considered active and ready.
 RECENT_JOIN_THRESHOLD = 10 * 60  # 10 minutes
 
 # A ready check older than this is stale: the next /readycheck deletes the
 # buried original and posts a fresh one (resetting ✅ confirmations and pruning
 # AFK no-shows) instead of editing it in place.
 READYCHECK_STALE_THRESHOLD = 30 * 60  # 30 minutes
+
+
+def _get_recent_signup_ids(player_data: dict[int, dict]) -> set[int]:
+    """Return lobby signups that are recent enough to count as ready."""
+    now = time.time()
+    return {
+        discord_id
+        for discord_id, data in player_data.items()
+        if (join_ts := data.get("join_ts")) is not None
+        and (now - join_ts) < RECENT_JOIN_THRESHOLD
+    }
 
 
 class LobbyCommands(commands.Cog):
@@ -165,10 +176,10 @@ class LobbyCommands(commands.Cog):
         player_data: dict[int, dict],
         guild_id: int | None,
         *,
-        auto_confirm_id: int | None = None,
+        auto_confirm_ids: set[int] | None = None,
         lobby_kind: LobbyKind | str | None = None,
-    ) -> tuple[bool, list[int]]:
-        """Apply one live-roster update to a specific readycheck generation."""
+    ) -> tuple[bool, bool, list[int]]:
+        """Return state/display success and mentions for one readycheck generation."""
         previous_snapshot = await asyncio.to_thread(
             self.lobby_service.get_readycheck_display_snapshot,
             message.id,
@@ -176,12 +187,15 @@ class LobbyCommands(commands.Cog):
             lobby_kind=lobby_kind,
         )
         if previous_snapshot is None:
-            return False, []
+            return False, False, []
         previous_player_data, previous_reacted = previous_snapshot
+        effective_auto_confirm_ids = _get_recent_signup_ids(player_data)
+        effective_auto_confirm_ids.update(auto_confirm_ids or set())
+        effective_auto_confirm_ids.intersection_update(player_data)
         departed_confirmations = set(previous_reacted) - set(player_data)
         new_unconfirmed_players = (
             set(player_data) - set(previous_player_data) - set(previous_reacted)
-        )
+        ) - effective_auto_confirm_ids
 
         for discord_id in departed_confirmations | new_unconfirmed_players:
             try:
@@ -192,7 +206,7 @@ class LobbyCommands(commands.Cog):
                     discord_id,
                     exc,
                 )
-                return False, []
+                return False, False, []
 
         removed_confirmations = await asyncio.to_thread(
             self.lobby_service.update_readycheck_data,
@@ -203,9 +217,9 @@ class LobbyCommands(commands.Cog):
             lobby_kind=lobby_kind,
         )
         if removed_confirmations is None:
-            return False, []
+            return False, False, []
 
-        if auto_confirm_id in player_data:
+        for auto_confirm_id in effective_auto_confirm_ids:
             await asyncio.to_thread(
                 self.lobby_service.add_readycheck_reaction,
                 auto_confirm_id,
@@ -222,7 +236,7 @@ class LobbyCommands(commands.Cog):
             lobby_kind=lobby_kind,
         )
         if snapshot is None:
-            return False, []
+            return True, False, []
         current_player_data, reacted = snapshot
         embed, mention_ids = build_readycheck_embed(
             current_player_data,
@@ -237,7 +251,7 @@ class LobbyCommands(commands.Cog):
             lobby_kind=lobby_kind,
         )
         if current_message_id != message.id:
-            return False, []
+            return True, False, []
 
         try:
             await message.edit(embed=embed)
@@ -247,9 +261,9 @@ class LobbyCommands(commands.Cog):
                 guild_id,
                 exc,
             )
-            return False, []
+            return True, False, []
 
-        return True, mention_ids
+        return True, True, mention_ids
 
     async def sync_readycheck_with_lobby(
         self,
@@ -297,13 +311,22 @@ class LobbyCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = channel.get_partial_message(message_id)
-                updated, _ = await self._apply_readycheck_lobby_update(
-                    message,
-                    player_data,
-                    guild_id,
-                    lobby_kind=kind,
+                state_updated, display_updated, _ = (
+                    await self._apply_readycheck_lobby_update(
+                        message,
+                        player_data,
+                        guild_id,
+                        lobby_kind=kind,
+                    )
                 )
-                return updated
+                if state_updated:
+                    await self.notify_readycheck_completion_if_ready(
+                        guild_id or 0,
+                        message_id,
+                        fallback_channel=channel,
+                        lobby_kind=kind,
+                    )
+                return display_updated
             except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
                 logger.warning(
                     "Failed to sync readycheck display for guild %s: %s",
@@ -2166,23 +2189,36 @@ class LobbyCommands(commands.Cog):
                 asyncio.Lock(),
             )
             async with refresh_lock:
-                updated, mention_ids = await self._apply_readycheck_lobby_update(
-                    msg,
-                    player_data,
-                    guild_id,
-                    auto_confirm_id=invoker_id,
+                state_updated, display_updated, mention_ids = (
+                    await self._apply_readycheck_lobby_update(
+                        msg,
+                        player_data,
+                        guild_id,
+                        auto_confirm_ids={invoker_id},
+                        lobby_kind=kind,
+                    )
+                )
+            if state_updated:
+                await self.notify_readycheck_completion_if_ready(
+                    guild_id or 0,
+                    msg.id,
+                    fallback_channel=msg.channel,
                     lobby_kind=kind,
                 )
-            if not updated:
+            if not display_updated:
                 return "error", {}
             embed = None
         else:
-            reacted = {}
+            auto_confirm_ids = _get_recent_signup_ids(player_data)
             # Running the check counts the trigger-er as ready (if they're in
             # the lobby). Reflected in the new embed now and persisted after
             # the message is saved below.
             if invoker_id in current_lobby_set:
-                reacted[invoker_id] = f"<@{invoker_id}>"
+                auto_confirm_ids.add(invoker_id)
+            reacted = {
+                discord_id: f"<@{discord_id}>"
+                for discord_id in auto_confirm_ids & current_lobby_set
+            }
 
             embed, mention_ids = build_readycheck_embed(
                 player_data,
@@ -2219,12 +2255,6 @@ class LobbyCommands(commands.Cog):
             ping_content = f"⚔️ **{kind.label} ready check!** {tags}"
 
         if is_refresh and msg:
-            await self.notify_readycheck_completion_if_ready(
-                guild_id or 0,
-                msg.id,
-                fallback_channel=msg.channel,
-                lobby_kind=kind,
-            )
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
             return "ok", {
@@ -2254,11 +2284,11 @@ class LobbyCommands(commands.Cog):
             guild_id=guild_id,
             lobby_kind=kind,
         )
-        if invoker_id in current_lobby_set:
+        for auto_confirm_id in reacted:
             await asyncio.to_thread(
                 self.lobby_service.add_readycheck_reaction,
-                invoker_id,
-                f"<@{invoker_id}>",
+                auto_confirm_id,
+                f"<@{auto_confirm_id}>",
                 guild_id=guild_id,
                 expected_message_id=msg.id,
                 lobby_kind=kind,

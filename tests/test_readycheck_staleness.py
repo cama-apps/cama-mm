@@ -239,6 +239,33 @@ async def test_trigger_er_auto_counted_ready(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_players_joined_under_ten_minutes_are_auto_counted_ready(monkeypatch):
+    fixed_now = 2_000_000.0
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})
+    env.lobby.player_join_times.update(
+        {
+            1: fixed_now - 20 * 60,
+            2: fixed_now - 9 * 60,
+            3: fixed_now - 10 * 60,
+        }
+    )
+    monkeypatch.setattr("commands.lobby.time.time", lambda: fixed_now)
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok"
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {
+        1: "<@1>",
+        2: "<@2>",
+    }
+    assert set(info["mention_ids"]) == {3}
+
+
+@pytest.mark.asyncio
 async def test_fresh_refresh_edits_in_place_and_preserves_reacted(monkeypatch):
     """Within 30 min: edit the same message, keep confirmations, prune nobody."""
     env = _setup(monkeypatch, regular=dict.fromkeys(range(1, 11), ONLINE))

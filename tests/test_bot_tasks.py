@@ -918,6 +918,134 @@ async def test_readycheck_sync_tracks_live_lobby_and_clears_departed_reaction():
     assert removed == {("✅", 2), ("✅", 3)}
 
 
+def _recent_tenth_signup_sync_env():
+    import discord
+
+    from commands.lobby import LobbyCommands
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    guild_id = 42
+    fixed_now = 2_000_000.0
+    manager = LobbyManagerService(FakeLobbyRepo())
+    for player_id in range(1, 10):
+        manager.join_lobby(player_id, guild_id=guild_id)
+    lobby = manager.get_lobby(guild_id=guild_id)
+    for player_id in range(1, 10):
+        lobby.player_join_times[player_id] = fixed_now - 20 * 60
+    initial_player_data = {
+        player_id: {
+            "group": "active",
+            "signals": "🟢",
+            "name": f"Player {player_id}",
+            "join_ts": fixed_now - 20 * 60,
+            "is_member": True,
+        }
+        for player_id in range(1, 10)
+    }
+    manager.set_readycheck_state(
+        500,
+        200,
+        set(range(1, 10)),
+        initial_player_data,
+        guild_id=guild_id,
+    )
+    for player_id in range(1, 10):
+        manager.add_readycheck_reaction(
+            player_id,
+            f"<@{player_id}>",
+            guild_id=guild_id,
+        )
+    manager.join_lobby(10, guild_id=guild_id)
+    lobby.player_join_times[10] = fixed_now - 2 * 60
+
+    player_repo = MagicMock()
+    player_repo.get_by_ids.side_effect = lambda player_ids, _guild_id: [
+        SimpleNamespace(discord_id=player_id) for player_id in player_ids
+    ]
+    lobby_service = LobbyService(manager, player_repo, ready_threshold=10)
+    readycheck_message = SimpleNamespace(
+        id=500,
+        edit=AsyncMock(),
+        remove_reaction=AsyncMock(),
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        get_partial_message=MagicMock(return_value=readycheck_message),
+        send=AsyncMock(),
+    )
+    members = {
+        player_id: SimpleNamespace(
+            id=player_id,
+            display_name=f"Player {player_id}",
+            status=discord.Status.online,
+            voice=None,
+            activities=[],
+        )
+        for player_id in range(1, 11)
+    }
+    guild = SimpleNamespace(
+        id=guild_id,
+        get_member=members.get,
+        fetch_member=AsyncMock(),
+    )
+    bot = SimpleNamespace(
+        get_guild=MagicMock(return_value=guild),
+        get_channel=MagicMock(return_value=readycheck_channel),
+        fetch_channel=AsyncMock(),
+    )
+    cog = LobbyCommands(bot, lobby_service, MagicMock())
+    return SimpleNamespace(
+        bot=bot,
+        cog=cog,
+        fixed_now=fixed_now,
+        guild_id=guild_id,
+        lobby_service=lobby_service,
+        manager=manager,
+        readycheck_channel=readycheck_channel,
+        readycheck_message=readycheck_message,
+    )
+
+
+async def test_recent_tenth_signup_completes_active_readycheck():
+    env = _recent_tenth_signup_sync_env()
+
+    with patch("commands.lobby.time.time", return_value=env.fixed_now):
+        assert await env.cog.sync_readycheck_with_lobby(env.guild_id)
+
+    snapshot = env.lobby_service.get_lobby_players_and_readycheck_snapshot(
+        guild_id=env.guild_id
+    )
+    assert snapshot is not None
+    player_ids, _players, _join_times, readycheck = snapshot
+    assert set(player_ids) == set(range(1, 11))
+    assert readycheck == (500, set(range(1, 11)))
+    env.readycheck_message.remove_reaction.assert_not_awaited()
+    env.readycheck_channel.send.assert_awaited_once_with(
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
+    )
+
+
+async def test_recent_tenth_signup_notifies_when_readycheck_edit_fails():
+    env = _recent_tenth_signup_sync_env()
+    env.readycheck_message.edit.side_effect = RuntimeError("temporary edit failure")
+
+    with patch("commands.lobby.time.time", return_value=env.fixed_now):
+        assert not await env.cog.sync_readycheck_with_lobby(env.guild_id)
+
+    assert env.manager.get_readycheck_reacted(guild_id=env.guild_id) == {
+        player_id: f"<@{player_id}>" for player_id in range(1, 11)
+    }
+    env.readycheck_channel.send.assert_awaited_once_with(
+        "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** "
+        "Anyone in this lobby can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
+    )
+
+
 async def test_readycheck_sync_aborts_when_generation_is_replaced():
     from commands.lobby import LobbyCommands
     from services.lobby_manager_service import LobbyManagerService
