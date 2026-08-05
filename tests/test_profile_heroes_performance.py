@@ -141,6 +141,8 @@ async def test_overview_loads_badge_bankruptcy_and_hero_stats_concurrently(
         main_role=None,
         preferred_region=None,
         inferred_region=None,
+        os_mu=30.0,
+        os_sigma=3.0,
     )
     player_service = SimpleNamespace(
         get_stats=MagicMock(
@@ -178,6 +180,9 @@ async def test_overview_loads_badge_bankruptcy_and_hero_stats_concurrently(
     assert chart_file is None
     assert embed.title == "Profile: Player"
     assert state["peak"] == 3
+    rating_field = next(field for field in embed.fields if field.name == "Rating")
+    assert "**OpenSkill:** 250" in rating_field.value
+    assert "64% certain" in rating_field.value
 
 
 @pytest.mark.asyncio
@@ -286,6 +291,8 @@ async def test_rating_loads_population_and_history_concurrently(monkeypatch):
         glicko_rating=1500.0,
         glicko_rd=100.0,
         glicko_volatility=0.06,
+        os_mu=30.0,
+        os_sigma=3.0,
     )
     player_repo = SimpleNamespace(
         get_by_id=MagicMock(return_value=player),
@@ -306,6 +313,9 @@ async def test_rating_loads_population_and_history_concurrently(monkeypatch):
 
     assert chart_file is None
     assert embed.title == "Profile: Player > Rating"
+    profile_field = next(f for f in embed.fields if f.name == "Rating Profile")
+    assert "**OpenSkill:** 250" in profile_field.value
+    assert "64% certain" in profile_field.value
     assert state["peak"] == 2
     match_repo.get_player_rating_history_detailed.assert_called_once_with(
         123,
@@ -323,6 +333,8 @@ async def test_rating_attaches_chart_with_openskill_only_history_row():
         glicko_rating=1500.0,
         glicko_rd=100.0,
         glicko_volatility=0.06,
+        os_mu=30.0,
+        os_sigma=3.0,
     )
     history = [
         {
@@ -332,7 +344,7 @@ async def test_rating_attaches_chart_with_openskill_only_history_row():
             "rd_after": 100.0,
             "volatility_before": 0.06,
             "volatility_after": 0.06,
-            "expected_team_win_prob": None,
+            "expected_team_win_prob": 0.6,
             "team_number": 1,
             "won": True,
             "match_id": 2,
@@ -367,7 +379,8 @@ async def test_rating_attaches_chart_with_openskill_only_history_row():
         get_all=MagicMock(return_value=[player]),
     )
     match_repo = SimpleNamespace(
-        get_player_rating_history_detailed=MagicMock(return_value=history)
+        get_player_rating_history_detailed=MagicMock(return_value=history),
+        get_os_ratings_for_matches=MagicMock(return_value={}),
     )
     cog = ProfileCommands(
         SimpleNamespace(player_repo=player_repo, match_repo=match_repo)
@@ -383,6 +396,10 @@ async def test_rating_attaches_chart_with_openskill_only_history_row():
         assert chart_file is not None
         assert chart_file.filename == "rating_chart.png"
         assert embed.image.url == "attachment://rating_chart.png"
+        recent_field = next(
+            f for f in embed.fields if f.name.startswith("Recent (")
+        )
+        assert "Δ G:+10 O:+50" in recent_field.value
     finally:
         if chart_file is not None:
             chart_file.close()

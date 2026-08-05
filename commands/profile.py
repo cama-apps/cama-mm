@@ -44,6 +44,17 @@ from utils.region import REGION_NAMES, resolve_region
 logger = logging.getLogger("cama_bot.commands.profile")
 
 
+def _openskill_display_delta(
+    system: CamaOpenSkillSystem,
+    before: float | None,
+    after: float | None,
+) -> int | None:
+    """Return an OpenSkill change on the same display scale as Glicko."""
+    if before is None or after is None:
+        return None
+    return system.mu_to_display(after) - system.mu_to_display(before)
+
+
 class ProfileView(discord.ui.View):
     """View with tab buttons for navigating profile sections."""
 
@@ -346,18 +357,32 @@ class ProfileCommands(commands.Cog):
             color=COLOR_BLUE,
         )
 
-        # Rating
+        # Ratings
+        rating_lines = []
         if stats["cama_rating"] is not None:
             certainty = 100 - stats["uncertainty"]
             rating_system = self._get_rating_system()
             rating_display = rating_system.rating_to_display(stats["cama_rating"])
-            embed.add_field(
-                name="Rating",
-                value=f"{rating_display} ({certainty:.0f}% certain)",
-                inline=True,
+            rating_lines.append(
+                f"**Glicko:** {rating_display} ({certainty:.0f}% certain)"
             )
         else:
-            embed.add_field(name="Rating", value="Not set", inline=True)
+            rating_lines.append("**Glicko:** Not set")
+
+        os_mu = getattr(player, "os_mu", None)
+        if os_mu is not None:
+            os_system = CamaOpenSkillSystem()
+            os_sigma = getattr(player, "os_sigma", None)
+            if os_sigma is None:
+                os_sigma = os_system.DEFAULT_SIGMA
+            os_display = os_system.mu_to_display(os_mu)
+            os_certainty = os_system.get_certainty_percentage(os_sigma)
+            rating_lines.append(
+                f"**OpenSkill:** {os_display} ({os_certainty:.0f}% certain)"
+            )
+        else:
+            rating_lines.append("**OpenSkill:** Not set")
+        embed.add_field(name="Rating", value="\n".join(rating_lines), inline=True)
 
         # Record
         total_games = player.wins + player.losses
@@ -478,6 +503,7 @@ class ProfileCommands(commands.Cog):
         player_repo = self._get_player_repo()
         match_repo = self._get_match_repo()
         rating_system = self._get_rating_system()
+        os_system = CamaOpenSkillSystem()
 
         if not player_repo:
             return discord.Embed(
@@ -520,6 +546,7 @@ class ProfileCommands(commands.Cog):
         calibration = compute_player_calibration(player, history, rated_players, rating_system)
         percentile = calibration.percentile
         last_5_delta = calibration.last_5_delta
+        openskill_last_5_delta = calibration.openskill_last_5_delta
 
         # Calculate calibration tier and trend color
         rd = player.glicko_rd or 350
@@ -550,6 +577,18 @@ class ProfileCommands(commands.Cog):
             f"**Rating:** {rating_display} ({certainty:.0f}% certain)",
             f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}",
         ]
+        if player.os_mu is not None:
+            os_sigma = (
+                player.os_sigma
+                if player.os_sigma is not None
+                else os_system.DEFAULT_SIGMA
+            )
+            os_display = os_system.mu_to_display(player.os_mu)
+            os_certainty = os_system.get_certainty_percentage(os_sigma)
+            profile_lines.insert(
+                1,
+                f"**OpenSkill:** {os_display} ({os_certainty:.0f}% certain, σ {os_sigma:.3f})",
+            )
         if player.glicko_volatility:
             profile_lines.append(f"**Volatility:** {player.glicko_volatility:.3f}")
         embed.add_field(name="Rating Profile", value="\n".join(profile_lines), inline=False)
@@ -597,9 +636,22 @@ class ProfileCommands(commands.Cog):
                 embed.add_field(name="Situational", value="\n".join(winrate_lines), inline=True)
 
         # Trend and streak
-        if last_5_delta is not None:
-            trend_emoji = "📈" if last_5_delta > 0 else "📉" if last_5_delta < 0 else "➡️"
-            trend_text = f"{trend_emoji} **{last_5_delta:+.0f}** over last {min(5, len(history))} games"
+        if last_5_delta is not None or openskill_last_5_delta is not None:
+            trend_value = (
+                last_5_delta
+                if last_5_delta is not None
+                else openskill_last_5_delta
+            )
+            trend_emoji = "📈" if trend_value > 0 else "📉" if trend_value < 0 else "➡️"
+            trend_parts = []
+            if last_5_delta is not None:
+                trend_parts.append(f"**G:** {last_5_delta:+.0f}")
+            if openskill_last_5_delta is not None:
+                trend_parts.append(f"**O:** {openskill_last_5_delta:+.0f}")
+            trend_text = (
+                f"{trend_emoji} {' | '.join(trend_parts)} over last "
+                f"{min(5, len(history))} games"
+            )
 
             streak = calibration.streak
             streak_type = calibration.streak_type
@@ -627,10 +679,9 @@ class ProfileCommands(commands.Cog):
                 return None
 
         chart_bytes = None
-        if matches_with_predictions:
-            os_system = CamaOpenSkillSystem()
+        if history:
             recent_lines = []
-            recent_matches = matches_with_predictions[:5]
+            recent_matches = history[:5]
             os_probabilities, chart_bytes = await asyncio.gather(
                 get_os_win_probabilities(
                     match_repo,
@@ -646,20 +697,45 @@ class ProfileCommands(commands.Cog):
             for h, os_prob in zip(
                 recent_matches, os_probabilities, strict=True
             ):
-                glicko_prob = h.get("expected_team_win_prob", 0.5)
+                glicko_prob = h.get("expected_team_win_prob")
                 won = h.get("won")
-                expected_win = glicko_prob >= 0.5
-
-                if won:
-                    emoji = "✅" if expected_win else "🔥"  # expected win or upset
+                if glicko_prob is None:
+                    emoji = "✅" if won else "❌" if won is False else "•"
                 else:
-                    emoji = "💀" if expected_win else "❌"  # choke or expected loss
+                    expected_win = glicko_prob >= 0.5
+                    if won:
+                        emoji = "✅" if expected_win else "🔥"  # expected win or upset
+                    else:
+                        emoji = "💀" if expected_win else "❌"  # choke or expected loss
 
                 # Build prediction string with both systems
-                pred_str = f"G:{glicko_prob:.0%}"
+                pred_parts = []
+                if glicko_prob is not None:
+                    pred_parts.append(f"G:{glicko_prob:.0%}")
                 if os_prob is not None:
-                    pred_str += f" O:{os_prob:.0%}"
-                recent_lines.append(f"{emoji} {pred_str} → {'W' if won else 'L'}")
+                    pred_parts.append(f"O:{os_prob:.0%}")
+                pred_str = " ".join(pred_parts) if pred_parts else "no pred"
+
+                delta_parts = []
+                rating_before = h.get("rating_before")
+                rating_after = h.get("rating")
+                if rating_before is not None and rating_after is not None:
+                    glicko_delta = (
+                        rating_system.rating_to_display(rating_after)
+                        - rating_system.rating_to_display(rating_before)
+                    )
+                    delta_parts.append(f"G:{glicko_delta:+d}")
+                os_delta = _openskill_display_delta(
+                    os_system,
+                    h.get("os_mu_before"),
+                    h.get("os_mu_after"),
+                )
+                if os_delta is not None:
+                    delta_parts.append(f"O:{os_delta:+d}")
+                delta_str = " ".join(delta_parts) if delta_parts else "?"
+                recent_lines.append(
+                    f"{emoji} {pred_str} | Δ {delta_str} → {'W' if won else 'L'}"
+                )
 
             embed.add_field(
                 name=f"Recent ({len(recent_lines)}) G=Glicko O=OS",

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from domain.models.player import Player
+from domain.rating_constants import OPENSKILL_DISPLAY_SCALE
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 
@@ -112,8 +113,14 @@ def compute_calibration_stats(
         rating_history_entries or []
     )
     rating_movement = _compute_rating_movement(rating_history_entries or [])
+    openskill_rating_movement = _compute_openskill_rating_movement(
+        rating_history_entries or []
+    )
     side_balance = _compute_side_balance(match_predictions or [])
     rating_stability = _compute_rating_stability(rating_history_entries or [])
+    openskill_rating_stability = _compute_openskill_rating_stability(
+        rating_history_entries or []
+    )
     team_composition = _compute_team_composition_stats(rating_history_entries or [])
 
     # Calculate average certainty (inverse of uncertainty)
@@ -143,8 +150,12 @@ def compute_calibration_stats(
         "glicko_prediction_quality": glicko_prediction_quality,
         "openskill_prediction_quality": openskill_prediction_quality,
         "rating_movement": rating_movement,
+        "glicko_rating_movement": rating_movement,
+        "openskill_rating_movement": openskill_rating_movement,
         "side_balance": side_balance,
         "rating_stability": rating_stability,
+        "glicko_rating_stability": rating_stability,
+        "openskill_rating_stability": openskill_rating_stability,
         "team_composition": team_composition,
         "avg_certainty": avg_certainty,
         "avg_rd": avg_rd,
@@ -274,6 +285,25 @@ def _compute_rating_movement(rating_history_entries: list[dict]) -> dict:
         if before is None or after is None:
             continue
         deltas.append(abs(after - before))
+
+    return {
+        "count": len(deltas),
+        "avg_delta": _mean(deltas),
+        "median_delta": _median(deltas),
+    }
+
+
+def _compute_openskill_rating_movement(
+    rating_history_entries: list[dict],
+) -> dict:
+    """Return OpenSkill movement in the shared 0-3000 display scale."""
+    deltas = []
+    for entry in rating_history_entries:
+        before = entry.get("os_mu_before")
+        after = entry.get("os_mu_after")
+        if before is None or after is None:
+            continue
+        deltas.append(abs(after - before) * OPENSKILL_DISPLAY_SCALE)
 
     return {
         "count": len(deltas),
@@ -491,6 +521,45 @@ def _compute_rating_stability(rating_history_entries: list[dict]) -> dict:
     }
 
 
+def _compute_openskill_rating_stability(
+    rating_history_entries: list[dict],
+) -> dict:
+    """Compare OpenSkill display swings above and below its sigma threshold."""
+    calibrated_deltas = []
+    uncalibrated_deltas = []
+    threshold = CamaOpenSkillSystem.CALIBRATION_THRESHOLD
+
+    for entry in rating_history_entries:
+        before = entry.get("os_mu_before")
+        after = entry.get("os_mu_after")
+        sigma_before = entry.get("os_sigma_before")
+        if before is None or after is None or sigma_before is None:
+            continue
+
+        delta = abs(after - before) * OPENSKILL_DISPLAY_SCALE
+        if sigma_before <= threshold:
+            calibrated_deltas.append(delta)
+        else:
+            uncalibrated_deltas.append(delta)
+
+    calibrated_avg = _mean(calibrated_deltas)
+    uncalibrated_avg = _mean(uncalibrated_deltas)
+    stability_ratio = (
+        calibrated_avg / uncalibrated_avg
+        if calibrated_avg is not None
+        and uncalibrated_avg is not None
+        and uncalibrated_avg > 0
+        else None
+    )
+    return {
+        "calibrated_avg_delta": calibrated_avg,
+        "calibrated_count": len(calibrated_deltas),
+        "uncalibrated_avg_delta": uncalibrated_avg,
+        "uncalibrated_count": len(uncalibrated_deltas),
+        "stability_ratio": stability_ratio,
+    }
+
+
 @dataclass
 class PlayerCalibration:
     """Shared per-player calibration computations.
@@ -512,6 +581,7 @@ class PlayerCalibration:
     favored_wins: int
     underdog_wins: int
     last_5_delta: float | None
+    openskill_last_5_delta: float | None
     streak: int
     streak_type: str | None
     upsets: list[tuple[dict, float]]
@@ -581,10 +651,24 @@ def compute_player_calibration(
             baseline_rating = baseline["rating"]
         last_5_delta = recent_glicko_history[0]["rating"] - baseline_rating
 
+    openskill_last_5_delta: float | None = None
+    recent_openskill_history = [
+        h for h in history[:5] if h.get("os_mu_after") is not None
+    ]
+    if len(recent_openskill_history) >= 2:
+        baseline = recent_openskill_history[-1]
+        baseline_mu = baseline.get("os_mu_before")
+        if baseline_mu is None:
+            baseline_mu = baseline["os_mu_after"]
+        openskill_last_5_delta = (
+            recent_openskill_history[0]["os_mu_after"] - baseline_mu
+        ) * OPENSKILL_DISPLAY_SCALE
+
     # Current streak
     streak = 0
     streak_type: str | None = None
-    for h in matches_with_predictions:
+    outcome_history = [h for h in history if h.get("won") is not None]
+    for h in outcome_history:
         won = h.get("won")
         if streak_type is None:
             streak_type = "W" if won else "L"
@@ -620,6 +704,7 @@ def compute_player_calibration(
         favored_wins=favored_wins,
         underdog_wins=underdog_wins,
         last_5_delta=last_5_delta,
+        openskill_last_5_delta=openskill_last_5_delta,
         streak=streak,
         streak_type=streak_type,
         upsets=upsets,

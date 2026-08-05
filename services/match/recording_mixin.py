@@ -558,6 +558,7 @@ class RecordingMixin:
                 radiant_os_data,
                 dire_os_data,
                 winning_team=1 if winning_team == "radiant" else 2,
+                streak_multipliers=streak_multipliers,
             )
             os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
 

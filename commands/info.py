@@ -42,6 +42,112 @@ MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections)
 ALL_LEADERBOARD_ENTRIES_LIMIT = 2**31 - 1
 
 
+def _openskill_display_delta(
+    system: CamaOpenSkillSystem,
+    before: float | None,
+    after: float | None,
+) -> int | None:
+    """Return an OpenSkill change on the same display scale as Glicko."""
+    if before is None or after is None:
+        return None
+    return system.mu_to_display(after) - system.mu_to_display(before)
+
+
+def _get_lobby_swing(
+    stats: dict,
+    system: str,
+) -> tuple[float | None, int | None]:
+    """Read one system's lobby swing, including legacy Glicko payloads."""
+    if system == "glicko":
+        swing = stats.get("glicko_avg_swing")
+        if swing is None:
+            swing = stats.get("avg_swing")
+        samples = stats.get("glicko_samples")
+        if samples is None:
+            samples = stats.get("games")
+        return swing, samples
+
+    return stats.get("openskill_avg_swing"), stats.get("openskill_samples")
+
+
+def _format_lobby_swing_summary(stats: dict) -> str:
+    """Format comparable Glicko/OpenSkill movement with sample counts."""
+    parts = []
+    for system, label in (("glicko", "G"), ("openskill", "O")):
+        swing, samples = _get_lobby_swing(stats, system)
+        if swing is None:
+            continue
+        sample_text = f" (n={samples})" if samples is not None else ""
+        parts.append(f"{label} ±{swing:.1f}{sample_text}")
+    return " | ".join(parts) if parts else "No rating changes"
+
+
+def _format_lobby_stats_line(
+    stats: dict,
+    *,
+    emoji: str,
+    label: str,
+    player: bool = False,
+) -> str:
+    """Format one lobby type with dual-system swings and Glicko expectation."""
+    actual_rate = stats.get("actual_win_rate")
+    expected_rate = stats.get("expected_win_rate")
+    openskill_expected_rate = stats.get("openskill_expected_win_rate")
+    actual = f"{actual_rate * 100:.0f}%" if actual_rate is not None else "n/a"
+    expected = (
+        f"{expected_rate * 100:.0f}%" if expected_rate is not None else "n/a"
+    )
+    openskill_expected = (
+        f"{openskill_expected_rate * 100:.0f}%"
+        if openskill_expected_rate is not None
+        else "n/a"
+    )
+    games = stats.get("games", 0)
+    actual_label = "W" if player else "Radiant actual"
+    return (
+        f"{emoji} **{label}**: {_format_lobby_swing_summary(stats)} | "
+        f"{games} games | {actual_label} {actual} | G exp {expected} | "
+        f"O exp {openskill_expected}"
+    )
+
+
+def _format_lobby_swing_comparisons(
+    shuffle_stats: dict | None,
+    draft_stats: dict | None,
+    *,
+    player: bool = False,
+) -> list[str]:
+    """Compare draft and shuffle volatility independently for each system."""
+    if not shuffle_stats or not draft_stats:
+        return []
+
+    lines = []
+    for system, label in (("glicko", "G"), ("openskill", "O")):
+        shuffle_swing, _ = _get_lobby_swing(shuffle_stats, system)
+        draft_swing, _ = _get_lobby_swing(draft_stats, system)
+        if shuffle_swing is None or draft_swing is None or shuffle_swing <= 0:
+            continue
+
+        difference = ((draft_swing - shuffle_swing) / shuffle_swing) * 100
+        if difference > 0:
+            comparison = (
+                f"You swing {difference:.0f}% more in Draft"
+                if player
+                else f"Draft swings are {difference:.0f}% larger than Shuffle"
+            )
+            lines.append(f"*{label}: {comparison}*")
+        elif difference < 0:
+            comparison = (
+                f"You swing {abs(difference):.0f}% more in Shuffle"
+                if player
+                else f"Shuffle swings are {abs(difference):.0f}% larger than Draft"
+            )
+            lines.append(f"*{label}: {comparison}*")
+        else:
+            lines.append(f"*{label}: Draft and Shuffle swings are even*")
+    return lines
+
+
 class LeaderboardTab(Enum):
     """Available leaderboard tabs."""
     BALANCE = "balance"
@@ -1288,18 +1394,28 @@ class InfoCommands(commands.Cog):
                 stats["openskill_prediction_quality"]
             )
 
-            rating_movement = stats["rating_movement"]
-            if rating_movement["count"]:
-                avg_delta = rating_movement["avg_delta"]
-                median_delta = rating_movement["median_delta"]
-                movement_text = (
-                    f"**{rating_movement['count']}** rating changes recorded\n"
-                    f"Avg change per game: **±{avg_delta:.1f}** points\n"
-                    f"Median change: **±{median_delta:.1f}** points\n"
-                    f"*Higher = more volatile matches*"
+            def _format_movement(label: str, movement: dict) -> str:
+                if not movement.get("count"):
+                    return f"**{label}:** No rating history"
+                return (
+                    f"**{label}:** ±{movement['avg_delta']:.1f} avg | "
+                    f"±{movement['median_delta']:.1f} median "
+                    f"({movement['count']} changes)"
                 )
-            else:
-                movement_text = "No rating history yet."
+
+            glicko_movement = stats.get(
+                "glicko_rating_movement",
+                stats["rating_movement"],
+            )
+            openskill_movement = stats.get(
+                "openskill_rating_movement",
+                {"count": 0, "avg_delta": None, "median_delta": None},
+            )
+            movement_text = (
+                f"{_format_movement('Glicko', glicko_movement)}\n"
+                f"{_format_movement('OpenSkill', openskill_movement)}\n"
+                "*Display points per game; higher = more volatile*"
+            )
 
             if stats["avg_drift"] is not None and stats["median_drift"] is not None:
                 avg_drift = stats["avg_drift"]
@@ -1335,34 +1451,43 @@ class InfoCommands(commands.Cog):
                 side_text = "No match data yet."
 
             # Rating stability (calibrated vs uncalibrated)
-            stability = stats["rating_stability"]
-            if stability["calibrated_count"] and stability["uncalibrated_count"]:
-                cal_avg = stability["calibrated_avg_delta"]
-                uncal_avg = stability["uncalibrated_avg_delta"]
-                ratio = stability["stability_ratio"]
-                # Describe the stability
-                if ratio < 0.7:
-                    stability_desc = "excellent - ratings converging well"
-                elif ratio < 0.9:
-                    stability_desc = "good - system stabilizing"
-                elif ratio < 1.1:
-                    stability_desc = "fair - similar volatility across players"
-                else:
-                    stability_desc = "poor - calibrated players still volatile"
-                stability_text = (
-                    f"**Calibrated** (57%+ certain): ±{cal_avg:.1f} avg swing ({stability['calibrated_count']} games)\n"
-                    f"**Uncalibrated** (<57% certain): ±{uncal_avg:.1f} avg swing ({stability['uncalibrated_count']} games)\n"
-                    f"Stability: **{ratio:.2f}x** ({stability_desc})\n"
-                    f"*<1.0 = calibrated swing less (good)*"
-                )
-            elif stability["calibrated_count"] or stability["uncalibrated_count"]:
-                # Only one category has data
-                if stability["calibrated_count"]:
-                    stability_text = f"Only calibrated data: ±{stability['calibrated_avg_delta']:.1f} avg swing"
-                else:
-                    stability_text = f"Only uncalibrated data: ±{stability['uncalibrated_avg_delta']:.1f} avg swing"
-            else:
-                stability_text = "No rating history with RD data yet."
+            def _format_stability(label: str, stability: dict) -> str:
+                calibrated_count = stability.get("calibrated_count", 0)
+                uncalibrated_count = stability.get("uncalibrated_count", 0)
+                parts = []
+                if calibrated_count:
+                    parts.append(
+                        f"cal ±{stability['calibrated_avg_delta']:.1f} "
+                        f"(n={calibrated_count})"
+                    )
+                if uncalibrated_count:
+                    parts.append(
+                        f"uncal ±{stability['uncalibrated_avg_delta']:.1f} "
+                        f"(n={uncalibrated_count})"
+                    )
+                ratio = stability.get("stability_ratio")
+                if ratio is not None:
+                    parts.append(f"ratio {ratio:.2f}x")
+                details = " | ".join(parts) if parts else "No stability history"
+                return f"**{label}:** {details}"
+
+            glicko_stability = stats.get(
+                "glicko_rating_stability",
+                stats["rating_stability"],
+            )
+            openskill_stability = stats.get(
+                "openskill_rating_stability",
+                {
+                    "calibrated_count": 0,
+                    "uncalibrated_count": 0,
+                    "stability_ratio": None,
+                },
+            )
+            stability_text = (
+                f"{_format_stability('Glicko', glicko_stability)}\n"
+                f"{_format_stability('OpenSkill', openskill_stability)}\n"
+                "*Ratio <1 means calibrated ratings move less*"
+            )
 
             embed = discord.Embed(title="Rating System Health", color=discord.Color.blue())
             avg_games_text = f"{stats['avg_games']:.1f}" if stats["avg_games"] is not None else "n/a"
@@ -1420,28 +1545,26 @@ class InfoCommands(commands.Cog):
                 draft_stats = next((s for s in lobby_stats if s["lobby_type"] == "draft"), None)
 
                 if shuffle_stats:
-                    avg_swing = shuffle_stats["avg_swing"] or 0
-                    games = shuffle_stats["games"]
-                    actual = (shuffle_stats["actual_win_rate"] or 0) * 100
-                    expected = (shuffle_stats["expected_win_rate"] or 0.5) * 100
-                    lobby_lines.append(f"🎲 **Shuffle**: ±{avg_swing:.1f} avg swing ({games} games) | {actual:.0f}% actual vs {expected:.0f}% exp")
+                    lobby_lines.append(
+                        _format_lobby_stats_line(
+                            shuffle_stats,
+                            emoji="🎲",
+                            label="Shuffle",
+                        )
+                    )
 
                 if draft_stats:
-                    avg_swing = draft_stats["avg_swing"] or 0
-                    games = draft_stats["games"]
-                    actual = (draft_stats["actual_win_rate"] or 0) * 100
-                    expected = (draft_stats["expected_win_rate"] or 0.5) * 100
-                    lobby_lines.append(f"👑 **Draft**: ±{avg_swing:.1f} avg swing ({games} games) | {actual:.0f}% actual vs {expected:.0f}% exp")
+                    lobby_lines.append(
+                        _format_lobby_stats_line(
+                            draft_stats,
+                            emoji="👑",
+                            label="Draft",
+                        )
+                    )
 
-                # Add comparison insight if both exist
-                if shuffle_stats and draft_stats and shuffle_stats["avg_swing"] and draft_stats["avg_swing"]:
-                    shuffle_swing = shuffle_stats["avg_swing"]
-                    draft_swing = draft_stats["avg_swing"]
-                    if shuffle_swing > 0:
-                        diff_pct = ((draft_swing - shuffle_swing) / shuffle_swing) * 100
-                        if abs(diff_pct) >= 5:
-                            more_volatile = "Draft" if diff_pct > 0 else "Shuffle"
-                            lobby_lines.append(f"*{more_volatile} shows {abs(diff_pct):.0f}% larger swings - more volatile outcomes*")
+                lobby_lines.extend(
+                    _format_lobby_swing_comparisons(shuffle_stats, draft_stats)
+                )
 
                 if lobby_lines:
                     embed.add_field(name="🎲 Lobby Type Impact", value="\n".join(lobby_lines), inline=False)
@@ -1633,6 +1756,7 @@ class InfoCommands(commands.Cog):
         favored_wins = calibration.favored_wins
         underdog_wins = calibration.underdog_wins
         last_5_delta = calibration.last_5_delta
+        openskill_last_5_delta = calibration.openskill_last_5_delta
         streak = calibration.streak
         streak_type = calibration.streak_type
         upsets = calibration.upsets
@@ -1652,6 +1776,25 @@ class InfoCommands(commands.Cog):
         # Recent matches with predictions comparison (last 5)
         # Shows Glicko-2 vs OpenSkill expected outcomes vs actual result
         os_system = CamaOpenSkillSystem()
+        os_data = (
+            await asyncio.to_thread(
+                self.player_service.get_openskill_rating,
+                user.id,
+                guild_id,
+            )
+            if self.player_service
+            and hasattr(self.player_service, "get_openskill_rating")
+            else None
+        )
+        if os_data is None and player.os_mu is not None:
+            os_data = (
+                player.os_mu,
+                player.os_sigma
+                if player.os_sigma is not None
+                else os_system.DEFAULT_SIGMA,
+            )
+        elif os_data is not None and os_data[1] is None:
+            os_data = (os_data[0], os_system.DEFAULT_SIGMA)
         recent_game_details = []
         recent_history = history[:5]
         os_probabilities = await get_os_win_probabilities(
@@ -1674,12 +1817,22 @@ class InfoCommands(commands.Cog):
             lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
             glicko_expected = h.get("expected_team_win_prob")
 
-            # Calculate rating delta
+            # Show both changes on the shared display-rating scale.
+            delta_parts = []
             if rating_after is not None and rating_before is not None:
-                rating_delta = rating_after - rating_before
-                delta_str = f"{rating_delta:+.0f}"
-            else:
-                delta_str = "?"
+                rating_delta = (
+                    rating_system.rating_to_display(rating_after)
+                    - rating_system.rating_to_display(rating_before)
+                )
+                delta_parts.append(f"G:{rating_delta:+d}")
+            os_delta = _openskill_display_delta(
+                os_system,
+                h.get("os_mu_before"),
+                h.get("os_mu_after"),
+            )
+            if os_delta is not None:
+                delta_parts.append(f"O:{os_delta:+d}")
+            delta_str = " ".join(delta_parts) if delta_parts else "?"
 
             result = "W" if won else "L"
             result_emoji = "✅" if won else "❌"
@@ -1693,7 +1846,8 @@ class InfoCommands(commands.Cog):
             pred_str = " ".join(pred_parts) if pred_parts else "no pred"
 
             recent_game_details.append(
-                f"{lobby_emoji}#{match_id}: {result_emoji}{result} ({pred_str}) → **{delta_str}**"
+                f"{lobby_emoji}#{match_id}: {result_emoji}{result} ({pred_str}) "
+                f"→ **Δ {delta_str}**"
             )
 
         # Build embed
@@ -1715,6 +1869,15 @@ class InfoCommands(commands.Cog):
             f"**Rating:** {rating_display} | **RD:** {rd:.0f} ({certainty:.0f}% certain)",
             f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}",
         ]
+        if os_data:
+            os_mu, os_sigma = os_data
+            os_display = os_system.mu_to_display(os_mu)
+            os_certainty = os_system.get_certainty_percentage(os_sigma)
+            profile_lines.insert(
+                1,
+                f"**OpenSkill:** {os_display} | **σ:** {os_sigma:.3f} "
+                f"({os_certainty:.0f}% certain)",
+            )
         if player.glicko_volatility:
             profile_lines.append(f"**Volatility:** {player.glicko_volatility:.3f}")
         embed.add_field(name="📊 Rating Profile", value="\n".join(profile_lines), inline=False)
@@ -1743,11 +1906,25 @@ class InfoCommands(commands.Cog):
                 embed.add_field(name="🎲 Situational", value=winrate_text, inline=True)
 
         # Trend
-        if last_5_delta is not None:
-            trend_emoji = "📈" if last_5_delta > 0 else "📉" if last_5_delta < 0 else "➡️"
-            trend_text = f"{trend_emoji} **{last_5_delta:+.0f}** over last {min(5, len(history))} games"
+        if last_5_delta is not None or openskill_last_5_delta is not None:
+            trend_value = (
+                last_5_delta
+                if last_5_delta is not None
+                else openskill_last_5_delta
+            )
+            trend_emoji = "📈" if trend_value > 0 else "📉" if trend_value < 0 else "➡️"
+            trend_parts = []
+            if last_5_delta is not None:
+                trend_parts.append(f"**G:** {last_5_delta:+.0f}")
+            if openskill_last_5_delta is not None:
+                trend_parts.append(f"**O:** {openskill_last_5_delta:+.0f}")
+            trend_text = (
+                f"{trend_emoji} {' | '.join(trend_parts)} over last "
+                f"{min(5, len(history))} games"
+            )
             if streak and streak_type:
-                trend_text += f"\n🔥 Current: **{streak}{streak_type}** streak"
+                streak_emoji = "🔥" if streak_type == "W" else "💀"
+                trend_text += f"\n{streak_emoji} Current: **{streak_type}{streak}** streak"
             embed.add_field(name="📉 Trend", value=trend_text, inline=True)
 
         # Recent matches with predictions comparison
@@ -1760,34 +1937,38 @@ class InfoCommands(commands.Cog):
 
         # Lobby type breakdown for this player
         player_lobby_stats = await asyncio.to_thread(self.match_service.get_player_lobby_type_stats, user.id, guild_id) if self.match_service else []
-        if player_lobby_stats and len(player_lobby_stats) > 1:
+        if player_lobby_stats:
             lobby_lines = []
             shuffle_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "shuffle"), None)
             draft_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "draft"), None)
 
             if shuffle_stats:
-                avg_swing = shuffle_stats["avg_swing"] or 0
-                games = shuffle_stats["games"]
-                actual = (shuffle_stats["actual_win_rate"] or 0) * 100
-                expected = (shuffle_stats["expected_win_rate"] or 0.5) * 100
-                lobby_lines.append(f"🎲 **Shuffle**: ±{avg_swing:.1f} avg ({games} games) | W: {actual:.0f}% vs {expected:.0f}% exp")
+                lobby_lines.append(
+                    _format_lobby_stats_line(
+                        shuffle_stats,
+                        emoji="🎲",
+                        label="Shuffle",
+                        player=True,
+                    )
+                )
 
             if draft_stats:
-                avg_swing = draft_stats["avg_swing"] or 0
-                games = draft_stats["games"]
-                actual = (draft_stats["actual_win_rate"] or 0) * 100
-                expected = (draft_stats["expected_win_rate"] or 0.5) * 100
-                lobby_lines.append(f"👑 **Draft**: ±{avg_swing:.1f} avg ({games} games) | W: {actual:.0f}% vs {expected:.0f}% exp")
+                lobby_lines.append(
+                    _format_lobby_stats_line(
+                        draft_stats,
+                        emoji="👑",
+                        label="Draft",
+                        player=True,
+                    )
+                )
 
-            # Add comparison insight if both exist
-            if shuffle_stats and draft_stats and shuffle_stats["avg_swing"] and draft_stats["avg_swing"]:
-                shuffle_swing = shuffle_stats["avg_swing"]
-                draft_swing = draft_stats["avg_swing"]
-                if shuffle_swing > 0:
-                    diff_pct = ((draft_swing - shuffle_swing) / shuffle_swing) * 100
-                    if abs(diff_pct) >= 5:
-                        more_volatile = "drafts" if diff_pct > 0 else "shuffles"
-                        lobby_lines.append(f"*You swing {abs(diff_pct):.0f}% more in {more_volatile}*")
+            lobby_lines.extend(
+                _format_lobby_swing_comparisons(
+                    shuffle_stats,
+                    draft_stats,
+                    player=True,
+                )
+            )
 
             if lobby_lines:
                 embed.add_field(name="🎲 Rating Swings by Lobby Type", value="\n".join(lobby_lines), inline=False)
@@ -1904,7 +2085,6 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
 
         # OpenSkill Rating (Fantasy-Weighted)
-        os_data = await asyncio.to_thread(self.player_service.get_openskill_rating, user.id, guild_id) if self.player_service else None
         if os_data:
             os_mu, os_sigma = os_data
             os_ordinal = os_system.ordinal(os_mu, os_sigma)

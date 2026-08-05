@@ -315,6 +315,7 @@ class VotingCorrectionMixin:
                         for pid in dire_ids
                     ],
                     winning_team=new_winning_team_num,
+                    streak_multipliers=streak_multipliers,
                 )
                 os_results = {pid: (mu, sigma) for pid, (mu, sigma, _factor) in weighted.items()}
                 os_factors = {pid: factor for pid, (_mu, _sigma, factor) in weighted.items()}
@@ -323,6 +324,7 @@ class VotingCorrectionMixin:
                     [(pid, *os_rating_by_id.get(pid, (None, None))) for pid in radiant_ids],
                     [(pid, *os_rating_by_id.get(pid, (None, None))) for pid in dire_ids],
                     winning_team=new_winning_team_num,
+                    streak_multipliers=streak_multipliers,
                 )
                 os_factors = dict.fromkeys(os_results)
             new_os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]

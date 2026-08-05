@@ -26,7 +26,12 @@ def draw_rating_history_chart(
     history: list[dict],
 ) -> BytesIO:
     """
-    Generate a dual Y-axis rating history chart with win/loss markers.
+    Generate a shared-scale rating history chart with win/loss markers.
+
+    OpenSkill mu values are converted to the canonical 0-3000 display scale,
+    so both lines deliberately share one Y axis. Separate autoscaled axes made
+    equally steep lines imply comparable movement when their point swings were
+    materially different.
 
     Args:
         username: Player's display name
@@ -95,26 +100,18 @@ def draw_rating_history_chart(
         else:
             os_values.append(None)
 
-    # Compute Y ranges with 10% padding
-    glicko_min = glicko_max = glicko_range = 0
-    if has_glicko:
-        glicko_min = min(glicko_valid)
-        glicko_max = max(glicko_valid)
-        glicko_range = max(glicko_max - glicko_min, 1)
-        glicko_min -= glicko_range * 0.1
-        glicko_max += glicko_range * 0.1
-        glicko_range = glicko_max - glicko_min
-
-    os_min = os_max = os_range = 0
-    if has_os:
-        os_valid = [v for v in os_values if v is not None]
-        if os_valid:
-            os_min = min(os_valid)
-            os_max = max(os_valid)
-            os_range = max(os_max - os_min, 1)
-            os_min -= os_range * 0.1
-            os_max += os_range * 0.1
-            os_range = os_max - os_min
+    # Both systems use display points, so compute one common range with 10%
+    # padding. This keeps visual slopes and gaps directly comparable.
+    os_valid = [v for v in os_values if v is not None]
+    combined_values = glicko_valid + os_valid
+    rating_min = rating_max = rating_range = 0
+    if combined_values:
+        rating_min = min(combined_values)
+        rating_max = max(combined_values)
+        raw_range = max(rating_max - rating_min, 1)
+        rating_min -= raw_range * 0.1
+        rating_max += raw_range * 0.1
+        rating_range = rating_max - rating_min
 
     # Chart origin
     chart_x = padding
@@ -126,17 +123,11 @@ def draw_rating_history_chart(
     def idx_to_x(i: int) -> int:
         return chart_x + int(i / max(n - 1, 1) * chart_width)
 
-    # Helper: Glicko value to pixel Y
-    def glicko_to_y(val: float) -> int:
-        if glicko_range == 0:
+    # Helper: display rating to pixel Y for either system
+    def rating_to_y(val: float) -> int:
+        if rating_range == 0:
             return chart_y + chart_height // 2
-        return chart_y + int((glicko_max - val) / glicko_range * chart_height)
-
-    # Helper: OpenSkill value to pixel Y
-    def os_to_y(val: float) -> int:
-        if os_range == 0:
-            return chart_y + chart_height // 2
-        return chart_y + int((os_max - val) / os_range * chart_height)
+        return chart_y + int((rating_max - val) / rating_range * chart_height)
 
     # Draw faint horizontal grid lines
     grid_color = "#444444"
@@ -144,25 +135,17 @@ def draw_rating_history_chart(
         gy = chart_y + int(frac * chart_height)
         draw.line([(chart_x, gy), (chart_x + chart_width, gy)], fill=grid_color, width=1)
 
-    # Left Y-axis labels (Glicko, blue, rounded to nearest 50)
-    if has_glicko:
+    # Shared display-rating Y-axis labels.
+    if combined_values:
         for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            val = glicko_max - frac * glicko_range
+            val = rating_max - frac * rating_range
             label = str(int(round(val / 50) * 50))
             gy = chart_y + int(frac * chart_height)
             text_w = _get_text_size(value_font, label)[0]
-            draw.text((chart_x - text_w - 6, gy - 6), label, fill=DISCORD_ACCENT, font=value_font)
-
-    # Right Y-axis labels (OpenSkill display, yellow, rounded to nearest 100)
-    if has_os and os_range > 0:
-        for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            val = os_max - frac * os_range
-            label = str(int(round(val / 100) * 100))
-            gy = chart_y + int(frac * chart_height)
             draw.text(
-                (chart_x + chart_width + 6, gy - 6),
+                (chart_x - text_w - 6, gy - 6),
                 label,
-                fill=DISCORD_YELLOW,
+                fill=DISCORD_GREY,
                 font=value_font,
             )
 
@@ -171,8 +154,8 @@ def draw_rating_history_chart(
         v1 = glicko_values[i]
         v2 = glicko_values[i + 1]
         if v1 is not None and v2 is not None:
-            x1, y1 = idx_to_x(i), glicko_to_y(v1)
-            x2, y2 = idx_to_x(i + 1), glicko_to_y(v2)
+            x1, y1 = idx_to_x(i), rating_to_y(v1)
+            x2, y2 = idx_to_x(i + 1), rating_to_y(v2)
             draw.line([(x1, y1), (x2, y2)], fill=DISCORD_ACCENT, width=2)
 
     # Draw OpenSkill line (yellow, width=2) — skip None gaps
@@ -181,8 +164,8 @@ def draw_rating_history_chart(
             v1 = os_values[i]
             v2 = os_values[i + 1]
             if v1 is not None and v2 is not None:
-                x1, y1 = idx_to_x(i), os_to_y(v1)
-                x2, y2 = idx_to_x(i + 1), os_to_y(v2)
+                x1, y1 = idx_to_x(i), rating_to_y(v1)
+                x2, y2 = idx_to_x(i + 1), rating_to_y(v2)
                 draw.line([(x1, y1), (x2, y2)], fill=DISCORD_YELLOW, width=2)
 
     # Draw win/loss markers on the available rating series.
@@ -191,9 +174,9 @@ def draw_rating_history_chart(
         rating = glicko_values[i]
         os_rating = os_values[i]
         if rating is not None:
-            py = glicko_to_y(rating)
+            py = rating_to_y(rating)
         elif os_rating is not None:
-            py = os_to_y(os_rating)
+            py = rating_to_y(os_rating)
         else:
             continue
         px = idx_to_x(i)

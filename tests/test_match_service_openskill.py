@@ -124,6 +124,40 @@ def test_update_openskill_for_match_moves_winners_up_losers_down(repo_db_path):
             assert mu < baselines[pid]
 
 
+def test_record_match_passes_shared_streaks_to_openskill_phase_one(repo_db_path):
+    service, player_repo, match_repo = _build_service(repo_db_path)
+    player_ids = _seed_players(player_repo)
+    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = service.get_last_shuffle(TEST_GUILD_ID)
+
+    # The current result becomes game three in each player's same-result run.
+    for pid in pending.radiant_team_ids:
+        for _ in range(2):
+            match_repo.add_rating_history(
+                pid,
+                TEST_GUILD_ID,
+                rating=1500.0,
+                won=True,
+            )
+    for pid in pending.dire_team_ids:
+        for _ in range(2):
+            match_repo.add_rating_history(
+                pid,
+                TEST_GUILD_ID,
+                rating=1500.0,
+                won=False,
+            )
+
+    phase_one = Mock(wraps=service.openskill_system.update_ratings_equal_weight)
+    service.openskill_system.update_ratings_equal_weight = phase_one
+
+    service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+    multipliers = phase_one.call_args.kwargs["streak_multipliers"]
+    assert set(multipliers) == set(player_ids)
+    assert all(multiplier == pytest.approx(1.25) for multiplier in multipliers.values())
+
+
 def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
     """With no fantasy points on any participant, Phase 2 is a documented no-op.
 

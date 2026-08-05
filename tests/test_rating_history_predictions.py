@@ -70,9 +70,30 @@ def test_record_match_stores_predictions_and_history(repo_db_path):
     for entry in history:
         assert entry["rating_before"] is not None
         assert entry["rd_before"] is not None
+        assert entry["os_mu_before"] is not None
+        assert entry["os_mu_after"] is not None
+        assert entry["os_sigma_before"] is not None
+        assert entry["os_sigma_after"] is not None
         assert entry["expected_team_win_prob"] == pytest.approx(0.5, rel=1e-6)
         assert entry["team_number"] in (1, 2)
         assert entry["won"] in (0, 1, True, False)
+
+    player_history = match_repo.get_player_rating_history_detailed(
+        player_ids[0], TEST_GUILD_ID, limit=1
+    )[0]
+    assert player_history["streak_length"] == 1
+    assert player_history["streak_multiplier"] == pytest.approx(1.0)
+
+    openskill_history = match_repo.get_player_openskill_history(
+        player_ids[0], TEST_GUILD_ID, limit=1
+    )[0]
+    assert openskill_history["streak_length"] == 1
+    assert openskill_history["streak_multiplier"] == pytest.approx(1.0)
+
+    match_history = match_repo.get_rating_history_for_match(result["match_id"])
+    target = next(row for row in match_history if row["discord_id"] == player_ids[0])
+    assert target["os_mu_before"] is not None
+    assert target["os_mu_after"] is not None
 
 
 @pytest.mark.parametrize(
