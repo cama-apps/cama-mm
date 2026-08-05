@@ -933,8 +933,8 @@ class DuelCommands(commands.Cog):
     def _flavor_details(challenge: DuelChallenge) -> dict[str, object]:
         return {
             "challenge_id": challenge.challenge_id,
-            "challenger_id": challenge.challenger_id,
-            "recipient_id": challenge.recipient_id,
+            "challenger": "the challenger",
+            "recipient": "the recipient",
             "wager": challenge.wager,
             "issuance_fee": challenge.issuance_fee,
             "status": challenge.status.value,
