@@ -2335,8 +2335,25 @@ class MatchCommands(commands.Cog):
             self.match_service.state_service.clear_last_shuffle, guild_id, pending_match_id
         )
         match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
+        lobby_player_ids = sorted(
+            set(getattr(pending_state, "radiant_team_ids", []) or [])
+            | set(getattr(pending_state, "dire_team_ids", []) or [])
+            | set(getattr(pending_state, "excluded_player_ids", []) or [])
+            | set(getattr(pending_state, "excluded_conditional_player_ids", []) or [])
+        )
+        mentions = " ".join(f"<@{player_id}>" for player_id in lobby_player_ids)
+        content = f"✅ Match aborted{match_id_note}. Bets have been refunded."
+        if mentions:
+            content += f"\n{mentions}"
         await interaction.followup.send(
-            f"✅ Match aborted{match_id_note}. Bets have been refunded.", ephemeral=False
+            content,
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=[discord.Object(id=player_id) for player_id in lobby_player_ids],
+                roles=False,
+                replied_user=False,
+            ),
         )
 
     async def _schedule_betting_reminders(

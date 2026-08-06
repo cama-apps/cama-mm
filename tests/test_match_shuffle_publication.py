@@ -10,6 +10,7 @@ import pytest
 
 from commands.match import MatchCommands
 from domain.models.lobby import LobbyKind
+from domain.models.pending_match_state import PendingMatchState
 
 
 async def _run_sync(func, *args, **kwargs):
@@ -306,6 +307,40 @@ async def test_abort_does_not_touch_a_new_or_sibling_lobby():
     unpin.assert_not_awaited()
     abort_thread.assert_awaited_once_with(1, 7)
     match_service.state_service.clear_last_shuffle.assert_called_once_with(1, 7)
+
+
+@pytest.mark.asyncio
+async def test_abort_pings_everyone_from_the_shuffled_lobby():
+    bot = MagicMock()
+    bot.betting_service = None
+    match_service = MagicMock()
+    match_service.state_service.get_last_shuffle.return_value = PendingMatchState(
+        radiant_team_ids=[30, 10],
+        dire_team_ids=[40, 20],
+        excluded_player_ids=[50, 10],
+        excluded_conditional_player_ids=[60, 50],
+        pending_match_id=7,
+    )
+    send = AsyncMock()
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=send))
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+    cog._cancel_betting_tasks = MagicMock()
+
+    with patch.object(cog, "_abort_lobby_thread", new=AsyncMock()):
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+
+    send.assert_awaited_once()
+    call = send.await_args
+    assert call.args == (
+        "✅ Match aborted (Match #7). Bets have been refunded.\n"
+        "<@10> <@20> <@30> <@40> <@50> <@60>",
+    )
+    assert call.kwargs["ephemeral"] is False
+    allowed_mentions = call.kwargs["allowed_mentions"]
+    assert [user.id for user in allowed_mentions.users] == [10, 20, 30, 40, 50, 60]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.replied_user is False
 
 
 @pytest.mark.asyncio
