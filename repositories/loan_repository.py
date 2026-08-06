@@ -267,6 +267,71 @@ class LoanRepository(BaseRepository, ILoanRepository):
             return {"open": 0, "lowskill": 0}
         return {"open": int(row["open"]), "lowskill": int(row["lowskill"])}
 
+    def get_first_game_pool_previews(
+        self,
+        guild_id: int | None,
+        regular_seed_amount: int,
+        game_date: str | None = None,
+        daily_amount: int = 0,
+    ) -> dict[str, int]:
+        """Return the amount each lobby could reserve on an immediate shuffle."""
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT fund.total_collected, fund.next_match_pot,
+                       fund.first_game_open_pool, fund.first_game_lowskill_pool,
+                       (
+                           SELECT MAX(days.game_date)
+                           FROM first_game_pool_funding_days AS days
+                           WHERE days.guild_id = fund.guild_id
+                       ) AS last_processed
+                FROM nonprofit_fund AS fund
+                WHERE fund.guild_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            return {"open": 0, "lowskill": 0}
+
+        available = max(0, int(row["total_collected"] or 0))
+        open_pool = max(0, int(row["first_game_open_pool"] or 0))
+        lowskill_pool = max(0, int(row["first_game_lowskill_pool"] or 0))
+        daily_amount = int(daily_amount)
+        if game_date is not None and daily_amount > 0:
+            target_date = date.fromisoformat(game_date)
+            last_processed = (
+                date.fromisoformat(row["last_processed"])
+                if row["last_processed"]
+                else None
+            )
+            next_date = (
+                target_date
+                if last_processed is None
+                else last_processed + timedelta(days=1)
+            )
+            pair_cost = daily_amount * 2
+            while next_date <= target_date:
+                if available >= pair_cost:
+                    available -= pair_cost
+                    open_pool += daily_amount
+                    lowskill_pool += daily_amount
+                next_date += timedelta(days=1)
+
+        queued_amount = max(0, int(row["next_match_pot"] or 0))
+        seed_amount = (
+            queued_amount
+            if queued_amount > 0
+            else min(
+                available,
+                max(0, int(regular_seed_amount)),
+            )
+        )
+        return {
+            "open": open_pool + seed_amount,
+            "lowskill": lowskill_pool + seed_amount,
+        }
+
     def fund_first_game_pools(
         self,
         guild_id: int | None,

@@ -6,7 +6,7 @@ import discord
 
 from rating_system import CamaRatingSystem
 from utils.embed_safety import truncate_field
-from utils.formatting import ROLE_EMOJIS, TOMBSTONE_EMOJI
+from utils.formatting import JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 from utils.region import summarize_region
 
@@ -166,6 +166,7 @@ def create_lobby_embed(
     lobby, players, player_ids,
     ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None,
     guild_id: int | None = None,
+    bonus_pool_preview: int | None = None,
 ):
     """Create the lobby embed with player list and status.
 
@@ -177,6 +178,7 @@ def create_lobby_embed(
         max_players: Maximum players allowed in lobby
         bankruptcy_repo: BankruptcyRepository instance
         guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from lobby.
+        bonus_pool_preview: Combined bonus pool available for this lobby's next shuffle.
     """
     lookup_guild_id = guild_id if guild_id is not None else getattr(lobby, "guild_id", None)
     regular_count = lobby.get_player_count()
@@ -220,6 +222,16 @@ def create_lobby_embed(
         value=summarize_region(list(players or [])),
         inline=False,
     )
+
+    if bonus_pool_preview is not None:
+        embed.add_field(
+            name="🎲 Bonus Pool",
+            value=(
+                f"**{bonus_pool_preview} {JOPACOIN_EMOTE}** "
+                "available if this lobby shuffles next."
+            ),
+            inline=False,
+        )
 
     # Status/ready indicator
     if total_count >= ready_threshold:

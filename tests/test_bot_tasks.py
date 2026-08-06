@@ -28,9 +28,11 @@ def bot_module():
     bot_module._duel_challenge_task = None
     bot_module._economy_event_task = None
     bot_module._first_game_pool_task = None
+    bot_module._lobby_message_update_locks.clear()
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
 
+    bot_module._lobby_message_update_locks.clear()
     for attr in (
         "_reminder_recovery_task",
         "_duel_challenge_task",
@@ -71,6 +73,226 @@ async def test_first_game_pool_loop_funds_every_guild_for_current_game_date(bot_
         call(42, "2026-08-05", 100),
     ]
     sleep.assert_awaited_once_with(900)
+
+
+async def test_first_game_pool_loop_refreshes_open_lobby_messages_after_funding(
+    bot_module,
+):
+    guild = SimpleNamespace(id=41)
+    open_lobby = SimpleNamespace(status="open")
+    lowskill_lobby = SimpleNamespace(status="open")
+    lobby_service = MagicMock()
+    lobby_service.get_lobby.side_effect = lambda *, guild_id, lobby_kind: {
+        (41, bot_module.LobbyKind.OPEN): open_lobby,
+        (41, bot_module.LobbyKind.LOWSKILL): lowskill_lobby,
+    }[(guild_id, lobby_kind)]
+    lobby_service.get_lobby_message_id.side_effect = (
+        lambda *, guild_id, lobby_kind: 100 + lobby_kind.lobby_id
+    )
+    lobby_service.get_lobby_channel_id.side_effect = (
+        lambda *, guild_id, lobby_kind: 200 + lobby_kind.lobby_id
+    )
+    open_message = object()
+    lowskill_message = object()
+    open_channel = SimpleNamespace(
+        get_partial_message=MagicMock(return_value=open_message)
+    )
+    lowskill_channel = SimpleNamespace(
+        get_partial_message=MagicMock(return_value=lowskill_message)
+    )
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.return_value = {
+        "funded_dates": ["2026-08-05"]
+    }
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(
+            bot_module.bot,
+            "get_channel",
+            side_effect=lambda channel_id: (
+                open_channel if channel_id == 201 else None
+            ),
+        ),
+        patch.object(
+            bot_module.bot,
+            "fetch_channel",
+            AsyncMock(return_value=lowskill_channel),
+        ) as fetch_channel,
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+        patch.object(bot_module, "update_lobby_message", AsyncMock()) as update_message,
+    ):
+        await bot_module._first_game_pool_loop()
+
+    assert update_message.await_args_list == [
+        call(
+            open_message,
+            open_lobby,
+            41,
+            expected_message_id=101,
+            lobby_kind=bot_module.LobbyKind.OPEN,
+        ),
+        call(
+            lowskill_message,
+            lowskill_lobby,
+            41,
+            expected_message_id=102,
+            lobby_kind=bot_module.LobbyKind.LOWSKILL,
+        ),
+    ]
+    fetch_channel.assert_awaited_once_with(202)
+
+
+async def test_first_game_pool_loop_does_not_refresh_after_idempotent_funding(
+    bot_module,
+):
+    guild = SimpleNamespace(id=41)
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.return_value = {"funded_dates": []}
+    lobby_service = MagicMock()
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+        patch.object(bot_module, "update_lobby_message", AsyncMock()) as update_message,
+    ):
+        await bot_module._first_game_pool_loop()
+
+    update_message.assert_not_awaited()
+    lobby_service.get_lobby.assert_not_called()
+
+
+async def test_first_game_pool_refresh_retries_failed_current_generation(bot_module):
+    lobby = SimpleNamespace(status="open")
+    lobby_service = MagicMock()
+    lobby_service.get_lobby.side_effect = (
+        lambda *, guild_id, lobby_kind: (
+            lobby if lobby_kind is bot_module.LobbyKind.OPEN else None
+        )
+    )
+    lobby_service.get_lobby_message_id.return_value = 101
+    lobby_service.get_lobby_channel_id.return_value = 201
+    message = object()
+    channel = SimpleNamespace(get_partial_message=MagicMock(return_value=message))
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(
+            bot_module,
+            "update_lobby_message",
+            AsyncMock(side_effect=[False, True]),
+        ) as update_message,
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await bot_module._refresh_first_game_pool_lobby_messages(41)
+
+    assert update_message.await_count == 2
+    assert lobby_service.get_lobby.call_args_list[:2] == [
+        call(guild_id=41, lobby_kind=bot_module.LobbyKind.OPEN),
+        call(guild_id=41, lobby_kind=bot_module.LobbyKind.OPEN),
+    ]
+    sleep.assert_awaited_once_with(1)
+
+
+async def test_first_game_pool_loop_isolates_lobby_refresh_failures_across_guilds(
+    bot_module,
+):
+    guilds = [SimpleNamespace(id=41), SimpleNamespace(id=42)]
+    lobbies = {
+        (41, bot_module.LobbyKind.LOWSKILL): SimpleNamespace(status="open"),
+        (42, bot_module.LobbyKind.OPEN): SimpleNamespace(status="open"),
+        (42, bot_module.LobbyKind.LOWSKILL): SimpleNamespace(status="open"),
+    }
+    lobby_service = MagicMock()
+
+    def get_lobby(*, guild_id, lobby_kind):
+        if (guild_id, lobby_kind) == (41, bot_module.LobbyKind.OPEN):
+            raise RuntimeError("missing lobby")
+        return lobbies[(guild_id, lobby_kind)]
+
+    lobby_service.get_lobby.side_effect = get_lobby
+    lobby_service.get_lobby_message_id.side_effect = (
+        lambda *, guild_id, lobby_kind: guild_id * 10 + lobby_kind.lobby_id
+    )
+    lobby_service.get_lobby_channel_id.side_effect = (
+        lambda *, guild_id, lobby_kind: guild_id * 100 + lobby_kind.lobby_id
+    )
+    messages = {
+        key: object()
+        for key in lobbies
+    }
+
+    def get_channel(channel_id):
+        guild_id, lobby_id = divmod(channel_id, 100)
+        kind = bot_module.LobbyKind.from_lobby_id(lobby_id)
+        return SimpleNamespace(
+            get_partial_message=MagicMock(return_value=messages[(guild_id, kind)])
+        )
+
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.return_value = {
+        "funded_dates": ["2026-08-05"]
+    }
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", side_effect=get_channel),
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+        patch.object(bot_module, "update_lobby_message", AsyncMock()) as update_message,
+    ):
+        await bot_module._first_game_pool_loop()
+
+    assert update_message.await_args_list == [
+        call(
+            messages[(41, bot_module.LobbyKind.LOWSKILL)],
+            lobbies[(41, bot_module.LobbyKind.LOWSKILL)],
+            41,
+            expected_message_id=412,
+            lobby_kind=bot_module.LobbyKind.LOWSKILL,
+        ),
+        call(
+            messages[(42, bot_module.LobbyKind.OPEN)],
+            lobbies[(42, bot_module.LobbyKind.OPEN)],
+            42,
+            expected_message_id=421,
+            lobby_kind=bot_module.LobbyKind.OPEN,
+        ),
+        call(
+            messages[(42, bot_module.LobbyKind.LOWSKILL)],
+            lobbies[(42, bot_module.LobbyKind.LOWSKILL)],
+            42,
+            expected_message_id=422,
+            lobby_kind=bot_module.LobbyKind.LOWSKILL,
+        ),
+    ]
 
 
 async def test_supervised_loop_returns_on_clean_exit(bot_module):
@@ -362,6 +584,109 @@ async def test_update_lobby_message_reports_failed_edit(bot_module):
         updated = await bot_module.update_lobby_message(message, lobby, 42)
 
     assert updated is False
+
+
+async def test_update_lobby_message_skips_recreated_lobby_generation(bot_module):
+    stale_lobby = SimpleNamespace(get_player_count=MagicMock(return_value=1))
+    current_lobby = SimpleNamespace(get_player_count=MagicMock(return_value=2))
+    lobby_service = MagicMock()
+    lobby_service.build_lobby_embed.return_value = object()
+    lobby_service.get_lobby.return_value = current_lobby
+    lobby_service.get_lobby_message_id.return_value = 202
+    message = SimpleNamespace(edit=AsyncMock())
+
+    with (
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+    ):
+        updated = await bot_module.update_lobby_message(
+            message,
+            stale_lobby,
+            42,
+            expected_message_id=101,
+            lobby_kind=bot_module.LobbyKind.OPEN,
+        )
+
+    assert updated is False
+    message.edit.assert_not_awaited()
+
+
+async def test_update_lobby_message_edits_current_lobby_generation(bot_module):
+    lobby = SimpleNamespace(get_player_count=MagicMock(return_value=2))
+    embed = object()
+    lobby_service = MagicMock()
+    lobby_service.build_lobby_embed.return_value = embed
+    lobby_service.get_lobby.return_value = lobby
+    lobby_service.get_lobby_message_id.return_value = 101
+    message = SimpleNamespace(edit=AsyncMock())
+
+    with (
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+    ):
+        updated = await bot_module.update_lobby_message(
+            message,
+            lobby,
+            42,
+            expected_message_id=101,
+            lobby_kind=bot_module.LobbyKind.OPEN,
+        )
+
+    assert updated is True
+    message.edit.assert_awaited_once_with(
+        embed=embed,
+        allowed_mentions=ANY,
+    )
+
+
+async def test_update_lobby_message_serializes_same_lobby_refreshes(bot_module):
+    lobby = SimpleNamespace(
+        kind=bot_module.LobbyKind.OPEN,
+        get_player_count=MagicMock(return_value=2),
+    )
+    old_embed = object()
+    new_embed = object()
+    first_build_started = asyncio.Event()
+    release_first_build = asyncio.Event()
+    build_count = 0
+    edited_embeds = []
+
+    lobby_service = MagicMock()
+
+    async def controlled_to_thread(func, *args, **kwargs):
+        nonlocal build_count
+        if func is lobby_service.build_lobby_embed:
+            build_count += 1
+            if build_count == 1:
+                first_build_started.set()
+                await release_first_build.wait()
+                return old_embed
+            return new_embed
+        return func(*args, **kwargs)
+
+    async def edit_message(*, embed, allowed_mentions):
+        edited_embeds.append(embed)
+
+    message = SimpleNamespace(edit=edit_message)
+
+    with (
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.asyncio, "to_thread", controlled_to_thread),
+    ):
+        older_refresh = asyncio.create_task(
+            bot_module.update_lobby_message(message, lobby, 42)
+        )
+        await first_build_started.wait()
+        newer_refresh = asyncio.create_task(
+            bot_module.update_lobby_message(message, lobby, 42)
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release_first_build.set()
+        assert await asyncio.gather(older_refresh, newer_refresh) == [True, True]
+
+    assert edited_embeds == [old_embed, new_embed]
 
 
 async def test_reconcile_persisted_lobby_message_retries_failed_edit(bot_module):

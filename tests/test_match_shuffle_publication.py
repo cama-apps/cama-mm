@@ -84,7 +84,10 @@ async def test_publication_sends_overlap_and_confirmation_error_waits_for_posts(
 
     lock_thread = AsyncMock()
     unpin = AsyncMock()
-    fake_bot_module = SimpleNamespace(clear_lobby_rally_cooldowns=MagicMock())
+    fake_bot_module = SimpleNamespace(
+        clear_lobby_rally_cooldowns=MagicMock(),
+        _refresh_first_game_pool_lobby_messages=AsyncMock(),
+    )
     with (
         patch("commands.match.asyncio.to_thread", new=_run_sync),
         patch.object(cog, "_schedule_betting_reminders", new=AsyncMock()),
@@ -142,7 +145,10 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
 
     lock_thread = AsyncMock()
     unpin = AsyncMock()
-    fake_bot_module = SimpleNamespace(clear_lobby_rally_cooldowns=MagicMock())
+    fake_bot_module = SimpleNamespace(
+        clear_lobby_rally_cooldowns=MagicMock(),
+        _refresh_first_game_pool_lobby_messages=AsyncMock(),
+    )
     caplog.set_level(logging.WARNING, logger="cama_bot.commands.match")
     with (
         patch("commands.match.asyncio.to_thread", new=_run_sync),
@@ -176,7 +182,7 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
 
 
 @pytest.mark.asyncio
-async def test_thread_and_pin_cleanup_overlap_before_reset():
+async def test_thread_and_pin_cleanup_finish_before_reset_and_pool_refresh():
     order = []
     thread_started = asyncio.Event()
     pins_started = asyncio.Event()
@@ -225,7 +231,14 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
         order.append("pins_done")
         return 1
 
-    fake_bot_module = SimpleNamespace(clear_lobby_rally_cooldowns=MagicMock())
+    async def refresh_pool_lobbies(guild_id):
+        assert guild_id == 1
+        order.append("pool_refresh")
+
+    fake_bot_module = SimpleNamespace(
+        clear_lobby_rally_cooldowns=MagicMock(),
+        _refresh_first_game_pool_lobby_messages=refresh_pool_lobbies,
+    )
     with (
         patch("commands.match.asyncio.to_thread", new=_run_sync),
         patch.object(cog, "_schedule_betting_reminders", new=AsyncMock()),
@@ -256,6 +269,7 @@ async def test_thread_and_pin_cleanup_overlap_before_reset():
     assert order.index("public_metadata") < order.index("reset")
     assert order.index("thread_metadata_done") < order.index("reset")
     assert order.index("pins_done") < order.index("reset")
+    assert order.index("reset") < order.index("pool_refresh")
     bot.fetch_channel.assert_not_awaited()
     bot.get_channel.assert_called_once_with(lobby_channel.id)
     lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)

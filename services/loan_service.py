@@ -8,11 +8,18 @@ Fees are collected into a nonprofit fund for gambling addiction.
 import time
 from dataclasses import dataclass
 
-from config import LOAN_COOLDOWN_SECONDS, LOAN_FEE_RATE, LOAN_MAX_AMOUNT, MAX_DEBT
+from config import (
+    FIRST_GAME_POOL_DAILY_AMOUNT,
+    LOAN_COOLDOWN_SECONDS,
+    LOAN_FEE_RATE,
+    LOAN_MAX_AMOUNT,
+    MAX_DEBT,
+)
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
 from services.result import Result
+from utils.game_date import get_game_date
 
 
 @dataclass
@@ -162,6 +169,17 @@ class LoanService:
     def consume_next_match_pot(self, guild_id: int | None) -> int:
         """Claim a reserve allocation earmarked for the next betting match."""
         return self.loan_repo.consume_next_match_pot(guild_id)
+
+    def get_first_game_pool_previews(
+        self, guild_id: int | None, regular_seed_amount: int
+    ) -> dict[str, int]:
+        """Return each lobby's visible first-game pool for its next shuffle."""
+        return self.loan_repo.get_first_game_pool_previews(
+            guild_id,
+            regular_seed_amount,
+            game_date=get_game_date(),
+            daily_amount=FIRST_GAME_POOL_DAILY_AMOUNT,
+        )
 
     def fund_first_game_pools(
         self,

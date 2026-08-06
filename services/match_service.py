@@ -9,9 +9,8 @@ lives in those mixins.
 """
 
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from config import FIRST_GAME_RESET_HOUR
 from domain.models.player import Player
 from domain.services.team_balancing_service import TeamBalancingService
 from openskill_rating_system import CamaOpenSkillSystem
@@ -27,7 +26,6 @@ from services.match.voting_correction_mixin import VotingCorrectionMixin
 from services.match_state_service import MatchStateService
 from services.match_voting_service import MatchVotingService
 from shuffler import BalancedShuffler
-from utils.guild import normalize_guild_id
 
 # Public surface plus the module-level ``logger`` that the former monolithic
 # ``services.match_service`` module exposed. ``logger`` is re-exported from
@@ -206,36 +204,3 @@ class MatchService(
                 )
 
         return float(mu), float(sigma)
-
-    def is_first_game_of_night(self, guild_id: int | None = None) -> bool:
-        """Check if no matches have been recorded since the most recent reset boundary.
-
-        The boundary is FIRST_GAME_RESET_HOUR in America/Los_Angeles timezone.
-        If current LA time is before the reset hour, the boundary is yesterday at the reset hour.
-        Otherwise, the boundary is today at the reset hour.
-
-        Kept on the composing class (rather than a mixin) so the module-level
-        ``datetime`` it reads resolves through ``services.match_service`` — the
-        first-game tests patch ``services.match_service.datetime`` directly.
-        """
-        from zoneinfo import ZoneInfo
-
-        la_tz = ZoneInfo("America/Los_Angeles")
-        now_la = datetime.now(la_tz)
-
-        if now_la.hour < FIRST_GAME_RESET_HOUR:
-            # Before reset hour today → boundary is yesterday at reset hour
-            boundary_la = now_la.replace(
-                hour=FIRST_GAME_RESET_HOUR, minute=0, second=0, microsecond=0
-            ) - timedelta(days=1)
-        else:
-            # At or after reset hour → boundary is today at reset hour
-            boundary_la = now_la.replace(
-                hour=FIRST_GAME_RESET_HOUR, minute=0, second=0, microsecond=0
-            )
-
-        boundary_utc = boundary_la.astimezone(UTC)
-        boundary_iso = boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
-
-        normalized_gid = normalize_guild_id(guild_id)
-        return self.match_repo.get_match_count_since(normalized_gid, boundary_iso) == 0

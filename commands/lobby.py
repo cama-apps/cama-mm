@@ -699,7 +699,6 @@ class LobbyCommands(commands.Cog):
     ) -> None:
         """Update channel message embed (which is also the thread starter)."""
         lobby_kind = lobby.kind
-        embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
         # Update channel message - this also updates the thread starter view
         message_id = await asyncio.to_thread(
@@ -718,26 +717,42 @@ class LobbyCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = channel.get_partial_message(message_id)
-                await message.edit(content=None, embed=embed)
-                logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
+                from bot import update_lobby_message
+
+                await update_lobby_message(
+                    message,
+                    lobby,
+                    guild_id,
+                    expected_message_id=message_id,
+                    lobby_kind=lobby_kind,
+                    clear_content=True,
+                    lobby_service=self.lobby_service,
+                )
             except Exception as exc:
                 logger.warning(f"Failed to update channel message: {exc}")
 
         if sync_readycheck:
             await self.sync_readycheck_with_lobby(guild_id, lobby_kind)
 
-    async def _update_thread_embed(self, lobby, embed=None, guild_id: int | None = None) -> None:
+    async def _update_thread_embed(self, lobby, guild_id: int | None = None) -> None:
         """Update the pinned embed in the lobby thread."""
         lobby_kind = lobby.kind
-        thread_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_thread_id,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-        )
-        embed_message_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_embed_message_id,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
+        thread_id, embed_message_id, lobby_message_id = await asyncio.gather(
+            asyncio.to_thread(
+                self.lobby_service.get_lobby_thread_id,
+                guild_id=guild_id,
+                lobby_kind=lobby_kind,
+            ),
+            asyncio.to_thread(
+                self.lobby_service.get_lobby_embed_message_id,
+                guild_id=guild_id,
+                lobby_kind=lobby_kind,
+            ),
+            asyncio.to_thread(
+                self.lobby_service.get_lobby_message_id,
+                guild_id=guild_id,
+                lobby_kind=lobby_kind,
+            ),
         )
 
         if not thread_id or not embed_message_id:
@@ -749,10 +764,16 @@ class LobbyCommands(commands.Cog):
                 thread = await self.bot.fetch_channel(thread_id)
 
             message = thread.get_partial_message(embed_message_id)
-            if not embed:
-                embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
-            if embed:
-                await message.edit(embed=embed)
+            from bot import update_lobby_message
+
+            await update_lobby_message(
+                message,
+                lobby,
+                guild_id,
+                expected_message_id=lobby_message_id,
+                lobby_kind=lobby_kind,
+                lobby_service=self.lobby_service,
+            )
         except Exception as exc:
             logger.warning(f"Failed to update thread embed: {exc}")
 

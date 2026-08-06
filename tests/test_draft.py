@@ -1996,6 +1996,76 @@ class TestHandlePlayerPick:
             is LobbyKind.LOWSKILL
         )
 
+    async def test_final_pick_refreshes_surviving_pool_lobby_after_reset(
+        self,
+        player_repository,
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_manager = MagicMock()
+        match_service = _FakeDraftMatchService()
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+        )
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=bot,
+            match_service=match_service,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
+
+        with patch(
+            "bot._refresh_first_game_pool_lobby_messages",
+            new=AsyncMock(),
+        ) as refresh_pool_lobbies:
+            await cog.handle_player_pick(interaction, guild_id, player_ids[9])
+
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.OPEN)
+        assert [await_call.args for await_call in refresh_pool_lobbies.await_args_list] == [
+            (guild_id,),
+            (guild_id,),
+        ]
+
+    async def test_final_pick_refreshes_pool_before_later_completion_failure(
+        self,
+        player_repository,
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_manager = MagicMock()
+        match_service = _FakeDraftMatchService()
+        match_service.get_last_shuffle = MagicMock(
+            side_effect=RuntimeError("stop after seed reservation")
+        )
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+        )
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=bot,
+            match_service=match_service,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
+
+        with patch(
+            "bot._refresh_first_game_pool_lobby_messages",
+            new=AsyncMock(),
+        ) as refresh_pool_lobbies:
+            await cog.handle_player_pick(interaction, guild_id, player_ids[9])
+
+        refresh_pool_lobbies.assert_awaited_once_with(guild_id)
+        lobby_manager.reset_lobby.assert_not_called()
+
     async def test_final_pick_edits_lobby_draft_without_duplicate_and_copies_to_origin(
         self, player_repository
     ):
