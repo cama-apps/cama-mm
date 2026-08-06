@@ -11,7 +11,7 @@ import random
 import time
 from datetime import UTC, datetime
 
-from config import BET_LOCK_SECONDS, DOTA_BET_SEED_AMOUNT
+from config import BET_LOCK_SECONDS, DOTA_BET_SEED_AMOUNT, FIRST_GAME_POOL_DAILY_AMOUNT
 from domain.models.lobby import LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from domain.models.player import Player
@@ -115,12 +115,32 @@ class ShufflePendingMixin:
         if loan_service is None:
             return state
 
-        reserved = loan_service.consume_next_match_pot(guild_id)
-        queued_for_next_match = reserved > 0
-        if not queued_for_next_match and DOTA_BET_SEED_AMOUNT <= 0:
-            return state
-        if not queued_for_next_match:
-            reserved = loan_service.deduct_up_to_nonprofit_fund(
+        first_game_reserved = 0
+        if (
+            state.betting_mode == "pool"
+            and state.pending_match_id is not None
+            and FIRST_GAME_POOL_DAILY_AMOUNT > 0
+        ):
+            from utils.game_date import get_game_date
+
+            game_date = get_game_date()
+            loan_service.fund_first_game_pools(
+                guild_id,
+                game_date,
+                FIRST_GAME_POOL_DAILY_AMOUNT,
+            )
+            lobby_kind = LobbyKind.normalize(state.lobby_kind).value
+            first_game_reserved = loan_service.claim_first_game_pool(
+                guild_id,
+                lobby_kind,
+                game_date,
+                state.pending_match_id,
+            )
+
+        regular_reserved = loan_service.consume_next_match_pot(guild_id)
+        queued_for_next_match = regular_reserved > 0
+        if not queued_for_next_match and DOTA_BET_SEED_AMOUNT > 0:
+            regular_reserved = loan_service.deduct_up_to_nonprofit_fund(
                 guild_id,
                 DOTA_BET_SEED_AMOUNT,
                 source="dota_bet_seed",
@@ -129,10 +149,12 @@ class ShufflePendingMixin:
                 reason="reserve-backed Dota betting seed",
                 metadata={"betting_mode": state.betting_mode},
             )
+        reserved = regular_reserved + first_game_reserved
         if reserved <= 0:
             return state
 
         state.bet_seed_reserved = reserved
+        state.first_game_pool_reserved = first_game_reserved
         # Route by betting mode: house settlement only pays the bonus field, so
         # a queued pot split radiant/dire on a house match would be consumed
         # without ever being paid out or returned.

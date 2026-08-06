@@ -741,6 +741,7 @@ class BettingService:
         pending_state.bet_seed_radiant = 0
         pending_state.bet_seed_dire = 0
         pending_state.bet_seed_bonus = 0
+        pending_state.first_game_pool_reserved = 0
         return refunded
 
     def create_auto_blind_bets(

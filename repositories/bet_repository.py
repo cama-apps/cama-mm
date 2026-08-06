@@ -50,7 +50,12 @@ class BetRepository(BaseRepository, IBetRepository):
         "bet_seed_radiant",
         "bet_seed_dire",
         "bet_seed_bonus",
+        "first_game_pool_reserved",
     )
+    _FIRST_GAME_POOL_COLUMNS = {
+        "open": "first_game_open_pool",
+        "lowskill": "first_game_lowskill_pool",
+    }
 
     def create_bet(
         self, guild_id: int | None, discord_id: int, team: str, amount: int, bet_time: int
@@ -852,6 +857,21 @@ class BetRepository(BaseRepository, IBetRepository):
             bet_seed_radiant = seed_fields["bet_seed_radiant"]
             bet_seed_dire = seed_fields["bet_seed_dire"]
             bet_seed_bonus = seed_fields["bet_seed_bonus"]
+            first_game_claim_amount = self._settle_first_game_pool_claim_in_txn(
+                cursor,
+                normalized_guild,
+                pending_match_id,
+            )
+            missing_first_game_seed = max(
+                0,
+                first_game_claim_amount - seed_fields["first_game_pool_reserved"],
+            )
+            if missing_first_game_seed:
+                if betting_mode == "pool":
+                    bet_seed_radiant += (missing_first_game_seed + 1) // 2
+                    bet_seed_dire += missing_first_game_seed // 2
+                else:
+                    bet_seed_bonus += missing_first_game_seed
             if betting_mode != "pool" and (bet_seed_radiant or bet_seed_dire):
                 # House settlement only pays the bonus field; a queued pot that
                 # was split radiant/dire (states persisted before mode-aware
@@ -1091,6 +1111,7 @@ class BetRepository(BaseRepository, IBetRepository):
             "bet_seed_radiant": int(bet_seed_radiant or 0),
             "bet_seed_dire": int(bet_seed_dire or 0),
             "bet_seed_bonus": int(bet_seed_bonus or 0),
+            "first_game_pool_reserved": 0,
         }
         if pending_match_id is None:
             return fallback
@@ -1128,6 +1149,36 @@ class BetRepository(BaseRepository, IBetRepository):
                 (json.dumps(payload), pending_match_id, normalized_guild),
             )
         return consumed
+
+    def _settle_first_game_pool_claim_in_txn(
+        self,
+        cursor,
+        normalized_guild: int,
+        pending_match_id: int | None,
+    ) -> int:
+        """Return the claim amount and make the settled reservation non-refundable."""
+        if pending_match_id is None:
+            return 0
+        row = cursor.execute(
+            """
+            SELECT amount
+            FROM first_game_pool_claims
+            WHERE guild_id = ? AND pending_match_id = ? AND settled = 0
+            """,
+            (normalized_guild, pending_match_id),
+        ).fetchone()
+        if row is None:
+            return 0
+        amount = int(row["amount"] or 0)
+        cursor.execute(
+            """
+            UPDATE first_game_pool_claims
+            SET settled = 1
+            WHERE guild_id = ? AND pending_match_id = ? AND settled = 0
+            """,
+            (normalized_guild, pending_match_id),
+        )
+        return amount
 
     def _credit_nonprofit_fund_in_txn(
         self,
@@ -1479,6 +1530,12 @@ class BetRepository(BaseRepository, IBetRepository):
                 bet_seed_reserved=bet_seed_reserved,
             )
             bet_seed_reserved = seed_fields["bet_seed_reserved"]
+            first_game_released = self._release_first_game_pool_claim_in_txn(
+                cursor,
+                normalized_guild,
+                pending_match_id,
+            )
+            nonprofit_seed_return = max(0, int(bet_seed_reserved) - first_game_released)
 
             if pending_match_id is not None:
                 # Match by pending_match_id OR legacy bets (NULL) with matching timestamp
@@ -1502,11 +1559,11 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
             rows = cursor.fetchall()
             if not rows:
-                if bet_seed_reserved > 0:
+                if nonprofit_seed_return > 0:
                     self._credit_nonprofit_fund_in_txn(
                         cursor,
                         normalized_guild,
-                        int(bet_seed_reserved),
+                        nonprofit_seed_return,
                         source="dota_bet_seed_return",
                         related_id=pending_match_id if pending_match_id is not None else since_ts,
                         reason="aborted betting seed returned",
@@ -1553,16 +1610,55 @@ class BetRepository(BaseRepository, IBetRepository):
                     f"DELETE FROM bets WHERE bet_id IN ({placeholders})",
                     bet_ids,
                 )
-            if bet_seed_reserved > 0:
+            if nonprofit_seed_return > 0:
                 self._credit_nonprofit_fund_in_txn(
                     cursor,
                     normalized_guild,
-                    int(bet_seed_reserved),
+                    nonprofit_seed_return,
                     source="dota_bet_seed_return",
                     related_id=pending_match_id if pending_match_id is not None else since_ts,
                     reason="aborted betting seed returned",
                 )
             return len(bet_ids)
+
+    def _release_first_game_pool_claim_in_txn(
+        self,
+        cursor,
+        normalized_guild: int,
+        pending_match_id: int | None,
+    ) -> int:
+        """Restore a cancelled match's pool claim and make the date claimable again."""
+        if pending_match_id is None:
+            return 0
+        row = cursor.execute(
+            """
+            SELECT lobby_kind, amount
+            FROM first_game_pool_claims
+            WHERE guild_id = ? AND pending_match_id = ? AND settled = 0
+            """,
+            (normalized_guild, pending_match_id),
+        ).fetchone()
+        if row is None:
+            return 0
+
+        amount = int(row["amount"] or 0)
+        pool_column = self._FIRST_GAME_POOL_COLUMNS[row["lobby_kind"]]
+        if amount > 0:
+            cursor.execute(
+                f"UPDATE nonprofit_fund SET {pool_column} = {pool_column} + ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
+                (amount, normalized_guild),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("cancelled first-game pool claim has no reserve row")
+        cursor.execute(
+            """
+            DELETE FROM first_game_pool_claims
+            WHERE guild_id = ? AND pending_match_id = ?
+            """,
+            (normalized_guild, pending_match_id),
+        )
+        return amount
 
     def get_player_bet_history(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """

@@ -1624,6 +1624,26 @@ class ILoanRepository(ABC):
     def consume_next_match_pot(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
+    def get_first_game_pool_balances(self, guild_id: int | None) -> dict[str, int]: ...
+
+    @abstractmethod
+    def fund_first_game_pools(
+        self,
+        guild_id: int | None,
+        game_date: str,
+        daily_amount: int,
+    ) -> dict: ...
+
+    @abstractmethod
+    def claim_first_game_pool(
+        self,
+        guild_id: int | None,
+        lobby_kind: str,
+        game_date: str,
+        pending_match_id: int,
+    ) -> int: ...
+
+    @abstractmethod
     def add_to_nonprofit_fund(
         self,
         guild_id: int | None,

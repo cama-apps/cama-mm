@@ -163,6 +163,30 @@ class LoanService:
         """Claim a reserve allocation earmarked for the next betting match."""
         return self.loan_repo.consume_next_match_pot(guild_id)
 
+    def fund_first_game_pools(
+        self,
+        guild_id: int | None,
+        game_date: str,
+        daily_amount: int,
+    ) -> dict:
+        """Fund both lobby pools for each unprocessed game-date or neither."""
+        return self.loan_repo.fund_first_game_pools(guild_id, game_date, daily_amount)
+
+    def claim_first_game_pool(
+        self,
+        guild_id: int | None,
+        lobby_kind: str,
+        game_date: str,
+        pending_match_id: int,
+    ) -> int:
+        """Claim one lobby's stacked pool for its first match of a game-date."""
+        return self.loan_repo.claim_first_game_pool(
+            guild_id,
+            lobby_kind,
+            game_date,
+            pending_match_id,
+        )
+
     def add_to_nonprofit_fund(
         self,
         guild_id: int | None,
