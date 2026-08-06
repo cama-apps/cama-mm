@@ -436,7 +436,11 @@ def compose_pet_card(
             layer = _fit_to_target(layer, source, target, "head")
         elif layer is not None and slot in ("back", "detail"):
             layer = _fit_to_target(layer, source, target, "body")
-            if slot == "detail" and stage == "adult" and species_id == "courier_cama":
+            if (
+                slot == "detail"
+                and stage == "adult"
+                and species_id in ("courier_cama", "rama")
+            ):
                 layer = _fit_layer(
                     layer,
                     scale=1.0,
