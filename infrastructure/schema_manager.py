@@ -793,6 +793,11 @@ class SchemaManager:
                 "add_first_game_pool_claim_settled",
                 self._migration_add_first_game_pool_claim_settled,
             ),
+            # Admin-granted exceptions to nickname-based vanity taxation.
+            (
+                "create_vanity_tax_exemptions",
+                self._migration_create_vanity_tax_exemptions,
+            ),
         ]
 
     # --- Migrations ---
@@ -1070,6 +1075,20 @@ class SchemaManager:
             "first_game_pool_claims",
             "settled",
             "INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0, 1))",
+        )
+
+    def _migration_create_vanity_tax_exemptions(self, cursor) -> None:
+        """Store persistent admin-granted vanity-tax exemptions."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vanity_tax_exemptions (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                exempted_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, discord_id)
+            )
+            """
         )
 
     def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:

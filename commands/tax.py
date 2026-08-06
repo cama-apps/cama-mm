@@ -17,7 +17,7 @@ from config import (
     VANITY_TAX_RATE,
 )
 from services import trivia_data
-from services.permissions import has_tax_man_permission
+from services.permissions import has_allowlisted_admin, has_tax_man_permission
 from services.tax_service import TaxService
 from utils.economy_event_display import build_public_economy_event_embed
 from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
@@ -379,12 +379,16 @@ class TaxCommands(commands.Cog):
             " exemptable)"
         ),
     )
-    @app_commands.describe(user="Player to check (defaults to you)")
+    @app_commands.describe(
+        user="Player to check (defaults to you)",
+        exempt="ADMIN_USER_IDS only: grant or remove a manual exemption",
+    )
     @require_guild
     async def vanity(
         self,
         interaction: discord.Interaction,
         user: discord.User | None = None,
+        exempt: bool | None = None,
     ):
         target = user or interaction.user
         guild_id = interaction.guild.id
@@ -394,11 +398,70 @@ class TaxCommands(commands.Cog):
                 "Vanity tax is not active.", ephemeral=True
             )
             return
-        taxable_ids = await asyncio.to_thread(
-            vanity_service.taxable_ids, guild_id
-        )
+        if exempt is not None:
+            if not has_allowlisted_admin(interaction):
+                await interaction.response.send_message(
+                    "Only admins configured in `ADMIN_USER_IDS` can change "
+                    "vanity-tax exemptions.",
+                    ephemeral=True,
+                )
+                return
+            if not await safe_defer(interaction, ephemeral=True):
+                return
+            await asyncio.to_thread(
+                vanity_service.set_manual_exemption,
+                guild_id,
+                target.id,
+                exempt=exempt,
+                actor_id=interaction.user.id,
+            )
+            if exempt:
+                message = (
+                    f"**{target.display_name}** is now manually exempt from "
+                    "the vanity tax."
+                )
+            else:
+                eligibility = await asyncio.to_thread(
+                    vanity_service.eligibility_status,
+                    guild_id,
+                    target.id,
+                )
+                if eligibility == "taxable":
+                    automatic_status = (
+                        "taxable because they have no server nickname"
+                    )
+                elif eligibility == "nickname_exemption":
+                    automatic_status = (
+                        "exempt because they have a server nickname"
+                    )
+                elif eligibility == "manual_exemption":
+                    automatic_status = "manually exempt by a newer override"
+                else:
+                    automatic_status = (
+                        "not currently in the server member cache"
+                    )
+                message = (
+                    f"**{target.display_name}** returned to the automatic "
+                    f"nickname rule and is {automatic_status}."
+                )
+            await safe_followup(
+                interaction,
+                content=message,
+                ephemeral=True,
+            )
+            return
         rate_pct = vanity_service.TAX_RATE * 100
-        if target.id in taxable_ids:
+        eligibility = await asyncio.to_thread(
+            vanity_service.eligibility_status,
+            guild_id,
+            target.id,
+        )
+        if eligibility == "manual_exemption":
+            message = (
+                f"**{target.display_name}** is manually exempt from the "
+                f"{rate_pct:g}% vanity tax by an admin override."
+            )
+        elif eligibility == "taxable":
             message = (
                 f"🏷️ **{target.display_name}** has no server nickname, so a "
                 f"**{rate_pct:g}% vanity tax** is "
@@ -407,11 +470,16 @@ class TaxCommands(commands.Cog):
                 "Exemption: right-click your name → **Edit Server Profile** → "
                 "set a nickname. The taxman notices immediately."
             )
-        else:
+        elif eligibility == "nickname_exemption":
             message = (
                 f"✅ **{target.display_name}** has a server nickname and is "
                 f"exempt from the {rate_pct:g}% vanity tax. Remove it and the "
                 "taxman returns."
+            )
+        else:
+            message = (
+                f"**{target.display_name}** is not currently in the server "
+                "member cache, so their vanity-tax status cannot be determined."
             )
         await interaction.response.send_message(message, ephemeral=True)
 
