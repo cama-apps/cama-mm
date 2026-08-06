@@ -205,7 +205,7 @@ class ServiceContainer:
         c["bankruptcy_service"] = BankruptcyService(
             c["bankruptcy_repo"], c["player_repo"]
         )
-        c["vanity_tax_service"] = VanityTaxService()
+        c["vanity_tax_service"] = VanityTaxService(c["tax_repo"])
         c["loan_service"] = LoanService(c["loan_repo"], c["player_repo"])
         c["recalibration_service"] = RecalibrationService(
             c["recalibration_repo"], c["player_repo"]

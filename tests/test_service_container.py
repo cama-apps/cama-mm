@@ -35,6 +35,21 @@ class TestServiceContainerInitialization:
         assert container._components["duel_service"] is service
         assert service.repo is repo
 
+    def test_vanity_tax_exemptions_survive_container_restart(self, repo_db_path):
+        first = ServiceContainer(repo_db_path)
+        first.initialize()
+        first_service = first._components["vanity_tax_service"]
+        member = type("Member", (), {"id": 7, "nick": None})()
+        first_service.refresh_guild(123, [member])
+        first_service.set_manual_exemption(123, 7, exempt=True, actor_id=42)
+
+        second = ServiceContainer(repo_db_path)
+        second.initialize()
+        second_service = second._components["vanity_tax_service"]
+        second_service.refresh_guild(123, [member])
+
+        assert second_service.calculate_tax(7, 123, 100) == 0
+
     def test_initialized_flag(self, repo_db_path):
         """_initialized returns correct state."""
         container = ServiceContainer(repo_db_path)

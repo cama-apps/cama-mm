@@ -1,12 +1,27 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from time import sleep
 from types import SimpleNamespace
 
+import pytest
+
+from repositories.tax_repository import TaxRepository
 from services.vanity_tax_service import VanityTaxService
 
 GUILD_ID = 123
 
 
-def _member(discord_id: int, nickname: str | None):
-    return SimpleNamespace(id=discord_id, nick=nickname)
+def _member(
+    discord_id: int,
+    nickname: str | None,
+    *,
+    global_name: str | None = None,
+):
+    return SimpleNamespace(
+        id=discord_id,
+        nick=nickname,
+        global_name=global_name,
+    )
 
 
 def test_refresh_taxes_only_members_without_server_nicknames():
@@ -24,6 +39,17 @@ def test_refresh_taxes_only_members_without_server_nicknames():
     assert service.calculate_tax(2, GUILD_ID, 199) == 0
 
 
+def test_global_display_name_does_not_exempt_without_server_nickname():
+    service = VanityTaxService()
+
+    service.refresh_guild(
+        GUILD_ID,
+        [_member(1, None, global_name="ANI")],
+    )
+
+    assert service.calculate_tax(1, GUILD_ID, 100) == 10
+
+
 def test_member_updates_toggle_taxability_and_removal_fails_open():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])
@@ -36,6 +62,136 @@ def test_member_updates_toggle_taxability_and_removal_fails_open():
 
     service.remove_member(GUILD_ID, 1)
     assert service.calculate_tax(1, GUILD_ID, 500) == 0
+
+
+def test_failed_exemption_refresh_keeps_guild_eligibility_unknown():
+    class FailingRepository:
+        def get_vanity_tax_exemptions(self, guild_id):
+            raise RuntimeError("database unavailable")
+
+    service = VanityTaxService(FailingRepository())
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        service.refresh_guild(GUILD_ID, [_member(1, None)])
+
+    assert service.taxable_ids(GUILD_ID) == frozenset()
+    assert service.eligibility_status(GUILD_ID, 1) == "unknown"
+
+
+def test_manual_exemption_persists_and_overrides_missing_nickname(repo_db_path):
+    repository = TaxRepository(repo_db_path)
+    service = VanityTaxService(repository)
+    service.refresh_guild(GUILD_ID, [_member(1, None)])
+
+    assert service.calculate_tax(1, GUILD_ID, 500) == 50
+
+    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+    assert service.is_manually_exempt(GUILD_ID, 1) is True
+    assert service.calculate_tax(1, GUILD_ID, 500) == 0
+
+    reloaded = VanityTaxService(repository)
+    reloaded.refresh_guild(GUILD_ID, [_member(1, None)])
+    assert reloaded.is_manually_exempt(GUILD_ID, 1) is True
+    assert reloaded.calculate_tax(1, GUILD_ID, 500) == 0
+    reloaded.refresh_guild(GUILD_ID + 1, [_member(1, None)])
+    assert reloaded.calculate_tax(1, GUILD_ID + 1, 500) == 50
+
+    reloaded.set_manual_exemption(GUILD_ID, 1, exempt=False, actor_id=100)
+    assert reloaded.is_manually_exempt(GUILD_ID, 1) is False
+    assert reloaded.calculate_tax(1, GUILD_ID, 500) == 50
+
+    after_revoke = VanityTaxService(repository)
+    after_revoke.refresh_guild(GUILD_ID, [_member(1, None)])
+    assert after_revoke.is_manually_exempt(GUILD_ID, 1) is False
+    assert after_revoke.calculate_tax(1, GUILD_ID, 500) == 50
+
+
+def test_committed_manual_exemption_updates_cache_without_repository_reload():
+    class Repository:
+        def __init__(self):
+            self.exemptions = set()
+            self.read_count = 0
+
+        def get_vanity_tax_exemptions(self, guild_id):
+            self.read_count += 1
+            if self.read_count > 1:
+                raise RuntimeError("reload failed")
+            return frozenset(self.exemptions)
+
+        def set_vanity_tax_exemption(
+            self,
+            guild_id,
+            discord_id,
+            *,
+            exempt,
+            actor_id,
+        ):
+            if exempt:
+                self.exemptions.add(discord_id)
+            else:
+                self.exemptions.discard(discord_id)
+            return frozenset(self.exemptions)
+
+    repository = Repository()
+    service = VanityTaxService(repository)
+    service.refresh_guild(GUILD_ID, [_member(1, None)])
+
+    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+
+    assert repository.exemptions == {1}
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
+    assert service.calculate_tax(1, GUILD_ID, 500) == 0
+
+
+def test_eligibility_status_distinguishes_every_cached_state():
+    service = VanityTaxService()
+    service.refresh_guild(
+        GUILD_ID,
+        [_member(1, None), _member(2, "Real Name")],
+    )
+
+    assert service.eligibility_status(GUILD_ID, 1) == "taxable"
+    assert service.eligibility_status(GUILD_ID, 2) == "nickname_exemption"
+    assert service.eligibility_status(GUILD_ID, 3) == "unknown"
+
+    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
+
+    service.update_member(GUILD_ID, 3, None)
+    assert service.eligibility_status(GUILD_ID, 3) == "taxable"
+    service.remove_member(GUILD_ID, 3)
+    assert service.eligibility_status(GUILD_ID, 3) == "unknown"
+
+
+def test_concurrent_manual_exemptions_do_not_lose_cached_members():
+    class SlowCache(dict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            sleep(0.05)
+            return value
+
+    service = VanityTaxService()
+    service.refresh_guild(GUILD_ID, [_member(1, None), _member(2, None)])
+    service._manual_exemptions_by_guild = SlowCache(
+        {GUILD_ID: frozenset()}
+    )
+    start = Barrier(2)
+
+    def exempt(discord_id: int) -> None:
+        start.wait()
+        service.set_manual_exemption(
+            GUILD_ID,
+            discord_id,
+            exempt=True,
+            actor_id=99,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(exempt, discord_id) for discord_id in (1, 2)]
+        for future in futures:
+            future.result()
+
+    assert service.taxable_ids(GUILD_ID) == frozenset()
 
 
 def test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit():

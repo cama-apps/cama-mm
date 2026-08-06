@@ -10,6 +10,65 @@ from repositories.base_repository import BaseRepository, safe_json_loads
 class TaxRepository(BaseRepository):
     """Read helpers for guild and player monetary exposure."""
 
+    def get_vanity_tax_exemptions(
+        self,
+        guild_id: int | None,
+    ) -> frozenset[int]:
+        """Return persistent vanity-tax exemptions for one guild."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT discord_id
+                FROM vanity_tax_exemptions
+                WHERE guild_id = ?
+                """,
+                (gid,),
+            ).fetchall()
+        return frozenset(int(row["discord_id"]) for row in rows)
+
+    def set_vanity_tax_exemption(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+        *,
+        exempt: bool,
+        actor_id: int,
+    ) -> frozenset[int]:
+        """Grant or revoke an exemption and return the authoritative set."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            if exempt:
+                conn.execute(
+                    """
+                    INSERT INTO vanity_tax_exemptions (
+                        guild_id, discord_id, exempted_by, created_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+                        exempted_by = excluded.exempted_by,
+                        created_at = excluded.created_at
+                    """,
+                    (gid, discord_id, actor_id, int(time.time())),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM vanity_tax_exemptions
+                    WHERE guild_id = ? AND discord_id = ?
+                    """,
+                    (gid, discord_id),
+                )
+            rows = conn.execute(
+                """
+                SELECT discord_id
+                FROM vanity_tax_exemptions
+                WHERE guild_id = ?
+                """,
+                (gid,),
+            ).fetchall()
+        return frozenset(int(row["discord_id"]) for row in rows)
+
     def reset_fine_cooldown(self, discord_id: int, guild_id: int | None) -> bool:
         """Clear the Tax Man fine cooldown for one guild-scoped player."""
         gid = self.normalize_guild_id(guild_id)

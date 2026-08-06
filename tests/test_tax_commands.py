@@ -73,7 +73,7 @@ class _FakeResponse:
             {"content": content, "ephemeral": ephemeral, "embed": embed, **kwargs}
         )
 
-    async def defer(self, ephemeral=False):
+    async def defer(self, ephemeral=False, thinking=False):
         self._done = True
         self.deferred_ephemeral = ephemeral
 
@@ -965,7 +965,7 @@ async def test_tax_vanity_reports_exempt_status():
     from services.vanity_tax_service import VanityTaxService
 
     vanity = VanityTaxService()
-    vanity.refresh_guild(123, [SimpleNamespace(id=42, nick="Real Name")])
+    vanity.refresh_guild(123, [SimpleNamespace(id=99, nick="Real Name")])
     cog = tax_commands.TaxCommands(
         bot=SimpleNamespace(vanity_tax_service=vanity),
         tax_service=SimpleNamespace(),
@@ -978,6 +978,84 @@ async def test_tax_vanity_reports_exempt_status():
     message = interaction.response.messages[-1]
     assert message["ephemeral"] is True
     assert "exempt" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_reports_unknown_status_for_uncached_user():
+    from services.vanity_tax_service import VanityTaxService
+
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=42, nick="Real Name")])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=99)
+    interaction.user.display_name = "NotCached"
+
+    await cog.vanity.callback(cog, interaction)
+
+    message = interaction.response.messages[-1]
+    assert message["ephemeral"] is True
+    assert "not currently in the server member cache" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_allowlisted_admin_can_set_and_clear_manual_exemption(
+    monkeypatch,
+):
+    from services.vanity_tax_service import VanityTaxService
+
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [42])
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick=None)])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    target = SimpleNamespace(id=7, display_name="ANI")
+
+    grant = _FakeInteraction(guild_id=123, user_id=42)
+    await cog.vanity.callback(cog, grant, user=target, exempt=True)
+
+    assert vanity.calculate_tax(7, 123, 500) == 0
+    assert grant.response.deferred_ephemeral is True
+    assert "manually exempt" in grant.followup.messages[-1]["content"]
+
+    status = _FakeInteraction(guild_id=123, user_id=7)
+    await cog.vanity.callback(cog, status, user=target)
+    assert "admin override" in status.response.messages[-1]["content"]
+
+    revoke = _FakeInteraction(guild_id=123, user_id=42)
+    await cog.vanity.callback(cog, revoke, user=target, exempt=False)
+
+    assert vanity.calculate_tax(7, 123, 500) == 50
+    assert revoke.response.deferred_ephemeral is True
+    assert "automatic nickname rule" in revoke.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_rejects_non_allowlisted_override(monkeypatch):
+    from services.vanity_tax_service import VanityTaxService
+
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick=None)])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+    interaction.user.guild_permissions = SimpleNamespace(
+        administrator=True,
+        manage_guild=True,
+    )
+    target = SimpleNamespace(id=7, display_name="ANI")
+
+    await cog.vanity.callback(cog, interaction, user=target, exempt=True)
+
+    assert vanity.calculate_tax(7, 123, 500) == 50
+    assert "ADMIN_USER_IDS" in interaction.response.messages[-1]["content"]
 
 
 @pytest.mark.asyncio
