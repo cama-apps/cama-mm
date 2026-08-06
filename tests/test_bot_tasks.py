@@ -27,6 +27,7 @@ def bot_module():
     bot_module._reminder_recovery_task = None
     bot_module._duel_challenge_task = None
     bot_module._economy_event_task = None
+    bot_module._first_game_pool_task = None
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
 
@@ -34,6 +35,7 @@ def bot_module():
         "_reminder_recovery_task",
         "_duel_challenge_task",
         "_economy_event_task",
+        "_first_game_pool_task",
     ):
         task = getattr(bot_module, attr)
         if task is not None:
@@ -42,6 +44,33 @@ def bot_module():
             elif not task.done():
                 task.cancel()
         setattr(bot_module, attr, None)
+
+
+async def test_first_game_pool_loop_funds_every_guild_for_current_game_date(bot_module):
+    guilds = [SimpleNamespace(id=41), SimpleNamespace(id=42)]
+    loan_service = MagicMock()
+    worker = getattr(bot_module, "_first_game_pool_loop", None)
+    assert worker is not None
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await worker()
+
+    assert loan_service.fund_first_game_pools.call_args_list == [
+        call(41, "2026-08-05", 100),
+        call(42, "2026-08-05", 100),
+    ]
+    sleep.assert_awaited_once_with(900)
 
 
 async def test_supervised_loop_returns_on_clean_exit(bot_module):
@@ -176,8 +205,8 @@ async def test_duel_loop_catches_up_immediately_and_isolates_delivery_failures(
     assert any("duel due delivery failed challenge=7" in rec.message for rec in caplog.records)
 
 
-async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
-    """Reconnect-ready events reuse the live duel worker and observe its exit."""
+async def test_on_ready_retains_supervised_duel_and_first_game_pool_workers(bot_module):
+    """Reconnect-ready events reuse both live workers and observe their exits."""
     running = MagicMock()
     running.done.return_value = False
     bot_module._prediction_refresh_task = running
@@ -185,22 +214,32 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
     bot_module._manashop_debt_task = running
     bot_module._economy_event_task = running
     bot_module._duel_challenge_task = None
+    bot_module._first_game_pool_task = None
 
     duel_task = MagicMock()
     duel_task.done.return_value = False
+    pool_task = MagicMock()
+    pool_task.done.return_value = False
     warm_tasks: list[MagicMock] = []
 
     def create_task(awaitable):
         if inspect.iscoroutine(awaitable):
             awaitable.close()
-        if awaitable is supervised_result:
+        if awaitable is duel_supervised:
             return duel_task
+        if awaitable is pool_supervised:
+            return pool_task
         task = MagicMock()
         warm_tasks.append(task)
         return task
 
-    supervised_result = object()
-    supervisor = MagicMock(return_value=supervised_result)
+    duel_supervised = object()
+    pool_supervised = object()
+    supervisor = MagicMock(
+        side_effect=lambda name, _body: (
+            duel_supervised if name == "duel_challenges" else pool_supervised
+        )
+    )
     exit_callback = object()
     fake_loop = SimpleNamespace(create_task=MagicMock(side_effect=create_task))
 
@@ -222,10 +261,18 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
         await bot_module.on_ready()
         await bot_module.on_ready()
 
-    supervisor.assert_called_once_with("duel_challenges", bot_module._duel_challenge_loop)
-    log_exit.assert_called_once_with("duel_challenges")
+    assert supervisor.call_args_list == [
+        call("duel_challenges", bot_module._duel_challenge_loop),
+        call("first_game_pool", bot_module._first_game_pool_loop),
+    ]
+    assert log_exit.call_args_list == [
+        call("duel_challenges"),
+        call("first_game_pool"),
+    ]
     duel_task.add_done_callback.assert_called_once_with(exit_callback)
+    pool_task.add_done_callback.assert_called_once_with(exit_callback)
     assert bot_module._duel_challenge_task is duel_task
+    assert bot_module._first_game_pool_task is pool_task
     assert reconcile_lobbies.await_count == 2
 
 

@@ -10,6 +10,7 @@ from domain.models.draft import DraftState
 from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from repositories.bet_repository import BetRepository
+from repositories.economy_event_repository import EconomyEventRepository
 from repositories.loan_repository import LoanRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -75,6 +76,331 @@ def test_pool_shuffle_reserves_split_seed_from_nonprofit_fund(services):
     assert pending.bet_seed_dire == 8
     assert pending.bet_seed_bonus == 0
     assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+
+def test_first_pool_match_claims_stacked_seed_once_for_each_lobby(services):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    match_service = services["match_service"]
+    player_ids = list(range(30020, 30050))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 500)
+
+    with patch("utils.game_date.get_game_date", return_value="2026-08-05"):
+        open_first = match_service.shuffle_players(
+            player_ids[:10],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+        open_second = match_service.shuffle_players(
+            player_ids[10:20],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+        lowskill_first = match_service.shuffle_players(
+            player_ids[20:],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="lowskill",
+        )
+
+    open_first_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID, open_first["pending_match_id"]
+    )
+    open_second_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID, open_second["pending_match_id"]
+    )
+    lowskill_first_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID, lowskill_first["pending_match_id"]
+    )
+
+    assert open_first_state.first_game_pool_reserved == 100
+    assert open_first_state.bet_seed_reserved == 150
+    assert open_first_state.bet_seed_radiant == 75
+    assert open_first_state.bet_seed_dire == 75
+    assert open_second_state.first_game_pool_reserved == 0
+    assert open_second_state.bet_seed_reserved == 50
+    assert lowskill_first_state.first_game_pool_reserved == 100
+    assert lowskill_first_state.bet_seed_reserved == 150
+    assert lowskill_first_state.bet_seed_radiant == 75
+    assert lowskill_first_state.bet_seed_dire == 75
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID) == {
+        "open": 0,
+        "lowskill": 0,
+    }
+
+
+def test_cancelled_first_pool_match_restores_pool_and_daily_claim(services):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    player_ids = list(range(30060, 30080))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+
+    with patch("utils.game_date.get_game_date", return_value="2026-08-05"):
+        first = match_service.shuffle_players(
+            player_ids[:10],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+        first_state = match_service.get_last_shuffle(
+            TEST_GUILD_ID, first["pending_match_id"]
+        )
+        betting_service.refund_pending_bets(TEST_GUILD_ID, first_state)
+        second = match_service.shuffle_players(
+            player_ids[10:],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+
+    second_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID, second["pending_match_id"]
+    )
+    assert second_state.first_game_pool_reserved == 100
+    assert second_state.bet_seed_reserved == 150
+    assert second_state.bet_seed_radiant == 75
+    assert second_state.bet_seed_dire == 75
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 50
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID) == {
+        "open": 0,
+        "lowskill": 100,
+    }
+
+
+def test_claimed_first_pool_stays_in_monetary_stock_while_match_is_pending(
+    services,
+    repo_db_path,
+):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    match_service = services["match_service"]
+    economy_repo = EconomyEventRepository(repo_db_path)
+    player_ids = list(range(30090, 30100))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+    stock_before = economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"]
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        match_service.shuffle_players(
+            player_ids,
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+
+    assert economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"] == stock_before
+
+
+def test_settled_first_game_claim_cannot_be_restored_by_later_abort_retry(
+    services,
+    repo_db_path,
+):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    economy_repo = EconomyEventRepository(repo_db_path)
+    player_ids = list(range(30120, 30130))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+    stock_before = economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"]
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        result = match_service.shuffle_players(
+            player_ids,
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+
+    pending = match_service.get_last_shuffle(
+        TEST_GUILD_ID,
+        result["pending_match_id"],
+    )
+    betting_service.settle_bets(
+        match_id=9001,
+        guild_id=TEST_GUILD_ID,
+        winning_team="radiant",
+        pending_state=pending,
+    )
+
+    betting_service.refund_pending_bets(TEST_GUILD_ID, pending)
+
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID) == {
+        "open": 0,
+        "lowskill": 100,
+    }
+    assert economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"] == stock_before
+
+
+def test_settled_daily_claim_stays_consumed_after_older_match_restores_pool(services):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    player_ids = list(range(30360, 30390))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 400)
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-04"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        older = match_service.shuffle_players(
+            player_ids[:10],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+    older_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID,
+        older["pending_match_id"],
+    )
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        current = match_service.shuffle_players(
+            player_ids[10:20],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+    current_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID,
+        current["pending_match_id"],
+    )
+
+    betting_service.settle_bets(
+        match_id=9003,
+        guild_id=TEST_GUILD_ID,
+        winning_team="radiant",
+        pending_state=current_state,
+    )
+    betting_service.refund_pending_bets(TEST_GUILD_ID, current_state)
+    betting_service.refund_pending_bets(TEST_GUILD_ID, older_state)
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        later = match_service.shuffle_players(
+            player_ids[20:],
+            guild_id=TEST_GUILD_ID,
+            betting_mode="pool",
+            lobby_kind="open",
+        )
+    later_state = match_service.get_last_shuffle(
+        TEST_GUILD_ID,
+        later["pending_match_id"],
+    )
+
+    assert later_state.first_game_pool_reserved == 0
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID)["open"] == 100
+
+
+def test_first_game_claim_retry_recovers_after_seed_state_persist_failure(services):
+    loan_repo = services["loan_repo"]
+    match_repo = services["match_repo"]
+    match_service = services["match_service"]
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 200)
+    pending = PendingMatchState(
+        shuffle_timestamp=int(time.time()),
+        betting_mode="pool",
+        lobby_kind="open",
+    )
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+        patch.object(
+            match_service.state_service,
+            "persist_state",
+            side_effect=RuntimeError("simulated persistence failure"),
+        ),
+        pytest.raises(RuntimeError, match="simulated persistence failure"),
+    ):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, pending)
+
+    payload = match_repo.get_pending_match_by_id(
+        pending.pending_match_id,
+        TEST_GUILD_ID,
+    )
+    reloaded = PendingMatchState.from_dict(payload)
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+    ):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, reloaded)
+
+    assert reloaded.first_game_pool_reserved == 100
+    assert reloaded.bet_seed_reserved == 100
+    assert reloaded.bet_seed_radiant == 50
+    assert reloaded.bet_seed_dire == 50
+
+
+def test_settlement_recovers_first_game_claim_when_seed_state_never_persisted(
+    services,
+    repo_db_path,
+):
+    loan_repo = services["loan_repo"]
+    match_repo = services["match_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    economy_repo = EconomyEventRepository(repo_db_path)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 200)
+    stock_before = economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"]
+    pending = PendingMatchState(
+        shuffle_timestamp=int(time.time()),
+        betting_mode="pool",
+        lobby_kind="open",
+    )
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch("services.match.shuffle_pending_mixin.DOTA_BET_SEED_AMOUNT", 0),
+        patch.object(
+            match_service.state_service,
+            "persist_state",
+            side_effect=RuntimeError("simulated persistence failure"),
+        ),
+        pytest.raises(RuntimeError, match="simulated persistence failure"),
+    ):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, pending)
+
+    payload = match_repo.get_pending_match_by_id(
+        pending.pending_match_id,
+        TEST_GUILD_ID,
+    )
+    reloaded = PendingMatchState.from_dict(payload)
+    betting_service.settle_bets(
+        match_id=9002,
+        guild_id=TEST_GUILD_ID,
+        winning_team="radiant",
+        pending_state=reloaded,
+    )
+
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 100
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID) == {
+        "open": 0,
+        "lowskill": 100,
+    }
+    assert economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"] == stock_before
 
 
 def test_pool_shuffle_consumes_entire_queued_next_match_pot(services):

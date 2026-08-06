@@ -3,6 +3,7 @@ Repository for loan state and nonprofit fund data access.
 """
 
 import time
+from datetime import date, timedelta
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import ILoanRepository
@@ -10,6 +11,11 @@ from repositories.interfaces import ILoanRepository
 
 class LoanRepository(BaseRepository, ILoanRepository):
     """Data access for loan state and nonprofit fund."""
+
+    _FIRST_GAME_POOL_COLUMNS = {
+        "open": "first_game_open_pool",
+        "lowskill": "first_game_lowskill_pool",
+    }
 
     def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """Get loan state for a player."""
@@ -242,6 +248,211 @@ class LoanRepository(BaseRepository, ILoanRepository):
                     "UPDATE nonprofit_fund SET next_match_pot = 0, updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
                     (normalized_id,),
                 )
+            return amount
+
+    def get_first_game_pool_balances(self, guild_id: int | None) -> dict[str, int]:
+        """Return stacked first-game liquidity for each lobby type."""
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(first_game_open_pool, 0) AS open,
+                       COALESCE(first_game_lowskill_pool, 0) AS lowskill
+                FROM nonprofit_fund
+                WHERE guild_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            return {"open": 0, "lowskill": 0}
+        return {"open": int(row["open"]), "lowskill": int(row["lowskill"])}
+
+    def fund_first_game_pools(
+        self,
+        guild_id: int | None,
+        game_date: str,
+        daily_amount: int,
+    ) -> dict:
+        """Process each unhandled game-date and fund both lobby pools or neither."""
+        target_date = date.fromisoformat(game_date)
+        daily_amount = int(daily_amount)
+        if daily_amount <= 0:
+            raise ValueError("daily_amount must be positive")
+
+        normalized_id = self.normalize_guild_id(guild_id)
+        processed_dates: list[str] = []
+        funded_dates: list[str] = []
+        skipped_dates: list[str] = []
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO nonprofit_fund (
+                    guild_id, total_collected, first_game_open_pool,
+                    first_game_lowskill_pool, updated_at
+                ) VALUES (?, 0, 0, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO NOTHING
+                """,
+                (normalized_id,),
+            )
+            row = cursor.execute(
+                """
+                SELECT MAX(game_date) AS last_processed
+                FROM first_game_pool_funding_days
+                WHERE guild_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+            last_processed = (
+                date.fromisoformat(row["last_processed"])
+                if row and row["last_processed"]
+                else None
+            )
+            next_date = target_date if last_processed is None else last_processed + timedelta(days=1)
+
+            pair_cost = daily_amount * 2
+            while next_date <= target_date:
+                date_str = next_date.isoformat()
+                reserve_row = cursor.execute(
+                    """
+                    SELECT COALESCE(total_collected, 0) AS available
+                    FROM nonprofit_fund
+                    WHERE guild_id = ?
+                    """,
+                    (normalized_id,),
+                ).fetchone()
+                available = int(reserve_row["available"]) if reserve_row else 0
+                funded = available >= pair_cost
+                if funded:
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source="first_game_pool_funding",
+                        related_type="game_date",
+                        related_id=date_str,
+                        reason="daily Open and Lowskill first-game pool funding",
+                        metadata={
+                            "daily_amount": daily_amount,
+                            "pair_cost": pair_cost,
+                        },
+                    )
+                    try:
+                        cursor.execute(
+                            """
+                            UPDATE nonprofit_fund
+                            SET total_collected = total_collected - ?,
+                                first_game_open_pool = first_game_open_pool + ?,
+                                first_game_lowskill_pool = first_game_lowskill_pool + ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE guild_id = ? AND total_collected >= ?
+                            """,
+                            (
+                                pair_cost,
+                                daily_amount,
+                                daily_amount,
+                                normalized_id,
+                                pair_cost,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise RuntimeError("nonprofit first-game funding changed unexpectedly")
+                    finally:
+                        self._clear_economy_ledger_context(cursor)
+                    funded_dates.append(date_str)
+                else:
+                    skipped_dates.append(date_str)
+
+                cursor.execute(
+                    """
+                    INSERT INTO first_game_pool_funding_days (
+                        guild_id, game_date, daily_amount, funded
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (normalized_id, date_str, daily_amount, int(funded)),
+                )
+                processed_dates.append(date_str)
+                next_date += timedelta(days=1)
+
+            balances = cursor.execute(
+                """
+                SELECT COALESCE(first_game_open_pool, 0) AS open,
+                       COALESCE(first_game_lowskill_pool, 0) AS lowskill
+                FROM nonprofit_fund
+                WHERE guild_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+
+        return {
+            "processed_dates": processed_dates,
+            "funded_dates": funded_dates,
+            "skipped_dates": skipped_dates,
+            "open": int(balances["open"]),
+            "lowskill": int(balances["lowskill"]),
+        }
+
+    def claim_first_game_pool(
+        self,
+        guild_id: int | None,
+        lobby_kind: str,
+        game_date: str,
+        pending_match_id: int,
+    ) -> int:
+        """Claim a lobby's stacked pool once for the given game-date."""
+        pool_column = self._FIRST_GAME_POOL_COLUMNS.get(lobby_kind)
+        if pool_column is None:
+            raise ValueError("lobby_kind must be 'open' or 'lowskill'")
+        date.fromisoformat(game_date)
+        normalized_id = self.normalize_guild_id(guild_id)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            existing = cursor.execute(
+                """
+                SELECT pending_match_id, amount, COALESCE(settled, 0) AS settled
+                FROM first_game_pool_claims
+                WHERE guild_id = ? AND lobby_kind = ? AND game_date = ?
+                """,
+                (normalized_id, lobby_kind, game_date),
+            ).fetchone()
+            if existing is not None:
+                return (
+                    int(existing["amount"] or 0)
+                    if int(existing["pending_match_id"]) == int(pending_match_id)
+                    and not int(existing["settled"])
+                    else 0
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO nonprofit_fund (
+                    guild_id, total_collected, first_game_open_pool,
+                    first_game_lowskill_pool, updated_at
+                ) VALUES (?, 0, 0, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO NOTHING
+                """,
+                (normalized_id,),
+            )
+            row = cursor.execute(
+                f"SELECT COALESCE({pool_column}, 0) AS amount "
+                "FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            ).fetchone()
+            amount = int(row["amount"]) if row else 0
+            if amount > 0:
+                cursor.execute(
+                    f"UPDATE nonprofit_fund SET {pool_column} = 0, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
+                    (normalized_id,),
+                )
+            cursor.execute(
+                """
+                INSERT INTO first_game_pool_claims (
+                    guild_id, lobby_kind, game_date, pending_match_id, amount
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (normalized_id, lobby_kind, game_date, int(pending_match_id), amount),
+            )
             return amount
 
     def add_to_nonprofit_fund(
