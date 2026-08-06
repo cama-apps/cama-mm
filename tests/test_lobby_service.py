@@ -43,7 +43,7 @@ def test_lobby_embed_uses_preview_for_its_lobby_kind(lobby_kind, expected_amount
     bonus_pool = next(field for field in embed.fields if field.name == "🎲 Bonus Pool")
     assert bonus_pool.value == (
         f"**{expected_amount} <:jopacoin:954159801049440297>** "
-        "available if this lobby shuffles next."
+        "currently available for this lobby."
     )
 
 
