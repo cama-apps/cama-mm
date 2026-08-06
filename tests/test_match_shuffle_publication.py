@@ -295,6 +295,38 @@ async def test_abort_does_not_touch_a_new_or_sibling_lobby():
 
 
 @pytest.mark.asyncio
+async def test_abort_refund_failure_keeps_pending_match_retryable():
+    bot = MagicMock()
+    bot.betting_service.refund_pending_bets.side_effect = RuntimeError("database busy")
+    match_service = MagicMock()
+    match_service.state_service.get_last_shuffle.return_value = SimpleNamespace(
+        pending_match_id=7,
+        lobby_kind=LobbyKind.OPEN.value,
+    )
+    interaction = SimpleNamespace(
+        channel=MagicMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+    cog._cancel_betting_tasks = MagicMock()
+    abort_thread = AsyncMock()
+
+    with (
+        patch("commands.match.asyncio.to_thread", new=_run_sync),
+        patch.object(cog, "_abort_lobby_thread", new=abort_thread),
+    ):
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+
+    match_service.state_service.clear_last_shuffle.assert_not_called()
+    cog._cancel_betting_tasks.assert_not_called()
+    abort_thread.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once_with(
+        "❌ Match abort failed while refunding bets. Please try again.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_completed_match_thread_retains_source_lobby_label():
     thread = AsyncMock()
     bot = MagicMock()

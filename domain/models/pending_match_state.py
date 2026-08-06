@@ -63,6 +63,7 @@ class PendingMatchState:
     bet_seed_radiant: int = 0
     bet_seed_dire: int = 0
     bet_seed_bonus: int = 0
+    first_game_pool_reserved: int = 0
 
     # Auto-blind betting result snapshot (draft display only)
     blind_bets_result: dict | None = None

@@ -2352,6 +2352,11 @@ class MatchCommands(commands.Cog):
                 )
             except Exception as exc:
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
+                await interaction.followup.send(
+                    "❌ Match abort failed while refunding bets. Please try again.",
+                    ephemeral=True,
+                )
+                return
         # The source lobby was already closed and reset when the match started.
         # Only clean up this pending match; a new or sibling lobby may be live now.
         self._cancel_betting_tasks(guild_id, pending_match_id=pending_match_id)

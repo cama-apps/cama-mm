@@ -81,12 +81,22 @@ class EconomyEventRepository(BaseRepository):
                 ), reserve_totals AS (
                     SELECT
                         COALESCE(total_collected, 0) AS reserve_available,
-                        COALESCE(next_match_pot, 0) AS reserve_next_match_pot
+                        COALESCE(next_match_pot, 0) AS reserve_next_match_pot,
+                        COALESCE(first_game_open_pool, 0)
+                            + COALESCE(first_game_lowskill_pool, 0)
+                            AS reserve_first_game_pools
                     FROM nonprofit_fund WHERE guild_id = :gid
                 ), locked_totals AS (
                     SELECT COALESCE(SUM(fund_amount), 0) AS reserve_locked
                     FROM disburse_proposals
                     WHERE guild_id = :gid AND status = 'active'
+                ), first_game_claim_totals AS (
+                    SELECT COALESCE(SUM(c.amount), 0) AS active_claims
+                    FROM first_game_pool_claims c
+                    JOIN pending_matches pm
+                      ON pm.guild_id = c.guild_id
+                     AND pm.pending_match_id = c.pending_match_id
+                    WHERE c.guild_id = :gid AND c.settled = 0
                 ), prediction_totals AS (
                     SELECT COALESCE(SUM(lp_pnl), 0) AS prediction_open_cash
                     FROM predictions
@@ -114,12 +124,15 @@ class EconomyEventRepository(BaseRepository):
                     p.player_count, p.player_wallets, p.positive_wallets,
                     p.visible_debt,
                     COALESCE(r.reserve_available, 0) AS reserve_available,
-                    l.reserve_locked,
+                    l.reserve_locked + COALESCE(r.reserve_first_game_pools, 0)
+                        + fc.active_claims
+                        AS reserve_locked,
                     COALESCE(r.reserve_next_match_pot, 0) AS reserve_next_match_pot,
                     pr.prediction_open_cash,
                     d.duel_escrow + m.mafia_escrow + b.bet_escrow AS wager_escrow
                 FROM player_totals p
                 CROSS JOIN locked_totals l
+                CROSS JOIN first_game_claim_totals fc
                 CROSS JOIN prediction_totals pr
                 CROSS JOIN duel_totals d
                 CROSS JOIN mafia_totals m

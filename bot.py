@@ -50,6 +50,7 @@ from config import (
     ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
     ECONOMY_EVENT_WAKE_SECONDS,
     ECONOMY_EVENTS_ENABLED,
+    FIRST_GAME_POOL_DAILY_AMOUNT,
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
     LLM_API_KEY,
@@ -72,6 +73,7 @@ from utils.command_registry import (
 )
 from utils.economy_event_display import build_public_economy_event_embed
 from utils.formatting import JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
+from utils.game_date import get_game_date
 from utils.thread_safety import ensure_thread_writable
 
 # Bot setup
@@ -136,8 +138,10 @@ _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
 _duel_challenge_task: asyncio.Task | None = None
 _economy_event_task: asyncio.Task | None = None
+_first_game_pool_task: asyncio.Task | None = None
 
 DUEL_WORKER_WAKE_SECONDS = 60
+FIRST_GAME_POOL_WAKE_SECONDS = 900
 
 
 def _log_task_exit(name: str):
@@ -350,6 +354,33 @@ async def _economy_event_loop() -> None:
                 "economy event trigger scheduling failed; using configured wake interval"
             )
         await asyncio.sleep(sleep_seconds)
+
+
+async def _first_game_pool_loop() -> None:
+    """Fund both stacked lobby pools once per fixed-PST game-date."""
+    await bot.wait_until_ready()
+    logger.info(
+        "first-game pool loop started (wake=%ss daily=%s JC per lobby)",
+        FIRST_GAME_POOL_WAKE_SECONDS,
+        FIRST_GAME_POOL_DAILY_AMOUNT,
+    )
+    while not bot.is_closed():
+        game_date = get_game_date()
+        for guild in list(bot.guilds):
+            try:
+                await asyncio.to_thread(
+                    bot.loan_service.fund_first_game_pools,
+                    guild.id,
+                    game_date,
+                    FIRST_GAME_POOL_DAILY_AMOUNT,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "first-game pool funding failed for guild=%s date=%s",
+                    guild.id,
+                    game_date,
+                )
+        await asyncio.sleep(FIRST_GAME_POOL_WAKE_SECONDS)
 
 
 async def _process_one_refresh(market: dict) -> None:
@@ -1310,7 +1341,7 @@ async def on_ready():
     # crash, and a done-callback that surfaces an unexpected exit to the log
     # so we can never lose a feature to silent failure.
     global _prediction_refresh_task, _prediction_digest_task, _manashop_debt_task
-    global _duel_challenge_task, _economy_event_task
+    global _duel_challenge_task, _economy_event_task, _first_game_pool_task
     if _prediction_refresh_task is None or _prediction_refresh_task.done():
         _prediction_refresh_task = bot.loop.create_task(
             _supervised_loop("prediction_refresh", _prediction_refresh_loop)
@@ -1340,6 +1371,13 @@ async def on_ready():
             _supervised_loop("economy_events", _economy_event_loop)
         )
         _economy_event_task.add_done_callback(_log_task_exit("economy_events"))
+    if FIRST_GAME_POOL_DAILY_AMOUNT > 0 and (
+        _first_game_pool_task is None or _first_game_pool_task.done()
+    ):
+        _first_game_pool_task = bot.loop.create_task(
+            _supervised_loop("first_game_pool", _first_game_pool_loop)
+        )
+        _first_game_pool_task.add_done_callback(_log_task_exit("first_game_pool"))
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:

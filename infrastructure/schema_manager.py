@@ -785,6 +785,14 @@ class SchemaManager:
                 "expand_low_priority_state",
                 self._migration_expand_low_priority_state,
             ),
+            (
+                "create_first_game_betting_pools",
+                self._migration_create_first_game_betting_pools,
+            ),
+            (
+                "add_first_game_pool_claim_settled",
+                self._migration_add_first_game_pool_claim_settled,
+            ),
         ]
 
     # --- Migrations ---
@@ -1011,6 +1019,57 @@ class SchemaManager:
             CREATE INDEX IF NOT EXISTS idx_low_priority_active_guild
             ON low_priority_state(guild_id, active, wins_remaining)
             """
+        )
+
+    def _migration_create_first_game_betting_pools(self, cursor) -> None:
+        """Persist stacked Open/Lowskill first-game liquidity and daily funding."""
+        self._add_column_if_not_exists(
+            cursor,
+            "nonprofit_fund",
+            "first_game_open_pool",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "nonprofit_fund",
+            "first_game_lowskill_pool",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS first_game_pool_funding_days (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                game_date TEXT NOT NULL,
+                daily_amount INTEGER NOT NULL,
+                funded INTEGER NOT NULL CHECK(funded IN (0, 1)),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, game_date)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS first_game_pool_claims (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                lobby_kind TEXT NOT NULL CHECK(lobby_kind IN ('open', 'lowskill')),
+                game_date TEXT NOT NULL,
+                pending_match_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount >= 0),
+                settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0, 1)),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, lobby_kind, game_date),
+                UNIQUE (guild_id, pending_match_id)
+            )
+            """
+        )
+
+    def _migration_add_first_game_pool_claim_settled(self, cursor) -> None:
+        """Distinguish refundable reservations from durable daily claims."""
+        self._add_column_if_not_exists(
+            cursor,
+            "first_game_pool_claims",
+            "settled",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0, 1))",
         )
 
     def _migration_add_economy_event_reminder_announced_at(self, cursor) -> None:
