@@ -306,6 +306,7 @@ class ServiceContainer:
             bankruptcy_repo=c["bankruptcy_repo"],
             match_state_service=c["match_state_service"],
             moderation_service=c["moderation_service"],
+            loan_service=c["loan_service"],
         )
         c["match_service"] = MatchService(
             player_repo=c["player_repo"],

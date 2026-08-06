@@ -17,7 +17,6 @@ from config import (
     BET_REMINDER_OFFSETS,
     BOMB_POT_CHANCE,
     ENRICHMENT_RETRY_DELAYS,
-    FIRST_GAME_BONUS,
     JOPACOIN_MIN_BET,
     OPENSKILL_SHUFFLE_CHANCE,
     STREAMING_BONUS,
@@ -826,6 +825,8 @@ class MatchCommands(commands.Cog):
                 kind,
             )
 
+        await self._refresh_bonus_pool_lobbies(guild_id)
+
         radiant_team = result["radiant_team"]
         dire_team = result["dire_team"]
         radiant_roles = result["radiant_roles"]
@@ -1126,6 +1127,12 @@ class MatchCommands(commands.Cog):
             lobby_kind=kind,
         )
 
+    async def _refresh_bonus_pool_lobbies(self, guild_id: int | None) -> None:
+        """Refresh current lobby displays after betting-pool availability changes."""
+        from bot import _refresh_first_game_pool_lobby_messages
+
+        await _refresh_first_game_pool_lobby_messages(guild_id or 0)
+
     async def _finalize_shuffle(
         self,
         interaction: discord.Interaction,
@@ -1279,6 +1286,8 @@ class MatchCommands(commands.Cog):
         )
 
         from bot import clear_lobby_rally_cooldowns
+
+        await self._refresh_bonus_pool_lobbies(guild_id)
         clear_lobby_rally_cooldowns(guild_id or 0, lobby_kind=kind)
 
     @app_commands.command(
@@ -1433,16 +1442,6 @@ class MatchCommands(commands.Cog):
         )
         lobby_kind_for_finalize = pending_state.lobby_kind if pending_state else None
 
-        # Check first-game-of-night BEFORE recording (0 matches since boundary = first game)
-        is_first_game = False
-        if FIRST_GAME_BONUS > 0:
-            try:
-                is_first_game = await asyncio.to_thread(
-                    self.match_service.is_first_game_of_night, guild_id
-                )
-            except Exception:
-                logger.warning("Failed to check first game of night", exc_info=True)
-
         try:
             record_result = await asyncio.to_thread(
                 functools.partial(self.match_service.record_match,
@@ -1496,9 +1495,6 @@ class MatchCommands(commands.Cog):
         distribution_text += self._format_streak_bonus(distributions)
         distribution_text += await self._award_streaming_bonus_at_record(
             guild, guild_id, record_result
-        )
-        distribution_text += await self._award_first_game_bonus(
-            guild_id, is_first_game, record_result
         )
 
         admin_override = (
@@ -1874,34 +1870,6 @@ class MatchCommands(commands.Cog):
         logger.info(f"Streaming bonus (+{STREAMING_BONUS} JC) at record: {streaming_ids}")
         return (
             f"\n📺 Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}): {streamer_mentions}"
-        )
-
-    async def _award_first_game_bonus(
-        self,
-        guild_id: int | None,
-        is_first_game: bool,
-        record_result: dict,
-    ) -> str:
-        """Award the first-game-of-the-night bonus to all lobby participants
-        (including excluded). Returns the formatted bonus line, or "".
-        """
-        if not (is_first_game and FIRST_GAME_BONUS > 0):
-            return ""
-
-        all_ids = list(set(
-            list(record_result.get("winning_player_ids", []))
-            + list(record_result.get("losing_player_ids", []))
-            + list(record_result.get("excluded_player_ids", []))
-            + list(record_result.get("excluded_conditional_player_ids", []))
-        ))
-        betting_svc = getattr(self.bot, "betting_service", None)
-        if not (betting_svc and all_ids):
-            return ""
-
-        await asyncio.to_thread(betting_svc.award_first_game_bonus, all_ids, guild_id)
-        logger.info(f"First game bonus (+{FIRST_GAME_BONUS} JC) awarded to {all_ids}")
-        return (
-            f"\n🌙 First game of the night! (+{FIRST_GAME_BONUS} {JOPACOIN_EMOTE} each)"
         )
 
     async def _run_neon_match_hooks(

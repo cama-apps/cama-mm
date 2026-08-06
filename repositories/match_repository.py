@@ -1859,17 +1859,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
-    def get_match_count_since(self, guild_id: int, since_iso: str) -> int:
-        """Get count of matches recorded since a given ISO timestamp."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) as count FROM matches WHERE guild_id = ? AND match_date >= ?",
-                (guild_id, since_iso),
-            )
-            row = cursor.fetchone()
-            return row["count"] if row else 0
-
     def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:
         """Get recent match predictions with outcomes for a guild."""
         normalized_guild_id = guild_id if guild_id is not None else 0

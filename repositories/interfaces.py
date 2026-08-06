@@ -774,11 +774,6 @@ class IMatchRepository(ABC):
     def get_match_count(self, guild_id: int) -> int: ...
 
     @abstractmethod
-    def get_match_count_since(self, guild_id: int, since_iso: str) -> int:
-        """Get count of matches recorded since a given ISO timestamp."""
-        ...
-
-    @abstractmethod
     def get_recent_match_predictions(self, guild_id: int, limit: int = 200): ...
 
     @abstractmethod
@@ -1625,6 +1620,17 @@ class ILoanRepository(ABC):
 
     @abstractmethod
     def get_first_game_pool_balances(self, guild_id: int | None) -> dict[str, int]: ...
+
+    @abstractmethod
+    def get_first_game_pool_previews(
+        self,
+        guild_id: int | None,
+        regular_seed_amount: int,
+        game_date: str | None = None,
+        daily_amount: int = 0,
+    ) -> dict[str, int]:
+        """Return each lobby's current first-game pool plus its next seed."""
+        ...
 
     @abstractmethod
     def fund_first_game_pools(

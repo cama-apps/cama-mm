@@ -4,6 +4,7 @@ Lobby orchestration and embed helpers.
 
 import asyncio
 
+from config import DOTA_BET_SEED_AMOUNT
 from domain.models.lobby import Lobby, LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from repositories.interfaces import IPlayerRepository
@@ -30,6 +31,7 @@ class LobbyService:
         bankruptcy_repo=None,
         match_state_service=None,
         moderation_service=None,
+        loan_service=None,
     ):
         self.player_repo = player_repo
         self.lobby_manager = lobby_manager
@@ -37,6 +39,7 @@ class LobbyService:
         self.max_players = max_players
         self.bankruptcy_repo = bankruptcy_repo
         self.match_state_service = match_state_service
+        self.loan_service = loan_service
         self.moderation_service = (
             moderation_service
             if moderation_service is not None
@@ -527,6 +530,14 @@ class LobbyService:
         if not lobby:
             return None
         player_ids, players = self.get_lobby_players(lobby, guild_id)
+        bonus_pool_preview = None
+        if self.loan_service is not None:
+            previews = self.loan_service.get_first_game_pool_previews(
+                guild_id,
+                DOTA_BET_SEED_AMOUNT,
+            )
+            lobby_kind = getattr(lobby.kind, "value", lobby.kind)
+            bonus_pool_preview = previews.get(lobby_kind)
 
         return create_lobby_embed(
             lobby, players, player_ids,
@@ -534,6 +545,7 @@ class LobbyService:
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
             guild_id=guild_id,
+            bonus_pool_preview=bonus_pool_preview,
         )
 
     def get_lobby_kind_for_message(

@@ -1972,6 +1972,12 @@ class DraftCommands(commands.Cog):
         # Update the draft UI
         await self._show_draft_ui(interaction, guild_id, state, is_edit=True)
 
+    async def _refresh_bonus_pool_lobbies(self, guild_id: int) -> None:
+        """Refresh current lobby displays after betting-pool availability changes."""
+        from bot import _refresh_first_game_pool_lobby_messages
+
+        await _refresh_first_game_pool_lobby_messages(guild_id)
+
     async def _complete_draft(
         self,
         interaction: discord.Interaction,
@@ -2034,6 +2040,8 @@ class DraftCommands(commands.Cog):
                 )
                 await self._edit_interaction_message(interaction, embed=embed, view=None)
                 return
+
+            await self._refresh_bonus_pool_lobbies(guild_id)
 
             # Get pending state for betting display (use specific pending_match_id for concurrent match support)
             pending_state = await asyncio.to_thread(
@@ -2112,6 +2120,7 @@ class DraftCommands(commands.Cog):
 
             from bot import clear_lobby_rally_cooldowns
 
+            await self._refresh_bonus_pool_lobbies(guild_id)
             clear_lobby_rally_cooldowns(guild_id, lobby_kind=kind)
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)

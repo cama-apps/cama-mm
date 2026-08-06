@@ -168,6 +168,45 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
 
 
 @pytest.mark.asyncio
+async def test_execute_shuffle_refreshes_pool_before_later_failure(monkeypatch):
+    player_ids = list(range(100, 110))
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.return_value = {}
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    lobby_service = MagicMock()
+    cog = MatchCommands(MagicMock(), lobby_service, match_service, MagicMock())
+    refresh_pool_lobbies = AsyncMock()
+    monkeypatch.setattr(
+        cog,
+        "_validate_shuffle_preconditions",
+        AsyncMock(return_value=lobby),
+    )
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, [], [], [], {})),
+    )
+    monkeypatch.setattr(
+        cog,
+        "_refresh_bonus_pool_lobbies",
+        refresh_pool_lobbies,
+        raising=False,
+    )
+
+    with pytest.raises(KeyError, match="radiant_team"):
+        await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    refresh_pool_lobbies.assert_awaited_once_with(TEST_GUILD_ID)
+    lobby_service.release_lobby_players.assert_called_once_with(
+        player_ids,
+        TEST_GUILD_ID,
+        LobbyKind.OPEN,
+    )
+
+
+@pytest.mark.asyncio
 async def test_readycheck_nonresponders_are_forwarded_to_normal_shuffle(monkeypatch):
     player_ids = list(range(100, 110))
     excluded_ids = list(range(110, 115))

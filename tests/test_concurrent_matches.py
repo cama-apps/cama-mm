@@ -642,6 +642,37 @@ class TestRecordFinalizeThreadIsolation:
             lobby_kind=state_a.lobby_kind,
         )
 
+    async def test_record_first_match_has_no_direct_first_game_award(self, services):
+        """A first match records without a participant award or award announcement."""
+        players = list(range(42500, 42510))
+        _register_players(services["player_repo"], players)
+        services["match_service"].shuffle_players(players, guild_id=TEST_GUILD_ID)
+
+        cog, mock_bot = self._make_record_cog(services)
+
+        def unexpected_first_game_award(*_args, **_kwargs):
+            raise AssertionError("obsolete first-game award was invoked")
+
+        mock_bot.betting_service = SimpleNamespace(
+            award_first_game_bonus=unexpected_first_game_award,
+        )
+        result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
+
+        with (
+            patch.object(cog, "_finalize_lobby_thread", AsyncMock()),
+            patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
+        ):
+            for voter in players[:3]:
+                interaction = self._make_interaction(voter)
+                await cog.record.callback(cog, interaction, result_choice)
+
+        announcements = [
+            str(call.args[0]) if call.args else str(call.kwargs.get("content", ""))
+            for call in interaction.followup.send.call_args_list
+        ]
+        recorded_announcement = next(message for message in announcements if "Match recorded" in message)
+        assert "First game of the night" not in recorded_announcement
+
     async def test_record_chunks_long_final_message_before_thread_finalize(self, services):
         """Large betting summaries must not make the final /record response fail.
 

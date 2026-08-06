@@ -1423,6 +1423,86 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
 
 
 @pytest.mark.asyncio
+async def test_sync_lobby_display_serializes_with_pool_refresh(monkeypatch):
+    import bot as bot_module
+
+    _, lobby_service, player_service, _ = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        guild_id=TEST_GUILD_ID,
+    )
+    old_embed = object()
+    new_embed = object()
+    first_build_started = asyncio.Event()
+    second_build_started = asyncio.Event()
+    release_first_build = asyncio.Event()
+    build_count = 0
+
+    def build_lobby_embed(current_lobby, guild_id):
+        raise AssertionError("build should run through controlled_to_thread")
+
+    async def controlled_to_thread(func, *args, **kwargs):
+        nonlocal build_count
+        if func is build_lobby_embed:
+            build_count += 1
+            if build_count == 1:
+                first_build_started.set()
+                await release_first_build.wait()
+                return old_embed
+            second_build_started.set()
+            return new_embed
+        return func(*args, **kwargs)
+
+    message = FakeMessage()
+    channel = FakeChannel(message=message)
+    cog = LobbyCommands(FakeBot(channel=channel), lobby_service, player_service)
+    monkeypatch.setattr(lobby_service, "build_lobby_embed", build_lobby_embed)
+    monkeypatch.setattr(bot_module, "_init_services", lambda: None)
+    monkeypatch.setattr(
+        bot_module.bot,
+        "lobby_service",
+        lobby_service,
+        raising=False,
+    )
+    monkeypatch.setattr(bot_module.asyncio, "to_thread", controlled_to_thread)
+    bot_module._lobby_message_update_locks.clear()
+
+    older_sync = asyncio.create_task(
+        cog._sync_lobby_displays(
+            lobby,
+            TEST_GUILD_ID,
+            sync_readycheck=False,
+        )
+    )
+    await first_build_started.wait()
+    newer_refresh = asyncio.create_task(
+        bot_module.update_lobby_message(
+            message,
+            lobby,
+            TEST_GUILD_ID,
+            expected_message_id=message.id,
+            lobby_kind=lobby.kind,
+        )
+    )
+    try:
+        await asyncio.wait_for(second_build_started.wait(), timeout=0.05)
+    except TimeoutError:
+        pass
+    else:
+        await asyncio.wait_for(asyncio.shield(newer_refresh), timeout=1)
+    release_first_build.set()
+    await asyncio.gather(older_sync, newer_refresh)
+
+    assert [edit["embed"] for edit in message.edits] == [old_embed, new_embed]
+    bot_module._lobby_message_update_locks.clear()
+
+
+@pytest.mark.asyncio
 async def test_remove_lobby_reaction_uses_partial_message_without_fetch():
     """Removing a reaction should issue only the mutation request."""
     _, lobby_service, player_service, _ = make_services()

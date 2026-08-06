@@ -51,6 +51,22 @@ def test_lobby_embed_uses_public_open_identity():
 from utils.formatting import TOMBSTONE_EMOJI
 
 
+def test_lobby_embed_shows_supplied_bonus_pool_preview_even_when_empty():
+    lobby = MagicMock()
+    lobby.created_at = None
+    lobby.get_player_count.return_value = 0
+
+    embed = create_lobby_embed(
+        lobby,
+        players=[],
+        player_ids=[],
+        bonus_pool_preview=0,
+    )
+
+    bonus_pool = next(field for field in embed.fields if field.name == "🎲 Bonus Pool")
+    assert bonus_pool.value == "**0 <:jopacoin:954159801049440297>** available if this lobby shuffles next."
+
+
 def test_lobby_embeds_do_not_expose_captain_eligibility():
     """Lobby presentation has no captain opt-in marker or input."""
     assert "captain_eligible_ids" not in inspect.signature(format_player_list).parameters

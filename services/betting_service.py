@@ -549,19 +549,6 @@ class BettingService:
         self._skim_blood_pact_from_awards(results, guild_id)
         return results
 
-    def award_first_game_bonus(
-        self, player_ids: list[int], guild_id: int | None = None
-    ) -> dict[int, dict[str, int]]:
-        """
-        Reward all players in the first game of the night with a jopacoin bonus.
-
-        Same processing as other awards so bankruptcy and garnishment rules still apply.
-        """
-        from config import FIRST_GAME_BONUS
-        results = self._award_with_penalties(player_ids, FIRST_GAME_BONUS, guild_id)
-        self._skim_blood_pact_from_awards(results, guild_id)
-        return results
-
     def _award_with_penalties(
         self, player_ids: list[int], reward_amount: int, guild_id: int | None = None,
         *, ledger: dict | None = None,

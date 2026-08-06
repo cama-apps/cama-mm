@@ -74,6 +74,7 @@ from utils.command_registry import (
 from utils.economy_event_display import build_public_economy_event_embed
 from utils.formatting import JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 from utils.game_date import get_game_date
+from utils.guild import normalize_guild_id
 from utils.thread_safety import ensure_thread_writable
 
 # Bot setup
@@ -109,6 +110,10 @@ _lobby_rally_lock = asyncio.Lock()
 _lobby_ready_cooldowns: dict[tuple[int, LobbyKind], float] = {}
 _lobby_ready_lock = asyncio.Lock()
 
+# Serialize lobby embed generation and publication so a slower refresh cannot
+# overwrite a newer snapshot for the same lobby.
+_lobby_message_update_locks: dict[tuple[int, LobbyKind], asyncio.Lock] = {}
+
 # Strong references to fire-and-forget tasks. The event loop only holds
 # tasks weakly, so an unreferenced task can be garbage-collected mid-run.
 _background_tasks: set[asyncio.Task] = set()
@@ -120,6 +125,18 @@ def _normalize_lobby_kind_or_open(value) -> LobbyKind:
         return LobbyKind.normalize(value)
     except (TypeError, ValueError):
         return LobbyKind.OPEN
+
+
+def _get_lobby_message_update_lock(
+    guild_id: int | None,
+    lobby_kind: LobbyKind | str | None,
+) -> asyncio.Lock:
+    key = (normalize_guild_id(guild_id), _normalize_lobby_kind_or_open(lobby_kind))
+    lock = _lobby_message_update_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _lobby_message_update_locks[key] = lock
+    return lock
 
 
 def _retain_background_task(task: asyncio.Task) -> asyncio.Task:
@@ -368,12 +385,14 @@ async def _first_game_pool_loop() -> None:
         game_date = get_game_date()
         for guild in list(bot.guilds):
             try:
-                await asyncio.to_thread(
+                funding = await asyncio.to_thread(
                     bot.loan_service.fund_first_game_pools,
                     guild.id,
                     game_date,
                     FIRST_GAME_POOL_DAILY_AMOUNT,
                 )
+                if isinstance(funding, dict) and funding.get("funded_dates"):
+                    await _refresh_first_game_pool_lobby_messages(guild.id)
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "first-game pool funding failed for guild=%s date=%s",
@@ -381,6 +400,69 @@ async def _first_game_pool_loop() -> None:
                     game_date,
                 )
         await asyncio.sleep(FIRST_GAME_POOL_WAKE_SECONDS)
+
+
+async def _refresh_first_game_pool_lobby_messages(guild_id: int) -> None:
+    """Refresh open lobby embeds after available betting-pool funds change."""
+    lobby_service = getattr(bot, "lobby_service", None)
+    if not lobby_service:
+        return
+
+    for kind in LobbyKind:
+        for attempt in range(_LOBBY_RECONCILE_MAX_ATTEMPTS):
+            try:
+                lobby = await asyncio.to_thread(
+                    lobby_service.get_lobby,
+                    guild_id=guild_id,
+                    lobby_kind=kind,
+                )
+                if not lobby or lobby.status != "open":
+                    break
+
+                message_id, channel_id = await asyncio.gather(
+                    asyncio.to_thread(
+                        lobby_service.get_lobby_message_id,
+                        guild_id=guild_id,
+                        lobby_kind=kind,
+                    ),
+                    asyncio.to_thread(
+                        lobby_service.get_lobby_channel_id,
+                        guild_id=guild_id,
+                        lobby_kind=kind,
+                    ),
+                )
+                if not message_id or not channel_id:
+                    break
+
+                channel = bot.get_channel(channel_id)
+                if not channel:
+                    channel = await bot.fetch_channel(channel_id)
+                message = channel.get_partial_message(message_id)
+                updated = await update_lobby_message(
+                    message,
+                    lobby,
+                    guild_id,
+                    expected_message_id=message_id,
+                    lobby_kind=kind,
+                )
+                if updated:
+                    break
+                if attempt + 1 == _LOBBY_RECONCILE_MAX_ATTEMPTS:
+                    logger.warning(
+                        "first-game pool lobby refresh exhausted retries for "
+                        "guild=%s kind=%s",
+                        guild_id,
+                        kind.value,
+                    )
+            except Exception:  # noqa: BLE001
+                if attempt + 1 == _LOBBY_RECONCILE_MAX_ATTEMPTS:
+                    logger.exception(
+                        "first-game pool lobby refresh failed for guild=%s kind=%s",
+                        guild_id,
+                        kind.value,
+                    )
+            if attempt + 1 < _LOBBY_RECONCILE_MAX_ATTEMPTS:
+                await asyncio.sleep(_LOBBY_RECONCILE_RETRY_SECONDS * (2**attempt))
 
 
 async def _process_one_refresh(market: dict) -> None:
@@ -673,17 +755,58 @@ async def _load_extensions():
 
 
 
-async def update_lobby_message(message, lobby, guild_id=None) -> bool:
+async def update_lobby_message(
+    message,
+    lobby,
+    guild_id=None,
+    *,
+    expected_message_id: int | None = None,
+    lobby_kind: LobbyKind | str | None = None,
+    clear_content: bool = False,
+    lobby_service=None,
+) -> bool:
     """Refresh lobby embed on the pinned lobby message (also updates thread since msg is thread starter)."""
-    _init_services()  # Ensure services are initialized
-    try:
-        embed = await asyncio.to_thread(bot.lobby_service.build_lobby_embed, lobby, guild_id)
-        if embed:
-            await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
-            return True
-    except Exception as exc:
-        logger.error(f"Error updating lobby message: {exc}", exc_info=True)
+    if lobby_service is None:
+        _init_services()  # Ensure services are initialized
+        lobby_service = bot.lobby_service
+    kind = _normalize_lobby_kind_or_open(
+        lobby_kind if lobby_kind is not None else getattr(lobby, "kind", None)
+    )
+    lock = _get_lobby_message_update_lock(guild_id, kind)
+    async with lock:
+        try:
+            embed = await asyncio.to_thread(
+                lobby_service.build_lobby_embed,
+                lobby,
+                guild_id,
+            )
+            if expected_message_id is not None:
+                current_lobby, current_message_id = await asyncio.gather(
+                    asyncio.to_thread(
+                        lobby_service.get_lobby,
+                        guild_id=guild_id,
+                        lobby_kind=kind,
+                    ),
+                    asyncio.to_thread(
+                        lobby_service.get_lobby_message_id,
+                        guild_id=guild_id,
+                        lobby_kind=kind,
+                    ),
+                )
+                if current_lobby is not lobby or current_message_id != expected_message_id:
+                    return False
+            if embed:
+                edit_kwargs = {
+                    "embed": embed,
+                    "allowed_mentions": discord.AllowedMentions.none(),
+                }
+                if clear_content:
+                    edit_kwargs["content"] = None
+                await message.edit(**edit_kwargs)
+                logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
+                return True
+        except Exception as exc:
+            logger.error(f"Error updating lobby message: {exc}", exc_info=True)
     return False
 
 

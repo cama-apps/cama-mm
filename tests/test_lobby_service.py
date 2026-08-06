@@ -12,6 +12,41 @@ from services.lobby_service import LobbyService
 from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
+@pytest.mark.parametrize(
+    ("lobby_kind", "expected_amount"),
+    [
+        (LobbyKind.OPEN, 125),
+        (LobbyKind.LOWSKILL, 275),
+    ],
+)
+def test_lobby_embed_uses_preview_for_its_lobby_kind(lobby_kind, expected_amount):
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    loan_service = MagicMock()
+    loan_service.get_first_game_pool_previews.return_value = {
+        "open": 125,
+        "lowskill": 275,
+    }
+    service = LobbyService(
+        lobby_manager=lobby_manager,
+        player_repo=MagicMock(),
+        loan_service=loan_service,
+    )
+    lobby = Lobby(
+        lobby_id=lobby_kind.lobby_id,
+        created_by=None,
+        created_at=datetime.now(),
+        kind=lobby_kind,
+    )
+
+    embed = service.build_lobby_embed(lobby, guild_id=99)
+
+    bonus_pool = next(field for field in embed.fields if field.name == "🎲 Bonus Pool")
+    assert bonus_pool.value == (
+        f"**{expected_amount} <:jopacoin:954159801049440297>** "
+        "available if this lobby shuffles next."
+    )
+
+
 class TestLobbyServicePendingMatchCheck:
     """Test that join_lobby blocks players in pending matches."""
 

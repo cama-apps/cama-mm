@@ -43,7 +43,7 @@ class BalanceHistoryService:
                               help rewards (parsed from the ``dig_actions.detail`` JSON)
 
     Un-persisted sources (shop, admin /givecoin, bankruptcy penalty, garnishment,
-    streaming / first-game / exclusion / bomb-pot bonuses, cancelled-match refunds,
+    streaming / exclusion / bomb-pot bonuses, cancelled-match refunds,
     dig cave-in losses, per-dig paid costs) are silently omitted — the series starts
     at 0 and does not pretend to equal live balance.
     """
