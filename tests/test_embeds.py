@@ -64,7 +64,7 @@ def test_lobby_embed_shows_supplied_bonus_pool_preview_even_when_empty():
     )
 
     bonus_pool = next(field for field in embed.fields if field.name == "🎲 Bonus Pool")
-    assert bonus_pool.value == "**0 <:jopacoin:954159801049440297>** available if this lobby shuffles next."
+    assert bonus_pool.value == "**0 <:jopacoin:954159801049440297>** currently available for this lobby."
 
 
 def test_lobby_embeds_do_not_expose_captain_eligibility():
