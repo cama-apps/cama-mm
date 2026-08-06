@@ -206,10 +206,17 @@ class TestRegistration:
             checked += 1
         assert checked >= 3
 
-    def test_courier_detail_centers_on_the_adult_chest(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("species_id", "center_tolerance"),
+        (("courier_cama", 1), ("rama", 2)),
+    )
+    def test_chest_mounted_detail_centers_on_the_adult_chest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        species_id: str,
+        center_tolerance: int,
     ):
-        """Courier saddlebags use chest x without changing their body fit."""
+        """Chest-mounted details use chest x without changing their body fit."""
         captured_layers = []
 
         def capture(layers):
@@ -219,7 +226,7 @@ class TestRegistration:
         monkeypatch.setattr(pet_compositor, "assemble_card", capture)
         source = pet_compositor._authoring_frame("adult")
         detail_pick = pet_compositor._pick_component(
-            "detail", "adult", "courier_cama", "happy", 1
+            "detail", "adult", species_id, "happy", 1
         )
         assert detail_pick is not None
         detail = pet_compositor._load_component(detail_pick[0])
@@ -227,12 +234,12 @@ class TestRegistration:
 
         covered_creatures = set()
         for seed in (1, 2, 5):
-            pet_compositor.compose_pet_card("courier_cama", "adult", "happy", seed)
+            pet_compositor.compose_pet_card(species_id, "adult", "happy", seed)
             fitted_detail = captured_layers[-1][
                 pet_compositor.SLOT_ORDER.index("detail")
             ]
             creature_pick = pet_compositor._pick_component(
-                "creature", "adult", "courier_cama", "happy", seed
+                "creature", "adult", species_id, "happy", seed
             )
             assert creature_pick is not None
             covered_creatures.add(creature_pick[0].name)
@@ -253,7 +260,7 @@ class TestRegistration:
                     (detail_bbox[0] + detail_bbox[2]) / 2
                     - anchors["chest_center"][0]
                 )
-                <= 1
+                <= center_tolerance
             )
 
         assert covered_creatures == {
@@ -261,12 +268,12 @@ class TestRegistration:
         }
 
     @pytest.mark.parametrize(
-        "species_id", ("crystal_cama", "jopacama", "pudge_cama", "rama")
+        "species_id", ("crystal_cama", "jopacama", "pudge_cama")
     )
-    def test_non_courier_detail_keeps_the_body_fit(
+    def test_other_adult_details_keep_the_body_fit(
         self, monkeypatch: pytest.MonkeyPatch, species_id: str
     ):
-        """Species detail other than courier bags remains body-centered."""
+        """Other adult species details remain body-centered."""
         captured_layers = []
 
         def capture(layers):
