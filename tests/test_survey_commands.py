@@ -170,7 +170,7 @@ def test_survey_commands_are_guild_only_without_discord_visibility_gate():
     assert all(command.default_permissions is None for command in commands)
 
 
-def test_delivery_history_match_falls_back_to_persistent_component_id():
+def test_delivery_history_match_uses_persistent_component_ids_only():
     message = SimpleNamespace(
         nonce=None,
         components=[
@@ -180,8 +180,16 @@ def test_delivery_history_match_falls_back_to_persistent_component_id():
         ],
     )
 
-    assert survey_commands._message_matches_delivery(message, 11, 501) is True
-    assert survey_commands._message_matches_delivery(message, 12, 501) is False
+    assert survey_commands._message_matches_delivery(message, 11) is True
+    assert survey_commands._message_matches_delivery(message, 12) is False
+
+    # History-fetched messages never expose the send-time nonce, so a nonce
+    # alone (with no components) must never identify a delivery.
+    nonce_only = SimpleNamespace(
+        nonce=survey_commands._delivery_nonce(501),
+        components=[],
+    )
+    assert survey_commands._message_matches_delivery(nonce_only, 11) is False
 
 
 @pytest.mark.asyncio
@@ -448,8 +456,12 @@ async def test_delayed_recovery_finds_existing_dm_in_history_without_resending()
     )
     message = SimpleNamespace(
         id=7001,
-        nonce=survey_commands._delivery_nonce(claimed.recipient_id),
-        components=[],
+        nonce=None,
+        components=[
+            SimpleNamespace(
+                children=[SimpleNamespace(custom_id="survey:11:question:101:score")]
+            )
+        ],
         author=SimpleNamespace(id=999),
     )
 
@@ -483,9 +495,9 @@ async def test_delayed_recovery_finds_existing_dm_in_history_without_resending()
     service.reconcile_delivery_sent.assert_called_once_with(501, 1, 6001, 7001)
     service.mark_delivery_receipt_checked.assert_not_called()
     history_kwargs = channel.history.call_args.kwargs
-    assert history_kwargs["limit"] is None
+    assert history_kwargs["limit"] == survey_commands._DELIVERY_RECEIPT_SCAN_LIMIT
     assert history_kwargs["after"].tzinfo is not None
-    assert history_kwargs["oldest_first"] is True
+    assert history_kwargs["oldest_first"] is False
     assert not hasattr(user, "send")
 
 
@@ -763,7 +775,7 @@ async def test_dispatch_failure_schedules_recovery_for_committed_campaign_state(
 
 
 @pytest.mark.asyncio
-async def test_send_post_open_failure_arms_recovery(monkeypatch):
+async def test_send_post_open_dispatch_failure_arms_recovery_in_background(monkeypatch):
     interaction = _interaction(
         user_id=900,
         guild=SimpleNamespace(id=77, members=[]),
@@ -774,23 +786,100 @@ async def test_send_post_open_failure_arms_recovery(monkeypatch):
     cog._dispatch_pending_locked = AsyncMock(side_effect=RuntimeError("db unavailable"))
     cog._schedule_delivery_recovery = MagicMock()
     cog.respond_error = AsyncMock()
+    followup = AsyncMock()
     monkeypatch.setattr(survey_commands, "has_admin_permission", lambda _i: True)
     monkeypatch.setattr(survey_commands, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(survey_commands, "safe_followup", followup)
 
     target = discord.app_commands.Choice(
         name="One member",
         value=survey_commands.SurveyTargetType.MEMBER.value,
     )
     await cog.send.callback(cog, interaction, 11, target)
+    await asyncio.gather(*cog._send_dispatch_tasks, return_exceptions=True)
 
     service.open_survey.assert_called_once()
+    # The campaign is durably pending: the admin got the opened confirmation
+    # and the background dispatch failure armed recovery instead of surfacing
+    # a bogus command error.
+    assert "opened for **1** recipients" in followup.await_args.kwargs["content"]
     cog._schedule_delivery_recovery.assert_called_once_with(
         survey_commands._DELIVERY_RECEIPT_GRACE_SECONDS
     )
-    cog.respond_error.assert_awaited_once_with(
-        interaction,
-        "Couldn't send that survey right now.",
+    cog.respond_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_responds_immediately_and_dispatches_in_background(monkeypatch):
+    interaction = _interaction(
+        user_id=900,
+        guild=SimpleNamespace(id=77, members=[]),
     )
+    service = MagicMock()
+    service.list_unconfirmed_deliveries.return_value = []
+    cog = _cog(survey_service=service)
+    cog._resolve_recipients = AsyncMock(return_value=[42, 43])
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_dispatch(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return 2
+
+    cog._dispatch_pending_locked = AsyncMock(side_effect=slow_dispatch)
+    followup = AsyncMock()
+    monkeypatch.setattr(survey_commands, "has_admin_permission", lambda _i: True)
+    monkeypatch.setattr(survey_commands, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(survey_commands, "safe_followup", followup)
+
+    target = discord.app_commands.Choice(
+        name="A role",
+        value=survey_commands.SurveyTargetType.ROLE.value,
+    )
+    await cog.send.callback(cog, interaction, 11, target)
+
+    # The admin already has the confirmation while delivery is still running.
+    assert "opened for **2** recipients" in followup.await_args.kwargs["content"]
+    service.open_survey.assert_called_once()
+    await asyncio.wait_for(started.wait(), timeout=5)
+    assert not release.is_set()
+    release.set()
+    await asyncio.gather(*cog._send_dispatch_tasks)
+    # The background dispatch scopes receipt reconciliation to this campaign.
+    cog._dispatch_pending_locked.assert_awaited_once_with(77, 11)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_scopes_receipt_reconciliation_to_the_given_survey():
+    service = MagicMock()
+    service.claim_deliveries.return_value = []
+    cog = _cog(survey_service=service)
+    cog.reconcile_unconfirmed_delivery_receipts = AsyncMock(return_value=0)
+
+    await cog._dispatch_pending_locked(77, 11)
+    cog.reconcile_unconfirmed_delivery_receipts.assert_awaited_once_with(77, 11)
+
+    cog.reconcile_unconfirmed_delivery_receipts.reset_mock()
+    await cog._dispatch_pending_locked()
+    cog.reconcile_unconfirmed_delivery_receipts.assert_awaited_once_with(None, None)
+
+
+@pytest.mark.asyncio
+async def test_respond_error_swallows_expired_interaction_token():
+    cog = _cog()
+    interaction = _interaction(user_id=42)
+    interaction.response.is_done = MagicMock(return_value=True)
+    interaction.followup.send = AsyncMock(
+        side_effect=discord.NotFound(
+            SimpleNamespace(status=404, reason="Not Found"),
+            {"message": "Unknown Webhook"},
+        )
+    )
+
+    await cog.respond_error(interaction, "boom")
+
+    interaction.followup.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1159,104 @@ async def test_racing_answer_acknowledges_before_waiting_for_response_lock():
     interaction.edit_original_response.assert_awaited_once()
 
 
+def test_member_targeted_question_dm_does_not_promise_anonymity():
+    questions = (_question(101, 1, SurveyQuestionType.NPS),)
+    member_session = SurveySession(
+        survey=replace(_survey(), target_type=survey_commands.SurveyTargetType.MEMBER),
+        recipient=_recipient(),
+        questions=questions,
+        answers=(),
+    )
+    role_session = SurveySession(
+        survey=replace(_survey(), target_type=survey_commands.SurveyTargetType.ROLE),
+        recipient=_recipient(),
+        questions=questions,
+        answers=(),
+    )
+
+    member_privacy = next(
+        field.value
+        for field in survey_commands._question_embed(member_session, questions[0]).fields
+        if field.name == "Privacy"
+    )
+    role_privacy = next(
+        field.value
+        for field in survey_commands._question_embed(role_session, questions[0]).fields
+        if field.name == "Privacy"
+    )
+
+    # A single-recipient survey must tell the respondent the truth: the
+    # admins can connect the answers to them.
+    assert "shared with the survey admins" in member_privacy
+    assert "not anonymous" in member_privacy
+    assert "anonymous, per-question results" not in member_privacy
+    assert "anonymous, per-question results" in role_privacy
+
+    member_submitted = survey_commands._submitted_embed(
+        SurveySession(
+            survey=member_session.survey,
+            recipient=_recipient(submitted_at=100, current_question_id=None),
+            questions=questions,
+            answers=(),
+        )
+    )
+    role_submitted = survey_commands._submitted_embed(
+        SurveySession(
+            survey=role_session.survey,
+            recipient=_recipient(submitted_at=100, current_question_id=None),
+            questions=questions,
+            answers=(),
+        )
+    )
+    assert "anonymously" not in member_submitted.description
+    assert "anonymously" in role_submitted.description
+
+
+@pytest.mark.asyncio
+async def test_saved_answer_is_not_reported_as_failed_when_dm_edit_fails():
+    next_session = _session(recipient=_recipient(current_question_id=102))
+    service = MagicMock()
+    service.answer_question.return_value = next_session
+    cog = _cog(survey_service=service)
+    cog._schedule_delivery_recovery = MagicMock()
+    cog.respond_error = AsyncMock()
+    interaction = _interaction(user_id=42)
+    interaction.edit_original_response.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"),
+        "try later",
+    )
+
+    await cog.answer_question(interaction, 11, 101, 9)
+
+    # The answer is durably saved; a Discord re-render failure must not tell
+    # the respondent their answer wasn't saved.
+    service.answer_question.assert_called_once_with(11, 42, 101, 9)
+    cog.respond_error.assert_not_awaited()
+    cog._schedule_delivery_recovery.assert_called_once_with(
+        survey_commands._DELIVERY_RECEIPT_GRACE_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_saved_skip_is_not_reported_as_failed_when_dm_edit_fails():
+    next_session = _session(recipient=_recipient(current_question_id=102))
+    service = MagicMock()
+    service.skip_question.return_value = next_session
+    cog = _cog(survey_service=service)
+    cog._schedule_delivery_recovery = MagicMock()
+    cog.respond_error = AsyncMock()
+    interaction = _interaction(user_id=42)
+    interaction.edit_original_response.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"),
+        "try later",
+    )
+
+    await cog.skip_question(interaction, 11, 102)
+
+    service.skip_question.assert_called_once_with(11, 42, 102)
+    cog.respond_error.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_committed_answer_schedules_recovery_when_discord_edit_fails():
     next_session = _session(recipient=_recipient(current_question_id=102))
@@ -1204,6 +1391,119 @@ async def test_results_pagination_is_locked_to_requesting_admin():
     assert await view.interaction_check(other) is False
     assert other.response.send_message.await_args.kwargs["ephemeral"] is True
     assert await view.interaction_check(owner) is True
+
+
+@pytest.mark.asyncio
+async def test_results_view_timeout_disables_pagination_buttons():
+    pages = [SimpleNamespace(), SimpleNamespace()]
+    interaction = _interaction(user_id=900)
+    view = survey_commands.SurveyResultsView(
+        owner_id=900,
+        pages=pages,
+        interaction=interaction,
+    )
+
+    await view.on_timeout()
+
+    assert all(child.disabled for child in view.children)
+    interaction.edit_original_response.assert_awaited_once()
+    assert interaction.edit_original_response.await_args.kwargs["view"] is view
+
+    # A vanished ephemeral report must not raise out of the timeout handler.
+    interaction.edit_original_response.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown Message"},
+    )
+    await view.on_timeout()
+
+
+@pytest.mark.asyncio
+async def test_results_command_wires_timeout_interaction_into_pagination(monkeypatch):
+    interaction = _interaction(user_id=900, guild=SimpleNamespace(id=77))
+    report = SurveyResults(
+        survey_id=11,
+        title="Feedback",
+        status=SurveyStatus.OPEN,
+        recipient_count=3,
+        delivered_count=3,
+        started_count=1,
+        completed_count=1,
+        delivery_rate=1.0,
+        started_rate=1 / 3,
+        completion_rate=1.0,
+        response_rate=1 / 3,
+        questions=(
+            SurveyQuestionResult(
+                question_id=101,
+                position=1,
+                prompt="Recommend?",
+                question_type=SurveyQuestionType.NPS,
+                response_count=1,
+                skipped_count=0,
+                nps_score=100,
+                promoters=1,
+                passives=0,
+                detractors=0,
+                rating_average=None,
+                rating_distribution=(0, 0, 0, 0, 0),
+                text_responses=(),
+            ),
+        ),
+    )
+    service = MagicMock()
+    service.get_results.return_value = report
+    cog = _cog(survey_service=service)
+    followup = AsyncMock()
+    monkeypatch.setattr(survey_commands, "has_admin_permission", lambda _i: True)
+    monkeypatch.setattr(survey_commands, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(survey_commands, "safe_followup", followup)
+
+    await cog.results.callback(cog, interaction, 11)
+
+    view = followup.await_args.kwargs["view"]
+    assert isinstance(view, survey_commands.SurveyResultsView)
+    assert view._interaction is interaction
+
+
+@pytest.mark.asyncio
+async def test_reconnect_reconciliation_skips_unchanged_response_messages():
+    session = _session()
+    message = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(get_partial_message=MagicMock(return_value=message))
+    user = SimpleNamespace(create_dm=AsyncMock(return_value=channel))
+    service = MagicMock()
+    service.get_response_session.return_value = session
+    bot = SimpleNamespace(
+        get_user=MagicMock(return_value=user),
+        fetch_user=AsyncMock(),
+        add_view=MagicMock(),
+    )
+    cog = _cog(bot=bot, survey_service=service)
+
+    await cog._reconcile_response_message(session)
+    await cog._reconcile_response_message(session)
+
+    # The second pass re-rendered nothing: same message, same committed state.
+    assert message.edit.await_count == 1
+    assert user.create_dm.await_count == 1
+
+    changed = _session(
+        recipient=replace(session.recipient, current_question_id=102, updated_at=6),
+    )
+    service.get_response_session.return_value = changed
+    await cog._reconcile_response_message(session)
+    assert message.edit.await_count == 2
+
+    # A survey status flip must re-render even with identical recipient state.
+    closed = SurveySession(
+        survey=_survey(status=SurveyStatus.CLOSED),
+        recipient=changed.recipient,
+        questions=changed.questions,
+        answers=(),
+    )
+    service.get_response_session.return_value = closed
+    await cog._reconcile_response_message(session)
+    assert message.edit.await_count == 3
 
 
 @pytest.mark.asyncio

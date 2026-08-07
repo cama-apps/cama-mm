@@ -313,9 +313,6 @@ class SurveyService:
         self._positive_id(discord_id, label="Respondent")
         return self.repo.get_response_session(survey_id, discord_id)
 
-    def list_active_response_sessions(self) -> list[SurveySession]:
-        return self.repo.list_active_response_sessions()
-
     def list_recoverable_response_sessions(self) -> list[SurveySession]:
         return self.repo.list_recoverable_response_sessions()
 
@@ -411,22 +408,6 @@ class SurveyService:
 
     def submit_response(self, survey_id: int, discord_id: int) -> bool:
         return self.repo.submit_response(survey_id, discord_id)
-
-    def set_response_ui(
-        self,
-        survey_id: int,
-        discord_id: int,
-        dm_channel_id: int,
-        dm_message_id: int,
-    ) -> None:
-        self._positive_id(dm_channel_id, label="DM channel")
-        self._positive_id(dm_message_id, label="DM message")
-        self.repo.set_response_ui(
-            survey_id,
-            discord_id,
-            dm_channel_id,
-            dm_message_id,
-        )
 
     def finalize_response_ui(
         self,

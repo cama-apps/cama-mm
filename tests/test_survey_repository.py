@@ -398,8 +398,11 @@ def test_delivery_claim_failure_retry_and_stale_recovery(repo_db_path, monkeypat
         602,
     )
 
-    sessions = service.list_active_response_sessions()
-    assert {session.recipient.discord_id for session in sessions} == {101, 102}
+    sessions = [
+        service.get_response_session(survey.survey_id, discord_id)
+        for discord_id in (101, 102)
+    ]
+    assert all(session is not None for session in sessions)
     assert all(session.recipient.ui_message_id is not None for session in sessions)
 
 
@@ -722,9 +725,7 @@ def test_review_edit_selection_persists_and_blocks_submit_until_summary(repo_db_
     assert back_to_summary.recipient.current_question_id is None
     assert restarted.submit_response(survey.survey_id, 101) is True
 
-    # Submitted sessions are excluded from persistent view registration but
-    # retained for restart-time message reconciliation.
-    assert restarted.list_active_response_sessions() == []
+    # Submitted sessions are retained for restart-time message reconciliation.
     recoverable = restarted.list_recoverable_response_sessions()
     assert len(recoverable) == 1
     assert recoverable[0].recipient.submitted_at is not None

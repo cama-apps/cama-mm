@@ -1028,42 +1028,13 @@ class SurveyRepository(BaseRepository, ISurveyRepository):
             conn.execute("BEGIN")
             return self._session_with_cursor(conn.cursor(), survey_id, discord_id)
 
-    def list_active_response_sessions(self) -> list[SurveySession]:
-        with self.connection() as conn:
-            conn.execute("BEGIN")
-            cursor = conn.cursor()
-            keys = cursor.execute(
-                """
-                SELECT recipients.survey_id, recipients.discord_id
-                FROM survey_recipients AS recipients
-                JOIN surveys
-                  ON surveys.survey_id = recipients.survey_id
-                 AND surveys.guild_id = recipients.guild_id
-                WHERE surveys.status = 'open'
-                  AND recipients.delivery_status = 'sent'
-                  AND recipients.submitted_at IS NULL
-                  AND recipients.controls_finalized = 0
-                  AND COALESCE(recipients.ui_message_id, recipients.dm_message_id) IS NOT NULL
-                ORDER BY recipients.recipient_id
-                """
-            ).fetchall()
-            sessions = [
-                self._session_with_cursor(
-                    cursor,
-                    int(key["survey_id"]),
-                    int(key["discord_id"]),
-                )
-                for key in keys
-            ]
-        return [session for session in sessions if session is not None]
-
     def list_recoverable_response_sessions(self) -> list[SurveySession]:
         """Return DM sessions whose stored message needs reconciliation.
 
-        Unlike ``list_active_response_sessions``, this deliberately includes
-        submitted and closed sessions so restart recovery can replace stale
-        controls with their durable final state. Callers should register
-        interactive views only for the open, unsubmitted subset.
+        Deliberately includes submitted and closed sessions so restart
+        recovery can replace stale controls with their durable final state.
+        Callers should register interactive views only for the open,
+        unsubmitted subset.
         """
         with self.connection() as conn:
             conn.execute("BEGIN")
@@ -1468,27 +1439,6 @@ class SurveyRepository(BaseRepository, ISurveyRepository):
                 (now, now, recipient["recipient_id"]),
             )
             return cursor.rowcount == 1
-
-    def set_response_ui(
-        self,
-        survey_id: int,
-        discord_id: int,
-        dm_channel_id: int,
-        dm_message_id: int,
-    ) -> None:
-        now = self._now()
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            recipient = self._require_open_recipient(cursor, survey_id, discord_id)
-            cursor.execute(
-                """
-                UPDATE survey_recipients
-                SET ui_channel_id = ?, ui_message_id = ?,
-                    controls_finalized = 0, updated_at = ?
-                WHERE recipient_id = ? AND submitted_at IS NULL
-                """,
-                (dm_channel_id, dm_message_id, now, recipient["recipient_id"]),
-            )
 
     def finalize_response_ui(
         self,
