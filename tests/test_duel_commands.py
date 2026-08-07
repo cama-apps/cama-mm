@@ -1064,11 +1064,56 @@ def test_main_channel_prefers_configured_duel_channel(
 
     configured = make_text_channel(4242, guild=interaction.guild)
     configured.name = "honor-duels"
-    interaction.guild.get_channel = MagicMock(return_value=configured)
+    interaction.guild.get_channel_or_thread = MagicMock(return_value=configured)
     monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
 
     assert cog._get_main_channel(GUILD_ID) is configured
-    interaction.guild.get_channel.assert_called_once_with(4242)
+    interaction.guild.get_channel_or_thread.assert_called_once_with(4242)
+
+
+def test_main_channel_resolves_configured_thread(cog, interaction, monkeypatch):
+    import config
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 4242
+    thread.guild = interaction.guild
+    thread.permissions_for.return_value = SimpleNamespace(
+        send_messages_in_threads=True
+    )
+    thread.send = AsyncMock()
+    interaction.guild.get_channel_or_thread = MagicMock(return_value=thread)
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
+
+    assert cog._get_main_channel(GUILD_ID) is thread
+    interaction.guild.get_channel_or_thread.assert_called_once_with(4242)
+
+
+def test_main_channel_logs_debug_when_configured_is_in_another_guild(
+    cog, bot, interaction, monkeypatch, caplog
+):
+    import config
+
+    interaction.guild.get_channel_or_thread = MagicMock(return_value=None)
+    # The bot can see the configured channel, just not in this guild.
+    bot.get_channel = MagicMock(
+        return_value=make_text_channel(
+            4242,
+            guild=SimpleNamespace(id=GUILD_ID + 1, me=SimpleNamespace(id=55)),
+        )
+    )
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
+
+    with caplog.at_level(logging.DEBUG, logger="cama_bot.commands.duel"):
+        assert cog._get_main_channel(GUILD_ID) is interaction.channel
+
+    assert not [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert any(
+        "belongs to another guild" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_main_channel_scans_by_name_when_unconfigured(
@@ -1076,11 +1121,11 @@ def test_main_channel_scans_by_name_when_unconfigured(
 ):
     import config
 
-    interaction.guild.get_channel = MagicMock()
+    interaction.guild.get_channel_or_thread = MagicMock()
     monkeypatch.setattr(config, "DUEL_CHANNEL_ID", None)
 
     assert cog._get_main_channel(GUILD_ID) is interaction.channel
-    interaction.guild.get_channel.assert_not_called()
+    interaction.guild.get_channel_or_thread.assert_not_called()
 
 
 @pytest.mark.parametrize("configured_state", ["missing", "unsendable"])
@@ -1095,7 +1140,7 @@ def test_main_channel_falls_back_to_name_scan_when_configured_is_unusable(
         configured = make_text_channel(
             4242, guild=interaction.guild, can_send=False
         )
-    interaction.guild.get_channel = MagicMock(return_value=configured)
+    interaction.guild.get_channel_or_thread = MagicMock(return_value=configured)
     monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
 
     assert cog._get_main_channel(GUILD_ID) is interaction.channel
