@@ -242,6 +242,48 @@ def test_repository_io_runs_outside_shared_cache_lock():
     assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
 
 
+def test_refresh_does_not_clobber_member_events_landing_mid_refresh():
+    """Member events racing an off-loop refresh must win over the snapshot.
+
+    ``refresh_guild`` now runs in a worker thread from a snapshot built on the
+    event loop; ``update_member``/``remove_member`` firing between snapshot and
+    store used to be wholesale-overwritten by the stale snapshot (re-taxing a
+    freshly nicknamed member, resurrecting a departed one). The repository
+    read sits exactly in that window, so the stub fires the events from it.
+    """
+
+    class InterleavingRepository:
+        def __init__(self):
+            self.service = None
+            self.calls = 0
+
+        def get_vanity_tax_exemptions(self, guild_id):
+            self.calls += 1
+            if self.calls == 1:
+                # Simulate event-loop handlers firing mid-refresh.
+                self.service.update_member(guild_id, 1, "Real Name")
+                self.service.remove_member(guild_id, 2)
+                self.service.update_member(guild_id, 3, None)
+            return frozenset()
+
+    repository = InterleavingRepository()
+    service = VanityTaxService(repository)
+    repository.service = service
+
+    service.refresh_guild(GUILD_ID, [_member(1, None), _member(2, None)])
+
+    assert service.eligibility_status(GUILD_ID, 1) == "nickname_exemption"
+    assert service.eligibility_status(GUILD_ID, 2) == "unknown"
+    assert service.eligibility_status(GUILD_ID, 3) == "taxable"
+    assert service.taxable_ids(GUILD_ID) == frozenset({3})
+
+    # The event journal is consumed by the store: an undisturbed refresh
+    # applies its snapshot cleanly again.
+    service.refresh_guild(GUILD_ID, [_member(1, None), _member(2, None)])
+    assert service.taxable_ids(GUILD_ID) == frozenset({1, 2})
+    assert service.eligibility_status(GUILD_ID, 3) == "unknown"
+
+
 def test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])

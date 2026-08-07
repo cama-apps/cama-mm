@@ -1636,9 +1636,6 @@ class ILoanRepository(ABC):
         ...
 
     @abstractmethod
-    def consume_next_match_pot(self, guild_id: int | None) -> int: ...
-
-    @abstractmethod
     def reserve_bet_seed_atomic(
         self,
         guild_id: int | None,

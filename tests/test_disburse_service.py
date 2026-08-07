@@ -392,7 +392,12 @@ class TestQuorumAndExecution:
         assert result["total_disbursed"] == proposal.fund_amount
         assert result["recipient_count"] == 0
         assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
-        queued = loan_repo.consume_next_match_pot(TEST_GUILD_ID)
+        with loan_repo.connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(next_match_pot, 0) AS amount FROM nonprofit_fund WHERE guild_id = ?",
+                (TEST_GUILD_ID,),
+            ).fetchone()
+        queued = int(row["amount"]) if row else 0
         assert queued == (proposal.fund_amount if method == "next_match_pot" else 0)
 
     def test_can_propose_without_player_recipients_for_burn_or_next_pot(

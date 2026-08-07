@@ -166,10 +166,6 @@ class LoanService:
             max_stipend,
         )
 
-    def consume_next_match_pot(self, guild_id: int | None) -> int:
-        """Claim a reserve allocation earmarked for the next betting match."""
-        return self.loan_repo.consume_next_match_pot(guild_id)
-
     def get_first_game_pool_previews(
         self, guild_id: int | None, regular_seed_amount: int
     ) -> dict[str, int]:
