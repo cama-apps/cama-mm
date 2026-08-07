@@ -1057,6 +1057,9 @@ class SchemaManager:
         # live config threshold (recording has always read STREAK_THRESHOLD),
         # so stamp them with that value rather than the column default of 3.
         # Guarded by `added`, this backfill touches only pre-column rows.
+        # NOTE: this backfill was added to the migration before it shipped
+        # anywhere — verified no database (server runs main; the dev DB lacks
+        # the column) recorded the earlier body, so editing in place is safe.
         import config
 
         cursor.execute(

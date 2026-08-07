@@ -570,10 +570,20 @@ class ShopCommands(commands.Cog):
             actor_id=user_id,
             reason="shop recalibration purchase",
         ):
-            await interaction.response.send_message(
-                f"You no longer have {recal_cost} {JOPACOIN_EMOTE} for this.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.response.send_message(
+                    f"You no longer have {recal_cost} {JOPACOIN_EMOTE} for this.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                # The debit can wait on the SQLite busy timeout, and the
+                # interaction's 3s ack window may lapse meanwhile. The spend
+                # was refused, so there is nothing to roll back — just drop
+                # the (private) notice rather than crash the handler.
+                logger.warning(
+                    "Recalibrate shortfall notice could not be sent for %s",
+                    user_id,
+                )
             return
 
         # Defer (public) — recalibration is a notable event

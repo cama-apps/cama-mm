@@ -5,6 +5,7 @@ Tests for shop commands.
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
+import discord
 import pytest
 
 from commands.shop import (
@@ -1338,6 +1339,37 @@ async def test_handle_recalibrate_aborts_when_balance_vanishes_before_the_debit(
     args, kwargs = interaction.response.send_message.call_args
     assert "no longer have" in args[0]
     assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_recalibrate_shortfall_tolerates_lapsed_interaction(monkeypatch):
+    """The debit can outlast the 3s ack window under DB contention; a lapsed
+    token must not crash the handler — the refused spend needs no rollback."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_balance.return_value = 2000
+    player_service.try_spend.return_value = False
+    recal_service = MagicMock()
+    recal_service.can_recalibrate.return_value = {
+        "allowed": True,
+        "current_rating": 1500.0,
+        "current_rd": 63.0,
+        "current_volatility": 0.06,
+        "games_played": 20,
+    }
+
+    cmds = ShopCommands(bot, player_service, recalibration_service=recal_service)
+    interaction = _make_interaction()
+    interaction.response.send_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+
+    await cmds._handle_recalibrate(interaction)
+
+    player_service.adjust_balance.assert_not_called()
+    recal_service.recalibrate.assert_not_called()
 
 
 @pytest.mark.asyncio

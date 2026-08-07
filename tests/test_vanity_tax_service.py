@@ -284,6 +284,25 @@ def test_refresh_does_not_clobber_member_events_landing_mid_refresh():
     assert service.eligibility_status(GUILD_ID, 3) == "unknown"
 
 
+def test_begin_refresh_lets_the_fresh_snapshot_repair_missed_events():
+    """The on_ready resync must win over journal entries older than its
+    snapshot: events recorded before ``begin_refresh`` reflect pre-outage
+    state and must not be re-applied over the fresh member list."""
+    service = VanityTaxService()
+    service.refresh_guild(GUILD_ID, [_member(1, None), _member(2, None)])
+    # Pre-outage events land in the journal...
+    service.update_member(GUILD_ID, 1, None)
+    service.update_member(GUILD_ID, 2, None)
+    # ...then the gateway reconnects: while disconnected, member 1 set a
+    # nickname and member 2 left. Snapshot authority begins here.
+    service.begin_refresh(GUILD_ID)
+    service.refresh_guild(GUILD_ID, [_member(1, "Real Name")])
+
+    assert service.eligibility_status(GUILD_ID, 1) == "nickname_exemption"
+    assert service.eligibility_status(GUILD_ID, 2) == "unknown"
+    assert service.taxable_ids(GUILD_ID) == frozenset()
+
+
 def test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])

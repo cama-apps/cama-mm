@@ -585,6 +585,8 @@ def test_expired_announcement_claim_and_clear_lifecycle(duel_fixture):
     assert claimed.kind is DuelDueKind.EXPIRED
     assert claimed.challenge.next_reminder_at == now + 600
     assert claimed.claimed_reminder_at == expired.next_reminder_at
+    # Redelivery retries are flagged so the settlement is not re-logged as new.
+    assert claimed.is_redelivery is True
     # Claiming the announcement never re-settles the coin transfer.
     assert (
         players.get_balance(1, GUILD_ID),

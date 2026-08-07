@@ -88,3 +88,6 @@ class DuelDueResult:
     remaining_seconds: int = 0
     ping_recipient: bool = False
     claimed_reminder_at: int | None = None
+    # True when an EXPIRED result is a redelivery retry of an announcement
+    # whose settlement already happened (and was already logged) earlier.
+    is_redelivery: bool = False

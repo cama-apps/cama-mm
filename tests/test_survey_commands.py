@@ -610,12 +610,15 @@ async def test_delivery_dispatch_is_bounded_to_five_concurrent_dms():
     service.get_response_session.side_effect = lambda _survey_id, user_id: sessions[user_id]
     active = 0
     peak = 0
+    # Deterministic overlap: sends block on an event instead of a wall-clock
+    # sleep, so the semaphore's bound is observed regardless of machine load.
+    release = asyncio.Event()
 
     async def send(**_kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
-        await asyncio.sleep(0.01)
+        await release.wait()
         active -= 1
         return SimpleNamespace(id=7001, channel=SimpleNamespace(id=6001))
 
@@ -630,7 +633,14 @@ async def test_delivery_dispatch_is_bounded_to_five_concurrent_dms():
     )
     cog = _cog(bot=bot, survey_service=service)
 
-    assert await cog.dispatch_pending() == 8
+    dispatch = asyncio.create_task(cog.dispatch_pending())
+    for _ in range(500):
+        if active == survey_commands._DELIVERY_CONCURRENCY:
+            break
+        await asyncio.sleep(0)
+    assert active == survey_commands._DELIVERY_CONCURRENCY
+    release.set()
+    assert await dispatch == 8
     assert peak == survey_commands._DELIVERY_CONCURRENCY
     assert service.mark_delivery_sent.call_count == 8
     assert service.claim_deliveries.call_args_list == [
@@ -1493,6 +1503,31 @@ async def test_results_view_timeout_edits_via_the_freshest_pagination_token():
     later_click.edit_original_response.assert_awaited_once()
     assert later_click.edit_original_response.await_args.kwargs["view"] is view
     original.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_results_view_failed_click_keeps_the_previous_timeout_token():
+    """A click whose edit fails was never acknowledged: its token cannot
+    perform the on_timeout edit, so the previously tracked one must stay."""
+    pages = [SimpleNamespace(), SimpleNamespace()]
+    original = _interaction(user_id=900)
+    view = survey_commands.SurveyResultsView(
+        owner_id=900,
+        pages=pages,
+        interaction=original,
+    )
+    failing_click = _interaction(user_id=900)
+    failing_click.response.edit_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+
+    with pytest.raises(discord.NotFound):
+        await view.next.callback(failing_click)
+    await view.on_timeout()
+
+    original.edit_original_response.assert_awaited_once()
+    failing_click.edit_original_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
