@@ -896,6 +896,53 @@ async def test_join_notifies_target_watchers_without_channel_metadata(
 
 
 @pytest.mark.asyncio
+async def test_join_cutoff_uses_the_join_results_own_watermark(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """/join must pass the join's joined_at_ns (not a pre-join clock read) as
+    the one-shot subscription claim cutoff, matching the reaction/auto-join
+    paths: a subscription committed while the join was in flight still fires."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.user.display_name = "Player One"
+    notify_subscribers = AsyncMock(return_value=1)
+    bot = FakeBot()
+    bot.reminder_service = SimpleNamespace(
+        notify_lobby_player_subscribers=notify_subscribers
+    )
+    cog = LobbyCommands(bot, lobby_service, player_service)
+
+    sentinel_watermark = 123_456_789
+    real_join = lobby_service.join_lobby
+
+    def stamped_join(*args, **kwargs):
+        success, reason, context = real_join(*args, **kwargs)
+        if success:
+            context.joined_at_ns = sentinel_watermark
+        return success, reason, context
+
+    monkeypatch.setattr(lobby_service, "join_lobby", stamped_join)
+
+    await cog.join.callback(cog, interaction)
+    await _drain_lobby_player_notification_tasks(cog)
+
+    notify_subscribers.assert_awaited_once_with(
+        bot,
+        interaction.user.id,
+        interaction.user.display_name,
+        TEST_GUILD_ID,
+        lobby_kind=LobbyKind.OPEN,
+        join_cutoff_ns=sentinel_watermark,
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_join_notifies_target_watchers_without_channel_metadata():
     """A successful /lobby auto-join uses the same metadata-independent hook."""
     _, lobby_service, player_service, player_repo = make_services()

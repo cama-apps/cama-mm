@@ -207,16 +207,20 @@ class LobbyCommands(commands.Cog):
             return False, False, []
         previous_player_data, previous_reacted = previous_snapshot
         effective_auto_confirm_ids = _get_recent_signup_ids(player_data)
-        effective_auto_confirm_ids.update(auto_confirm_ids or set())
-        effective_auto_confirm_ids.intersection_update(player_data)
         # Never auto re-confirm a player who explicitly withdrew their ✅ for
         # this readycheck; clicking ✅ again is the only way back to ready.
+        # Only the background sweep is filtered: the explicitly passed
+        # auto_confirm_ids (the /readycheck invoker) are a fresh readiness
+        # signal, and add_readycheck_reaction below clears their declined
+        # marker exactly like a manual re-click would.
         declined_ids = await asyncio.to_thread(
             self.lobby_service.get_readycheck_declined,
             guild_id=guild_id,
             lobby_kind=lobby_kind,
         )
         effective_auto_confirm_ids.difference_update(declined_ids)
+        effective_auto_confirm_ids.update(auto_confirm_ids or set())
+        effective_auto_confirm_ids.intersection_update(player_data)
         departed_confirmations = set(previous_reacted) - set(player_data)
         new_unconfirmed_players = (
             set(player_data) - set(previous_player_data) - set(previous_reacted)
@@ -1515,7 +1519,6 @@ class LobbyCommands(commands.Cog):
             return
 
         # Attempt to join (pending match check now inside LobbyService)
-        join_cutoff_ns = time.time_ns()
         success, reason, pending_info = await asyncio.to_thread(
             self.lobby_service.join_lobby,
             interaction.user.id,
@@ -1578,6 +1581,9 @@ class LobbyCommands(commands.Cog):
                 )
             return
 
+        # Cut the one-shot subscription claim at the join's own watermark, so
+        # a subscription committed while this join was in flight still fires.
+        join_cutoff_ns = getattr(pending_info, "joined_at_ns", None) or time.time_ns()
         # Tie the one-shot notification to the successful join result rather
         # than the best-effort lobby refresh/publication that follows.
         self._schedule_lobby_player_notifications(
