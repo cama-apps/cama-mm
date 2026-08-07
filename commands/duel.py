@@ -611,7 +611,23 @@ class DuelCommands(commands.Cog):
 
     async def _get_lifecycle_channels(self, challenge: DuelChallenge) -> list:
         """Resolve unique, same-guild delivery targets in fallback order."""
+        from config import DUEL_CHANNEL_ID
+
         main_channel = self._get_main_channel(challenge.guild_id)
+        if (
+            DUEL_CHANNEL_ID is not None
+            and getattr(main_channel, "id", None) != DUEL_CHANNEL_ID
+            and self.bot.get_channel(DUEL_CHANNEL_ID) is None
+        ):
+            # Archived threads are evicted from the gateway cache, so the
+            # sync resolution above cannot see a configured thread once it
+            # auto-archives. A fetch still retrieves it; foreign or deleted
+            # ids fail the same-guild/sendability gate below.
+            fetched = await self._get_channel(DUEL_CHANNEL_ID)
+            if fetched is not None and self._can_send_reminder(
+                fetched, challenge.guild_id
+            ):
+                main_channel = fetched
         origin_channel = await self._get_channel(challenge.channel_id)
         channels = []
         channel_ids = set()
@@ -656,8 +672,11 @@ class DuelCommands(commands.Cog):
                     DUEL_CHANNEL_ID,
                 )
             else:
-                logger.warning(
-                    "Configured duel channel unavailable; guild=%s channel=%s",
+                # Not in cache: an auto-archived thread, or deleted. The
+                # async lifecycle resolution attempts a fetch rescue, so a
+                # per-resolution warning here would just be noise.
+                logger.debug(
+                    "Configured duel channel not in cache; guild=%s channel=%s",
                     guild_id,
                     DUEL_CHANNEL_ID,
                 )

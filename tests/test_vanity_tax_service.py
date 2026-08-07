@@ -303,6 +303,28 @@ def test_begin_refresh_lets_the_fresh_snapshot_repair_missed_events():
     assert service.taxable_ids(GUILD_ID) == frozenset()
 
 
+def test_superseded_refresh_generation_does_not_clobber_the_newer_store():
+    """When resyncs overlap, the older snapshot's store must be dropped: it
+    would otherwise consume the journal and overwrite the newer state."""
+    service = VanityTaxService()
+    gen1 = service.begin_refresh(GUILD_ID)
+    # A second resync begins while the first is still off-loop...
+    gen2 = service.begin_refresh(GUILD_ID)
+    # ...and a member event lands after the second snapshot was taken.
+    service.update_member(GUILD_ID, 1, "Real Name")
+
+    # The stale worker finishes first: its store is discarded and the
+    # journal survives for the current generation.
+    service.refresh_guild(GUILD_ID, [_member(1, None)], generation=gen1)
+    assert service.taxable_ids(GUILD_ID) == frozenset()
+
+    # The current worker stores its (pre-event) snapshot: the journaled
+    # event is re-applied on top, so the nickname still exempts member 1.
+    service.refresh_guild(GUILD_ID, [_member(1, None)], generation=gen2)
+    assert service.eligibility_status(GUILD_ID, 1) == "nickname_exemption"
+    assert service.taxable_ids(GUILD_ID) == frozenset()
+
+
 def test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])

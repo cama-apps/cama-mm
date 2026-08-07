@@ -190,10 +190,42 @@ async def test_pingedash_cooldown_response_is_private(monkeypatch):
 
     await commands._handle_pingedash(interaction)
 
-    kwargs = interaction.followup.send.call_args.kwargs
+    # No defer happened, so the direct response is genuinely ephemeral — the
+    # first followup after a public defer would ignore ephemeral=True.
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
     assert kwargs["ephemeral"] is True
-    assert f"<t:{cooldown_ends_at}:R>" in kwargs["content"]
-    assert PINGEDASH_TENOR_URL not in kwargs["content"]
+    assert f"<t:{cooldown_ends_at}:R>" in args[0]
+    assert PINGEDASH_TENOR_URL not in args[0]
+
+
+@pytest.mark.asyncio
+async def test_pingedash_failure_notice_tolerates_lapsed_interaction(monkeypatch):
+    """The debit can outlast the 3s ack window under DB contention; a lapsed
+    token must not crash the handler — the refused purchase needs no rollback."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.try_purchase_pingedash.return_value = {
+        "success": False,
+        "reason": "insufficient_balance",
+        "balance": 5,
+        "cooldown_ends_at": None,
+    }
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    interaction.response.send_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+    monkeypatch.setattr("commands.shop.PINGEDASH_TARGET_USER_ID", 123456789012345678)
+
+    await commands._handle_pingedash(interaction)
+
+    player_service.try_purchase_pingedash.assert_called_once()
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -274,10 +306,15 @@ async def test_pingedkevin_cooldown_response_is_private(monkeypatch):
 
     await commands._handle_pingedkevin(interaction)
 
-    kwargs = interaction.followup.send.call_args.kwargs
+    # No defer happened, so the direct response is genuinely ephemeral — the
+    # first followup after a public defer would ignore ephemeral=True.
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
     assert kwargs["ephemeral"] is True
-    assert f"<t:{cooldown_ends_at}:R>" in kwargs["content"]
-    assert PINGEDKEVIN_TENOR_URL not in kwargs["content"]
+    assert f"<t:{cooldown_ends_at}:R>" in args[0]
+    assert PINGEDKEVIN_TENOR_URL not in args[0]
 
 
 def test_pingedash_purchase_debits_once_per_cooldown(player_repository):
@@ -611,6 +648,69 @@ async def test_handle_jopa_coin_success_deducts_balance():
     interaction.followup.send.assert_awaited()
     embed = interaction.followup.send.call_args.kwargs["embed"]
     assert "Jopa Coin" in embed.title
+
+
+@pytest.mark.asyncio
+async def test_handle_jopa_coin_aborts_when_balance_vanishes_before_the_debit(monkeypatch):
+    """Funds gone between the balance read and the debit: no mint, no overdraft.
+
+    The shortfall notice must go out via interaction.response BEFORE the public
+    defer — the first followup after a public defer ignores ephemeral=True, so
+    a followup here would broadcast the user's balance shortfall publicly.
+    """
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    # Check passes...
+    player_service.get_balance.return_value = SHOP_JOPA_COIN_COST + 100
+    # ...but the funds are gone by the time the debit runs.
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await commands._handle_jopa_coin(interaction)
+
+    player_service.try_spend.assert_called_once()
+    player_service.adjust_balance.assert_not_called()
+    # No defer happened, so the direct response is genuinely ephemeral.
+    safe_defer.assert_not_awaited()
+    followup.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "no longer have" in args[0]
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_jopa_coin_shortfall_tolerates_lapsed_interaction(monkeypatch):
+    """The debit can outlast the 3s ack window under DB contention; a lapsed
+    token must not crash the handler — the refused spend needs no rollback."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    player_service.get_balance.return_value = SHOP_JOPA_COIN_COST + 100
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+    interaction.response.send_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await commands._handle_jopa_coin(interaction)
+
+    player_service.adjust_balance.assert_not_called()
+    followup.assert_not_awaited()
 
 
 # --- Soft Avoid / Package Deal ---
@@ -1187,6 +1287,69 @@ async def test_handle_mystery_gift_success_deducts_20k():
     interaction.followup.send.assert_awaited()
     embed = interaction.followup.send.call_args.kwargs["embed"]
     assert "Mystery Gift" in embed.title
+
+
+@pytest.mark.asyncio
+async def test_handle_mystery_gift_aborts_when_balance_vanishes_before_the_debit(monkeypatch):
+    """Funds gone between the balance read and the debit: no gift, no overdraft.
+
+    The shortfall notice must go out via interaction.response BEFORE the public
+    defer — the first followup after a public defer ignores ephemeral=True, so
+    a followup here would broadcast the user's balance shortfall publicly.
+    """
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    # Check passes...
+    player_service.get_balance.return_value = SHOP_NEW_MYSTERY_GIFT_COST + 100
+    # ...but the funds are gone by the time the debit runs.
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await commands._handle_mystery_gift(interaction)
+
+    player_service.try_spend.assert_called_once()
+    player_service.adjust_balance.assert_not_called()
+    # No defer happened, so the direct response is genuinely ephemeral.
+    safe_defer.assert_not_awaited()
+    followup.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "no longer have" in args[0]
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_mystery_gift_shortfall_tolerates_lapsed_interaction(monkeypatch):
+    """The debit can outlast the 3s ack window under DB contention; a lapsed
+    token must not crash the handler — the refused spend needs no rollback."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    player_service.get_balance.return_value = SHOP_NEW_MYSTERY_GIFT_COST + 100
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+    interaction.response.send_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await commands._handle_mystery_gift(interaction)
+
+    player_service.adjust_balance.assert_not_called()
+    followup.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2271,6 +2434,10 @@ async def test_handle_announce_aborts_when_balance_vanishes_before_the_debit(mon
     The balance read is only a friendly fast path — the shop rate limit allows
     3 actions per 60s, so two purchases could both pass it and overdraft. The
     conditional debit is the authoritative gate.
+
+    The shortfall notice must go out via interaction.response BEFORE the public
+    defer — the first followup after a public defer ignores ephemeral=True, so
+    a followup here would broadcast the user's balance shortfall publicly.
     """
     bot = MagicMock()
     player_service = MagicMock()
@@ -2289,12 +2456,47 @@ async def test_handle_announce_aborts_when_balance_vanishes_before_the_debit(mon
     monkeypatch.setattr("commands.shop.random.choice", lambda _items: "Test message")
     monkeypatch.setattr("commands.shop.get_hero_color", lambda _hero_id: None)
     monkeypatch.setattr("commands.shop.get_hero_image_url", lambda _hero_id: None)
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
 
     await commands._handle_announce(interaction, target=target)
 
     player_service.try_spend.assert_called_once()
     player_service.adjust_balance.assert_not_called()
-    # No announcement embed — the purchase did not go through.
-    kwargs = interaction.followup.send.call_args.kwargs
-    assert kwargs.get("embed") is None
-    assert "no longer have" in kwargs.get("content", "")
+    # No defer happened, so the direct response is genuinely ephemeral.
+    safe_defer.assert_not_awaited()
+    followup.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "no longer have" in args[0]
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_announce_shortfall_tolerates_lapsed_interaction(monkeypatch):
+    """The debit can outlast the 3s ack window under DB contention; a lapsed
+    token must not crash the handler — the refused spend needs no rollback."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(
+        wins=10, losses=5, jopacoin_balance=500, glicko_rating=1500.0
+    )
+    player_service.get_balance.return_value = SHOP_ANNOUNCE_COST + 10
+    player_service.try_spend.return_value = False
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction()
+    interaction.response.send_message.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"message": "Unknown interaction"},
+    )
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await commands._handle_announce(interaction, target=None)
+
+    player_service.adjust_balance.assert_not_called()
+    followup.assert_not_awaited()

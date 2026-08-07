@@ -174,12 +174,47 @@ def test_join_rolls_back_when_suspension_lands_during_the_join():
 
     assert result == "lobby_suspended"
     assert result.suspension is moderation.suspensions[(10, 99, "all")]
-    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
-    assert lobby is not None and 10 not in lobby.players
-    # The rollback is persisted, not just in-memory.
-    assert all(10 not in row["players"] for row in repo.load_all_lobby_states())
+    # The join also auto-created the lobby, so the rollback drops the empty
+    # shell entirely — nobody legitimately opened it — and persists nothing.
+    assert manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN) is None
+    assert repo.load_all_lobby_states() == []
     # Both moderation reads ran: the pre-join gate and the post-add re-check.
     assert len(moderation.calls) == 2
+
+
+def test_join_rollback_preserves_a_lobby_others_already_occupy():
+    """Rolling back a racing join must only undo the join itself: an existing
+    lobby with other members stays, persisted without the suspended player."""
+
+    class RacingModerationService(FakeModerationService):
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            result = super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+            if discord_id == 10 and result is None and not self.suspensions:
+                self.suspend(discord_id, guild_id, "all")
+            return result
+
+    moderation = RacingModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+    assert manager.join_lobby(11, guild_id=99) == "ok"
+
+    result = manager.join_lobby(10, guild_id=99)
+
+    assert result == "lobby_suspended"
+    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    assert lobby is not None
+    assert 11 in lobby.players and 10 not in lobby.players
+    assert all(10 not in row["players"] for row in repo.load_all_lobby_states())
+    assert any(11 in row["players"] for row in repo.load_all_lobby_states())
 
 
 def test_join_rollback_leaves_reserved_player_seated():

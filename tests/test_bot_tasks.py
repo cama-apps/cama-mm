@@ -580,22 +580,23 @@ async def test_on_ready_retains_supervised_duel_and_first_game_pool_workers(bot_
 def test_refresh_vanity_tax_memberships_uses_current_guild_members(bot_module):
     service = MagicMock()
     snapshot = [
-        (42, [SimpleNamespace(id=7, nick=None)]),
-        (84, [SimpleNamespace(id=8, nick="Real Name")]),
+        (42, [SimpleNamespace(id=7, nick=None)], 1),
+        (84, [SimpleNamespace(id=8, nick="Real Name")], 5),
     ]
 
     with patch.object(bot_module.bot, "vanity_tax_service", service, create=True):
         bot_module._refresh_vanity_tax_memberships(snapshot)
 
     assert service.refresh_guild.call_args_list == [
-        call(42, snapshot[0][1]),
-        call(84, snapshot[1][1]),
+        call(42, snapshot[0][1], generation=1),
+        call(84, snapshot[1][1], generation=5),
     ]
 
 
 async def test_refresh_vanity_tax_memberships_runs_off_the_event_loop(bot_module):
     """on_ready's refresh does blocking SQLite reads, so it must go via to_thread."""
     service = MagicMock()
+    service.begin_refresh.side_effect = [3, 4]
     guilds = [
         SimpleNamespace(id=42, members=[SimpleNamespace(id=7, nick=None)]),
         SimpleNamespace(id=84, members=[SimpleNamespace(id=8, nick="Real Name")]),
@@ -616,10 +617,12 @@ async def test_refresh_vanity_tax_memberships_runs_off_the_event_loop(bot_module
     to_thread.assert_awaited_once_with(
         bot_module._refresh_vanity_tax_memberships,
         [
-            (42, guilds[0].members),
-            (84, guilds[1].members),
+            (42, guilds[0].members, 3),
+            (84, guilds[1].members, 4),
         ],
     )
+    # Snapshot authority (journal clear + generation) marked per guild.
+    assert service.begin_refresh.call_args_list == [call(42), call(84)]
     # The blocking refresh itself never ran on the loop.
     service.refresh_guild.assert_not_called()
 

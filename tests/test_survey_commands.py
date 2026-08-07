@@ -613,11 +613,14 @@ async def test_delivery_dispatch_is_bounded_to_five_concurrent_dms():
     # Deterministic overlap: sends block on an event instead of a wall-clock
     # sleep, so the semaphore's bound is observed regardless of machine load.
     release = asyncio.Event()
+    bound_reached = asyncio.Event()
 
     async def send(**_kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
+        if active == survey_commands._DELIVERY_CONCURRENCY:
+            bound_reached.set()
         await release.wait()
         active -= 1
         return SimpleNamespace(id=7001, channel=SimpleNamespace(id=6001))
@@ -634,10 +637,10 @@ async def test_delivery_dispatch_is_bounded_to_five_concurrent_dms():
     cog = _cog(bot=bot, survey_service=service)
 
     dispatch = asyncio.create_task(cog.dispatch_pending())
-    for _ in range(500):
-        if active == survey_commands._DELIVERY_CONCURRENCY:
-            break
-        await asyncio.sleep(0)
+    # Wait on the condition itself (bounded only as a hang backstop): the
+    # dispatcher needs real thread-pool hops before five sends are in flight,
+    # so an iteration-count spin would race machine load.
+    await asyncio.wait_for(bound_reached.wait(), timeout=10)
     assert active == survey_commands._DELIVERY_CONCURRENCY
     release.set()
     assert await dispatch == 8
@@ -1506,9 +1509,10 @@ async def test_results_view_timeout_edits_via_the_freshest_pagination_token():
 
 
 @pytest.mark.asyncio
-async def test_results_view_failed_click_keeps_the_previous_timeout_token():
-    """A click whose edit fails was never acknowledged: its token cannot
-    perform the on_timeout edit, so the previously tracked one must stay."""
+async def test_results_view_failed_click_retires_via_the_previous_token():
+    """A click whose edit fails was never acknowledged, yet it still pushed
+    the view timeout past the kept token's 15m lifetime — so the view must
+    retire immediately through the token that still works."""
     pages = [SimpleNamespace(), SimpleNamespace()]
     original = _interaction(user_id=900)
     view = survey_commands.SurveyResultsView(
@@ -1524,10 +1528,11 @@ async def test_results_view_failed_click_keeps_the_previous_timeout_token():
 
     with pytest.raises(discord.NotFound):
         await view.next.callback(failing_click)
-    await view.on_timeout()
 
     original.edit_original_response.assert_awaited_once()
     failing_click.edit_original_response.assert_not_awaited()
+    assert view.is_finished()
+    assert all(child.disabled for child in view.children)
 
 
 @pytest.mark.asyncio

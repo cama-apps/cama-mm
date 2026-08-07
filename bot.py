@@ -1384,7 +1384,7 @@ def _log_command_registration(stage: str):
 
 
 def _refresh_vanity_tax_memberships(
-    guild_members: list[tuple[int, list]],
+    guild_members: list[tuple[int, list, int]],
 ) -> None:
     """Rebuild nickname eligibility from a snapshot of the member cache.
 
@@ -1394,22 +1394,25 @@ def _refresh_vanity_tax_memberships(
     service = getattr(bot, "vanity_tax_service", None)
     if service is None:
         return
-    for guild_id, members in guild_members:
-        service.refresh_guild(guild_id, members)
+    for guild_id, members, generation in guild_members:
+        service.refresh_guild(guild_id, members, generation=generation)
 
 
 async def _refresh_vanity_tax_memberships_async() -> None:
     """Snapshot guild members on the loop, then refresh off-loop."""
     service = getattr(bot, "vanity_tax_service", None)
+    if service is None:
+        return
     snapshot = []
     for guild in bot.guilds:
         # The journal's authority starts at this snapshot: clear older
         # entries (same synchronous block as the member-list copy, so no
         # event can land between) or the store would re-apply pre-outage
         # state over the fresh member list on the on_ready resync path.
-        if service is not None:
-            service.begin_refresh(guild.id)
-        snapshot.append((guild.id, list(guild.members)))
+        # The generation lets an overlapping resync supersede this one —
+        # a store from an older snapshot is dropped instead of clobbering.
+        generation = service.begin_refresh(guild.id)
+        snapshot.append((guild.id, list(guild.members), generation))
     await asyncio.to_thread(_refresh_vanity_tax_memberships, snapshot)
 
 

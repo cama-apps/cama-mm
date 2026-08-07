@@ -460,8 +460,6 @@ class LobbyManagerService:
             else:
                 result = "already_joined"
             persist = created or result == "ok"
-        if persist:
-            self._persist_lobby(normalized, target_kind)
         if result == "ok":
             # Close the TOCTOU window left by the unlocked moderation gate: a
             # suspension committed between the read above and the locked add
@@ -469,14 +467,16 @@ class LobbyManagerService:
             # this read sees no suspension, the suspension commit happened
             # after it — and the suspend flow's post-commit membership read
             # (under _state_lock) then sees this member and evicts. Either
-            # way one side observes the other.
+            # way one side observes the other. The re-read runs BEFORE the
+            # membership row is ever persisted, so a rolled-back join leaves
+            # no durable trace.
             suspension = self._get_active_suspension(
                 discord_id,
                 normalized,
                 target_kind,
             )
             if suspension is not None:
-                removed = False
+                rolled_back = False
                 with self._state_lock:
                     # A player already reserved by an in-flight shuffle/draft
                     # keeps their seat: a suspension racing a reservation lets
@@ -484,15 +484,24 @@ class LobbyManagerService:
                     # policy as leave_lobby and the admin suspend eviction).
                     if (
                         self._in_flight_player_kinds.get((normalized, discord_id))
-                        is not None
+                        is None
                     ):
-                        return result
-                    lobby = self.lobbies.get((normalized, target_kind))
-                    if lobby is not None:
-                        removed = lobby.remove_player(discord_id)
-                if removed:
-                    self._persist_lobby(normalized, target_kind)
-                return LobbyJoinResult("lobby_suspended", suspension)
+                        rolled_back = True
+                        lobby = self.lobbies.get((normalized, target_kind))
+                        if lobby is not None:
+                            lobby.remove_player(discord_id)
+                            if created and lobby.get_total_count() == 0:
+                                # The rolled-back join was also this lobby's
+                                # creation: drop the empty shell instead of
+                                # leaving a lobby no one opened.
+                                self.lobbies.pop((normalized, target_kind), None)
+                                persist = False
+                if rolled_back:
+                    if persist:
+                        self._persist_lobby(normalized, target_kind)
+                    return LobbyJoinResult("lobby_suspended", suspension)
+        if persist:
+            self._persist_lobby(normalized, target_kind)
         return result
 
     def _join_conflict_locked(
