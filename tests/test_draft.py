@@ -2723,6 +2723,46 @@ class TestDraftCaptainPingCleanup:
         )
         assert cog.draft_state_manager.get_state(guild_id) is state
 
+    async def test_restart_does_not_clear_a_previous_drafts_pending_match(self):
+        """A restarting draft never owns a pending match, so it must not clear one.
+
+        ``_complete_draft`` always clears the draft state in its ``finally``, so a
+        draft-created pending match found here belongs to an earlier completed
+        draft whose match is in play with live bets. Clearing without an id wipes
+        every pending match in the guild.
+        """
+        guild_id = 123
+        captain_id = 456
+        origin_channel = _FakeChannel(channel_id=777_020)
+        ping_message = await origin_channel.send(f"<@{captain_id}> Draft starting!")
+        bot = SimpleNamespace(
+            get_channel=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            )
+        )
+        cog = self._make_cog(bot)
+        cog.match_service = MagicMock()
+        cog.match_service.get_last_shuffle.return_value = SimpleNamespace(
+            is_draft=True, pending_match_id=4242
+        )
+
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.captain1_id = captain_id
+        state.captain2_id = captain_id + 1
+        state.draft_channel_id = origin_channel.id
+        state.captain_ping_message_id = ping_message.id
+        interaction = SimpleNamespace(
+            guild=_FakeGuild(guild_id),
+            user=SimpleNamespace(id=captain_id, display_name="Captain"),
+            channel=_FakeChannel(channel_id=777_021),
+            response=AsyncMock(),
+        )
+
+        await cog.restartdraft.callback(cog, interaction)
+
+        cog.match_service.clear_last_shuffle.assert_not_called()
+        assert cog.draft_state_manager.get_state(guild_id) is None
+
     async def test_timeout_deletes_ping_from_persisted_draft_channel(self):
         guild_id = 123
         origin_channel = _FakeChannel(channel_id=777_012)
