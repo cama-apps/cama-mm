@@ -470,32 +470,67 @@ class LobbyManagerService:
             # way one side observes the other. The re-read runs BEFORE the
             # membership row is ever persisted, so a rolled-back join leaves
             # no durable trace.
-            suspension = self._get_active_suspension(
-                discord_id,
-                normalized,
-                target_kind,
-            )
+            try:
+                suspension = self._get_active_suspension(
+                    discord_id,
+                    normalized,
+                    target_kind,
+                )
+            except Exception:
+                # The re-read is best-effort hardening: a lookup failure must
+                # not strand a half-applied join (the player is already added
+                # in memory). Proceed as if no suspension was found — the
+                # admin suspend flow's post-commit eviction covers a real
+                # race.
+                logging.getLogger("cama_bot.services.lobby_manager").exception(
+                    "Post-join suspension re-check failed; keeping the join"
+                )
+                suspension = None
             if suspension is not None:
                 rolled_back = False
-                with self._state_lock:
-                    # A player already reserved by an in-flight shuffle/draft
-                    # keeps their seat: a suspension racing a reservation lets
-                    # the starting match proceed with membership intact (same
-                    # policy as leave_lobby and the admin suspend eviction).
-                    if (
-                        self._in_flight_player_kinds.get((normalized, discord_id))
-                        is None
-                    ):
-                        rolled_back = True
-                        lobby = self.lobbies.get((normalized, target_kind))
-                        if lobby is not None:
-                            lobby.remove_player(discord_id)
-                            if created and lobby.get_total_count() == 0:
-                                # The rolled-back join was also this lobby's
-                                # creation: drop the empty shell instead of
-                                # leaving a lobby no one opened.
+                drop_shell = False
+                with self._persist_lock:
+                    with self._state_lock:
+                        # A player already reserved by an in-flight
+                        # shuffle/draft keeps their seat: a suspension racing
+                        # a reservation lets the starting match proceed with
+                        # membership intact (same policy as leave_lobby and
+                        # the admin suspend eviction).
+                        if (
+                            self._in_flight_player_kinds.get(
+                                (normalized, discord_id)
+                            )
+                            is None
+                        ):
+                            rolled_back = True
+                            current = self.lobbies.get((normalized, target_kind))
+                            if current is not None:
+                                current.remove_player(discord_id)
+                                drop_shell = (
+                                    created
+                                    and current is lobby
+                                    and current.get_total_count() == 0
+                                )
+                    if drop_shell:
+                        # The rolled-back join was also this lobby's creation:
+                        # drop the empty shell. Mirror reset_lobby — delete
+                        # the row while holding _persist_lock (a racing
+                        # persist that already wrote the shell cannot write
+                        # it back), then re-verify under the state lock that
+                        # the shell is still ours and still empty before
+                        # popping it from memory.
+                        self._clear_persistent_lobby(normalized, target_kind)
+                        with self._state_lock:
+                            if (
+                                self.lobbies.get((normalized, target_kind))
+                                is lobby
+                                and lobby.get_total_count() == 0
+                            ):
                                 self.lobbies.pop((normalized, target_kind), None)
                                 persist = False
+                            # else: another join occupied the shell while the
+                            # row was being deleted — keep it, and let the
+                            # persist below rewrite the deleted row.
                 if rolled_back:
                     if persist:
                         self._persist_lobby(normalized, target_kind)
