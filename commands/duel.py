@@ -573,8 +573,25 @@ class DuelCommands(commands.Cog):
         try:
             delivered = await self.deliver_due_result(result)
         finally:
-            if result.kind is not DuelDueKind.EXPIRED and not delivered:
-                await asyncio.to_thread(self.duel_service.rearm_reminder, result)
+            if not delivered:
+                if result.kind is DuelDueKind.EXPIRED:
+                    expired = result.challenge
+                    logger.error(
+                        "Duel expiry settled but its announcement was not "
+                        "delivered: challenge=%s guild=%s challenger=%s was "
+                        "refunded the %s JC escrow and received the %s JC "
+                        "penalty debited from recipient=%s",
+                        expired.challenge_id,
+                        expired.guild_id,
+                        expired.challenger_id,
+                        expired.wager,
+                        expired.decline_penalty,
+                        expired.recipient_id,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self.duel_service.rearm_reminder, result
+                    )
 
     async def _get_lifecycle_channels(self, challenge: DuelChallenge) -> list:
         """Resolve unique, same-guild delivery targets in fallback order."""
@@ -584,12 +601,10 @@ class DuelCommands(commands.Cog):
         channel_ids = set()
         for channel in (main_channel, origin_channel):
             channel_id = getattr(channel, "id", None)
-            channel_guild = getattr(channel, "guild", None)
             if (
                 channel is None
                 or channel_id in channel_ids
-                or channel_guild is None
-                or channel_guild.id != challenge.guild_id
+                or not self._can_send_reminder(channel, challenge.guild_id)
             ):
                 continue
             channels.append(channel)
@@ -608,6 +623,11 @@ class DuelCommands(commands.Cog):
             if isinstance(channel, discord.TextChannel)
             and MAIN_CHANNEL_NAME in channel.name
         ]
+        exact = [
+            channel for channel in matches if channel.name == MAIN_CHANNEL_NAME
+        ]
+        if len(exact) == 1:
+            matches = exact
         if len(matches) != 1:
             logger.warning(
                 "Expected one #%s text channel; guild=%s matches=%s",
@@ -629,12 +649,15 @@ class DuelCommands(commands.Cog):
 
     @staticmethod
     def _can_send_reminder(channel, guild_id: int) -> bool:
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return False
         guild = channel.guild
         if guild.id != guild_id or guild.me is None:
             return False
-        return channel.permissions_for(guild.me).send_messages
+        permissions = channel.permissions_for(guild.me)
+        if isinstance(channel, discord.Thread):
+            return permissions.send_messages_in_threads
+        return permissions.send_messages
 
     def build_challenge_embed(
         self,

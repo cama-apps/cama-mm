@@ -15,6 +15,7 @@ from domain.pet_evolution import PetActivity
 RESPONSE_SECONDS = 7 * 86400
 CHALLENGER_COOLDOWN_SECONDS = 30 * 86400
 RECIPIENT_COOLDOWN_SECONDS = 7 * 86400
+REMINDER_RETRY_BACKOFF_SECONDS = 600
 
 
 class DuelService:
@@ -164,10 +165,18 @@ class DuelService:
             or result.challenge.next_reminder_at is None
         ):
             return False
+        # Retry after a backoff rather than at the original (past) claim
+        # time, so a failing delivery target cannot hot-loop a claim and
+        # flavor-generation cycle on every worker wake. Never retry later
+        # than the regularly scheduled next reminder.
+        retry_at = min(
+            result.challenge.next_reminder_at,
+            int(self._clock()) + REMINDER_RETRY_BACKOFF_SECONDS,
+        )
         return self.repo.rearm_reminder_atomic(
             result.challenge.challenge_id,
             result.challenge.guild_id,
             expected_status,
             result.challenge.next_reminder_at,
-            result.claimed_reminder_at,
+            retry_at,
         )
