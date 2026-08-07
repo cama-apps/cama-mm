@@ -403,6 +403,113 @@ def test_settlement_recovers_first_game_claim_when_seed_state_never_persisted(
     assert economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"] == stock_before
 
 
+def test_regular_seed_persist_failure_cannot_strand_or_double_deduct(services):
+    """The regular seed must get the same durable treatment as the first-game
+    claim: the deduction and the payload record commit together, so a persist
+    failure cannot strand coins and a reloaded-state retry cannot deduct twice.
+    """
+    loan_repo = services["loan_repo"]
+    match_repo = services["match_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+    pending = PendingMatchState(
+        shuffle_timestamp=int(time.time()),
+        betting_mode="pool",
+        lobby_kind="open",
+    )
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    with (
+        patch("utils.game_date.get_game_date", return_value="2026-08-05"),
+        patch.object(
+            match_service.state_service,
+            "persist_state",
+            side_effect=RuntimeError("simulated persistence failure"),
+        ),
+        pytest.raises(RuntimeError, match="simulated persistence failure"),
+    ):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, pending)
+
+    # 300 - 200 daily funding - 50 regular seed: the deduction is recorded on
+    # the pending match even though persist_state failed.
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 50
+    payload = match_repo.get_pending_match_by_id(
+        pending.pending_match_id,
+        TEST_GUILD_ID,
+    )
+    reloaded = PendingMatchState.from_dict(payload)
+    assert reloaded.bet_seed_reserved == 150
+    assert reloaded.first_game_pool_reserved == 100
+    assert reloaded.bet_seed_radiant == 75
+    assert reloaded.bet_seed_dire == 75
+
+    # Retrying on the reloaded state must not deduct the fund a second time.
+    with patch("utils.game_date.get_game_date", return_value="2026-08-05"):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, reloaded)
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 50
+    assert reloaded.bet_seed_reserved == 150
+
+    # Abort reconciles the full reservation: regular seed back to the fund,
+    # first-game claim back to the open pool.
+    betting_service.refund_pending_bets(TEST_GUILD_ID, reloaded)
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 100
+    assert loan_repo.get_first_game_pool_balances(TEST_GUILD_ID) == {
+        "open": 100,
+        "lowskill": 100,
+    }
+
+
+def test_settlement_recovers_regular_seed_when_seed_state_never_persisted(
+    services,
+    repo_db_path,
+):
+    """A house-mode regular seed whose persist_state failed must still flow
+    back through settlement instead of being destroyed."""
+    loan_repo = services["loan_repo"]
+    match_repo = services["match_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    economy_repo = EconomyEventRepository(repo_db_path)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 60)
+    stock_before = economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"]
+    pending = PendingMatchState(
+        shuffle_timestamp=int(time.time()),
+        betting_mode="house",
+        lobby_kind="open",
+    )
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    with (
+        patch.object(
+            match_service.state_service,
+            "persist_state",
+            side_effect=RuntimeError("simulated persistence failure"),
+        ),
+        pytest.raises(RuntimeError, match="simulated persistence failure"),
+    ):
+        match_service.reserve_betting_seed(TEST_GUILD_ID, pending)
+
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 10
+    payload = match_repo.get_pending_match_by_id(
+        pending.pending_match_id,
+        TEST_GUILD_ID,
+    )
+    reloaded = PendingMatchState.from_dict(payload)
+    assert reloaded.bet_seed_reserved == 50
+    assert reloaded.bet_seed_bonus == 50
+
+    betting_service.settle_bets(
+        match_id=9004,
+        guild_id=TEST_GUILD_ID,
+        winning_team="radiant",
+        pending_state=reloaded,
+    )
+
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 60
+    assert economy_repo.capture_balance_sheet(TEST_GUILD_ID)["monetary_stock"] == stock_before
+
+
 def test_pool_shuffle_consumes_entire_queued_next_match_pot(services):
     player_repo = services["player_repo"]
     loan_repo = services["loan_repo"]

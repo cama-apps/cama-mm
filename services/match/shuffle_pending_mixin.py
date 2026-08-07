@@ -114,6 +114,10 @@ class ShufflePendingMixin:
         loan_service = getattr(self, "loan_service", None)
         if loan_service is None:
             return state
+        if state.pending_match_id is None:
+            # The durable reservation is keyed by pending_match_id; make sure
+            # the row exists before any coins move.
+            self.state_service.persist_state(guild_id, state)
 
         first_game_reserved = 0
         if (
@@ -137,35 +141,26 @@ class ShufflePendingMixin:
                 state.pending_match_id,
             )
 
-        regular_reserved = loan_service.consume_next_match_pot(guild_id)
-        queued_for_next_match = regular_reserved > 0
-        if not queued_for_next_match and DOTA_BET_SEED_AMOUNT > 0:
-            regular_reserved = loan_service.deduct_up_to_nonprofit_fund(
-                guild_id,
-                DOTA_BET_SEED_AMOUNT,
-                source="dota_bet_seed",
-                related_type="pending_match",
-                related_id=state.pending_match_id,
-                reason="reserve-backed Dota betting seed",
-                metadata={"betting_mode": state.betting_mode},
-            )
-        reserved = regular_reserved + first_game_reserved
-        if reserved <= 0:
+        # One transaction takes the queued pot / reserve seed AND records the
+        # reservation on the pending match payload, so a crash or persist
+        # failure cannot strand the coins and a retry cannot deduct twice
+        # (mirrors the durable first-game claim above). Seed routing by
+        # betting mode lives in repositories.bet_repository.split_bet_seed.
+        seed_fields = loan_service.loan_repo.reserve_bet_seed_atomic(
+            guild_id,
+            state.pending_match_id,
+            DOTA_BET_SEED_AMOUNT,
+            first_game_reserved=first_game_reserved,
+            betting_mode=state.betting_mode,
+        )
+        if seed_fields["bet_seed_reserved"] <= 0:
             return state
 
-        state.bet_seed_reserved = reserved
-        state.first_game_pool_reserved = first_game_reserved
-        # Route by betting mode: house settlement only pays the bonus field, so
-        # a queued pot split radiant/dire on a house match would be consumed
-        # without ever being paid out or returned.
-        if state.betting_mode == "pool":
-            state.bet_seed_radiant = (reserved + 1) // 2
-            state.bet_seed_dire = reserved // 2
-            state.bet_seed_bonus = 0
-        else:
-            state.bet_seed_radiant = 0
-            state.bet_seed_dire = 0
-            state.bet_seed_bonus = reserved
+        state.bet_seed_reserved = seed_fields["bet_seed_reserved"]
+        state.first_game_pool_reserved = seed_fields["first_game_pool_reserved"]
+        state.bet_seed_radiant = seed_fields["bet_seed_radiant"]
+        state.bet_seed_dire = seed_fields["bet_seed_dire"]
+        state.bet_seed_bonus = seed_fields["bet_seed_bonus"]
         self.state_service.persist_state(guild_id, state)
         return state
 
@@ -384,6 +379,15 @@ class ShufflePendingMixin:
             deals,
             low_priority_ids=low_priority_ids,
         )
+        # Split penalty (one deal member selected, one excluded) — the pool
+        # shuffler charges this when picking the sit-out list; mirror it so the
+        # displayed goodness matches the optimized objective.
+        deal_split_penalty = shuffler._calculate_package_deal_split_penalty(
+            radiant_ids_set | dire_ids_set,
+            set(excluded_ids),
+            deals,
+            low_priority_ids=low_priority_ids,
+        )
         low_priority_penalty = shuffler.calculate_low_priority_penalty(
             radiant_ids_set | dire_ids_set,
             low_priority_ids,
@@ -409,6 +413,10 @@ class ShufflePendingMixin:
             lobby_wait_minutes,
         )
 
+        # Note: the shuffler's rd_priority bonus (a selection bias toward
+        # high-uncertainty players, subtracted from every candidate's score)
+        # is deliberately not mirrored here; the displayed goodness covers the
+        # matchup-quality terms only.
         goodness_score = (
             value_diff
             + off_role_penalty
@@ -417,6 +425,7 @@ class ShufflePendingMixin:
             + recent_match_penalty
             + soft_avoid_penalty
             + package_deal_penalty
+            + deal_split_penalty
             + low_priority_penalty
             + region_split_penalty
             + rating_spread_penalty

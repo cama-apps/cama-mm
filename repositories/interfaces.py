@@ -1639,6 +1639,19 @@ class ILoanRepository(ABC):
     def consume_next_match_pot(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
+    def reserve_bet_seed_atomic(
+        self,
+        guild_id: int | None,
+        pending_match_id: int,
+        max_seed_amount: int,
+        *,
+        first_game_reserved: int = 0,
+        betting_mode: str = "pool",
+    ) -> dict[str, int]:
+        """Deduct the seed and record it on the pending match in one transaction."""
+        ...
+
+    @abstractmethod
     def get_first_game_pool_balances(self, guild_id: int | None) -> dict[str, int]: ...
 
     @abstractmethod
@@ -2679,9 +2692,6 @@ class ISurveyRepository(ABC):
     def get_response_session(self, survey_id: int, discord_id: int): ...
 
     @abstractmethod
-    def list_active_response_sessions(self) -> list: ...
-
-    @abstractmethod
     def list_recoverable_response_sessions(self) -> list: ...
 
     @abstractmethod
@@ -2711,15 +2721,6 @@ class ISurveyRepository(ABC):
 
     @abstractmethod
     def submit_response(self, survey_id: int, discord_id: int) -> bool: ...
-
-    @abstractmethod
-    def set_response_ui(
-        self,
-        survey_id: int,
-        discord_id: int,
-        dm_channel_id: int,
-        dm_message_id: int,
-    ) -> None: ...
 
     @abstractmethod
     def finalize_response_ui(

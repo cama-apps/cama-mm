@@ -559,10 +559,24 @@ class ShopCommands(commands.Cog):
         # Defer (public) — recalibration is a notable event
         await safe_defer(interaction)
 
-        # Deduct cost
-        await asyncio.to_thread(
-            self.player_service.adjust_balance, user_id, guild_id, -recal_cost
-        )
+        # Deduct cost. Conditional debit, not adjust_balance: the balance read
+        # above is a fast path for the friendly message, and two purchases can
+        # both pass it inside the shop rate-limit window and overdraft.
+        if not await asyncio.to_thread(
+            self.player_service.try_spend,
+            user_id,
+            guild_id,
+            recal_cost,
+            source="shop_recalibrate",
+            actor_id=user_id,
+            reason="shop recalibration purchase",
+        ):
+            await safe_followup(
+                interaction,
+                content=f"You no longer have {recal_cost} {JOPACOIN_EMOTE} for this.",
+                ephemeral=True,
+            )
+            return
 
         # Execute recalibration
         result = await asyncio.to_thread(
@@ -572,7 +586,13 @@ class ShopCommands(commands.Cog):
         if not result["success"]:
             # Refund on unexpected failure
             await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, recal_cost
+                self.player_service.adjust_balance,
+                user_id,
+                guild_id,
+                recal_cost,
+                source="shop_recalibrate",
+                actor_id=user_id,
+                reason="recalibration failed; purchase refunded",
             )
             await safe_followup(
                 interaction, content="Recalibration failed unexpectedly. You have been refunded."

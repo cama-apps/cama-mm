@@ -2,10 +2,12 @@
 Repository for loan state and nonprofit fund data access.
 """
 
+import json
 import time
 from datetime import date, timedelta
 
 from repositories.base_repository import BaseRepository
+from repositories.bet_repository import split_bet_seed
 from repositories.interfaces import ILoanRepository
 
 
@@ -250,6 +252,133 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 )
             return amount
 
+    def reserve_bet_seed_atomic(
+        self,
+        guild_id: int | None,
+        pending_match_id: int,
+        max_seed_amount: int,
+        *,
+        first_game_reserved: int = 0,
+        betting_mode: str = "pool",
+    ) -> dict[str, int]:
+        """Take the queued pot (or up to ``max_seed_amount`` from the nonprofit
+        fund) and durably record the full seed reservation on the pending match
+        payload, all in one transaction.
+
+        The deduction and the payload write commit together, so a crash or a
+        later persist failure can never strand deducted coins: settlement and
+        abort reconcile against the payload's seed fields. A retry after a
+        failure (or on a state reloaded from the payload) sees
+        ``bet_seed_reserved > 0`` and returns the recorded fields instead of
+        deducting a second time.
+
+        Returns the pending-match seed fields (all zero when nothing was
+        reserved).
+        """
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                """
+                SELECT payload
+                FROM pending_matches
+                WHERE pending_match_id = ? AND guild_id = ?
+                """,
+                (int(pending_match_id), normalized_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"pending match {pending_match_id} has no persisted row to "
+                    "record the seed reservation on"
+                )
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+
+            already_reserved = int(payload.get("bet_seed_reserved", 0) or 0)
+            if already_reserved > 0:
+                return {
+                    "bet_seed_reserved": already_reserved,
+                    "bet_seed_radiant": int(payload.get("bet_seed_radiant", 0) or 0),
+                    "bet_seed_dire": int(payload.get("bet_seed_dire", 0) or 0),
+                    "bet_seed_bonus": int(payload.get("bet_seed_bonus", 0) or 0),
+                    "first_game_pool_reserved": int(
+                        payload.get("first_game_pool_reserved", 0) or 0
+                    ),
+                }
+
+            # Claim the queued next-match pot first; fall back to the reserve.
+            pot_row = cursor.execute(
+                "SELECT COALESCE(next_match_pot, 0) AS amount FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            ).fetchone()
+            regular_reserved = int(pot_row["amount"]) if pot_row else 0
+            if regular_reserved:
+                cursor.execute(
+                    "UPDATE nonprofit_fund SET next_match_pot = 0, updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
+                    (normalized_id,),
+                )
+            elif int(max_seed_amount) > 0:
+                fund_row = cursor.execute(
+                    "SELECT COALESCE(total_collected, 0) AS available FROM nonprofit_fund WHERE guild_id = ?",
+                    (normalized_id,),
+                ).fetchone()
+                available = int(fund_row["available"]) if fund_row else 0
+                deduction = min(int(max_seed_amount), available)
+                if deduction > 0:
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source="dota_bet_seed",
+                        related_type="pending_match",
+                        related_id=int(pending_match_id),
+                        reason="reserve-backed Dota betting seed",
+                        metadata={"betting_mode": betting_mode},
+                    )
+                    try:
+                        cursor.execute(
+                            """
+                            UPDATE nonprofit_fund
+                            SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE guild_id = ?
+                            """,
+                            (deduction, normalized_id),
+                        )
+                    finally:
+                        self._clear_economy_ledger_context(cursor)
+                    regular_reserved = deduction
+
+            first_game_reserved = max(0, int(first_game_reserved))
+            reserved = regular_reserved + first_game_reserved
+            seed_fields = {
+                "bet_seed_reserved": 0,
+                "bet_seed_radiant": 0,
+                "bet_seed_dire": 0,
+                "bet_seed_bonus": 0,
+                "first_game_pool_reserved": 0,
+            }
+            if reserved <= 0:
+                return seed_fields
+
+            seed_radiant, seed_dire, seed_bonus = split_bet_seed(reserved, betting_mode)
+            seed_fields.update(
+                bet_seed_reserved=reserved,
+                bet_seed_radiant=seed_radiant,
+                bet_seed_dire=seed_dire,
+                bet_seed_bonus=seed_bonus,
+                first_game_pool_reserved=first_game_reserved,
+            )
+            payload.update(seed_fields)
+            cursor.execute(
+                """
+                UPDATE pending_matches
+                SET payload = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE pending_match_id = ? AND guild_id = ?
+                """,
+                (json.dumps(payload), int(pending_match_id), normalized_id),
+            )
+            return seed_fields
+
     def get_first_game_pool_balances(self, guild_id: int | None) -> dict[str, int]:
         """Return stacked first-game liquidity for each lobby type."""
         normalized_id = self.normalize_guild_id(guild_id)
@@ -266,6 +395,33 @@ class LoanRepository(BaseRepository, ILoanRepository):
         if row is None:
             return {"open": 0, "lowskill": 0}
         return {"open": int(row["open"]), "lowskill": int(row["lowskill"])}
+
+    @staticmethod
+    def _simulate_first_game_funding(
+        last_processed: date | None,
+        target_date: date,
+        daily_amount: int,
+        available: int,
+    ) -> tuple[list[tuple[str, bool]], int]:
+        """Walk unprocessed game-dates, funding both pools or neither per day.
+
+        Single owner of the daily catch-up rule shared by the read-only
+        preview and the funding write path. Returns ``(day_plan, remaining)``
+        where ``day_plan`` is a chronological list of ``(date_str, funded)``
+        pairs and ``remaining`` is the reserve left after the funded days.
+        """
+        day_plan: list[tuple[str, bool]] = []
+        pair_cost = daily_amount * 2
+        next_date = (
+            target_date if last_processed is None else last_processed + timedelta(days=1)
+        )
+        while next_date <= target_date:
+            funded = available >= pair_cost
+            if funded:
+                available -= pair_cost
+            day_plan.append((next_date.isoformat(), funded))
+            next_date += timedelta(days=1)
+        return day_plan, available
 
     def get_first_game_pool_previews(
         self,
@@ -305,18 +461,12 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 if row["last_processed"]
                 else None
             )
-            next_date = (
-                target_date
-                if last_processed is None
-                else last_processed + timedelta(days=1)
+            day_plan, available = self._simulate_first_game_funding(
+                last_processed, target_date, daily_amount, available
             )
-            pair_cost = daily_amount * 2
-            while next_date <= target_date:
-                if available >= pair_cost:
-                    available -= pair_cost
-                    open_pool += daily_amount
-                    lowskill_pool += daily_amount
-                next_date += timedelta(days=1)
+            funded_days = sum(1 for _, funded in day_plan if funded)
+            open_pool += daily_amount * funded_days
+            lowskill_pool += daily_amount * funded_days
 
         queued_amount = max(0, int(row["next_match_pot"] or 0))
         seed_amount = (
@@ -374,21 +524,21 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 if row and row["last_processed"]
                 else None
             )
-            next_date = target_date if last_processed is None else last_processed + timedelta(days=1)
+            reserve_row = cursor.execute(
+                """
+                SELECT COALESCE(total_collected, 0) AS available
+                FROM nonprofit_fund
+                WHERE guild_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+            available = int(reserve_row["available"]) if reserve_row else 0
 
             pair_cost = daily_amount * 2
-            while next_date <= target_date:
-                date_str = next_date.isoformat()
-                reserve_row = cursor.execute(
-                    """
-                    SELECT COALESCE(total_collected, 0) AS available
-                    FROM nonprofit_fund
-                    WHERE guild_id = ?
-                    """,
-                    (normalized_id,),
-                ).fetchone()
-                available = int(reserve_row["available"]) if reserve_row else 0
-                funded = available >= pair_cost
+            day_plan, _ = self._simulate_first_game_funding(
+                last_processed, target_date, daily_amount, available
+            )
+            for date_str, funded in day_plan:
                 if funded:
                     self._set_economy_ledger_context(
                         cursor,
@@ -436,7 +586,6 @@ class LoanRepository(BaseRepository, ILoanRepository):
                     (normalized_id, date_str, daily_amount, int(funded)),
                 )
                 processed_dates.append(date_str)
-                next_date += timedelta(days=1)
 
             balances = cursor.execute(
                 """
@@ -472,21 +621,35 @@ class LoanRepository(BaseRepository, ILoanRepository):
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            # Idempotency must match the table's UNIQUE(guild_id,
+            # pending_match_id): a retry for the same pending match after the
+            # game-date rolls over would miss a date-keyed check and hit the
+            # constraint on insert, wedging the reservation forever.
+            same_match = cursor.execute(
+                """
+                SELECT amount, COALESCE(settled, 0) AS settled
+                FROM first_game_pool_claims
+                WHERE guild_id = ? AND pending_match_id = ?
+                """,
+                (normalized_id, int(pending_match_id)),
+            ).fetchone()
+            if same_match is not None:
+                return (
+                    int(same_match["amount"] or 0)
+                    if not int(same_match["settled"])
+                    else 0
+                )
             existing = cursor.execute(
                 """
-                SELECT pending_match_id, amount, COALESCE(settled, 0) AS settled
+                SELECT 1
                 FROM first_game_pool_claims
                 WHERE guild_id = ? AND lobby_kind = ? AND game_date = ?
                 """,
                 (normalized_id, lobby_kind, game_date),
             ).fetchone()
             if existing is not None:
-                return (
-                    int(existing["amount"] or 0)
-                    if int(existing["pending_match_id"]) == int(pending_match_id)
-                    and not int(existing["settled"])
-                    else 0
-                )
+                # Another match already claimed this lobby's pool for the date.
+                return 0
 
             cursor.execute(
                 """
