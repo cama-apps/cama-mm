@@ -182,7 +182,7 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
 
 
 @pytest.mark.asyncio
-async def test_thread_and_pin_cleanup_finish_before_reset_and_pool_refresh():
+async def test_thread_and_pin_cleanup_finish_before_reset():
     order = []
     thread_started = asyncio.Event()
     pins_started = asyncio.Event()
@@ -231,11 +231,6 @@ async def test_thread_and_pin_cleanup_finish_before_reset_and_pool_refresh():
         order.append("pins_done")
         return 1
 
-    async def refresh_pool_lobbies(guild_id):
-        assert guild_id == 1
-        order.append("pool_refresh")
-
-    cog.bot.refresh_first_game_pool_lobby_messages = refresh_pool_lobbies
     fake_bot_module = SimpleNamespace(
         clear_lobby_rally_cooldowns=MagicMock(),
     )
@@ -269,7 +264,9 @@ async def test_thread_and_pin_cleanup_finish_before_reset_and_pool_refresh():
     assert order.index("public_metadata") < order.index("reset")
     assert order.index("thread_metadata_done") < order.index("reset")
     assert order.index("pins_done") < order.index("reset")
-    assert order.index("reset") < order.index("pool_refresh")
+    # The exactly-once pool refresh is owned by _execute_shuffle's try/finally,
+    # not by _finalize_shuffle.
+    bot.refresh_first_game_pool_lobby_messages.assert_not_awaited()
     bot.fetch_channel.assert_not_awaited()
     bot.get_channel.assert_called_once_with(lobby_channel.id)
     lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)

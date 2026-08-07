@@ -2042,8 +2042,6 @@ class DraftCommands(commands.Cog):
                 await self._edit_interaction_message(interaction, embed=embed, view=None)
                 return
 
-            await self._refresh_bonus_pool_lobbies(guild_id)
-
             # Get pending state for betting display (use specific pending_match_id for concurrent match support)
             pending_state = await asyncio.to_thread(
                 self.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
@@ -2121,7 +2119,6 @@ class DraftCommands(commands.Cog):
 
             from bot import clear_lobby_rally_cooldowns
 
-            await self._refresh_bonus_pool_lobbies(guild_id)
             clear_lobby_rally_cooldowns(guild_id, lobby_kind=kind)
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
@@ -2218,6 +2215,11 @@ class DraftCommands(commands.Cog):
                 state,
             )
             await self._release_draft_players(state)
+            if pending_match_id is not None:
+                # Exactly one pool refresh per completion: it runs after the
+                # lobby reset on success, and still runs if a later step fails
+                # once the pending match consumed the first-game pool.
+                await self._refresh_bonus_pool_lobbies(guild_id)
 
     async def _publish_draft_completion(
         self,
