@@ -168,7 +168,7 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
 
 
 @pytest.mark.asyncio
-async def test_execute_shuffle_refreshes_pool_before_later_failure(monkeypatch):
+async def test_execute_shuffle_refreshes_pool_exactly_once_on_later_failure(monkeypatch):
     player_ids = list(range(100, 110))
     lobby = SimpleNamespace(get_player_count=lambda: 10)
     match_service = MagicMock()
@@ -204,6 +204,61 @@ async def test_execute_shuffle_refreshes_pool_before_later_failure(monkeypatch):
         TEST_GUILD_ID,
         LobbyKind.OPEN,
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_shuffle_refreshes_pool_exactly_once_after_finalize(monkeypatch):
+    """On success the pool refresh runs once, after the lobby-resetting finalize."""
+    player_ids = list(range(100, 110))
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    team_players = [
+        SimpleNamespace(get_value=lambda *args, **kwargs: 100.0) for _ in range(5)
+    ]
+    team = SimpleNamespace(players=team_players, get_off_role_count=lambda: 0)
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.return_value = {
+        "radiant_team": team,
+        "dire_team": team,
+        "radiant_roles": ["1", "2", "3", "4", "5"],
+        "dire_roles": ["1", "2", "3", "4", "5"],
+        "value_diff": 0.0,
+        "first_pick_team": "Radiant",
+        "excluded_ids": [],
+        "pending_match_id": 7,
+    }
+    bot = MagicMock()
+    bot.betting_service = None
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+    order = []
+    finalize = AsyncMock(side_effect=lambda **kwargs: order.append("finalize"))
+    refresh_pool_lobbies = AsyncMock(side_effect=lambda _gid: order.append("refresh"))
+    monkeypatch.setattr(
+        cog,
+        "_validate_shuffle_preconditions",
+        AsyncMock(return_value=lobby),
+    )
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, [], [], [], {})),
+    )
+    monkeypatch.setattr(cog, "_format_team_lines", lambda *args, **kwargs: ["line"] * 5)
+    monkeypatch.setattr("commands.match.summarize_region", lambda players: "USE")
+    monkeypatch.setattr(cog, "_finalize_shuffle", finalize, raising=False)
+    monkeypatch.setattr(
+        cog,
+        "_refresh_bonus_pool_lobbies",
+        refresh_pool_lobbies,
+        raising=False,
+    )
+
+    await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    finalize.assert_awaited_once()
+    refresh_pool_lobbies.assert_awaited_once_with(TEST_GUILD_ID)
+    assert order == ["finalize", "refresh"]
 
 
 @pytest.mark.asyncio

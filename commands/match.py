@@ -808,307 +808,311 @@ class MatchCommands(commands.Cog):
                 kind,
             )
 
-        await self._refresh_bonus_pool_lobbies(guild_id)
-
-        radiant_team = result["radiant_team"]
-        dire_team = result["dire_team"]
-        radiant_roles = result["radiant_roles"]
-        dire_roles = result["dire_roles"]
-        value_diff = result["value_diff"]
-        goodness_score = result.get("goodness_score")
-        # Use actual rating system (may have fallen back from openskill to glicko)
-        rs = result.get("balancing_rating_system", rs)
-        is_openskill_shuffle = is_openskill_shuffle and rs == "openskill"
-        # Sum of raw ratings (without off-role multipliers) for display
-        use_os = rs == "openskill"
-        use_jc = rs == "jopacoin"
-        radiant_sum = sum(
-            player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
-            for player in radiant_team.players
-        )
-        dire_sum = sum(
-            player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
-            for player in dire_team.players
-        )
-        first_pick_team = result["first_pick_team"]
-        excluded_ids = result["excluded_ids"]
-        pending_match_id = result.get("pending_match_id")
-
-        # Determine if this is a bomb pot match (~10% chance)
-        is_bomb_pot = random.random() < BOMB_POT_CHANCE
-
-        # Store bomb pot status in pending state and persist to DB
-        pending_state = await asyncio.to_thread(
-            self.match_service.get_last_shuffle,
-            guild_id,
-            pending_match_id=pending_match_id,
-        )
-        if pending_state:
-            pending_state.is_bomb_pot = is_bomb_pot
-            pending_state.is_openskill_shuffle = is_openskill_shuffle
-            # Persist to DB so bomb pot and openskill shuffle survive bot restart
-            await asyncio.to_thread(
-                self.match_service._persist_match_state, guild_id, pending_state
+        try:
+            radiant_team = result["radiant_team"]
+            dire_team = result["dire_team"]
+            radiant_roles = result["radiant_roles"]
+            dire_roles = result["dire_roles"]
+            value_diff = result["value_diff"]
+            goodness_score = result.get("goodness_score")
+            # Use actual rating system (may have fallen back from openskill to glicko)
+            rs = result.get("balancing_rating_system", rs)
+            is_openskill_shuffle = is_openskill_shuffle and rs == "openskill"
+            # Sum of raw ratings (without off-role multipliers) for display
+            use_os = rs == "openskill"
+            use_jc = rs == "jopacoin"
+            radiant_sum = sum(
+                player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
+                for player in radiant_team.players
             )
-
-        if is_bomb_pot:
-            logger.info(f"💣 BOMB POT triggered for guild {guild_id}")
-        if is_openskill_shuffle:
-            logger.info(f"⚗️ OPENSKILL SHUFFLE triggered for guild {guild_id}")
-
-        # Create auto-liquidity blind bets for pool mode
-        blind_bets_result = None
-        spectator_bets_result = None
-        if mode == "pool":
-            betting_service = getattr(self.bot, "betting_service", None)
-            if betting_service:
-                try:
-                    # Get IDs and timestamp from the saved pending state
-                    logger.debug(f"Creating blind bets for pending_match_id={pending_match_id}")
-                    pending_state = await asyncio.to_thread(
-                        self.match_service.get_last_shuffle,
-                        guild_id,
-                        pending_match_id=pending_match_id,
-                    )
-                    state_pmid = pending_state.pending_match_id if pending_state else None
-                    logger.debug(f"Blind bets: state={pending_state is not None}, state_pmid={state_pmid}")
-                    blind_bets_result = await asyncio.to_thread(
-                        functools.partial(betting_service.create_auto_blind_bets,
-                            guild_id=guild_id,
-                            radiant_ids=pending_state.radiant_team_ids,
-                            dire_ids=pending_state.dire_team_ids,
-                            shuffle_timestamp=pending_state.shuffle_timestamp,
-                            is_bomb_pot=is_bomb_pot,
-                            pending_match_id=pending_state.pending_match_id,
-                        )
-                    )
-                    spectator_bets_result = await asyncio.to_thread(
-                        functools.partial(
-                            betting_service.create_auto_spectator_bets,
-                            guild_id=guild_id,
-                            radiant_ids=pending_state.radiant_team_ids,
-                            dire_ids=pending_state.dire_team_ids,
-                            shuffle_timestamp=pending_state.shuffle_timestamp,
-                            pending_match_id=pending_state.pending_match_id,
-                        )
-                    )
-                    if blind_bets_result["created"] > 0:
-                        logger.info(
-                            f"Created {blind_bets_result['created']} blind bets: "
-                            f"Radiant={blind_bets_result['total_radiant']}, "
-                            f"Dire={blind_bets_result['total_dire']}"
-                            f"{' (BOMB POT)' if is_bomb_pot else ''}"
-                        )
-                        # Neon Degen Terminal: Bomb pot easter egg
-                        if is_bomb_pot:
-                            try:
-                                neon = get_neon_service(self.bot)
-                                if neon:
-                                    pool_total = blind_bets_result['total_radiant'] + blind_bets_result['total_dire']
-                                    bomb_result = await neon.on_bomb_pot(
-                                        guild_id, pool_total, blind_bets_result['created']
-                                    )
-                                    if bomb_result:
-                                        await send_neon_result(interaction, bomb_result)
-                            except Exception as e:
-                                logger.debug(f"neon on_bomb_pot error: {e}")
-                    if spectator_bets_result["created"] > 0:
-                        logger.info(
-                            f"Created {spectator_bets_result['created']} spectator auto-wagers: "
-                            f"Radiant={spectator_bets_result['total_radiant']}, "
-                            f"Dire={spectator_bets_result['total_dire']}"
-                        )
-                except Exception as exc:
-                    logger.warning(f"Failed to create automatic bets: {exc}", exc_info=True)
-
-        # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live
-        # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
-        streaming_bonus_names = []
-        if guild and hasattr(guild, "get_member") and STREAMING_BONUS > 0:
-            all_lobby_ids = list(player_ids) + list(excluded_conditional_ids)
-            streaming_ids = get_streaming_player_ids(guild, all_lobby_ids)
-            if streaming_ids:
-                betting_svc = getattr(self.bot, "betting_service", None)
-                if betting_svc:
-                    await asyncio.to_thread(
-                        betting_svc.award_streaming_bonus, list(streaming_ids), guild_id
-                    )
-                for sid in streaming_ids:
-                    player_obj = await get_roster_player(sid)
-                    if player_obj:
-                        streaming_bonus_names.append(
-                            get_player_display_name(player_obj, discord_id=sid, guild=guild)
-                        )
-                logger.info(
-                    f"Streaming bonus (+{STREAMING_BONUS} JC) at shuffle: {streaming_ids}"
-                )
-
-        radiant_lines = self._format_team_lines(
-            radiant_team, radiant_roles, player_ids, players, guild, balancing_system=rs
-        )
-        dire_lines = self._format_team_lines(
-            dire_team, dire_roles, player_ids, players, guild, balancing_system=rs
-        )
-
-        # Sort by role number for cleaner view
-        radiant_sorted = sorted(zip(radiant_roles, radiant_lines), key=lambda x: int(x[0]))
-        dire_sorted = sorted(zip(dire_roles, dire_lines), key=lambda x: int(x[0]))
-
-        head_to_head = []
-        for (_r_role, r_line), (_d_role, d_line) in zip(radiant_sorted, dire_sorted):
-            head_to_head.append(f"{r_line}  |  {d_line}")
-
-        # Build embed title with match ID and bomb pot banner if applicable
-        match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
-        if is_bomb_pot:
-            title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
-            embed_title = (
-                f"💣 BOMB POT 💣 {kind.label} — {match_label}{title_mode}"
+            dire_sum = sum(
+                player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
+                for player in dire_team.players
             )
-            embed_color = discord.Color.orange()
-        else:
-            title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
-            embed_title = f"{kind.label} — {match_label}{title_mode}"
-            embed_color = discord.Color.blue()
+            first_pick_team = result["first_pick_team"]
+            excluded_ids = result["excluded_ids"]
+            pending_match_id = result.get("pending_match_id")
 
-        embed = discord.Embed(title=embed_title, color=embed_color)
-        first_pick_emoji = "🟢" if first_pick_team == "Radiant" else "🔴"
-        embed.add_field(
-            name=f"🟢 Radiant ({radiant_sum:.0f})  |  🔴 Dire ({dire_sum:.0f})",
-            value=f"{first_pick_emoji} **First Pick: {first_pick_team}**\n\n"
-            + "\n".join(head_to_head),
-            inline=False,
-        )
+            # Determine if this is a bomb pot match (~10% chance)
+            is_bomb_pot = random.random() < BOMB_POT_CHANCE
 
-        embed.add_field(
-            name="🌎 Recommended Server",
-            value=summarize_region(radiant_team.players + dire_team.players),
-            inline=False,
-        )
-
-        if team_mode == "region":
-            embed.add_field(
-                name="🌎 Region Split",
-                value=(
-                    f"{self._format_region_mix('Radiant', radiant_team)}\n"
-                    f"{self._format_region_mix('Dire', dire_team)}"
-                ),
-                inline=False,
-            )
-
-        radiant_off = radiant_team.get_off_role_count()
-        dire_off = dire_team.get_off_role_count()
-        goodness_display = f"{goodness_score:.1f}" if goodness_score is not None else "N/A"
-
-        # Show which rating system was used for balancing
-        balancing_system = result.get("balancing_rating_system", "glicko")
-        if balancing_system == "jopacoin":
-            rating_system_display = "💰 Jopacoin Balance"
-        elif balancing_system == "openskill":
-            rating_system_display = "⚗️ OpenSkill (experimental)"
-        else:
-            rating_system_display = "📊 Glicko-2"
-
-        balance_info = (
-            f"**Shuffle mode:** {'Region Split' if team_mode == 'region' else 'Balanced'}\n"
-            f"**Balanced with:** {rating_system_display}\n"
-            f"**Goodness score:** {goodness_display} (lower = better)\n"
-            f"**Value diff:** {value_diff:.0f}\n"
-            f"**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {radiant_off + dire_off})"
-        )
-        # Build the regular-player exclusion list.
-        all_excluded_names = []
-        if excluded_ids:
-            for pid in excluded_ids:
-                player_obj = await get_roster_player(pid)
-                if player_obj:
-                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
-                    all_excluded_names.append(display_name)
-                else:
-                    all_excluded_names.append(f"Unknown({pid})")
-
-        if all_excluded_names:
-            balance_info += f"\n**Excluded:** {', '.join(all_excluded_names)}"
-        if streaming_bonus_names:
-            balance_info += f"\n📺 **Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}):** {', '.join(streaming_bonus_names)}"
-        embed.add_field(name="📊 Balance", value=balance_info, inline=False)
-
-        # Betting instructions (house mode retired; all matches use pool betting)
-        betting_note = (
-            f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
-            "Pool betting: odds determined by bet distribution."
-        )
-        embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
-
-        # Show blind bet summary if any were created
-        if blind_bets_result and blind_bets_result["created"] > 0:
-            if is_bomb_pot:
-                blind_pct = f"{blind_bets_result.get('percentage', 0) * 100:g}%"
-                blind_note = (
-                    f"💣 **BOMB POT:** All 10 players ante'd in! ({blind_pct} + 10 {JOPACOIN_EMOTE} ante)\n"
-                    f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
-                    f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}\n"
-                    f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
-                )
-                embed.add_field(name="💣 Bomb Pot Stakes", value=blind_note, inline=False)
-            else:
-                blind_note = (
-                    f"**Auto-liquidity:** {blind_bets_result['created']} players contributed blind bets\n"
-                    f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
-                    f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
-                )
-                embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
-
-        if spectator_bets_result and spectator_bets_result["created"] > 0:
-            spectator_note = format_spectator_autobet_summary(spectator_bets_result)
-            embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
-
-        # Current wagers display
-        betting_service = getattr(self.bot, "betting_service", None)
-        totals = {"radiant": 0, "dire": 0}
-        lock_until = None
-        seed_radiant = seed_dire = seed_bonus = 0
-        if betting_service:
+            # Store bomb pot status in pending state and persist to DB
             pending_state = await asyncio.to_thread(
                 self.match_service.get_last_shuffle,
                 guild_id,
                 pending_match_id=pending_match_id,
             )
-            totals = await asyncio.to_thread(
-                betting_service.get_pot_odds, guild_id, pending_state=pending_state
-            )
-            lock_until = pending_state.bet_lock_until if pending_state else None
             if pending_state:
-                seed_radiant = pending_state.bet_seed_radiant
-                seed_dire = pending_state.bet_seed_dire
-                seed_bonus = pending_state.bet_seed_bonus
+                pending_state.is_bomb_pot = is_bomb_pot
+                pending_state.is_openskill_shuffle = is_openskill_shuffle
+                # Persist to DB so bomb pot and openskill shuffle survive bot restart
+                await asyncio.to_thread(
+                    self.match_service._persist_match_state, guild_id, pending_state
+                )
 
-        wager_field_name, wager_field_value = format_betting_display(
-            totals["radiant"],
-            totals["dire"],
-            mode,
-            lock_until,
-            seed_radiant=seed_radiant,
-            seed_dire=seed_dire,
-            seed_bonus=seed_bonus,
-        )
-        embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
+            if is_bomb_pot:
+                logger.info(f"💣 BOMB POT triggered for guild {guild_id}")
+            if is_openskill_shuffle:
+                logger.info(f"⚗️ OPENSKILL SHUFFLE triggered for guild {guild_id}")
 
-        # Add match quality indicators to footer (subtle display)
-        glicko_prob = result.get("glicko_radiant_win_prob", 0.5)
-        os_prob = result.get("openskill_radiant_win_prob", 0.5)
-        if pending_match_id:
-            embed.set_footer(text=f"Match #{pending_match_id} | {glicko_prob:.2f} {os_prob:.2f}")
-        else:
-            embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
+            # Create auto-liquidity blind bets for pool mode
+            blind_bets_result = None
+            spectator_bets_result = None
+            if mode == "pool":
+                betting_service = getattr(self.bot, "betting_service", None)
+                if betting_service:
+                    try:
+                        # Get IDs and timestamp from the saved pending state
+                        logger.debug(f"Creating blind bets for pending_match_id={pending_match_id}")
+                        pending_state = await asyncio.to_thread(
+                            self.match_service.get_last_shuffle,
+                            guild_id,
+                            pending_match_id=pending_match_id,
+                        )
+                        state_pmid = pending_state.pending_match_id if pending_state else None
+                        logger.debug(f"Blind bets: state={pending_state is not None}, state_pmid={state_pmid}")
+                        blind_bets_result = await asyncio.to_thread(
+                            functools.partial(betting_service.create_auto_blind_bets,
+                                guild_id=guild_id,
+                                radiant_ids=pending_state.radiant_team_ids,
+                                dire_ids=pending_state.dire_team_ids,
+                                shuffle_timestamp=pending_state.shuffle_timestamp,
+                                is_bomb_pot=is_bomb_pot,
+                                pending_match_id=pending_state.pending_match_id,
+                            )
+                        )
+                        spectator_bets_result = await asyncio.to_thread(
+                            functools.partial(
+                                betting_service.create_auto_spectator_bets,
+                                guild_id=guild_id,
+                                radiant_ids=pending_state.radiant_team_ids,
+                                dire_ids=pending_state.dire_team_ids,
+                                shuffle_timestamp=pending_state.shuffle_timestamp,
+                                pending_match_id=pending_state.pending_match_id,
+                            )
+                        )
+                        if blind_bets_result["created"] > 0:
+                            logger.info(
+                                f"Created {blind_bets_result['created']} blind bets: "
+                                f"Radiant={blind_bets_result['total_radiant']}, "
+                                f"Dire={blind_bets_result['total_dire']}"
+                                f"{' (BOMB POT)' if is_bomb_pot else ''}"
+                            )
+                            # Neon Degen Terminal: Bomb pot easter egg
+                            if is_bomb_pot:
+                                try:
+                                    neon = get_neon_service(self.bot)
+                                    if neon:
+                                        pool_total = blind_bets_result['total_radiant'] + blind_bets_result['total_dire']
+                                        bomb_result = await neon.on_bomb_pot(
+                                            guild_id, pool_total, blind_bets_result['created']
+                                        )
+                                        if bomb_result:
+                                            await send_neon_result(interaction, bomb_result)
+                                except Exception as e:
+                                    logger.debug(f"neon on_bomb_pot error: {e}")
+                        if spectator_bets_result["created"] > 0:
+                            logger.info(
+                                f"Created {spectator_bets_result['created']} spectator auto-wagers: "
+                                f"Radiant={spectator_bets_result['total_radiant']}, "
+                                f"Dire={spectator_bets_result['total_dire']}"
+                            )
+                    except Exception as exc:
+                        logger.warning(f"Failed to create automatic bets: {exc}", exc_info=True)
 
-        await self._finalize_shuffle(
-            interaction=interaction,
-            guild_id=guild_id,
-            embed=embed,
-            pending_match_id=pending_match_id,
-            lobby_kind=kind,
-        )
+            # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live
+            # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
+            streaming_bonus_names = []
+            if guild and hasattr(guild, "get_member") and STREAMING_BONUS > 0:
+                all_lobby_ids = list(player_ids) + list(excluded_conditional_ids)
+                streaming_ids = get_streaming_player_ids(guild, all_lobby_ids)
+                if streaming_ids:
+                    betting_svc = getattr(self.bot, "betting_service", None)
+                    if betting_svc:
+                        await asyncio.to_thread(
+                            betting_svc.award_streaming_bonus, list(streaming_ids), guild_id
+                        )
+                    for sid in streaming_ids:
+                        player_obj = await get_roster_player(sid)
+                        if player_obj:
+                            streaming_bonus_names.append(
+                                get_player_display_name(player_obj, discord_id=sid, guild=guild)
+                            )
+                    logger.info(
+                        f"Streaming bonus (+{STREAMING_BONUS} JC) at shuffle: {streaming_ids}"
+                    )
+
+            radiant_lines = self._format_team_lines(
+                radiant_team, radiant_roles, player_ids, players, guild, balancing_system=rs
+            )
+            dire_lines = self._format_team_lines(
+                dire_team, dire_roles, player_ids, players, guild, balancing_system=rs
+            )
+
+            # Sort by role number for cleaner view
+            radiant_sorted = sorted(zip(radiant_roles, radiant_lines), key=lambda x: int(x[0]))
+            dire_sorted = sorted(zip(dire_roles, dire_lines), key=lambda x: int(x[0]))
+
+            head_to_head = []
+            for (_r_role, r_line), (_d_role, d_line) in zip(radiant_sorted, dire_sorted):
+                head_to_head.append(f"{r_line}  |  {d_line}")
+
+            # Build embed title with match ID and bomb pot banner if applicable
+            match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
+            if is_bomb_pot:
+                title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
+                embed_title = (
+                    f"💣 BOMB POT 💣 {kind.label} — {match_label}{title_mode}"
+                )
+                embed_color = discord.Color.orange()
+            else:
+                title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
+                embed_title = f"{kind.label} — {match_label}{title_mode}"
+                embed_color = discord.Color.blue()
+
+            embed = discord.Embed(title=embed_title, color=embed_color)
+            first_pick_emoji = "🟢" if first_pick_team == "Radiant" else "🔴"
+            embed.add_field(
+                name=f"🟢 Radiant ({radiant_sum:.0f})  |  🔴 Dire ({dire_sum:.0f})",
+                value=f"{first_pick_emoji} **First Pick: {first_pick_team}**\n\n"
+                + "\n".join(head_to_head),
+                inline=False,
+            )
+
+            embed.add_field(
+                name="🌎 Recommended Server",
+                value=summarize_region(radiant_team.players + dire_team.players),
+                inline=False,
+            )
+
+            if team_mode == "region":
+                embed.add_field(
+                    name="🌎 Region Split",
+                    value=(
+                        f"{self._format_region_mix('Radiant', radiant_team)}\n"
+                        f"{self._format_region_mix('Dire', dire_team)}"
+                    ),
+                    inline=False,
+                )
+
+            radiant_off = radiant_team.get_off_role_count()
+            dire_off = dire_team.get_off_role_count()
+            goodness_display = f"{goodness_score:.1f}" if goodness_score is not None else "N/A"
+
+            # Show which rating system was used for balancing
+            balancing_system = result.get("balancing_rating_system", "glicko")
+            if balancing_system == "jopacoin":
+                rating_system_display = "💰 Jopacoin Balance"
+            elif balancing_system == "openskill":
+                rating_system_display = "⚗️ OpenSkill (experimental)"
+            else:
+                rating_system_display = "📊 Glicko-2"
+
+            balance_info = (
+                f"**Shuffle mode:** {'Region Split' if team_mode == 'region' else 'Balanced'}\n"
+                f"**Balanced with:** {rating_system_display}\n"
+                f"**Goodness score:** {goodness_display} (lower = better)\n"
+                f"**Value diff:** {value_diff:.0f}\n"
+                f"**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {radiant_off + dire_off})"
+            )
+            # Build the regular-player exclusion list.
+            all_excluded_names = []
+            if excluded_ids:
+                for pid in excluded_ids:
+                    player_obj = await get_roster_player(pid)
+                    if player_obj:
+                        display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
+                        all_excluded_names.append(display_name)
+                    else:
+                        all_excluded_names.append(f"Unknown({pid})")
+
+            if all_excluded_names:
+                balance_info += f"\n**Excluded:** {', '.join(all_excluded_names)}"
+            if streaming_bonus_names:
+                balance_info += f"\n📺 **Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}):** {', '.join(streaming_bonus_names)}"
+            embed.add_field(name="📊 Balance", value=balance_info, inline=False)
+
+            # Betting instructions (house mode retired; all matches use pool betting)
+            betting_note = (
+                f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
+                "Pool betting: odds determined by bet distribution."
+            )
+            embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
+
+            # Show blind bet summary if any were created
+            if blind_bets_result and blind_bets_result["created"] > 0:
+                if is_bomb_pot:
+                    blind_pct = f"{blind_bets_result.get('percentage', 0) * 100:g}%"
+                    blind_note = (
+                        f"💣 **BOMB POT:** All 10 players ante'd in! ({blind_pct} + 10 {JOPACOIN_EMOTE} ante)\n"
+                        f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                        f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}\n"
+                        f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
+                    )
+                    embed.add_field(name="💣 Bomb Pot Stakes", value=blind_note, inline=False)
+                else:
+                    blind_note = (
+                        f"**Auto-liquidity:** {blind_bets_result['created']} players contributed blind bets\n"
+                        f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                        f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
+                    )
+                    embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+
+            if spectator_bets_result and spectator_bets_result["created"] > 0:
+                spectator_note = format_spectator_autobet_summary(spectator_bets_result)
+                embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
+
+            # Current wagers display
+            betting_service = getattr(self.bot, "betting_service", None)
+            totals = {"radiant": 0, "dire": 0}
+            lock_until = None
+            seed_radiant = seed_dire = seed_bonus = 0
+            if betting_service:
+                pending_state = await asyncio.to_thread(
+                    self.match_service.get_last_shuffle,
+                    guild_id,
+                    pending_match_id=pending_match_id,
+                )
+                totals = await asyncio.to_thread(
+                    betting_service.get_pot_odds, guild_id, pending_state=pending_state
+                )
+                lock_until = pending_state.bet_lock_until if pending_state else None
+                if pending_state:
+                    seed_radiant = pending_state.bet_seed_radiant
+                    seed_dire = pending_state.bet_seed_dire
+                    seed_bonus = pending_state.bet_seed_bonus
+
+            wager_field_name, wager_field_value = format_betting_display(
+                totals["radiant"],
+                totals["dire"],
+                mode,
+                lock_until,
+                seed_radiant=seed_radiant,
+                seed_dire=seed_dire,
+                seed_bonus=seed_bonus,
+            )
+            embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
+
+            # Add match quality indicators to footer (subtle display)
+            glicko_prob = result.get("glicko_radiant_win_prob", 0.5)
+            os_prob = result.get("openskill_radiant_win_prob", 0.5)
+            if pending_match_id:
+                embed.set_footer(text=f"Match #{pending_match_id} | {glicko_prob:.2f} {os_prob:.2f}")
+            else:
+                embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
+
+            await self._finalize_shuffle(
+                interaction=interaction,
+                guild_id=guild_id,
+                embed=embed,
+                pending_match_id=pending_match_id,
+                lobby_kind=kind,
+            )
+        finally:
+            # Exactly one pool refresh per shuffle: it runs after the lobby
+            # reset on success, and still runs if a later step fails so lobby
+            # embeds reflect the consumed first-game pool.
+            await self._refresh_bonus_pool_lobbies(guild_id)
 
     async def _refresh_bonus_pool_lobbies(self, guild_id: int | None) -> None:
         """Refresh current lobby displays after betting-pool availability changes."""
@@ -1270,7 +1274,6 @@ class MatchCommands(commands.Cog):
 
         from bot import clear_lobby_rally_cooldowns
 
-        await self._refresh_bonus_pool_lobbies(guild_id)
         clear_lobby_rally_cooldowns(guild_id or 0, lobby_kind=kind)
 
     @app_commands.command(

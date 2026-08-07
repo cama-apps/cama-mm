@@ -2019,17 +2019,21 @@ class TestHandlePlayerPick:
         )
         interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
 
-        refresh_pool_lobbies = AsyncMock()
+        order = []
+        lobby_manager.reset_lobby.side_effect = (
+            lambda *args, **kwargs: order.append("reset")
+        )
+        refresh_pool_lobbies = AsyncMock(
+            side_effect=lambda _guild_id: order.append("refresh")
+        )
         bot.refresh_first_game_pool_lobby_messages = refresh_pool_lobbies
         await cog.handle_player_pick(interaction, guild_id, player_ids[9])
 
         lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.OPEN)
-        assert [await_call.args for await_call in refresh_pool_lobbies.await_args_list] == [
-            (guild_id,),
-            (guild_id,),
-        ]
+        refresh_pool_lobbies.assert_awaited_once_with(guild_id)
+        assert order == ["reset", "refresh"]
 
-    async def test_final_pick_refreshes_pool_before_later_completion_failure(
+    async def test_final_pick_still_refreshes_pool_once_on_completion_failure(
         self,
         player_repository,
     ):
@@ -2898,15 +2902,9 @@ class TestDraftCompletionErrorGuidance:
         state = cog.draft_state_manager.create_draft(guild_id)
         interaction = self._make_interaction()
 
-        with (
-            patch.object(
-                cog, "_create_pending_match", AsyncMock(return_value=4242)
-            ),
-            patch.object(
-                cog,
-                "_refresh_bonus_pool_lobbies",
-                AsyncMock(side_effect=RuntimeError("boom")),
-            ),
+        cog.match_service.get_last_shuffle.side_effect = RuntimeError("boom")
+        with patch.object(
+            cog, "_create_pending_match", AsyncMock(return_value=4242)
         ):
             await cog._complete_draft(interaction, guild_id, state)
 
