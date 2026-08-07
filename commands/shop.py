@@ -556,12 +556,11 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Defer (public) — recalibration is a notable event
-        await safe_defer(interaction)
-
         # Deduct cost. Conditional debit, not adjust_balance: the balance read
         # above is a fast path for the friendly message, and two purchases can
-        # both pass it inside the shop rate-limit window and overdraft.
+        # both pass it inside the shop rate-limit window and overdraft. Runs
+        # before the public defer: ephemerality is locked in at defer time, so
+        # a followup after a public defer would post this shortfall publicly.
         if not await asyncio.to_thread(
             self.player_service.try_spend,
             user_id,
@@ -571,12 +570,14 @@ class ShopCommands(commands.Cog):
             actor_id=user_id,
             reason="shop recalibration purchase",
         ):
-            await safe_followup(
-                interaction,
-                content=f"You no longer have {recal_cost} {JOPACOIN_EMOTE} for this.",
+            await interaction.response.send_message(
+                f"You no longer have {recal_cost} {JOPACOIN_EMOTE} for this.",
                 ephemeral=True,
             )
             return
+
+        # Defer (public) — recalibration is a notable event
+        await safe_defer(interaction)
 
         # Execute recalibration
         result = await asyncio.to_thread(

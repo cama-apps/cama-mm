@@ -1297,7 +1297,12 @@ async def test_handle_recalibrate_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_recalibrate_aborts_when_balance_vanishes_before_the_debit(monkeypatch):
-    """Funds gone between the balance read and the debit: no overdraft, no reset."""
+    """Funds gone between the balance read and the debit: no overdraft, no reset.
+
+    The shortfall notice must go out via interaction.response BEFORE the public
+    defer — the first followup after a public defer ignores ephemeral=True, so
+    a followup here would broadcast the user's balance shortfall publicly.
+    """
     bot = MagicMock()
     player_service = MagicMock()
     # Check passes...
@@ -1316,7 +1321,8 @@ async def test_handle_recalibrate_aborts_when_balance_vanishes_before_the_debit(
     cmds = ShopCommands(bot, player_service, recalibration_service=recal_service)
     interaction = _make_interaction()
 
-    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
     followup = AsyncMock()
     monkeypatch.setattr("commands.shop.safe_followup", followup)
 
@@ -1325,7 +1331,13 @@ async def test_handle_recalibrate_aborts_when_balance_vanishes_before_the_debit(
     player_service.try_spend.assert_called_once()
     player_service.adjust_balance.assert_not_called()
     recal_service.recalibrate.assert_not_called()
-    assert "no longer have" in followup.call_args.kwargs["content"]
+    # No defer happened, so the direct response is genuinely ephemeral.
+    safe_defer.assert_not_awaited()
+    followup.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "no longer have" in args[0]
+    assert kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio

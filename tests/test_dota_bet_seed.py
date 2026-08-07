@@ -460,6 +460,51 @@ def test_regular_seed_persist_failure_cannot_strand_or_double_deduct(services):
     }
 
 
+def test_reserve_bet_seed_atomic_retry_deducts_fund_exactly_once(services):
+    """A crash-retry re-enters reserve_bet_seed_atomic itself: after a reload
+    the in-memory ``bet_seed_reserved > 0`` short-circuit in the mixin may be
+    gone, so the repo's payload-keyed idempotency branch must return the
+    recorded fields without deducting the nonprofit fund a second time."""
+    loan_repo = services["loan_repo"]
+    match_service = services["match_service"]
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 300)
+    pending = PendingMatchState(
+        shuffle_timestamp=int(time.time()),
+        betting_mode="pool",
+        lobby_kind="open",
+    )
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    first = loan_repo.reserve_bet_seed_atomic(
+        TEST_GUILD_ID,
+        pending.pending_match_id,
+        50,
+        first_game_reserved=100,
+        betting_mode="pool",
+    )
+    assert first == {
+        "bet_seed_reserved": 150,
+        "bet_seed_radiant": 75,
+        "bet_seed_dire": 75,
+        "bet_seed_bonus": 0,
+        "first_game_pool_reserved": 100,
+    }
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 250
+
+    # Same pending match, fresh call (as a crash-retry would make): the fund
+    # must stay deducted exactly once and the recorded fields come back
+    # unchanged.
+    second = loan_repo.reserve_bet_seed_atomic(
+        TEST_GUILD_ID,
+        pending.pending_match_id,
+        50,
+        first_game_reserved=100,
+        betting_mode="pool",
+    )
+    assert second == first
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 250
+
+
 def test_settlement_recovers_regular_seed_when_seed_state_never_persisted(
     services,
     repo_db_path,
@@ -530,7 +575,12 @@ def test_pool_shuffle_consumes_entire_queued_next_match_pot(services):
     assert pending.bet_seed_radiant == 88
     assert pending.bet_seed_dire == 87
     assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 25
-    assert loan_repo.consume_next_match_pot(TEST_GUILD_ID) == 0
+    with loan_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(next_match_pot, 0) AS amount FROM nonprofit_fund WHERE guild_id = ?",
+            (TEST_GUILD_ID,),
+        ).fetchone()
+    assert row["amount"] == 0
 
 
 def test_house_shuffle_reserves_partial_seed_as_bonus_pool(services):
