@@ -182,6 +182,76 @@ def test_join_rolls_back_when_suspension_lands_during_the_join():
     assert len(moderation.calls) == 2
 
 
+def test_join_rollback_deletes_a_row_a_racing_persist_already_wrote():
+    """A persist landing during the post-add re-read (e.g. a racing
+    set_lobby_message) must not leave a durable ghost of the dropped shell:
+    the rollback deletes the row under the persist lock."""
+
+    class RacingModerationService(FakeModerationService):
+        manager: LobbyManagerService
+
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            result = super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+            if result is None and not self.suspensions:
+                # A concurrent flow persists the newborn shell (with the
+                # joining player in it) before the rollback runs.
+                self.manager._persist_lobby(99, LobbyKind.OPEN)
+                self.suspend(discord_id, guild_id, "all")
+            return result
+
+    moderation = RacingModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+    moderation.manager = manager
+
+    result = manager.join_lobby(10, guild_id=99)
+
+    assert result == "lobby_suspended"
+    assert manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN) is None
+    assert repo.load_all_lobby_states() == []
+
+
+def test_join_survives_a_failing_post_add_suspension_recheck():
+    """The post-add re-read is best-effort: a moderation lookup error must
+    not strand a half-applied join or fail the command."""
+
+    class FlakyModerationService(FakeModerationService):
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            if len(self.calls) >= 1 and not self.suspensions:
+                self.calls.append((discord_id, guild_id, lobby_kind))
+                raise RuntimeError("database is locked")
+            return super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+
+    moderation = FlakyModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+
+    result = manager.join_lobby(10, guild_id=99)
+
+    assert result == "ok"
+    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    assert lobby is not None and 10 in lobby.players
+    assert any(10 in row["players"] for row in repo.load_all_lobby_states())
+
+
 def test_join_rollback_preserves_a_lobby_others_already_occupy():
     """Rolling back a racing join must only undo the join itself: an existing
     lobby with other members stays, persisted without the suspended player."""

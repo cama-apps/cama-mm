@@ -1201,9 +1201,11 @@ class ShopCommands(commands.Cog):
                 )
                 return
 
-        # Defer - we'll send the result publicly
-        if not await safe_defer(interaction, ephemeral=False):
-            return
+        # Defer - we'll send the result publicly. Not gated: the 30-day
+        # cooldown claim already committed, so the flip must still run on a
+        # lapsed token (safe_followup falls back to channel.send) instead of
+        # consuming the monthly attempt with no coin flip.
+        await safe_defer(interaction, ephemeral=False)
 
         # Deduct cost first
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
@@ -1727,16 +1729,26 @@ class ShopCommands(commands.Cog):
         item: app_commands.Choice[str],
         target: discord.Member = None,
     ):
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
         guild_id = interaction.guild.id
         user_id = interaction.user.id
+
+        async def _reject(message: str) -> None:
+            # Private failure notices must precede the public defer:
+            # ephemerality is locked in at defer time, so a followup after a
+            # public defer would post them publicly. Guarded because the
+            # validation chain can outlast the 3s ack window under DB
+            # contention; nothing needs rolling back on a lapsed token.
+            try:
+                await interaction.response.send_message(message, ephemeral=True)
+            except discord.HTTPException:
+                logger.warning(
+                    "Manashop failure notice could not be sent for %s", user_id
+                )
 
         # Check registration
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.followup.send("You need to `/player register` first.", ephemeral=True)
+            await _reject("You need to `/player register` first.")
             return
 
         mana_effects_service = getattr(self.bot, "mana_effects_service", None)
@@ -1753,26 +1765,22 @@ class ShopCommands(commands.Cog):
             else getattr(self.bot, "protection_service", None)
         )
         if not (mana_effects_service and mana_service and mana_repo):
-            await interaction.followup.send("Mana system not available.", ephemeral=True)
+            await _reject("Mana system not available.")
             return
 
         # Tap-state check: a tapped player has no active color, /shop mana locked.
         tapped = await asyncio.to_thread(mana_service.is_mana_consumed, user_id, guild_id)
         if tapped:
-            await interaction.followup.send(
+            await _reject(
                 "Your mana is spent — today's ultimate consumed your color. "
                 "Come back tomorrow.",
-                ephemeral=True,
             )
             return
 
         # Resolve effects (returns defaults if mana not assigned today).
         effects = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
         if not effects.color:
-            await interaction.followup.send(
-                "You have no active mana today. Use `/mana` first.",
-                ephemeral=True,
-            )
+            await _reject("You have no active mana today. Use `/mana` first.")
             return
 
         # Item catalog:
@@ -1802,7 +1810,7 @@ class ShopCommands(commands.Cog):
 
         item_key = item.value
         if item_key not in MANA_ITEMS:
-            await interaction.followup.send("Unknown item.", ephemeral=True)
+            await _reject("Unknown item.")
             return
 
         spec = MANA_ITEMS[item_key]
@@ -1813,10 +1821,9 @@ class ShopCommands(commands.Cog):
 
         if effects.color != required_color:
             color_to_land = {"Red": "Mountain", "Blue": "Island", "Green": "Forest", "White": "Plains", "Black": "Swamp"}
-            await interaction.followup.send(
+            await _reject(
                 f"**{display_name}** requires **{required_color}** mana ({color_to_land.get(required_color, '?')}). "
                 f"Your current mana is **{effects.color}**.",
-                ephemeral=True,
             )
             return
 
@@ -1828,25 +1835,18 @@ class ShopCommands(commands.Cog):
         no_self_target_items = {"sanctuary", "blood_pact"}
         if item_key in target_required_for:
             if not target:
-                await interaction.followup.send(
-                    f"**{display_name}** requires a `target` player.",
-                    ephemeral=True,
-                )
+                await _reject(f"**{display_name}** requires a `target` player.")
                 return
             if target.id == user_id and item_key in no_self_target_items:
-                await interaction.followup.send(
-                    f"**{display_name}** must target another player.",
-                    ephemeral=True,
-                )
+                await _reject(f"**{display_name}** must target another player.")
                 return
 
         # Check balance up-front — we still want a clean "not enough JC"
         # message before any side effect runs.
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
-            await interaction.followup.send(
+            await _reject(
                 f"You need {cost} {JOPACOIN_EMOTE} for {display_name}. You have {balance}.",
-                ephemeral=True,
             )
             return
 
@@ -1858,9 +1858,8 @@ class ShopCommands(commands.Cog):
             mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
         )
         if not claimed:
-            await interaction.followup.send(
+            await _reject(
                 f"**{display_name}** is once-per-day. Already used today.",
-                ephemeral=True,
             )
             return
 
@@ -1875,11 +1874,16 @@ class ShopCommands(commands.Cog):
                     )
                 except Exception:
                     logger.exception("Failed to release daily-use slot for %s", item_key)
-                await interaction.followup.send(
+                await _reject(
                     "Your mana was already tapped this turn. Try again tomorrow.",
-                    ephemeral=True,
                 )
                 return
+
+        # Defer (public) only once the purchase proceeds. Not gated: the
+        # daily claim (and for ults the tap) already committed, so the effect
+        # must still be delivered on a lapsed token (safe_followup and
+        # channel sends still work).
+        await safe_defer(interaction, ephemeral=False)
 
         # Charge cost AFTER the claim won so failure paths don't show a
         # charge-then-refund flicker.
@@ -1894,7 +1898,10 @@ class ShopCommands(commands.Cog):
                 )
             except Exception:
                 logger.exception("Failed to release daily-use slot for %s", item_key)
-            await interaction.followup.send(reason, ephemeral=True)
+            # Deliberately public: the first followup after the public defer
+            # ignores ephemeral, and a visible refund notice is honest about
+            # the publicly in-progress purchase failing.
+            await interaction.followup.send(reason)
 
         async def _apply_hostile_loss(
             victim_id: int,

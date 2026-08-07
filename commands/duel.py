@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Iterable
 
 import discord
@@ -120,10 +121,16 @@ class DuelCommands(commands.Cog):
 
     duel = app_commands.Group(name="duel", description="Challenges of honor")
 
+    # A failed fetch rescue of the configured duel channel is remembered for
+    # this long, so a deleted/unfetchable DUEL_CHANNEL_ID costs one failing
+    # HTTP call per window instead of one per wake.
+    CONFIGURED_RESCUE_RETRY_SECONDS = 600
+
     def __init__(self, bot, duel_service, flavor_service) -> None:
         self.bot = bot
         self.duel_service = duel_service
         self.flavor_service = flavor_service
+        self._configured_rescue_failed_at = 0.0
 
     @duel.command(name="issue", description="Challenge a player to a duel of honor")
     async def issue(
@@ -618,12 +625,28 @@ class DuelCommands(commands.Cog):
             DUEL_CHANNEL_ID is not None
             and getattr(main_channel, "id", None) != DUEL_CHANNEL_ID
             and self.bot.get_channel(DUEL_CHANNEL_ID) is None
+            and (
+                time.monotonic() - self._configured_rescue_failed_at
+                >= self.CONFIGURED_RESCUE_RETRY_SECONDS
+            )
         ):
             # Archived threads are evicted from the gateway cache, so the
             # sync resolution above cannot see a configured thread once it
             # auto-archives. A fetch still retrieves it; foreign or deleted
-            # ids fail the same-guild/sendability gate below.
-            fetched = await self._get_channel(DUEL_CHANNEL_ID)
+            # ids fail the fetch or the same-guild/sendability gate below,
+            # and a failure is negative-cached so it cannot cost an HTTP
+            # call (and log noise) on every wake.
+            try:
+                fetched = await self.bot.fetch_channel(DUEL_CHANNEL_ID)
+            except discord.DiscordException:
+                self._configured_rescue_failed_at = time.monotonic()
+                logger.debug(
+                    "Configured duel channel fetch rescue failed; "
+                    "guild=%s channel=%s",
+                    challenge.guild_id,
+                    DUEL_CHANNEL_ID,
+                )
+                fetched = None
             if fetched is not None and self._can_send_reminder(
                 fetched, challenge.guild_id
             ):
@@ -659,10 +682,16 @@ class DuelCommands(commands.Cog):
                 configured, guild_id
             ):
                 return configured
-            if (
-                configured is None
-                and self.bot.get_channel(DUEL_CHANNEL_ID) is not None
-            ):
+            if configured is not None:
+                # Cached but unsendable (permission revoked, or a
+                # non-messageable type): a misconfiguration the fetch rescue
+                # cannot repair — keep it loud.
+                logger.warning(
+                    "Configured duel channel is not sendable; guild=%s channel=%s",
+                    guild_id,
+                    DUEL_CHANNEL_ID,
+                )
+            elif self.bot.get_channel(DUEL_CHANNEL_ID) is not None:
                 # The configured channel lives in another guild; routine in
                 # multi-guild deployments, so don't warn on every resolution.
                 logger.debug(

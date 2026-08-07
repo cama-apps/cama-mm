@@ -1885,6 +1885,37 @@ def test_recent_loss_aggregate_combines_only_recent_losing_bets_and_wheel(
 
 
 @pytest.mark.asyncio
+async def test_manashop_failure_notices_precede_the_public_defer(monkeypatch):
+    """Manashop rejections must respond ephemerally BEFORE any public defer -
+    the first followup after a public defer ignores ephemeral=True and would
+    broadcast the private notice."""
+    from tests.conftest import TEST_GUILD_ID
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=1001)
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=TEST_GUILD_ID)
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
+
+    # Regrowth needs Green mana; the buyer holds Red.
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="regrowth"), target=None,
+    )
+
+    safe_defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "requires" in args[0]
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("item", "color", "loss_method"),
     [
