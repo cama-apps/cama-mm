@@ -474,8 +474,13 @@ class ReminderService:
             f"Betting is open for ~{minutes} more minutes. "
             "Use `/bet` now!"
         )
-        for discord_id in subscribers:
-            asyncio.create_task(self._dm_user(bot, discord_id, message))
+        # Await the sends instead of spawning unreferenced tasks: the event
+        # loop only holds tasks weakly, so a dropped Task handle can be
+        # garbage-collected before the DM is delivered. Callers already run
+        # this coroutine from a retained background task.
+        await asyncio.gather(
+            *(self._dm_user(bot, discord_id, message) for discord_id in subscribers)
+        )
 
     # ------------------------------------------------------------------
     # Restart recovery

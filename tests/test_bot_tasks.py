@@ -75,6 +75,85 @@ async def test_first_game_pool_loop_funds_every_guild_for_current_game_date(bot_
     sleep.assert_awaited_once_with(900)
 
 
+async def test_first_game_pool_loop_skips_guilds_already_processed_for_game_date(
+    bot_module,
+):
+    """Funding changes once per game-date, so later wakes must not re-enter the
+    write transaction for an already-processed guild/date."""
+    guilds = [SimpleNamespace(id=41)]
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.return_value = {"funded_dates": []}
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await bot_module._first_game_pool_loop()
+
+    loan_service.fund_first_game_pools.assert_called_once_with(41, "2026-08-05", 100)
+
+
+async def test_first_game_pool_loop_funds_again_when_game_date_advances(bot_module):
+    guilds = [SimpleNamespace(id=41)]
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.return_value = {"funded_dates": []}
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(
+            bot_module, "get_game_date", side_effect=["2026-08-05", "2026-08-06"]
+        ),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await bot_module._first_game_pool_loop()
+
+    assert loan_service.fund_first_game_pools.call_args_list == [
+        call(41, "2026-08-05", 100),
+        call(41, "2026-08-06", 100),
+    ]
+
+
+async def test_first_game_pool_loop_retries_failed_guild_on_next_wake(bot_module):
+    """A failed funding attempt is not treated as processed for the game-date."""
+    guilds = [SimpleNamespace(id=41)]
+    loan_service = MagicMock()
+    loan_service.fund_first_game_pools.side_effect = [
+        RuntimeError("db locked"),
+        {"funded_dates": []},
+    ]
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+        patch.object(bot_module.bot, "loan_service", loan_service, create=True),
+        patch.object(bot_module, "get_game_date", return_value="2026-08-05"),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()),
+    ):
+        await bot_module._first_game_pool_loop()
+
+    assert loan_service.fund_first_game_pools.call_count == 2
+
+
 async def test_first_game_pool_loop_refreshes_open_lobby_messages_after_funding(
     bot_module,
 ):
@@ -500,10 +579,28 @@ async def test_on_ready_retains_supervised_duel_and_first_game_pool_workers(bot_
 
 def test_refresh_vanity_tax_memberships_uses_current_guild_members(bot_module):
     service = MagicMock()
+    snapshot = [
+        (42, [SimpleNamespace(id=7, nick=None)]),
+        (84, [SimpleNamespace(id=8, nick="Real Name")]),
+    ]
+
+    with patch.object(bot_module.bot, "vanity_tax_service", service, create=True):
+        bot_module._refresh_vanity_tax_memberships(snapshot)
+
+    assert service.refresh_guild.call_args_list == [
+        call(42, snapshot[0][1]),
+        call(84, snapshot[1][1]),
+    ]
+
+
+async def test_refresh_vanity_tax_memberships_runs_off_the_event_loop(bot_module):
+    """on_ready's refresh does blocking SQLite reads, so it must go via to_thread."""
+    service = MagicMock()
     guilds = [
         SimpleNamespace(id=42, members=[SimpleNamespace(id=7, nick=None)]),
         SimpleNamespace(id=84, members=[SimpleNamespace(id=8, nick="Real Name")]),
     ]
+    to_thread = AsyncMock()
 
     with (
         patch.object(bot_module.bot, "vanity_tax_service", service, create=True),
@@ -512,13 +609,19 @@ def test_refresh_vanity_tax_memberships_uses_current_guild_members(bot_module):
             "guilds",
             new_callable=lambda: property(lambda _self: guilds),
         ),
+        patch.object(bot_module.asyncio, "to_thread", to_thread),
     ):
-        bot_module._refresh_vanity_tax_memberships()
+        await bot_module._refresh_vanity_tax_memberships_async()
 
-    assert service.refresh_guild.call_args_list == [
-        call(42, guilds[0].members),
-        call(84, guilds[1].members),
-    ]
+    to_thread.assert_awaited_once_with(
+        bot_module._refresh_vanity_tax_memberships,
+        [
+            (42, guilds[0].members),
+            (84, guilds[1].members),
+        ],
+    )
+    # The blocking refresh itself never ran on the loop.
+    service.refresh_guild.assert_not_called()
 
 
 async def test_member_events_keep_vanity_tax_membership_current(bot_module):
@@ -1479,7 +1582,9 @@ async def test_readycheck_sync_aborts_when_generation_is_replaced():
     readycheck_message.remove_reaction.assert_not_awaited()
 
 
-async def test_readycheck_sync_retries_departed_reaction_cleanup_after_failure():
+async def test_readycheck_sync_tolerates_departed_reaction_cleanup_failure():
+    """Reaction removal is best-effort display cleanup: a Discord failure must
+    not abort the sync, and departed players still stop counting as confirmed."""
     from commands.lobby import LobbyCommands
     from services.lobby_manager_service import LobbyManagerService
     from services.lobby_service import LobbyService
@@ -1507,7 +1612,7 @@ async def test_readycheck_sync_retries_departed_reaction_cleanup_after_failure()
         id=500,
         edit=AsyncMock(),
         remove_reaction=AsyncMock(
-            side_effect=[RuntimeError("temporary Discord failure"), None]
+            side_effect=RuntimeError("temporary Discord failure")
         ),
     )
     readycheck_channel = SimpleNamespace(
@@ -1533,12 +1638,9 @@ async def test_readycheck_sync_retries_departed_reaction_cleanup_after_failure()
         }
     )
 
-    assert not await cog.sync_readycheck_with_lobby(guild_id)
-    assert manager.get_readycheck_reacted(guild_id=guild_id) == {2: "<@2>"}
-
     assert await cog.sync_readycheck_with_lobby(guild_id)
     assert manager.get_readycheck_reacted(guild_id=guild_id) == {}
-    assert readycheck_message.remove_reaction.await_count == 2
+    assert readycheck_message.remove_reaction.await_count == 1
 
 
 async def test_readycheck_sync_contains_message_edit_failure():
@@ -1983,6 +2085,7 @@ async def test_readycheck_completion_falls_back_when_origin_channel_fetch_fails(
 
     readycheck_channel = SimpleNamespace(id=200, send=AsyncMock())
     lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
     lobby_service.get_origin_channel_id.return_value = 300
     cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
 
@@ -2016,6 +2119,7 @@ async def test_readycheck_completion_falls_back_when_origin_lookup_fails(
 
     readycheck_channel = SimpleNamespace(id=200, send=AsyncMock())
     lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
     lobby_service.get_origin_channel_id.side_effect = RuntimeError(
         "origin lookup unavailable"
     )

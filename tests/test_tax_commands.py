@@ -65,6 +65,7 @@ class _FakeResponse:
     def __init__(self):
         self.messages: list[dict] = []
         self._done = False
+        self.deferred = False
         self.deferred_ephemeral: bool | None = None
 
     async def send_message(self, content=None, ephemeral=None, embed=None, **kwargs):
@@ -75,6 +76,7 @@ class _FakeResponse:
 
     async def defer(self, ephemeral=False, thinking=False):
         self._done = True
+        self.deferred = True
         self.deferred_ephemeral = ephemeral
 
     async def edit_message(self, **kwargs):
@@ -101,6 +103,10 @@ class _FakeInteraction:
         self.user = SimpleNamespace(id=user_id)
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
+        self.edited: list[dict] = []
+
+    async def edit_original_response(self, **kwargs):
+        self.edited.append(kwargs)
 
 
 def _embed_text(embed) -> str:
@@ -673,8 +679,9 @@ async def test_tax_player_ledger_view_loads_next_page_with_offset():
         ledger_offset=16,
     )
 
-    edited_message = interaction.response.messages[-1]
-    assert edited_message["edit"] is True
+    # The component interaction is acknowledged before the DB work runs.
+    assert interaction.response.deferred is True
+    edited_message = interaction.edited[-1]
     assert edited_message["view"] is view
     assert view.previous_page.disabled is False
     assert view.next_page.disabled is True
@@ -685,6 +692,69 @@ async def test_tax_player_ledger_view_loads_next_page_with_offset():
         limit=limit,
     )
     assert validate_embed(edited_message["embed"]) == []
+
+
+@pytest.mark.asyncio
+async def test_tax_player_ledger_view_failed_load_keeps_page_state():
+    """A failed page load must defer first, report the error, and leave the
+    view's page/button state on the page the message still shows."""
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    limit = tax_commands.PLAYER_LEDGER_DEFAULT_LIMIT
+    tax_service = SimpleNamespace(
+        count_ledger_entries=MagicMock(return_value=21),
+        get_player_snapshot=MagicMock(side_effect=RuntimeError("db unavailable")),
+    )
+    view = tax_commands.TaxPlayerLedgerView(
+        tax_service=tax_service,
+        guild_id=123,
+        requester_id=42,
+        user=target,
+        limit=limit,
+        current_page=1,
+        total_entries=21,
+    )
+    previous_disabled = view.previous_page.disabled
+    next_disabled = view.next_page.disabled
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await view._show_page(interaction, 3)
+
+    assert interaction.response.deferred is True
+    assert view.current_page == 1
+    assert view.previous_page.disabled is previous_disabled
+    assert view.next_page.disabled is next_disabled
+    assert interaction.edited == []
+    error = interaction.followup.messages[-1]
+    assert error["ephemeral"] is True
+    assert "Couldn't load" in error["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_ledger_view_failed_load_keeps_page_state():
+    tax_service = SimpleNamespace(
+        count_ledger_entries=MagicMock(side_effect=RuntimeError("db unavailable")),
+        get_recent_ledger=MagicMock(),
+    )
+    view = tax_commands.TaxLedgerView(
+        tax_service=tax_service,
+        guild_id=123,
+        requester_id=42,
+        user=None,
+        limit=10,
+        current_page=2,
+        total_entries=100,
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await view._show_page(interaction, 3)
+
+    assert interaction.response.deferred is True
+    assert view.current_page == 2
+    tax_service.get_recent_ledger.assert_not_called()
+    assert interaction.edited == []
+    error = interaction.followup.messages[-1]
+    assert error["ephemeral"] is True
+    assert "Couldn't load" in error["content"]
 
 
 @pytest.mark.asyncio

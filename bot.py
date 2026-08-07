@@ -381,9 +381,15 @@ async def _first_game_pool_loop() -> None:
         FIRST_GAME_POOL_WAKE_SECONDS,
         FIRST_GAME_POOL_DAILY_AMOUNT,
     )
+    # Funding is processed at most once per PST game-date per guild, so
+    # remember the last date each guild processed and skip the redundant
+    # BEGIN IMMEDIATE write transaction on the ~95 other daily wakes.
+    processed_game_dates: dict[int, str] = {}
     while not bot.is_closed():
         game_date = get_game_date()
         for guild in list(bot.guilds):
+            if processed_game_dates.get(guild.id) == game_date:
+                continue
             try:
                 funding = await asyncio.to_thread(
                     bot.loan_service.fund_first_game_pools,
@@ -391,6 +397,7 @@ async def _first_game_pool_loop() -> None:
                     game_date,
                     FIRST_GAME_POOL_DAILY_AMOUNT,
                 )
+                processed_game_dates[guild.id] = game_date
                 if isinstance(funding, dict) and funding.get("funded_dates"):
                     await _refresh_first_game_pool_lobby_messages(guild.id)
             except Exception:  # noqa: BLE001
@@ -463,6 +470,11 @@ async def _refresh_first_game_pool_lobby_messages(guild_id: int) -> None:
                     )
             if attempt + 1 < _LOBBY_RECONCILE_MAX_ATTEMPTS:
                 await asyncio.sleep(_LOBBY_RECONCILE_RETRY_SECONDS * (2**attempt))
+
+
+# Sanctioned handle for command cogs (which otherwise cannot reach this
+# module-level coroutine without importing a bot.py private).
+bot.refresh_first_game_pool_lobby_messages = _refresh_first_game_pool_lobby_messages
 
 
 async def _process_one_refresh(market: dict) -> None:
@@ -1371,13 +1383,25 @@ def _log_command_registration(stage: str):
     return summary
 
 
-def _refresh_vanity_tax_memberships() -> None:
-    """Rebuild nickname eligibility from Discord's current member cache."""
+def _refresh_vanity_tax_memberships(
+    guild_members: list[tuple[int, list]],
+) -> None:
+    """Rebuild nickname eligibility from a snapshot of the member cache.
+
+    Runs blocking SQLite reads (manual-exemption reload), so it is called via
+    ``asyncio.to_thread`` with the member snapshot built on the event loop.
+    """
     service = getattr(bot, "vanity_tax_service", None)
     if service is None:
         return
-    for guild in bot.guilds:
-        service.refresh_guild(guild.id, guild.members)
+    for guild_id, members in guild_members:
+        service.refresh_guild(guild_id, members)
+
+
+async def _refresh_vanity_tax_memberships_async() -> None:
+    """Snapshot guild members on the loop, then refresh off-loop."""
+    snapshot = [(guild.id, list(guild.members)) for guild in bot.guilds]
+    await asyncio.to_thread(_refresh_vanity_tax_memberships, snapshot)
 
 
 @bot.event
@@ -1408,7 +1432,7 @@ async def on_member_remove(member: discord.Member) -> None:
 async def on_ready():
     """Called when bot is ready."""
     logger.info(f"{bot.user} connected. Guilds: {len(bot.guilds)}")
-    _refresh_vanity_tax_memberships()
+    await _refresh_vanity_tax_memberships_async()
 
     _log_command_registration("Pre-sync")
     logger.info(f"Loaded cogs: {list(bot.cogs.keys())}")
@@ -1893,13 +1917,15 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        join_cutoff_ns = time.time_ns()
         success, reason, pending_info = await asyncio.to_thread(
             bot.lobby_service.join_lobby,
             payload.user_id,
             guild_id,
             lobby_kind,
         )
+        # Cut the one-shot subscription claim at the join's own watermark, so
+        # a subscription committed while this join was in flight still fires.
+        join_cutoff_ns = getattr(pending_info, "joined_at_ns", None) or time.time_ns()
 
         if not success:
             try:
@@ -1941,7 +1967,8 @@ async def on_raw_reaction_add(payload):
                     "lobby_full": "Lobby is full.",
                     "already_joined": "Already in lobby.",
                     "rating_too_high": (
-                        f"{LobbyKind.LOWSKILL.label} is limited to Glicko below 1400."
+                        f"{LobbyKind.LOWSKILL.label} is limited to "
+                        f"{LobbyKind.LOWSKILL.eligibility_text.lower()}."
                     ),
                     "in_other_lobby": "Leave your current lobby before joining another.",
                     "in_flight": (

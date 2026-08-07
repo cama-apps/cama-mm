@@ -19,33 +19,18 @@ from opendota_integration import run_opendota_io
 from utils.formatting import escape_discord_text, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
+from utils.suspension_format import (
+    format_suspension_scope,
+    format_suspension_terms,
+)
 
 logger = logging.getLogger("cama_bot.commands.registration")
 
 
-def _moderation_enum_value(value) -> str:
-    return str(getattr(value, "value", value))
-
-
 def _player_suspension_summary(state) -> str:
-    scope = _moderation_enum_value(state.scope)
-    scope_text = {
-        "all": "all matchmaking lobbies",
-        "open": "🍽️ All You Can Feed",
-        "lowskill": "🧀 Whine & Cheese",
-    }.get(scope, scope)
-    terms: list[str] = []
-    if state.expires_at is not None:
-        expires_at = int(state.expires_at)
-        terms.append(f"until <t:{expires_at}:F> (<t:{expires_at}:R>)")
-    if state.matches_remaining is not None:
-        noun = "match" if state.matches_remaining == 1 else "matches"
-        terms.append(f"{state.matches_remaining} completed {noun} remaining")
-    completion = _moderation_enum_value(state.completion)
-    joiner = " or " if completion == "either" else " and "
     return (
-        f"**Lobby suspension** — {scope_text}\n"
-        f"Term: {joiner.join(terms)}\nReason: {state.reason}"
+        f"**Lobby suspension** — {format_suspension_scope(state)}\n"
+        f"Term: {format_suspension_terms(state)}\nReason: {state.reason}"
     )
 
 
@@ -62,6 +47,18 @@ class RegistrationCommands(commands.Cog):
     def __init__(self, bot: commands.Bot, player_service):
         self.bot = bot
         self.player_service = player_service
+
+    @staticmethod
+    async def _update_lobby_alert_dm(interaction, dm_message, content: str) -> None:
+        """Best-effort edit of the preflight DM so it reflects the final outcome."""
+        try:
+            await dm_message.edit(content=content)
+        except Exception as exc:
+            logger.debug(
+                "Could not update lobby-alert DM for %s: %s",
+                interaction.user.id,
+                exc,
+            )
 
     @player_lobby.command(
         name="autonotify",
@@ -121,8 +118,10 @@ class RegistrationCommands(commands.Cog):
             try:
                 # Discord has no guild permission bit that proves a user accepts
                 # bot DMs. A real send is the only reliable preflight, and the
-                # subscription is persisted only after it succeeds.
-                await interaction.user.send(
+                # subscription is persisted only after it succeeds. The message
+                # is edited below once the real outcome (created, duplicate, or
+                # save failure) is known so the DM never overstates progress.
+                dm_message = await interaction.user.send(
                     "✅ DM check passed for your one-time lobby alert request "
                     f"about **{target_name}**."
                 )
@@ -176,11 +175,9 @@ class RegistrationCommands(commands.Cog):
                     exc,
                     exc_info=True,
                 )
-                await safe_followup(
-                    interaction,
-                    content="❌ Your DM check passed, but I couldn't save the alert. Try again later.",
-                    ephemeral=True,
-                )
+                message = "❌ Your DM check passed, but I couldn't save the alert. Try again later."
+                await self._update_lobby_alert_dm(interaction, dm_message, message)
+                await safe_followup(interaction, content=message, ephemeral=True)
                 return
 
             if created:
@@ -192,6 +189,7 @@ class RegistrationCommands(commands.Cog):
                 message = (
                     f"🔔 You already have a one-time lobby alert set for **{target_name}**."
                 )
+            await self._update_lobby_alert_dm(interaction, dm_message, message)
             await safe_followup(interaction, content=message, ephemeral=True)
             return
 

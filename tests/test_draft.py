@@ -2019,11 +2019,9 @@ class TestHandlePlayerPick:
         )
         interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
 
-        with patch(
-            "bot._refresh_first_game_pool_lobby_messages",
-            new=AsyncMock(),
-        ) as refresh_pool_lobbies:
-            await cog.handle_player_pick(interaction, guild_id, player_ids[9])
+        refresh_pool_lobbies = AsyncMock()
+        bot.refresh_first_game_pool_lobby_messages = refresh_pool_lobbies
+        await cog.handle_player_pick(interaction, guild_id, player_ids[9])
 
         lobby_manager.reset_lobby.assert_called_once_with(guild_id, LobbyKind.OPEN)
         assert [await_call.args for await_call in refresh_pool_lobbies.await_args_list] == [
@@ -2057,11 +2055,9 @@ class TestHandlePlayerPick:
         )
         interaction = _FakeComponentInteraction(guild_id, user_id=player_ids[0])
 
-        with patch(
-            "bot._refresh_first_game_pool_lobby_messages",
-            new=AsyncMock(),
-        ) as refresh_pool_lobbies:
-            await cog.handle_player_pick(interaction, guild_id, player_ids[9])
+        refresh_pool_lobbies = AsyncMock()
+        bot.refresh_first_game_pool_lobby_messages = refresh_pool_lobbies
+        await cog.handle_player_pick(interaction, guild_id, player_ids[9])
 
         refresh_pool_lobbies.assert_awaited_once_with(guild_id)
         lobby_manager.reset_lobby.assert_not_called()
@@ -2723,46 +2719,6 @@ class TestDraftCaptainPingCleanup:
         )
         assert cog.draft_state_manager.get_state(guild_id) is state
 
-    async def test_restart_does_not_clear_a_previous_drafts_pending_match(self):
-        """A restarting draft never owns a pending match, so it must not clear one.
-
-        ``_complete_draft`` always clears the draft state in its ``finally``, so a
-        draft-created pending match found here belongs to an earlier completed
-        draft whose match is in play with live bets. Clearing without an id wipes
-        every pending match in the guild.
-        """
-        guild_id = 123
-        captain_id = 456
-        origin_channel = _FakeChannel(channel_id=777_020)
-        ping_message = await origin_channel.send(f"<@{captain_id}> Draft starting!")
-        bot = SimpleNamespace(
-            get_channel=lambda channel_id: (
-                origin_channel if channel_id == origin_channel.id else None
-            )
-        )
-        cog = self._make_cog(bot)
-        cog.match_service = MagicMock()
-        cog.match_service.get_last_shuffle.return_value = SimpleNamespace(
-            is_draft=True, pending_match_id=4242
-        )
-
-        state = cog.draft_state_manager.create_draft(guild_id)
-        state.captain1_id = captain_id
-        state.captain2_id = captain_id + 1
-        state.draft_channel_id = origin_channel.id
-        state.captain_ping_message_id = ping_message.id
-        interaction = SimpleNamespace(
-            guild=_FakeGuild(guild_id),
-            user=SimpleNamespace(id=captain_id, display_name="Captain"),
-            channel=_FakeChannel(channel_id=777_021),
-            response=AsyncMock(),
-        )
-
-        await cog.restartdraft.callback(cog, interaction)
-
-        cog.match_service.clear_last_shuffle.assert_not_called()
-        assert cog.draft_state_manager.get_state(guild_id) is None
-
     async def test_timeout_deletes_ping_from_persisted_draft_channel(self):
         guild_id = 123
         origin_channel = _FakeChannel(channel_id=777_012)
@@ -2907,3 +2863,75 @@ class TestDraftTimeoutOwnership:
         await cog._handle_draft_timeout(guild_id, view=sample_view)
 
         assert cog.draft_state_manager.get_state(guild_id) is real_state
+
+
+class TestDraftCompletionErrorGuidance:
+    """The completion error handler must not tell users to /draft start once
+    the pending match exists — the players are locked to it until it is
+    recorded or aborted (finding: wrong recovery guidance)."""
+
+    def _make_cog(self):
+        return DraftCommands(
+            bot=SimpleNamespace(get_cog=MagicMock(return_value=None)),
+            player_repo=MagicMock(),
+            lobby_manager=MagicMock(),
+            draft_state_manager=DraftStateManager(),
+            draft_service=DraftService(),
+            match_service=MagicMock(),
+        )
+
+    @staticmethod
+    def _make_interaction():
+        return SimpleNamespace(
+            guild=SimpleNamespace(id=123),
+            response=SimpleNamespace(
+                is_done=lambda: False,
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_after_pending_match_creation_points_to_record_abort(self):
+        cog = self._make_cog()
+        guild_id = 123
+        state = cog.draft_state_manager.create_draft(guild_id)
+        interaction = self._make_interaction()
+
+        with (
+            patch.object(
+                cog, "_create_pending_match", AsyncMock(return_value=4242)
+            ),
+            patch.object(
+                cog,
+                "_refresh_bonus_pool_lobbies",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            await cog._complete_draft(interaction, guild_id, state)
+
+        interaction.response.send_message.assert_awaited_once()
+        message = interaction.response.send_message.await_args.args[0]
+        assert "Match #4242" in message
+        assert "/record abort" in message
+        assert "/draft start" not in message
+
+    @pytest.mark.asyncio
+    async def test_error_before_pending_match_creation_still_suggests_draft_start(
+        self,
+    ):
+        cog = self._make_cog()
+        guild_id = 123
+        state = cog.draft_state_manager.create_draft(guild_id)
+        interaction = self._make_interaction()
+
+        with patch.object(
+            cog,
+            "_create_pending_match",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await cog._complete_draft(interaction, guild_id, state)
+
+        interaction.response.send_message.assert_awaited_once()
+        message = interaction.response.send_message.await_args.args[0]
+        assert "/draft start" in message

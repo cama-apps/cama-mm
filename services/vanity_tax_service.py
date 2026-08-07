@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from threading import RLock
+from threading import Lock, RLock
 from typing import TYPE_CHECKING
 
 from config import VANITY_TAX_RATE
@@ -19,10 +19,30 @@ class VanityTaxService:
 
     def __init__(self, repository: TaxRepository | None = None) -> None:
         self._repository = repository
+        # ``_lock`` guards only the in-memory caches and is acquired by sync
+        # event handlers on the event loop (on_member_update etc.), so it must
+        # never be held across repository I/O. ``_io_lock`` serializes the
+        # repository read/write + cache swap so a stale refresh cannot clobber
+        # a newer manual-exemption write.
         self._lock = RLock()
+        self._io_lock = Lock()
         self._known_members_by_guild: dict[int, frozenset[int]] = {}
         self._nickname_taxable_by_guild: dict[int, frozenset[int]] = {}
         self._manual_exemptions_by_guild: dict[int, frozenset[int]] = {}
+
+    def _store_refresh(
+        self,
+        guild_id: int,
+        known_members: set[int],
+        nickname_taxable: set[int],
+        manual_exemptions: frozenset[int],
+    ) -> None:
+        with self._lock:
+            self._known_members_by_guild[guild_id] = frozenset(known_members)
+            self._nickname_taxable_by_guild[guild_id] = frozenset(
+                nickname_taxable
+            )
+            self._manual_exemptions_by_guild[guild_id] = manual_exemptions
 
     def refresh_guild(self, guild_id: int, members: Iterable[object]) -> None:
         known_members: set[int] = set()
@@ -32,21 +52,31 @@ class VanityTaxService:
             known_members.add(discord_id)
             if getattr(member, "nick", None) is None:
                 nickname_taxable.add(discord_id)
-        with self._lock:
-            if self._repository is not None:
+        if self._repository is not None:
+            # Blocking SQLite read happens outside the cache lock so event-loop
+            # callers never wait on DB I/O.
+            with self._io_lock:
                 manual_exemptions = (
                     self._repository.get_vanity_tax_exemptions(guild_id)
                 )
-            else:
+                self._store_refresh(
+                    guild_id,
+                    known_members,
+                    nickname_taxable,
+                    manual_exemptions,
+                )
+        else:
+            with self._lock:
                 manual_exemptions = self._manual_exemptions_by_guild.get(
                     guild_id,
                     frozenset(),
                 )
-            self._known_members_by_guild[guild_id] = frozenset(known_members)
-            self._nickname_taxable_by_guild[guild_id] = frozenset(
-                nickname_taxable
-            )
-            self._manual_exemptions_by_guild[guild_id] = manual_exemptions
+                self._store_refresh(
+                    guild_id,
+                    known_members,
+                    nickname_taxable,
+                    manual_exemptions,
+                )
 
     def update_member(
         self,
@@ -87,15 +117,20 @@ class VanityTaxService:
         actor_id: int,
     ) -> None:
         """Grant or revoke a persistent exemption from the nickname rule."""
-        with self._lock:
-            if self._repository is not None:
+        if self._repository is not None:
+            # The blocking SQLite write happens outside the cache lock so
+            # event-loop callers never wait on DB I/O.
+            with self._io_lock:
                 exemptions = self._repository.set_vanity_tax_exemption(
                     guild_id,
                     discord_id,
                     exempt=exempt,
                     actor_id=actor_id,
                 )
-            else:
+                with self._lock:
+                    self._manual_exemptions_by_guild[guild_id] = exemptions
+        else:
+            with self._lock:
                 updated = set(
                     self._manual_exemptions_by_guild.get(guild_id, ())
                 )
@@ -103,8 +138,7 @@ class VanityTaxService:
                     updated.add(discord_id)
                 else:
                     updated.discard(discord_id)
-                exemptions = frozenset(updated)
-            self._manual_exemptions_by_guild[guild_id] = exemptions
+                self._manual_exemptions_by_guild[guild_id] = frozenset(updated)
 
     def eligibility_status(
         self,

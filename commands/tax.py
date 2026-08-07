@@ -68,20 +68,24 @@ class TaxLedgerView(discord.ui.View):
         return False
 
     async def _load_page(self, page: int) -> discord.Embed:
-        self.total_entries = await asyncio.to_thread(
+        # Compute into locals and only commit the page state once every query
+        # has succeeded, so a failed load leaves the view on its current page.
+        total_entries = await asyncio.to_thread(
             self.tax_service.count_ledger_entries,
             self.guild_id,
             user_id=self.user.id if self.user else None,
         )
-        self.total_pages = _ledger_total_pages(self.total_entries, self.limit)
-        self.current_page = _clamp_ledger_page(page, self.limit, self.total_entries)
+        current_page = _clamp_ledger_page(page, self.limit, total_entries)
         rows = await asyncio.to_thread(
             self.tax_service.get_recent_ledger,
             self.guild_id,
             limit=self.limit,
-            offset=_ledger_offset(self.current_page, self.limit),
+            offset=_ledger_offset(current_page, self.limit),
             user_id=self.user.id if self.user else None,
         )
+        self.total_entries = total_entries
+        self.total_pages = _ledger_total_pages(total_entries, self.limit)
+        self.current_page = current_page
         self._sync_buttons()
         return _build_ledger_embed(
             rows,
@@ -96,6 +100,9 @@ class TaxLedgerView(discord.ui.View):
         interaction: discord.Interaction,
         page: int,
     ) -> None:
+        # Acknowledge within Discord's 3-second component window before the
+        # ledger queries run.
+        await interaction.response.defer()
         try:
             embed = await self._load_page(page)
         except Exception:
@@ -103,12 +110,12 @@ class TaxLedgerView(discord.ui.View):
                 "Failed to paginate tax ledger for guild_id=%s",
                 self.guild_id,
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Couldn't load that ledger page right now.",
                 ephemeral=True,
             )
             return
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     def _sync_buttons(self) -> None:
         self.previous_page.disabled = self.current_page <= 1
@@ -166,20 +173,24 @@ class TaxPlayerLedgerView(discord.ui.View):
         return False
 
     async def _load_page(self, page: int) -> discord.Embed:
-        self.total_entries = await asyncio.to_thread(
+        # Compute into locals and only commit the page state once every query
+        # has succeeded, so a failed load leaves the view on its current page.
+        total_entries = await asyncio.to_thread(
             self.tax_service.count_ledger_entries,
             self.guild_id,
             user_id=self.user.id,
         )
-        self.total_pages = _ledger_total_pages(self.total_entries, self.limit)
-        self.current_page = _clamp_ledger_page(page, self.limit, self.total_entries)
+        current_page = _clamp_ledger_page(page, self.limit, total_entries)
         snapshot = await asyncio.to_thread(
             self.tax_service.get_player_snapshot,
             self.user.id,
             self.guild_id,
             ledger_limit=self.limit,
-            ledger_offset=_ledger_offset(self.current_page, self.limit),
+            ledger_offset=_ledger_offset(current_page, self.limit),
         )
+        self.total_entries = total_entries
+        self.total_pages = _ledger_total_pages(total_entries, self.limit)
+        self.current_page = current_page
         self._sync_buttons()
         return _build_player_embed(
             self.user,
@@ -194,10 +205,13 @@ class TaxPlayerLedgerView(discord.ui.View):
         interaction: discord.Interaction,
         page: int,
     ) -> None:
+        # Acknowledge within Discord's 3-second component window before the
+        # snapshot queries run.
+        await interaction.response.defer()
         try:
             embed = await self._load_page(page)
         except ValueError as exc:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 _format_tax_error(str(exc)),
                 ephemeral=True,
             )
@@ -208,12 +222,12 @@ class TaxPlayerLedgerView(discord.ui.View):
                 self.guild_id,
                 self.user.id,
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Couldn't load that player ledger page right now.",
                 ephemeral=True,
             )
             return
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     def _sync_buttons(self) -> None:
         self.previous_page.disabled = self.current_page <= 1
