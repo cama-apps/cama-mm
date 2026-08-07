@@ -24,15 +24,17 @@ class LobbySuspendedError(ValueError):
 
 
 class LobbyJoinResult(str):
-    """String-compatible manager result carrying optional suspension context."""
+    """String-compatible manager result carrying optional join context."""
 
     def __new__(
         cls,
         value: str,
         suspension: object | None = None,
+        joined_at_ns: int | None = None,
     ) -> "LobbyJoinResult":
         result = super().__new__(cls, value)
         result.suspension = suspension
+        result.joined_at_ns = joined_at_ns
         return result
 
 
@@ -70,18 +72,25 @@ class LobbyManagerService:
         # guilds create their lobbies in parallel.
         self._creation_locks: dict[tuple[int, LobbyKind], asyncio.Lock] = {}
         self._state_lock = threading.RLock()  # Protects all in-memory state mutations
+        # Serializes DB persistence (save/clear) so writes never run inside
+        # the process-wide state lock. Lock order is always
+        # _persist_lock -> _state_lock, never the reverse.
+        self._persist_lock = threading.Lock()
         # Players selected by an in-progress shuffle or draft may not leave or
         # switch lobbies until that operation either creates its pending match
         # or is cancelled. Keyed independently from lobby membership so the
-        # reservation check and membership mutation share one lock.
-        self._in_flight_player_kinds: dict[
-            tuple[int, int], tuple[LobbyKind, int]
-        ] = {}
+        # reservation check and membership mutation share one lock. Values are
+        # the reserving lobby kind; only one reservation per player can exist.
+        self._in_flight_player_kinds: dict[tuple[int, int], LobbyKind] = {}
         # Readycheck state (in-memory only, cleared on lobby reset) — per guild
         self.readycheck_message_ids: dict[tuple[int, LobbyKind], int] = {}
         self.readycheck_channel_ids: dict[tuple[int, LobbyKind], int] = {}
         self.readycheck_lobby_ids: dict[tuple[int, LobbyKind], set[int]] = {}
         self.readycheck_reacted: dict[tuple[int, LobbyKind], dict[int, str]] = {}
+        # Players who explicitly withdrew their ✅ for the current readycheck
+        # generation. Auto-confirm sweeps must never re-add them; clicking ✅
+        # again (add_readycheck_reaction) clears the marker.
+        self.readycheck_declined: dict[tuple[int, LobbyKind], set[int]] = {}
         self.readycheck_player_data: dict[
             tuple[int, LobbyKind], dict[int, dict]
         ] = {}
@@ -96,7 +105,7 @@ class LobbyManagerService:
         with self._state_lock:
             self.moderation_service = moderation_service
 
-    def _get_active_suspension_locked(
+    def _get_active_suspension(
         self,
         discord_id: int,
         guild_id: int,
@@ -104,10 +113,12 @@ class LobbyManagerService:
     ) -> object | None:
         """Return the suspension covering one lobby kind.
 
-        Callers hold ``_state_lock`` so the eligibility check and subsequent
-        membership mutation are one manager-side critical section. The
-        moderation service is responsible for matching both the requested
-        kind and an all-lobbies scope.
+        This is DB I/O (and may issue a lapsed-suspension close write), so
+        callers must NOT hold ``_state_lock`` while calling it. They check
+        eligibility first, then re-verify the cheap in-memory invariants
+        inside the lock; the small TOCTOU window is acceptable (see
+        ``reserve_lobby_players``). The moderation service is responsible for
+        matching both the requested kind and an all-lobbies scope.
         """
         if self.moderation_service is None:
             return None
@@ -208,26 +219,43 @@ class LobbyManagerService:
         normalized, kind = key
         with self._state_lock:
             current = self.lobbies.get(key)
-            if current is None or current.status != "open":
-                if creator_id is not None:
-                    suspension = self._get_active_suspension_locked(
-                        creator_id,
-                        normalized,
-                        kind,
-                    )
-                    if suspension is not None:
-                        raise LobbySuspendedError(suspension)
-                new_lobby = Lobby(
-                    lobby_id=kind.lobby_id,
-                    guild_id=normalized,
-                    kind=kind,
-                    created_by=creator_id or 0,
-                    created_at=datetime.now(),
-                )
-                self.lobbies[key] = new_lobby
-                self._persist_lobby(normalized, kind)
-                return new_lobby
-            return current
+            if current is not None and current.status == "open":
+                return current
+        # Moderation gate outside the state lock: the lookup is DB I/O and
+        # may close a lapsed suspension with a write transaction.
+        if creator_id is not None:
+            suspension = self._get_active_suspension(
+                creator_id,
+                normalized,
+                kind,
+            )
+            if suspension is not None:
+                raise LobbySuspendedError(suspension)
+        with self._state_lock:
+            lobby, created = self._get_or_create_lobby_locked(key, creator_id)
+        if created:
+            self._persist_lobby(normalized, kind)
+        return lobby
+
+    def _get_or_create_lobby_locked(
+        self,
+        key: tuple[int, LobbyKind],
+        creator_id: int | None,
+    ) -> tuple[Lobby, bool]:
+        """Return (lobby, created). Caller holds ``_state_lock``; no DB I/O."""
+        normalized, kind = key
+        current = self.lobbies.get(key)
+        if current is not None and current.status == "open":
+            return current, False
+        new_lobby = Lobby(
+            lobby_id=kind.lobby_id,
+            guild_id=normalized,
+            kind=kind,
+            created_by=creator_id or 0,
+            created_at=datetime.now(),
+        )
+        self.lobbies[key] = new_lobby
+        return new_lobby, True
 
     def get_lobby(
         self,
@@ -259,8 +287,7 @@ class LobbyManagerService:
         """Return the lobby kind currently reserving a player."""
         key = (self._normalize_guild_id(guild_id), discord_id)
         with self._state_lock:
-            reservation = self._in_flight_player_kinds.get(key)
-            return reservation[0] if reservation else None
+            return self._in_flight_player_kinds.get(key)
 
     def reserve_lobby_players(
         self,
@@ -272,37 +299,55 @@ class LobbyManagerService:
         normalized, kind = self._lobby_key(guild_id, lobby_kind)
         selected_ids = set(player_ids)
         with self._state_lock:
-            lobby = self.lobbies.get((normalized, kind))
+            if not self._can_reserve_locked(selected_ids, normalized, kind):
+                return False
+        # A suspension created before this check prevents a future match from
+        # starting. Existing reservations rejected above are deliberately
+        # left untouched: they belong to a match operation that was already
+        # in flight when moderation changed. The lookups are DB I/O (and may
+        # close a lapsed suspension), so they run outside the state lock.
+        for player_id in selected_ids:
             if (
-                lobby is None
-                or lobby.status != "open"
-                or not selected_ids.issubset(
-                    lobby.players | lobby.conditional_players
+                self._get_active_suspension(
+                    player_id,
+                    normalized,
+                    kind,
                 )
+                is not None
             ):
                 return False
-            for player_id in selected_ids:
-                reservation = self._in_flight_player_kinds.get((normalized, player_id))
-                if reservation is not None:
-                    return False
-            # A suspension created before this critical section prevents a
-            # future match from starting. Existing reservations returned
-            # above are deliberately left untouched: they belong to a match
-            # operation that was already in flight when moderation changed.
-            for player_id in selected_ids:
-                if (
-                    self._get_active_suspension_locked(
-                        player_id,
-                        normalized,
-                        kind,
-                    )
-                    is not None
-                ):
-                    return False
+        with self._state_lock:
+            # Re-verify the cheap in-memory invariants after the unlocked
+            # moderation lookups; a suspension written after this point is
+            # treated like one written after reservation (in-flight match
+            # proceeds).
+            if not self._can_reserve_locked(selected_ids, normalized, kind):
+                return False
             for player_id in selected_ids:
                 key = (normalized, player_id)
-                self._in_flight_player_kinds[key] = (kind, 1)
+                self._in_flight_player_kinds[key] = kind
             return True
+
+    def _can_reserve_locked(
+        self,
+        selected_ids: set[int],
+        normalized: int,
+        kind: LobbyKind,
+    ) -> bool:
+        """Check the in-memory reservation invariants. Caller holds ``_state_lock``."""
+        lobby = self.lobbies.get((normalized, kind))
+        if (
+            lobby is None
+            or lobby.status != "open"
+            or not selected_ids.issubset(
+                lobby.players | lobby.conditional_players
+            )
+        ):
+            return False
+        return all(
+            self._in_flight_player_kinds.get((normalized, player_id)) is None
+            for player_id in selected_ids
+        )
 
     def has_in_flight_lobby_players(
         self,
@@ -313,8 +358,8 @@ class LobbyManagerService:
         normalized, kind = self._lobby_key(guild_id, lobby_kind)
         with self._state_lock:
             return any(
-                player_key[0] == normalized and reservation[0] is kind
-                for player_key, reservation in self._in_flight_player_kinds.items()
+                player_key[0] == normalized and reserved_kind is kind
+                for player_key, reserved_kind in self._in_flight_player_kinds.items()
             )
 
     def release_lobby_players(
@@ -328,15 +373,8 @@ class LobbyManagerService:
         with self._state_lock:
             for player_id in player_ids:
                 key = (normalized, player_id)
-                reservation = self._in_flight_player_kinds.get(key)
-                if reservation and reservation[0] is kind:
-                    if reservation[1] == 1:
-                        self._in_flight_player_kinds.pop(key, None)
-                    else:
-                        self._in_flight_player_kinds[key] = (
-                            kind,
-                            reservation[1] - 1,
-                        )
+                if self._in_flight_player_kinds.get(key) is kind:
+                    self._in_flight_player_kinds.pop(key, None)
 
     def get_lobby_kind_for_message(
         self,
@@ -371,43 +409,77 @@ class LobbyManagerService:
         guild_id: int | None = None,
         lobby_kind: LobbyKind | str | None = None,
     ) -> str:
-        """Add a player to the lobby under the state lock.
+        """Add a player to the lobby.
 
         Returns a string-compatible result. A ``"lobby_suspended"`` result
         also exposes the matched record as its ``suspension`` attribute.
         """
+        target_kind = LobbyKind.normalize(lobby_kind)
+        normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
-            target_kind = LobbyKind.normalize(lobby_kind)
-            normalized = self._normalize_guild_id(guild_id)
-            reservation = self._in_flight_player_kinds.get(
-                (normalized, discord_id)
-            )
-            reserved_kind = reservation[0] if reservation else None
-            if reserved_kind is not None and reserved_kind is not target_kind:
-                return "in_flight"
-            current_kind = self.get_lobby_kind_for_player(discord_id, guild_id)
-            if current_kind is not None and current_kind is not target_kind:
-                return "in_other_lobby"
-            suspension = self._get_active_suspension_locked(
+            conflict = self._join_conflict_locked(
                 discord_id,
                 normalized,
                 target_kind,
             )
-            if suspension is not None:
-                return LobbyJoinResult("lobby_suspended", suspension)
-            lobby = self.get_or_create_lobby(
-                guild_id=guild_id,
-                lobby_kind=target_kind,
+            if conflict is not None:
+                return conflict
+        # Moderation gate outside the state lock: the lookup is DB I/O and
+        # may close a lapsed suspension with a write transaction.
+        suspension = self._get_active_suspension(
+            discord_id,
+            normalized,
+            target_kind,
+        )
+        if suspension is not None:
+            return LobbyJoinResult("lobby_suspended", suspension)
+        persist = False
+        with self._state_lock:
+            # Re-verify the cheap in-memory invariants after the unlocked
+            # moderation lookup.
+            conflict = self._join_conflict_locked(
+                discord_id,
+                normalized,
+                target_kind,
+            )
+            if conflict is not None:
+                return conflict
+            lobby, created = self._get_or_create_lobby_locked(
+                (normalized, target_kind),
+                None,
             )
             # Capacity check is the authoritative check — happens inside the lock
             # so two concurrent joins at the boundary cannot both slip through.
             if lobby.get_total_count() >= max_players:
-                return "full"
-            success = lobby.add_player(discord_id)
-            if success:
-                self._persist_lobby(lobby.guild_id, lobby.kind)
-                return "ok"
-            return "already_joined"
+                result = "full"
+            elif lobby.add_player(discord_id):
+                # Watermark the join at the in-memory mutation, so one-shot
+                # target subscriptions committed before this moment are always
+                # claimed for this join (and later ones wait for the next).
+                result = LobbyJoinResult("ok", joined_at_ns=time.time_ns())
+            else:
+                result = "already_joined"
+            persist = created or result == "ok"
+        if persist:
+            self._persist_lobby(normalized, target_kind)
+        return result
+
+    def _join_conflict_locked(
+        self,
+        discord_id: int,
+        normalized: int,
+        target_kind: LobbyKind,
+    ) -> str | None:
+        """Return a blocking join result, if any. Caller holds ``_state_lock``."""
+        reserved_kind = self._in_flight_player_kinds.get(
+            (normalized, discord_id)
+        )
+        if reserved_kind is not None and reserved_kind is not target_kind:
+            return "in_flight"
+        current_kind = self.get_lobby_kind_for_player(discord_id, normalized)
+        if current_kind is not None and current_kind is not target_kind:
+            return "in_other_lobby"
+        return None
 
     def join_lobby_conditional(
         self, discord_id: int, max_players: int = 12, guild_id: int | None = None
@@ -429,9 +501,9 @@ class LobbyManagerService:
             if not lobby:
                 return False
             success = lobby.remove_player(discord_id)
-            if success:
-                self._persist_lobby(lobby.guild_id, lobby.kind)
-            return success
+        if success:
+            self._persist_lobby(lobby.guild_id, lobby.kind)
+        return success
 
     def leave_lobby_conditional(
         self,
@@ -448,9 +520,9 @@ class LobbyManagerService:
             if not lobby:
                 return False
             success = lobby.remove_conditional_player(discord_id)
-            if success:
-                self._persist_lobby(lobby.guild_id, lobby.kind)
-            return success
+        if success:
+            self._persist_lobby(lobby.guild_id, lobby.kind)
+        return success
 
     def set_lobby_message(
         self,
@@ -480,8 +552,9 @@ class LobbyManagerService:
                 self.lobby_embed_message_ids[key] = embed_message_id
             if origin_channel_id is not None:
                 self.origin_channel_ids[key] = origin_channel_id
-            if self.lobbies.get(key):
-                self._persist_lobby(normalized, kind)
+            has_lobby = self.lobbies.get(key) is not None
+        if has_lobby:
+            self._persist_lobby(normalized, kind)
 
     def get_lobby_message_id(
         self,
@@ -527,35 +600,44 @@ class LobbyManagerService:
     ) -> None:
         key = self._lobby_key(guild_id, lobby_kind)
         normalized, kind = key
-        with self._state_lock:
-            logger = logging.getLogger("cama_bot.services.lobby_manager")
-            lobby = self.lobbies.get(key)
+        logger = logging.getLogger("cama_bot.services.lobby_manager")
+        with self._persist_lock:
+            with self._state_lock:
+                lobby = self.lobbies.get(key)
             logger.info(
                 f"reset_lobby called for guild_id={normalized}. Current lobby: {lobby}"
             )
-            if lobby:
-                lobby.status = "closed"
-            self.lobbies.pop(key, None)
-            self.lobby_message_ids.pop(key, None)
-            self.lobby_channel_ids.pop(key, None)
-            self.lobby_thread_ids.pop(key, None)
-            self.lobby_embed_message_ids.pop(key, None)
-            self.origin_channel_ids.pop(key, None)
-            self.readycheck_message_ids.pop(key, None)
-            self.readycheck_channel_ids.pop(key, None)
-            self.readycheck_lobby_ids.pop(key, None)
-            self.readycheck_reacted.pop(key, None)
-            self.readycheck_player_data.pop(key, None)
-            self.readycheck_created_ats.pop(key, None)
-            for player_key, reservation in list(
-                self._in_flight_player_kinds.items()
-            ):
-                if player_key[0] == normalized and reservation[0] is kind:
-                    self._in_flight_player_kinds.pop(player_key, None)
+            # Delete the persisted row before touching memory: if the DB
+            # delete fails, in-memory state stays intact instead of a stale
+            # row resurrecting a ghost lobby on the next restart. Holding
+            # _persist_lock keeps a concurrent _persist_lobby from writing
+            # the row back between the delete and the memory clear.
             self._clear_persistent_lobby(normalized, kind)
-            logger.info(
-                f"reset_lobby completed for guild_id={normalized} - cleared persistent lobby"
-            )
+            with self._state_lock:
+                lobby = self.lobbies.get(key)
+                if lobby:
+                    lobby.status = "closed"
+                self.lobbies.pop(key, None)
+                self.lobby_message_ids.pop(key, None)
+                self.lobby_channel_ids.pop(key, None)
+                self.lobby_thread_ids.pop(key, None)
+                self.lobby_embed_message_ids.pop(key, None)
+                self.origin_channel_ids.pop(key, None)
+                self.readycheck_message_ids.pop(key, None)
+                self.readycheck_channel_ids.pop(key, None)
+                self.readycheck_lobby_ids.pop(key, None)
+                self.readycheck_reacted.pop(key, None)
+                self.readycheck_declined.pop(key, None)
+                self.readycheck_player_data.pop(key, None)
+                self.readycheck_created_ats.pop(key, None)
+                for player_key, reserved_kind in list(
+                    self._in_flight_player_kinds.items()
+                ):
+                    if player_key[0] == normalized and reserved_kind is kind:
+                        self._in_flight_player_kinds.pop(player_key, None)
+        logger.info(
+            f"reset_lobby completed for guild_id={normalized} - cleared persistent lobby"
+        )
 
     # --- Readycheck state accessors/mutators (per guild) ---
 
@@ -692,6 +774,7 @@ class LobbyManagerService:
             self.readycheck_lobby_ids[key] = lobby_ids
             self.readycheck_player_data[key] = player_data
             self.readycheck_reacted[key] = {}
+            self.readycheck_declined[key] = set()
             self.readycheck_created_ats[key] = (
                 created_at if created_at is not None else time.time()
             )
@@ -723,6 +806,11 @@ class LobbyManagerService:
             self.readycheck_reacted[key] = {
                 k: v for k, v in existing.items() if k in lobby_ids
             }
+            # A departed player's explicit withdrawal dies with their
+            # membership: re-joining is a fresh signal of intent.
+            declined = self.readycheck_declined.get(key)
+            if declined:
+                declined.intersection_update(lobby_ids)
             return removed_confirmations
 
     def add_readycheck_reaction(
@@ -753,6 +841,10 @@ class LobbyManagerService:
             if discord_id not in lobby_ids:
                 return False
             reacted[discord_id] = tag
+            # Confirming again clears an earlier explicit withdrawal.
+            declined = self.readycheck_declined.get(key)
+            if declined:
+                declined.discard(discord_id)
             return True
 
     def get_readycheck_reaction_count_for_message(
@@ -787,7 +879,20 @@ class LobbyManagerService:
             if not reacted or discord_id not in reacted:
                 return False
             del reacted[discord_id]
+            # Remember the explicit withdrawal so auto-confirm sweeps never
+            # silently flip this player back to ready.
+            self.readycheck_declined.setdefault(key, set()).add(discord_id)
             return True
+
+    def get_readycheck_declined(
+        self,
+        guild_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
+    ) -> set[int]:
+        """Players who explicitly withdrew their ✅ for the current readycheck."""
+        key = self._lobby_key(guild_id, lobby_kind)
+        with self._state_lock:
+            return set(self.readycheck_declined.get(key, set()))
 
     # --- Persistence helpers ---
 
@@ -796,27 +901,37 @@ class LobbyManagerService:
         guild_id: int | None = None,
         lobby_kind: LobbyKind | str | None = None,
     ) -> None:
-        """Persist one lobby kind for a guild."""
+        """Persist one lobby kind for a guild.
+
+        Snapshots under ``_state_lock`` and writes under ``_persist_lock``
+        so the DB write never runs inside the process-wide state lock.
+        ``_persist_lock`` serializes writers, and each writer re-snapshots
+        the latest state, so the final write always reflects the newest
+        mutation. Callers must NOT hold ``_state_lock``.
+        """
         key = self._lobby_key(guild_id, lobby_kind)
         normalized, _ = key
-        lobby = self.lobbies.get(key)
-        if not lobby:
-            return
-        self.lobby_repo.save_lobby_state(
-            lobby_id=lobby.lobby_id,
-            guild_id=normalized,
-            players=list(lobby.players),
-            conditional_players=[],
-            status=lobby.status,
-            created_by=lobby.created_by,
-            created_at=lobby.created_at.isoformat(),
-            message_id=self.lobby_message_ids.get(key),
-            channel_id=self.lobby_channel_ids.get(key),
-            thread_id=self.lobby_thread_ids.get(key),
-            embed_message_id=self.lobby_embed_message_ids.get(key),
-            origin_channel_id=self.origin_channel_ids.get(key),
-            player_join_times=lobby.player_join_times,
-        )
+        with self._persist_lock:
+            with self._state_lock:
+                lobby = self.lobbies.get(key)
+                if not lobby:
+                    return
+                snapshot = {
+                    "lobby_id": lobby.lobby_id,
+                    "guild_id": normalized,
+                    "players": list(lobby.players),
+                    "conditional_players": [],
+                    "status": lobby.status,
+                    "created_by": lobby.created_by,
+                    "created_at": lobby.created_at.isoformat(),
+                    "message_id": self.lobby_message_ids.get(key),
+                    "channel_id": self.lobby_channel_ids.get(key),
+                    "thread_id": self.lobby_thread_ids.get(key),
+                    "embed_message_id": self.lobby_embed_message_ids.get(key),
+                    "origin_channel_id": self.origin_channel_ids.get(key),
+                    "player_join_times": dict(lobby.player_join_times),
+                }
+            self.lobby_repo.save_lobby_state(**snapshot)
 
     def _clear_persistent_lobby(
         self,

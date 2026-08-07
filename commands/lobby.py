@@ -27,11 +27,16 @@ from utils.interaction_safety import safe_defer, safe_followup, update_lobby_mes
 from utils.neon_helpers import get_neon_service
 from utils.pin_helpers import safe_unpin_message
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.suspension_format import format_suspension_scope, format_suspension_terms
 
 logger = logging.getLogger("cama_bot.commands.lobby")
 
 # Players who joined within this window are considered active and ready.
 RECENT_JOIN_THRESHOLD = 10 * 60  # 10 minutes
+
+# User-facing Whine & Cheese copy derives from the enforced cutoff so tuning
+# the constant can never desync the messaging from the actual rule.
+LOWSKILL_CUTOFF_TEXT = f"{LobbyService.LOWSKILL_RATING_CUTOFF:.0f}"
 
 # A ready check older than this is stale: the next /readycheck deletes the
 # buried original and posts a fresh one (resetting ✅ confirmations and pruning
@@ -54,31 +59,8 @@ def _private_suspension_message(suspension) -> str:
     """Describe a restriction only in ephemeral responses or target DMs."""
     if suspension is None:
         return "You are temporarily suspended from this matchmaking lobby."
-    raw_scope = getattr(suspension, "scope", "all")
-    scope = str(getattr(raw_scope, "value", raw_scope))
-    scope_text = {
-        "all": "all matchmaking lobbies",
-        "open": LobbyKind.OPEN.label,
-        "lowskill": LobbyKind.LOWSKILL.label,
-    }.get(scope, scope)
-    terms: list[str] = []
-    expires_at = getattr(suspension, "expires_at", None)
-    if expires_at is not None:
-        expiry = int(expires_at)
-        terms.append(f"until <t:{expiry}:F> (<t:{expiry}:R>)")
-    matches_remaining = getattr(suspension, "matches_remaining", None)
-    if matches_remaining is not None:
-        noun = "match" if matches_remaining == 1 else "matches"
-        terms.append(f"{matches_remaining} completed {noun} remaining")
-    completion = str(
-        getattr(
-            getattr(suspension, "completion", None),
-            "value",
-            getattr(suspension, "completion", "either"),
-        )
-    )
-    joiner = " or " if completion == "either" else " and "
-    term_text = joiner.join(terms) if terms else "temporarily"
+    scope_text = format_suspension_scope(suspension)
+    term_text = format_suspension_terms(suspension, empty="temporarily")
     return (
         f"You are suspended from {scope_text} {term_text}. "
         f"Reason: {getattr(suspension, 'reason', 'Not provided')}"
@@ -227,6 +209,14 @@ class LobbyCommands(commands.Cog):
         effective_auto_confirm_ids = _get_recent_signup_ids(player_data)
         effective_auto_confirm_ids.update(auto_confirm_ids or set())
         effective_auto_confirm_ids.intersection_update(player_data)
+        # Never auto re-confirm a player who explicitly withdrew their ✅ for
+        # this readycheck; clicking ✅ again is the only way back to ready.
+        declined_ids = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_declined,
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
+        effective_auto_confirm_ids.difference_update(declined_ids)
         departed_confirmations = set(previous_reacted) - set(player_data)
         new_unconfirmed_players = (
             set(player_data) - set(previous_player_data) - set(previous_reacted)
@@ -236,12 +226,16 @@ class LobbyCommands(commands.Cog):
             try:
                 await message.remove_reaction("✅", discord.Object(id=discord_id))
             except Exception as exc:
+                # Best-effort display cleanup only: the bot may lack Manage
+                # Messages (Forbidden) or the player may have no physical
+                # reaction at all (auto-confirms are state-only, NotFound).
+                # The authoritative state update below must still run so
+                # departed players stop counting as confirmed.
                 logger.warning(
                     "Failed to clear departed readycheck reaction for %s: %s",
                     discord_id,
                     exc,
                 )
-                return False, False, []
 
         removed_confirmations = await asyncio.to_thread(
             self.lobby_service.update_readycheck_data,
@@ -464,7 +458,8 @@ class LobbyCommands(commands.Cog):
 
             try:
                 await target_channel.send(
-                    f"✅ **{kind.label}: 10 players confirmed ready.** "
+                    f"✅ **{kind.label}: "
+                    f"{self.lobby_service.ready_threshold} players confirmed ready.** "
                     "Anyone in this lobby can use `/shuffle` now. "
                     "Only players who confirmed ready will be included; "
                     "everyone else will sit out."
@@ -1011,20 +1006,22 @@ class LobbyCommands(commands.Cog):
             return False, "⚠️ Set your preferred roles with `/player roles` to auto-join."
 
         # Attempt to join (pending match check now inside LobbyService)
-        join_cutoff_ns = time.time_ns()
         success, reason, context = await asyncio.to_thread(
             self.lobby_service.join_lobby,
             user_id,
             guild_id,
             lobby.kind,
         )
+        # Cut the one-shot subscription claim at the join's own watermark, so
+        # a subscription committed while this join was in flight still fires.
+        join_cutoff_ns = getattr(context, "joined_at_ns", None) or time.time_ns()
         if not success:
             logger.info(f"Auto-join failed for {user_id}: {reason}")
             if reason == "rating_too_high":
                 return (
                     False,
                     f"ℹ️ You can view {lobby.kind.label}, but only players "
-                    "below 1400 Glicko can join.",
+                    f"below {LOWSKILL_CUTOFF_TEXT} Glicko can join.",
                 )
             if reason == "in_other_lobby":
                 return False, "ℹ️ Leave your current lobby before joining this one."
@@ -1119,7 +1116,10 @@ class LobbyCommands(commands.Cog):
                 if str(exc) == "rating_too_high":
                     await safe_followup(
                         interaction,
-                        content="❌ Only players below 1400 Glicko can create Whine & Cheese.",
+                        content=(
+                            f"❌ Only players below {LOWSKILL_CUTOFF_TEXT} "
+                            "Glicko can create Whine & Cheese."
+                        ),
                         ephemeral=True,
                     )
                     return
@@ -1543,7 +1543,7 @@ class LobbyCommands(commands.Cog):
                     interaction,
                     content=(
                         f"❌ {LobbyKind.LOWSKILL.label} is limited to players "
-                        "below 1400 Glicko."
+                        f"below {LOWSKILL_CUTOFF_TEXT} Glicko."
                     ),
                     ephemeral=True,
                 )
@@ -1749,32 +1749,52 @@ class LobbyCommands(commands.Cog):
         name="resetlobby",
         description="Reset the current lobby (Admin or lobby creator only)",
     )
+    @app_commands.describe(lobby="Lobby to reset (defaults to the lobby you're in)")
+    @app_commands.choices(
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ]
+    )
     @require_guild
-    async def resetlobby(self, interaction: discord.Interaction):
+    async def resetlobby(
+        self,
+        interaction: discord.Interaction,
+        lobby: app_commands.Choice[str] | None = None,
+    ):
         """Allow admins or lobby creators to reset/abort an unfilled lobby."""
         logger.info(f"Reset lobby command: User {interaction.user.id} ({interaction.user})")
         can_respond = await safe_defer(interaction, ephemeral=True)
 
         guild_id = interaction.guild.id
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
-            interaction.user.id,
-            guild_id,
-        )
-        if lobby_kind is not None and not isinstance(
-            lobby_kind,
-            (LobbyKind, str),
-        ):
-            lobby_kind = LobbyKind.OPEN
-        if lobby_kind is None:
-            if can_respond:
-                await safe_followup(
-                    interaction,
-                    content="❌ Join a lobby before resetting one.",
-                    ephemeral=True,
-                )
-            return
-        lobby_kind = LobbyKind.normalize(lobby_kind)
+        if lobby is not None:
+            # An explicit choice lets admins and departed creators reset a
+            # lobby they are not currently a member of; the permission check
+            # below runs against the resolved lobby either way.
+            lobby_kind = LobbyKind.normalize(lobby.value)
+        else:
+            lobby_kind = await asyncio.to_thread(
+                self.lobby_service.get_lobby_kind_for_player,
+                interaction.user.id,
+                guild_id,
+            )
+            if lobby_kind is not None and not isinstance(
+                lobby_kind,
+                (LobbyKind, str),
+            ):
+                lobby_kind = LobbyKind.OPEN
+            if lobby_kind is None:
+                if can_respond:
+                    await safe_followup(
+                        interaction,
+                        content=(
+                            "❌ Join a lobby, or pass the `lobby` option to "
+                            "pick which lobby to reset."
+                        ),
+                        ephemeral=True,
+                    )
+                return
+            lobby_kind = LobbyKind.normalize(lobby_kind)
 
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
@@ -2276,26 +2296,34 @@ class LobbyCommands(commands.Cog):
                     and pid not in old_reacted
                     and pid != invoker_id
                 ]
-                if pruned_ids:
-                    logger.info(
-                        "Stale readycheck prune: removing %d AFK player(s) %s from guild %s",
-                        len(pruned_ids),
-                        pruned_ids,
-                        guild_id,
-                    )
+                removed_ids: list[int] = []
                 for pid in pruned_ids:
-                    await asyncio.to_thread(
+                    removed = await asyncio.to_thread(
                         self.lobby_service.leave_lobby,
                         pid,
                         guild_id,
                         kind,
                     )
+                    if not removed:
+                        # Reserved by an in-flight shuffle/draft (or already
+                        # gone): keep their state instead of announcing a
+                        # removal that did not happen.
+                        continue
+                    removed_ids.append(pid)
                     player_data.pop(pid, None)
                     current_lobby_set.discard(pid)
                     await self._remove_user_lobby_reactions(
                         discord.Object(id=pid),
                         guild_id=guild_id,
                         lobby_kind=kind,
+                    )
+                pruned_ids = removed_ids
+                if pruned_ids:
+                    logger.info(
+                        "Stale readycheck prune: removed %d AFK player(s) %s from guild %s",
+                        len(pruned_ids),
+                        pruned_ids,
+                        guild_id,
                     )
                 if pruned_ids:
                     lobby = await asyncio.to_thread(

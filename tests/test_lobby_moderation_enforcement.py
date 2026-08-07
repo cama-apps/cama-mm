@@ -143,7 +143,11 @@ def test_suspension_does_not_revoke_an_existing_reservation():
     assert manager.get_in_flight_lobby_kind_for_player(10, guild_id=99) is None
 
 
-def test_moderation_queries_run_while_manager_state_lock_is_held():
+def test_moderation_queries_run_outside_manager_state_lock():
+    """Suspension lookups are DB I/O (and can issue a lapsed-suspension close
+    write), so they must never run inside the process-wide ``_state_lock``
+    that the event loop also acquires synchronously (get_creation_lock)."""
+
     class LockCheckingModerationService(FakeModerationService):
         manager: LobbyManagerService
 
@@ -153,7 +157,7 @@ def test_moderation_queries_run_while_manager_state_lock_is_held():
             guild_id: int,
             lobby_kind: str | None = None,
         ) -> FakeSuspension | None:
-            assert self.manager._state_lock._is_owned()
+            assert not self.manager._state_lock._is_owned()
             return super().get_active_suspension(discord_id, guild_id, lobby_kind)
 
     moderation = LockCheckingModerationService()
@@ -168,3 +172,6 @@ def test_moderation_queries_run_while_manager_state_lock_is_held():
 
     with pytest.raises(LobbySuspendedError):
         manager.get_or_create_lobby(creator_id=20, guild_id=99)
+
+    # The unlocked lookup must have actually been exercised on every path.
+    assert moderation.calls

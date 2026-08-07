@@ -43,7 +43,7 @@ def test_lobby_embed_uses_preview_for_its_lobby_kind(lobby_kind, expected_amount
     bonus_pool = next(field for field in embed.fields if field.name == "🎲 Bonus Pool")
     assert bonus_pool.value == (
         f"**{expected_amount} <:jopacoin:954159801049440297>** "
-        "currently available for this lobby."
+        "available if this lobby shuffles next."
     )
 
 
@@ -97,7 +97,7 @@ class TestLobbyServicePendingMatchCheck:
 
         assert success is True
         assert reason == ""
-        assert pending_info is None
+        assert pending_info == "ok"
         lobby_manager.join_lobby.assert_called_once()
 
 
@@ -134,7 +134,10 @@ def test_lowskill_join_uses_strict_1400_cutoff(
 
     assert success is expected_success
     assert reason == expected_reason
-    assert pending_info is None
+    if expected_success:
+        assert pending_info == "ok"
+    else:
+        assert pending_info is None
 
 
 def test_player_cannot_join_both_lobby_kinds():
@@ -311,7 +314,7 @@ class TestLobbyServiceJoinResults:
         success, _, pending_info = service.join_lobby(discord_id=12345, guild_id=999)
 
         assert success is True
-        assert pending_info is None
+        assert pending_info == "ok"
 
     def test_join_lobby_returns_lobby_full_reason(self):
         """Test that lobby full returns correct reason code.
@@ -411,6 +414,35 @@ def test_lobby_readycheck_snapshot_loads_players_from_atomic_manager_snapshot():
     assert join_times == {1: 100.5, 2: 200.5}
     assert readycheck == (111, {1})
     player_repo.get_by_ids.assert_called_once_with(player_ids, 0)
+
+
+def test_join_lobby_success_carries_commit_ordered_watermark():
+    """A successful join returns joined_at_ns taken at the in-memory add.
+
+    The one-shot lobby-watch claim cuts off at this watermark; a caller-side
+    timestamp taken before the join call would silently exclude subscriptions
+    committed while the join was in flight.
+    """
+    import time
+
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    player_repo = MagicMock()
+    player_repo.get_by_ids.return_value = []
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
+
+    before_ns = time.time_ns()
+    success, reason, context = service.join_lobby(1, 0)
+    after_ns = time.time_ns()
+
+    assert success is True
+    assert reason == ""
+    assert context == "ok"
+    assert before_ns <= context.joined_at_ns <= after_ns
+
+    # Re-joining does not fabricate a fresh watermark for a non-join.
+    success, _, context = service.join_lobby(1, 0)
+    assert success is False
+    assert getattr(context, "joined_at_ns", None) is None
 
 
 if __name__ == "__main__":

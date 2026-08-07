@@ -16,9 +16,9 @@ from services.lobby_service import LobbyService
 from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
-async def invoke_reset(cog: LobbyCommands, interaction):
+async def invoke_reset(cog: LobbyCommands, interaction, lobby=None):
     """Invoke the app command callback directly for testing."""
-    return await cog.resetlobby.callback(cog, interaction)
+    return await cog.resetlobby.callback(cog, interaction, lobby)
 
 
 class FakePlayerRepo:
@@ -404,3 +404,73 @@ async def test_resetlobby_new_lobby_is_empty(monkeypatch):
 
     # New lobby should have 0 players, not the old 3
     assert new_lobby.get_player_count() == 0, "New lobby should be empty after reset"
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_admin_can_reset_lobby_without_membership(monkeypatch):
+    """A non-member admin resets via the explicit lobby choice."""
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby.add_player(42)
+    interaction = FakeInteraction(user_id=1)  # not in the lobby
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
+
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+    await invoke_reset(cog, interaction, lobby=SimpleNamespace(value="open"))
+
+    assert lobby_service.get_lobby(guild_id=123) is None
+    assert "All You Can Feed reset" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_departed_creator_can_reset_with_choice(monkeypatch):
+    """A creator who already left the lobby can still reset it."""
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=7, guild_id=123)
+    lobby.add_player(42)  # creator 7 is not a member
+    interaction = FakeInteraction(user_id=7)
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+    await invoke_reset(cog, interaction, lobby=SimpleNamespace(value="open"))
+
+    assert lobby_service.get_lobby(guild_id=123) is None
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_choice_still_enforces_permissions(monkeypatch):
+    """The explicit choice bypasses only membership, never the permission gate."""
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby.add_player(42)
+    interaction = FakeInteraction(user_id=6)  # neither admin nor creator
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: False)
+
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+    await invoke_reset(cog, interaction, lobby=SimpleNamespace(value="open"))
+
+    assert lobby_service.get_lobby(guild_id=123) is not None
+    assert "Permission denied" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_non_member_without_choice_gets_hint(monkeypatch):
+    _, lobby_service = make_lobby_service()
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby.add_player(42)
+    interaction = FakeInteraction(user_id=1)
+
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
+
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+    await invoke_reset(cog, interaction)
+
+    assert lobby_service.get_lobby(guild_id=123) is not None
+    assert "`lobby` option" in interaction.followup.messages[0]["content"]

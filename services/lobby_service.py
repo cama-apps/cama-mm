@@ -5,6 +5,7 @@ Lobby orchestration and embed helpers.
 import asyncio
 
 from config import DOTA_BET_SEED_AMOUNT
+from domain.models.lobby import LOWSKILL_RATING_CUTOFF as _LOWSKILL_RATING_CUTOFF
 from domain.models.lobby import Lobby, LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from repositories.interfaces import IPlayerRepository
@@ -20,7 +21,7 @@ class LobbyService:
     the manager normalizes ``None`` to ``0``.
     """
 
-    LOWSKILL_RATING_CUTOFF = 1400.0
+    LOWSKILL_RATING_CUTOFF = _LOWSKILL_RATING_CUTOFF
 
     def __init__(
         self,
@@ -138,7 +139,8 @@ class LobbyService:
             - success: True if joined, False otherwise
             - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
             - pending_info: PendingMatchState for an existing match, the active
-              suspension for ``"lobby_suspended"``, or None otherwise
+              suspension for ``"lobby_suspended"``, the manager join result
+              (carrying ``joined_at_ns``) on success, or None otherwise
         """
         # Check if player is in a pending match FIRST
         if self.match_state_service:
@@ -164,7 +166,9 @@ class LobbyService:
             lobby_kind=kind,
         )
         if reason == "ok":
-            return True, "", None
+            # Carry the manager result: its joined_at_ns watermark lets the
+            # one-shot subscription claim cut off at the actual join moment.
+            return True, "", reason
         if reason == "full":
             return False, "lobby_full", None
         if reason == "in_other_lobby":
@@ -423,6 +427,17 @@ class LobbyService:
         lobby_kind: LobbyKind | str | None = None,
     ) -> dict[int, str]:
         return self.lobby_manager.get_readycheck_reacted(
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
+
+    def get_readycheck_declined(
+        self,
+        guild_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
+    ) -> set[int]:
+        """Players who explicitly withdrew their ✅ for the current readycheck."""
+        return self.lobby_manager.get_readycheck_declined(
             guild_id=guild_id,
             lobby_kind=lobby_kind,
         )

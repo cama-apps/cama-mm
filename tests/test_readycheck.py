@@ -468,3 +468,76 @@ class TestLobbyReadycheckSnapshot:
 
         assert set(player_ids) == set(range(1, 11))
         assert readycheck == (111, set(range(1, 11)))
+
+
+class TestReadycheckDeclinedTracking:
+    """Explicit un-readies are remembered so auto-confirm never overrides them."""
+
+    def test_remove_reaction_marks_player_declined(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+        mgr.add_readycheck_reaction(1, "<@1>", guild_id=42)
+
+        assert mgr.remove_readycheck_reaction(1, guild_id=42) is True
+
+        assert mgr.get_readycheck_declined(guild_id=42) == {1}
+
+    def test_removing_absent_reaction_does_not_mark_declined(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+
+        assert mgr.remove_readycheck_reaction(1, guild_id=42) is False
+
+        assert mgr.get_readycheck_declined(guild_id=42) == set()
+
+    def test_confirming_again_clears_declined_marker(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+        mgr.add_readycheck_reaction(1, "<@1>", guild_id=42)
+        mgr.remove_readycheck_reaction(1, guild_id=42)
+
+        assert mgr.add_readycheck_reaction(1, "<@1>", guild_id=42) is True
+
+        assert mgr.get_readycheck_declined(guild_id=42) == set()
+
+    def test_new_readycheck_generation_resets_declined(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+        mgr.add_readycheck_reaction(1, "<@1>", guild_id=42)
+        mgr.remove_readycheck_reaction(1, guild_id=42)
+
+        mgr.set_readycheck_state(333, 222, {1}, {}, guild_id=42)
+
+        assert mgr.get_readycheck_declined(guild_id=42) == set()
+
+    def test_departed_player_declined_marker_is_pruned(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.join_lobby(2, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1, 2}, {}, guild_id=42)
+        mgr.add_readycheck_reaction(2, "<@2>", guild_id=42)
+        mgr.remove_readycheck_reaction(2, guild_id=42)
+
+        mgr.update_readycheck_data(
+            {1},
+            {1: {"name": "One"}},
+            guild_id=42,
+            expected_message_id=111,
+        )
+
+        assert mgr.get_readycheck_declined(guild_id=42) == set()
+
+    def test_reset_lobby_clears_declined(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+        mgr.add_readycheck_reaction(1, "<@1>", guild_id=42)
+        mgr.remove_readycheck_reaction(1, guild_id=42)
+
+        mgr.reset_lobby(guild_id=42)
+
+        assert mgr.get_readycheck_declined(guild_id=42) == set()
