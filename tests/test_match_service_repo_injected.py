@@ -129,6 +129,32 @@ def test_goodness_subtracts_selected_players_lobby_wait_minutes(repo_db_path):
     )
 
 
+def test_goodness_subtracts_rd_priority_bonus(repo_db_path):
+    """Displayed goodness mirrors the shuffler's RD-priority selection bonus."""
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 10)
+
+    baseline = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    for pid in player_ids:
+        player_repo.update_glicko_rating(pid, TEST_GUILD_ID, 1500.0, 100.0, 0.06)
+    lowered = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    # rd_priority = sum(glicko_rd) * weight, subtracted from the score; dropping
+    # every RD from 350 to 100 shrinks the bonus by 10 * 250 * weight, so the
+    # displayed goodness rises by exactly that amount.
+    expected_delta = 10 * 250.0 * service.shuffler.rd_priority_weight
+    assert lowered["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        expected_delta
+    )
+
+
 def test_goodness_adds_230_for_selected_last_match_player(
     repo_db_path,
     monkeypatch,
@@ -350,6 +376,7 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     # combined parity = 2000; weighted by 0.17 -> 340
     # rating spread = (2000 - 1000) / 10 = 100
     # off-role penalty and exclusion penalty = 0
+    # rd priority bonus = 0 (glicko_rd is None for every player)
     # lobby rating bonus = average team total / 10 = 13,300 / 2 / 10 = 665
     assert result["goodness_score"] == pytest.approx(75.0)
 

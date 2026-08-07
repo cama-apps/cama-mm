@@ -413,10 +413,11 @@ class ShufflePendingMixin:
             lobby_wait_minutes,
         )
 
-        # Note: the shuffler's rd_priority bonus (a selection bias toward
-        # high-uncertainty players, subtracted from every candidate's score)
-        # is deliberately not mirrored here; the displayed goodness covers the
-        # matchup-quality terms only.
+        # RD-priority bonus (selection bias toward high-uncertainty players,
+        # subtracted from every candidate's score in the shuffler); mirrored so
+        # the displayed goodness matches the optimized objective.
+        rd_priority_bonus = shuffler._calculate_rd_priority(selected_players_list)
+
         goodness_score = (
             value_diff
             + off_role_penalty
@@ -431,6 +432,7 @@ class ShufflePendingMixin:
             + rating_spread_penalty
             - lobby_rating_bonus
             - lobby_wait_bonus
+            - rd_priority_bonus
         )
 
         # Calculate Glicko-2 win probability for Radiant
