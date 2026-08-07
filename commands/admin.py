@@ -20,11 +20,16 @@ from config import (
 )
 from domain.low_priority_constants import LOW_PRIORITY_REQUIRED_WINS
 from domain.models.lobby import LobbyKind
+from domain.models.moderation import ActiveSuspensionExistsError
 from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.suspension_format import (
+    format_suspension_scope,
+    format_suspension_terms,
+)
 
 logger = logging.getLogger("cama_bot.commands.admin")
 
@@ -36,35 +41,6 @@ _INTERACTION_TTL = 300.0  # 5 minutes
 
 def _enum_value(value) -> str:
     return str(getattr(value, "value", value))
-
-
-def _format_suspension_terms(state) -> str:
-    """Return a private/admin-safe summary of a suspension's remaining term."""
-    parts: list[str] = []
-    expires_at = getattr(state, "expires_at", None)
-    if expires_at is not None:
-        expiry = int(expires_at)
-        parts.append(f"until <t:{expiry}:F> (<t:{expiry}:R>)")
-    matches_remaining = getattr(state, "matches_remaining", None)
-    if matches_remaining is not None:
-        noun = "match" if matches_remaining == 1 else "matches"
-        parts.append(f"{matches_remaining} completed {noun} remaining")
-    if not parts:
-        return "no remaining term"
-    if len(parts) == 1:
-        return parts[0]
-    completion = _enum_value(getattr(state, "completion", "either"))
-    joiner = " or " if completion == "either" else " and "
-    return joiner.join(parts)
-
-
-def _format_suspension_scope(state) -> str:
-    scope = _enum_value(getattr(state, "scope", "all"))
-    return {
-        "all": "all matchmaking lobbies",
-        "open": LobbyKind.OPEN.label,
-        "lowskill": LobbyKind.LOWSKILL.label,
-    }.get(scope, scope)
 
 
 class AdminCommands(commands.Cog):
@@ -366,6 +342,7 @@ class AdminCommands(commands.Cog):
         completion="When both terms are set, release on either term or only after both",
         lobby="Lobby scope; defaults to all lobbies",
         reason="Reason shown privately to the player and admins",
+        replace="Explicitly overwrite the player's existing active suspension",
     )
     @app_commands.choices(
         completion=[
@@ -389,6 +366,7 @@ class AdminCommands(commands.Cog):
         matches: app_commands.Range[int, 1, 20] | None = None,
         completion: app_commands.Choice[str] | None = None,
         lobby: app_commands.Choice[str] | None = None,
+        replace: bool = False,
     ):
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -447,14 +425,21 @@ class AdminCommands(commands.Cog):
         )
         scope_value = lobby.value if lobby is not None else "all"
         guild_id = interaction.guild.id
-        existing = await asyncio.to_thread(
-            self.moderation_service.get_active_suspension,
-            player.id,
-            guild_id,
+        # Only overwrite an existing suspension when the admin explicitly opts
+        # in; create_suspension raises ActiveSuspensionExistsError otherwise,
+        # which also removes the old check-then-act race between two admins.
+        existing = (
+            await asyncio.to_thread(
+                self.moderation_service.get_active_suspension,
+                player.id,
+                guild_id,
+            )
+            if replace
+            else None
         )
         operation = (
             self.moderation_service.replace_suspension
-            if existing is not None
+            if replace
             else self.moderation_service.create_suspension
         )
         try:
@@ -473,12 +458,34 @@ class AdminCommands(commands.Cog):
                     now=now,
                 )
             )
+        except ActiveSuspensionExistsError:
+            active = await asyncio.to_thread(
+                self.moderation_service.get_active_suspension,
+                player.id,
+                guild_id,
+            )
+            detail = ""
+            if active is not None:
+                detail = (
+                    f" from **{format_suspension_scope(active)}**: "
+                    f"{format_suspension_terms(active)} "
+                    f"(reason: {active.reason})"
+                )
+            await safe_followup(
+                interaction,
+                content=(
+                    f"❌ {player.mention} already has an active suspension{detail}. "
+                    "Re-run with `replace: True` to overwrite it."
+                ),
+                ephemeral=True,
+            )
+            return
         except ValueError as exc:
             await safe_followup(interaction, content=f"❌ {exc}", ephemeral=True)
             return
 
-        term_text = _format_suspension_terms(state)
-        scope_text = _format_suspension_scope(state)
+        term_text = format_suspension_terms(state)
+        scope_text = format_suspension_scope(state)
         dm_message = (
             f"You have been temporarily suspended from {scope_text}.\n"
             f"Term: {term_text}\nReason: {reason}\n"
@@ -616,8 +623,8 @@ class AdminCommands(commands.Cog):
             message = f"{player.mention} has no active lobby suspension."
         else:
             message = (
-                f"**{player.mention}** — {_format_suspension_scope(state)}\n"
-                f"Term: {_format_suspension_terms(state)}\n"
+                f"**{player.mention}** — {format_suspension_scope(state)}\n"
+                f"Term: {format_suspension_terms(state)}\n"
                 f"Reason: {state.reason}\nIssued by: <@{state.actor_id}>\n"
                 f"Applied: <t:{int(state.created_at)}:F>"
             )
@@ -645,8 +652,8 @@ class AdminCommands(commands.Cog):
             message = "No active lobby suspensions."
         else:
             lines = [
-                f"<@{state.discord_id}> — {_format_suspension_scope(state)}; "
-                f"{_format_suspension_terms(state)}; reason: {state.reason}; "
+                f"<@{state.discord_id}> — {format_suspension_scope(state)}; "
+                f"{format_suspension_terms(state)}; reason: {state.reason}; "
                 f"by <@{state.actor_id}> at <t:{int(state.created_at)}:f>"
                 for state in states[:10]
             ]

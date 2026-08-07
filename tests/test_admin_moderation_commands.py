@@ -210,7 +210,6 @@ async def test_suspend_creates_exact_time_scoped_state_and_notifies_privately(
     )
 
     moderation_service.parse_expiry.assert_called_once_with("2h", now=1_000)
-    moderation_service.get_active_suspension.assert_called_once_with(42, 77)
     moderation_service.create_suspension.assert_called_once_with(
         42,
         77,
@@ -234,7 +233,47 @@ async def test_suspend_creates_exact_time_scoped_state_and_notifies_privately(
 
 
 @pytest.mark.asyncio
-async def test_suspend_replaces_active_state_with_exact_match_terms(monkeypatch):
+async def test_suspend_without_replace_flag_reports_existing_suspension(monkeypatch):
+    """An active suspension is never silently overwritten: the admin gets the
+    existing terms back and must explicitly pass ``replace: True``."""
+    from domain.models.moderation import ActiveSuspensionExistsError
+
+    commands, moderation_service, _lobby_service = _commands()
+    interaction = _interaction()
+    player = _target()
+    existing = _state()
+    moderation_service.create_suspension.side_effect = ActiveSuspensionExistsError(
+        "Player already has an active lobby suspension"
+    )
+    moderation_service.get_active_suspension.return_value = existing
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
+    monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.admin.safe_followup", safe_followup)
+    monkeypatch.setattr("commands.admin.time.time", lambda: 2_000)
+
+    await commands.moderation_suspend.callback(
+        commands,
+        interaction,
+        player,
+        reason="new exact term",
+        matches=5,
+        lobby=app_commands.Choice(name="All You Can Feed", value="open"),
+    )
+
+    moderation_service.create_suspension.assert_called_once()
+    moderation_service.replace_suspension.assert_not_called()
+    player.send.assert_not_awaited()
+    content = safe_followup.await_args.kwargs["content"]
+    assert "already has an active suspension" in content
+    assert "<t:8200:F>" in content
+    assert "repeat abandonment" in content
+    assert "replace: True" in content
+    assert safe_followup.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_suspend_replaces_active_state_only_with_explicit_flag(monkeypatch):
     commands, moderation_service, _lobby_service = _commands()
     interaction = _interaction()
     player = _target()
@@ -261,6 +300,7 @@ async def test_suspend_replaces_active_state_with_exact_match_terms(monkeypatch)
         reason="new exact term",
         matches=5,
         lobby=app_commands.Choice(name="All You Can Feed", value="open"),
+        replace=True,
     )
 
     moderation_service.replace_suspension.assert_called_once_with(

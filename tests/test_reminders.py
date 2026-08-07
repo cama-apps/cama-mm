@@ -538,6 +538,33 @@ class TestReminderServiceBetting:
             "Betting is open for ~15 more minutes. Use `/bet` now!"
         ]
 
+    @pytest.mark.asyncio
+    async def test_notify_betting_awaits_dms_before_returning(
+        self, reminder_service, mock_bot
+    ):
+        """DM sends are awaited rather than spawned as unreferenced tasks.
+
+        The event loop only holds tasks weakly, so a fire-and-forget
+        ``create_task`` with no retained handle could be garbage-collected
+        before the DM ran. Awaiting means every DM attempt has completed by
+        the time this coroutine returns.
+        """
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "betting")
+        reminder_service.toggle_preference(2, TEST_GUILD_ID, "betting")
+        sent_to = []
+
+        async def fake_dm(bot, discord_id, message):
+            await asyncio.sleep(0)
+            sent_to.append(discord_id)
+
+        with patch.object(reminder_service, "_dm_user", new=fake_dm):
+            await reminder_service.notify_betting_subscribers(
+                mock_bot, TEST_GUILD_ID, int(time.time()) + 900
+            )
+
+        # No extra event-loop yields: delivery finished with the call itself.
+        assert set(sent_to) == {1, 2}
+
 
 # ---------------------------------------------------------------------------
 # Dig reminder

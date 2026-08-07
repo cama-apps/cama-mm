@@ -194,6 +194,54 @@ def test_concurrent_manual_exemptions_do_not_lose_cached_members():
     assert service.taxable_ids(GUILD_ID) == frozenset()
 
 
+def _cache_lock_free_from_other_thread(service) -> bool:
+    """True when ``service._lock`` can be acquired by a different thread."""
+    result: dict[str, bool] = {}
+
+    def probe() -> None:
+        acquired = service._lock.acquire(timeout=1.0)
+        result["acquired"] = acquired
+        if acquired:
+            service._lock.release()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(probe).result()
+    return result.get("acquired", False)
+
+
+def test_repository_io_runs_outside_shared_cache_lock():
+    """DB reads/writes must not hold the cache lock the event loop acquires.
+
+    ``refresh_guild`` (called from on_ready) and ``set_manual_exemption``
+    (called from /tax vanity) perform SQLite I/O; holding ``_lock`` across it
+    would block the sync member-event handlers running on the event loop.
+    """
+    observations: list[bool] = []
+
+    class ProbingRepository:
+        def __init__(self):
+            self.service = None
+
+        def get_vanity_tax_exemptions(self, guild_id):
+            observations.append(_cache_lock_free_from_other_thread(self.service))
+            return frozenset()
+
+        def set_vanity_tax_exemption(self, guild_id, discord_id, *, exempt, actor_id):
+            observations.append(_cache_lock_free_from_other_thread(self.service))
+            return frozenset({discord_id} if exempt else set())
+
+    repository = ProbingRepository()
+    service = VanityTaxService(repository)
+    repository.service = service
+
+    service.refresh_guild(GUILD_ID, [_member(1, None)])
+    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+
+    assert observations == [True, True]
+    # The cache still ends up consistent after both operations.
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
+
+
 def test_tax_floors_ten_percent_and_ignores_unknown_or_nonpositive_profit():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])

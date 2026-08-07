@@ -1974,9 +1974,9 @@ class DraftCommands(commands.Cog):
 
     async def _refresh_bonus_pool_lobbies(self, guild_id: int) -> None:
         """Refresh current lobby displays after betting-pool availability changes."""
-        from bot import _refresh_first_game_pool_lobby_messages
-
-        await _refresh_first_game_pool_lobby_messages(guild_id)
+        refresh = getattr(self.bot, "refresh_first_game_pool_lobby_messages", None)
+        if refresh is not None:
+            await refresh(guild_id)
 
     async def _complete_draft(
         self,
@@ -1991,6 +1991,7 @@ class DraftCommands(commands.Cog):
         builds and posts the completion embed, stores message info, schedules
         betting reminders, and posts to the match thread. Behavior-preserving.
         """
+        pending_match_id = None
         try:
             kind = LobbyKind.normalize(state.lobby_kind)
             # Capture the lobby thread id up front so the pending match is
@@ -2184,10 +2185,22 @@ class DraftCommands(commands.Cog):
         except Exception as e:
             logger.error(f"Error during draft completion for guild {guild_id}: {e}", exc_info=True)
             try:
-                msg = (
-                    "⚠️ Draft complete but encountered an error during match setup. "
-                    "Use `/draft start` to try again."
-                )
+                if pending_match_id is not None:
+                    # The pending match already exists (with blind bets and the
+                    # betting seed) and the lobby was or will be reset, so
+                    # `/draft start` cannot work — the players are locked to
+                    # the pending match until it is recorded or aborted.
+                    msg = (
+                        f"⚠️ Draft complete — Match #{pending_match_id} was created, "
+                        "but an error occurred while announcing it. Betting and "
+                        "recording still work: play the match and use `/record`, "
+                        "or use `/record abort` to cancel it."
+                    )
+                else:
+                    msg = (
+                        "⚠️ Draft complete but encountered an error during match setup. "
+                        "Use `/draft start` to try again."
+                    )
                 if interaction.response.is_done():
                     await interaction.followup.send(msg, ephemeral=True)
                 else:
