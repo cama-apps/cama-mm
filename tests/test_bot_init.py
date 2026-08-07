@@ -8,8 +8,44 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_survey_transform_errors_do_not_log_raw_recipient_ids(monkeypatch):
+    import discord
+
+    import bot as bot_module
+
+    sensitive_id = "123456789012345678"
+    interaction = SimpleNamespace(
+        command=SimpleNamespace(name="send", qualified_name="survey send"),
+        data={"name": "survey"},
+        response=SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    error = discord.app_commands.TransformerError(
+        sensitive_id,
+        discord.AppCommandOptionType.user,
+        discord.app_commands.Transformer(),
+    )
+    log_error = MagicMock()
+    monkeypatch.setattr(bot_module.logger, "error", log_error)
+
+    await bot_module.on_app_command_error(interaction, error)
+
+    logged_arguments = " ".join(str(argument) for argument in log_error.call_args.args)
+    assert sensitive_id not in logged_arguments
+    assert "TransformerError" in logged_arguments
+    assert "exc_info" not in log_error.call_args.kwargs
+    response_content = interaction.response.send_message.await_args.kwargs["content"]
+    assert sensitive_id not in response_content
 
 
 def test_bot_import():
@@ -71,6 +107,7 @@ def test_bot_commands_registered(tmp_path):
                     "leaderboard",
                     "help",
                     "blameluke",
+                    "survey",
                 )
                 for command_name in expected_commands:
                     assert command_name in command_names, (
@@ -99,9 +136,14 @@ def test_bot_commands_registered(tmp_path):
                     "matches history",
                     "matches view",
                     "matches recent",
+                    "survey create",
+                    "survey question add",
+                    "survey send",
+                    "survey results",
+                    "survey close",
                 }
                 assert expected_paths <= qualified_names
-                expected_top_level_count = 43 if "ask" in command_names else 42
+                expected_top_level_count = 44 if "ask" in command_names else 43
                 assert len(bot.bot.tree.get_commands()) == expected_top_level_count
                 assert len(bot.bot.tree.get_commands()) <= 100
                 for command in bot.bot.tree.walk_commands():

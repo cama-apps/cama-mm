@@ -138,6 +138,18 @@ def test_commands_use_approved_consolidated_paths():
         "/admin moderation list",
         "/admin moderation history",
         "/blameluke",
+        "/survey create",
+        "/survey list",
+        "/survey preview",
+        "/survey delete",
+        "/survey send",
+        "/survey retry",
+        "/survey results",
+        "/survey close",
+        "/survey question add",
+        "/survey question edit",
+        "/survey question remove",
+        "/survey question move",
     }
     retired_paths = {
         "/dig resetcooldown",
@@ -167,9 +179,11 @@ def test_commands_use_approved_consolidated_paths():
 def test_command_tree_stays_within_discord_limits():
     _, top_level_count, direct_option_counts = _all_registration_shapes()
 
-    assert top_level_count == 43
+    assert top_level_count == 44
     assert top_level_count <= 100
     assert all(count <= 25 for count in direct_option_counts.values())
     assert direct_option_counts["/dig"] == 22
     assert direct_option_counts["/player"] == 8
     assert direct_option_counts["/player lobby"] == 2
+    assert direct_option_counts["/survey"] == 9
+    assert direct_option_counts["/survey question"] == 4

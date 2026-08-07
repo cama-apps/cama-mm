@@ -135,6 +135,7 @@ class ServiceContainer:
         from repositories.recalibration_repository import RecalibrationRepository
         from repositories.slow_drip_repository import SlowDripRepository
         from repositories.soft_avoid_repository import SoftAvoidRepository
+        from repositories.survey_repository import SurveyRepository
         from repositories.tax_repository import TaxRepository
         from repositories.tip_repository import TipRepository
         from repositories.wrapped_repository import WrappedRepository
@@ -162,6 +163,7 @@ class ServiceContainer:
             "tax_repo": TaxRepository(p),
             "recalibration_repo": RecalibrationRepository(p),
             "soft_avoid_repo": SoftAvoidRepository(p),
+            "survey_repo": SurveyRepository(p),
             "package_deal_repo": PackageDealRepository(p),
             "tip_repo": TipRepository(p),
             "neon_event_repo": NeonEventRepository(p),
@@ -193,6 +195,7 @@ class ServiceContainer:
         from services.pairings_service import PairingsService
         from services.recalibration_service import RecalibrationService
         from services.soft_avoid_service import SoftAvoidService
+        from services.survey_service import SurveyService
         from services.tip_service import TipService
         from services.vanity_tax_service import VanityTaxService
 
@@ -212,6 +215,7 @@ class ServiceContainer:
         )
         c["pairings_service"] = PairingsService(c["pairings_repo"])
         c["soft_avoid_service"] = SoftAvoidService(c["soft_avoid_repo"])
+        c["survey_service"] = SurveyService(c["survey_repo"])
         c["package_deal_service"] = PackageDealService(c["package_deal_repo"])
         c["tip_service"] = TipService(c["tip_repo"])
         c["opendota_player_service"] = OpenDotaPlayerService(c["player_repo"])
@@ -695,6 +699,7 @@ class ServiceContainer:
         bot.match_discovery_service = c["match_discovery_service"]
         bot.pairings_service = c["pairings_service"]
         bot.soft_avoid_service = c["soft_avoid_service"]
+        bot.survey_service = c["survey_service"]
         bot.package_deal_service = c["package_deal_service"]
         bot.tip_service = c["tip_service"]
         bot.opendota_player_service = c["opendota_player_service"]

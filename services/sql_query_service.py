@@ -50,6 +50,13 @@ BLOCKED_TABLES: set[str] = {
     # and correct_index is a live answer key for in-progress sessions.
     "player_trivia_sessions",
     "player_trivia_questions",
+    # Anonymous survey state includes recipient IDs and answer correlation.
+    # Keep the complete feature surface out of /ask, including aggregate queries,
+    # so generated SQL cannot weaken the admin-facing anonymity contract.
+    "surveys",
+    "survey_questions",
+    "survey_recipients",
+    "survey_answers",
     # Tables with no guild_id column: the per-guild TEMP VIEW isolation cannot
     # shadow them, so an AI query would read every guild's rows. Listed here for
     # documentation; the enforcement is structural — _validate_sql rejects any

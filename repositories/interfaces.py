@@ -2523,3 +2523,191 @@ class IDigGuildModifierRepository(ABC):
     def clear_expired(self, now: int | None = None) -> int:
         """Delete expired rows globally. Returns count removed."""
         ...
+
+
+class ISurveyRepository(ABC):
+    """Persistence contract for one-off guild surveys and private DM sessions."""
+
+    @abstractmethod
+    def create_survey(self, guild_id: int, title: str): ...
+
+    @abstractmethod
+    def list_surveys(self, guild_id: int, status: str | None = None) -> list: ...
+
+    @abstractmethod
+    def get_survey(self, guild_id: int, survey_id: int): ...
+
+    @abstractmethod
+    def delete_survey(self, guild_id: int, survey_id: int) -> bool: ...
+
+    @abstractmethod
+    def get_questions(self, guild_id: int, survey_id: int) -> list: ...
+
+    @abstractmethod
+    def add_question(
+        self,
+        guild_id: int,
+        survey_id: int,
+        prompt: str,
+        question_type: str,
+        required: bool,
+    ): ...
+
+    @abstractmethod
+    def edit_question(
+        self,
+        guild_id: int,
+        survey_id: int,
+        question_id: int,
+        *,
+        prompt: str | None = None,
+        question_type: str | None = None,
+        required: bool | None = None,
+    ): ...
+
+    @abstractmethod
+    def remove_question(self, guild_id: int, survey_id: int, question_id: int) -> bool: ...
+
+    @abstractmethod
+    def move_question(
+        self,
+        guild_id: int,
+        survey_id: int,
+        question_id: int,
+        new_position: int,
+    ) -> list: ...
+
+    @abstractmethod
+    def open_survey(
+        self,
+        guild_id: int,
+        survey_id: int,
+        recipient_ids: list[int],
+        *,
+        target_type: str,
+        registered_only: bool,
+    ): ...
+
+    @abstractmethod
+    def close_survey(self, guild_id: int, survey_id: int): ...
+
+    @abstractmethod
+    def claim_deliveries(self, limit: int, stale_after_seconds: int) -> list: ...
+
+    @abstractmethod
+    def renew_delivery_claim(
+        self,
+        recipient_id: int,
+        expected_attempt_count: int,
+    ): ...
+
+    @abstractmethod
+    def recover_stale_deliveries(self, stale_after_seconds: int) -> int: ...
+
+    @abstractmethod
+    def list_unconfirmed_deliveries(
+        self,
+        guild_id: int | None = None,
+        survey_id: int | None = None,
+        sending_stale_after_seconds: int = 300,
+        failed_grace_seconds: int = 30,
+    ) -> list: ...
+
+    @abstractmethod
+    def mark_delivery_sent(
+        self,
+        recipient_id: int,
+        expected_attempt_count: int,
+        dm_channel_id: int,
+        dm_message_id: int,
+    ): ...
+
+    @abstractmethod
+    def mark_delivery_failed(
+        self,
+        recipient_id: int,
+        expected_attempt_count: int,
+        error: str,
+    ): ...
+
+    @abstractmethod
+    def reconcile_delivery_sent(
+        self,
+        recipient_id: int,
+        expected_attempt_count: int,
+        dm_channel_id: int,
+        dm_message_id: int,
+    ): ...
+
+    @abstractmethod
+    def mark_delivery_receipt_checked(
+        self,
+        recipient_id: int,
+        expected_attempt_count: int,
+        expected_claimed_at: int | None,
+        expected_delivery_status: str,
+        expected_updated_at: int,
+    ) -> bool: ...
+
+    @abstractmethod
+    def retry_failed_deliveries(self, guild_id: int, survey_id: int) -> int: ...
+
+    @abstractmethod
+    def queue_requested_delivery_retries(self) -> int: ...
+
+    @abstractmethod
+    def get_response_session(self, survey_id: int, discord_id: int): ...
+
+    @abstractmethod
+    def list_active_response_sessions(self) -> list: ...
+
+    @abstractmethod
+    def list_recoverable_response_sessions(self) -> list: ...
+
+    @abstractmethod
+    def save_answer(
+        self,
+        survey_id: int,
+        discord_id: int,
+        question_id: int,
+        *,
+        numeric_value: int | None,
+        text_value: str | None,
+    ): ...
+
+    @abstractmethod
+    def skip_question(self, survey_id: int, discord_id: int, question_id: int): ...
+
+    @abstractmethod
+    def begin_review(self, survey_id: int, discord_id: int): ...
+
+    @abstractmethod
+    def select_response_question(
+        self,
+        survey_id: int,
+        discord_id: int,
+        question_id: int,
+    ): ...
+
+    @abstractmethod
+    def submit_response(self, survey_id: int, discord_id: int) -> bool: ...
+
+    @abstractmethod
+    def set_response_ui(
+        self,
+        survey_id: int,
+        discord_id: int,
+        dm_channel_id: int,
+        dm_message_id: int,
+    ) -> None: ...
+
+    @abstractmethod
+    def finalize_response_ui(
+        self,
+        survey_id: int,
+        discord_id: int,
+        expected_message_id: int,
+    ) -> bool: ...
+
+    @abstractmethod
+    def get_results(self, guild_id: int, survey_id: int): ...

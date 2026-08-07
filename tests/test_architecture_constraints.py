@@ -321,6 +321,7 @@ class TestCommandLayerConstraints:
             "reminder_service",
             "soft_avoid_service",
             "sql_query_service",
+            "survey_service",
             "tip_service",
             "wrapped_service",
         }
@@ -334,6 +335,7 @@ class TestCommandLayerConstraints:
             "pairings_repo",
             "player_repo",
             "prediction_repo",
+            "survey_repo",
         }
         known_blocking_helpers = {
             "compose_items_used",

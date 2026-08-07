@@ -890,6 +890,21 @@ class TestSQLQueryService:
             assert not is_valid, f"Trivia table must be blocked: {query}"
             assert "not allowed" in error.lower()
 
+    def test_validate_sql_rejects_all_survey_tables(self):
+        """Anonymous survey state must never be visible through /ask."""
+        service = _validator_service()
+
+        for table, column in {
+            "surveys": "title",
+            "survey_questions": "prompt",
+            "survey_recipients": "delivery_status",
+            "survey_answers": "answer_text",
+        }.items():
+            query = f"SELECT {column} FROM {table}"
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Survey table must be blocked: {query}"
+            assert "not allowed" in error.lower()
+
     def test_validate_sql_blocks_unscoped_table_not_in_blocklist(self):
         """A table with no guild_id column is blocked even when BLOCKED_TABLES
         does not name it (fail closed): the per-guild TEMP views cannot shadow
@@ -984,6 +999,12 @@ class TestSQLQueryService:
         assert "low_priority_state" in BLOCKED_TABLES
         assert "lobby_suspensions" in BLOCKED_TABLES
         assert "moderation_events" in BLOCKED_TABLES
+        assert {
+            "surveys",
+            "survey_questions",
+            "survey_recipients",
+            "survey_answers",
+        } <= BLOCKED_TABLES
 
     def test_blocked_columns_blocklist(self):
         """Test that sensitive columns are in the blocklist."""

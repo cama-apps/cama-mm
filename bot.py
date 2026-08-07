@@ -717,6 +717,7 @@ EXTENSIONS = [
     "commands.mafia",
     "commands.pet",
     "commands.reminders",
+    "commands.survey",
 ]
 
 
@@ -1512,10 +1513,36 @@ async def on_ready():
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     """Global error handler for app commands - prevents infinite 'thinking...' state."""
     usage_monitor.record_command_failure()
-    logger.error(f"App command error in '{interaction.command.name if interaction.command else 'unknown'}': {error}", exc_info=error)
+    command = interaction.command
+    qualified_name = getattr(command, "qualified_name", "") or ""
+    interaction_data = interaction.data
+    root_name = interaction_data.get("name", "") if isinstance(interaction_data, dict) else ""
+    is_survey_command = (
+        root_name == "survey"
+        or qualified_name == "survey"
+        or qualified_name.startswith("survey ")
+    )
+    if is_survey_command:
+        # Transformer failures can embed the raw option value in both their
+        # string and traceback. Survey options may contain respondent IDs, so
+        # this path records only a non-sensitive error category.
+        logger.error("App command error in survey command: %s", type(error).__name__)
+    else:
+        command_name = getattr(command, "name", None) or "unknown"
+        logger.error(
+            "App command error in '%s': %s",
+            command_name,
+            error,
+            exc_info=error,
+        )
 
     # Handle TransformerError (e.g., typing a username instead of selecting from Discord's picker)
-    if isinstance(error, TransformerError):
+    if isinstance(error, TransformerError) and is_survey_command:
+        error_msg = (
+            "Could not resolve that survey target. "
+            "Please use @mention or select from Discord's picker when typing."
+        )
+    elif isinstance(error, TransformerError):
         value = getattr(error, 'value', None)
         error_msg = (
             f"Could not find user `{value}`. "
@@ -1526,12 +1553,18 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         error_msg = "An error occurred while processing your command. Please try again."
 
     try:
+        response_kwargs = {
+            "content": f"❌ {error_msg}",
+            "ephemeral": True,
+        }
+        if is_survey_command:
+            response_kwargs["allowed_mentions"] = discord.AllowedMentions.none()
         if interaction.response.is_done():
             # Interaction was deferred, use followup
-            await interaction.followup.send(content=f"❌ {error_msg}", ephemeral=True)
+            await interaction.followup.send(**response_kwargs)
         else:
             # Interaction not yet responded, use response
-            await interaction.response.send_message(content=f"❌ {error_msg}", ephemeral=True)
+            await interaction.response.send_message(**response_kwargs)
     except Exception as followup_error:
         logger.error(f"Failed to send error message to user: {followup_error}")
 

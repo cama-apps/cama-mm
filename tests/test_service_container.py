@@ -219,6 +219,7 @@ class TestServiceContainerBotExposure:
             "match_discovery_service": "match_discovery_service",
             "pairings_service": "pairings_service",
             "soft_avoid_service": "soft_avoid_service",
+            "survey_service": "survey_service",
             "package_deal_service": "package_deal_service",
             "tip_service": "tip_service",
             "opendota_player_service": "opendota_player_service",
@@ -267,6 +268,7 @@ class TestServiceContainerBotExposure:
             "role_names",
             "slow_drip_repo",
             "soft_avoid_repo",
+            "survey_repo",
             "tax_repo",
             "tip_repository",
         }
@@ -376,3 +378,13 @@ class TestServiceDependencies:
         state = container._components["match_state_service"]
         assert lobby.match_state_service is not None
         assert lobby.match_state_service is state
+
+    def test_survey_service_has_survey_repository(self, repo_db_path):
+        """SurveyService shares the container's persistent repository."""
+        container = ServiceContainer(repo_db_path)
+        container.initialize()
+
+        survey_service = container._components["survey_service"]
+        survey_repo = container._components["survey_repo"]
+
+        assert survey_service.repo is survey_repo

@@ -798,9 +798,213 @@ class SchemaManager:
                 "create_vanity_tax_exemptions",
                 self._migration_create_vanity_tax_exemptions,
             ),
+            # One-off, guild-scoped surveys with durable DM delivery and
+            # respondent drafts. Identity-bearing tables remain private to
+            # the survey repository; reporting emits anonymous aggregates.
+            (
+                "create_survey_tables",
+                self._migration_create_survey_tables,
+            ),
+            (
+                "add_survey_controls_finalized",
+                self._migration_add_survey_controls_finalized,
+            ),
+            (
+                "add_survey_receipt_checked_attempt",
+                self._migration_add_survey_receipt_checked_attempt,
+            ),
+            (
+                "add_survey_retry_requested",
+                self._migration_add_survey_retry_requested,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_create_survey_tables(self, cursor) -> None:
+        """Create one-off survey campaigns, questions, recipients, and answers."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS surveys (
+                survey_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id        INTEGER NOT NULL DEFAULT 0,
+                title           TEXT NOT NULL
+                    CHECK(length(trim(title)) BETWEEN 1 AND 100),
+                status          TEXT NOT NULL DEFAULT 'draft'
+                    CHECK(status IN ('draft', 'open', 'closed')),
+                target_type     TEXT
+                    CHECK(target_type IS NULL OR target_type IN (
+                        'all_registered', 'member', 'role'
+                    )),
+                registered_only INTEGER NOT NULL DEFAULT 0
+                    CHECK(registered_only IN (0, 1)),
+                created_at      INTEGER NOT NULL,
+                opened_at       INTEGER,
+                closed_at       INTEGER,
+                CHECK(status = 'draft' OR (target_type IS NOT NULL AND opened_at IS NOT NULL)),
+                CHECK(status != 'closed' OR closed_at IS NOT NULL)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_surveys_guild_status
+            ON surveys(guild_id, status, survey_id DESC)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS survey_questions (
+                question_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                survey_id     INTEGER NOT NULL,
+                guild_id      INTEGER NOT NULL DEFAULT 0,
+                position      INTEGER NOT NULL CHECK(position BETWEEN 1 AND 10),
+                prompt        TEXT NOT NULL
+                    CHECK(length(trim(prompt)) BETWEEN 1 AND 1000),
+                question_type TEXT NOT NULL
+                    CHECK(question_type IN ('nps', 'rating', 'text')),
+                required      INTEGER NOT NULL DEFAULT 1
+                    CHECK(required IN (0, 1)),
+                created_at    INTEGER NOT NULL,
+                UNIQUE(guild_id, survey_id, position),
+                FOREIGN KEY(survey_id) REFERENCES surveys(survey_id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_questions_order
+            ON survey_questions(guild_id, survey_id, position)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS survey_recipients (
+                recipient_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                survey_id          INTEGER NOT NULL,
+                guild_id           INTEGER NOT NULL DEFAULT 0,
+                discord_id         INTEGER NOT NULL CHECK(discord_id > 0),
+                delivery_status    TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(delivery_status IN ('pending', 'sending', 'sent', 'failed')),
+                attempt_count      INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                receipt_checked_attempt INTEGER NOT NULL DEFAULT 0
+                    CHECK(receipt_checked_attempt >= 0),
+                retry_requested    INTEGER NOT NULL DEFAULT 0
+                    CHECK(retry_requested IN (0, 1)),
+                claimed_at         INTEGER,
+                dm_channel_id      INTEGER,
+                dm_message_id      INTEGER,
+                ui_channel_id      INTEGER,
+                ui_message_id      INTEGER,
+                controls_finalized INTEGER NOT NULL DEFAULT 0
+                    CHECK(controls_finalized IN (0, 1)),
+                current_question_id INTEGER,
+                in_review          INTEGER NOT NULL DEFAULT 0 CHECK(in_review IN (0, 1)),
+                started_at         INTEGER,
+                submitted_at       INTEGER,
+                last_error         TEXT,
+                created_at         INTEGER NOT NULL,
+                updated_at         INTEGER NOT NULL,
+                UNIQUE(survey_id, discord_id),
+                FOREIGN KEY(survey_id) REFERENCES surveys(survey_id) ON DELETE CASCADE,
+                FOREIGN KEY(current_question_id) REFERENCES survey_questions(question_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_recipients_delivery
+            ON survey_recipients(delivery_status, claimed_at, recipient_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_recipients_guild_campaign
+            ON survey_recipients(guild_id, survey_id, delivery_status)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_recipients_active_ui
+            ON survey_recipients(survey_id, submitted_at, ui_message_id)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS survey_answers (
+                answer_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                survey_id     INTEGER NOT NULL,
+                guild_id      INTEGER NOT NULL DEFAULT 0,
+                recipient_id  INTEGER NOT NULL,
+                question_id   INTEGER NOT NULL,
+                numeric_value INTEGER,
+                text_value    TEXT CHECK(text_value IS NULL OR length(text_value) <= 1000),
+                skipped       INTEGER NOT NULL DEFAULT 0 CHECK(skipped IN (0, 1)),
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER NOT NULL,
+                UNIQUE(recipient_id, question_id),
+                CHECK(
+                    (skipped = 1 AND numeric_value IS NULL AND text_value IS NULL)
+                    OR
+                    (skipped = 0 AND ((numeric_value IS NULL) != (text_value IS NULL)))
+                ),
+                FOREIGN KEY(survey_id) REFERENCES surveys(survey_id) ON DELETE CASCADE,
+                FOREIGN KEY(recipient_id)
+                    REFERENCES survey_recipients(recipient_id) ON DELETE CASCADE,
+                FOREIGN KEY(question_id)
+                    REFERENCES survey_questions(question_id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_answers_question
+            ON survey_answers(guild_id, survey_id, question_id, recipient_id)
+            """
+        )
+
+    def _migration_add_survey_controls_finalized(self, cursor) -> None:
+        """Upgrade databases initialized by an earlier survey migration draft."""
+        self._add_column_if_not_exists(
+            cursor,
+            "survey_recipients",
+            "controls_finalized",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(controls_finalized IN (0, 1))",
+        )
+
+    def _migration_add_survey_receipt_checked_attempt(self, cursor) -> None:
+        """Track which delivery attempt was safely checked against DM history."""
+        self._add_column_if_not_exists(
+            cursor,
+            "survey_recipients",
+            "receipt_checked_attempt",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(receipt_checked_attempt >= 0)",
+        )
+        # Earlier development builds could requeue a claimed attempt as
+        # ``pending`` without first checking whether Discord accepted its DM.
+        # Quarantine those rows so startup history reconciliation runs before
+        # they can ever be claimed again.
+        cursor.execute(
+            """
+            UPDATE survey_recipients
+            SET delivery_status = 'sending',
+                claimed_at = COALESCE(claimed_at, updated_at)
+            WHERE delivery_status = 'pending'
+              AND attempt_count > receipt_checked_attempt
+            """
+        )
+
+    def _migration_add_survey_retry_requested(self, cursor) -> None:
+        """Persist admin retry intent until ambiguous receipts are resolved."""
+        self._add_column_if_not_exists(
+            cursor,
+            "survey_recipients",
+            "retry_requested",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(retry_requested IN (0, 1))",
+        )
 
     def _migration_add_streak_multiplier_per_game_to_rating_history(self, cursor) -> None:
         """Preserve the rating-streak curve used when each match was recorded."""
