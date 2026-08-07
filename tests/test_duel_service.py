@@ -221,6 +221,7 @@ def test_service_process_due_returns_expiry_after_reminder_declines(duel_repo_mo
     expired = object()
     duel_repo_mock.claim_reminder_atomic.return_value = None
     duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None
+    duel_repo_mock.claim_expired_announcement_atomic.return_value = None
     duel_repo_mock.expire_atomic.return_value = expired
     service = DuelService(duel_repo_mock)
 
@@ -231,6 +232,9 @@ def test_service_process_due_returns_expiry_after_reminder_declines(duel_repo_mo
     assert duel_repo_mock.method_calls == [
         call.claim_reminder_atomic(7, GUILD_ID, 1_000_000),
         call.claim_unresolved_reminder_atomic(7, GUILD_ID, 1_000_000),
+        call.claim_expired_announcement_atomic(
+            7, GUILD_ID, 1_000_000, 1_000_000 + REMINDER_RETRY_BACKOFF_SECONDS
+        ),
         call.expire_atomic(7, GUILD_ID, 1_000_000),
     ]
 
@@ -270,6 +274,7 @@ def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
     assert result is None
     duel_repo_mock.claim_reminder_atomic.assert_not_called()
     duel_repo_mock.claim_unresolved_reminder_atomic.assert_not_called()
+    duel_repo_mock.claim_expired_announcement_atomic.assert_not_called()
     duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
 
 
@@ -332,10 +337,114 @@ def test_service_rearm_retry_never_delays_past_scheduled_reminder(duel_repo_mock
 def test_service_process_due_returns_none_for_stale_challenge(duel_repo_mock):
     duel_repo_mock.claim_reminder_atomic.return_value = None
     duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None
+    duel_repo_mock.claim_expired_announcement_atomic.return_value = None
     duel_repo_mock.expire_atomic.side_effect = ValueError("stale")
     service = DuelService(duel_repo_mock)
 
     assert service.process_due(7, GUILD_ID, 1_000_000) is None
+
+
+def test_service_process_due_returns_claimed_expired_announcement(duel_repo_mock):
+    announcement = object()
+    duel_repo_mock.claim_reminder_atomic.return_value = None
+    duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None
+    duel_repo_mock.claim_expired_announcement_atomic.return_value = announcement
+    service = DuelService(duel_repo_mock)
+
+    assert service.process_due(7, GUILD_ID, 1_000_000) is announcement
+    duel_repo_mock.claim_expired_announcement_atomic.assert_called_once_with(
+        7, GUILD_ID, 1_000_000, 1_000_000 + REMINDER_RETRY_BACKOFF_SECONDS
+    )
+    duel_repo_mock.expire_atomic.assert_not_called()
+
+
+def test_service_confirm_expiry_announced_clears_the_claimed_marker(duel_repo_mock):
+    result = SimpleNamespace(
+        kind=DuelDueKind.EXPIRED,
+        challenge=SimpleNamespace(
+            challenge_id=7,
+            guild_id=GUILD_ID,
+            next_reminder_at=NOW + REMINDER_RETRY_BACKOFF_SECONDS,
+        ),
+    )
+    duel_repo_mock.clear_expired_announcement_atomic.return_value = True
+    service = DuelService(duel_repo_mock, clock=lambda: NOW)
+
+    assert service.confirm_expiry_announced(result)
+    duel_repo_mock.clear_expired_announcement_atomic.assert_called_once_with(
+        7, GUILD_ID, NOW + REMINDER_RETRY_BACKOFF_SECONDS
+    )
+
+
+def test_service_confirm_expiry_announced_ignores_non_expiry_results(duel_repo_mock):
+    service = DuelService(duel_repo_mock, clock=lambda: NOW)
+    reminder = SimpleNamespace(
+        kind=DuelDueKind.REMINDER,
+        challenge=SimpleNamespace(
+            challenge_id=7, guild_id=GUILD_ID, next_reminder_at=NOW
+        ),
+    )
+    unmarked = SimpleNamespace(
+        kind=DuelDueKind.EXPIRED,
+        challenge=SimpleNamespace(
+            challenge_id=7, guild_id=GUILD_ID, next_reminder_at=None
+        ),
+    )
+
+    assert not service.confirm_expiry_announced(reminder)
+    assert not service.confirm_expiry_announced(unmarked)
+    duel_repo_mock.clear_expired_announcement_atomic.assert_not_called()
+
+
+def test_expiry_announcement_failure_is_retried_without_double_pay(repo_db_path):
+    """A transient send failure must retry the announcement, not the coins."""
+    service, challenge = create_real_pending_duel(repo_db_path)
+    players = PlayerRepository(repo_db_path)
+    now = NOW + RESPONSE_SECONDS
+
+    settled = service.process_due(challenge.challenge_id, GUILD_ID, now)
+    assert settled is not None
+    assert settled.kind is DuelDueKind.EXPIRED
+    balances = (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    )
+    assert balances == (750, 250)
+
+    # The send failed, so no confirmation: the announcement stays due for the
+    # next wake, and reclaiming it delivers the same expiry without moving
+    # coins a second time.
+    assert service.get_due_challenge_ids(now) == [
+        (challenge.challenge_id, GUILD_ID)
+    ]
+    retry = service.process_due(challenge.challenge_id, GUILD_ID, now + 60)
+    assert retry is not None
+    assert retry.kind is DuelDueKind.EXPIRED
+    assert retry.challenge.status is DuelStatus.EXPIRED
+    assert (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    ) == balances
+
+    # A permanently failing target cannot hot-loop: the claim backs off.
+    assert service.get_due_challenge_ids(now + 61) == []
+    assert service.get_due_challenge_ids(
+        now + 60 + REMINDER_RETRY_BACKOFF_SECONDS
+    ) == [(challenge.challenge_id, GUILD_ID)]
+
+    # A confirmed send retires the announcement for good.
+    assert service.confirm_expiry_announced(retry)
+    assert service.get_due_challenge_ids(
+        now + 60 + REMINDER_RETRY_BACKOFF_SECONDS
+    ) == []
+    assert (
+        service.process_due(
+            challenge.challenge_id,
+            GUILD_ID,
+            now + 60 + REMINDER_RETRY_BACKOFF_SECONDS,
+        )
+        is None
+    )
 
 
 def test_service_process_due_real_repository_returns_reminder(repo_db_path):

@@ -636,14 +636,18 @@ class DuelChallengeRepository(BaseRepository):
                 actor_id=None,
                 reason="expired penalty recipient debit",
             )
+            # Keep next_reminder_at armed as a durable pending-announcement
+            # marker: the settlement and the marker commit atomically, and the
+            # marker is only cleared once the expiry announcement is confirmed
+            # sent (clear_expired_announcement_atomic).
             cursor.execute(
                 """
                 UPDATE duel_challenges
-                SET status = 'expired', next_reminder_at = NULL, resolved_at = ?
+                SET status = 'expired', next_reminder_at = ?, resolved_at = ?
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
                   AND message_id IS NOT NULL AND expires_at <= ?
                 """,
-                (now, challenge_id, guild_id, now),
+                (now, now, challenge_id, guild_id, now),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("Duel expiry state was not recorded.")
@@ -752,6 +756,11 @@ class DuelChallengeRepository(BaseRepository):
                       AND next_reminder_at IS NOT NULL
                       AND next_reminder_at <= ?
                   )
+                  OR (
+                      status = 'expired'
+                      AND next_reminder_at IS NOT NULL
+                      AND next_reminder_at <= ?
+                  )
                 ORDER BY CASE
                              WHEN status = 'pending' AND expires_at <= ? THEN 0
                              ELSE 1
@@ -763,7 +772,7 @@ class DuelChallengeRepository(BaseRepository):
                          END,
                          challenge_id
                 """,
-                (now, now, now, now, now),
+                (now, now, now, now, now, now),
             ).fetchall()
         return [
             (int(row["challenge_id"]), int(row["guild_id"])) for row in rows
@@ -875,6 +884,78 @@ class DuelChallengeRepository(BaseRepository):
                 challenge=claimed,
                 claimed_reminder_at=challenge.next_reminder_at,
             )
+
+    def claim_expired_announcement_atomic(
+        self, challenge_id: int, guild_id: int, now: int, retry_at: int
+    ) -> DuelDueResult | None:
+        """Claim an expired duel's undelivered announcement for redelivery.
+
+        Advances the pending-announcement marker to ``retry_at`` so a failing
+        delivery target cannot hot-loop; a confirmed send clears the marker
+        via ``clear_expired_announcement_atomic``.
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            challenge = self._challenge_from_row(
+                cursor.execute(
+                    """
+                    SELECT * FROM duel_challenges
+                    WHERE challenge_id = ? AND guild_id = ? AND status = 'expired'
+                    """,
+                    (challenge_id, guild_id),
+                ).fetchone()
+            )
+            if challenge is None:
+                return None
+            if challenge.next_reminder_at is None or challenge.next_reminder_at > now:
+                return None
+            cursor.execute(
+                """
+                UPDATE duel_challenges
+                SET next_reminder_at = ?
+                WHERE challenge_id = ? AND guild_id = ? AND status = 'expired'
+                  AND next_reminder_at IS NOT NULL AND next_reminder_at <= ?
+                """,
+                (retry_at, challenge_id, guild_id, now),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = self._challenge_from_row(
+                cursor.execute(
+                    "SELECT * FROM duel_challenges WHERE challenge_id = ? AND guild_id = ?",
+                    (challenge_id, guild_id),
+                ).fetchone()
+            )
+            if claimed is None:
+                raise RuntimeError(
+                    "Claimed expired duel announcement could not be read."
+                )
+            return DuelDueResult(
+                kind=DuelDueKind.EXPIRED,
+                challenge=claimed,
+                claimed_reminder_at=challenge.next_reminder_at,
+            )
+
+    def clear_expired_announcement_atomic(
+        self,
+        challenge_id: int,
+        guild_id: int,
+        expected_next_reminder_at: int,
+    ) -> bool:
+        """Retire the pending-announcement marker after a confirmed send."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE duel_challenges
+                SET next_reminder_at = NULL
+                WHERE challenge_id = ? AND guild_id = ? AND status = 'expired'
+                  AND next_reminder_at = ?
+                """,
+                (challenge_id, guild_id, expected_next_reminder_at),
+            )
+            return cursor.rowcount == 1
 
     def rearm_reminder_atomic(
         self,

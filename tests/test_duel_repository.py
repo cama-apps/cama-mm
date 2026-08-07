@@ -561,7 +561,56 @@ def test_expiry_uses_ceiling_half_and_allows_debt(duel_fixture):
     assert expired.status is DuelStatus.EXPIRED
     assert players.get_balance(1, GUILD_ID) == 751
     assert players.get_balance(2, GUILD_ID) == -251
-    assert expired.next_reminder_at is None
+    # The settlement leaves a pending-announcement marker so a lost expiry
+    # announcement stays retryable by the wake loop.
+    assert expired.next_reminder_at == challenge.expires_at
+
+
+def test_expired_announcement_claim_and_clear_lifecycle(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
+    now = challenge.expires_at
+    expired = repo.expire_atomic(challenge.challenge_id, GUILD_ID, now)
+    balances = (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    )
+
+    # The undelivered announcement keeps the row in the due scan.
+    assert repo.get_due_challenge_ids(now) == [(challenge.challenge_id, GUILD_ID)]
+
+    claimed = repo.claim_expired_announcement_atomic(
+        challenge.challenge_id, GUILD_ID, now, now + 600
+    )
+    assert claimed is not None
+    assert claimed.kind is DuelDueKind.EXPIRED
+    assert claimed.challenge.next_reminder_at == now + 600
+    assert claimed.claimed_reminder_at == expired.next_reminder_at
+    # Claiming the announcement never re-settles the coin transfer.
+    assert (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    ) == balances
+
+    # The claim backs off: not due again until the retry time arrives.
+    assert repo.get_due_challenge_ids(now + 599) == []
+    assert repo.claim_expired_announcement_atomic(
+        challenge.challenge_id, GUILD_ID, now + 599, now + 1200
+    ) is None
+    assert repo.get_due_challenge_ids(now + 600) == [
+        (challenge.challenge_id, GUILD_ID)
+    ]
+
+    # A stale marker cannot be cleared; the current one retires the row.
+    assert not repo.clear_expired_announcement_atomic(
+        challenge.challenge_id, GUILD_ID, expired.next_reminder_at
+    )
+    assert repo.clear_expired_announcement_atomic(
+        challenge.challenge_id, GUILD_ID, now + 600
+    )
+    assert repo.get_due_challenge_ids(now + 10_000) == []
+    assert repo.claim_expired_announcement_atomic(
+        challenge.challenge_id, GUILD_ID, now + 10_000, now + 10_600
+    ) is None
 
 
 def test_expiry_rejects_unbound_pending_without_moving_balances(repo_db_path):
