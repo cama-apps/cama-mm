@@ -534,7 +534,17 @@ class LobbyManagerService:
                         # it back), then re-verify under the state lock that
                         # the shell is still ours and still empty before
                         # popping it from memory.
-                        self._clear_persistent_lobby(normalized, target_kind)
+                        try:
+                            self._clear_persistent_lobby(normalized, target_kind)
+                        except Exception:
+                            # Same contention window the re-read retries for.
+                            # The in-memory rollback stands; a later persist
+                            # of any membership change reconciles the row.
+                            logging.getLogger(
+                                "cama_bot.services.lobby_manager"
+                            ).exception(
+                                "Rolled-back join could not clear the shell row"
+                            )
                         with self._state_lock:
                             if (
                                 self.lobbies.get((normalized, target_kind))
@@ -548,7 +558,17 @@ class LobbyManagerService:
                             # persist below rewrite the deleted row.
                 if rolled_back:
                     if persist:
-                        self._persist_lobby(normalized, target_kind)
+                        try:
+                            self._persist_lobby(normalized, target_kind)
+                        except Exception:
+                            logging.getLogger(
+                                "cama_bot.services.lobby_manager"
+                            ).exception(
+                                "Rolled-back join could not persist the "
+                                "membership removal"
+                            )
+                    # Even when a write failed, the in-memory rollback stands
+                    # and the user must still get the suspension notice.
                     return LobbyJoinResult("lobby_suspended", suspension)
         if persist:
             self._persist_lobby(normalized, target_kind)

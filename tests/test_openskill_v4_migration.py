@@ -15,8 +15,13 @@ from tests.conftest import TEST_GUILD_ID
 MIGRATION_NAME = "openskill_v4_streak_replay"
 
 
-def test_streak_threshold_column_defaults_to_legacy_3(repo_db_path):
-    """rating_history.streak_threshold exists and backfills legacy rows to 3."""
+def test_streak_threshold_column_defaults_to_3_for_fresh_inserts(repo_db_path):
+    """rating_history.streak_threshold exists with column DEFAULT 3.
+
+    This pins only the DEFAULT applied to newly inserted rows that omit the
+    column; the pre-column backfill (live config, not 3) is pinned by
+    test_migration_backfills_pre_column_rows_with_live_config_threshold.
+    """
     with sqlite3.connect(repo_db_path) as conn:
         conn.row_factory = sqlite3.Row
         columns = {

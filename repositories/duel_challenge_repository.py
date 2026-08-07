@@ -866,6 +866,11 @@ class DuelChallengeRepository(BaseRepository):
                 else challenge.next_reminder_at
             )
             next_reminder_at = anchor + ((now - anchor) // 86400 + 1) * 86400
+            # An off-grid backoff retry can land just under the next grid
+            # point; skip it rather than ping twice minutes apart. 600s
+            # matches the service-side retry backoff.
+            if next_reminder_at - now < 600:
+                next_reminder_at += 86400
             cursor.execute(
                 """
                 UPDATE duel_challenges
