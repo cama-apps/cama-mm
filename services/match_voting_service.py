@@ -121,22 +121,28 @@ class MatchVotingService:
 
     def get_non_admin_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
         """
-        Get count of non-admin votes for radiant or dire.
+        Get count of eligible non-admin votes for radiant or dire.
+
+        Eligibility is re-checked at count time (mirroring the abort tally) so
+        persisted submissions that predate the participant gate can never
+        satisfy the quorum.
 
         Args:
             guild_id: Guild ID
             pending_match_id: Optional specific match ID for concurrent match support
 
         Returns:
-            Number of non-admin result votes
+            Number of eligible non-admin result votes
         """
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return 0
         return sum(
             1
-            for sub in state.record_submissions.values()
-            if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
+            for user_id, sub in state.record_submissions.items()
+            if not sub.get("is_admin")
+            and sub.get("result") in ("radiant", "dire")
+            and self._is_record_voter_eligible(state, user_id)
         )
 
     def _is_record_voter_eligible(self, state: PendingMatchState, user_id: int) -> bool:
@@ -243,7 +249,11 @@ class MatchVotingService:
 
     def get_vote_counts(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int]:
         """
-        Get vote counts for radiant and dire (non-admin only).
+        Get vote counts for radiant and dire (eligible non-admins only).
+
+        Eligibility is re-checked at count time (mirroring the abort tally) so
+        persisted submissions that predate the participant gate can never
+        satisfy the quorum.
 
         Args:
             guild_id: Guild ID
@@ -256,8 +266,8 @@ class MatchVotingService:
         if not state:
             return {"radiant": 0, "dire": 0}
         counts = {"radiant": 0, "dire": 0}
-        for sub in state.record_submissions.values():
-            if not sub.get("is_admin"):
+        for user_id, sub in state.record_submissions.items():
+            if not sub.get("is_admin") and self._is_record_voter_eligible(state, user_id):
                 result = sub.get("result")
                 if result in counts:
                     counts[result] += 1

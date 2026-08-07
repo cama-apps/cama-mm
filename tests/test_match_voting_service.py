@@ -215,6 +215,46 @@ def test_admin_non_participant_can_still_vote_on_result(voting_service, pending_
     assert result["result"] == "dire"
 
 
+def test_persisted_ineligible_result_votes_do_not_count_toward_quorum(
+    state_service, voting_service
+):
+    """Ineligible submissions already in the payload never satisfy the quorum.
+
+    Submissions persist in the pending-match payload and survive restarts, so
+    spectator votes stored before the insert-time participant gate existed (or
+    via any path bypassing it) must be filtered at count time — mirroring the
+    abort tally — or three persisted spectator votes could still finalize a
+    false result.
+    """
+    from domain.models.pending_match_state import PendingMatchState
+
+    gid = TEST_GUILD_ID
+    state = PendingMatchState(
+        radiant_team_ids=[1, 2, 3, 4, 5],
+        dire_team_ids=[6, 7, 8, 9, 10],
+        # Three matching spectator votes persisted before the gate existed.
+        record_submissions={
+            501: {"result": "radiant", "is_admin": False},
+            502: {"result": "radiant", "is_admin": False},
+            503: {"result": "radiant", "is_admin": False},
+        },
+    )
+    state_service.persist_state(gid, state)
+
+    assert voting_service.get_vote_counts(gid) == {"radiant": 0, "dire": 0}
+    assert voting_service.get_non_admin_submission_count(gid) == 0
+    assert voting_service.get_pending_record_result(gid) is None
+    assert voting_service.can_record_match(gid) is False
+
+    # Participant votes still count and are decisive on their own.
+    voting_service.add_record_submission(gid, user_id=1, result="dire", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="dire", is_admin=False)
+    result = voting_service.add_record_submission(gid, user_id=3, result="dire", is_admin=False)
+    assert result["vote_counts"] == {"radiant": 0, "dire": 3}
+    assert result["result"] == "dire"
+    assert voting_service.can_record_match(gid) is True
+
+
 # =============================================================================
 # NON-ADMIN RECORD THRESHOLD (requires MIN_NON_ADMIN_SUBMISSIONS matching votes)
 # =============================================================================

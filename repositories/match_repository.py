@@ -6,6 +6,7 @@ import json
 import logging
 import time
 
+from config import STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD
 from domain.models.moderation import ModerationEventType, ModerationSource
 from openskill_rating_system import CamaOpenSkillSystem
 from openskill_replay import OPENSKILL_ALGORITHM_VERSION, OpenSkillReplayResult
@@ -759,8 +760,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             openskill_fingerprint,
                             row.get("streak_length"),
                             row.get("streak_multiplier"),
-                            row.get("streak_multiplier_per_game", 0.20),
-                            row.get("streak_threshold", 3),
+                            # Live recording always computes streak boosts with
+                            # the live config curve, so a caller omitting these
+                            # keys must not mislabel the row with the legacy
+                            # pre-column constants (0.20 / 3).
+                            row.get("streak_multiplier_per_game", STREAK_MULTIPLIER_PER_GAME),
+                            row.get("streak_threshold", STREAK_THRESHOLD),
                             row.get("base_rating_delta_multiplier", 0.75),
                         )
                         for row in rating_history_rows
