@@ -19,6 +19,32 @@ from config import (
     STREAK_THRESHOLD,
 )
 
+# Streak parameters used before the per-match rating_history columns existed.
+# Replay and correction fall back to these when a stored value is missing or
+# malformed, so historical matches keep the curve they were recorded with.
+LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
+LEGACY_STREAK_THRESHOLD = 3
+
+
+def recorded_streak_rate(value) -> float:
+    """Parse a persisted per-match streak rate, falling back to the legacy curve."""
+    if value is None:
+        return LEGACY_STREAK_MULTIPLIER_PER_GAME
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return LEGACY_STREAK_MULTIPLIER_PER_GAME
+
+
+def recorded_streak_threshold(value) -> int:
+    """Parse a persisted per-match streak threshold, falling back to the legacy value."""
+    if value is None:
+        return LEGACY_STREAK_THRESHOLD
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return LEGACY_STREAK_THRESHOLD
+
 
 class FixedVolatilityPlayer(Player):
     """Glicko-2 player whose volatility is an input, not an inferred state."""
@@ -98,6 +124,11 @@ class CamaRatingSystem:
     def base_rating_delta_multiplier(self) -> float:
         """Return the base scale used when calculating new Glicko deltas."""
         return BASE_RATING_DELTA_MULTIPLIER
+
+    @property
+    def streak_threshold(self) -> int:
+        """Return the minimum streak length that activates the multiplier."""
+        return STREAK_THRESHOLD
 
     @staticmethod
     def apply_rd_decay(rd: float, days_since_last_match: int) -> float:
@@ -219,6 +250,7 @@ class CamaRatingSystem:
         recent_outcomes: list[bool],
         won: bool,
         streak_multiplier_per_game: float | None = None,
+        streak_threshold: int | None = None,
     ) -> tuple[int, float]:
         """
         Calculate current streak length and delta multiplier.
@@ -233,6 +265,7 @@ class CamaRatingSystem:
             recent_outcomes: List of recent outcomes (most recent first), True=win
             won: Whether this match was won
             streak_multiplier_per_game: Historical rate override for match correction
+            streak_threshold: Historical threshold override for match correction
 
         Returns:
             (streak_length, multiplier) - multiplier is 1.0 if streak < 3 or
@@ -261,7 +294,8 @@ class CamaRatingSystem:
         # Calculate multiplier: 1.0 + STREAK_MULTIPLIER_PER_GAME * (streak_length - 2).
         # The guard above guarantees streak_length >= STREAK_THRESHOLD (3), so
         # (streak_length - 2) is always >= 1 and no max(0, ...) clamp is needed.
-        if streak_length < STREAK_THRESHOLD:
+        threshold = STREAK_THRESHOLD if streak_threshold is None else streak_threshold
+        if streak_length < threshold:
             return streak_length, 1.0
 
         rate = (

@@ -120,6 +120,51 @@ def test_replay_reconstructs_streaks_with_recorded_rate_and_bounded_history(
     assert system.streak_calls[21][target] == pytest.approx(2.90)
 
 
+def test_replay_honors_recorded_streak_threshold():
+    """A match's persisted threshold gates the streak boost, not current config."""
+    player_ids, players, matches, participants = _streak_replay_inputs(
+        match_count=4,
+        with_fantasy=False,
+    )
+    for match in matches:
+        match["streak_threshold"] = 4
+    system = _RecordingOpenSkillSystem()
+
+    replay = replay_openskill(
+        players=players,
+        matches=matches,
+        participants_by_match=participants,
+        system=system,
+    )
+
+    assert replay.errors == []
+    target = player_ids[0]
+    # A 3-game streak stays unboosted under the recorded threshold of 4,
+    # where the default threshold of 3 would have applied 1.10.
+    assert system.streak_calls[2][target] == pytest.approx(1.0)
+    # The 4-game streak passes the recorded gate with the match's own rate.
+    assert system.streak_calls[3][target] == pytest.approx(1.60)
+
+
+def test_replay_persist_skips_unchanged_history_rows(repo_db_path):
+    """Re-persisting an identical replay must rewrite nothing."""
+    match_service, _player_service, player_repo, match_repo = _build(repo_db_path)
+    _player_ids, _match_id = _seed_and_record(match_service, player_repo)
+
+    system = CamaOpenSkillSystem()
+    replay, total = match_repo.replay_openskill_atomic(
+        guild_id=TEST_GUILD_ID,
+        system=system,
+    )
+    assert total == 1
+    assert replay.errors == []
+
+    counts = match_repo.replace_openskill_replay_atomic(replay, TEST_GUILD_ID)
+    assert counts["history_updated"] == 0
+    assert counts["history_inserted"] == 0
+    assert counts["predictions_updated"] == 0
+
+
 def test_replay_uses_legacy_streak_rate_when_match_rate_is_unavailable():
     player_ids, players, matches, participants = _streak_replay_inputs(
         match_count=3,

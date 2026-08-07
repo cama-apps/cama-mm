@@ -6,10 +6,12 @@ import json
 import logging
 import time
 
+from domain.models.moderation import ModerationEventType, ModerationSource
 from openskill_rating_system import CamaOpenSkillSystem
 from openskill_replay import OPENSKILL_ALGORITHM_VERSION, OpenSkillReplayResult
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IMatchRepository
+from repositories.moderation_repository import ModerationRepository
 from utils.match_bans import extract_match_bans
 from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 
@@ -418,6 +420,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
             # metadata are intentionally ignored.
             recorded_at = int(time.time())
             if pending_match_id is not None and lobby_kind is not None:
+                # An 'either' suspension whose time term already lapsed is no
+                # longer active per Suspension.is_active_at, even when the row
+                # was never lazily closed. Skip it so recording cannot emit a
+                # bogus completion event days after the suspension ended.
                 progressing_suspensions = cursor.execute(
                     """
                     SELECT discord_id, scope, completion, expires_at,
@@ -428,8 +434,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                       AND matches_remaining > 0
                       AND ? > pending_match_watermark
                       AND (scope = 'all' OR scope = ?)
+                      AND (
+                          completion != 'either'
+                          OR expires_at IS NULL
+                          OR expires_at > ?
+                      )
                     """,
-                    (normalized_guild, pending_match_id, lobby_kind),
+                    (normalized_guild, pending_match_id, lobby_kind, recorded_at),
                 ).fetchall()
 
                 completed_suspensions = []
@@ -466,6 +477,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                       AND matches_remaining > 0
                       AND ? > pending_match_watermark
                       AND (scope = 'all' OR scope = ?)
+                      AND (
+                          completion != 'either'
+                          OR expires_at IS NULL
+                          OR expires_at > ?
+                      )
                     """,
                     (
                         recorded_at,
@@ -473,37 +489,29 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         normalized_guild,
                         pending_match_id,
                         lobby_kind,
+                        recorded_at,
                     ),
                 )
 
-                if completed_suspensions:
-                    cursor.executemany(
-                        """
-                        INSERT INTO moderation_events (
-                            guild_id, discord_id, event_type, source, actor_id,
-                            reason, scope, completion, expires_at,
-                            matches_required, matches_remaining,
-                            pending_match_watermark, wins_required,
-                            wins_remaining, match_id, created_at
-                        )
-                        VALUES (?, ?, 'complete', 'system', NULL, ?, ?, ?, ?, ?,
-                                0, ?, NULL, NULL, ?, ?)
-                        """,
-                        [
-                            (
-                                normalized_guild,
-                                state["discord_id"],
-                                "Suspension requirements completed",
-                                state["scope"],
-                                state["completion"],
-                                state["expires_at"],
-                                state["matches_required"],
-                                state["pending_match_watermark"],
-                                match_id,
-                                recorded_at,
-                            )
-                            for state in completed_suspensions
-                        ],
+                for state in completed_suspensions:
+                    ModerationRepository._insert_event(
+                        cursor,
+                        discord_id=state["discord_id"],
+                        guild_id=normalized_guild,
+                        event_type=ModerationEventType.COMPLETE.value,
+                        source=ModerationSource.SYSTEM.value,
+                        actor_id=None,
+                        reason="Suspension requirements completed",
+                        scope=state["scope"],
+                        completion=state["completion"],
+                        expires_at=state["expires_at"],
+                        matches_required=state["matches_required"],
+                        matches_remaining=0,
+                        pending_match_watermark=state["pending_match_watermark"],
+                        wins_required=None,
+                        wins_remaining=None,
+                        match_id=match_id,
+                        now=recorded_at,
                     )
 
             # A recorded Dota win is the only automatic way out of low
@@ -529,31 +537,25 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         *winning_ids,
                     ),
                 ).fetchall()
-                if completing_low_priority:
-                    cursor.executemany(
-                        """
-                        INSERT INTO moderation_events (
-                            guild_id, discord_id, event_type, source, actor_id,
-                            reason, scope, completion, expires_at,
-                            matches_required, matches_remaining,
-                            pending_match_watermark, wins_required,
-                            wins_remaining, match_id, created_at
-                        )
-                        VALUES (?, ?, 'lowprio_complete', 'system', NULL, ?,
-                                NULL, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?)
-                        """,
-                        [
-                            (
-                                normalized_guild,
-                                state["discord_id"],
-                                "Required wins completed",
-                                state["start_pending_match_id"],
-                                state["wins_required"],
-                                match_id,
-                                recorded_at,
-                            )
-                            for state in completing_low_priority
-                        ],
+                for state in completing_low_priority:
+                    ModerationRepository._insert_event(
+                        cursor,
+                        discord_id=state["discord_id"],
+                        guild_id=normalized_guild,
+                        event_type=ModerationEventType.LOWPRIO_COMPLETE.value,
+                        source=ModerationSource.SYSTEM.value,
+                        actor_id=None,
+                        reason="Required wins completed",
+                        scope=None,
+                        completion=None,
+                        expires_at=None,
+                        matches_required=None,
+                        matches_remaining=None,
+                        pending_match_watermark=state["start_pending_match_id"],
+                        wins_required=state["wins_required"],
+                        wins_remaining=0,
+                        match_id=match_id,
+                        now=recorded_at,
                     )
                 cursor.execute(
                     f"""
@@ -729,10 +731,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         fantasy_weight, os_algorithm_version,
                         os_algorithm_fingerprint,
                         streak_length, streak_multiplier,
-                        streak_multiplier_per_game,
+                        streak_multiplier_per_game, streak_threshold,
                         base_rating_delta_multiplier
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -758,6 +760,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             row.get("streak_length"),
                             row.get("streak_multiplier"),
                             row.get("streak_multiplier_per_game", 0.20),
+                            row.get("streak_threshold", 3),
                             row.get("base_rating_delta_multiplier", 0.75),
                         )
                         for row in rating_history_rows
@@ -1621,7 +1624,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 SELECT won FROM rating_history
                 WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
-                ORDER BY id DESC
+                ORDER BY match_id DESC, id DESC
                 LIMIT ?
             """,
                 (discord_id, guild_id, limit),
@@ -1645,11 +1648,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             for discord_id in unique_ids:
+                # Order by match chronology (match_id), not rating_history.id:
+                # replay can backfill legacy matches' history rows with brand-new
+                # autoincrement ids, which would otherwise surface years-old
+                # outcomes at the head of the recency window.
                 cursor.execute(
                     """
                     SELECT won FROM rating_history
                     WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
-                    ORDER BY id DESC
+                    ORDER BY match_id DESC, id DESC
                     LIMIT ?
                     """,
                     (discord_id, guild_id, limit),
@@ -1671,18 +1678,40 @@ class MatchRepository(BaseRepository, IMatchRepository):
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
+            # Window match rows by match chronology (match_id), not
+            # rating_history.id: replay can backfill legacy matches' rows with
+            # brand-new autoincrement ids. Rows without a match (seeded
+            # history) have no chronology and keep the insertion-order cutoff.
             cursor.execute(
                 """
                 SELECT won FROM rating_history
                 WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
-                  AND id < (
-                      SELECT id FROM rating_history
+                  AND (
+                      match_id < ?
+                      OR (match_id IS NULL AND id < (
+                          SELECT MIN(id) FROM rating_history
+                          WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                      ))
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM rating_history
                       WHERE match_id = ? AND discord_id = ? AND guild_id = ?
                   )
-                ORDER BY id DESC
+                ORDER BY match_id DESC, id DESC
                 LIMIT ?
                 """,
-                (discord_id, normalized_guild, match_id, discord_id, normalized_guild, limit),
+                (
+                    discord_id,
+                    normalized_guild,
+                    match_id,
+                    match_id,
+                    discord_id,
+                    normalized_guild,
+                    match_id,
+                    discord_id,
+                    normalized_guild,
+                    limit,
+                ),
             )
             rows = cursor.fetchall()
             return [bool(row["won"]) for row in rows]
@@ -1704,6 +1733,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
         placeholders = ",".join("?" * len(unique_ids))
         with self.connection() as conn:
             cursor = conn.cursor()
+            # Window match rows by match chronology (match_id), not
+            # rating_history.id: replay can backfill legacy matches' rows with
+            # brand-new autoincrement ids. Rows without a match (seeded
+            # history) have no chronology and keep the insertion-order cutoff.
             cursor.execute(
                 f"""
                 WITH target_rows AS (
@@ -1718,13 +1751,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         history.won,
                         ROW_NUMBER() OVER (
                             PARTITION BY history.discord_id
-                            ORDER BY history.id DESC
+                            ORDER BY history.match_id DESC, history.id DESC
                         ) AS outcome_rank
                     FROM rating_history AS history
                     JOIN target_rows AS target
                       ON target.discord_id = history.discord_id
-                     AND history.id < target.cutoff_id
                     WHERE history.guild_id = ? AND history.won IS NOT NULL
+                      AND (
+                          history.match_id < ?
+                          OR (
+                              history.match_id IS NULL
+                              AND history.id < target.cutoff_id
+                          )
+                      )
                 )
                 SELECT discord_id, won
                 FROM ranked_outcomes
@@ -1736,6 +1775,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     normalized_guild,
                     *unique_ids,
                     normalized_guild,
+                    match_id,
                     limit,
                 ),
             )
@@ -2517,10 +2557,58 @@ class MatchRepository(BaseRepository, IMatchRepository):
             if row_guild == guild_id
         ]
         fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
+
+        # Load the existing per-row snapshot once so unchanged rows can be
+        # skipped entirely: a replay usually reproduces most of history
+        # verbatim, and rewriting every row kept the write lock for time
+        # proportional to the full league history.
+        existing_history = {
+            (row["match_id"], row["discord_id"]): row
+            for row in cursor.execute(
+                """
+                SELECT match_id, discord_id,
+                       os_mu_before, os_mu_after,
+                       os_sigma_before, os_sigma_after,
+                       fantasy_weight, os_algorithm_version,
+                       os_algorithm_fingerprint, team_number, won
+                FROM rating_history
+                WHERE guild_id = ?
+                """,
+                (guild_id,),
+            ).fetchall()
+        }
+
+        def _history_row_changed(history: dict, existing) -> bool:
+            if (
+                existing["os_mu_before"] != history["os_mu_before"]
+                or existing["os_mu_after"] != history["os_mu_after"]
+                or existing["os_sigma_before"] != history["os_sigma_before"]
+                or existing["os_sigma_after"] != history["os_sigma_after"]
+                or existing["fantasy_weight"] != history["fantasy_weight"]
+                or existing["os_algorithm_version"] != OPENSKILL_ALGORITHM_VERSION
+                or existing["os_algorithm_fingerprint"]
+                != history["os_algorithm_fingerprint"]
+            ):
+                return True
+            # The UPDATE only fills NULL team_number/won (COALESCE keeps
+            # existing values), so those columns matter only when unset.
+            if existing["team_number"] is None and history["team_number"] is not None:
+                return True
+            return existing["won"] is None and history["won"] is not None
+
+        update_rows: list[dict] = []
+        insert_rows: list[dict] = []
+        for history in history_rows:
+            existing = existing_history.get((history["match_id"], history["discord_id"]))
+            if existing is None:
+                insert_rows.append(history)
+            elif _history_row_changed(history, existing):
+                update_rows.append(history)
+
         history_updated = 0
         history_inserted = 0
-        for history in history_rows:
-            cursor.execute(
+        if update_rows:
+            cursor.executemany(
                 """
                 UPDATE rating_history
                 SET os_mu_before = ?,
@@ -2534,25 +2622,27 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     won = COALESCE(won, ?)
                 WHERE guild_id = ? AND match_id = ? AND discord_id = ?
                 """,
-                (
-                    history["os_mu_before"],
-                    history["os_mu_after"],
-                    history["os_sigma_before"],
-                    history["os_sigma_after"],
-                    history["fantasy_weight"],
-                    OPENSKILL_ALGORITHM_VERSION,
-                    history["os_algorithm_fingerprint"],
-                    history["team_number"],
-                    history["won"],
-                    guild_id,
-                    history["match_id"],
-                    history["discord_id"],
-                ),
+                [
+                    (
+                        history["os_mu_before"],
+                        history["os_mu_after"],
+                        history["os_sigma_before"],
+                        history["os_sigma_after"],
+                        history["fantasy_weight"],
+                        OPENSKILL_ALGORITHM_VERSION,
+                        history["os_algorithm_fingerprint"],
+                        history["team_number"],
+                        history["won"],
+                        guild_id,
+                        history["match_id"],
+                        history["discord_id"],
+                    )
+                    for history in update_rows
+                ],
             )
-            if cursor.rowcount:
-                history_updated += cursor.rowcount
-                continue
-            cursor.execute(
+            history_updated = cursor.rowcount
+        if insert_rows:
+            cursor.executemany(
                 """
                 INSERT INTO rating_history (
                     discord_id, guild_id, match_id, timestamp,
@@ -2565,23 +2655,26 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP),
                         ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    history["discord_id"],
-                    guild_id,
-                    history["match_id"],
-                    history["match_date"],
-                    history["team_number"],
-                    history["won"],
-                    history["os_mu_before"],
-                    history["os_mu_after"],
-                    history["os_sigma_before"],
-                    history["os_sigma_after"],
-                    history["fantasy_weight"],
-                    OPENSKILL_ALGORITHM_VERSION,
-                    history["os_algorithm_fingerprint"],
-                ),
+                [
+                    (
+                        history["discord_id"],
+                        guild_id,
+                        history["match_id"],
+                        history["match_date"],
+                        history["team_number"],
+                        history["won"],
+                        history["os_mu_before"],
+                        history["os_mu_after"],
+                        history["os_sigma_before"],
+                        history["os_sigma_after"],
+                        history["fantasy_weight"],
+                        OPENSKILL_ALGORITHM_VERSION,
+                        history["os_algorithm_fingerprint"],
+                    )
+                    for history in insert_rows
+                ],
             )
-            history_inserted += 1
+            history_inserted = len(insert_rows)
 
         if player_rows:
             cursor.executemany(
@@ -2609,11 +2702,45 @@ class MatchRepository(BaseRepository, IMatchRepository):
         else:
             players_updated = 0
 
-        predictions_updated = 0
-        for prediction in replay.prediction_rows:
-            if prediction["guild_id"] != guild_id:
-                continue
-            cursor.execute(
+        existing_predictions = {
+            row["match_id"]: row
+            for row in cursor.execute(
+                """
+                SELECT p.match_id,
+                       p.openskill_radiant_win_prob,
+                       p.openskill_raw_radiant_win_prob,
+                       p.openskill_algorithm_version,
+                       p.openskill_algorithm_fingerprint
+                FROM match_predictions p
+                JOIN matches m ON m.match_id = p.match_id
+                WHERE m.guild_id = ?
+                """,
+                (guild_id,),
+            ).fetchall()
+        }
+
+        def _prediction_changed(prediction: dict) -> bool:
+            existing = existing_predictions.get(prediction["match_id"])
+            if existing is None:
+                return True
+            return (
+                existing["openskill_radiant_win_prob"]
+                != prediction["openskill_radiant_win_prob"]
+                or existing["openskill_raw_radiant_win_prob"]
+                != prediction["openskill_raw_radiant_win_prob"]
+                or existing["openskill_algorithm_version"] != OPENSKILL_ALGORITHM_VERSION
+                or existing["openskill_algorithm_fingerprint"]
+                != prediction["openskill_algorithm_fingerprint"]
+            )
+
+        prediction_rows = [
+            prediction
+            for prediction in replay.prediction_rows
+            if prediction["guild_id"] == guild_id and _prediction_changed(prediction)
+        ]
+        predictions_updated = len(prediction_rows)
+        if prediction_rows:
+            cursor.executemany(
                 """
                 INSERT INTO match_predictions (
                     match_id,
@@ -2633,15 +2760,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     openskill_algorithm_fingerprint =
                         excluded.openskill_algorithm_fingerprint
                 """,
-                (
-                    prediction["match_id"],
-                    prediction["openskill_radiant_win_prob"],
-                    prediction["openskill_raw_radiant_win_prob"],
-                    OPENSKILL_ALGORITHM_VERSION,
-                    prediction["openskill_algorithm_fingerprint"],
-                ),
+                [
+                    (
+                        prediction["match_id"],
+                        prediction["openskill_radiant_win_prob"],
+                        prediction["openskill_raw_radiant_win_prob"],
+                        OPENSKILL_ALGORITHM_VERSION,
+                        prediction["openskill_algorithm_fingerprint"],
+                    )
+                    for prediction in prediction_rows
+                ],
             )
-            predictions_updated += 1
 
         cursor.execute(
             "DELETE FROM openskill_replay_jobs WHERE guild_id = ?",
@@ -2715,7 +2844,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
                              AND rh.match_id = m.match_id
                            ORDER BY rh.id
                            LIMIT 1
-                       ) AS streak_multiplier_per_game
+                       ) AS streak_multiplier_per_game,
+                       (
+                           SELECT rh.streak_threshold
+                           FROM rating_history rh
+                           WHERE rh.guild_id = m.guild_id
+                             AND rh.match_id = m.match_id
+                           ORDER BY rh.id
+                           LIMIT 1
+                       ) AS streak_threshold
                 FROM matches m
                 WHERE m.guild_id = ? AND m.winning_team IN (1, 2)
                 ORDER BY m.match_date, m.match_id
@@ -3912,6 +4049,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_sigma_after,
                     fantasy_weight,
                     streak_multiplier_per_game,
+                    streak_threshold,
                     base_rating_delta_multiplier
                 FROM rating_history
                 WHERE match_id = ?
