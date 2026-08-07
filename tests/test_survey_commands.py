@@ -1258,6 +1258,63 @@ async def test_saved_skip_is_not_reported_as_failed_when_dm_edit_fails():
 
 
 @pytest.mark.asyncio
+async def test_submitted_response_is_not_reported_as_failed_when_dm_edit_fails():
+    submitted_session = _session(
+        recipient=_recipient(
+            current_question_id=None,
+            in_review=True,
+            submitted_at=100,
+        )
+    )
+    service = MagicMock()
+    service.submit_response.return_value = True
+    service.get_response_session.return_value = submitted_session
+    cog = _cog(survey_service=service)
+    cog._schedule_delivery_recovery = MagicMock()
+    cog.respond_error = AsyncMock()
+    interaction = _interaction(user_id=42)
+    interaction.edit_original_response.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"),
+        "try later",
+    )
+
+    await cog.submit_response(interaction, 11)
+
+    # The submission is durably committed and counted in results; a Discord
+    # re-render failure must not tell the respondent the submit failed.
+    service.submit_response.assert_called_once_with(11, 42)
+    cog.respond_error.assert_not_awaited()
+    cog._schedule_delivery_recovery.assert_called_once_with(
+        survey_commands._DELIVERY_RECEIPT_GRACE_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_navigation_is_not_reported_as_failed_when_dm_edit_fails():
+    review_session = _session(
+        recipient=_recipient(current_question_id=None, in_review=True),
+    )
+    service = MagicMock()
+    service.select_response_question.return_value = _session()
+    service.begin_review.return_value = review_session
+    cog = _cog(survey_service=service)
+    cog._schedule_delivery_recovery = MagicMock()
+    cog.respond_error = AsyncMock()
+    interaction = _interaction(user_id=42)
+    interaction.edit_original_response.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"),
+        "try later",
+    )
+
+    await cog.edit_response_question(interaction, 11, 101)
+    await cog.return_to_review(interaction, 11)
+
+    service.select_response_question.assert_called_once_with(11, 42, 101)
+    service.begin_review.assert_called_once_with(11, 42)
+    cog.respond_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_committed_answer_schedules_recovery_when_discord_edit_fails():
     next_session = _session(recipient=_recipient(current_question_id=102))
     service = MagicMock()
@@ -1418,6 +1475,27 @@ async def test_results_view_timeout_disables_pagination_buttons():
 
 
 @pytest.mark.asyncio
+async def test_results_view_timeout_edits_via_the_freshest_pagination_token():
+    """Clicks push the view timeout past the original token's 15m lifetime,
+    so on_timeout must edit with the latest component interaction instead."""
+    pages = [SimpleNamespace(), SimpleNamespace()]
+    original = _interaction(user_id=900)
+    view = survey_commands.SurveyResultsView(
+        owner_id=900,
+        pages=pages,
+        interaction=original,
+    )
+    later_click = _interaction(user_id=900)
+
+    await view.next.callback(later_click)
+    await view.on_timeout()
+
+    later_click.edit_original_response.assert_awaited_once()
+    assert later_click.edit_original_response.await_args.kwargs["view"] is view
+    original.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_results_command_wires_timeout_interaction_into_pagination(monkeypatch):
     interaction = _interaction(user_id=900, guild=SimpleNamespace(id=77))
     report = SurveyResults(
@@ -1507,6 +1585,43 @@ async def test_reconnect_reconciliation_skips_unchanged_response_messages():
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_cache_holds_no_answer_text_and_evicts_on_finalize():
+    secret = "my private free-text feedback"
+    session = _session(
+        answers=(SurveyDraftAnswer(102, None, secret, False, 5),),
+    )
+    message = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(get_partial_message=MagicMock(return_value=message))
+    user = SimpleNamespace(create_dm=AsyncMock(return_value=channel))
+    service = MagicMock()
+    service.get_response_session.return_value = session
+    bot = SimpleNamespace(
+        get_user=MagicMock(return_value=user),
+        fetch_user=AsyncMock(),
+        add_view=MagicMock(),
+    )
+    cog = _cog(bot=bot, survey_service=service)
+
+    await cog._reconcile_response_message(session)
+
+    # The skip cache must retain a digest, never respondents' raw answers.
+    assert len(cog._reconciled_response_fingerprints) == 1
+    assert secret not in repr(cog._reconciled_response_fingerprints)
+
+    submitted = _session(
+        recipient=replace(session.recipient, submitted_at=100, updated_at=6),
+        answers=session.answers,
+    )
+    service.get_response_session.return_value = submitted
+    await cog._reconcile_response_message(session)
+
+    # Finalizing removes the session from the recoverable set for good, so
+    # its fingerprint entry must not outlive it.
+    service.finalize_response_ui.assert_called_once()
+    assert cog._reconciled_response_fingerprints == {}
+
+
+@pytest.mark.asyncio
 async def test_setup_restores_question_and_review_views_by_persisted_message_id():
     question_session = _session(
         recipient=_recipient(dm_message_id=7001, ui_message_id=None),
@@ -1545,6 +1660,32 @@ async def test_setup_restores_question_and_review_views_by_persisted_message_id(
     assert bot.add_view.call_args_list[1].kwargs == {"message_id": 7999}
     assert first_view.is_persistent()
     assert second_view.is_persistent()
+
+
+@pytest.mark.asyncio
+async def test_setup_schedules_delivery_recovery_for_interrupted_campaigns(
+    monkeypatch,
+):
+    """cog_unload cancels in-flight dispatch tasks, so a reloaded cog must
+    resume pending deliveries instead of waiting for the next on_ready."""
+    schedule = MagicMock()
+    monkeypatch.setattr(
+        survey_commands.SurveyCommands,
+        "_schedule_delivery_recovery",
+        schedule,
+    )
+    service = MagicMock()
+    service.list_recoverable_response_sessions.return_value = []
+    bot = SimpleNamespace(
+        survey_service=service,
+        player_service=MagicMock(),
+        add_cog=AsyncMock(),
+        add_view=MagicMock(),
+    )
+
+    await survey_commands.setup(bot)
+
+    schedule.assert_called_once_with(survey_commands._DELIVERY_RECEIPT_GRACE_SECONDS)
 
 
 @pytest.mark.asyncio
