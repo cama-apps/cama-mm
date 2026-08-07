@@ -756,6 +756,10 @@ class SchemaManager:
                 "add_streak_multiplier_per_game_to_rating_history",
                 self._migration_add_streak_multiplier_per_game_to_rating_history,
             ),
+            (
+                "add_base_rating_delta_multiplier_to_rating_history",
+                self._migration_add_base_rating_delta_multiplier_to_rating_history,
+            ),
             # OpenSkill v4: apply the same persisted streak curve as Glicko
             # during both live updates and chronological replay.
             (
@@ -1013,6 +1017,15 @@ class SchemaManager:
             "rating_history",
             "streak_multiplier_per_game",
             "REAL NOT NULL DEFAULT 0.20",
+        )
+
+    def _migration_add_base_rating_delta_multiplier_to_rating_history(self, cursor) -> None:
+        """Preserve the base Glicko curve used when each match was recorded."""
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "base_rating_delta_multiplier",
+            "REAL NOT NULL DEFAULT 0.75",
         )
 
     def _migration_openskill_v4_streak_replay(self, cursor) -> None:

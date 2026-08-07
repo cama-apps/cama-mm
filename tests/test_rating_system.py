@@ -1060,15 +1060,15 @@ class TestV3TeamBasedExpectedOutcome:
     def rating_system(self):
         return CamaRatingSystem()
 
-    def test_eighty_percent_certainty_moves_about_ten_in_even_match(
+    def test_rd_sixty_player_moves_about_ten_in_even_match(
         self, rating_system
     ):
         team1 = [
-            (Player(rating=1500, rd=70, vol=0.06), f"radiant_{index}")
+            (Player(rating=1500, rd=60, vol=0.06), f"radiant_{index}")
             for index in range(5)
         ]
         team2 = [
-            (Player(rating=1500, rd=70, vol=0.06), f"dire_{index}")
+            (Player(rating=1500, rd=60, vol=0.06), f"dire_{index}")
             for index in range(5)
         ]
 

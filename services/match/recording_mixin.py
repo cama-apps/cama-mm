@@ -601,6 +601,9 @@ class RecordingMixin:
                         "streak_multiplier_per_game": (
                             self.rating_system.streak_multiplier_per_game
                         ),
+                        "base_rating_delta_multiplier": (
+                            self.rating_system.base_rating_delta_multiplier
+                        ),
                     }
                 )
 

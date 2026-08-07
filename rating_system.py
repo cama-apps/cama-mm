@@ -94,6 +94,11 @@ class CamaRatingSystem:
         """Return the rate used when calculating new match streak multipliers."""
         return STREAK_MULTIPLIER_PER_GAME
 
+    @property
+    def base_rating_delta_multiplier(self) -> float:
+        """Return the base scale used when calculating new Glicko deltas."""
+        return BASE_RATING_DELTA_MULTIPLIER
+
     @staticmethod
     def apply_rd_decay(rd: float, days_since_last_match: int) -> float:
         """
@@ -275,6 +280,7 @@ class CamaRatingSystem:
         opponent_rd: float,
         result: float,
         streak_multiplier: float = 1.0,
+        base_rating_delta_multiplier: float | None = None,
     ) -> tuple[float, float, float]:
         """
         Compute updated rating, RD, and volatility for a single player.
@@ -291,6 +297,7 @@ class CamaRatingSystem:
             opponent_rd: Opponent team RMS RD
             result: 1.0 for win, 0.0 for loss
             streak_multiplier: Multiplier for rating delta (default 1.0)
+            base_rating_delta_multiplier: Recording-time base delta scale, or the current default
 
         Returns:
             Tuple of (new_rating, new_rd, new_vol)
@@ -306,7 +313,12 @@ class CamaRatingSystem:
         # Delta is how much the "team representative with this player's RD" moved
         delta = synth.rating - team_rating
 
-        delta = delta * BASE_RATING_DELTA_MULTIPLIER
+        base_multiplier = (
+            BASE_RATING_DELTA_MULTIPLIER
+            if base_rating_delta_multiplier is None
+            else base_rating_delta_multiplier
+        )
+        delta = delta * base_multiplier
 
         # Apply streak multiplier before capping
         delta = delta * streak_multiplier
@@ -328,6 +340,7 @@ class CamaRatingSystem:
         team2_players: list[tuple[Player, int]],
         winning_team: int,
         streak_multipliers: dict[int, float] | None = None,
+        base_rating_delta_multiplier: float | None = None,
     ) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
         """
         Update ratings after a match using team-based expected outcome with individual RD.
@@ -356,6 +369,7 @@ class CamaRatingSystem:
             team2_players: List of (Glicko-2 Player, discord_id) for team 2 (non-empty)
             winning_team: 1 or 2 (which team won)
             streak_multipliers: Optional dict mapping discord_id to streak multiplier
+            base_rating_delta_multiplier: Recording-time base delta scale, or the current default
 
         Returns:
             Tuple of (team1_updated_ratings, team2_updated_ratings)
@@ -385,7 +399,8 @@ class CamaRatingSystem:
             (
                 *self._update_player_rating(
                     player, team1_rating, team2_rating, team2_rd, team1_result,
-                    streak_multiplier=streak_multipliers.get(discord_id, 1.0)
+                    streak_multiplier=streak_multipliers.get(discord_id, 1.0),
+                    base_rating_delta_multiplier=base_rating_delta_multiplier,
                 ),
                 discord_id
             )
@@ -395,7 +410,8 @@ class CamaRatingSystem:
             (
                 *self._update_player_rating(
                     player, team2_rating, team1_rating, team1_rd, team2_result,
-                    streak_multiplier=streak_multipliers.get(discord_id, 1.0)
+                    streak_multiplier=streak_multipliers.get(discord_id, 1.0),
+                    base_rating_delta_multiplier=base_rating_delta_multiplier,
                 ),
                 discord_id
             )
