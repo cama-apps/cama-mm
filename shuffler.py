@@ -25,6 +25,10 @@ from domain.low_priority_constants import (
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.rating_constants import OPENSKILL_DISPLAY_SCALE
+from domain.services.team_balancing_service import (
+    role_matchup_delta_from_values,
+    role_parity_delta_from_values,
+)
 from utils.region import region_split_mismatches
 from utils.role_assignment_cache import get_cached_role_assignments
 
@@ -242,51 +246,6 @@ class BalancedShuffler:
                 for player in players
                 if player.discord_id is not None
             )
-        )
-
-    def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
-        """
-        Calculate the sum of role matchup deltas between two teams.
-
-        Compares:
-        - Team1 carry (1) vs Team2 offlane (3)
-        - Team2 carry (1) vs Team1 offlane (3)
-        - Team1 mid (2) vs Team2 mid (2)
-        - Team1 pos4 vs Team2 pos5 (cross-lane support)
-        - Team2 pos4 vs Team1 pos5 (cross-lane support)
-
-        Args:
-            team1: First team
-            team2: Second team
-
-        Returns:
-            Sum of deltas across the five critical matchups
-        """
-
-        # Effective value for each role, per team
-        def role_value(team: Team, role: str) -> float:
-            _player, value = team.get_player_by_role(
-                role,
-                self.use_glicko,
-                self.off_role_multiplier,
-                use_openskill=self.use_openskill,
-                use_jopacoin=self.use_jopacoin,
-            )
-            return value
-
-        t1 = {role: role_value(team1, role) for role in ("1", "2", "3", "4", "5")}
-        t2 = {role: role_value(team2, role) for role in ("1", "2", "3", "4", "5")}
-
-        # Calculate the five critical matchups
-        carry_vs_offlane_1 = abs(t1["1"] - t2["3"])
-        carry_vs_offlane_2 = abs(t2["1"] - t1["3"])
-        mid_vs_mid = abs(t1["2"] - t2["2"])
-        support_cross_1 = abs(t1["4"] - t2["5"])
-        support_cross_2 = abs(t2["4"] - t1["5"])
-
-        # Return the sum of all five deltas
-        return (
-            carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
         )
 
     def _calculate_region_split_penalty(
@@ -761,15 +720,7 @@ class BalancedShuffler:
         team2: _RoleAssignmentMetrics,
     ) -> float:
         """Calculate lane matchup delta from precomputed effective role values."""
-        t1_values = team1.role_values
-        t2_values = team2.role_values
-        return (
-            abs(t1_values[0] - t2_values[2])
-            + abs(t2_values[0] - t1_values[2])
-            + abs(t1_values[1] - t2_values[1])
-            + abs(t1_values[3] - t2_values[4])
-            + abs(t2_values[3] - t1_values[4])
-        )
+        return role_matchup_delta_from_values(team1.role_values, team2.role_values)
 
     @staticmethod
     def _role_parity_delta_from_metrics(
@@ -777,7 +728,7 @@ class BalancedShuffler:
         team2: _RoleAssignmentMetrics,
     ) -> float:
         """Calculate the same-role delta from precomputed effective values."""
-        return sum(abs(t1 - t2) for t1, t2 in zip(team1.role_values, team2.role_values))
+        return role_parity_delta_from_values(team1.role_values, team2.role_values)
 
     def _optimize_role_assignments_for_matchup(
         self,
@@ -867,6 +818,9 @@ class BalancedShuffler:
                     t2_soft_support,
                     t2_hard_support,
                 ) = team2_assignment.role_values
+                # Inline copy of role_matchup_delta_from_values /
+                # role_parity_delta_from_values (kept manual for speed; pinned
+                # by TestRoleDeltaFormulaConsistency). Update all copies together.
                 role_matchup_delta = (
                     abs_value(t1_carry - t2_offlane)
                     + abs_value(t2_carry - t1_offlane)
@@ -977,6 +931,9 @@ class BalancedShuffler:
                     t2_soft_support,
                     t2_hard_support,
                 ) = team2_assignment.role_values
+                # Inline copy of role_matchup_delta_from_values /
+                # role_parity_delta_from_values (kept manual for speed; pinned
+                # by TestRoleDeltaFormulaConsistency). Update all copies together.
                 role_matchup_delta = (
                     abs(t1_carry - t2_offlane)
                     + abs(t2_carry - t1_offlane)

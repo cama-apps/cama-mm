@@ -1154,13 +1154,110 @@ class TestRoleMatchupDelta:
             off_role_flat_penalty=0.0,
             role_matchup_delta_weight=1.0,
         )
-        delta = shuffler._calculate_role_matchup_delta(team1, team2)
+        delta = shuffler._role_matchup_delta_from_metrics(
+            shuffler._assigned_role_metrics(team1),
+            shuffler._assigned_role_metrics(team2),
+        )
 
         # carry/offlane/mid all equal → 0
         # pos4 cross 1: |1300 - 1200| = 100
         # pos4 cross 2: |1100 - 900| = 200
         # total = 0 + 0 + 0 + 100 + 200 = 300
         assert delta == 300
+
+
+class TestRoleDeltaFormulaConsistency:
+    """Characterization tests pinning the lane-matchup/parity formulas.
+
+    The canonical formulas live in domain/services/team_balancing_service.py.
+    The shuffler's metrics helpers reuse them, while the two inlined hot loops
+    (_score_unconstrained_role_assignments and the constrained fallback in
+    _score_role_assignments_for_matchup) keep manual copies for speed. These
+    tests pin every copy to the same numbers so a future scoring tweak that
+    misses one copy fails here instead of silently diverging.
+    """
+
+    @staticmethod
+    def _teams() -> tuple[Team, Team]:
+        team1_players = [
+            Player(name="Carry1", mmr=2000, preferred_roles=["1"], discord_id=1),
+            Player(name="Mid1", mmr=1500, preferred_roles=["2"], discord_id=2),
+            Player(name="Offlane1", mmr=1200, preferred_roles=["3"], discord_id=3),
+            Player(name="Sup1", mmr=1100, preferred_roles=["4"], discord_id=4),
+            Player(name="Sup2", mmr=1000, preferred_roles=["5"], discord_id=5),
+        ]
+        team2_players = [
+            Player(name="Carry2", mmr=1000, preferred_roles=["1"], discord_id=6),
+            Player(name="Mid2", mmr=1500, preferred_roles=["2"], discord_id=7),
+            Player(name="Offlane2", mmr=1900, preferred_roles=["3"], discord_id=8),
+            Player(name="Sup3", mmr=1050, preferred_roles=["4"], discord_id=9),
+            Player(name="Sup4", mmr=950, preferred_roles=["5"], discord_id=10),
+        ]
+        roles = ["1", "2", "3", "4", "5"]
+        return (
+            Team(team1_players, role_assignments=roles),
+            Team(team2_players, role_assignments=roles),
+        )
+
+    # Pinned by hand from the fixture above:
+    # matchup = |2000-1900| + |1000-1200| + |1500-1500| + |1100-950| + |1050-1000|
+    #         = 100 + 200 + 0 + 150 + 50 = 500
+    # parity  = |2000-1000| + |1500-1500| + |1200-1900| + |1100-1050| + |1000-950|
+    #         = 1000 + 0 + 700 + 50 + 50 = 1800
+    EXPECTED_MATCHUP = 500
+    EXPECTED_PARITY = 1800
+
+    def test_service_and_shuffler_metrics_helpers_agree(self):
+        """Service methods and shuffler metrics helpers pin the same numbers."""
+        team1, team2 = self._teams()
+        service = TeamBalancingService(use_glicko=False, off_role_multiplier=1.0)
+        shuffler = BalancedShuffler(
+            use_glicko=False, consider_roles=True, off_role_multiplier=1.0
+        )
+        metrics1 = shuffler._assigned_role_metrics(team1)
+        metrics2 = shuffler._assigned_role_metrics(team2)
+
+        assert service.calculate_role_matchup_delta(team1, team2) == self.EXPECTED_MATCHUP
+        assert service.calculate_role_parity_delta(team1, team2) == self.EXPECTED_PARITY
+        assert (
+            shuffler._role_matchup_delta_from_metrics(metrics1, metrics2)
+            == self.EXPECTED_MATCHUP
+        )
+        assert (
+            shuffler._role_parity_delta_from_metrics(metrics1, metrics2)
+            == self.EXPECTED_PARITY
+        )
+
+    def test_inlined_hot_loops_match_shared_formulas(self):
+        """Both inlined scoring loops must reproduce the shared formulas."""
+        team1, team2 = self._teams()
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            consider_roles=True,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.5,
+            rd_priority_weight=0.0,
+        )
+        # value diff = |6800 - 6400| = 400; weighted deltas = (500 + 1800) * 0.5
+        expected_score = 400 + (self.EXPECTED_MATCHUP + self.EXPECTED_PARITY) * 0.5
+
+        # Unconstrained hot loop (_score_unconstrained_role_assignments).
+        _, _, unconstrained_score = shuffler._score_role_assignments_for_matchup(
+            team1.players, team2.players, max_assignments_per_team=1
+        )
+        assert unconstrained_score == pytest.approx(expected_score)
+
+        # Constrained fallback loop: a cross-team avoid adds zero penalty but
+        # forces the avoid/deal scoring path, whose arithmetic must agree.
+        inert_avoid = SimpleNamespace(avoider_discord_id=1, avoided_discord_id=6)
+        _, _, constrained_score = shuffler._score_role_assignments_for_matchup(
+            team1.players,
+            team2.players,
+            max_assignments_per_team=1,
+            avoids=[inert_avoid],
+        )
+        assert constrained_score == pytest.approx(expected_score)
 
 
 def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 50) -> list[Player]:

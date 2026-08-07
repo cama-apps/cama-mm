@@ -7,6 +7,39 @@ Handles team value calculations and balance scoring.
 from domain.models.team import Team
 
 
+def role_matchup_delta_from_values(
+    team1_values: tuple[float, ...],
+    team2_values: tuple[float, ...],
+) -> float:
+    """
+    Sum of the five critical lane matchups from effective role values.
+
+    Values are ordered by position ("1".."5"). Compares:
+    - Team1 carry (1) vs Team2 offlane (3), and vice versa
+    - Team1 mid (2) vs Team2 mid (2)
+    - Team1 pos4 vs Team2 pos5 (cross-lane support), and vice versa
+
+    This is the single canonical formula; the shuffler's inlined hot loops
+    keep manual copies for speed that are pinned to it by tests
+    (tests/test_shuffler.py::TestRoleDeltaFormulaConsistency).
+    """
+    return (
+        abs(team1_values[0] - team2_values[2])
+        + abs(team2_values[0] - team1_values[2])
+        + abs(team1_values[1] - team2_values[1])
+        + abs(team1_values[3] - team2_values[4])
+        + abs(team2_values[3] - team1_values[4])
+    )
+
+
+def role_parity_delta_from_values(
+    team1_values: tuple[float, ...],
+    team2_values: tuple[float, ...],
+) -> float:
+    """Sum of same-role value differences from effective role values."""
+    return sum(abs(v1 - v2) for v1, v2 in zip(team1_values, team2_values))
+
+
 class TeamBalancingService:
     """
     Pure domain service for team balancing logic.
@@ -95,38 +128,10 @@ class TeamBalancingService:
         Returns:
             Sum of deltas across the five critical matchups
         """
-
-        def role_value(team: Team, role: str) -> float:
-            _, value = team.get_player_by_role(
-                role,
-                self.use_glicko,
-                self.off_role_multiplier,
-                use_openskill=use_openskill,
-                use_jopacoin=use_jopacoin,
-            )
-            return value
-
-        team1_carry_value = role_value(team1, "1")
-        team1_offlane_value = role_value(team1, "3")
-        team1_mid_value = role_value(team1, "2")
-        team1_pos4_value = role_value(team1, "4")
-        team1_pos5_value = role_value(team1, "5")
-
-        team2_carry_value = role_value(team2, "1")
-        team2_offlane_value = role_value(team2, "3")
-        team2_mid_value = role_value(team2, "2")
-        team2_pos4_value = role_value(team2, "4")
-        team2_pos5_value = role_value(team2, "5")
-
-        # Calculate the five critical matchups
-        carry_vs_offlane_1 = abs(team1_carry_value - team2_offlane_value)
-        carry_vs_offlane_2 = abs(team2_carry_value - team1_offlane_value)
-        mid_vs_mid = abs(team1_mid_value - team2_mid_value)
-        support_cross_1 = abs(team1_pos4_value - team2_pos5_value)
-        support_cross_2 = abs(team2_pos4_value - team1_pos5_value)
-
-        # Return the sum of all five deltas
-        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
+        return role_matchup_delta_from_values(
+            self._role_values(team1, use_openskill=use_openskill, use_jopacoin=use_jopacoin),
+            self._role_values(team2, use_openskill=use_openskill, use_jopacoin=use_jopacoin),
+        )
 
     def calculate_role_parity_delta(
         self,
@@ -137,8 +142,21 @@ class TeamBalancingService:
         use_jopacoin: bool = False,
     ) -> float:
         """Return the sum of same-role value differences between two teams."""
+        return role_parity_delta_from_values(
+            self._role_values(team1, use_openskill=use_openskill, use_jopacoin=use_jopacoin),
+            self._role_values(team2, use_openskill=use_openskill, use_jopacoin=use_jopacoin),
+        )
 
-        def role_value(team: Team, role: str) -> float:
+    def _role_values(
+        self,
+        team: Team,
+        *,
+        use_openskill: bool = False,
+        use_jopacoin: bool = False,
+    ) -> tuple[float, ...]:
+        """Return the team's effective values ordered by position ("1".."5")."""
+
+        def role_value(role: str) -> float:
             _, value = team.get_player_by_role(
                 role,
                 self.use_glicko,
@@ -148,10 +166,7 @@ class TeamBalancingService:
             )
             return value
 
-        return sum(
-            abs(role_value(team1, role) - role_value(team2, role))
-            for role in ("1", "2", "3", "4", "5")
-        )
+        return tuple(role_value(role) for role in ("1", "2", "3", "4", "5"))
 
     def calculate_matchup_score(
         self,
