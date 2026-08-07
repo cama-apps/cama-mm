@@ -856,9 +856,15 @@ class DuelChallengeRepository(BaseRepository):
             if challenge.next_reminder_at is None or challenge.next_reminder_at > now:
                 return None
 
-            # Anchor on the stored schedule so daily pings keep a stable
-            # time of day, including rows re-armed off-grid by migration.
-            anchor = challenge.next_reminder_at
+            # Anchor on the acceptance time so daily pings keep a stable
+            # time of day: the stored value can sit off-grid after a
+            # delivery-failure backoff (rearm_reminder) or a migration
+            # re-arm, and must only affect the wake time, not the schedule.
+            anchor = (
+                challenge.responded_at
+                if challenge.responded_at is not None
+                else challenge.next_reminder_at
+            )
             next_reminder_at = anchor + ((now - anchor) // 86400 + 1) * 86400
             cursor.execute(
                 """

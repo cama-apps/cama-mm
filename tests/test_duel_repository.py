@@ -1078,21 +1078,24 @@ def test_unresolved_claim_preserves_claimed_schedule_for_delivery_retry(
     assert claimed.claimed_reminder_at == accepted.next_reminder_at
 
 
-def test_unresolved_claim_keeps_the_stored_reminder_grid(duel_fixture):
+def test_unresolved_claim_returns_off_grid_rearm_to_daily_grid(duel_fixture):
+    """A delivery-failure backoff moves the wake time, not the schedule."""
     repo, _, accepted = accept_fixture_challenge(duel_fixture)
     off_grid = accepted.responded_at + DAY + 7 * 3600
-    with sqlite3.connect(repo.db_path) as conn:
-        conn.execute(
-            "UPDATE duel_challenges SET next_reminder_at = ? WHERE challenge_id = ?",
-            (off_grid, accepted.challenge_id),
-        )
+    assert repo.rearm_reminder_atomic(
+        accepted.challenge_id,
+        GUILD_ID,
+        DuelStatus.ACCEPTED,
+        accepted.next_reminder_at,
+        off_grid,
+    )
 
     claimed = repo.claim_unresolved_reminder_atomic(
         accepted.challenge_id, GUILD_ID, off_grid + 100
     )
 
     assert claimed is not None
-    assert claimed.challenge.next_reminder_at == off_grid + DAY
+    assert claimed.challenge.next_reminder_at == accepted.responded_at + 2 * DAY
 
 
 def test_due_scan_includes_accepted_unresolved_reminder(duel_fixture):

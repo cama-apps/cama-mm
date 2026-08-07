@@ -266,6 +266,7 @@ def test_service_process_due_returns_claimed_unresolved_reminder(duel_repo_mock)
 
 
 def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
+    duel_repo_mock.claim_expired_announcement_atomic.return_value = None
     duel_repo_mock.expire_atomic.side_effect = ValueError("not due")
     service = DuelService(duel_repo_mock)
 
@@ -274,8 +275,26 @@ def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
     assert result is None
     duel_repo_mock.claim_reminder_atomic.assert_not_called()
     duel_repo_mock.claim_unresolved_reminder_atomic.assert_not_called()
-    duel_repo_mock.claim_expired_announcement_atomic.assert_not_called()
     duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
+
+
+def test_service_process_due_deferred_still_claims_expired_announcement(
+    duel_repo_mock,
+):
+    """A deferred wake must advance the announcement marker (backoff)."""
+    announcement = object()
+    duel_repo_mock.claim_expired_announcement_atomic.return_value = announcement
+    service = DuelService(duel_repo_mock)
+
+    result = service.process_due(7, GUILD_ID, 1_000_000, claim_reminders=False)
+
+    assert result is announcement
+    duel_repo_mock.claim_reminder_atomic.assert_not_called()
+    duel_repo_mock.claim_unresolved_reminder_atomic.assert_not_called()
+    duel_repo_mock.claim_expired_announcement_atomic.assert_called_once_with(
+        7, GUILD_ID, 1_000_000, 1_000_000 + REMINDER_RETRY_BACKOFF_SECONDS
+    )
+    duel_repo_mock.expire_atomic.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -445,6 +464,64 @@ def test_expiry_announcement_failure_is_retried_without_double_pay(repo_db_path)
         )
         is None
     )
+
+
+def test_deferred_wake_advances_expired_announcement_marker(repo_db_path):
+    """No sendable channel must still engage the announcement backoff."""
+    service, challenge = create_real_pending_duel(repo_db_path)
+    now = NOW + RESPONSE_SECONDS
+
+    settled = service.process_due(
+        challenge.challenge_id, GUILD_ID, now, claim_reminders=False
+    )
+    assert settled is not None
+    assert settled.kind is DuelDueKind.EXPIRED
+
+    retry = service.process_due(
+        challenge.challenge_id, GUILD_ID, now + 60, claim_reminders=False
+    )
+    assert retry is not None
+    assert retry.kind is DuelDueKind.EXPIRED
+
+    # The marker advanced, so the stranded row is no longer due on every
+    # wake: it only comes back after the retry backoff.
+    assert service.get_due_challenge_ids(now + 61) == []
+    assert service.get_due_challenge_ids(
+        now + 60 + REMINDER_RETRY_BACKOFF_SECONDS
+    ) == [(challenge.challenge_id, GUILD_ID)]
+
+
+def test_unresolved_daily_ping_returns_to_grid_after_backoff(repo_db_path):
+    """One failed delivery must not shift the daily reminder's time of day."""
+    service, challenge = create_real_pending_duel(repo_db_path)
+    current = {"now": NOW}
+    service = DuelService(service.repo, clock=lambda: current["now"])
+    accepted = service.respond(GUILD_ID, 2, "trial_by_combat")
+    assert accepted.next_reminder_at == NOW + DAY
+
+    # The first daily ping is claimed slightly late and fails to deliver,
+    # so it is re-armed with the retry backoff (off the daily grid).
+    current["now"] = NOW + DAY + 30
+    claimed = service.process_due(
+        challenge.challenge_id, GUILD_ID, current["now"]
+    )
+    assert claimed is not None
+    assert claimed.kind is DuelDueKind.UNRESOLVED
+    assert service.rearm_reminder(claimed)
+    stored = service.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.next_reminder_at == (
+        NOW + DAY + 30 + REMINDER_RETRY_BACKOFF_SECONDS
+    )
+
+    # The retry wakes off-grid, but the next daily ping lands back on the
+    # acceptance-anchored grid instead of drifting by the backoff offset.
+    current["now"] = stored.next_reminder_at
+    retried = service.process_due(
+        challenge.challenge_id, GUILD_ID, current["now"]
+    )
+    assert retried is not None
+    assert retried.kind is DuelDueKind.UNRESOLVED
+    assert retried.challenge.next_reminder_at == NOW + 2 * DAY
 
 
 def test_service_process_due_real_repository_returns_reminder(repo_db_path):

@@ -618,7 +618,9 @@ class DuelCommands(commands.Cog):
             channel_ids.add(channel_id)
         return channels
 
-    def _get_main_channel(self, guild_id: int) -> discord.TextChannel | None:
+    def _get_main_channel(
+        self, guild_id: int
+    ) -> discord.TextChannel | discord.Thread | None:
         """Resolve the configured duel channel, else the unique dota-mm channel."""
         from config import DUEL_CHANNEL_ID
 
@@ -627,16 +629,29 @@ class DuelCommands(commands.Cog):
             logger.warning("Duel reminder guild unavailable; guild=%s", guild_id)
             return None
         if DUEL_CHANNEL_ID is not None:
-            configured = guild.get_channel(DUEL_CHANNEL_ID)
+            configured = guild.get_channel_or_thread(DUEL_CHANNEL_ID)
             if configured is not None and self._can_send_reminder(
                 configured, guild_id
             ):
                 return configured
-            logger.warning(
-                "Configured duel channel unavailable; guild=%s channel=%s",
-                guild_id,
-                DUEL_CHANNEL_ID,
-            )
+            if (
+                configured is None
+                and self.bot.get_channel(DUEL_CHANNEL_ID) is not None
+            ):
+                # The configured channel lives in another guild; routine in
+                # multi-guild deployments, so don't warn on every resolution.
+                logger.debug(
+                    "Configured duel channel belongs to another guild; "
+                    "guild=%s channel=%s",
+                    guild_id,
+                    DUEL_CHANNEL_ID,
+                )
+            else:
+                logger.warning(
+                    "Configured duel channel unavailable; guild=%s channel=%s",
+                    guild_id,
+                    DUEL_CHANNEL_ID,
+                )
         matches = [
             channel
             for channel in guild.text_channels

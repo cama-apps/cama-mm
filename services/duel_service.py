@@ -148,14 +148,18 @@ class DuelService:
             )
             if unresolved is not None:
                 return unresolved
-            announcement = self.repo.claim_expired_announcement_atomic(
-                challenge_id,
-                guild_id,
-                now,
-                now + REMINDER_RETRY_BACKOFF_SECONDS,
-            )
-            if announcement is not None:
-                return announcement
+        # Claim expired announcements even when reminder claims are deferred:
+        # the expiry is already settled, and advancing the marker engages the
+        # retry backoff so a challenge with no sendable channel cannot re-run
+        # channel resolution on every worker wake.
+        announcement = self.repo.claim_expired_announcement_atomic(
+            challenge_id,
+            guild_id,
+            now,
+            now + REMINDER_RETRY_BACKOFF_SECONDS,
+        )
+        if announcement is not None:
+            return announcement
         try:
             expired = self.repo.expire_atomic(challenge_id, guild_id, now)
         except ValueError:
