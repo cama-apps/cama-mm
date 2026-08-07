@@ -182,6 +182,49 @@ def test_join_rolls_back_when_suspension_lands_during_the_join():
     assert len(moderation.calls) == 2
 
 
+def test_join_rollback_leaves_reserved_player_seated():
+    """A suspension landing mid-join must not evict a player an in-flight
+    shuffle already reserved: the starting match proceeds with membership
+    intact (same policy as leave_lobby and the admin suspend eviction)."""
+
+    class RacingModerationService(FakeModerationService):
+        manager: LobbyManagerService
+
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            result = super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+            if result is None and not self.suspensions:
+                # Between the pre-join gate and the post-add re-check, a
+                # shuffle reserves the player and the admin commits a
+                # suspension (injected directly: reserve_lobby_players would
+                # recurse into this hook).
+                self.manager._in_flight_player_kinds[(99, discord_id)] = (
+                    LobbyKind.OPEN
+                )
+                self.suspend(discord_id, guild_id, "all")
+            return result
+
+    moderation = RacingModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+    moderation.manager = manager
+
+    result = manager.join_lobby(10, guild_id=99)
+
+    assert result == "ok"
+    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    assert lobby is not None and 10 in lobby.players
+    assert any(10 in row["players"] for row in repo.load_all_lobby_states())
+
+
 def test_moderation_queries_run_outside_manager_state_lock():
     """Suspension lookups are DB I/O (and can issue a lapsed-suspension close
     write), so they must never run inside the process-wide ``_state_lock``

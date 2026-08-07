@@ -478,6 +478,15 @@ class LobbyManagerService:
             if suspension is not None:
                 removed = False
                 with self._state_lock:
+                    # A player already reserved by an in-flight shuffle/draft
+                    # keeps their seat: a suspension racing a reservation lets
+                    # the starting match proceed with membership intact (same
+                    # policy as leave_lobby and the admin suspend eviction).
+                    if (
+                        self._in_flight_player_kinds.get((normalized, discord_id))
+                        is not None
+                    ):
+                        return result
                     lobby = self.lobbies.get((normalized, target_kind))
                     if lobby is not None:
                         removed = lobby.remove_player(discord_id)

@@ -941,6 +941,7 @@ class DuelChallengeRepository(BaseRepository):
                 kind=DuelDueKind.EXPIRED,
                 challenge=claimed,
                 claimed_reminder_at=challenge.next_reminder_at,
+                is_redelivery=True,
             )
 
     def clear_expired_announcement_atomic(

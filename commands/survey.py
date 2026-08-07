@@ -553,14 +553,16 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = max(0, self.index - 1)
         self._sync_buttons()
-        # discord.py pushes the view timeout forward on every click; keep the
-        # freshest token so the on_timeout edit stays inside its 15m window.
-        self._interaction = interaction
         await interaction.response.edit_message(
             embed=self.pages[self.index],
             view=self,
             allowed_mentions=_ALLOWED_MENTIONS,
         )
+        # discord.py pushes the view timeout forward on every click; keep the
+        # freshest token so the on_timeout edit stays inside its 15m window.
+        # Only after the edit succeeds — a failed click's unacknowledged token
+        # cannot perform the timeout edit, while the previous one still can.
+        self._interaction = interaction
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
     async def next(
@@ -570,13 +572,13 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = min(len(self.pages) - 1, self.index + 1)
         self._sync_buttons()
-        # See previous(): keep the freshest token for the on_timeout edit.
-        self._interaction = interaction
         await interaction.response.edit_message(
             embed=self.pages[self.index],
             view=self,
             allowed_mentions=_ALLOWED_MENTIONS,
         )
+        # See previous(): only adopt the token once the edit succeeded.
+        self._interaction = interaction
 
 
 def _percent(value: float) -> str:

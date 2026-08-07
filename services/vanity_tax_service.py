@@ -29,12 +29,26 @@ class VanityTaxService:
         self._known_members_by_guild: dict[int, frozenset[int]] = {}
         self._nickname_taxable_by_guild: dict[int, frozenset[int]] = {}
         self._manual_exemptions_by_guild: dict[int, frozenset[int]] = {}
-        # Ids touched by update_member/remove_member since the last completed
-        # refresh. ``refresh_guild`` runs off-loop from a snapshot taken on
-        # the event loop; a member event landing before ``_store_refresh``
-        # would otherwise be clobbered by the (older) wholesale store, so the
-        # store re-applies the live state of these ids on top of the snapshot.
+        # Ids touched by update_member/remove_member since the current
+        # refresh's snapshot was taken (``begin_refresh``). ``refresh_guild``
+        # runs off-loop from a snapshot taken on the event loop; a member
+        # event landing before ``_store_refresh`` would otherwise be clobbered
+        # by the (older) wholesale store, so the store re-applies the live
+        # state of these ids on top of the snapshot. Entries older than the
+        # snapshot must NOT survive into the store — on the on_ready resync
+        # path they would re-apply pre-outage state over the fresh snapshot —
+        # so snapshot builders call ``begin_refresh`` first.
         self._mutated_members_by_guild: dict[int, set[int]] = {}
+
+    def begin_refresh(self, guild_id: int) -> None:
+        """Mark the start of a refresh snapshot's authority.
+
+        Call on the event loop in the same synchronous block that copies the
+        member list, so the journal holds exactly the events that arrive
+        after the snapshot.
+        """
+        with self._lock:
+            self._mutated_members_by_guild.pop(guild_id, None)
 
     def _store_refresh(
         self,

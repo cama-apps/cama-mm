@@ -578,6 +578,15 @@ class DuelCommands(commands.Cog):
                     await asyncio.to_thread(
                         self.duel_service.confirm_expiry_announced, result
                     )
+                elif result.is_redelivery:
+                    # Settlement (and its ERROR log) already happened on an
+                    # earlier wake; this retry just found no sendable channel.
+                    logger.warning(
+                        "Duel expiry announcement still undelivered, retrying "
+                        "with backoff: challenge=%s guild=%s",
+                        result.challenge.challenge_id,
+                        result.challenge.guild_id,
+                    )
                 else:
                     # The pending-announcement marker set alongside the
                     # settlement stays armed, so the wake loop retries the
