@@ -1194,11 +1194,20 @@ class ShopCommands(commands.Cog):
                 user_id, guild_id, now, DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
             )
             if not claimed:
-                await interaction.response.send_message(
-                    "You already tempted fate recently. "
-                    "Wait for your Double or Nothing cooldown before trying again.",
-                    ephemeral=True,
-                )
+                try:
+                    await interaction.response.send_message(
+                        "You already tempted fate recently. "
+                        "Wait for your Double or Nothing cooldown before trying again.",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException:
+                    # The claim write can outlast the 3s ack window; the
+                    # claim was refused, so nothing needs rolling back.
+                    logger.warning(
+                        "Double-or-nothing cooldown notice could not be "
+                        "sent for %s",
+                        user_id,
+                    )
                 return
 
         # Defer - we'll send the result publicly. Not gated: the 30-day

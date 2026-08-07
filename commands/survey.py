@@ -1182,13 +1182,16 @@ class SurveyCommands(commands.Cog):
                 await self.respond_error(interaction, str(exc))
                 return
             except Exception as exc:
-                # The post-commit refetch is only for the re-render; restart
-                # reconciliation already repairs the DM from durable state.
+                # The post-commit refetch is only for the re-render; schedule
+                # the in-process reconciliation pass (like every sibling
+                # post-commit failure path) so the DM is repaired without
+                # waiting for a gateway reconnect.
                 logger.warning(
                     "Survey response submitted but the session refetch "
                     "failed (%s)",
                     type(exc).__name__,
                 )
+                self._schedule_delivery_recovery(_DELIVERY_RECEIPT_GRACE_SECONDS)
                 return
             try:
                 await self._edit_response_message(interaction, session)
