@@ -189,6 +189,7 @@ def test_join_rollback_deletes_a_row_a_racing_persist_already_wrote():
 
     class RacingModerationService(FakeModerationService):
         manager: LobbyManagerService
+        mid_race_rows: list | None = None
 
         def get_active_suspension(
             self,
@@ -196,17 +197,21 @@ def test_join_rollback_deletes_a_row_a_racing_persist_already_wrote():
             guild_id: int,
             lobby_kind: str | None = None,
         ) -> FakeSuspension | None:
-            result = super().get_active_suspension(
+            if len(self.calls) == 1 and not self.suspensions:
+                # This is the post-add re-read: the newborn shell (with the
+                # joining player) exists in memory now. A concurrent flow
+                # persists it before the rollback runs, then the admin
+                # commits the suspension.
+                self.manager._persist_lobby(99, LobbyKind.OPEN)
+                self.mid_race_rows = (
+                    self.manager.lobby_repo.load_all_lobby_states()
+                )
+                self.suspend(discord_id, guild_id, "all")
+            return super().get_active_suspension(
                 discord_id,
                 guild_id,
                 lobby_kind,
             )
-            if result is None and not self.suspensions:
-                # A concurrent flow persists the newborn shell (with the
-                # joining player in it) before the rollback runs.
-                self.manager._persist_lobby(99, LobbyKind.OPEN)
-                self.suspend(discord_id, guild_id, "all")
-            return result
 
     moderation = RacingModerationService()
     repo = FakeLobbyRepo()
@@ -216,6 +221,11 @@ def test_join_rollback_deletes_a_row_a_racing_persist_already_wrote():
     result = manager.join_lobby(10, guild_id=99)
 
     assert result == "lobby_suspended"
+    # The racing persist really wrote the shell mid-race...
+    assert moderation.mid_race_rows and any(
+        10 in row["players"] for row in moderation.mid_race_rows
+    )
+    # ...and the rollback's delete-under-persist-lock removed it again.
     assert manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN) is None
     assert repo.load_all_lobby_states() == []
 

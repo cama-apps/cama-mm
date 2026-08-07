@@ -130,7 +130,11 @@ class DuelCommands(commands.Cog):
         self.bot = bot
         self.duel_service = duel_service
         self.flavor_service = flavor_service
-        self._configured_rescue_failed_at = 0.0
+        # Per-guild monotonic timestamps of failed configured-channel
+        # rescues (missing key = never failed, so the first attempt always
+        # runs). Keyed by guild so a foreign-guild gate failure cannot
+        # suppress the rescue in the guild where it would succeed.
+        self._configured_rescue_failed_at: dict[int, float] = {}
 
     @duel.command(name="issue", description="Challenge a player to a duel of honor")
     async def issue(
@@ -626,20 +630,25 @@ class DuelCommands(commands.Cog):
             and getattr(main_channel, "id", None) != DUEL_CHANNEL_ID
             and self.bot.get_channel(DUEL_CHANNEL_ID) is None
             and (
-                time.monotonic() - self._configured_rescue_failed_at
+                time.monotonic()
+                - self._configured_rescue_failed_at.get(
+                    challenge.guild_id, float("-inf")
+                )
                 >= self.CONFIGURED_RESCUE_RETRY_SECONDS
             )
         ):
             # Archived threads are evicted from the gateway cache, so the
             # sync resolution above cannot see a configured thread once it
             # auto-archives. A fetch still retrieves it; foreign or deleted
-            # ids fail the fetch or the same-guild/sendability gate below,
-            # and a failure is negative-cached so it cannot cost an HTTP
-            # call (and log noise) on every wake.
+            # ids fail the fetch or the same-guild/sendability gate below.
+            # Both outcomes are negative-cached so a stale configured id
+            # cannot cost an HTTP call (and log noise) on every wake.
             try:
                 fetched = await self.bot.fetch_channel(DUEL_CHANNEL_ID)
             except discord.DiscordException:
-                self._configured_rescue_failed_at = time.monotonic()
+                self._configured_rescue_failed_at[challenge.guild_id] = (
+                    time.monotonic()
+                )
                 logger.debug(
                     "Configured duel channel fetch rescue failed; "
                     "guild=%s channel=%s",
@@ -651,6 +660,12 @@ class DuelCommands(commands.Cog):
                 fetched, challenge.guild_id
             ):
                 main_channel = fetched
+            elif fetched is not None:
+                # Fetch succeeded but the target is foreign or unsendable —
+                # refetching every resolution would change nothing.
+                self._configured_rescue_failed_at[challenge.guild_id] = (
+                    time.monotonic()
+                )
         origin_channel = await self._get_channel(challenge.channel_id)
         channels = []
         channel_ids = set()

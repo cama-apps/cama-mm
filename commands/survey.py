@@ -1158,6 +1158,17 @@ class SurveyCommands(commands.Cog):
                     survey_id,
                     interaction.user.id,
                 )
+            except ValueError as exc:
+                await self.respond_error(interaction, str(exc))
+                return
+            except Exception as exc:
+                logger.error("Survey submission failed (%s)", type(exc).__name__)
+                await self.respond_error(interaction, "Couldn't submit that response right now.")
+                return
+            # The submit call returned without raising: any commit it made is
+            # durable, so a transient failure below (refetch/re-render) must
+            # not be reported as a submit failure.
+            try:
                 session = await asyncio.to_thread(
                     self.survey_service.get_response_session,
                     survey_id,
@@ -1171,8 +1182,13 @@ class SurveyCommands(commands.Cog):
                 await self.respond_error(interaction, str(exc))
                 return
             except Exception as exc:
-                logger.error("Survey submission failed (%s)", type(exc).__name__)
-                await self.respond_error(interaction, "Couldn't submit that response right now.")
+                # The post-commit refetch is only for the re-render; restart
+                # reconciliation already repairs the DM from durable state.
+                logger.warning(
+                    "Survey response submitted but the session refetch "
+                    "failed (%s)",
+                    type(exc).__name__,
+                )
                 return
             try:
                 await self._edit_response_message(interaction, session)

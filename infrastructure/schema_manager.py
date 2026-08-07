@@ -1026,7 +1026,14 @@ class SchemaManager:
         )
 
     def _migration_add_streak_multiplier_per_game_to_rating_history(self, cursor) -> None:
-        """Preserve the rating-streak curve used when each match was recorded."""
+        """Preserve the rating-streak curve used when each match was recorded.
+
+        Deliberately stamps the hardcoded 0.20, NOT live config: this column
+        shipped in the same deploy that raised the config rate to 0.25, so
+        pre-column rows were genuinely recorded at the historical 0.20 (see
+        test_streak_rate_migration_backfills_legacy_history). Contrast the
+        threshold migration below, whose config knob predates its column.
+        """
         self._add_column_if_not_exists(
             cursor,
             "rating_history",
