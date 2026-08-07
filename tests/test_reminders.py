@@ -221,6 +221,57 @@ class TestNotificationRepository:
             TEST_GUILD_ID_2,
         ) == [1]
 
+    def test_has_lobby_target_subscription_reflects_add_and_claim(
+        self,
+        notification_repo,
+    ):
+        assert notification_repo.has_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is False
+
+        notification_repo.add_lobby_target_subscription(1, 10, TEST_GUILD_ID)
+
+        assert notification_repo.has_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is True
+        # Scoped to the exact (subscriber, target, guild) triple.
+        assert notification_repo.has_lobby_target_subscription(
+            2,
+            10,
+            TEST_GUILD_ID,
+        ) is False
+        assert notification_repo.has_lobby_target_subscription(
+            1,
+            11,
+            TEST_GUILD_ID,
+        ) is False
+        assert notification_repo.has_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID_2,
+        ) is False
+
+        notification_repo.claim_lobby_target_subscribers(10, TEST_GUILD_ID)
+
+        assert notification_repo.has_lobby_target_subscription(
+            1,
+            10,
+            TEST_GUILD_ID,
+        ) is False
+
+    def test_service_pass_through_reads_target_subscription(
+        self,
+        reminder_service,
+        notification_repo,
+    ):
+        assert reminder_service.has_lobby_player_subscription(1, 10, TEST_GUILD_ID) is False
+        notification_repo.add_lobby_target_subscription(1, 10, TEST_GUILD_ID)
+        assert reminder_service.has_lobby_player_subscription(1, 10, TEST_GUILD_ID) is True
+
     def test_join_cutoff_leaves_subscriptions_created_after_the_join(
         self,
         notification_repo,
