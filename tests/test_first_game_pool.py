@@ -250,6 +250,37 @@ def test_claims_are_once_per_game_date_and_independent_by_lobby(repo_db_path):
     }
 
 
+def test_same_pending_match_reclaim_after_game_date_rollover_is_idempotent(repo_db_path):
+    """A reserve retry that crosses the 4 AM rollover must return the recorded
+    claim instead of violating UNIQUE(guild_id, pending_match_id) on insert."""
+    loan_repo = LoanRepository(repo_db_path)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 400)
+    loan_repo.fund_first_game_pools(TEST_GUILD_ID, "2026-08-05", 100)
+    assert (
+        loan_repo.claim_first_game_pool(
+            TEST_GUILD_ID, "open", "2026-08-05", pending_match_id=701
+        )
+        == 100
+    )
+
+    # Same pending match retried with the next game-date: idempotent.
+    assert (
+        loan_repo.claim_first_game_pool(
+            TEST_GUILD_ID, "open", "2026-08-06", pending_match_id=701
+        )
+        == 100
+    )
+
+    # The retry must not have claimed the new date; the next match still can.
+    loan_repo.fund_first_game_pools(TEST_GUILD_ID, "2026-08-06", 100)
+    assert (
+        loan_repo.claim_first_game_pool(
+            TEST_GUILD_ID, "open", "2026-08-06", pending_match_id=702
+        )
+        == 100
+    )
+
+
 def test_next_game_date_claim_receives_newly_stacked_balance(repo_db_path):
     loan_repo = LoanRepository(repo_db_path)
     loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 400)

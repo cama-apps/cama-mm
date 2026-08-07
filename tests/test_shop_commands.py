@@ -1285,8 +1285,77 @@ async def test_handle_recalibrate_success(monkeypatch):
 
     await cmds._handle_recalibrate(interaction)
 
-    player_service.adjust_balance.assert_called_once_with(1001, None, -SHOP_RECALIBRATE_COST)
+    # Conditional debit, not adjust_balance: the read-then-adjust pair let two
+    # purchases inside the rate-limit window both pass the check and overdraft.
+    player_service.try_spend.assert_called_once()
+    args, kwargs = player_service.try_spend.call_args
+    assert args[:3] == (1001, None, SHOP_RECALIBRATE_COST)
+    assert kwargs["source"] == "shop_recalibrate"
+    player_service.adjust_balance.assert_not_called()
     recal_service.recalibrate.assert_called_once_with(1001, None)
+
+
+@pytest.mark.asyncio
+async def test_handle_recalibrate_aborts_when_balance_vanishes_before_the_debit(monkeypatch):
+    """Funds gone between the balance read and the debit: no overdraft, no reset."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    # Check passes...
+    player_service.get_balance.return_value = 2000
+    # ...but the funds are gone by the time the debit runs.
+    player_service.try_spend.return_value = False
+    recal_service = MagicMock()
+    recal_service.can_recalibrate.return_value = {
+        "allowed": True,
+        "current_rating": 1500.0,
+        "current_rd": 63.0,
+        "current_volatility": 0.06,
+        "games_played": 20,
+    }
+
+    cmds = ShopCommands(bot, player_service, recalibration_service=recal_service)
+    interaction = _make_interaction()
+
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", followup)
+
+    await cmds._handle_recalibrate(interaction)
+
+    player_service.try_spend.assert_called_once()
+    player_service.adjust_balance.assert_not_called()
+    recal_service.recalibrate.assert_not_called()
+    assert "no longer have" in followup.call_args.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_handle_recalibrate_failure_refunds_with_ledger_context(monkeypatch):
+    """A failed recalibration refunds through adjust_balance WITH a source."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_balance.return_value = 2000
+    recal_service = MagicMock()
+    recal_service.can_recalibrate.return_value = {
+        "allowed": True,
+        "current_rating": 1500.0,
+        "current_rd": 63.0,
+        "current_volatility": 0.06,
+        "games_played": 20,
+    }
+    recal_service.recalibrate.return_value = {"success": False}
+
+    cmds = ShopCommands(bot, player_service, recalibration_service=recal_service)
+    interaction = _make_interaction()
+
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock())
+    monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
+
+    await cmds._handle_recalibrate(interaction)
+
+    player_service.adjust_balance.assert_called_once()
+    args, kwargs = player_service.adjust_balance.call_args
+    assert args[:3] == (1001, None, SHOP_RECALIBRATE_COST)
+    assert kwargs["source"] == "shop_recalibrate"
 
 
 @pytest.mark.asyncio

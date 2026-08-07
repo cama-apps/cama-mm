@@ -228,7 +228,7 @@ def create_lobby_embed(
             name="🎲 Bonus Pool",
             value=(
                 f"**{bonus_pool_preview} {JOPACOIN_EMOTE}** "
-                "currently available for this lobby."
+                "available if this lobby shuffles next."
             ),
             inline=False,
         )

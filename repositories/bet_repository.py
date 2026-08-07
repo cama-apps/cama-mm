@@ -40,6 +40,21 @@ def _raise_one_side_bet_required(existing_team: str) -> None:
     )
 
 
+def split_bet_seed(amount: int, betting_mode: str) -> tuple[int, int, int]:
+    """Route a reserved betting seed into ``(radiant, dire, bonus)`` for a mode.
+
+    Single owner of the seed-routing policy shared by seed reservation and the
+    settlement-time first-game top-up: pool splits the seed across both sides
+    (Radiant gets the odd coin); house settlement only pays the bonus field, so
+    the whole seed lands there (a radiant/dire split on a house match would be
+    consumed without ever being paid out or returned).
+    """
+    amount = int(amount)
+    if betting_mode == "pool":
+        return (amount + 1) // 2, amount // 2, 0
+    return 0, 0, amount
+
+
 class BetRepository(BaseRepository, IBetRepository):
     """
     Handles CRUD operations against the bets table.
@@ -869,11 +884,12 @@ class BetRepository(BaseRepository, IBetRepository):
                 first_game_claim_amount - seed_fields["first_game_pool_reserved"],
             )
             if missing_first_game_seed:
-                if betting_mode == "pool":
-                    bet_seed_radiant += (missing_first_game_seed + 1) // 2
-                    bet_seed_dire += missing_first_game_seed // 2
-                else:
-                    bet_seed_bonus += missing_first_game_seed
+                top_up_radiant, top_up_dire, top_up_bonus = split_bet_seed(
+                    missing_first_game_seed, betting_mode
+                )
+                bet_seed_radiant += top_up_radiant
+                bet_seed_dire += top_up_dire
+                bet_seed_bonus += top_up_bonus
             if betting_mode != "pool" and (bet_seed_radiant or bet_seed_dire):
                 # House settlement only pays the bonus field; a queued pot that
                 # was split radiant/dire (states persisted before mode-aware
