@@ -66,6 +66,23 @@ def test_award_exclusion_bonus_empty_list_noop(services):
     assert result == {}
 
 
+def test_retired_conditional_exclusion_path_keeps_one_jc_fallback(services):
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+    pid = 7071
+    player_repo.add(
+        discord_id=pid,
+        discord_username="LegacyConditionalUser",
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+
+    result = betting_service.award_exclusion_bonus_half([pid], TEST_GUILD_ID)
+
+    assert result[pid]["gross"] == 1
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == 1
+
+
 def test_betting_totals_only_include_pending_bets(services):
     """Verify that betting totals only count pending bets, not settled ones."""
     match_service = services["match_service"]

@@ -10,11 +10,14 @@ no state of its own and is composed into ``MatchService``.
 import time
 from datetime import UTC, datetime
 
-from config import CALIBRATION_RD_THRESHOLD
+from config import CALIBRATION_RD_THRESHOLD, JOPACOIN_WIN_REWARD
 from domain.models.pending_match_state import PendingMatchState
 from openskill_rating_system import CamaOpenSkillSystem
 from services.match._common import coalesce_os_baseline, logger
+from utils.betting_accounting import calculate_bet_jc_deltas as _calculate_bet_jc_deltas
 from utils.guild import normalize_guild_id
+
+_LEGACY_WIN_REWARD_JC = 4
 
 
 class RecordingMixin:
@@ -40,25 +43,46 @@ class RecordingMixin:
         if not self.betting_service:
             return distributions
 
-        # Per-match idempotency claim for the bonus credits. The atomic core
-        # no-ops on retry (pending_match_id guard), but this post-core path
-        # re-runs whenever a later step (e.g. loan repayment) raised and the
-        # user retried — previously double-paying participation, win, and
-        # streak bonuses. Bet settlement stays outside the claim: it has its
-        # own idempotency (pending bets settle exactly once).
-        bonuses_claimed = True
-        if hasattr(self.match_repo, "claim_match_bonuses_paid"):
-            bonuses_claimed = self.match_repo.claim_match_bonuses_paid(match_id, guild_id)
-
         is_bomb_pot = last_shuffle.is_bomb_pot
         # Track actual net JC paid per player so we can persist it on
         # match_participants. Without this, balance-history reconstruction
         # would silently drift if reward constants or penalty rules change.
         bonus_net: dict[int, int] = {}
+        jc_changes: dict[int, dict[str, int]] = {}
+        bonus_components: dict[int, dict[str, int]] = {}
+        get_stored_jc_changes = getattr(self.match_repo, "get_match_jc_changes", None)
+        if callable(get_stored_jc_changes):
+            jc_changes.update(get_stored_jc_changes(match_id, guild_id))
+        get_stored_bet_skims = getattr(
+            self.betting_service.bet_repo, "get_match_blood_pact_skims", None
+        )
+        if callable(get_stored_bet_skims):
+            for pid, skimmed in get_stored_bet_skims(match_id, guild_id).items():
+                components = jc_changes.setdefault(pid, {})
+                if "bet_blood_pact_skim" not in components:
+                    components["bet"] = components.get("bet", 0) - int(skimmed)
+                    components["bet_blood_pact_skim"] = int(skimmed)
 
-        def _accumulate(awards: dict[int, dict[str, int]]) -> None:
+        # Per-match idempotency claim for the bonus credits. The atomic core
+        # no-ops on retry (pending_match_id guard), but this post-core path
+        # re-runs whenever a later step (e.g. loan repayment) raised and the
+        # user retried — previously double-paying participation, win, and
+        # streak bonuses. Complete fallible recovery reads before consuming
+        # the claim; bet settlement stays outside it and is idempotent itself.
+        bonuses_claimed = True
+        if hasattr(self.match_repo, "claim_match_bonuses_paid"):
+            bonuses_claimed = self.match_repo.claim_match_bonuses_paid(match_id, guild_id)
+
+        def _accumulate(
+            awards: dict[int, dict[str, int]], component: str = "payout"
+        ) -> None:
             for pid, amounts in awards.items():
                 bonus_net[pid] = bonus_net.get(pid, 0) + int(amounts.get("net", 0))
+                balance_delta = int(amounts.get("net", 0)) + int(
+                    amounts.get("garnished", 0)
+                )
+                components = bonus_components.setdefault(pid, {})
+                components[component] = components.get(component, 0) + balance_delta
 
         # Any failure below, after the claim was consumed, would otherwise
         # strand the match: retries see the consumed claim and skip the whole
@@ -82,35 +106,65 @@ class RecordingMixin:
                     )
 
             distributions = self.betting_service.settle_bets(
-                match_id, guild_id, winning_team, pending_state=last_shuffle
+                match_id,
+                guild_id,
+                winning_team,
+                pending_state=last_shuffle,
+                persist_match_jc_changes=True,
             )
+            bet_deltas = _calculate_bet_jc_deltas(distributions)
+            for pid, delta in bet_deltas.items():
+                jc_changes.setdefault(pid, {})["bet"] = delta
+            for pid, skimmed in distributions.get("blood_pact_skims", {}).items():
+                jc_changes.setdefault(int(pid), {})["bet_blood_pact_skim"] = int(
+                    skimmed
+                )
+            distributions["jc_changes"] = jc_changes
             distributions["streaks"] = {}
+            if bet_deltas and hasattr(self.match_repo, "update_match_jc_changes"):
+                # Bet settlement is independently idempotent and commits before
+                # the remaining bonus work. Snapshot its full-lifecycle deltas
+                # now so a later bonus failure cannot consume the only source
+                # rows needed for the eventual public summary.
+                self.match_repo.update_match_jc_changes(match_id, guild_id, jc_changes)
             if not bonuses_claimed:
                 return distributions
 
+            recorded_match = self.match_repo.get_match(match_id, guild_id) or {}
+            stored_win_reward = recorded_match.get("win_reward_jc")
+            recorded_win_reward = (
+                int(stored_win_reward)
+                if stored_win_reward is not None
+                else _LEGACY_WIN_REWARD_JC
+            )
             win_awards = self.betting_service.award_win_bonus(
-                winning_ids, guild_id, match_id=match_id,
+                winning_ids,
+                guild_id,
+                match_id=match_id,
+                reward_amount=recorded_win_reward,
             )
             _accumulate(win_awards)
             if excluded_player_ids:
                 _accumulate(
                     self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
                 )
-            excluded_conditional_ids = last_shuffle.excluded_conditional_player_ids
-            if excluded_conditional_ids:
-                _accumulate(
-                    self.betting_service.award_exclusion_bonus_half(
-                        excluded_conditional_ids, guild_id
-                    )
-                )
 
             # Daily-play streak bonus. Only fires for actual players (winning_ids +
             # losing_ids, never bench/excluded), and reuses the same 4 AM PST
             # rollover that /dig uses so the two systems can't drift on day math.
             streaks = self._award_dota_streak_bonuses(
-                winning_ids + losing_ids, guild_id, _accumulate
+                winning_ids + losing_ids,
+                guild_id,
+                lambda awards: _accumulate(awards, "streak"),
             )
             distributions["streaks"] = streaks
+
+            for pid, pending_components in bonus_components.items():
+                components = jc_changes.setdefault(pid, {})
+                for component, amount in pending_components.items():
+                    components[component] = components.get(component, 0) + amount
+            if jc_changes and hasattr(self.match_repo, "update_match_jc_changes"):
+                self.match_repo.update_match_jc_changes(match_id, guild_id, jc_changes)
         except Exception:
             if bonuses_claimed:
                 self._rollback_partial_bonuses(match_id, guild_id, bonus_net)
@@ -678,6 +732,7 @@ class RecordingMixin:
                 full_exclusion_increment_ids=full_exclusion_increment_ids,
                 half_exclusion_increment_ids=half_exclusion_increment_ids,
                 expected_openskill_revision=expected_openskill_revision,
+                win_reward_jc=JOPACOIN_WIN_REWARD,
             )
             updated_count = len(glicko_updates)
 
@@ -729,6 +784,7 @@ class RecordingMixin:
                 "excluded_player_ids": excluded_player_ids,
                 "excluded_conditional_player_ids": last_shuffle.excluded_conditional_player_ids,
                 "bet_distributions": distributions,
+                "jc_changes": distributions.get("jc_changes", {}),
                 "loan_repayments": loan_repayments,
                 "notable_streak": notable_streak,
                 "easter_egg_data": easter_egg_data,

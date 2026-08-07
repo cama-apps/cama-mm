@@ -19,6 +19,7 @@ from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
+from services.match import voting_correction_mixin
 from services.match_service import MatchService
 from services.vanity_tax_service import VanityTaxService
 from tests.conftest import TEST_GUILD_ID
@@ -68,6 +69,11 @@ def _create_players(player_repo, start_id=1000, count=10):
         # Give players some balance for betting
         player_repo.add_balance(pid, TEST_GUILD_ID, 100)
     return player_ids
+
+
+def test_recorded_win_reward_uses_historical_fallback_only_for_legacy_matches():
+    assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": 10}) == 10
+    assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": None}) == 4
 
 
 class TestMatchCorrection:
@@ -742,6 +748,39 @@ class TestMatchCorrection:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
                 start[pid] + JOPACOIN_PER_GAME
             )
+
+    def test_correction_uses_win_reward_recorded_with_match(
+        self, correction_services, monkeypatch
+    ):
+        match_service = correction_services["match_service"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=9050)
+        start = {
+            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in player_ids
+        }
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        match_id = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)["match_id"]
+
+        monkeypatch.setattr("services.betting_service.JOPACOIN_WIN_REWARD", 99)
+        correction = match_service.correct_match_result(
+            match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+        )
+
+        assert correction["win_bonus_correction"]["reversed"] == dict.fromkeys(
+            radiant_ids, 10
+        )
+        assert correction["win_bonus_correction"]["awarded"] == dict.fromkeys(
+            dire_ids, 10
+        )
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid]
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid] + 5 + 10
 
     def test_correction_applies_streak_multipliers(
         self, correction_services, monkeypatch

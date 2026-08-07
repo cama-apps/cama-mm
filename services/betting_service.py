@@ -88,10 +88,27 @@ class BettingService:
         return min(10.0, max(0.0, value))
 
     def _apply_blood_pact_skim(
-        self, earner_id: int, guild_id: int | None, earning: int
+        self,
+        earner_id: int,
+        guild_id: int | None,
+        earning: int,
+        *,
+        match_id: int | None = None,
     ) -> int:
         if self.buff_service is None or earning <= 0:
             return 0
+        if match_id is not None:
+            return self.buff_service.apply_blood_pact_skim(
+                earner_id,
+                guild_id,
+                earning,
+                self.player_repo,
+                source="dota_bet_blood_pact",
+                related_type="match",
+                related_id=match_id,
+                event_key=f"dota-bet-blood-pact:{match_id}:{earner_id}",
+                metadata={"match_id": match_id, "origin": "dota_bet"},
+            )
         return self.buff_service.apply_blood_pact_skim(
             earner_id, guild_id, earning, self.player_repo
         )
@@ -210,7 +227,7 @@ class BettingService:
         """
         Give each participant jopacoin for playing.
 
-        Base reward is JOPACOIN_PER_GAME (1). In bomb pot matches, all players
+        Base reward is JOPACOIN_PER_GAME. In bomb pot matches, all players
         receive an additional BOMB_POT_PARTICIPATION_BONUS (+1 JC).
 
         Args:
@@ -295,7 +312,13 @@ class BettingService:
         return results
 
     def settle_bets(
-        self, match_id: int, guild_id: int | None, winning_team: str, pending_state: PendingMatchState
+        self,
+        match_id: int,
+        guild_id: int | None,
+        winning_team: str,
+        pending_state: PendingMatchState,
+        *,
+        persist_match_jc_changes: bool = False,
     ) -> dict[str, list[dict]]:
         """
         Settle bets based on betting mode.
@@ -346,6 +369,7 @@ class BettingService:
             bet_seed_dire=pending_state.bet_seed_dire,
             bet_seed_bonus=pending_state.bet_seed_bonus,
             payout_multiplier=event_payout_multiplier,
+            persist_match_jc_changes=persist_match_jc_changes,
         )
         pending_state.bet_seed_reserved = 0
         pending_state.bet_seed_radiant = 0
@@ -386,7 +410,10 @@ class BettingService:
                 skimmed = 0
                 if pid in pact_targets:
                     skimmed = self._apply_blood_pact_skim(
-                        pid, guild_id, net_profit
+                        pid,
+                        guild_id,
+                        net_profit,
+                        match_id=match_id if persist_match_jc_changes else None,
                     )
                 if skimmed:
                     pact_skims[pid] = skimmed
@@ -397,7 +424,7 @@ class BettingService:
 
     def award_win_bonus(
         self, winning_ids: list[int], guild_id: int | None = None,
-        *, match_id: int | None = None,
+        *, match_id: int | None = None, reward_amount: int | None = None,
     ) -> dict[int, dict[str, int]]:
         """
         Reward winners with additional jopacoins.
@@ -422,8 +449,9 @@ class BettingService:
             if match_id is not None
             else None
         )
+        base_reward = JOPACOIN_WIN_REWARD if reward_amount is None else int(reward_amount)
         results = self._award_with_penalties(
-            winning_ids, JOPACOIN_WIN_REWARD, guild_id, ledger=ledger,
+            winning_ids, base_reward, guild_id, ledger=ledger,
         )
 
         # Decrement after awarding so the final required win is still reduced.
@@ -449,7 +477,7 @@ class BettingService:
                 try:
                     if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
                         sanctuary_bonus = adjust_generated_jc_reward(
-                            max(1, int(JOPACOIN_WIN_REWARD * 0.15)),
+                            max(1, int(base_reward * 0.15)),
                             guild_id=guild_id,
                             economy_event_service=self.economy_event_service,
                         )
@@ -480,7 +508,7 @@ class BettingService:
                 blessing = communion_blessings.get(pid)
                 if blessing:
                     blessing_bonus = adjust_generated_jc_reward(
-                        max(1, int(JOPACOIN_WIN_REWARD * 0.10)),
+                        max(1, int(base_reward * 0.10)),
                         guild_id=guild_id,
                         economy_event_service=self.economy_event_service,
                     )
@@ -526,13 +554,13 @@ class BettingService:
         self, excluded_ids: list[int], guild_id: int | None = None
     ) -> dict[int, dict[str, int]]:
         """
-        Reward conditional players excluded from shuffle with half the normal bonus.
+        Preserve the retired conditional-exclusion path's historical fallback.
 
-        Same processing as award_exclusion_bonus but with JOPACOIN_EXCLUSION_REWARD // 2.
+        No live lobby creates these awards, but persisted legacy state may still
+        reach this method. Keep its previous +1 JC behavior independent of the
+        full exclusion reward.
         """
-        results = self._award_with_penalties(
-            excluded_ids, JOPACOIN_EXCLUSION_REWARD // 2, guild_id
-        )
+        results = self._award_with_penalties(excluded_ids, 1, guild_id)
         self._skim_blood_pact_from_awards(results, guild_id)
         return results
 

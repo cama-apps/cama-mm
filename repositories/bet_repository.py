@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from repositories.base_repository import BaseRepository
+from utils.betting_accounting import calculate_bet_jc_deltas
 
 logger = logging.getLogger("cama_bot.repositories.bet")
 from repositories.interfaces import IBetRepository
@@ -815,6 +816,7 @@ class BetRepository(BaseRepository, IBetRepository):
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
         payout_multiplier: float = 1.0,
+        persist_match_jc_changes: bool = False,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -1090,6 +1092,36 @@ class BetRepository(BaseRepository, IBetRepository):
                     WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
                     """,
                     (match_id, normalized_guild, since_ts),
+                )
+
+            bet_deltas = calculate_bet_jc_deltas(distributions)
+            if persist_match_jc_changes and bet_deltas:
+                cursor.execute(
+                    """
+                    SELECT jc_changes
+                    FROM matches
+                    WHERE match_id = ? AND guild_id = ?
+                    """,
+                    (match_id, normalized_guild),
+                )
+                match_row = cursor.fetchone()
+                if match_row is None:
+                    raise ValueError(f"Match {match_id} not found")
+                jc_changes = (
+                    json.loads(match_row["jc_changes"])
+                    if match_row["jc_changes"]
+                    else {}
+                )
+                for discord_id, delta in bet_deltas.items():
+                    components = jc_changes.setdefault(str(discord_id), {})
+                    components["bet"] = int(delta)
+                cursor.execute(
+                    """
+                    UPDATE matches
+                    SET jc_changes = ?
+                    WHERE match_id = ? AND guild_id = ?
+                    """,
+                    (json.dumps(jc_changes), match_id, normalized_guild),
                 )
 
         return distributions
@@ -2369,6 +2401,45 @@ class BetRepository(BaseRepository, IBetRepository):
                 (match_id,),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_match_blood_pact_skims(
+        self, match_id: int, guild_id: int | None
+    ) -> dict[int, int]:
+        """Return durable Blood Pact debits attributable to one bet settlement."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            direct_rows = conn.execute(
+                """
+                SELECT account_id AS discord_id, -SUM(delta) AS skimmed
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND account_type = 'player'
+                  AND source = 'dota_bet_blood_pact'
+                  AND related_type = 'match'
+                  AND related_id = ?
+                  AND delta < 0
+                GROUP BY account_id
+                """,
+                (normalized_guild, str(match_id)),
+            ).fetchall()
+            protected_rows = conn.execute(
+                """
+                SELECT victim_id AS discord_id, SUM(applied) AS skimmed
+                FROM hostile_loss_events
+                WHERE guild_id = ?
+                  AND kind = 'blood_pact'
+                  AND event_key LIKE ?
+                  AND applied > 0
+                GROUP BY victim_id
+                """,
+                (normalized_guild, f"dota-bet-blood-pact:{match_id}:%"),
+            ).fetchall()
+
+        skims: dict[int, int] = {}
+        for row in [*direct_rows, *protected_rows]:
+            discord_id = int(row["discord_id"])
+            skims[discord_id] = skims.get(discord_id, 0) + int(row["skimmed"])
+        return skims
 
     def reverse_bet_payouts_for_correction(
         self,

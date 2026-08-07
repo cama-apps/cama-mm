@@ -14,6 +14,13 @@ from services.match._common import logger
 
 _LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
 _LEGACY_BASE_RATING_DELTA_MULTIPLIER = 0.75
+_LEGACY_WIN_REWARD_JC = 4
+
+
+def _recorded_win_reward_jc(match: dict) -> int:
+    """Return the match input, with the pre-snapshot historical default."""
+    stored = match.get("win_reward_jc")
+    return int(stored) if stored is not None else _LEGACY_WIN_REWARD_JC
 
 
 class VotingCorrectionMixin:
@@ -409,14 +416,12 @@ class VotingCorrectionMixin:
         # each old winner's recorded win-bonus balance delta (win_bonus_jc,
         # snapshotted at recording) and marks the row 0 in the same txn, so a
         # re-run recomputes a zero debit and skips it; matches recorded before
-        # the snapshot existed fall back to the gross JOPACOIN_WIN_REWARD —
-        # the best recoverable figure, since garnishment stayed in the balance
-        # and any bankruptcy penalty withheld back then was never persisted
-        # per-player.
+        # the snapshot existed fall back to the match's recorded reward input.
+        # Rows predating that snapshot use the historical +4 JC default rather
+        # than whatever the live configuration happens to be today.
         win_bonus_correction: dict = {}
         if self.betting_service and hasattr(self.match_repo, "apply_win_bonus_reversal_atomic"):
-            from config import JOPACOIN_WIN_REWARD
-
+            recorded_win_reward = _recorded_win_reward_jc(match)
             participants_by_id = {p["discord_id"]: p for p in participants}
 
             win_bonus_awarded: dict[int, int] = {}
@@ -446,7 +451,10 @@ class VotingCorrectionMixin:
                     # re-correction's winner permanently unpaid.
                     continue
                 awards = self.betting_service.award_win_bonus(
-                    [pid], guild_id, match_id=match_id,
+                    [pid],
+                    guild_id,
+                    match_id=match_id,
+                    reward_amount=recorded_win_reward,
                 )
                 result = awards.get(pid, {})
                 delta = int(result.get("net", 0)) + int(result.get("garnished", 0))
@@ -459,7 +467,7 @@ class VotingCorrectionMixin:
             win_bonus_debits: dict[int, int] = {}
             for pid in old_winner_ids:
                 stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
-                amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
+                amount = int(stored) if stored is not None else recorded_win_reward
                 if amount > 0:
                     win_bonus_debits[pid] = amount
             self.match_repo.apply_win_bonus_reversal_atomic(match_id, guild_id, win_bonus_debits)

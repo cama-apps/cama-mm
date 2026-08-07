@@ -9,10 +9,14 @@ import pytest
 
 from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
+from repositories.buff_repository import BuffRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from repositories.protection_repository import ProtectionRepository
 from services.betting_service import BettingService
+from services.buff_service import BuffService
 from services.match_service import MatchService
+from services.protection_service import ProtectionService
 from tests.repository_harness import RepositoryTestDatabase as Database
 
 TEST_GUILD_ID = 123
@@ -286,7 +290,14 @@ class TestConcurrencyGuard:
         # already-recorded match (no duplicate, no second win/loss), and the
         # post-core money steps re-run to recover — instead of stranding.
         match_service._repay_outstanding_loans = original_repay
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        retry_result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        assert {
+            pid: retry_result["jc_changes"][pid] for pid in radiant_ids
+        } == dict.fromkeys(radiant_ids, {"payout": 10})
+        assert {
+            pid: retry_result["jc_changes"][pid] for pid in dire_ids
+        } == dict.fromkeys(dire_ids, {"payout": 5})
 
         # Exactly one match recorded — not two.
         conn = test_db.get_connection()
@@ -323,7 +334,7 @@ class TestConcurrencyGuard:
             ), f"loser {pid} must be credited participation exactly once"
 
     def test_bonus_failure_compensates_and_releases_claim(
-        self, test_db, player_repo, test_players
+        self, test_db, player_repo, test_players, monkeypatch
     ):
         """Regression: a failure INSIDE the claimed bonus block must not strand
         the match half-paid. The claim is consumed up front (to stop retries
@@ -347,6 +358,16 @@ class TestConcurrencyGuard:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         radiant_ids = list(pending.radiant_team_ids)
         dire_ids = list(pending.dire_team_ids)
+
+        winning_bettor = 7991
+        losing_bettor = 7992
+        for bettor in (winning_bettor, losing_bettor):
+            player_repo.add(bettor, f"Bettor{bettor}", TEST_GUILD_ID)
+            player_repo.add_balance(bettor, TEST_GUILD_ID, 20)
+        betting_service.place_bet(
+            TEST_GUILD_ID, winning_bettor, "radiant", 5, pending
+        )
+        betting_service.place_bet(TEST_GUILD_ID, losing_bettor, "dire", 5, pending)
 
         # Fail INSIDE the claimed block: participation has already been
         # credited to the losers when the win-bonus award raises.
@@ -378,7 +399,10 @@ class TestConcurrencyGuard:
 
         # Retry pays everyone exactly once.
         betting_service.award_win_bonus = original_award
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        monkeypatch.setattr("services.betting_service.JOPACOIN_WIN_REWARD", 99)
+        retry_result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        assert retry_result["jc_changes"][winning_bettor] == {"bet": 5}
+        assert retry_result["jc_changes"][losing_bettor] == {"bet": -5}
         for pid in radiant_ids:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
                 start[pid] + JOPACOIN_WIN_REWARD
@@ -387,6 +411,125 @@ class TestConcurrencyGuard:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
                 start[pid] + JOPACOIN_PER_GAME
             )
+
+    @pytest.mark.parametrize("failing_read", ["jc_changes", "blood_pact_skims"])
+    def test_snapshot_read_failure_does_not_consume_bonus_claim(
+        self,
+        test_db,
+        player_repo,
+        test_players,
+        monkeypatch,
+        failing_read,
+    ):
+        match_repo = MatchRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        betting_service = BettingService(bet_repo, player_repo)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+            betting_service=betting_service,
+        )
+        start = {
+            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in test_players
+        }
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+
+        if failing_read == "jc_changes":
+            target = match_repo
+            method_name = "get_match_jc_changes"
+        else:
+            target = bet_repo
+            method_name = "get_match_blood_pact_skims"
+        original_read = getattr(target, method_name)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated snapshot read failure")
+
+        monkeypatch.setattr(target, method_name, _boom)
+        with pytest.raises(RuntimeError, match="simulated snapshot read failure"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        match_id = match_repo.get_most_recent_match(TEST_GUILD_ID)["match_id"]
+        with test_db.get_connection() as conn:
+            claimed = conn.execute(
+                "SELECT COALESCE(bonuses_paid, 0) FROM matches WHERE match_id = ?",
+                (match_id,),
+            ).fetchone()[0]
+        assert claimed == 0
+
+        monkeypatch.setattr(target, method_name, original_read)
+        retry_result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        for pid in pending.radiant_team_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid] + 10
+            assert retry_result["jc_changes"][pid] == {"payout": 10}
+        for pid in pending.dire_team_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid] + 5
+            assert retry_result["jc_changes"][pid] == {"payout": 5}
+
+    @pytest.mark.parametrize("use_protection", [False, True])
+    def test_settled_bet_summary_survives_snapshot_write_failure(
+        self, test_db, player_repo, test_players, use_protection
+    ):
+        """Settled bets remain reportable if the follow-up summary write fails."""
+        match_repo = MatchRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        protection_service = (
+            ProtectionService(ProtectionRepository(test_db.db_path))
+            if use_protection
+            else None
+        )
+        buff_service = BuffService(
+            BuffRepository(test_db.db_path),
+            protection_service=protection_service,
+        )
+        betting_service = BettingService(
+            bet_repo, player_repo, buff_service=buff_service
+        )
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+            betting_service=betting_service,
+        )
+
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        winning_bettor = 7981
+        losing_bettor = 7982
+        skimmer = 7983
+        for bettor in (winning_bettor, losing_bettor, skimmer):
+            player_repo.add(bettor, f"Bettor{bettor}", TEST_GUILD_ID)
+            player_repo.add_balance(bettor, TEST_GUILD_ID, 20)
+        buff_service.grant_blood_pact(skimmer, TEST_GUILD_ID, winning_bettor)
+        betting_service.place_bet(
+            TEST_GUILD_ID, winning_bettor, "radiant", 5, pending
+        )
+        betting_service.place_bet(TEST_GUILD_ID, losing_bettor, "dire", 5, pending)
+
+        original_update = match_repo.update_match_jc_changes
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated JC snapshot failure")
+
+        match_repo.update_match_jc_changes = _boom
+        with pytest.raises(RuntimeError, match="simulated JC snapshot failure"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        match_id = match_repo.get_most_recent_match(TEST_GUILD_ID)["match_id"]
+        stored = match_repo.get_match_jc_changes(match_id, TEST_GUILD_ID)
+        assert stored[winning_bettor] == {"bet": 5}
+        assert stored[losing_bettor] == {"bet": -5}
+
+        match_repo.update_match_jc_changes = original_update
+        retry_result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        assert retry_result["jc_changes"][winning_bettor] == {
+            "bet": 4,
+            "bet_blood_pact_skim": 1,
+        }
+        assert retry_result["jc_changes"][losing_bettor] == {"bet": -5}
 
     def test_consume_pending_match_is_single_use_idempotent(self, test_db):
         """consume_pending_match is single-use: the first call returns the exact

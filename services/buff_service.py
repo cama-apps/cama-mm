@@ -274,6 +274,12 @@ class BuffService:
         guild_id: int | None,
         earning: int,
         player_repo: "PlayerRepository",
+        *,
+        source: str | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        event_key: str | None = None,
+        metadata: dict | None = None,
     ) -> int:
         """Reserve, transfer, and roll back the skim counter on transfer failure."""
         if earning <= 0:
@@ -314,17 +320,22 @@ class BuffService:
             amount = accounted
         try:
             if self.protection_service is not None:
+                event_metadata = {
+                    **(metadata or {}),
+                    "buff_id": buff_id,
+                    "earning": earning,
+                }
                 settlement = self.protection_service.apply_hostile_loss(
                     target_id,
                     guild_id,
                     amount,
                     "blood_pact",
                     actor_id=skimmer_id,
-                    event_key=f"blood-pact:{buff_id}:{uuid.uuid4().hex}",
+                    event_key=event_key or f"blood-pact:{buff_id}:{uuid.uuid4().hex}",
                     destination="player",
                     recipient_id=skimmer_id,
                     clamp_to_balance=False,
-                    metadata={"buff_id": buff_id, "earning": earning},
+                    metadata=event_metadata,
                 )
                 applied = int(settlement.applied)
                 if applied < accounted:
@@ -340,9 +351,19 @@ class BuffService:
                             buff_id,
                         )
                 return applied
+            transfer_context = {}
+            if source is not None:
+                transfer_context = {
+                    "source": source,
+                    "related_type": related_type,
+                    "related_id": related_id,
+                    "reason": "Blood Pact skim",
+                    "metadata": metadata,
+                }
             player_repo.add_balance_many(
                 {target_id: -amount, skimmer_id: amount},
                 guild_id,
+                **transfer_context,
             )
             if amount < accounted:
                 try:
