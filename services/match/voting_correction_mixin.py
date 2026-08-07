@@ -10,9 +10,9 @@ no state of its own and is composed into ``MatchService``.
 
 from typing import Any
 
+from rating_system import recorded_streak_rate, recorded_streak_threshold
 from services.match._common import logger
 
-_LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
 _LEGACY_BASE_RATING_DELTA_MULTIPLIER = 0.75
 _LEGACY_WIN_REWARD_JC = 4
 
@@ -232,10 +232,14 @@ class VotingCorrectionMixin:
         )
 
         def _recorded_streak_rate(pid: int) -> float:
-            stored = rating_by_id.get(pid, {}).get("streak_multiplier_per_game")
-            if stored is None:
-                return _LEGACY_STREAK_MULTIPLIER_PER_GAME
-            return float(stored)
+            return recorded_streak_rate(
+                rating_by_id.get(pid, {}).get("streak_multiplier_per_game")
+            )
+
+        def _recorded_streak_threshold(pid: int) -> int:
+            return recorded_streak_threshold(
+                rating_by_id.get(pid, {}).get("streak_threshold")
+            )
 
         # Recompute per-player streak multipliers as-of this match with the
         # CORRECTED result. Recording amplifies Glicko deltas on 3+ game
@@ -254,6 +258,7 @@ class VotingCorrectionMixin:
                     outcomes_by_id.get(pid, []),
                     won=pid in new_winner_ids,
                     streak_multiplier_per_game=_recorded_streak_rate(pid),
+                    streak_threshold=_recorded_streak_threshold(pid),
                 )
                 streak_multipliers[pid] = mult
                 new_streaks[pid] = (slen, mult)
@@ -266,6 +271,7 @@ class VotingCorrectionMixin:
                     outcomes,
                     won=pid in new_winner_ids,
                     streak_multiplier_per_game=_recorded_streak_rate(pid),
+                    streak_threshold=_recorded_streak_threshold(pid),
                 )
                 streak_multipliers[pid] = mult
                 new_streaks[pid] = (slen, mult)

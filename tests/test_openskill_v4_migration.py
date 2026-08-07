@@ -15,6 +15,39 @@ from tests.conftest import TEST_GUILD_ID
 MIGRATION_NAME = "openskill_v4_streak_replay"
 
 
+def test_streak_threshold_column_defaults_to_legacy_3(repo_db_path):
+    """rating_history.streak_threshold exists and backfills legacy rows to 3."""
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(rating_history)")
+        }
+        assert "streak_threshold" in columns
+
+        conn.execute(
+            """
+            INSERT INTO players (discord_id, guild_id, discord_username)
+            VALUES (98999, ?, 'ThresholdDefault')
+            """,
+            (TEST_GUILD_ID,),
+        )
+        conn.execute(
+            """
+            INSERT INTO rating_history (discord_id, guild_id, rating, won)
+            VALUES (98999, ?, 1500.0, 1)
+            """,
+            (TEST_GUILD_ID,),
+        )
+        row = conn.execute(
+            """
+            SELECT streak_threshold FROM rating_history
+            WHERE discord_id = 98999 AND guild_id = ?
+            """,
+            (TEST_GUILD_ID,),
+        ).fetchone()
+        assert row["streak_threshold"] == 3
+
+
 def test_v4_migration_replays_recorded_streak_rates_idempotently(repo_db_path):
     player_ids = list(range(99000, 99010))
     players = [

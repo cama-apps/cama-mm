@@ -1699,3 +1699,125 @@ class TestMatchRepository:
             "synergies": [],
             "hero_vs_hero": [],
         }
+
+
+class TestSuspensionProgressOnRecord:
+    """record_match_core_atomic must not advance suspensions already over."""
+
+    @staticmethod
+    def _record(db_path, pending_match_id):
+        from repositories.match_repository import MatchRepository
+
+        return MatchRepository(db_path).record_match_core_atomic(
+            team1_ids=[],
+            team2_ids=[],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+            dotabuff_match_id=None,
+            lobby_type="shuffle",
+            lobby_kind="open",
+            balancing_rating_system="glicko",
+            winning_ids=[],
+            losing_ids=[],
+            glicko_updates=[],
+            openskill_updates=[],
+            rating_history_rows=[],
+            match_prediction={
+                "radiant_rating": 1500.0,
+                "dire_rating": 1500.0,
+                "radiant_rd": 200.0,
+                "dire_rd": 200.0,
+                "expected_radiant_win_prob": 0.5,
+            },
+            last_match_date_iso="2026-08-05T00:00:00+00:00",
+            first_calibration_ids=[],
+            first_calibration_unix=0,
+            effective_avoid_ids=[],
+            effective_deal_ids=[],
+            pending_match_id=pending_match_id,
+        )
+
+    def test_time_lapsed_either_suspension_is_not_decremented_or_completed(
+        self, repo_db_path
+    ):
+        """An 'either' suspension whose time term lapsed is already over; a
+        later recorded match must not decrement it or emit a bogus
+        completion event."""
+        import time as time_module
+
+        from repositories.match_repository import MatchRepository
+        from repositories.moderation_repository import ModerationRepository
+        from services.moderation_service import ModerationService
+
+        repo = ModerationRepository(repo_db_path)
+        service = ModerationService(repo)
+        now = int(time_module.time())
+        created_at = now - 7200
+        service.create_suspension(
+            424242,
+            TEST_GUILD_ID,
+            actor_id=900,
+            reason="Either, lapsed by time",
+            completion="either",
+            expires_at=now - 3600,
+            matches=1,
+            now=created_at,
+        )
+        # Already inactive by time per is_active_at, but never lazily closed.
+        suspension = repo.get_suspension(424242, TEST_GUILD_ID)
+        assert suspension.active
+        assert not suspension.is_active_at(now)
+
+        pending_id = MatchRepository(repo_db_path).save_pending_match(
+            TEST_GUILD_ID, {}
+        )
+        match_id = self._record(repo_db_path, pending_id)
+
+        after = repo.get_suspension(424242, TEST_GUILD_ID)
+        assert after.matches_remaining == 1
+        assert after.active
+
+        completions = repo.get_completion_events_for_match(
+            TEST_GUILD_ID, match_id
+        )
+        assert completions == []
+
+    def test_unexpired_either_suspension_still_progresses(self, repo_db_path):
+        """The guard only skips time-lapsed rows; live terms still advance."""
+        import time as time_module
+
+        from domain.models.moderation import ModerationEventType
+        from repositories.match_repository import MatchRepository
+        from repositories.moderation_repository import ModerationRepository
+        from services.moderation_service import ModerationService
+
+        repo = ModerationRepository(repo_db_path)
+        service = ModerationService(repo)
+        now = int(time_module.time())
+        service.create_suspension(
+            424243,
+            TEST_GUILD_ID,
+            actor_id=900,
+            reason="Either, still live",
+            completion="either",
+            expires_at=now + 3600,
+            matches=1,
+            now=now,
+        )
+
+        pending_id = MatchRepository(repo_db_path).save_pending_match(
+            TEST_GUILD_ID, {}
+        )
+        match_id = self._record(repo_db_path, pending_id)
+
+        after = repo.get_suspension(424243, TEST_GUILD_ID)
+        assert after.matches_remaining == 0
+        assert not after.active
+
+        completions = repo.get_completion_events_for_match(
+            TEST_GUILD_ID, match_id
+        )
+        assert [event.event_type for event in completions] == [
+            ModerationEventType.COMPLETE
+        ]
+        assert completions[0].discord_id == 424243

@@ -827,6 +827,13 @@ class SchemaManager:
                 "add_survey_retry_requested",
                 self._migration_add_survey_retry_requested,
             ),
+            # Persist the streak threshold per match like the per-match rate,
+            # so replay reproduces the gate each match was recorded with even
+            # if STREAK_THRESHOLD is later reconfigured.
+            (
+                "add_streak_threshold_to_rating_history",
+                self._migration_add_streak_threshold_to_rating_history,
+            ),
         ]
 
     # --- Migrations ---
@@ -1032,6 +1039,15 @@ class SchemaManager:
             "rating_history",
             "base_rating_delta_multiplier",
             "REAL NOT NULL DEFAULT 0.75",
+        )
+
+    def _migration_add_streak_threshold_to_rating_history(self, cursor) -> None:
+        """Preserve the streak threshold used when each match was recorded."""
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "streak_threshold",
+            "INTEGER NOT NULL DEFAULT 3",
         )
 
     def _migration_openskill_v4_streak_replay(self, cursor) -> None:
@@ -1449,9 +1465,11 @@ class SchemaManager:
             "TEXT",
         )
         # The historical v3 migration is also the reusable replay primitive
-        # for later algorithm versions. Ensure the rate exists before loading
-        # replay inputs so fresh and already-upgraded databases behave alike.
+        # for later algorithm versions. Ensure the rate and threshold exist
+        # before loading replay inputs so fresh and already-upgraded
+        # databases behave alike.
         self._migration_add_streak_multiplier_per_game_to_rating_history(cursor)
+        self._migration_add_streak_threshold_to_rating_history(cursor)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS openskill_rating_events (
@@ -1515,7 +1533,15 @@ class SchemaManager:
                          AND rh.match_id = m.match_id
                        ORDER BY rh.id
                        LIMIT 1
-                   ) AS streak_multiplier_per_game
+                   ) AS streak_multiplier_per_game,
+                   (
+                       SELECT rh.streak_threshold
+                       FROM rating_history rh
+                       WHERE rh.guild_id = m.guild_id
+                         AND rh.match_id = m.match_id
+                       ORDER BY rh.id
+                       LIMIT 1
+                   ) AS streak_threshold
             FROM matches m
             WHERE m.winning_team IN (1, 2)
             ORDER BY m.guild_id, m.match_date, m.match_id

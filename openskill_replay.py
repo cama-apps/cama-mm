@@ -16,11 +16,14 @@ from typing import Any
 
 from config import NEW_PLAYER_MMR_DISCOUNT
 from openskill_rating_system import CamaOpenSkillSystem
-from rating_system import CamaRatingSystem
+from rating_system import (
+    CamaRatingSystem,
+    recorded_streak_rate,
+    recorded_streak_threshold,
+)
 
 OPENSKILL_ALGORITHM_VERSION = 4
 _RECENT_OUTCOME_LIMIT = 20
-_LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
 
 
 def _value(record: Any, key: str, default=None):
@@ -78,17 +81,25 @@ def _participant_team(participant: Any) -> int | None:
 def _streak_rate(match: Any) -> float:
     """Return the rating-streak rate recorded for a match.
 
-    Matches recorded before the rate column was introduced used the historical
-    20% curve. Replay inputs without a matching history row therefore use the
-    same legacy value rather than today's configuration.
+    Matches recorded between the streak feature launch and the rate column's
+    introduction used the historical 20% curve. Matches older than the feature
+    itself had no Glicko streak boost at all, but the v4 backfill deliberately
+    stamps them with the same legacy rate so the replayed OpenSkill history
+    applies one consistent retroactive curve. Replay inputs without a matching
+    history row likewise use the legacy value rather than today's
+    configuration.
     """
-    stored = _value(match, "streak_multiplier_per_game")
-    if stored is None:
-        return _LEGACY_STREAK_MULTIPLIER_PER_GAME
-    try:
-        return float(stored)
-    except (TypeError, ValueError):
-        return _LEGACY_STREAK_MULTIPLIER_PER_GAME
+    return recorded_streak_rate(_value(match, "streak_multiplier_per_game"))
+
+
+def _streak_threshold(match: Any) -> int:
+    """Return the rating-streak threshold recorded for a match.
+
+    Matches recorded before the threshold column existed all used the
+    historical threshold of 3, so replay falls back to that legacy value
+    rather than today's configuration.
+    """
+    return recorded_streak_threshold(_value(match, "streak_threshold"))
 
 
 @dataclass
@@ -287,14 +298,16 @@ def replay_openskill(
             for team_number, player_ids in ((1, team1_ids), (2, team2_ids))
             for player_id in player_ids
         }
-        recorded_streak_rate = _streak_rate(match)
+        match_streak_rate = _streak_rate(match)
+        match_streak_threshold = _streak_threshold(match)
         streak_multipliers: dict[int, float] = {}
         for player_id in all_ids:
             key = (guild_id, player_id)
             _streak_length, multiplier = streak_system.calculate_streak_multiplier(
                 recent_outcomes.get(key, []),
                 won=won_by_player[player_id],
-                streak_multiplier_per_game=recorded_streak_rate,
+                streak_multiplier_per_game=match_streak_rate,
+                streak_threshold=match_streak_threshold,
             )
             streak_multipliers[player_id] = multiplier
 

@@ -16,7 +16,11 @@ Multiplier formula: 1.0 + 0.25 * max(0, streak_length - 2)
 import pytest
 
 from config import STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD
-from rating_system import CamaRatingSystem
+from rating_system import (
+    CamaRatingSystem,
+    recorded_streak_rate,
+    recorded_streak_threshold,
+)
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -154,6 +158,33 @@ class TestStreakMultiplierCalculation:
         """Verify config constants are set correctly."""
         assert STREAK_THRESHOLD == 3
         assert pytest.approx(0.25) == STREAK_MULTIPLIER_PER_GAME
+
+    def test_threshold_override_suppresses_boost_below_recorded_gate(self, rating_system):
+        """A recorded threshold above the streak length yields no multiplier."""
+        recent_outcomes = [True, True]  # 3-game streak with the current win
+        streak_length, multiplier = rating_system.calculate_streak_multiplier(
+            recent_outcomes, won=True, streak_threshold=4
+        )
+        assert streak_length == 3
+        assert multiplier == 1.0
+
+    def test_threshold_override_matching_default_keeps_boost(self, rating_system):
+        """An explicit threshold of 3 reproduces the default gate."""
+        recent_outcomes = [True, True]
+        streak_length, multiplier = rating_system.calculate_streak_multiplier(
+            recent_outcomes, won=True, streak_threshold=3
+        )
+        assert streak_length == 3
+        assert multiplier == pytest.approx(1.25)
+
+    def test_recorded_streak_helpers_fall_back_to_legacy_values(self):
+        """Missing or malformed stored values parse to the legacy curve."""
+        assert recorded_streak_rate(None) == pytest.approx(0.20)
+        assert recorded_streak_rate("not-a-number") == pytest.approx(0.20)
+        assert recorded_streak_rate(0.30) == pytest.approx(0.30)
+        assert recorded_streak_threshold(None) == 3
+        assert recorded_streak_threshold("not-a-number") == 3
+        assert recorded_streak_threshold(4) == 4
 
 
 class TestStreakInRatingUpdate:
@@ -476,3 +507,125 @@ class TestRatingHistoryStreakColumns:
         assert len(history) == 1
         assert history[0].get("streak_length") is None
         assert history[0].get("streak_multiplier") is None
+
+
+class TestChronologicalOutcomeWindows:
+    """Outcome windows must follow match chronology, not rating_history.id.
+
+    The OpenSkill replay backfills missing rating_history rows for legacy
+    matches, giving them brand-new autoincrement ids. If the streak windows
+    ordered by id, those years-old outcomes would surface at the head of the
+    recency window and corrupt the next streak computation.
+    """
+
+    def _setup_history(self, player_repository, match_repository):
+        discord_id = 31337
+        player_repository.add(
+            discord_id=discord_id,
+            discord_username="BackfillPlayer",
+            guild_id=TEST_GUILD_ID,
+            glicko_rating=1500,
+            glicko_rd=100,
+            glicko_volatility=0.06,
+        )
+
+        # Three chronological matches: m1 (oldest, won) then m2/m3 (lost).
+        match_ids = []
+        for i, won in enumerate([True, False, False]):
+            match_ids.append(
+                match_repository.record_match(
+                    team1_ids=[discord_id],
+                    team2_ids=[99999 + i],
+                    winning_team=1 if won else 2,
+                    guild_id=TEST_GUILD_ID,
+                )
+            )
+        m1, m2, m3 = match_ids
+
+        # History rows for m2 and m3 exist first; m1's row is backfilled by a
+        # replay LAST, so it receives the highest rating_history.id.
+        for match_id, won in ((m2, False), (m3, False), (m1, True)):
+            match_repository.add_rating_history(
+                discord_id=discord_id,
+                guild_id=TEST_GUILD_ID,
+                rating=1500,
+                match_id=match_id,
+                won=won,
+            )
+        return discord_id, (m1, m2, m3)
+
+    def test_recent_outcomes_follow_match_chronology(
+        self, player_repository, match_repository
+    ):
+        discord_id, _match_ids = self._setup_history(player_repository, match_repository)
+
+        outcomes = match_repository.get_player_recent_outcomes(
+            discord_id, guild_id=TEST_GUILD_ID, limit=10
+        )
+        # Most recent first: m3 (loss), m2 (loss), m1 (win) — even though m1's
+        # row was inserted last.
+        assert outcomes == [False, False, True]
+
+    def test_recent_outcomes_bulk_follow_match_chronology(
+        self, player_repository, match_repository
+    ):
+        discord_id, _match_ids = self._setup_history(player_repository, match_repository)
+
+        outcomes = match_repository.get_player_recent_outcomes_bulk(
+            [discord_id], TEST_GUILD_ID, limit=10
+        )
+        assert outcomes[discord_id] == [False, False, True]
+
+    def test_outcomes_before_match_follow_match_chronology(
+        self, player_repository, match_repository
+    ):
+        discord_id, (m1, _m2, m3) = self._setup_history(player_repository, match_repository)
+
+        outcomes = match_repository.get_player_outcomes_before_match(
+            discord_id, TEST_GUILD_ID, m3, limit=10
+        )
+        # Before m3: m2 (loss) then m1 (win). The id-ordered cutoff would have
+        # dropped m1 entirely (its row id is larger than m3's).
+        assert outcomes == [False, True]
+
+        # Nothing before the oldest match.
+        assert (
+            match_repository.get_player_outcomes_before_match(
+                discord_id, TEST_GUILD_ID, m1, limit=10
+            )
+            == []
+        )
+
+    def test_outcomes_before_match_bulk_follow_match_chronology(
+        self, player_repository, match_repository
+    ):
+        discord_id, (_m1, _m2, m3) = self._setup_history(player_repository, match_repository)
+
+        outcomes = match_repository.get_player_outcomes_before_match_bulk(
+            [discord_id], TEST_GUILD_ID, m3, limit=10
+        )
+        assert outcomes[discord_id] == [False, True]
+
+    def test_outcomes_before_match_empty_without_history_row(
+        self, player_repository, match_repository
+    ):
+        """A player with no rating_history row for the match gets no window."""
+        discord_id, _match_ids = self._setup_history(player_repository, match_repository)
+
+        extra_match = match_repository.record_match(
+            team1_ids=[discord_id],
+            team2_ids=[88888],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+        )
+        # No rating_history row was written for extra_match.
+        assert (
+            match_repository.get_player_outcomes_before_match(
+                discord_id, TEST_GUILD_ID, extra_match, limit=10
+            )
+            == []
+        )
+        bulk = match_repository.get_player_outcomes_before_match_bulk(
+            [discord_id], TEST_GUILD_ID, extra_match, limit=10
+        )
+        assert bulk[discord_id] == []
