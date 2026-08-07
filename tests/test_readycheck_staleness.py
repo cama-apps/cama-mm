@@ -100,6 +100,9 @@ class FakeThread:
     async def fetch_message(self, message_id):
         return self.by_id[message_id]
 
+    def get_partial_message(self, message_id):
+        return self.by_id[message_id]
+
 
 class FakeBot:
     def __init__(self, thread):
@@ -143,7 +146,14 @@ class FakePlayerService:
         return self.player_repo.players.get((discord_id, guild_id))
 
 
-def _setup(monkeypatch, regular, conditional=None, present=None, guild_id=TEST_GUILD_ID):
+def _setup(
+    monkeypatch,
+    regular,
+    conditional=None,
+    present=None,
+    guild_id=TEST_GUILD_ID,
+    ready_threshold=10,
+):
     """Build a lobby + cog. ``regular``/``conditional`` map pid -> discord.Status.
 
     ``present`` lists pids that appear as guild members; pids omitted from it are
@@ -159,7 +169,7 @@ def _setup(monkeypatch, regular, conditional=None, present=None, guild_id=TEST_G
 
     mgr = LobbyManagerService(FakeLobbyRepo())
     player_repo = FakePlayerRepo()
-    lobby_service = LobbyService(mgr, player_repo)
+    lobby_service = LobbyService(mgr, player_repo, ready_threshold=ready_threshold)
     player_service = FakePlayerService(player_repo)
 
     lobby = mgr.get_or_create_lobby(creator_id=0, guild_id=guild_id)
@@ -470,3 +480,146 @@ async def test_stale_prune_below_10_shows_shortfall_note(monkeypatch):
     assert status == "ok" and info["pruned_count"] == 4
     assert env.lobby.get_total_count() == 8
     assert "need 2 more for a full game" in _posted_embed(env).description
+
+
+@pytest.mark.asyncio
+async def test_explicit_unready_is_not_reconfirmed_by_refresh(monkeypatch):
+    """A recent joiner who explicitly withdraws their ✅ must stay withdrawn
+    when the readycheck is refreshed (auto-confirm must not override them)."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})
+    env.lobby.player_join_times[2] = time.time() - 60  # recent joiner
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert 2 in reacted  # recent joiner was auto-confirmed
+
+    # Player 2 explicitly un-readies (the bot.py reaction-remove path).
+    assert env.lobby_service.remove_readycheck_reaction(2, guild_id=env.guild_id)
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert 2 not in reacted, "explicit un-ready must survive a refresh sync"
+    assert 1 in reacted
+
+
+@pytest.mark.asyncio
+async def test_explicit_unready_survives_other_player_leaving(monkeypatch):
+    """Any roster change runs the sync; the withdrawn player must stay out."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})
+    env.bot.get_guild = lambda _guild_id: env.guild
+    env.lobby.player_join_times[2] = time.time() - 60  # recent joiner
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    assert env.lobby_service.remove_readycheck_reaction(2, guild_id=env.guild_id)
+
+    env.lobby_service.leave_lobby(3, env.guild_id)
+    synced = await env.cog.sync_readycheck_with_lobby(env.guild_id)
+
+    assert synced is True
+    reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert 2 not in reacted, "roster sync must not re-confirm a withdrawal"
+
+
+@pytest.mark.asyncio
+async def test_reclicking_checkmark_after_unready_confirms_again(monkeypatch):
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
+    env.lobby.player_join_times[2] = time.time() - 60
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    env.lobby_service.remove_readycheck_reaction(2, guild_id=env.guild_id)
+    # The player changes their mind and clicks ✅ again (bot.py add path).
+    assert env.lobby_service.add_readycheck_reaction(2, "<@2>", guild_id=env.guild_id)
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+
+    reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert 2 in reacted
+
+
+@pytest.mark.asyncio
+async def test_failed_reaction_removal_still_prunes_departed_confirmation(monkeypatch):
+    """remove_reaction failures (e.g. missing Manage Messages) are best-effort:
+    the state update must still prune departed players' confirmations."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    first_id = env.lobby_service.get_readycheck_message_id(guild_id=env.guild_id)
+    env.lobby_service.add_readycheck_reaction(2, "<@2>", guild_id=env.guild_id)
+    env.lobby_service.leave_lobby(2, env.guild_id)
+
+    async def raise_forbidden(emoji, user):
+        raise discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            "Missing Permissions",
+        )
+
+    env.thread.by_id[first_id].remove_reaction = raise_forbidden
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {
+        1: "<@1>"
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_prune_keeps_player_reserved_by_in_flight_match(monkeypatch):
+    """leave_lobby returns False for reserved players; the sweep must not
+    announce a removal that did not happen."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: OFFLINE, 3: OFFLINE})
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    _make_stale(env)
+    assert env.lobby_service.reserve_lobby_players([2], env.guild_id)
+
+    status, info = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+
+    assert status == "ok"
+    assert info["pruned_count"] == 1
+    assert 2 in env.lobby.players  # reserved player kept
+    assert 3 not in env.lobby.players
+    note = next(
+        text for text in _ping_texts(env) if "Removed (away during ready check)" in text
+    )
+    assert "<@3>" in note
+    assert "<@2>" not in note
+
+
+@pytest.mark.asyncio
+async def test_ready_announcement_uses_configured_threshold(monkeypatch):
+    env = _setup(
+        monkeypatch,
+        regular={1: ONLINE, 2: ONLINE, 3: ONLINE},
+        ready_threshold=3,
+    )
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    for player_id in (2, 3):
+        env.lobby_service.add_readycheck_reaction(
+            player_id,
+            f"<@{player_id}>",
+            guild_id=env.guild_id,
+        )
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    announcement = next(
+        text for text in _ping_texts(env) if "players confirmed ready" in text
+    )
+    assert "3 players confirmed ready" in announcement

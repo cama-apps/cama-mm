@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
+# Glicko rating below which a player qualifies for the lowskill lobby.
+# Single source of truth — user-facing copy and the service gate derive from it.
+LOWSKILL_RATING_CUTOFF = 1400.0
+
 
 class LobbyKind(str, Enum):
     """Stable matchmaking lobby kinds."""
@@ -41,7 +45,7 @@ class LobbyKind(str, Enum):
         return (
             "Open to all ratings"
             if self is LobbyKind.OPEN
-            else "Glicko below 1400"
+            else f"Glicko below {LOWSKILL_RATING_CUTOFF:.0f}"
         )
 
     @classmethod

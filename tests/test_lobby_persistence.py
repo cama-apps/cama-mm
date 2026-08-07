@@ -1,8 +1,11 @@
 
+import pytest
+
 from repositories.lobby_repository import LobbyRepository
 from repositories.player_repository import PlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 def test_lobby_manager_persists_and_recovers_state(repo_db_path):
@@ -143,3 +146,59 @@ def test_lobby_message_id_persists(repo_db_path):
 
     assert service2.get_lobby_message_id() == 12345678, "Message ID should survive restart"
     assert service2.get_lobby_channel_id() == 87654321, "Channel ID should survive restart"
+
+
+class LockCheckingLobbyRepo(FakeLobbyRepo):
+    """Asserts persistence I/O never runs inside the manager's state lock."""
+
+    manager: LobbyManager
+
+    def save_lobby_state(self, *args, **kwargs):
+        assert not self.manager._state_lock._is_owned()
+        return super().save_lobby_state(*args, **kwargs)
+
+    def clear_lobby_state(self, lobby_id, guild_id=None):
+        assert not self.manager._state_lock._is_owned()
+        return super().clear_lobby_state(lobby_id, guild_id=guild_id)
+
+
+def test_lobby_persistence_runs_outside_state_lock():
+    """DB writes must not run under the process-wide ``_state_lock`` the event
+    loop also acquires synchronously (get_creation_lock)."""
+    repo = LockCheckingLobbyRepo()
+    manager = LobbyManager(repo)
+    repo.manager = manager
+
+    manager.get_or_create_lobby(creator_id=42, guild_id=7)
+    assert manager.join_lobby(111, guild_id=7) == "ok"
+    manager.set_lobby_message(message_id=1, channel_id=2, guild_id=7)
+    assert manager.leave_lobby(111, guild_id=7) is True
+    manager.reset_lobby(guild_id=7)
+
+    assert manager.get_lobby(guild_id=7) is None
+    assert repo.load_lobby_state(1, guild_id=7) is None
+
+
+class FailingClearLobbyRepo(FakeLobbyRepo):
+    def clear_lobby_state(self, lobby_id, guild_id=None):
+        raise RuntimeError("database is locked")
+
+
+def test_reset_lobby_failed_db_delete_keeps_in_memory_state():
+    """The persisted row is deleted before memory is cleared: a failed delete
+    must leave the in-memory lobby intact instead of letting the stale row
+    resurrect a ghost lobby on the next restart."""
+    repo = FailingClearLobbyRepo()
+    manager = LobbyManager(repo)
+
+    manager.get_or_create_lobby(creator_id=42, guild_id=7)
+    assert manager.join_lobby(111, guild_id=7) == "ok"
+
+    with pytest.raises(RuntimeError):
+        manager.reset_lobby(guild_id=7)
+
+    lobby = manager.get_lobby(guild_id=7)
+    assert lobby is not None
+    assert 111 in lobby.players
+    # The row is still persisted, matching the surviving in-memory lobby.
+    assert repo.load_lobby_state(lobby.lobby_id, guild_id=7) is not None
