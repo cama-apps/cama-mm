@@ -36,6 +36,7 @@ _DELIVERY_BATCH_SIZE = 25
 _DELIVERY_CONCURRENCY = 5
 _DELIVERY_STALE_SECONDS = 300
 _DELIVERY_RECEIPT_GRACE_SECONDS = 30
+_DELIVERY_RECEIPT_SCAN_LIMIT = 500
 _RESULTS_TIMEOUT_SECONDS = 600
 _TEXT_RESULTS_PER_PAGE = 4
 _EMBED_CONTENT_BUDGET = 5_900
@@ -94,14 +95,19 @@ def _question_embed(
         color=0x5865F2,
     )
     embed.add_field(name="How to answer", value=kind, inline=False)
-    embed.add_field(
-        name="Privacy",
-        value=(
+    if session.survey.target_type is SurveyTargetType.MEMBER:
+        # A single-recipient survey cannot honor an anonymity promise: the
+        # admin knows exactly whose answers the results contain.
+        privacy = (
+            "This survey was sent only to you, so your answers are shared "
+            "with the survey admins and are not anonymous."
+        )
+    else:
+        privacy = (
             "Admins receive anonymous, per-question results. "
             "Your answers are not shown with your Discord identity."
-        ),
-        inline=False,
-    )
+        )
+    embed.add_field(name="Privacy", value=privacy, inline=False)
     requirement = "Required" if question.required else "Optional"
     edit_suffix = " • Editing from review" if session.recipient.in_review else ""
     embed.set_footer(
@@ -202,11 +208,16 @@ def _preview_pages(
 
 
 def _submitted_embed(session: SurveySession) -> discord.Embed:
+    saved = (
+        "Your response was saved."
+        if session.survey.target_type is SurveyTargetType.MEMBER
+        else "Your response was saved anonymously."
+    )
     return discord.Embed(
         title="Survey submitted",
         description=(
             f"Thanks for completing **{escape_discord_text(session.survey.title)}**. "
-            "Your response was saved anonymously."
+            f"{saved}"
         ),
         color=0x57F287,
     )
@@ -224,14 +235,18 @@ def _closed_embed(session: SurveySession) -> discord.Embed:
 
 
 def _delivery_nonce(recipient_id: int) -> str:
-    """Stable receipt marker used to recognize the original survey DM."""
+    """Stable send-time nonce so Discord deduplicates a rapidly retried send."""
     return f"cama-s:{recipient_id:x}"
 
 
-def _message_matches_delivery(message, survey_id: int, recipient_id: int) -> bool:
-    """Recognize a prior survey DM by nonce or its persistent component IDs."""
-    if str(getattr(message, "nonce", "")) == _delivery_nonce(recipient_id):
-        return True
+def _message_matches_delivery(message, survey_id: int) -> bool:
+    """Recognize a prior survey DM by its persistent component custom IDs.
+
+    History-fetched messages never carry the send-time nonce (Discord only
+    returns it on the send response and gateway create event), so the durable
+    receipt marker is the ``survey:{survey_id}:`` custom_id prefix that every
+    delivered survey DM's view components carry.
+    """
     custom_id_prefix = f"survey:{survey_id}:"
     for action_row in getattr(message, "components", ()):
         for component in getattr(action_row, "children", ()):
@@ -490,16 +505,34 @@ class SurveyResultsView(discord.ui.View):
         self,
         owner_id: int,
         pages: list[discord.Embed],
+        interaction: discord.Interaction | None = None,
     ) -> None:
         super().__init__(timeout=_RESULTS_TIMEOUT_SECONDS)
         self.owner_id = owner_id
         self.pages = pages
         self.index = 0
+        self._interaction = interaction
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
         self.previous.disabled = self.index == 0
         self.next.disabled = self.index >= len(self.pages) - 1
+
+    async def on_timeout(self) -> None:
+        """Disable the dead buttons so the stale report cannot look clickable."""
+        for child in self.children:
+            child.disabled = True
+        if self._interaction is None:
+            return
+        try:
+            # The 600s view timeout is inside the 15-minute interaction token
+            # window, so the ephemeral report is still editable here.
+            await self._interaction.edit_original_response(view=self)
+        except Exception as exc:
+            logger.debug(
+                "Survey results view could not be disabled after timeout (%s)",
+                type(exc).__name__,
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -749,6 +782,11 @@ class SurveyCommands(commands.Cog):
         self._ready_recovery_lock = asyncio.Lock()
         self._delivery_recovery_handle: asyncio.TimerHandle | None = None
         self._delivery_recovery_task: asyncio.Task[None] | None = None
+        self._send_dispatch_tasks: set[asyncio.Task[None]] = set()
+        # Last (message_id, survey status, recipient/answer state) this process
+        # successfully wrote to each respondent DM, so reconnect reconciliation
+        # can skip edits that would re-render identical content.
+        self._reconciled_response_fingerprints: dict[tuple[int, int], tuple] = {}
         self._unloaded = False
         self._response_locks: weakref.WeakValueDictionary[
             tuple[int, int], asyncio.Lock
@@ -805,6 +843,9 @@ class SurveyCommands(commands.Cog):
         self._delivery_recovery_task = None
         if task is not None and not task.done():
             task.cancel()
+        for dispatch_task in list(self._send_dispatch_tasks):
+            dispatch_task.cancel()
+        self._send_dispatch_tasks.clear()
 
     async def _run_scheduled_delivery_recovery(self) -> None:
         try:
@@ -835,17 +876,25 @@ class SurveyCommands(commands.Cog):
         message: str,
     ) -> None:
         content = f"❌ {message}"
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                content,
-                ephemeral=True,
-                allowed_mentions=_ALLOWED_MENTIONS,
-            )
-        else:
-            await interaction.response.send_message(
-                content,
-                ephemeral=True,
-                allowed_mentions=_ALLOWED_MENTIONS,
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    content,
+                    ephemeral=True,
+                    allowed_mentions=_ALLOWED_MENTIONS,
+                )
+            else:
+                await interaction.response.send_message(
+                    content,
+                    ephemeral=True,
+                    allowed_mentions=_ALLOWED_MENTIONS,
+                )
+        except Exception as exc:
+            # An expired/consumed interaction token must not raise out of the
+            # error reporter itself and mask what the caller already did.
+            logger.warning(
+                "Survey error response could not be delivered (%s)",
+                type(exc).__name__,
             )
 
     async def _require_admin(self, interaction: discord.Interaction) -> bool:
@@ -927,12 +976,22 @@ class SurveyCommands(commands.Cog):
                     question_id,
                     value,
                 )
-                await self._edit_response_message(interaction, session)
             except ValueError as exc:
                 await self.respond_error(interaction, str(exc))
+                return
             except Exception as exc:
                 logger.error("Survey answer handling failed (%s)", type(exc).__name__)
                 await self.respond_error(interaction, "Couldn't save that answer right now.")
+                return
+            try:
+                await self._edit_response_message(interaction, session)
+            except Exception as exc:
+                # The answer is durably saved; only the DM re-render failed and
+                # recovery is already scheduled. Never report a save failure.
+                logger.warning(
+                    "Survey answer saved but the DM refresh failed (%s)",
+                    type(exc).__name__,
+                )
 
     async def skip_question(
         self,
@@ -950,12 +1009,22 @@ class SurveyCommands(commands.Cog):
                     interaction.user.id,
                     question_id,
                 )
-                await self._edit_response_message(interaction, session)
             except ValueError as exc:
                 await self.respond_error(interaction, str(exc))
+                return
             except Exception as exc:
                 logger.error("Survey skip handling failed (%s)", type(exc).__name__)
                 await self.respond_error(interaction, "Couldn't skip that question right now.")
+                return
+            try:
+                await self._edit_response_message(interaction, session)
+            except Exception as exc:
+                # The skip is durably saved; only the DM re-render failed and
+                # recovery is already scheduled. Never report a skip failure.
+                logger.warning(
+                    "Survey skip saved but the DM refresh failed (%s)",
+                    type(exc).__name__,
+                )
 
     async def edit_response_question(
         self,
@@ -1152,8 +1221,9 @@ class SurveyCommands(commands.Cog):
                     int(message.id),
                 )
             except Exception as exc:
-                # The DM succeeded. Do not relabel it as failed: the stable
-                # Discord nonce and exact receipt let recovery resolve it.
+                # The DM succeeded. Do not relabel it as failed: the message's
+                # persistent component IDs and exact receipt let recovery
+                # resolve it.
                 logger.warning(
                     "Survey delivery receipt could not be persisted (%s)",
                     type(exc).__name__,
@@ -1196,10 +1266,14 @@ class SurveyCommands(commands.Cog):
                 )
                 bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
                 matched_message = None
+                # Scan newest-first with a bound: a delivered survey DM sits
+                # among the bot's recent messages to that user, and an
+                # unbounded walk of a busy DM channel is paginated REST work
+                # done once per unconfirmed attempt.
                 async for candidate in channel.history(
-                    limit=None,
+                    limit=_DELIVERY_RECEIPT_SCAN_LIMIT,
                     after=after,
-                    oldest_first=True,
+                    oldest_first=False,
                 ):
                     author_id = getattr(getattr(candidate, "author", None), "id", None)
                     if (
@@ -1208,11 +1282,7 @@ class SurveyCommands(commands.Cog):
                         and author_id != bot_user_id
                     ):
                         continue
-                    if _message_matches_delivery(
-                        candidate,
-                        recipient.survey_id,
-                        recipient.recipient_id,
-                    ):
+                    if _message_matches_delivery(candidate, recipient.survey_id):
                         matched_message = candidate
                         break
 
@@ -1265,12 +1335,22 @@ class SurveyCommands(commands.Cog):
         )
         return sum(outcomes)
 
-    async def _dispatch_pending_locked(self) -> int:
-        """Drain pending deliveries while ``_delivery_lock`` is held."""
+    async def _dispatch_pending_locked(
+        self,
+        guild_id: int | None = None,
+        survey_id: int | None = None,
+    ) -> int:
+        """Drain pending deliveries while ``_delivery_lock`` is held.
+
+        ``guild_id``/``survey_id`` only scope the per-iteration receipt
+        reconciliation (the claim queue is global by design); pass them when
+        dispatching on behalf of one campaign so its loop does not run
+        bot-wide DM-history scans.
+        """
         try:
             delivered = 0
             while True:
-                await self.reconcile_unconfirmed_delivery_receipts()
+                await self.reconcile_unconfirmed_delivery_receipts(guild_id, survey_id)
                 await asyncio.to_thread(
                     self.survey_service.queue_requested_delivery_retries,
                 )
@@ -1300,6 +1380,30 @@ class SurveyCommands(commands.Cog):
         """Drain durable pending deliveries without concurrent duplicate workers."""
         async with self._delivery_lock:
             return await self._dispatch_pending_locked()
+
+    def _start_send_dispatch(self, guild_id: int, survey_id: int) -> None:
+        """Deliver an opened campaign in the background, off the command token.
+
+        The recipients are already durably pending, so the admin gets an
+        immediate response while the claim/receipt machinery (shared with
+        scheduled recovery) delivers the DMs. A strong task reference is kept
+        so the dispatch cannot be garbage-collected mid-campaign.
+        """
+        task = asyncio.create_task(self._run_send_dispatch(guild_id, survey_id))
+        self._send_dispatch_tasks.add(task)
+        task.add_done_callback(self._send_dispatch_tasks.discard)
+
+    async def _run_send_dispatch(self, guild_id: int, survey_id: int) -> None:
+        try:
+            async with self._delivery_lock:
+                await self._dispatch_pending_locked(guild_id, survey_id)
+            await self._schedule_if_unconfirmed_deliveries()
+        except Exception as exc:
+            logger.error(
+                "Survey send delivery dispatch failed (%s)",
+                type(exc).__name__,
+            )
+            self._schedule_delivery_recovery(_DELIVERY_RECEIPT_GRACE_SECONDS)
 
     async def restore_response_views(self) -> int:
         sessions = await asyncio.to_thread(
@@ -1334,16 +1438,31 @@ class SurveyCommands(commands.Cog):
                     )
                     if message_id is None:
                         return
-                    user = self.bot.get_user(latest.recipient.discord_id)
-                    if user is None:
-                        user = await self.bot.fetch_user(latest.recipient.discord_id)
-                    channel = await user.create_dm()
-                    message = channel.get_partial_message(message_id)
-                    await message.edit(
-                        embed=self._response_embed(latest),
-                        view=self._response_view(latest),
-                        allowed_mentions=_ALLOWED_MENTIONS,
+                    key = (latest.survey.survey_id, latest.recipient.discord_id)
+                    fingerprint = (
+                        message_id,
+                        latest.survey.status.value,
+                        latest.recipient.updated_at,
+                        latest.recipient.current_question_id,
+                        latest.recipient.in_review,
+                        latest.recipient.submitted_at,
+                        latest.answers,
                     )
+                    # Skip the Discord edit when this process already rendered
+                    # exactly this state to this message (e.g. repeated
+                    # on_ready reconnects with no respondent activity).
+                    if self._reconciled_response_fingerprints.get(key) != fingerprint:
+                        user = self.bot.get_user(latest.recipient.discord_id)
+                        if user is None:
+                            user = await self.bot.fetch_user(latest.recipient.discord_id)
+                        channel = await user.create_dm()
+                        message = channel.get_partial_message(message_id)
+                        await message.edit(
+                            embed=self._response_embed(latest),
+                            view=self._response_view(latest),
+                            allowed_mentions=_ALLOWED_MENTIONS,
+                        )
+                        self._reconciled_response_fingerprints[key] = fingerprint
                     if (
                         latest.recipient.submitted_at is not None
                         or latest.survey.status is SurveyStatus.CLOSED
@@ -1550,7 +1669,11 @@ class SurveyCommands(commands.Cog):
             if survey is None:
                 raise ValueError("Survey not found in this server")
             pages = _preview_pages(survey, questions)
-            view = SurveyResultsView(interaction.user.id, pages) if len(pages) > 1 else None
+            view = (
+                SurveyResultsView(interaction.user.id, pages, interaction)
+                if len(pages) > 1
+                else None
+            )
             await safe_followup(
                 interaction,
                 embed=pages[0],
@@ -1768,28 +1891,24 @@ class SurveyCommands(commands.Cog):
                 role=role,
                 registered_only=registered_only,
             )
-            async with self._delivery_lock:
-                await asyncio.to_thread(
-                    self.survey_service.open_survey,
-                    interaction.guild.id,
-                    survey_id,
-                    recipient_ids,
-                    target_type=target_type,
-                    registered_only=registered_only,
-                )
-                await self._dispatch_pending_locked()
-            results = await asyncio.to_thread(
-                self.survey_service.get_results,
+            await asyncio.to_thread(
+                self.survey_service.open_survey,
                 interaction.guild.id,
                 survey_id,
+                recipient_ids,
+                target_type=target_type,
+                registered_only=registered_only,
             )
-            failed = max(0, results.recipient_count - results.delivered_count)
+            # The recipients are durably pending now; deliver in the
+            # background instead of running a whole DM campaign inline under
+            # the delivery lock and the 15-minute interaction token.
+            self._start_send_dispatch(interaction.guild.id, survey_id)
             await safe_followup(
                 interaction,
                 content=(
                     f"✅ Survey **#{survey_id}** opened for "
-                    f"**{results.recipient_count}** recipients. "
-                    f"Delivered: **{results.delivered_count}** • Failed: **{failed}**."
+                    f"**{len(recipient_ids)}** recipients. Delivering by DM — "
+                    f"check `/survey results` for delivery progress."
                 ),
                 ephemeral=True,
                 allowed_mentions=_ALLOWED_MENTIONS,
@@ -1855,7 +1974,11 @@ class SurveyCommands(commands.Cog):
                 survey_id,
             )
             pages = _results_pages(results)
-            view = SurveyResultsView(interaction.user.id, pages) if len(pages) > 1 else None
+            view = (
+                SurveyResultsView(interaction.user.id, pages, interaction)
+                if len(pages) > 1
+                else None
+            )
             await safe_followup(
                 interaction,
                 embed=pages[0],
