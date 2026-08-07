@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import weakref
 from datetime import UTC, datetime
@@ -525,8 +526,9 @@ class SurveyResultsView(discord.ui.View):
         if self._interaction is None:
             return
         try:
-            # The 600s view timeout is inside the 15-minute interaction token
-            # window, so the ephemeral report is still editable here.
+            # Every click refreshes both the view timeout and the tracked
+            # interaction, so the 600s timeout always fires inside the last
+            # token's 15-minute window and the ephemeral report stays editable.
             await self._interaction.edit_original_response(view=self)
         except Exception as exc:
             logger.debug(
@@ -551,6 +553,9 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = max(0, self.index - 1)
         self._sync_buttons()
+        # discord.py pushes the view timeout forward on every click; keep the
+        # freshest token so the on_timeout edit stays inside its 15m window.
+        self._interaction = interaction
         await interaction.response.edit_message(
             embed=self.pages[self.index],
             view=self,
@@ -565,6 +570,8 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = min(len(self.pages) - 1, self.index + 1)
         self._sync_buttons()
+        # See previous(): keep the freshest token for the on_timeout edit.
+        self._interaction = interaction
         await interaction.response.edit_message(
             embed=self.pages[self.index],
             view=self,
@@ -758,6 +765,24 @@ def _results_pages(results: SurveyResults) -> list[discord.Embed]:
     return pages
 
 
+def _response_state_fingerprint(session: SurveySession, message_id: int) -> str:
+    """Digest every rendered input of a respondent DM without retaining it.
+
+    Hashing keeps respondents' free-text answers out of long-lived process
+    memory while still detecting any state change that would re-render.
+    """
+    state = (
+        message_id,
+        session.survey.status.value,
+        session.recipient.updated_at,
+        session.recipient.current_question_id,
+        session.recipient.in_review,
+        session.recipient.submitted_at,
+        session.answers,
+    )
+    return hashlib.sha256(repr(state).encode("utf-8")).hexdigest()
+
+
 class SurveyCommands(commands.Cog):
     """Admin commands plus persistent respondent controls for surveys."""
 
@@ -783,10 +808,12 @@ class SurveyCommands(commands.Cog):
         self._delivery_recovery_handle: asyncio.TimerHandle | None = None
         self._delivery_recovery_task: asyncio.Task[None] | None = None
         self._send_dispatch_tasks: set[asyncio.Task[None]] = set()
-        # Last (message_id, survey status, recipient/answer state) this process
-        # successfully wrote to each respondent DM, so reconnect reconciliation
-        # can skip edits that would re-render identical content.
-        self._reconciled_response_fingerprints: dict[tuple[int, int], tuple] = {}
+        # Digest of the last (message_id, survey status, recipient/answer
+        # state) this process successfully wrote to each respondent DM, so
+        # reconnect reconciliation can skip edits that would re-render
+        # identical content. Stored hashed — never raw answer content — and
+        # evicted once the response UI is finalized.
+        self._reconciled_response_fingerprints: dict[tuple[int, int], str] = {}
         self._unloaded = False
         self._response_locks: weakref.WeakValueDictionary[
             tuple[int, int], asyncio.Lock
@@ -949,6 +976,12 @@ class SurveyCommands(commands.Cog):
                 session.recipient.discord_id,
                 message_id,
             )
+            # The session left the recoverable set for good, so its
+            # reconciliation fingerprint can never be consulted again.
+            self._reconciled_response_fingerprints.pop(
+                (session.survey.survey_id, session.recipient.discord_id),
+                None,
+            )
         except Exception as exc:
             # The final, viewless Discord message is already correct. Leaving
             # this unfinalized lets reconnect recovery safely try again.
@@ -1042,14 +1075,24 @@ class SurveyCommands(commands.Cog):
                     interaction.user.id,
                     question_id,
                 )
-                await self._edit_response_message(interaction, session)
             except ValueError as exc:
                 await self.respond_error(interaction, str(exc))
+                return
             except Exception as exc:
                 logger.error(
                     "Survey review edit selection failed (%s)", type(exc).__name__
                 )
                 await self.respond_error(interaction, "Couldn't open that answer right now.")
+                return
+            try:
+                await self._edit_response_message(interaction, session)
+            except Exception as exc:
+                # The selection is durably saved; only the DM re-render failed
+                # and recovery is already scheduled. Never report a failure.
+                logger.warning(
+                    "Survey edit selection saved but the DM refresh failed (%s)",
+                    type(exc).__name__,
+                )
 
     async def return_to_review(
         self,
@@ -1065,12 +1108,22 @@ class SurveyCommands(commands.Cog):
                     survey_id,
                     interaction.user.id,
                 )
-                await self._edit_response_message(interaction, session)
             except ValueError as exc:
                 await self.respond_error(interaction, str(exc))
+                return
             except Exception as exc:
                 logger.error("Survey return-to-review failed (%s)", type(exc).__name__)
                 await self.respond_error(interaction, "Couldn't return to review right now.")
+                return
+            try:
+                await self._edit_response_message(interaction, session)
+            except Exception as exc:
+                # The review state is durably saved; only the DM re-render
+                # failed and recovery is already scheduled.
+                logger.warning(
+                    "Survey review opened but the DM refresh failed (%s)",
+                    type(exc).__name__,
+                )
 
     async def submit_response(
         self,
@@ -1095,12 +1148,23 @@ class SurveyCommands(commands.Cog):
                     raise ValueError("This survey response no longer exists")
                 if not submitted and session.recipient.submitted_at is None:
                     raise ValueError("This response could not be submitted")
-                await self._edit_response_message(interaction, session)
             except ValueError as exc:
                 await self.respond_error(interaction, str(exc))
+                return
             except Exception as exc:
                 logger.error("Survey submission failed (%s)", type(exc).__name__)
                 await self.respond_error(interaction, "Couldn't submit that response right now.")
+                return
+            try:
+                await self._edit_response_message(interaction, session)
+            except Exception as exc:
+                # The submission is durably recorded and already counted in
+                # results; only the DM re-render failed and recovery is
+                # already scheduled. Never report a submit failure.
+                logger.warning(
+                    "Survey response submitted but the DM refresh failed (%s)",
+                    type(exc).__name__,
+                )
 
     def _response_view(self, session: SurveySession) -> discord.ui.View | None:
         if (
@@ -1439,15 +1503,7 @@ class SurveyCommands(commands.Cog):
                     if message_id is None:
                         return
                     key = (latest.survey.survey_id, latest.recipient.discord_id)
-                    fingerprint = (
-                        message_id,
-                        latest.survey.status.value,
-                        latest.recipient.updated_at,
-                        latest.recipient.current_question_id,
-                        latest.recipient.in_review,
-                        latest.recipient.submitted_at,
-                        latest.answers,
-                    )
+                    fingerprint = _response_state_fingerprint(latest, message_id)
                     # Skip the Discord edit when this process already rendered
                     # exactly this state to this message (e.g. repeated
                     # on_ready reconnects with no respondent activity).
@@ -2058,4 +2114,8 @@ async def setup(bot: commands.Bot) -> None:
     cog = SurveyCommands(bot, survey_service, player_service)
     await bot.add_cog(cog)
     restored = await cog.restore_response_views()
+    # cog_unload cancels in-flight dispatch tasks, so a mid-campaign extension
+    # reload must resume pending deliveries itself instead of stranding
+    # recipients until the next gateway reconnect.
+    cog._schedule_delivery_recovery(_DELIVERY_RECEIPT_GRACE_SECONDS)
     logger.info("Survey command cog loaded; restored %d response views", restored)
