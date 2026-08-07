@@ -48,6 +48,63 @@ def test_streak_threshold_column_defaults_to_legacy_3(repo_db_path):
         assert row["streak_threshold"] == 3
 
 
+def test_migration_backfills_pre_column_rows_with_live_config_threshold(
+    temp_db_path, monkeypatch
+):
+    """Rows recorded before the column existed get the live config threshold.
+
+    Recording has always computed streak boosts with config.STREAK_THRESHOLD,
+    so a deployment running a non-default value must not have its history
+    stamped with the hardcoded default of 3 — that would silently rewrite all
+    OpenSkill history on the next replay.
+    """
+    import config
+
+    # Build a pre-threshold-column database: base schema plus one legacy row.
+    manager = SchemaManager(temp_db_path)
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        cursor = conn.cursor()
+        manager._create_base_schema(cursor)
+        cursor.execute(
+            """
+            INSERT INTO players (discord_id, discord_username, initial_mmr)
+            VALUES (77001, 'LegacyThreshold', 3000)
+            """
+        )
+        cursor.execute(
+            "INSERT INTO rating_history (discord_id, rating, won) VALUES (77001, 1500.0, 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # This deployment has always recorded with a non-default threshold.
+    monkeypatch.setattr(config, "STREAK_THRESHOLD", 4)
+    SchemaManager(temp_db_path).initialize()
+
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT streak_threshold FROM rating_history WHERE discord_id = 77001"
+        ).fetchone()
+        # A second initialize (idempotent re-run) must not restamp rows that
+        # now carry a real recorded threshold.
+        conn.execute(
+            "UPDATE rating_history SET streak_threshold = 6 WHERE discord_id = 77001"
+        )
+        conn.commit()
+    assert row["streak_threshold"] == 4
+
+    SchemaManager(temp_db_path).initialize()
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT streak_threshold FROM rating_history WHERE discord_id = 77001"
+        ).fetchone()
+    assert row["streak_threshold"] == 6
+
+
 def test_v4_migration_replays_recorded_streak_rates_idempotently(repo_db_path):
     player_ids = list(range(99000, 99010))
     players = [

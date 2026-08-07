@@ -147,13 +147,15 @@ class SchemaManager:
 
     # --- Migration helpers ---
 
-    def _add_column_if_not_exists(self, cursor, table: str, column: str, column_type: str) -> None:
+    def _add_column_if_not_exists(self, cursor, table: str, column: str, column_type: str) -> bool:
+        """Add the column when missing; return True when this call added it."""
         # table/column/column_type are internal migration strings only — not for external input.
         cursor.execute(f"PRAGMA table_info({table})")
         existing = {row["name"] for row in cursor.fetchall()}
         if column in existing:
-            return
+            return False
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        return True
 
     def _create_schema_migrations_table(self, cursor) -> None:
         cursor.execute(
@@ -1043,11 +1045,23 @@ class SchemaManager:
 
     def _migration_add_streak_threshold_to_rating_history(self, cursor) -> None:
         """Preserve the streak threshold used when each match was recorded."""
-        self._add_column_if_not_exists(
+        added = self._add_column_if_not_exists(
             cursor,
             "rating_history",
             "streak_threshold",
             "INTEGER NOT NULL DEFAULT 3",
+        )
+        if not added:
+            return
+        # Rows recorded before this column existed were computed with the
+        # live config threshold (recording has always read STREAK_THRESHOLD),
+        # so stamp them with that value rather than the column default of 3.
+        # Guarded by `added`, this backfill touches only pre-column rows.
+        import config
+
+        cursor.execute(
+            "UPDATE rating_history SET streak_threshold = ?",
+            (int(config.STREAK_THRESHOLD),),
         )
 
     def _migration_openskill_v4_streak_replay(self, cursor) -> None:

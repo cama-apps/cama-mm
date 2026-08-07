@@ -1821,3 +1821,105 @@ class TestSuspensionProgressOnRecord:
             ModerationEventType.COMPLETE
         ]
         assert completions[0].discord_id == 424243
+
+
+class TestRatingHistoryStreakInsertDefaults:
+    """record_match_core_atomic stamps live-config streak params, not legacy ones.
+
+    Live recording always computes streak boosts with the live config curve,
+    and replay/correction trust the recorded per-row values — so a caller that
+    omits the keys must not mislabel the row with the pre-column legacy
+    constants (0.20 / 3).
+    """
+
+    @staticmethod
+    def _record(db_path, rating_history_rows):
+        from repositories.match_repository import MatchRepository
+
+        repo = MatchRepository(db_path)
+        pending_id = repo.save_pending_match(TEST_GUILD_ID, {})
+        return repo.record_match_core_atomic(
+            team1_ids=[111],
+            team2_ids=[222],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+            dotabuff_match_id=None,
+            lobby_type="shuffle",
+            lobby_kind="open",
+            balancing_rating_system="glicko",
+            winning_ids=[],
+            losing_ids=[],
+            glicko_updates=[],
+            openskill_updates=[],
+            rating_history_rows=rating_history_rows,
+            match_prediction={
+                "radiant_rating": 1500.0,
+                "dire_rating": 1500.0,
+                "radiant_rd": 200.0,
+                "dire_rd": 200.0,
+                "expected_radiant_win_prob": 0.5,
+            },
+            last_match_date_iso="2026-08-05T00:00:00+00:00",
+            first_calibration_ids=[],
+            first_calibration_unix=0,
+            effective_avoid_ids=[],
+            effective_deal_ids=[],
+            pending_match_id=pending_id,
+        )
+
+    def test_omitted_streak_keys_default_to_live_config(
+        self, repo_db_path, monkeypatch
+    ):
+        """A row without streak keys is stamped with the live config values."""
+        import repositories.match_repository as match_repository_module
+
+        # Simulate a deployment running a non-default streak configuration.
+        monkeypatch.setattr(match_repository_module, "STREAK_THRESHOLD", 5)
+        monkeypatch.setattr(
+            match_repository_module, "STREAK_MULTIPLIER_PER_GAME", 0.40
+        )
+
+        match_id = self._record(
+            repo_db_path,
+            [{"discord_id": 111, "rating": 1520.0}],
+        )
+
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT streak_multiplier_per_game, streak_threshold
+                FROM rating_history
+                WHERE guild_id = ? AND match_id = ? AND discord_id = 111
+                """,
+                (TEST_GUILD_ID, match_id),
+            ).fetchone()
+        assert row["streak_threshold"] == 5
+        assert row["streak_multiplier_per_game"] == pytest.approx(0.40)
+
+    def test_supplied_streak_keys_are_stored_verbatim(self, repo_db_path):
+        """Caller-supplied per-row streak params always win over any default."""
+        match_id = self._record(
+            repo_db_path,
+            [
+                {
+                    "discord_id": 111,
+                    "rating": 1520.0,
+                    "streak_multiplier_per_game": 0.10,
+                    "streak_threshold": 7,
+                }
+            ],
+        )
+
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT streak_multiplier_per_game, streak_threshold
+                FROM rating_history
+                WHERE guild_id = ? AND match_id = ? AND discord_id = 111
+                """,
+                (TEST_GUILD_ID, match_id),
+            ).fetchone()
+        assert row["streak_threshold"] == 7
+        assert row["streak_multiplier_per_game"] == pytest.approx(0.10)
