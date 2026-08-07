@@ -228,7 +228,7 @@ class BettingService:
         Give each participant jopacoin for playing.
 
         Base reward is JOPACOIN_PER_GAME. In bomb pot matches, all players
-        receive an additional BOMB_POT_PARTICIPATION_BONUS (+1 JC).
+        receive the additional configured BOMB_POT_PARTICIPATION_BONUS.
 
         Args:
             player_ids: List of player Discord IDs to reward

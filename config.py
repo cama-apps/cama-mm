@@ -201,8 +201,8 @@ BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.20)  # 20% chance per match
 BOMB_POT_BLIND_PERCENTAGE = _parse_float("BOMB_POT_BLIND_PERCENTAGE", 0.15)  # 15% plus ante
 BOMB_POT_ANTE = _parse_int("BOMB_POT_ANTE", 10)  # Flat 10 JC ante (mandatory, can go negative)
 BOMB_POT_PARTICIPATION_BONUS = _parse_int(
-    "BOMB_POT_PARTICIPATION_BONUS", 1
-)  # Extra +1 JC for all players
+    "BOMB_POT_PARTICIPATION_BONUS", 5
+)  # Extra JC for players in Bomb Pot matches
 
 # Leverage betting configuration
 LEVERAGE_TIERS = _parse_int_list("LEVERAGE_TIERS", [2, 3, 5])

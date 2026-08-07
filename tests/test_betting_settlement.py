@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from config import BOMB_POT_PARTICIPATION_BONUS, JOPACOIN_PER_GAME
+from config import JOPACOIN_PER_GAME
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -939,8 +939,8 @@ class TestBombPotSettlement:
         # Bomb pot mode: losers get JOPACOIN_PER_GAME + bomb pot bonus
         bomb_pot_result = betting_service.award_participation(losing_ids, TEST_GUILD_ID, is_bomb_pot=True)
         for pid in losing_ids:
-            assert bomb_pot_result[pid]["net"] == JOPACOIN_PER_GAME + BOMB_POT_PARTICIPATION_BONUS
-            assert bomb_pot_result[pid]["bomb_pot_bonus"] == BOMB_POT_PARTICIPATION_BONUS
+            assert bomb_pot_result[pid]["net"] == 10
+            assert bomb_pot_result[pid]["bomb_pot_bonus"] == 5
 
     def test_bomb_pot_participation_bonus_winners_only_bonus(self, services):
         """Winners in bomb pot get only the bomb pot bonus (not base participation)."""
@@ -961,8 +961,8 @@ class TestBombPotSettlement:
             winning_ids, TEST_GUILD_ID, is_bomb_pot=True, bomb_pot_bonus_only=True
         )
         for pid in winning_ids:
-            assert result[pid]["net"] == BOMB_POT_PARTICIPATION_BONUS  # Only bomb pot bonus, no base
-            assert result[pid]["bomb_pot_bonus"] == BOMB_POT_PARTICIPATION_BONUS
+            assert result[pid]["net"] == 5  # Only bomb pot bonus, no base
+            assert result[pid]["bomb_pot_bonus"] == 5
 
     def test_bomb_pot_bonus_only_no_bomb_pot_gives_nothing(self, services):
         """If bomb_pot_bonus_only but not bomb pot, give nothing."""
