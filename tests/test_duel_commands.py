@@ -1057,6 +1057,50 @@ def test_main_channel_keeps_unique_substring_match(cog, interaction):
     assert cog._get_main_channel(GUILD_ID) is decorated_channel
 
 
+def test_main_channel_prefers_configured_duel_channel(
+    cog, interaction, monkeypatch
+):
+    import config
+
+    configured = make_text_channel(4242, guild=interaction.guild)
+    configured.name = "honor-duels"
+    interaction.guild.get_channel = MagicMock(return_value=configured)
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
+
+    assert cog._get_main_channel(GUILD_ID) is configured
+    interaction.guild.get_channel.assert_called_once_with(4242)
+
+
+def test_main_channel_scans_by_name_when_unconfigured(
+    cog, interaction, monkeypatch
+):
+    import config
+
+    interaction.guild.get_channel = MagicMock()
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", None)
+
+    assert cog._get_main_channel(GUILD_ID) is interaction.channel
+    interaction.guild.get_channel.assert_not_called()
+
+
+@pytest.mark.parametrize("configured_state", ["missing", "unsendable"])
+def test_main_channel_falls_back_to_name_scan_when_configured_is_unusable(
+    cog, interaction, monkeypatch, configured_state
+):
+    import config
+
+    if configured_state == "missing":
+        configured = None
+    else:
+        configured = make_text_channel(
+            4242, guild=interaction.guild, can_send=False
+        )
+    interaction.guild.get_channel = MagicMock(return_value=configured)
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
+
+    assert cog._get_main_channel(GUILD_ID) is interaction.channel
+
+
 @pytest.mark.asyncio
 async def test_earlier_daily_reminder_suppresses_recipient_ping(cog, bot):
     result = DuelDueResult(
@@ -1284,6 +1328,41 @@ async def test_undelivered_expiry_settlement_logs_amounts(
     assert f"recipient={RECIPIENT_ID}" in messages
     assert f"{challenge.wager} JC escrow" in messages
     assert f"{challenge.decline_penalty} JC penalty" in messages
+
+
+@pytest.mark.asyncio
+async def test_delivered_expiry_announcement_is_confirmed(cog, duel_service):
+    """A confirmed send retires the durable pending-announcement marker."""
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=1_700_604_800,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+    duel_service.process_due.return_value = result
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_604_800)
+
+    duel_service.confirm_expiry_announced.assert_called_once_with(result)
+    duel_service.rearm_reminder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_expiry_announcement_is_not_confirmed(
+    cog, duel_service, interaction
+):
+    """A transient send failure must leave the marker armed for retry."""
+    interaction.channel.send.side_effect = discord.DiscordException("timeout")
+    challenge = make_challenge(
+        status=DuelStatus.EXPIRED,
+        next_reminder_at=1_700_604_800,
+    )
+    result = DuelDueResult(kind=DuelDueKind.EXPIRED, challenge=challenge)
+    duel_service.process_due.return_value = result
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_604_800)
+
+    duel_service.confirm_expiry_announced.assert_not_called()
+    duel_service.rearm_reminder.assert_not_called()
 
 
 @pytest.mark.asyncio

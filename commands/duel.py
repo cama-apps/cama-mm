@@ -573,8 +573,15 @@ class DuelCommands(commands.Cog):
         try:
             delivered = await self.deliver_due_result(result)
         finally:
-            if not delivered:
-                if result.kind is DuelDueKind.EXPIRED:
+            if result.kind is DuelDueKind.EXPIRED:
+                if delivered:
+                    await asyncio.to_thread(
+                        self.duel_service.confirm_expiry_announced, result
+                    )
+                else:
+                    # The pending-announcement marker set alongside the
+                    # settlement stays armed, so the wake loop retries the
+                    # announcement (with backoff) until a send succeeds.
                     expired = result.challenge
                     logger.error(
                         "Duel expiry settled but its announcement was not "
@@ -588,10 +595,10 @@ class DuelCommands(commands.Cog):
                         expired.decline_penalty,
                         expired.recipient_id,
                     )
-                else:
-                    await asyncio.to_thread(
-                        self.duel_service.rearm_reminder, result
-                    )
+            elif not delivered:
+                await asyncio.to_thread(
+                    self.duel_service.rearm_reminder, result
+                )
 
     async def _get_lifecycle_channels(self, challenge: DuelChallenge) -> list:
         """Resolve unique, same-guild delivery targets in fallback order."""
@@ -612,11 +619,24 @@ class DuelCommands(commands.Cog):
         return channels
 
     def _get_main_channel(self, guild_id: int) -> discord.TextChannel | None:
-        """Resolve the guild's unique dota-mm text channel from the cache."""
+        """Resolve the configured duel channel, else the unique dota-mm channel."""
+        from config import DUEL_CHANNEL_ID
+
         guild = self.bot.get_guild(guild_id)
         if guild is None:
             logger.warning("Duel reminder guild unavailable; guild=%s", guild_id)
             return None
+        if DUEL_CHANNEL_ID is not None:
+            configured = guild.get_channel(DUEL_CHANNEL_ID)
+            if configured is not None and self._can_send_reminder(
+                configured, guild_id
+            ):
+                return configured
+            logger.warning(
+                "Configured duel channel unavailable; guild=%s channel=%s",
+                guild_id,
+                DUEL_CHANNEL_ID,
+            )
         matches = [
             channel
             for channel in guild.text_channels

@@ -148,11 +148,32 @@ class DuelService:
             )
             if unresolved is not None:
                 return unresolved
+            announcement = self.repo.claim_expired_announcement_atomic(
+                challenge_id,
+                guild_id,
+                now,
+                now + REMINDER_RETRY_BACKOFF_SECONDS,
+            )
+            if announcement is not None:
+                return announcement
         try:
             expired = self.repo.expire_atomic(challenge_id, guild_id, now)
         except ValueError:
             return None
         return DuelDueResult(DuelDueKind.EXPIRED, expired)
+
+    def confirm_expiry_announced(self, result: DuelDueResult) -> bool:
+        """Retire an expired duel's pending-announcement marker after a send."""
+        if (
+            result.kind is not DuelDueKind.EXPIRED
+            or result.challenge.next_reminder_at is None
+        ):
+            return False
+        return self.repo.clear_expired_announcement_atomic(
+            result.challenge.challenge_id,
+            result.challenge.guild_id,
+            result.challenge.next_reminder_at,
+        )
 
     def rearm_reminder(self, result: DuelDueResult) -> bool:
         expected_status = {

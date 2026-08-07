@@ -120,6 +120,17 @@ if _dig_channel_raw:
     except ValueError:
         DIG_CHANNEL_ID = None
 
+# Dedicated duel channel - if set, duel lifecycle notices (reminders, expiry,
+# unresolved nags) post here. When unset, the guild's unique #dota-mm text
+# channel is resolved by name instead.
+DUEL_CHANNEL_ID: int | None = None
+_duel_channel_raw = os.getenv("DUEL_CHANNEL_ID")
+if _duel_channel_raw:
+    try:
+        DUEL_CHANNEL_ID = int(_duel_channel_raw.strip())
+    except ValueError:
+        DUEL_CHANNEL_ID = None
+
 # Dedicated mafia channel. Public mafia embeds post here and /mafia commands
 # are gated to it (threads under it inherit). Hardcoded rather than env-driven.
 MAFIA_CHANNEL_ID: int = 1514997325385306132
