@@ -98,7 +98,7 @@ class RecordingMixin:
                     )
                 )
                 if is_bomb_pot:
-                    # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+                    # Winners also get the configured bomb-pot bonus on top of their win bonus.
                     _accumulate(
                         self.betting_service.award_participation(
                             winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
