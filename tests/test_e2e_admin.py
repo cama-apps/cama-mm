@@ -939,17 +939,19 @@ class TestE2ESoftAvoid:
             for avoider, avoided in avoid_pairs
         )
         shuffler = match_service.shuffler
+        selected_players = result["radiant_team"].players + result["dire_team"].players
         selected_values = [
             p.get_value(
                 shuffler.use_glicko,
                 use_openskill=shuffler.use_openskill,
                 use_jopacoin=shuffler.use_jopacoin,
             )
-            for p in result["radiant_team"].players + result["dire_team"].players
+            for p in selected_players
         ]
         expected_score = (
             same_team_avoids * shuffler.soft_avoid_penalty
             - shuffler._calculate_lobby_rating_bonus(selected_values)
+            - shuffler._calculate_rd_priority(selected_players)
         )
 
         assert result["goodness_score"] == pytest.approx(expected_score)
