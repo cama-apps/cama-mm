@@ -38,7 +38,7 @@ from utils.formatting import (
     get_player_display_name,
 )
 from utils.guild import normalize_guild_id
-from utils.interaction_safety import safe_defer, update_lobby_message_closed
+from utils.interaction_safety import safe_defer
 from utils.match_views import EnrichedMatchView
 from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
@@ -125,21 +125,8 @@ class MatchCommands(commands.Cog):
         self.bankruptcy_repo = bankruptcy_repo
         # Track scheduled betting reminder tasks per pending match for cleanup.
         self._betting_tasks_by_match = {}
-
-    async def _update_channel_message_closed(
-        self,
-        reason: str = "Match Aborted",
-        guild_id: int | None = None,
-        lobby_kind: LobbyKind | str | None = None,
-    ) -> None:
-        """Update the channel message embed to show lobby/match is closed."""
-        await update_lobby_message_closed(
-            self.bot,
-            self.lobby_service,
-            reason,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-        )
+        # Guard so concurrent abort votes finalize (refund/announce) only once.
+        self._aborts_in_progress: set[tuple[int, int | None]] = set()
 
     async def _lock_lobby_thread(
         self,
@@ -600,11 +587,7 @@ class MatchCommands(commands.Cog):
             user_id = interaction.user.id
 
             is_captain = state and user_id in (state.captain1_id, state.captain2_id)
-            is_admin = user_id in getattr(self.bot, "admin_user_ids", set())
-            if not is_admin and interaction.guild:
-                member = interaction.guild.get_member(user_id)
-                if member and member.guild_permissions.administrator:
-                    is_admin = True
+            is_admin = has_admin_permission(interaction)
 
             if is_captain or is_admin:
                 msg = (
@@ -1129,9 +1112,9 @@ class MatchCommands(commands.Cog):
 
     async def _refresh_bonus_pool_lobbies(self, guild_id: int | None) -> None:
         """Refresh current lobby displays after betting-pool availability changes."""
-        from bot import _refresh_first_game_pool_lobby_messages
-
-        await _refresh_first_game_pool_lobby_messages(guild_id or 0)
+        refresh = getattr(self.bot, "refresh_first_game_pool_lobby_messages", None)
+        if refresh is not None:
+            await refresh(guild_id or 0)
 
     async def _finalize_shuffle(
         self,
@@ -2358,11 +2341,38 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         pending_match_id: int | None = None,
     ):
+        # Every abort vote at/above the threshold re-triggers finalization, so
+        # concurrent voters could each refund/announce. Only the first caller
+        # proceeds; the check-and-add is atomic on the event loop.
+        abort_key = (normalize_guild_id(guild_id), pending_match_id)
+        if abort_key in self._aborts_in_progress:
+            await interaction.followup.send(
+                "⏳ This match is already being aborted.", ephemeral=True
+            )
+            return
+        self._aborts_in_progress.add(abort_key)
+        try:
+            await self._finalize_abort_locked(interaction, guild_id, pending_match_id)
+        finally:
+            self._aborts_in_progress.discard(abort_key)
+
+    async def _finalize_abort_locked(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        pending_match_id: int | None = None,
+    ):
         betting_service = getattr(self.bot, "betting_service", None)
         pending_state = await asyncio.to_thread(
             self.match_service.state_service.get_last_shuffle, guild_id, pending_match_id
         )
-        if betting_service and pending_state:
+        if pending_state is None:
+            # A concurrent finalization already cleared this pending match.
+            await interaction.followup.send(
+                "❌ No pending match to abort.", ephemeral=True
+            )
+            return
+        if betting_service:
             try:
                 await asyncio.to_thread(
                     betting_service.refund_pending_bets,
@@ -2387,11 +2397,17 @@ class MatchCommands(commands.Cog):
             self.match_service.state_service.clear_last_shuffle, guild_id, pending_match_id
         )
         match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
+        # Filter out fake users (negative IDs) - Discord rejects them in
+        # allowed_mentions, which would fail the whole announcement.
         lobby_player_ids = sorted(
-            set(getattr(pending_state, "radiant_team_ids", []) or [])
-            | set(getattr(pending_state, "dire_team_ids", []) or [])
-            | set(getattr(pending_state, "excluded_player_ids", []) or [])
-            | set(getattr(pending_state, "excluded_conditional_player_ids", []) or [])
+            player_id
+            for player_id in (
+                set(getattr(pending_state, "radiant_team_ids", []) or [])
+                | set(getattr(pending_state, "dire_team_ids", []) or [])
+                | set(getattr(pending_state, "excluded_player_ids", []) or [])
+                | set(getattr(pending_state, "excluded_conditional_player_ids", []) or [])
+            )
+            if player_id > 0
         )
         mentions = " ".join(f"<@{player_id}>" for player_id in lobby_player_ids)
         content = f"✅ Match aborted{match_id_note}. Bets have been refunded."

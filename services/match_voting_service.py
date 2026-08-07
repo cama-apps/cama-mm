@@ -90,7 +90,8 @@ class MatchVotingService:
             Dict with vote counts, readiness status, and current result
 
         Raises:
-            ValueError: If result is invalid or user already voted differently
+            ValueError: If result is invalid, the user already voted differently,
+                or a non-admin voter is not a match participant
         """
         if result not in ("radiant", "dire"):
             raise ValueError("Result must be 'radiant' or 'dire'.")
@@ -99,6 +100,8 @@ class MatchVotingService:
         with self.state_service.state_lock():
             state = self.state_service.ensure_pending_state(guild_id, pending_match_id)
             submissions = self.state_service.ensure_record_submissions(state)
+            if not is_admin and not self._is_record_voter_eligible(state, user_id):
+                raise ValueError("Only match participants can vote on the result.")
             existing = submissions.get(user_id)
             if existing and existing["result"] != result:
                 raise ValueError("You already submitted a different result.")
@@ -134,6 +137,12 @@ class MatchVotingService:
             1
             for sub in state.record_submissions.values()
             if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
+        )
+
+    def _is_record_voter_eligible(self, state: PendingMatchState, user_id: int) -> bool:
+        """Result votes are limited to actual match participants (either team)."""
+        return user_id in (
+            set(state.radiant_team_ids or []) | set(state.dire_team_ids or [])
         )
 
     def _abort_eligible_player_ids(self, state: PendingMatchState) -> set[int]:

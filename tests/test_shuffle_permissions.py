@@ -183,3 +183,32 @@ async def test_shuffle_command_infers_lowskill_membership(monkeypatch):
         None,
         lobby_kind=LobbyKind.LOWSKILL,
     )
+
+
+@pytest.mark.asyncio
+async def test_active_draft_admin_hint_uses_central_admin_permission(monkeypatch):
+    """Allowlisted admins get the /draft restart hint during an active draft.
+
+    The check must go through services.permissions.has_admin_permission —
+    bot.admin_user_ids is never set on the bot object, so the old hand-rolled
+    check silently treated ADMIN_USER_IDS/manage_guild admins as non-admins.
+    """
+    lobby = _ready_lobby(players=range(1, 11))
+    cog = _make_cog(lobby, admin=True, monkeypatch=monkeypatch)
+    cog.bot.draft_state_manager = SimpleNamespace(
+        has_active_draft=MagicMock(return_value=True),
+        get_state=MagicMock(
+            return_value=SimpleNamespace(
+                lobby_kind=LobbyKind.OPEN,
+                captain1_id=50,
+                captain2_id=51,
+            )
+        ),
+    )
+    interaction = _make_interaction(42)
+
+    result = await cog._validate_shuffle_preconditions(interaction, TEST_GUILD_ID)
+
+    assert result is None
+    (message,), _kwargs = interaction.followup.send.call_args
+    assert "/draft restart" in message
