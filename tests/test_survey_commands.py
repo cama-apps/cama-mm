@@ -150,7 +150,7 @@ def _cog(*, bot=None, survey_service=None, player_service=None):
     )
 
 
-def test_survey_commands_require_manage_guild_by_default():
+def test_survey_commands_are_guild_only_without_discord_visibility_gate():
     commands = (
         survey_commands.SurveyCommands.create,
         survey_commands.SurveyCommands.list_surveys,
@@ -166,8 +166,8 @@ def test_survey_commands_require_manage_guild_by_default():
         survey_commands.SurveyCommands.question_move,
     )
     assert survey_commands.SurveyCommands.survey.guild_only is True
-    assert survey_commands.SurveyCommands.survey.default_permissions.manage_guild is True
-    assert all(command.default_permissions.manage_guild is True for command in commands)
+    assert survey_commands.SurveyCommands.survey.default_permissions is None
+    assert all(command.default_permissions is None for command in commands)
 
 
 def test_delivery_history_match_falls_back_to_persistent_component_id():

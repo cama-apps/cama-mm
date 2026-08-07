@@ -732,7 +732,6 @@ class SurveyCommands(commands.Cog):
         name="survey",
         description="Create and manage private one-off surveys",
         guild_only=True,
-        default_permissions=discord.Permissions(manage_guild=True),
     )
     question = app_commands.Group(
         name="question",
@@ -1457,7 +1456,6 @@ class SurveyCommands(commands.Cog):
 
     @survey.command(name="create", description="Create a one-off survey draft")
     @app_commands.describe(title="Survey title shown to respondents")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def create(
         self,
@@ -1489,7 +1487,6 @@ class SurveyCommands(commands.Cog):
 
     @survey.command(name="list", description="List this server's surveys")
     @app_commands.choices(status=STATUS_CHOICES)
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def list_surveys(
         self,
@@ -1531,7 +1528,6 @@ class SurveyCommands(commands.Cog):
 
     @survey.command(name="preview", description="Preview a survey and its questions")
     @app_commands.describe(survey_id="Survey number")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def preview(self, interaction: discord.Interaction, survey_id: int) -> None:
         if not await self._require_admin(interaction):
@@ -1566,7 +1562,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, str(exc))
 
     @survey.command(name="delete", description="Delete a survey draft")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def delete(self, interaction: discord.Interaction, survey_id: int) -> None:
         if not await self._require_admin(interaction):
@@ -1598,7 +1593,6 @@ class SurveyCommands(commands.Cog):
         required="Whether respondents must answer this question",
     )
     @app_commands.choices(question_type=QUESTION_TYPE_CHOICES)
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def question_add(
         self,
@@ -1642,7 +1636,6 @@ class SurveyCommands(commands.Cog):
         required="Replacement required/optional setting",
     )
     @app_commands.choices(question_type=QUESTION_TYPE_CHOICES)
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def question_edit(
         self,
@@ -1677,7 +1670,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, str(exc))
 
     @question.command(name="remove", description="Remove a draft survey question")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def question_remove(
         self,
@@ -1708,7 +1700,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, str(exc))
 
     @question.command(name="move", description="Move a draft question to a new position")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def question_move(
         self,
@@ -1754,7 +1745,6 @@ class SurveyCommands(commands.Cog):
         registered_only="For member/role targets, include only registered Cama players",
     )
     @app_commands.choices(target=TARGET_TYPE_CHOICES)
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def send(
         self,
@@ -1813,7 +1803,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, "Couldn't send that survey right now.")
 
     @survey.command(name="retry", description="Retry failed DMs for an open survey")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def retry(self, interaction: discord.Interaction, survey_id: int) -> None:
         if not await self._require_admin(interaction):
@@ -1853,7 +1842,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, "Couldn't retry that survey right now.")
 
     @survey.command(name="results", description="View anonymous survey results")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def results(self, interaction: discord.Interaction, survey_id: int) -> None:
         if not await self._require_admin(interaction):
@@ -1882,7 +1870,6 @@ class SurveyCommands(commands.Cog):
             await self.respond_error(interaction, "Couldn't load those results right now.")
 
     @survey.command(name="close", description="Close an open survey")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def close(self, interaction: discord.Interaction, survey_id: int) -> None:
         if not await self._require_admin(interaction):
