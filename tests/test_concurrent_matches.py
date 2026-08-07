@@ -672,6 +672,9 @@ class TestRecordFinalizeThreadIsolation:
         ]
         recorded_announcement = next(message for message in announcements if "Match recorded" in message)
         assert "First game of the night" not in recorded_announcement
+        assert "🪙 **JC Changes:**" in recorded_announcement
+        assert "win +10" in recorded_announcement
+        assert "play +5" in recorded_announcement
 
     async def test_record_chunks_long_final_message_before_thread_finalize(self, services):
         """Large betting summaries must not make the final /record response fail.
@@ -696,7 +699,7 @@ class TestRecordFinalizeThreadIsolation:
 
         cog, _mock_bot = self._make_record_cog(services)
         result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
-        long_distribution = "\n" + "\n".join(
+        long_jc_changes = "\n" + "\n".join(
             f"<@{90000 + i}> won {1000 - i} JC (bet {100 + i}, 1.25x)"
             for i in range(80)
         )
@@ -709,7 +712,7 @@ class TestRecordFinalizeThreadIsolation:
             sent_messages.append(content)
 
         with (
-            patch.object(cog, "_format_bet_distribution", return_value=long_distribution),
+            patch.object(cog, "_format_jc_changes", return_value=long_jc_changes),
             patch.object(cog, "_finalize_lobby_thread", AsyncMock()) as finalize,
             patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
         ):

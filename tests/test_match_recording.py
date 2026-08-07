@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
+from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from domain.models.team import Team
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
@@ -942,13 +942,15 @@ class TestBettingEndToEnd:
         assert distributions["winners"], "Expected at least one winning distribution"
         assert distributions["winners"][0]["discord_id"] == participant
         assert distributions["losers"][0]["discord_id"] == spectator
+        assert result["jc_changes"][participant] == {"payout": 10, "bet": 5}
+        assert result["jc_changes"][spectator] == {"bet": -5}
 
         expected_participant_balance = 3 + 20 - 5 + 10 + JOPACOIN_WIN_REWARD
         assert player_repo.get_balance(participant, TEST_GUILD_ID) == expected_participant_balance
         # Spectator starts with 3, gets +10 top-up, -5 lost bet = 8
         assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 8
 
-    def test_excluded_players_receive_exclusion_bonus(self, test_db):
+    def test_lobby_rewards_pay_ten_to_winners_and_five_to_others(self, test_db):
         player_repo = PlayerRepository(test_db.db_path)
         bet_repo = BetRepository(test_db.db_path)
         match_repo = MatchRepository(test_db.db_path)
@@ -981,22 +983,59 @@ class TestBettingEndToEnd:
         for pid in player_ids:
             player_repo.update_balance(pid, TEST_GUILD_ID, 0)
 
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         for pid in excluded_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == JOPACOIN_EXCLUSION_REWARD
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == 5
+            assert result["jc_changes"][pid] == {"payout": 5}
 
         # Included players got the win bonus (radiant won) or participation
         # (dire lost). Pin each player's exact reward by the side they landed
         # on so the assertion catches a regression that pays winners the loser
         # reward or vice versa (which the prior {win, lose} membership check
         # silently accepted).
-        from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
         radiant_ids = set(pending.radiant_team_ids)
         included_ids = set(player_ids) - set(excluded_ids)
         for pid in included_ids:
-            expected = JOPACOIN_WIN_REWARD if pid in radiant_ids else JOPACOIN_PER_GAME
+            expected = 10 if pid in radiant_ids else 5
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == expected
+            assert result["jc_changes"][pid] == {"payout": expected}
+
+    def test_readycheck_nonresponders_receive_no_match_jc(self, test_db):
+        player_repo = PlayerRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        betting_service = BettingService(bet_repo, player_repo)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=False,
+            betting_service=betting_service,
+        )
+
+        player_ids = list(range(5151, 5161))
+        nonresponder = 5161
+        for pid in [*player_ids, nonresponder]:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                guild_id=TEST_GUILD_ID,
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+
+        match_service.shuffle_players(
+            player_ids,
+            guild_id=TEST_GUILD_ID,
+            excluded_conditional_ids=[nonresponder],
+        )
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        assert player_repo.get_balance(nonresponder, TEST_GUILD_ID) == 0
+        assert nonresponder not in result["jc_changes"]
 
     def test_max_lobby_14_players_4_excluded(self, test_db):
         """

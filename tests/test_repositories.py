@@ -1197,6 +1197,8 @@ class TestMatchRepository:
             "game_mode": 2,
             "lobby_type": "draft",
             "balancing_rating_system": "openskill",
+            "win_reward_jc": None,
+            "jc_changes": {},
         }
         assert len(player_matches) == 1
         player_match = player_matches[0]

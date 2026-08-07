@@ -279,6 +279,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
+        win_reward_jc: int | None = None,
     ) -> int:
         """Record a match and all dependent rating/pairings/consumable writes
         atomically.
@@ -350,9 +351,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 INSERT INTO matches (
                     guild_id, team1_players, team2_players, winning_team,
                     dotabuff_match_id, lobby_type, lobby_kind, balancing_rating_system,
-                    betting_mode, pending_match_id, match_date
+                    betting_mode, pending_match_id, match_date, win_reward_jc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_guild,
@@ -366,6 +367,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     betting_mode,
                     pending_match_id,
                     last_match_date_iso,
+                    win_reward_jc,
                 ),
             )
             match_id = cursor.lastrowid
@@ -1177,7 +1179,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT match_id, team1_players, team2_players, winning_team,
                        match_date, dotabuff_match_id, notes, valve_match_id,
                        duration_seconds, radiant_score, dire_score, game_mode,
-                       lobby_type, balancing_rating_system
+                       lobby_type, balancing_rating_system, win_reward_jc,
+                       jc_changes
                 FROM matches
                 WHERE match_id = ? AND guild_id = ?
                 """,
@@ -1208,7 +1211,75 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "balancing_rating_system": row["balancing_rating_system"]
                 if "balancing_rating_system" in row.keys()
                 else "glicko",
+                "win_reward_jc": row["win_reward_jc"]
+                if "win_reward_jc" in row.keys()
+                else None,
+                "jc_changes": (
+                    {
+                        int(discord_id): {
+                            str(component): int(amount)
+                            for component, amount in components.items()
+                        }
+                        for discord_id, components in json.loads(row["jc_changes"]).items()
+                    }
+                    if "jc_changes" in row.keys() and row["jc_changes"]
+                    else {}
+                ),
             }
+
+    def update_match_jc_changes(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        jc_changes: dict[int, dict[str, int]],
+    ) -> None:
+        """Persist finalized per-user JC components for retry-safe reporting."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        payload = json.dumps(
+            {
+                str(discord_id): {
+                    str(component): int(amount)
+                    for component, amount in components.items()
+                }
+                for discord_id, components in jc_changes.items()
+            }
+        )
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE matches
+                SET jc_changes = ?
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (payload, match_id, normalized_guild),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"Match {match_id} not found")
+
+    def get_match_jc_changes(
+        self, match_id: int, guild_id: int | None
+    ) -> dict[int, dict[str, int]]:
+        """Load the finalized JC component snapshot for a match."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT jc_changes
+                FROM matches
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, normalized_guild),
+            ).fetchone()
+        if not row or not row["jc_changes"]:
+            return {}
+        return {
+            int(discord_id): {
+                str(component): int(amount)
+                for component, amount in components.items()
+            }
+            for discord_id, components in json.loads(row["jc_changes"]).items()
+        }
 
     def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None:
         """Get parsed enrichment_data JSON for a match, or None if not enriched."""

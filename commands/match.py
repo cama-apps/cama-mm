@@ -1485,14 +1485,8 @@ class MatchCommands(commands.Cog):
         losers = distributions.get("losers", [])
 
         # Assemble the result message body from focused formatting steps.
-        distribution_text = self._format_bet_distribution(
-            winners,
-            losers,
-            distributions.get("bankruptcy_penalties", {}),
-            distributions.get("vanity_taxes", {}),
-        )
+        distribution_text = self._format_jc_changes(record_result)
         distribution_text += self._format_stake_distribution(record_result)
-        distribution_text += self._format_streak_bonus(distributions)
         distribution_text += await self._award_streaming_bonus_at_record(
             guild, guild_id, record_result
         )
@@ -1671,6 +1665,64 @@ class MatchCommands(commands.Cog):
         """Send the reliable result details, chunked when needed."""
         for content in _chunk_discord_content(result_message):
             await interaction.followup.send(content, ephemeral=False)
+
+    def _format_jc_changes(self, record_result: dict) -> str:
+        """Format one concise, netted JC line for every affected user."""
+        changes = record_result.get("jc_changes", {})
+        if not changes:
+            return ""
+
+        winning_ids = list(record_result.get("winning_player_ids", []))
+        losing_ids = list(record_result.get("losing_player_ids", []))
+        excluded_ids = list(record_result.get("excluded_player_ids", []))
+        ordered_ids = list(
+            dict.fromkeys([*winning_ids, *losing_ids, *excluded_ids, *changes])
+        )
+        winning_set = set(winning_ids)
+        losing_set = set(losing_ids)
+        excluded_set = set(excluded_ids)
+
+        def signed(amount: int) -> str:
+            if amount > 0:
+                return f"+{amount}"
+            if amount < 0:
+                return f"−{abs(amount)}"
+            return "0"
+
+        lines: list[str] = []
+        for discord_id in ordered_ids:
+            components = changes.get(discord_id)
+            if components is None:
+                continue
+
+            parts: list[str] = []
+            if "payout" in components:
+                if discord_id in winning_set:
+                    payout_label = "win"
+                elif discord_id in losing_set:
+                    payout_label = "play"
+                elif discord_id in excluded_set:
+                    payout_label = "excluded"
+                else:
+                    payout_label = "payout"
+                parts.append(f"{payout_label} {signed(int(components['payout']))}")
+            if "bet" in components:
+                parts.append(f"bet {signed(int(components['bet']))}")
+            if "streak" in components:
+                parts.append(f"streak {signed(int(components['streak']))}")
+
+            total = sum(
+                int(components.get(component, 0))
+                for component in ("payout", "bet", "streak")
+            )
+            detail = f" ({', '.join(parts)})" if parts else ""
+            lines.append(
+                f"<@{discord_id}>: **{signed(total)}** {JOPACOIN_EMOTE}{detail}"
+            )
+
+        if not lines:
+            return ""
+        return "\n\n🪙 **JC Changes:**\n" + "\n".join(lines)
 
     def _format_bet_distribution(
         self, winners: list[dict], losers: list[dict],

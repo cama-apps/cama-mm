@@ -597,6 +597,12 @@ class SchemaManager:
                 "add_win_bonus_jc_to_match_participants",
                 self._migration_add_win_bonus_jc_to_match_participants,
             ),
+            # Keep post-game JC reporting and later result corrections tied to
+            # the values recorded with the match, not current configuration.
+            (
+                "add_match_jc_accounting_snapshots",
+                self._migration_add_match_jc_accounting_snapshots,
+            ),
             # Stamp the last game-date a daily tunnel bonus applied so the
             # write commits together with the bonus and can't re-apply on a
             # retried dig.
@@ -2098,6 +2104,11 @@ class SchemaManager:
         match, so a correction couldn't isolate the win bonus to reverse it;
         this column records exactly the JC the win bonus put on the balance."""
         self._add_column_if_not_exists(cursor, "match_participants", "win_bonus_jc", "INTEGER")
+
+    def _migration_add_match_jc_accounting_snapshots(self, cursor) -> None:
+        """Persist immutable match reward inputs and finalized JC components."""
+        self._add_column_if_not_exists(cursor, "matches", "win_reward_jc", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "jc_changes", "TEXT")
 
     def _migration_add_announced_at_to_economy_daily_events(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "economy_daily_events", "announced_at", "INTEGER")

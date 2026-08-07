@@ -520,9 +520,15 @@ class IBetRepository(ABC):
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
         payout_multiplier: float = 1.0,
+        persist_match_jc_changes: bool = False,
     ) -> dict:
         """Atomically settle bets for the current match window."""
         ...
+
+    @abstractmethod
+    def get_match_blood_pact_skims(
+        self, match_id: int, guild_id: int | None
+    ) -> dict[int, int]: ...
 
     @abstractmethod
     def refund_pending_bets_atomic(
@@ -642,6 +648,7 @@ class IMatchRepository(ABC):
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
+        win_reward_jc: int | None = None,
     ) -> int: ...
 
     @abstractmethod
@@ -715,6 +722,19 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def get_match(self, match_id: int, guild_id: int | None = None): ...
+
+    @abstractmethod
+    def update_match_jc_changes(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        jc_changes: dict[int, dict[str, int]],
+    ) -> None: ...
+
+    @abstractmethod
+    def get_match_jc_changes(
+        self, match_id: int, guild_id: int | None
+    ) -> dict[int, dict[str, int]]: ...
 
     @abstractmethod
     def get_match_participants_bulk(
