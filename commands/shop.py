@@ -1901,7 +1901,7 @@ class ShopCommands(commands.Cog):
             # Deliberately public: the first followup after the public defer
             # ignores ephemeral, and a visible refund notice is honest about
             # the publicly in-progress purchase failing.
-            await interaction.followup.send(reason)
+            await safe_followup(interaction, content=reason)
 
         async def _apply_hostile_loss(
             victim_id: int,
@@ -2078,13 +2078,13 @@ class ShopCommands(commands.Cog):
                 if total_absorbed
                 else ""
             )
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"⛰️🔥 **PYROCLASM** — {interaction.user.mention} unleashes chaos!\n"
                 f"{victims_text}\n"
                 f"**{total_destroyed} {JOPACOIN_EMOTE} burned**.{shield_text} "
                 f"You claim **{bounty} {JOPACOIN_EMOTE}** from the ash.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + bounty})"
-            )
+            ))
 
         elif item_key == "insight":
             recipient = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
@@ -2101,24 +2101,24 @@ class ShopCommands(commands.Cog):
                 except Exception:
                     tunnel_info = None
             if tunnel_info is None:
-                await interaction.followup.send(
+                await safe_followup(interaction, content=(
                     f"🏝️🔍 **INSIGHT** — {target.mention} hasn't started digging.\n"
                     f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-                )
+                ))
                 return
             tunnel = tunnel_info.get("tunnel") or tunnel_info
             relics = tunnel_info.get("relics") or []
             relic_names = ", ".join(
                 r.get("name", r.get("artifact_id", "?")) for r in relics if r
             ) or "—"
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🏝️🔍 **INSIGHT** — {interaction.user.mention} reads the threads of fate.\n"
                 f"**{target.display_name}** depth `{tunnel.get('depth', 0)}` "
                 f"luminosity `{tunnel.get('luminosity', 0)}` "
                 f"prestige `{tunnel.get('prestige_level', 0)}`\n"
                 f"Equipped relics: {relic_names}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "sapling":
             dig_service = getattr(self.bot, "dig_service", None)
@@ -2145,11 +2145,11 @@ class ShopCommands(commands.Cog):
                         shaved_seconds = 0
                 except Exception:
                     shaved_seconds = 0
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌲🌱 **SAPLING** — {interaction.user.mention} accelerates growth.\n"
                 f"`/dig` cooldown reduced by {shaved_seconds // 60}m.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "reprieve":
             if buff_service is None:
@@ -2179,13 +2179,13 @@ class ShopCommands(commands.Cog):
                 except Exception:
                     logger.exception("Reprieve retroactive reconciliation failed")
 
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌾🕊️ **REPRIEVE** — {interaction.user.mention} raises a rolling ward.\n"
                 f"Recovered **{recovered} {JOPACOIN_EMOTE}** from eligible losses "
                 f"in the past 24h. Remaining capacity protects 50% of hostile "
                 f"losses for 24h, up to **25 {JOPACOIN_EMOTE}** total.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance + recovered})"
-            )
+            ))
 
         elif item_key == "soul_harvest":
             all_players = await asyncio.to_thread(
@@ -2258,12 +2258,12 @@ class ShopCommands(commands.Cog):
                 if total_absorbed
                 else ""
             )
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
                 f"Drained up to **3 {JOPACOIN_EMOTE}** from **{len(eligible)}** players. "
                 f"Gained **{total_drained} {JOPACOIN_EMOTE}**.{shield_text}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + total_drained})"
-            )
+            ))
 
         elif item_key == "dynamite_cache":
             # Mid: stash a 3-charge yield buff on the dig service.
@@ -2285,11 +2285,11 @@ class ShopCommands(commands.Cog):
                 logger.exception("Dynamite Cache buff write failed")
                 await _refund("Could not pack the cache; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"⛰️🧨 **DYNAMITE CACHE** — {interaction.user.mention} packs the next 3 digs hot.\n"
                 f"Yield +75% on your next 3 swings.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "mana_shield":
             now_ts = int(time.time())
@@ -2317,11 +2317,11 @@ class ShopCommands(commands.Cog):
                         "adjusted_reward": refund,
                     },
                 )
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
                 f"(60% of your largest loss in the past 24h, capped at 120. "
                 f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + refund})"
-            )
+            ))
 
         elif item_key == "regrowth":
             # Rolling 24h window (matching Mana Shield). A 4 AM-PST calendar
@@ -2351,11 +2351,11 @@ class ShopCommands(commands.Cog):
                         "adjusted_reward": recovery,
                     },
                 )
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
                 f"(35% of your last 24h losses, capped at 120. "
                 f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + recovery})"
-            )
+            ))
 
         elif item_key == "aegis":
             if buff_service is None:
@@ -2367,12 +2367,12 @@ class ShopCommands(commands.Cog):
                 logger.exception("Aegis grant failed")
                 await _refund("Could not raise the ward; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌾🛡️ **AEGIS** — {interaction.user.mention} raises a fortified ward.\n"
                 f"For 24h, it fully absorbs up to **75 {JOPACOIN_EMOTE}** of "
                 f"hostile losses (or one non-JC sabotage).\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "blood_pact":
             if buff_service is None:
@@ -2386,11 +2386,11 @@ class ShopCommands(commands.Cog):
                 logger.exception("Blood Pact grant failed")
                 await _refund("Could not seal the pact; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌿🩸 **BLOOD PACT** — {interaction.user.mention} marks {target.mention} for skim.\n"
                 f"For 24h, you receive 25% of {target.display_name}'s match/wheel/dig earnings (cap 150 JC).\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "wildfire":
             all_players = await asyncio.to_thread(
@@ -2454,13 +2454,13 @@ class ShopCommands(commands.Cog):
                 if total_absorbed
                 else ""
             )
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"⛰️🔥🔥 **WILDFIRE** — {interaction.user.mention} consumes the day's color in flame.\n"
                 f"Drained **{total_drained} {JOPACOIN_EMOTE}** from {len(eligible)} players. "
                 f"You claim **{user_gain} {JOPACOIN_EMOTE}** of the harvest."
                 f"{shield_text}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + user_gain + ult_refund})"
-            )
+            ))
 
         elif item_key == "counterspell":
             if buff_service is None:
@@ -2472,12 +2472,12 @@ class ShopCommands(commands.Cog):
                 logger.exception("Counterspell grant failed")
                 await _refund("Could not weave the ward; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🏝️🜨 **COUNTERSPELL** — {interaction.user.mention} weaves a 24h ward.\n"
                 f"All Pyroclasm / Soul Harvest / Sabotage / Blood Pact / Wildfire targeting you "
                 f"is repelled for the next 24 hours.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "overgrowth":
             if buff_service is None:
@@ -2489,11 +2489,11 @@ class ShopCommands(commands.Cog):
                 logger.exception("Overgrowth grant failed")
                 await _refund("Could not seed the overgrowth; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌲🌳 **OVERGROWTH** — {interaction.user.mention} burns the day's mana into the soil.\n"
                 f"For 12h: your next 10 digs get +10 JC and cave-in chance halved.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "sanctuary":
             if buff_service is None:
@@ -2511,12 +2511,12 @@ class ShopCommands(commands.Cog):
                 logger.exception("Sanctuary grant failed")
                 await _refund("Could not bind the sanctuary; refunded.")
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌾🕊️ **SANCTUARY** — {interaction.user.mention} shelters {target.mention}.\n"
                 f"For 24h, both of you share **150 {JOPACOIN_EMOTE}** of full "
                 f"hostile-loss protection and non-JC PvP immunity.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
-            )
+            ))
 
         elif item_key == "dark_bargain":
             if buff_service is None:
@@ -2546,11 +2546,11 @@ class ShopCommands(commands.Cog):
                     "recorded — contact an admin if it doesn't clear.",
                 )
                 return
-            await interaction.followup.send(
+            await safe_followup(interaction, content=(
                 f"🌿💀 **DARK BARGAIN** — {interaction.user.mention} signs in red ink.\n"
                 f"+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + 800 + ult_refund})"
-            )
+            ))
 
 
     def _compute_largest_recent_loss(

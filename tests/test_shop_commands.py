@@ -2007,7 +2007,7 @@ async def test_manashop_reprieve_grants_pool_and_reconciles_rolling_losses(
     bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
         user_id, guild_id, "reprieve", ANY,
     )
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "REPRIEVE" in message
     assert "Recovered **10" in message
     assert "balance: 95" in message
@@ -2081,7 +2081,7 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
         (buyer_id, guild_id, -25),
         (buyer_id, guild_id, 13),
     ]
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "**27" in message
     assert "You claim **13" in message
     assert "Shields absorbed **27" in message
@@ -2184,7 +2184,7 @@ async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch
         assert call.kwargs["kind"] == "soul_harvest"
         assert call.kwargs["destination"] == "player"
         assert call.kwargs["recipient_id"] == buyer_id
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "Gained **2" in message
     assert "Shields absorbed **3" in message
 
@@ -2238,7 +2238,7 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     assert sum(-delta for _, _, delta in victim_debits) == 6
     assert all(delta == -2 for _, _, delta in victim_debits)
 
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "drains the living" in message.lower()
     assert "balance: 481" in message
     bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
@@ -2277,7 +2277,7 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
         (buyer_id, guild_id, -25),
         (buyer_id, guild_id, 25),
     ]
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "No living souls" in message
     bot.mana_repo.unmark_item_used.assert_called_once_with(
         buyer_id, guild_id, "soul_harvest", ANY,
@@ -2330,7 +2330,7 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
         (buyer_id, guild_id, -150),
         (buyer_id, guild_id, 1),
     ]
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "Drained **4" in message
     assert "claim **1" in message
     assert "Shields absorbed **5" in message
@@ -2377,7 +2377,7 @@ async def test_manashop_sanctuary_costs_90_without_match_bonus(monkeypatch):
     bot.buff_service.grant_sanctuary.assert_called_once_with(
         buyer_id, guild_id, ally_id,
     )
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["content"]
     assert "150" in message
     assert "match" not in message.lower()
 
@@ -2404,7 +2404,7 @@ async def test_dark_bargain_due_amount_matches_loan_principal():
     bot.buff_service.grant_dark_bargain_debt.assert_called_once_with(
         interaction.user.id, interaction.guild.id, amount_due=700, due_in_days=7,
     )
-    assert "700 due in 7 days" in interaction.followup.send.call_args.args[0]
+    assert "700 due in 7 days" in interaction.followup.send.call_args.kwargs["content"]
 
 
 @pytest.mark.asyncio

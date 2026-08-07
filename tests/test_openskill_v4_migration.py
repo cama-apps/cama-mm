@@ -104,7 +104,6 @@ def test_migration_backfills_pre_column_rows_with_live_config_threshold(
         ).fetchone()
     assert row["streak_threshold"] == 6
 
-
 def test_v4_migration_replays_recorded_streak_rates_idempotently(repo_db_path):
     player_ids = list(range(99000, 99010))
     players = [

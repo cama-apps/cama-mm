@@ -477,15 +477,30 @@ class LobbyManagerService:
                     target_kind,
                 )
             except Exception:
-                # The re-read is best-effort hardening: a lookup failure must
-                # not strand a half-applied join (the player is already added
-                # in memory). Proceed as if no suspension was found — the
-                # admin suspend flow's post-commit eviction covers a real
-                # race.
-                logging.getLogger("cama_bot.services.lobby_manager").exception(
-                    "Post-join suspension re-check failed; keeping the join"
-                )
-                suspension = None
+                # A locked-DB blip is likeliest exactly when a racing
+                # suspension write is committing, so retry once before
+                # falling open.
+                try:
+                    suspension = self._get_active_suspension(
+                        discord_id,
+                        normalized,
+                        target_kind,
+                    )
+                except Exception:
+                    # Fail open: stranding a half-applied join (player added
+                    # in memory, error surfaced to the user) is worse than
+                    # the residual window this leaves — for THIS join the
+                    # TOCTOU closure is void, and the admin eviction only
+                    # catches suspensions whose post-commit membership read
+                    # runs after the add. Accepted: the seated player is
+                    # visible and evictable by re-running the suspend.
+                    logging.getLogger(
+                        "cama_bot.services.lobby_manager"
+                    ).exception(
+                        "Post-join suspension re-check failed twice; "
+                        "keeping the join"
+                    )
+                    suspension = None
             if suspension is not None:
                 rolled_back = False
                 drop_shell = False
