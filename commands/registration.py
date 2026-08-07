@@ -115,6 +115,38 @@ class RegistrationCommands(commands.Cog):
                 return
 
             target_name = escape_discord_text(playername.display_name)
+
+            # Detect an existing subscription before the DM preflight so a
+            # re-run gets the duplicate notice without a pointless "check
+            # passed" DM. Best-effort only: the persist step below still
+            # reports duplicates (created=False), so a failed read check
+            # falls through to the normal preflight path rather than
+            # blocking the command.
+            try:
+                already_subscribed = await asyncio.to_thread(
+                    reminder_service.has_lobby_player_subscription,
+                    interaction.user.id,
+                    playername.id,
+                    interaction.guild.id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not pre-check lobby alert duplicate for subscriber %s and target %s: %s",
+                    interaction.user.id,
+                    playername.id,
+                    exc,
+                )
+                already_subscribed = False
+            if already_subscribed:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"🔔 You already have a one-time lobby alert set for **{target_name}**."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
             try:
                 # Discord has no guild permission bit that proves a user accepts
                 # bot DMs. A real send is the only reliable preflight, and the

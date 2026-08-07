@@ -1711,20 +1711,6 @@ class ILoanRepository(ABC):
     ) -> int: ...
 
     @abstractmethod
-    def deduct_up_to_nonprofit_fund(
-        self,
-        guild_id: int | None,
-        amount: int,
-        *,
-        source: str | None = None,
-        actor_id: int | None = None,
-        related_type: str | None = None,
-        related_id: str | int | None = None,
-        reason: str | None = None,
-        metadata: dict | str | None = None,
-    ) -> int: ...
-
-    @abstractmethod
     def get_and_deduct_nonprofit_fund_atomic(
         self,
         guild_id: int | None,
@@ -2514,6 +2500,16 @@ class IReminderRepository(ABC):
         guild_id: int,
     ) -> bool:
         """Add a one-shot target subscription; return whether it was new."""
+        ...
+
+    @abstractmethod
+    def has_lobby_target_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Return whether this one-shot target subscription already exists."""
         ...
 
     @abstractmethod

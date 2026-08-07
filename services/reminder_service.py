@@ -143,6 +143,19 @@ class ReminderService:
             guild_id,
         )
 
+    def has_lobby_player_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Return whether a one-shot alert for this target is already armed."""
+        return self._notification_repo.has_lobby_target_subscription(
+            subscriber_id,
+            target_id,
+            guild_id,
+        )
+
     async def notify_lobby_player_subscribers(
         self,
         bot: "commands.Bot",

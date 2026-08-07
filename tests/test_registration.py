@@ -182,6 +182,9 @@ class TestLobbyAutonotifyCommand:
         trace = []
         dm_message = Mock(edit=AsyncMock())
         reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.side_effect = (
+            lambda *_args: trace.append("dup_check") or False
+        )
         reminder_service.add_lobby_player_subscription.side_effect = (
             lambda *_args: trace.append("persist") or True
         )
@@ -200,7 +203,7 @@ class TestLobbyAutonotifyCommand:
             playername=target,
         )
 
-        assert trace == ["dm_check", "persist"]
+        assert trace == ["dup_check", "dm_check", "persist"]
         interaction.user.send.assert_awaited_once()
         assert "Target Player" in interaction.user.send.await_args.args[0]
         reminder_service.add_lobby_player_subscription.assert_called_once_with(
@@ -222,9 +225,13 @@ class TestLobbyAutonotifyCommand:
     @pytest.mark.asyncio
     async def test_player_target_duplicate_updates_dm_to_reflect_no_new_alert(self):
         """A re-run must not leave a 'DM check passed' message implying a new
-        alert was armed when the subscription already existed."""
+        alert was armed when the subscription already existed.
+
+        Covers the race where the pre-check saw no subscription but the
+        persist step still reported a duplicate (created=False)."""
         dm_message = Mock(edit=AsyncMock())
         reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.return_value = False
         reminder_service.add_lobby_player_subscription.return_value = False
         bot = Mock()
         bot.reminder_service = reminder_service
@@ -249,9 +256,73 @@ class TestLobbyAutonotifyCommand:
         )
 
     @pytest.mark.asyncio
+    async def test_player_target_known_duplicate_skips_preflight_dm(self):
+        """A duplicate detected by the pre-check must return the duplicate
+        notice without sending any 'DM check passed' preflight DM."""
+        reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.return_value = True
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+        interaction.user.send = AsyncMock()
+        target = Mock(id=456, bot=False, display_name="Target Player")
+
+        await cog.lobby_autonotify.callback(
+            cog,
+            interaction,
+            playername=target,
+        )
+
+        reminder_service.has_lobby_player_subscription.assert_called_once_with(
+            123,
+            456,
+            TEST_GUILD_ID,
+        )
+        interaction.user.send.assert_not_awaited()
+        reminder_service.add_lobby_player_subscription.assert_not_called()
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "already have a one-time lobby alert" in kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_player_target_precheck_failure_falls_back_to_preflight(self):
+        """A failing duplicate pre-check must not block the command; the
+        normal preflight-then-persist flow still runs."""
+        dm_message = Mock(edit=AsyncMock())
+        reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.side_effect = RuntimeError(
+            "db unavailable"
+        )
+        reminder_service.add_lobby_player_subscription.return_value = True
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+        interaction.user.send = AsyncMock(return_value=dm_message)
+        target = Mock(id=456, bot=False, display_name="Target Player")
+
+        await cog.lobby_autonotify.callback(
+            cog,
+            interaction,
+            playername=target,
+        )
+
+        interaction.user.send.assert_awaited_once()
+        reminder_service.add_lobby_player_subscription.assert_called_once_with(
+            123,
+            456,
+            TEST_GUILD_ID,
+        )
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "One-time lobby alert set" in kwargs["content"]
+
+    @pytest.mark.asyncio
     async def test_player_target_save_failure_updates_dm_to_reflect_failure(self):
         dm_message = Mock(edit=AsyncMock())
         reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.return_value = False
         reminder_service.add_lobby_player_subscription.side_effect = RuntimeError(
             "db unavailable"
         )
@@ -279,6 +350,7 @@ class TestLobbyAutonotifyCommand:
     @pytest.mark.asyncio
     async def test_player_target_blocked_dm_persists_nothing(self):
         reminder_service = Mock()
+        reminder_service.has_lobby_player_subscription.return_value = False
         bot = Mock()
         bot.reminder_service = reminder_service
         cog = RegistrationCommands(bot=bot, player_service=Mock())

@@ -126,6 +126,26 @@ class NotificationRepository(BaseRepository, IReminderRepository):
             )
             return cursor.rowcount == 1
 
+    def has_lobby_target_subscription(
+        self,
+        subscriber_id: int,
+        target_id: int,
+        guild_id: int,
+    ) -> bool:
+        """Return whether this one-shot target subscription already exists."""
+        normalized = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1
+                FROM lobby_target_subscriptions
+                WHERE guild_id = ? AND target_id = ? AND subscriber_id = ?
+                """,
+                (normalized, target_id, subscriber_id),
+            )
+            return cursor.fetchone() is not None
+
     def claim_lobby_target_subscribers(
         self,
         target_id: int,
