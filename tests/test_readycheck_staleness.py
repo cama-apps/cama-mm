@@ -527,6 +527,31 @@ async def test_explicit_unready_survives_other_player_leaving(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_reconfirms_invoker_who_previously_unreadied(monkeypatch):
+    """Re-running /readycheck is a fresh readiness signal: the invoker's own
+    earlier withdrawal must not cancel their explicit auto-confirmation on the
+    refresh path (the fresh-post path already resets declined markers)."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    # The invoker withdraws their ✅ (the bot.py reaction-remove path)...
+    assert env.lobby_service.remove_readycheck_reaction(1, guild_id=env.guild_id)
+
+    # ...then re-runs /readycheck within the freshness window (refresh path).
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
+    assert 1 in reacted, "explicit /readycheck must re-confirm the invoker"
+    # The re-confirmation cleared the declined marker like a manual re-click.
+    assert env.lobby_service.get_readycheck_declined(guild_id=env.guild_id) == set()
+
+
+@pytest.mark.asyncio
 async def test_reclicking_checkmark_after_unready_confirms_again(monkeypatch):
     env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
     env.lobby.player_join_times[2] = time.time() - 60

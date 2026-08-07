@@ -143,6 +143,45 @@ def test_suspension_does_not_revoke_an_existing_reservation():
     assert manager.get_in_flight_lobby_kind_for_player(10, guild_id=99) is None
 
 
+def test_join_rolls_back_when_suspension_lands_during_the_join():
+    """A suspension committed between the unlocked moderation read and the
+    locked membership add must not leave the player seated: the post-add
+    re-validation detects it and rolls the join back."""
+
+    class RacingModerationService(FakeModerationService):
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            result = super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+            if result is None and not self.suspensions:
+                # The admin flow commits its suspension immediately after the
+                # pre-join read returned nothing — classic TOCTOU sequencing.
+                self.suspend(discord_id, guild_id, "all")
+            return result
+
+    moderation = RacingModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+
+    result = manager.join_lobby(10, guild_id=99)
+
+    assert result == "lobby_suspended"
+    assert result.suspension is moderation.suspensions[(10, 99, "all")]
+    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    assert lobby is not None and 10 not in lobby.players
+    # The rollback is persisted, not just in-memory.
+    assert all(10 not in row["players"] for row in repo.load_all_lobby_states())
+    # Both moderation reads ran: the pre-join gate and the post-add re-check.
+    assert len(moderation.calls) == 2
+
+
 def test_moderation_queries_run_outside_manager_state_lock():
     """Suspension lookups are DB I/O (and can issue a lapsed-suspension close
     write), so they must never run inside the process-wide ``_state_lock``

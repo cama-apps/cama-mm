@@ -462,6 +462,28 @@ class LobbyManagerService:
             persist = created or result == "ok"
         if persist:
             self._persist_lobby(normalized, target_kind)
+        if result == "ok":
+            # Close the TOCTOU window left by the unlocked moderation gate: a
+            # suspension committed between the read above and the locked add
+            # is caught by this post-add re-read and the join rolled back. If
+            # this read sees no suspension, the suspension commit happened
+            # after it — and the suspend flow's post-commit membership read
+            # (under _state_lock) then sees this member and evicts. Either
+            # way one side observes the other.
+            suspension = self._get_active_suspension(
+                discord_id,
+                normalized,
+                target_kind,
+            )
+            if suspension is not None:
+                removed = False
+                with self._state_lock:
+                    lobby = self.lobbies.get((normalized, target_kind))
+                    if lobby is not None:
+                        removed = lobby.remove_player(discord_id)
+                if removed:
+                    self._persist_lobby(normalized, target_kind)
+                return LobbyJoinResult("lobby_suspended", suspension)
         return result
 
     def _join_conflict_locked(
