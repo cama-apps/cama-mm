@@ -924,6 +924,92 @@ class TestMatchCorrection:
         for pid in dire_ids:
             assert stored_streaks[pid] == (4, pytest.approx(1.40))
 
+    def test_correction_preserves_recording_time_base_delta_multiplier(
+        self, correction_services, monkeypatch
+    ):
+        """A later base-delta change must not rewrite an older match's curve."""
+        import rating_system as rating_system_module
+
+        match_service = correction_services["match_service"]
+        match_repo = correction_services["match_repo"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=11700)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
+
+        recorded_multiplier = 0.80
+        monkeypatch.setattr(
+            rating_system_module,
+            "BASE_RATING_DELTA_MULTIPLIER",
+            recorded_multiplier,
+        )
+        match_id = match_service.record_match(
+            "radiant",
+            guild_id=TEST_GUILD_ID,
+        )["match_id"]
+
+        history = match_repo.get_full_rating_history_for_match(match_id)
+        snapshots = {entry["discord_id"]: entry for entry in history}
+        rating_system = match_service.rating_system
+
+        def _glicko(pid):
+            entry = snapshots[pid]
+            return rating_system.create_player_from_rating(
+                entry["rating_before"],
+                entry["rd_before"],
+                entry["volatility_before"],
+            )
+
+        recorded_team1, recorded_team2 = rating_system.update_ratings_after_match(
+            [(_glicko(pid), pid) for pid in dire_ids],
+            [(_glicko(pid), pid) for pid in radiant_ids],
+            1,
+        )
+        expected = {
+            pid: rating
+            for rating, _rd, _vol, pid in recorded_team1 + recorded_team2
+        }
+
+        current_multiplier = 0.98
+        monkeypatch.setattr(
+            rating_system_module,
+            "BASE_RATING_DELTA_MULTIPLIER",
+            current_multiplier,
+        )
+        current_team1, current_team2 = rating_system.update_ratings_after_match(
+            [(_glicko(pid), pid) for pid in dire_ids],
+            [(_glicko(pid), pid) for pid in radiant_ids],
+            1,
+        )
+        wrong_current = {
+            pid: rating
+            for rating, _rd, _vol, pid in current_team1 + current_team2
+        }
+
+        match_service.correct_match_result(
+            match_id,
+            "dire",
+            TEST_GUILD_ID,
+            corrected_by=1,
+        )
+
+        corrected = {
+            entry["discord_id"]: entry
+            for entry in match_repo.get_full_rating_history_for_match(match_id)
+        }
+        for pid in player_ids:
+            assert corrected[pid]["base_rating_delta_multiplier"] == pytest.approx(
+                recorded_multiplier
+            )
+            assert corrected[pid]["rating"] == pytest.approx(expected[pid])
+            assert corrected[pid]["rating"] != pytest.approx(wrong_current[pid])
+            assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] == pytest.approx(
+                expected[pid]
+            )
+
     def test_correction_replay_uses_recorded_streak_rate_for_openskill(
         self, correction_services, monkeypatch
     ):

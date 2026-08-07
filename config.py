@@ -429,8 +429,8 @@ MAX_RATING_SWING_PER_GAME = _parse_float(
     "MAX_RATING_SWING_PER_GAME", 400.0
 )  # Cap on individual rating change per match
 BASE_RATING_DELTA_MULTIPLIER = _parse_float(
-    "BASE_RATING_DELTA_MULTIPLIER", 0.75
-)  # Target about +/-10 at 80% certainty
+    "BASE_RATING_DELTA_MULTIPLIER", 0.98
+)  # Target about +/-10 at RD 60
 MAX_RD_CONTRACTION_PER_GAME = _parse_float(
     "MAX_RD_CONTRACTION_PER_GAME", 0.065
 )  # Slow active confidence gain

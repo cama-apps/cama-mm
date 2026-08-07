@@ -13,6 +13,7 @@ from typing import Any
 from services.match._common import logger
 
 _LEGACY_STREAK_MULTIPLIER_PER_GAME = 0.20
+_LEGACY_BASE_RATING_DELTA_MULTIPLIER = 0.75
 
 
 class VotingCorrectionMixin:
@@ -214,6 +215,15 @@ class VotingCorrectionMixin:
         # fall back to current rating if a snapshot is missing.
         rating_by_id = {e["discord_id"]: e for e in rating_history}
 
+        recorded_base_multiplier = next(
+            (
+                float(entry["base_rating_delta_multiplier"])
+                for entry in rating_history
+                if entry.get("base_rating_delta_multiplier") is not None
+            ),
+            _LEGACY_BASE_RATING_DELTA_MULTIPLIER,
+        )
+
         def _recorded_streak_rate(pid: int) -> float:
             stored = rating_by_id.get(pid, {}).get("streak_multiplier_per_game")
             if stored is None:
@@ -268,11 +278,19 @@ class VotingCorrectionMixin:
 
         if new_winning_team == "radiant":
             team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                radiant_glicko, dire_glicko, 1, streak_multipliers=streak_multipliers
+                radiant_glicko,
+                dire_glicko,
+                1,
+                streak_multipliers=streak_multipliers,
+                base_rating_delta_multiplier=recorded_base_multiplier,
             )
         else:
             team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                dire_glicko, radiant_glicko, 1, streak_multipliers=streak_multipliers
+                dire_glicko,
+                radiant_glicko,
+                1,
+                streak_multipliers=streak_multipliers,
+                base_rating_delta_multiplier=recorded_base_multiplier,
             )
 
         new_glicko_updates = [

@@ -244,6 +244,38 @@ def test_streak_rate_migration_backfills_legacy_history(tmp_path):
     assert stored_rate == pytest.approx(0.20)
 
 
+def test_base_delta_multiplier_migration_backfills_legacy_history(tmp_path):
+    """Pre-multiplier rating rows retain the historical 0.75 calibration."""
+    db_path = str(tmp_path / "legacy-base-delta-multiplier.db")
+    manager = SchemaManager(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE rating_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rating REAL
+            )
+            """
+        )
+        conn.execute("INSERT INTO rating_history (rating) VALUES (1510.0)")
+
+        migration = getattr(
+            manager,
+            "_migration_add_base_rating_delta_multiplier_to_rating_history",
+            None,
+        )
+        assert migration is not None
+        migration(conn.cursor())
+
+        stored_multiplier = conn.execute(
+            "SELECT base_rating_delta_multiplier FROM rating_history"
+        ).fetchone()[0]
+
+    assert stored_multiplier == pytest.approx(0.75)
+
+
 def test_wrapped_enrichment_facts_migration_backfills_safely_and_idempotently(
     repo_db_path,
 ):
