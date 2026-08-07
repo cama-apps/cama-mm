@@ -96,7 +96,7 @@ The bot will connect to Discord and sync slash commands automatically.
 
 ## Discord Commands
 
-The bot registers **43 top-level commands/groups totaling 177 command paths**. The
+The bot registers **44 top-level commands/groups totaling 189 command paths**. The
 core flows (lobby/shuffle, draft, match recording, betting) are documented in
 full below; everything else gets a summary — run `/help` in Discord for the
 complete list, and Discord's slash-command autocomplete shows per-option details.
@@ -249,6 +249,13 @@ View leaderboard with multiple ranking types.
 - `/playertrivia` — Daily trivia set about this server's player stats
 - `/setreminder` — Configure DM reminders for cooldowns and match betting windows
 
+### Surveys — `/survey`
+
+- Admins can create, list, preview, edit, delete, send, retry, close, and view results for one-off surveys delivered by DM.
+- `/survey question add|edit|remove|move` configures up to 10 ordered NPS (0–10), rating (1–5), or free-text questions while the survey is a draft.
+- `/survey send` targets registered players, one server member, or a role; member and role sends can be limited to registered players.
+- Responses are submitted from a private review screen. Results show response rates and anonymous per-question aggregates or text responses without respondent identities or cross-question correlation.
+
 ### Dota 2 Reference — `/dota`
 
 - `/dota hero` — Hero information (stats, abilities, talents, facets) with autocomplete
@@ -274,6 +281,7 @@ List all available commands with descriptions.
 - `/player lobby status` — Privately view your active lobby suspension and low-priority progress
 - `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
 - `/trivia-reset-cooldown` — Reset a user's trivia cooldown
+- `/survey` — Manage and report on one-off anonymous DM surveys (`create`, `list`, `preview`, `delete`, `send`, `retry`, `results`, `close`, and `question add|edit|remove|move`)
 
 ## Configuration
 
