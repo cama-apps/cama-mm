@@ -11,6 +11,7 @@ from repositories.player_repository import PlayerRepository
 from services.duel_service import (
     CHALLENGER_COOLDOWN_SECONDS,
     RECIPIENT_COOLDOWN_SECONDS,
+    REMINDER_RETRY_BACKOFF_SECONDS,
     RESPONSE_SECONDS,
     DuelService,
 )
@@ -279,7 +280,10 @@ def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
         (DuelDueKind.UNRESOLVED, DuelStatus.ACCEPTED),
     ],
 )
-def test_service_rearms_failed_reminder_claim(duel_repo_mock, kind, status):
+def test_service_rearms_failed_reminder_claim_with_backoff(
+    duel_repo_mock, kind, status
+):
+    """Retry uses a backoff from now, not the original past claim time."""
     result = SimpleNamespace(
         kind=kind,
         challenge=SimpleNamespace(
@@ -287,10 +291,10 @@ def test_service_rearms_failed_reminder_claim(duel_repo_mock, kind, status):
             guild_id=GUILD_ID,
             next_reminder_at=NOW + 2 * DAY,
         ),
-        claimed_reminder_at=NOW + DAY,
+        claimed_reminder_at=NOW - DAY,
     )
     duel_repo_mock.rearm_reminder_atomic.return_value = True
-    service = DuelService(duel_repo_mock)
+    service = DuelService(duel_repo_mock, clock=lambda: NOW)
 
     assert service.rearm_reminder(result)
     duel_repo_mock.rearm_reminder_atomic.assert_called_once_with(
@@ -298,7 +302,30 @@ def test_service_rearms_failed_reminder_claim(duel_repo_mock, kind, status):
         GUILD_ID,
         status,
         NOW + 2 * DAY,
-        NOW + DAY,
+        NOW + REMINDER_RETRY_BACKOFF_SECONDS,
+    )
+
+
+def test_service_rearm_retry_never_delays_past_scheduled_reminder(duel_repo_mock):
+    result = SimpleNamespace(
+        kind=DuelDueKind.REMINDER,
+        challenge=SimpleNamespace(
+            challenge_id=7,
+            guild_id=GUILD_ID,
+            next_reminder_at=NOW + 60,
+        ),
+        claimed_reminder_at=NOW - DAY,
+    )
+    duel_repo_mock.rearm_reminder_atomic.return_value = True
+    service = DuelService(duel_repo_mock, clock=lambda: NOW)
+
+    assert service.rearm_reminder(result)
+    duel_repo_mock.rearm_reminder_atomic.assert_called_once_with(
+        7,
+        GUILD_ID,
+        DuelStatus.PENDING,
+        NOW + 60,
+        NOW + 60,
     )
 
 

@@ -1003,6 +1003,61 @@ async def test_due_reminder_uses_origin_without_main_send_permission(
 
 
 @pytest.mark.asyncio
+async def test_unsendable_origin_channel_defers_reminder_claims(
+    cog, bot, duel_service, flavor_service, interaction
+):
+    """A permanently unsendable origin must defer the claim, not hot-loop."""
+    interaction.channel.permissions_for.return_value = SimpleNamespace(
+        send_messages=False
+    )
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=False
+    )
+    flavor_service.generate.assert_not_awaited()
+    interaction.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_skips_unsendable_origin_channel(cog, bot, interaction):
+    interaction.channel.permissions_for.return_value = SimpleNamespace(
+        send_messages=False
+    )
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    delivered = await cog.deliver_due_result(result)
+
+    assert not delivered
+    interaction.channel.send.assert_not_awaited()
+
+
+def test_main_channel_prefers_exact_name_over_substring_matches(
+    cog, interaction
+):
+    exact_channel = interaction.channel
+    clips_channel = make_text_channel(999, guild=interaction.guild)
+    clips_channel.name = "dota-mm-clips"
+    interaction.guild.text_channels = [clips_channel, exact_channel]
+
+    assert cog._get_main_channel(GUILD_ID) is exact_channel
+
+
+def test_main_channel_keeps_unique_substring_match(cog, interaction):
+    decorated_channel = interaction.channel
+    decorated_channel.name = "the-dota-mm-hub"
+
+    assert cog._get_main_channel(GUILD_ID) is decorated_channel
+
+
+@pytest.mark.asyncio
 async def test_earlier_daily_reminder_suppresses_recipient_ping(cog, bot):
     result = DuelDueResult(
         kind=DuelDueKind.REMINDER,
@@ -1198,6 +1253,37 @@ async def test_process_due_challenge_does_not_rearm_after_origin_fallback(
 
     origin_channel.send.assert_awaited_once()
     duel_service.rearm_reminder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_undelivered_expiry_settlement_logs_amounts(
+    cog, bot, duel_service, caplog
+):
+    """Expiry moves coins; a lost announcement must at least log the transfer."""
+    bot.get_guild.return_value.text_channels = []
+    bot.get_channel.return_value = None
+    bot.fetch_channel.side_effect = discord.DiscordException("gone")
+    challenge = make_challenge(status=DuelStatus.EXPIRED, next_reminder_at=None)
+    duel_service.process_due.return_value = DuelDueResult(
+        kind=DuelDueKind.EXPIRED,
+        challenge=challenge,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="cama_bot.commands.duel"):
+        await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.rearm_reminder.assert_not_called()
+    messages = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+    )
+    assert "challenge=7" in messages
+    assert f"guild={GUILD_ID}" in messages
+    assert f"challenger={CHALLENGER_ID}" in messages
+    assert f"recipient={RECIPIENT_ID}" in messages
+    assert f"{challenge.wager} JC escrow" in messages
+    assert f"{challenge.decline_penalty} JC penalty" in messages
 
 
 @pytest.mark.asyncio
