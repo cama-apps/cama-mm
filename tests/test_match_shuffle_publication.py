@@ -30,6 +30,7 @@ def _make_cog(
     bot.get_channel.return_value = lobby_channel
     bot.fetch_channel = AsyncMock()
     bot.get_cog.return_value = None
+    bot.refresh_first_game_pool_lobby_messages = AsyncMock()
 
     lobby_service = MagicMock()
     lobby_service.get_lobby_channel_id.return_value = lobby_channel.id
@@ -87,7 +88,6 @@ async def test_publication_sends_overlap_and_confirmation_error_waits_for_posts(
     unpin = AsyncMock()
     fake_bot_module = SimpleNamespace(
         clear_lobby_rally_cooldowns=MagicMock(),
-        _refresh_first_game_pool_lobby_messages=AsyncMock(),
     )
     with (
         patch("commands.match.asyncio.to_thread", new=_run_sync),
@@ -148,7 +148,6 @@ async def test_public_send_failures_are_isolated_and_logged(caplog):
     unpin = AsyncMock()
     fake_bot_module = SimpleNamespace(
         clear_lobby_rally_cooldowns=MagicMock(),
-        _refresh_first_game_pool_lobby_messages=AsyncMock(),
     )
     caplog.set_level(logging.WARNING, logger="cama_bot.commands.match")
     with (
@@ -236,9 +235,9 @@ async def test_thread_and_pin_cleanup_finish_before_reset_and_pool_refresh():
         assert guild_id == 1
         order.append("pool_refresh")
 
+    cog.bot.refresh_first_game_pool_lobby_messages = refresh_pool_lobbies
     fake_bot_module = SimpleNamespace(
         clear_lobby_rally_cooldowns=MagicMock(),
-        _refresh_first_game_pool_lobby_messages=refresh_pool_lobbies,
     )
     with (
         patch("commands.match.asyncio.to_thread", new=_run_sync),
@@ -291,19 +290,16 @@ async def test_abort_does_not_touch_a_new_or_sibling_lobby():
         followup=SimpleNamespace(send=AsyncMock()),
     )
     cog = MatchCommands(bot, lobby_service, match_service, MagicMock())
-    update_lobby = AsyncMock()
     abort_thread = AsyncMock()
     cog._cancel_betting_tasks = MagicMock()
 
     with (
-        patch.object(cog, "_update_channel_message_closed", new=update_lobby),
         patch.object(cog, "_abort_lobby_thread", new=abort_thread),
         patch("commands.match.safe_unpin_message", new=AsyncMock()) as unpin,
     ):
         await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
 
     cog._cancel_betting_tasks.assert_called_once_with(1, pending_match_id=7)
-    update_lobby.assert_not_awaited()
     unpin.assert_not_awaited()
     abort_thread.assert_awaited_once_with(1, 7)
     match_service.state_service.clear_last_shuffle.assert_called_once_with(1, 7)
@@ -498,3 +494,96 @@ async def test_thread_rename_overlaps_ordered_posts_and_lock_waits_for_both():
         thread_id=42,
         pending_match_id=7,
     )
+
+
+def _make_abort_cog(pending_state):
+    """MatchCommands wired for _finalize_abort tests (no betting service)."""
+    bot = MagicMock()
+    bot.betting_service = None
+    match_service = MagicMock()
+    match_service.state_service.get_last_shuffle.return_value = pending_state
+    followup_send = AsyncMock()
+    interaction = SimpleNamespace(
+        channel=MagicMock(),
+        followup=SimpleNamespace(send=followup_send),
+    )
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+    cog._cancel_betting_tasks = MagicMock()
+    return cog, match_service, interaction, followup_send
+
+
+@pytest.mark.asyncio
+async def test_abort_announcement_filters_fake_negative_player_ids():
+    """Fake fill players (negative IDs) must not reach mentions/allowed_mentions.
+
+    Discord rejects negative snowflakes in allowed_mentions with a 400, which
+    would fail the public abort confirmation after the abort already committed.
+    """
+    pending_state = SimpleNamespace(
+        pending_match_id=7,
+        lobby_kind=LobbyKind.OPEN.value,
+        radiant_team_ids=[1, 2, -1],
+        dire_team_ids=[3, -2],
+        excluded_player_ids=[4],
+        excluded_conditional_player_ids=[-3],
+    )
+    cog, match_service, interaction, followup_send = _make_abort_cog(pending_state)
+
+    with patch.object(cog, "_abort_lobby_thread", new=AsyncMock()):
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+
+    (content,), kwargs = followup_send.call_args
+    assert "<@-" not in content
+    assert [obj.id for obj in kwargs["allowed_mentions"].users] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_abort_finalizations_only_announce_once():
+    """A second abort vote landing mid-finalization must not re-announce/re-ping."""
+    pending_state = SimpleNamespace(
+        pending_match_id=7,
+        lobby_kind=LobbyKind.OPEN.value,
+        radiant_team_ids=[1, 2],
+        dire_team_ids=[3, 4],
+    )
+    cog, match_service, interaction, followup_send = _make_abort_cog(pending_state)
+
+    thread_started = asyncio.Event()
+    release_thread = asyncio.Event()
+
+    async def slow_abort_thread(*args):
+        thread_started.set()
+        await release_thread.wait()
+
+    with patch.object(cog, "_abort_lobby_thread", new=AsyncMock(side_effect=slow_abort_thread)):
+        first = asyncio.create_task(
+            cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+        )
+        await asyncio.wait_for(thread_started.wait(), timeout=1)
+        # A second voter reaches the threshold while the first finalization is
+        # still mid-flight: it must be turned away, not run the full finalize.
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+        release_thread.set()
+        await first
+
+    match_service.state_service.clear_last_shuffle.assert_called_once_with(1, 7)
+    public_sends = [
+        call for call in followup_send.call_args_list
+        if call.kwargs.get("ephemeral") is False
+    ]
+    assert len(public_sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_finalize_abort_with_cleared_state_does_not_reannounce():
+    """After a finalization cleared the pending state, a late vote must not
+    send the public 'Bets have been refunded' announcement again."""
+    cog, match_service, interaction, followup_send = _make_abort_cog(None)
+
+    with patch.object(cog, "_abort_lobby_thread", new=AsyncMock()) as abort_thread:
+        await cog._finalize_abort(interaction, guild_id=1, pending_match_id=7)
+
+    abort_thread.assert_not_awaited()
+    match_service.state_service.clear_last_shuffle.assert_not_called()
+    followup_send.assert_awaited_once()
+    assert followup_send.call_args.kwargs.get("ephemeral") is True

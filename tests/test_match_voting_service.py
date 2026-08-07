@@ -101,13 +101,13 @@ def test_record_submission_without_pending_match_raises(voting_service):
     match that was never shuffled.
     """
     with pytest.raises(ValueError, match="No recent shuffle"):
-        voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="radiant", is_admin=False)
+        voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="radiant", is_admin=False)
 
 
 def test_abort_submission_without_pending_match_raises(voting_service):
     """Abort voting also requires an existing pending match."""
     with pytest.raises(ValueError, match="No recent shuffle"):
-        voting_service.add_abort_submission(TEST_GUILD_ID, user_id=100, is_admin=False)
+        voting_service.add_abort_submission(TEST_GUILD_ID, user_id=1, is_admin=False)
 
 
 # =============================================================================
@@ -122,9 +122,9 @@ def test_invalid_result_string_rejected(voting_service, pending_match_id):
     vote that the threshold logic would then never be able to interpret.
     """
     with pytest.raises(ValueError, match="radiant.*dire"):
-        voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="abort", is_admin=False)
+        voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="abort", is_admin=False)
     with pytest.raises(ValueError, match="radiant.*dire"):
-        voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="garbage", is_admin=False)
+        voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="garbage", is_admin=False)
 
 
 def test_user_cannot_switch_record_vote(voting_service, pending_match_id):
@@ -133,9 +133,9 @@ def test_user_cannot_switch_record_vote(voting_service, pending_match_id):
     Vote-flipping would let one person inflate both tallies; the conflict guard
     must reject the second, differing vote.
     """
-    voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="radiant", is_admin=False)
+    voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="radiant", is_admin=False)
     with pytest.raises(ValueError, match="already submitted"):
-        voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="dire", is_admin=False)
+        voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="dire", is_admin=False)
 
 
 def test_user_cannot_switch_from_record_to_abort(voting_service, pending_match_id):
@@ -162,11 +162,57 @@ def test_duplicate_identical_vote_is_idempotent(voting_service, pending_match_id
     Players often re-click the same button; the tally must stay at one vote
     for that user rather than rejecting them or counting them twice.
     """
-    voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="radiant", is_admin=False)
-    result = voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="radiant", is_admin=False)
+    voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="radiant", is_admin=False)
+    result = voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="radiant", is_admin=False)
     assert result["vote_counts"] == {"radiant": 1, "dire": 0}
     assert result["total_count"] == 1
     assert result["non_admin_count"] == 1
+
+
+# =============================================================================
+# RECORD-VOTE ELIGIBILITY (non-admin result votes require match participation)
+# =============================================================================
+
+
+def test_non_participant_cannot_vote_on_result(voting_service, pending_match_id):
+    """Result votes from users outside both teams are rejected.
+
+    Without this gate, three spectators (e.g. bettors) could submit matching
+    votes and finalize a false result on the single-pending-match /record path,
+    settling bets and updating ratings on the wrong outcome.
+    """
+    with pytest.raises(ValueError, match="match participants"):
+        voting_service.add_record_submission(
+            TEST_GUILD_ID, user_id=555_555, result="radiant", is_admin=False
+        )
+    assert voting_service.get_vote_counts(TEST_GUILD_ID) == {"radiant": 0, "dire": 0}
+    assert voting_service.can_record_match(TEST_GUILD_ID) is False
+
+
+def test_excluded_lobby_player_cannot_vote_on_result(state_service, voting_service):
+    """Excluded players may vote to abort, but not on the match result."""
+    from domain.models.pending_match_state import PendingMatchState
+
+    state = PendingMatchState(
+        radiant_team_ids=[1, 2, 3, 4, 5],
+        dire_team_ids=[6, 7, 8, 9, 10],
+        excluded_player_ids=[11],
+    )
+    state_service.persist_state(TEST_GUILD_ID, state)
+
+    with pytest.raises(ValueError, match="match participants"):
+        voting_service.add_record_submission(
+            TEST_GUILD_ID, user_id=11, result="dire", is_admin=False
+        )
+
+
+def test_admin_non_participant_can_still_vote_on_result(voting_service, pending_match_id):
+    """The participant gate must not restrict the admin override path."""
+    result = voting_service.add_record_submission(
+        TEST_GUILD_ID, user_id=424_242, result="dire", is_admin=True
+    )
+    assert result["is_ready"] is True
+    assert result["result"] == "dire"
 
 
 # =============================================================================
@@ -180,8 +226,8 @@ def test_below_threshold_non_admin_votes_cannot_record(voting_service, pending_m
     Recording on only two votes would let a minority decide the match result.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    result = voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    result = voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
     assert result["vote_counts"] == {"radiant": 2, "dire": 0}
     assert result["is_ready"] is False
     assert result["result"] is None
@@ -195,9 +241,9 @@ def test_third_matching_non_admin_vote_reaches_threshold(voting_service, pending
     agreeing voters wins.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
-    result = voting_service.add_record_submission(gid, user_id=102, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
+    result = voting_service.add_record_submission(gid, user_id=3, result="radiant", is_admin=False)
     assert result["is_ready"] is True
     assert result["result"] == "radiant"
     assert voting_service.can_record_match(gid) is True
@@ -212,10 +258,10 @@ def test_split_non_admin_votes_do_not_reach_threshold(voting_service, pending_ma
     arbitrary side.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=102, result="dire", is_admin=False)
-    result = voting_service.add_record_submission(gid, user_id=103, result="dire", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=3, result="dire", is_admin=False)
+    result = voting_service.add_record_submission(gid, user_id=4, result="dire", is_admin=False)
     assert result["vote_counts"] == {"radiant": 2, "dire": 2}
     assert result["total_count"] == 4
     assert result["is_ready"] is False
@@ -229,10 +275,10 @@ def test_contested_vote_records_side_that_first_hits_threshold(voting_service, p
     MIN_NON_ADMIN_SUBMISSIONS supporters decides the recorded winner.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_record_submission(gid, user_id=100, result="dire", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=102, result="radiant", is_admin=False)
-    result = voting_service.add_record_submission(gid, user_id=103, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="dire", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=3, result="radiant", is_admin=False)
+    result = voting_service.add_record_submission(gid, user_id=4, result="radiant", is_admin=False)
     assert result["vote_counts"] == {"radiant": 3, "dire": 1}
     assert result["result"] == "radiant"
     assert voting_service.can_record_match(gid) is True
@@ -265,9 +311,9 @@ def test_admin_vote_overrides_contested_non_admin_majority(voting_service, pendi
     """
     gid = TEST_GUILD_ID
     # Non-admin majority for radiant (3 votes -> would itself be recordable).
-    voting_service.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=102, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=3, result="radiant", is_admin=False)
     # Admin overrides with dire.
     voting_service.add_record_submission(gid, user_id=999, result="dire", is_admin=True)
     assert voting_service.get_pending_record_result(gid) == "dire"
@@ -281,8 +327,8 @@ def test_admin_vote_excluded_from_non_admin_tallies(voting_service, pending_matc
     wrongly reach the 3-vote non-admin quorum.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    voting_service.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    voting_service.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
     voting_service.add_record_submission(gid, user_id=999, result="radiant", is_admin=True)
     assert voting_service.get_vote_counts(gid) == {"radiant": 2, "dire": 0}
     assert voting_service.get_non_admin_submission_count(gid) == 2
@@ -406,9 +452,9 @@ def test_votes_persist_across_service_instances(match_repository, pending_match_
     """
     gid = TEST_GUILD_ID
     first = MatchVotingService(MatchStateService(match_repository))
-    first.add_record_submission(gid, user_id=100, result="radiant", is_admin=False)
-    first.add_record_submission(gid, user_id=101, result="radiant", is_admin=False)
-    first.add_record_submission(gid, user_id=102, result="radiant", is_admin=False)
+    first.add_record_submission(gid, user_id=1, result="radiant", is_admin=False)
+    first.add_record_submission(gid, user_id=2, result="radiant", is_admin=False)
+    first.add_record_submission(gid, user_id=3, result="radiant", is_admin=False)
 
     # Brand-new service + state service, same repo/DB — no shared in-memory cache.
     reloaded = MatchVotingService(MatchStateService(match_repository))

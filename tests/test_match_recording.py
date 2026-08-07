@@ -1666,7 +1666,7 @@ class TestAdminOverride:
     ):
         """Test has_admin_submission returns False when only non-admin submits."""
         admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
 
         assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is False
 
@@ -1695,14 +1695,14 @@ class TestAdminOverride:
         admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
 
         # Add 2 non-admin submissions - should not be ready
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5002, result="radiant", is_admin=False)
 
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
         assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 2
 
         # Add 3rd non-admin submission - should be ready
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5003, result="radiant", is_admin=False)
 
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
         assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 3
@@ -1732,7 +1732,7 @@ class TestAdminOverride:
         admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
 
         # Add 1 non-admin submission (not enough)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
 
         # Admin submits - should override and allow recording
@@ -1779,9 +1779,9 @@ class TestFirstToThreeVoting:
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # Add some votes
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="radiant", is_admin=False)
 
         counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
         assert counts == {"radiant": 2, "dire": 1}
@@ -1792,7 +1792,7 @@ class TestFirstToThreeVoting:
 
         # Add admin and non-admin votes
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
 
         counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
         assert counts == {"radiant": 1, "dire": 0}
@@ -1802,9 +1802,9 @@ class TestFirstToThreeVoting:
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # Add conflicting votes - should not raise
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="radiant", is_admin=False)
 
         counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
         assert counts == {"radiant": 2, "dire": 1}
@@ -1814,17 +1814,17 @@ class TestFirstToThreeVoting:
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # 2 radiant, 2 dire - not ready
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1004, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6004, result="dire", is_admin=False)
 
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
         assert admin_match_service.get_pending_record_result(TEST_GUILD_ID) is None
 
         # 3rd radiant vote - radiant wins!
         submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=1005, result="radiant", is_admin=False
+            TEST_GUILD_ID, user_id=6005, result="radiant", is_admin=False
         )
 
         assert submission["is_ready"] is True
@@ -1837,15 +1837,15 @@ class TestFirstToThreeVoting:
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # 1 radiant, 2 dire
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="dire", is_admin=False)
 
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
 
         # 3rd dire vote - dire wins!
         submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=1004, result="dire", is_admin=False
+            TEST_GUILD_ID, user_id=6004, result="dire", is_admin=False
         )
 
         assert submission["is_ready"] is True
@@ -1856,19 +1856,19 @@ class TestFirstToThreeVoting:
         """Test that a user cannot change their vote."""
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
 
         # Same user tries to vote differently
         with pytest.raises(ValueError, match="already submitted"):
-            admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="dire", is_admin=False)
+            admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="dire", is_admin=False)
 
     def test_user_can_revote_same_result(self, admin_match_service, voting_test_players):
         """Test that a user can submit the same vote again (no-op)."""
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
         # Same vote again - should not raise, just update
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
 
         counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
         assert counts == {"radiant": 1, "dire": 0}  # Still just 1 vote
@@ -1877,9 +1877,9 @@ class TestFirstToThreeVoting:
         """Test that add_record_submission returns current vote counts."""
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
         submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=1002, result="dire", is_admin=False
+            TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False
         )
 
         assert "vote_counts" in submission
@@ -1890,12 +1890,12 @@ class TestFirstToThreeVoting:
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # Radiant gets 3 votes, Dire gets 2
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1001, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1002, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1003, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=1004, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="radiant", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="dire", is_admin=False)
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6004, result="radiant", is_admin=False)
         submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=1005, result="radiant", is_admin=False
+            TEST_GUILD_ID, user_id=6005, result="radiant", is_admin=False
         )
 
         assert submission["is_ready"] is True

@@ -327,7 +327,7 @@ class TestE2EAdminCommands:
         match_service.shuffle_players(player_ids, guild_id=test_guild_id)
 
         # Create non-admin interaction
-        user_id = 100001
+        user_id = 600101  # a shuffled participant - non-participants cannot vote
         mock_interaction = MockDiscordInteraction(user_id, "RegularUser")
 
         # Mock guild
@@ -362,7 +362,7 @@ class TestE2EAdminCommands:
             assert match_service.can_record_match(test_guild_id) is False
 
             # Second submission from different user
-            mock_interaction2 = MockDiscordInteraction(100002, "User2")
+            mock_interaction2 = MockDiscordInteraction(600102, "User2")
             mock_interaction2.guild = mock_guild
             mock_interaction2.user.guild_permissions = mock_permissions
             mock_interaction2.response = AsyncMock()
@@ -374,7 +374,7 @@ class TestE2EAdminCommands:
             assert match_service.can_record_match(test_guild_id) is False
 
             # Third submission from different user
-            mock_interaction3 = MockDiscordInteraction(100003, "User3")
+            mock_interaction3 = MockDiscordInteraction(600103, "User3")
             mock_interaction3.guild = mock_guild
             mock_interaction3.user.guild_permissions = mock_permissions
             mock_interaction3.response = AsyncMock()
