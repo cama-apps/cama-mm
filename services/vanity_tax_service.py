@@ -39,16 +39,26 @@ class VanityTaxService:
         # path they would re-apply pre-outage state over the fresh snapshot —
         # so snapshot builders call ``begin_refresh`` first.
         self._mutated_members_by_guild: dict[int, set[int]] = {}
+        # Monotonic per-guild refresh generation: a store whose snapshot
+        # predates the newest begin_refresh must be discarded, or an
+        # overlapping resync could consume the journal and then overwrite
+        # the newer snapshot's state with its older one.
+        self._refresh_generation_by_guild: dict[int, int] = {}
 
-    def begin_refresh(self, guild_id: int) -> None:
+    def begin_refresh(self, guild_id: int) -> int:
         """Mark the start of a refresh snapshot's authority.
 
         Call on the event loop in the same synchronous block that copies the
         member list, so the journal holds exactly the events that arrive
-        after the snapshot.
+        after the snapshot. Returns the refresh generation to pass through to
+        :meth:`refresh_guild`; a store from a superseded generation is
+        dropped.
         """
         with self._lock:
             self._mutated_members_by_guild.pop(guild_id, None)
+            generation = self._refresh_generation_by_guild.get(guild_id, 0) + 1
+            self._refresh_generation_by_guild[guild_id] = generation
+            return generation
 
     def _store_refresh(
         self,
@@ -56,8 +66,17 @@ class VanityTaxService:
         known_members: set[int],
         nickname_taxable: set[int],
         manual_exemptions: frozenset[int],
+        generation: int | None = None,
     ) -> None:
         with self._lock:
+            if (
+                generation is not None
+                and generation != self._refresh_generation_by_guild.get(guild_id)
+            ):
+                # A newer refresh began after this snapshot was taken: its
+                # begin_refresh owns the journal now, and this older snapshot
+                # must not overwrite the newer state.
+                return
             # Member events that raced this refresh are newer than the
             # snapshot: re-apply their live outcome on top of it. (An event
             # older than the snapshot merges to the same result — snapshot
@@ -86,7 +105,12 @@ class VanityTaxService:
             )
             self._manual_exemptions_by_guild[guild_id] = manual_exemptions
 
-    def refresh_guild(self, guild_id: int, members: Iterable[object]) -> None:
+    def refresh_guild(
+        self,
+        guild_id: int,
+        members: Iterable[object],
+        generation: int | None = None,
+    ) -> None:
         known_members: set[int] = set()
         nickname_taxable: set[int] = set()
         for member in members:
@@ -106,6 +130,7 @@ class VanityTaxService:
                     known_members,
                     nickname_taxable,
                     manual_exemptions,
+                    generation=generation,
                 )
         else:
             with self._lock:
@@ -118,6 +143,7 @@ class VanityTaxService:
                     known_members,
                     nickname_taxable,
                     manual_exemptions,
+                    generation=generation,
                 )
 
     def update_member(

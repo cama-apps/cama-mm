@@ -446,12 +446,12 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
         user_id = interaction.user.id
         guild_id = interaction.guild.id
         now = int(time.time())
+        # Conditional debit before the public defer: ephemerality is locked in
+        # at defer time, so a followup after a public defer would post the
+        # private failure notices below publicly.
         result = await asyncio.to_thread(
             purchase,
             user_id,
@@ -480,8 +480,24 @@ class ShopCommands(commands.Cog):
                 )
             else:
                 message = f"{display_name} is unavailable right now."
-            await safe_followup(interaction, content=message, ephemeral=True)
+            try:
+                await interaction.response.send_message(message, ephemeral=True)
+            except discord.HTTPException:
+                # The debit can wait on the SQLite busy timeout, and the
+                # interaction's 3s ack window may lapse meanwhile. The purchase
+                # was refused, so there is nothing to roll back — just drop
+                # the (private) notice rather than crash the handler.
+                logger.warning(
+                    "%s failure notice could not be sent for %s",
+                    display_name,
+                    user_id,
+                )
             return
+
+        # Defer (public) only on the success path — the ping is the product.
+        # Not gated: the purchase already debited, so delivery must proceed
+        # even on a lapsed token (safe_followup falls back to channel.send).
+        await safe_defer(interaction, ephemeral=False)
 
         allowed_mentions = discord.AllowedMentions(
             everyone=False,
@@ -580,6 +596,10 @@ class ShopCommands(commands.Cog):
                 # interaction's 3s ack window may lapse meanwhile. The spend
                 # was refused, so there is nothing to roll back — just drop
                 # the (private) notice rather than crash the handler.
+                # Success-path counterpart, accepted: under the same >3s write
+                # contention the token can lapse before the post-debit defer;
+                # the purchase still completes and safe_followup's channel-send
+                # fallback delivers the announcement. Funds are safe.
                 logger.warning(
                     "Recalibrate shortfall notice could not be sent for %s",
                     user_id,
@@ -672,13 +692,11 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Defer now - AI flavor text can take a while
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
         # Deduct cost. Conditional debit, not adjust_balance: the balance read
         # above is a fast path for the friendly message, and two purchases can
-        # both pass it inside the shop rate-limit window and overdraft.
+        # both pass it inside the shop rate-limit window and overdraft. Runs
+        # before the public defer: ephemerality is locked in at defer time, so
+        # a followup after a public defer would post this shortfall publicly.
         if not await asyncio.to_thread(
             self.player_service.try_spend,
             user_id,
@@ -688,12 +706,27 @@ class ShopCommands(commands.Cog):
             actor_id=user_id,
             reason="shop announcement purchase",
         ):
-            await safe_followup(
-                interaction,
-                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.response.send_message(
+                    f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                # The debit can wait on the SQLite busy timeout, and the
+                # interaction's 3s ack window may lapse meanwhile. The spend
+                # was refused, so there is nothing to roll back — just drop
+                # the (private) notice rather than crash the handler.
+                logger.warning(
+                    "Announce shortfall notice could not be sent for %s",
+                    user_id,
+                )
             return
+
+        # Defer now - AI flavor text can take a while. Not gated: the debit
+        # already happened, so the announcement must still go out on a lapsed
+        # token (safe_followup falls back to channel.send).
+        await safe_defer(interaction, ephemeral=False)
+
         new_balance = await asyncio.to_thread(
             self.player_service.get_balance, user_id, guild_id
         )
@@ -950,9 +983,9 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
+        # Conditional debit before the public defer: ephemerality is locked in
+        # at defer time, so a followup after a public defer would post this
+        # shortfall publicly.
         if not await asyncio.to_thread(
             self.player_service.try_spend,
             user_id,
@@ -962,12 +995,25 @@ class ShopCommands(commands.Cog):
             actor_id=user_id,
             reason="Jopa Coin(TM) purchase",
         ):
-            await safe_followup(
-                interaction,
-                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.response.send_message(
+                    f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                # The debit can wait on the SQLite busy timeout, and the
+                # interaction's 3s ack window may lapse meanwhile. The spend
+                # was refused, so there is nothing to roll back — just drop
+                # the (private) notice rather than crash the handler.
+                logger.warning(
+                    "Jopa Coin shortfall notice could not be sent for %s",
+                    user_id,
+                )
             return
+
+        # Not gated: the debit already happened, so the purchased effect must
+        # still be delivered on a lapsed token (safe_followup channel fallback).
+        await safe_defer(interaction, ephemeral=False)
 
         embed = discord.Embed(
             title="🪙 Jopa Coin(TM) Minted!",
@@ -1003,9 +1049,9 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
+        # Conditional debit before the public defer: ephemerality is locked in
+        # at defer time, so a followup after a public defer would post this
+        # shortfall publicly.
         if not await asyncio.to_thread(
             self.player_service.try_spend,
             user_id,
@@ -1015,12 +1061,25 @@ class ShopCommands(commands.Cog):
             actor_id=user_id,
             reason="Mystery Gift purchase",
         ):
-            await safe_followup(
-                interaction,
-                content=f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
-                ephemeral=True,
-            )
+            try:
+                await interaction.response.send_message(
+                    f"You no longer have {cost} {JOPACOIN_EMOTE} for this.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                # The debit can wait on the SQLite busy timeout, and the
+                # interaction's 3s ack window may lapse meanwhile. The spend
+                # was refused, so there is nothing to roll back — just drop
+                # the (private) notice rather than crash the handler.
+                logger.warning(
+                    "Mystery Gift shortfall notice could not be sent for %s",
+                    user_id,
+                )
             return
+
+        # Not gated: the debit already happened, so the purchased effect must
+        # still be delivered on a lapsed token (safe_followup channel fallback).
+        await safe_defer(interaction, ephemeral=False)
 
         embed = discord.Embed(
             title="🎁 Mystery Gift Redeemed!",

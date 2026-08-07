@@ -1088,6 +1088,33 @@ def test_main_channel_resolves_configured_thread(cog, interaction, monkeypatch):
     interaction.guild.get_channel_or_thread.assert_called_once_with(4242)
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_channels_fetch_configured_thread_evicted_from_cache(
+    cog, bot, interaction, monkeypatch
+):
+    """Auto-archived threads leave the gateway cache; the async lifecycle
+    resolution must fetch the configured target instead of silently falling
+    back to the name scan with a warning."""
+    import config
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 4242
+    thread.guild = interaction.guild
+    thread.permissions_for.return_value = SimpleNamespace(
+        send_messages_in_threads=True
+    )
+    thread.send = AsyncMock()
+    interaction.guild.get_channel_or_thread = MagicMock(return_value=None)
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(return_value=thread)
+    monkeypatch.setattr(config, "DUEL_CHANNEL_ID", 4242)
+
+    channels = await cog._get_lifecycle_channels(make_challenge())
+
+    assert channels and channels[0] is thread
+    assert 4242 in {call.args[0] for call in bot.fetch_channel.await_args_list}
+
+
 def test_main_channel_logs_debug_when_configured_is_in_another_guild(
     cog, bot, interaction, monkeypatch, caplog
 ):

@@ -521,14 +521,20 @@ class SurveyResultsView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         """Disable the dead buttons so the stale report cannot look clickable."""
+        await self._retire_now()
+
+    async def _retire_now(self) -> None:
+        """Disable the buttons and stop the view via the tracked token."""
         for child in self.children:
             child.disabled = True
+        self.stop()
         if self._interaction is None:
             return
         try:
-            # Every click refreshes both the view timeout and the tracked
-            # interaction, so the 600s timeout always fires inside the last
-            # token's 15-minute window and the ephemeral report stays editable.
+            # Every successful click refreshes both the view timeout and the
+            # tracked interaction, so this edit normally runs inside the last
+            # token's 15-minute window; a failed click retires eagerly here
+            # before the kept token can age out.
             await self._interaction.edit_original_response(view=self)
         except Exception as exc:
             logger.debug(
@@ -553,15 +559,21 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = max(0, self.index - 1)
         self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=self.pages[self.index],
-            view=self,
-            allowed_mentions=_ALLOWED_MENTIONS,
-        )
+        try:
+            await interaction.response.edit_message(
+                embed=self.pages[self.index],
+                view=self,
+                allowed_mentions=_ALLOWED_MENTIONS,
+            )
+        except Exception:
+            # A failed click still refreshed the view timeout, but its
+            # unacknowledged token cannot edit — and the kept token may not
+            # survive until the pushed-back on_timeout. Retire the report now
+            # through the token that still works instead of gambling.
+            await self._retire_now()
+            raise
         # discord.py pushes the view timeout forward on every click; keep the
         # freshest token so the on_timeout edit stays inside its 15m window.
-        # Only after the edit succeeds — a failed click's unacknowledged token
-        # cannot perform the timeout edit, while the previous one still can.
         self._interaction = interaction
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
@@ -572,11 +584,16 @@ class SurveyResultsView(discord.ui.View):
     ) -> None:
         self.index = min(len(self.pages) - 1, self.index + 1)
         self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=self.pages[self.index],
-            view=self,
-            allowed_mentions=_ALLOWED_MENTIONS,
-        )
+        try:
+            await interaction.response.edit_message(
+                embed=self.pages[self.index],
+                view=self,
+                allowed_mentions=_ALLOWED_MENTIONS,
+            )
+        except Exception:
+            # See previous(): retire through the still-working token.
+            await self._retire_now()
+            raise
         # See previous(): only adopt the token once the edit succeeded.
         self._interaction = interaction
 
