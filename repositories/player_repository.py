@@ -4,6 +4,7 @@ Repository for player data access.
 
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
@@ -225,6 +226,38 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
+
+    def create_referral(self, referrer_id: int, referred_id: int, guild_id: int) -> None:
+        """Enroll an unregistered player under a registered guild referrer."""
+        guild_id = self.normalize_guild_id(guild_id)
+        if referrer_id == referred_id:
+            raise ValueError("Self-referrals are not allowed.")
+
+        try:
+            with self.atomic_transaction() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                    (referrer_id, guild_id),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError("Referrer must be registered in this guild.")
+
+                cursor.execute(
+                    "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                    (referred_id, guild_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError("That player is already registered in this guild.")
+
+                cursor.execute(
+                    "INSERT INTO referrals (guild_id, referred_id, referrer_id) VALUES (?, ?, ?)",
+                    (guild_id, referred_id, referrer_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "referrals.guild_id, referrals.referred_id" in str(exc):
+                raise ValueError("That player already has a referral.") from exc
+            raise
 
     def get_by_id(self, discord_id: int, guild_id: int) -> Player | None:
         """

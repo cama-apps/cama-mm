@@ -29,6 +29,9 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def create_referral(self, referrer_id: int, referred_id: int, guild_id: int) -> None: ...
+
+    @abstractmethod
     def get_by_id(self, discord_id: int, guild_id: int): ...
 
     @abstractmethod
@@ -649,6 +652,7 @@ class IMatchRepository(ABC):
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
         win_reward_jc: int | None = None,
+        referral_rewards_out: list[dict] | None = None,
     ) -> int: ...
 
     @abstractmethod

@@ -153,6 +153,10 @@ class PlayerService:
             "mmr": mmr,
         }
 
+    def create_referral(self, referrer_id: int, referred_id: int, guild_id: int) -> None:
+        """Enroll an unregistered player under a registered referrer."""
+        self.player_repo.create_referral(referrer_id, referred_id, guild_id)
+
     def set_roles(self, discord_id: int, guild_id: int, roles: list[str]):
         """Persist preferred roles for a player."""
         player = self.player_repo.get_by_id(discord_id, guild_id)

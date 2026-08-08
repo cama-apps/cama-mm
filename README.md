@@ -96,7 +96,7 @@ The bot will connect to Discord and sync slash commands automatically.
 
 ## Discord Commands
 
-The bot registers **44 top-level commands/groups totaling 189 command paths**. The
+The bot registers **45 top-level commands/groups totaling 190 command paths**. The
 core flows (lobby/shuffle, draft, match recording, betting) are documented in
 full below; everything else gets a summary — run `/help` in Discord for the
 complete list, and Discord's slash-command autocomplete shows per-option details.
@@ -207,6 +207,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 ### Registration & Profile — `/player`
 
 - `/player register` — Register yourself with your Steam32 ID; fetches MMR from OpenDota to seed your rating
+- `/refer` — Refer a new player before they register
 - `/player link` / `/player unlink` / `/player steamids` — Link, unlink, and list your Steam accounts
 - `/player roles` — Set preferred roles (1-5) for matchmaking
 - `/player region` — Set your preferred Dota server (US East / US West)

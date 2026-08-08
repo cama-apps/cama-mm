@@ -1696,10 +1696,12 @@ class MatchCommands(commands.Cog):
                 parts.append(f"bet {signed(int(components['bet']))}")
             if "streak" in components:
                 parts.append(f"streak {signed(int(components['streak']))}")
+            if "referral" in components:
+                parts.append(f"referral {signed(int(components['referral']))}")
 
             total = sum(
                 int(components.get(component, 0))
-                for component in ("payout", "bet", "streak")
+                for component in ("payout", "bet", "streak", "referral")
             )
             detail = f" ({', '.join(parts)})" if parts else ""
             lines.append(
