@@ -121,6 +121,10 @@ class TestBoundedDailyScores:
     def test_rows_stay_bounded_when_the_window_intersects_eight_calendar_dates(
         self, evolution_repo
     ):
+        """3 attempts per (instant, path) suffice: the daily path cap fills on
+        the first two events (2 + 1 points), so the third attempt is a
+        deterministic post-cap no-op — extra attempts beyond that exercise the
+        identical rejected branch and cannot change the row count."""
         start = T0 + DAY - 60
         pet_id = insert_pet(
             evolution_repo.db_path,
@@ -140,7 +144,7 @@ class TestBoundedDailyScores:
         assert len(instants) == 8
         for instant_index, occurred_at in enumerate(instants):
             for instinct, activity in activities.items():
-                for attempt in range(20):
+                for attempt in range(3):
                     score(
                         evolution_repo,
                         activity,

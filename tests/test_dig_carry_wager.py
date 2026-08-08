@@ -137,8 +137,9 @@ class TestRegularBossRetreatIgnoresCarry:
         self, dig_service, dig_repo, player_repository, guild_id,
     ):
         """Half-forfeit on retreat is a pinnacle-only mechanic: a stale
-        carry marker on a REGULAR boundary must not be debited. The live
-        half-forfeit path is pinned by TestPinnacleRetreatForfeitsHalfOfCarry.
+        carry marker on a REGULAR boundary must not be debited — but the
+        stale markers are still cleared. The live half-forfeit path is
+        pinned by TestPinnacleRetreatForfeitsHalfOfCarry.
         """
         _register(player_repository)
         _seed_phase1_cleared(dig_repo, 10001, guild_id)
@@ -149,18 +150,9 @@ class TestRegularBossRetreatIgnoresCarry:
         assert result["success"]
         assert result["carried_wager_forfeit"] == 0
         assert player_repository.get_balance(10001, guild_id) == balance_before
-
-    def test_retreat_clears_carry_markers(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        _register(player_repository)
-        _seed_phase1_cleared(dig_repo, 10001, guild_id)
-
-        dig_service.retreat_boss(10001, guild_id)
-
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        boss_progress = json.loads(tunnel["boss_progress"])
-        entry = boss_progress["25"]
+        entry = json.loads(
+            dig_repo.get_tunnel(10001, guild_id)["boss_progress"]
+        )["25"]
         assert "carried_wager" not in entry
         assert "carried_risk_tier" not in entry
 
@@ -408,6 +400,8 @@ class TestPinnacleRetreatForfeitsHalfOfCarry:
     def test_pinnacle_retreat_with_carried_wager_debits_half(
         self, dig_service, dig_repo, player_repository, guild_id,
     ):
+        """Half the carry is forfeited on retreat, and the markers are cleared
+        so a later finalize cannot re-settle the stake."""
         self._seed_pinnacle_phase1_cleared(dig_repo, player_repository, guild_id)
         balance_before = player_repository.get_balance(20001, guild_id)
 
@@ -417,14 +411,6 @@ class TestPinnacleRetreatForfeitsHalfOfCarry:
         assert result["boundary"] == PINNACLE_DEPTH
         assert result["carried_wager_forfeit"] == 100  # 200 // 2
         assert player_repository.get_balance(20001, guild_id) == balance_before - 100
-
-    def test_pinnacle_retreat_clears_carry_markers(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        self._seed_pinnacle_phase1_cleared(dig_repo, player_repository, guild_id)
-
-        dig_service.retreat_boss(20001, guild_id)
-
         entry = json.loads(
             dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
         )[str(PINNACLE_DEPTH)]
@@ -436,25 +422,12 @@ class TestPinnacleWagerPayout:
     """A pinnacle wager rides all 3 phases and pays out on a full clear at
     win-chance-tapered odds; any phase loss forfeits it. Previously the wager
     was ignored on a phase-3 win and could only ever be lost.
+
+    The untapered full-clear payout, phase-1 carry write, loss forfeiture,
+    and loss-side marker clearing are pinned end-to-end by
+    ``TestWagerSettledExactlyOnceAcrossPhases``; this class keeps only the
+    branches that chain does not reach.
     """
-
-    def test_full_clear_pays_the_wager_on_top_of_base_reward(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
-        before = player_repository.get_balance(20001, guild_id)
-
-        # bold tier, win chance below the taper knee -> the BOSS_PAYOUTS[350]
-        # bold multiplier (3.8) log-compresses to 1 + ln(3.8); a 200 wager
-        # profits int(200 * ln(3.8)) = 267.
-        result = _finalize_pinnacle(
-            dig_service, guild_id, tunnel=tunnel,
-            phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.55,
-        )
-
-        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 267
-        assert result["payout"] == expected
-        assert player_repository.get_balance(20001, guild_id) == before + expected
 
     def test_full_clear_wager_payout_tapers_at_high_win_chance(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -486,57 +459,6 @@ class TestPinnacleWagerPayout:
         expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD)
         assert result["payout"] == expected
         assert player_repository.get_balance(20001, guild_id) == before + expected
-
-    def test_phase_loss_forfeits_the_wager(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
-        before = player_repository.get_balance(20001, guild_id)
-
-        _finalize_pinnacle(
-            dig_service, guild_id, tunnel=tunnel,
-            phase_idx=2, won=False, wager=200,
-        )
-
-        assert player_repository.get_balance(20001, guild_id) == before - 200
-
-    def test_phase1_win_carries_the_wager_forward(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
-
-        _finalize_pinnacle(
-            dig_service, guild_id, tunnel=tunnel,
-            phase_idx=1, won=True, wager=150, risk_tier="reckless",
-        )
-
-        entry = json.loads(
-            dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
-        )[str(PINNACLE_DEPTH)]
-        assert entry["carried_wager"] == 150
-        assert entry["carried_risk_tier"] == "reckless"
-
-    def test_phase_loss_clears_a_carried_wager(
-        self, dig_service, dig_repo, player_repository, guild_id,
-    ):
-        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
-        boss_progress = {
-            str(PINNACLE_DEPTH): {
-                "status": "phase1_defeated", "boss_id": "forgotten_king",
-                "carried_wager": 200, "carried_risk_tier": "bold",
-            }
-        }
-
-        _finalize_pinnacle(
-            dig_service, guild_id, tunnel=tunnel,
-            phase_idx=2, won=False, wager=200, boss_progress=boss_progress,
-        )
-
-        entry = json.loads(
-            dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
-        )[str(PINNACLE_DEPTH)]
-        assert "carried_wager" not in entry
-        assert "carried_risk_tier" not in entry
 
 
 def _read_carry(dig_repo, guild_id, discord_id=20001):

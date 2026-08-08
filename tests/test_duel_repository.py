@@ -546,7 +546,9 @@ def test_delivery_failure_cannot_refund_a_bound_challenge(repo_db_path):
     )
 
 
-def test_decline_uses_ceiling_half_and_allows_debt(duel_fixture):
+def test_decline_uses_ceiling_half_and_allows_debt(duel_fixture, repo_db_path):
+    """Decline charges the recipient ceil(wager/2) even into debt, and the
+    ledger records actor/challenge context with distinct reasons per leg."""
     repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
     declined = repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, 1_000_100, 2)
     assert declined.status is DuelStatus.DECLINED
@@ -554,26 +556,35 @@ def test_decline_uses_ceiling_half_and_allows_debt(duel_fixture):
     assert players.get_balance(2, GUILD_ID) == -251
     assert declined.next_reminder_at is None
 
-
-def test_expiry_uses_ceiling_half_and_allows_debt(duel_fixture):
-    repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
-    expired = repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at)
-    assert expired.status is DuelStatus.EXPIRED
-    assert players.get_balance(1, GUILD_ID) == 751
-    assert players.get_balance(2, GUILD_ID) == -251
-    # The settlement leaves a pending-announcement marker so a lost expiry
-    # announcement stays retryable by the wake loop.
-    assert expired.next_reminder_at == challenge.expires_at
+    rows = ledger_rows(repo_db_path, challenge.challenge_id)
+    assert [(row["account_id"], row["delta"]) for row in rows] == [
+        (1, 501),
+        (1, 251),
+        (2, -251),
+    ]
+    assert {row["source"] for row in rows} == {"duel_challenge"}
+    assert {row["actor_id"] for row in rows} == {2}
+    assert {row["related_type"] for row in rows} == {"duel_challenge"}
+    assert {row["related_id"] for row in rows} == {str(challenge.challenge_id)}
+    assert len({row["reason"] for row in rows}) == 3
 
 
 def test_expired_announcement_claim_and_clear_lifecycle(duel_fixture):
+    """Expiry settles at ceil(wager/2) (into debt if needed), leaves a
+    pending-announcement marker, and the claim/backoff/clear lifecycle
+    delivers the announcement exactly once without re-settling."""
     repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
     now = challenge.expires_at
     expired = repo.expire_atomic(challenge.challenge_id, GUILD_ID, now)
+    assert expired.status is DuelStatus.EXPIRED
     balances = (
         players.get_balance(1, GUILD_ID),
         players.get_balance(2, GUILD_ID),
     )
+    assert balances == (751, -251)
+    # The settlement leaves a pending-announcement marker so a lost expiry
+    # announcement stays retryable by the wake loop.
+    assert expired.next_reminder_at == challenge.expires_at
 
     # The undelivered announcement keeps the row in the due scan.
     assert repo.get_due_challenge_ids(now) == [(challenge.challenge_id, GUILD_ID)]
@@ -638,6 +649,8 @@ def test_expiry_rejects_unbound_pending_without_moving_balances(repo_db_path):
 
 
 def test_accept_then_winner_receives_double_pot(duel_fixture):
+    """Accepting escrows the recipient stake (an exact-balance recipient is
+    allowed, ending at 0), and resolution pays the winner both stakes."""
     repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
     accepted = repo.accept_atomic(
         challenge.challenge_id,
@@ -647,6 +660,7 @@ def test_accept_then_winner_receives_double_pot(duel_fixture):
         1_000_100,
         2,
     )
+    assert accepted.status is DuelStatus.ACCEPTED
     assert players.get_balance(2, GUILD_ID) == 0
     resolved = repo.resolve_atomic(
         accepted.challenge_id, GUILD_ID, winner_id=2, now=1_000_200, actor_id=99
@@ -656,6 +670,7 @@ def test_accept_then_winner_receives_double_pot(duel_fixture):
 
 
 def test_void_refunds_both_stakes(duel_fixture):
+    """Voiding refunds both stakes and stops unresolved reminders."""
     repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
     accepted = repo.accept_atomic(
         challenge.challenge_id,
@@ -675,6 +690,13 @@ def test_void_refunds_both_stakes(duel_fixture):
     assert voided.status is DuelStatus.VOIDED
     assert players.get_balance(1, GUILD_ID) == 500
     assert players.get_balance(2, GUILD_ID) == 500
+    assert repo.get_due_challenge_ids(NOW + 30 * DAY) == []
+    assert (
+        repo.claim_unresolved_reminder_atomic(
+            accepted.challenge_id, GUILD_ID, NOW + 30 * DAY
+        )
+        is None
+    )
 
 
 def test_unfunded_acceptance_voids_and_refunds_only_challenger_wager(
@@ -718,22 +740,6 @@ def test_unfunded_acceptance_voids_and_refunds_only_challenger_wager(
         )
     assert players.get_balance(1, GUILD_ID) == 500
     assert len(ledger_rows(repo_db_path, challenge.challenge_id)) == 1
-
-
-def test_accept_allows_exact_recipient_balance(duel_fixture):
-    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
-
-    accepted = repo.accept_atomic(
-        challenge.challenge_id,
-        GUILD_ID,
-        2,
-        DuelTrial.TRIAL_OF_FIVE,
-        NOW + 100,
-        2,
-    )
-
-    assert accepted.status is DuelStatus.ACCEPTED
-    assert players.get_balance(2, GUILD_ID) == 0
 
 
 def test_accept_rejects_wrong_recipient(duel_fixture):
@@ -840,26 +846,6 @@ def test_accept_and_decline_race_has_exactly_one_success(duel_fixture):
     assert balances in {(0, 0), (750, 250)}
 
 
-def test_decline_ledger_context_has_actor_challenge_and_distinct_reasons(
-    duel_fixture, repo_db_path
-):
-    repo, _, challenge = duel_fixture()
-
-    repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, NOW + 100, 2)
-
-    rows = ledger_rows(repo_db_path, challenge.challenge_id)
-    assert [(row["account_id"], row["delta"]) for row in rows] == [
-        (1, 500),
-        (1, 250),
-        (2, -250),
-    ]
-    assert {row["source"] for row in rows} == {"duel_challenge"}
-    assert {row["actor_id"] for row in rows} == {2}
-    assert {row["related_type"] for row in rows} == {"duel_challenge"}
-    assert {row["related_id"] for row in rows} == {str(challenge.challenge_id)}
-    assert len({row["reason"] for row in rows}) == 3
-
-
 def test_due_expiry_takes_precedence_over_reminder(duel_fixture):
     repo, _, challenge = duel_fixture()
 
@@ -907,6 +893,8 @@ def test_due_scan_returns_guild_pairs_with_expiry_first(repo_db_path):
 
 
 def test_reminder_claim_catches_up_to_next_daily_boundary(duel_fixture):
+    """The claim bumps the schedule to the next daily boundary while
+    preserving the claimed slot for delivery-failure rearm."""
     repo, _, challenge = duel_fixture()
     now = challenge.created_at + 3 * DAY
 
@@ -916,14 +904,6 @@ def test_reminder_claim_catches_up_to_next_daily_boundary(duel_fixture):
     assert claimed.remaining_seconds == challenge.expires_at - now
     assert claimed.challenge.next_reminder_at == challenge.created_at + 4 * DAY
     assert not claimed.ping_recipient
-
-
-def test_reminder_claim_preserves_claimed_schedule_for_delivery_retry(duel_fixture):
-    repo, _, challenge = duel_fixture()
-    now = challenge.created_at + 3 * DAY
-
-    claimed = repo.claim_reminder_atomic(challenge.challenge_id, GUILD_ID, now)
-
     assert claimed.claimed_reminder_at == challenge.next_reminder_at
 
 
@@ -1051,6 +1031,8 @@ def test_accept_schedules_daily_unresolved_reminder(duel_fixture):
 
 
 def test_unresolved_claim_bumps_to_next_daily_boundary(duel_fixture):
+    """The claim bumps to the next daily boundary, is one-shot for the same
+    tick, and preserves the claimed slot for delivery-failure rearm."""
     repo, _, accepted = accept_fixture_challenge(duel_fixture)
     now = accepted.responded_at + 3 * DAY + 500
 
@@ -1061,23 +1043,11 @@ def test_unresolved_claim_bumps_to_next_daily_boundary(duel_fixture):
     assert claimed is not None
     assert claimed.kind is DuelDueKind.UNRESOLVED
     assert claimed.challenge.next_reminder_at == accepted.responded_at + 4 * DAY
+    assert claimed.claimed_reminder_at == accepted.next_reminder_at
     assert (
         repo.claim_unresolved_reminder_atomic(accepted.challenge_id, GUILD_ID, now)
         is None
     )
-
-
-def test_unresolved_claim_preserves_claimed_schedule_for_delivery_retry(
-    duel_fixture,
-):
-    repo, _, accepted = accept_fixture_challenge(duel_fixture)
-    now = accepted.responded_at + 3 * DAY + 500
-
-    claimed = repo.claim_unresolved_reminder_atomic(
-        accepted.challenge_id, GUILD_ID, now
-    )
-
-    assert claimed.claimed_reminder_at == accepted.next_reminder_at
 
 
 def test_unresolved_claim_returns_off_grid_rearm_to_daily_grid(duel_fixture):
@@ -1137,22 +1107,6 @@ def test_only_one_concurrent_unresolved_claim_succeeds(duel_fixture):
         results = list(executor.map(lambda _: claim(), range(2)))
 
     assert sum(result is not None for result in results) == 1
-
-
-def test_voiding_stops_unresolved_reminders(duel_fixture):
-    repo, _, accepted = accept_fixture_challenge(duel_fixture)
-    voided = repo.resolve_atomic(
-        accepted.challenge_id, GUILD_ID, winner_id=None, now=NOW + 200, actor_id=99
-    )
-
-    assert voided.status is DuelStatus.VOIDED
-    assert repo.get_due_challenge_ids(NOW + 30 * DAY) == []
-    assert (
-        repo.claim_unresolved_reminder_atomic(
-            accepted.challenge_id, GUILD_ID, NOW + 30 * DAY
-        )
-        is None
-    )
 
 
 def test_due_scan_orders_pending_expiry_before_unresolved_reminder(repo_db_path):

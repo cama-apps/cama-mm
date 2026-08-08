@@ -81,6 +81,8 @@ class TestAdopt:
     def test_adopt_over_a_starved_pet_claims_death_and_escalates_fee(
         self, service, clock
     ):
+        """The unswept death is claimed lazily before pricing, and the fee
+        escalates with the death count (also covers explicit-claim pricing)."""
         pet = adopt_common(service, clock)
         clock.now = pet.hatched_at + 9 * DAY  # long past starvation, unswept
         second = adopt_common(service, clock, name="Blep II")
@@ -88,18 +90,12 @@ class TestAdopt:
         dead = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
         assert dead.died_at == pet.hatched_at + 5 * DAY
 
-    def test_adoption_fee_escalates_with_deaths(self, service, clock):
-        pet = adopt_common(service, clock)
-        service.pet_repo.claim_death(
-            pet.pet_id, TEST_GUILD_ID, died_at=T0 + 100,
-            expected_last_fed_at=pet.last_fed_at,
-            expected_hunger=pet.hunger_at_last_fed,
-        )
-        second = adopt_common(service, clock, name="Blep II")
-        assert second.adopt_fee == 50
-
     def test_species_roll_respects_tier_weights(self, service, clock):
+        """The species is rolled at hatch (not purchase) using the standard
+        tier weights; the egg stays 'unhatched' until then."""
         egg = service.adopt(100, TEST_GUILD_ID, "Weighted").value["pet"]
+        assert egg.species == "unhatched"
+        assert egg.egg_tier == "standard"
         clock.now = egg.hatched_at
         with patch("services.pet_service.random.choices") as choices:
             choices.return_value = ["rama"]
@@ -141,23 +137,6 @@ class TestAdopt:
 
 
 class TestEggHatchAndUpgrade:
-    def test_standard_species_is_selected_at_hatch_not_purchase(
-        self, service, clock
-    ):
-        adopted = service.adopt(100, TEST_GUILD_ID, "Later")
-        assert adopted.success, adopted.error
-        egg = adopted.value["pet"]
-        assert egg.species == "unhatched"
-        assert egg.egg_tier == "standard"
-
-        clock.now = egg.hatched_at
-        with patch(
-            "services.pet_service.random.choices",
-            return_value=["rama"],
-        ):
-            status = service.get_status(100, TEST_GUILD_ID).value
-        assert status.pet.species == "rama"
-
     def test_second_gilded_adoption_upgrades_and_renames_existing_egg(
         self, service, clock
     ):
@@ -579,6 +558,8 @@ class TestGacha:
 
 class TestMatchHook:
     def test_win_feeds_living_pets_and_skips_eggs(self, service, clock):
+        """The winner's living pet is topped up (and its anchors moved to the
+        top-up moment); unregistered/eggless ids are skipped."""
         pet = adopt_common(service, clock)
         clock.now = pet.hatched_at + 2 * DAY  # hunger 60
         fed = service.on_match_win([100, 555], TEST_GUILD_ID)
@@ -586,14 +567,10 @@ class TestMatchHook:
         fed_pet, amount = fed[0]
         assert fed_pet.pet_id == pet.pet_id
         assert amount == 10
+        assert fed_pet.last_fed_at == clock.now
+        assert fed_pet.hunger_at_last_fed == 70
         status = service.get_status(100, TEST_GUILD_ID).value
         assert status.hunger == 70
-
-    def test_win_caps_at_max(self, service, clock):
-        pet = adopt_common(service, clock)
-        clock.now = pet.hatched_at  # full
-        service.on_match_win([100], TEST_GUILD_ID)
-        assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
 
     def test_win_reports_only_fullness_actually_applied(self, service, clock):
         pet = adopt_common(service, clock)
@@ -603,14 +580,6 @@ class TestMatchHook:
 
         assert fed[0][1] == 5
         assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
-
-    def test_win_returns_post_top_up_anchors(self, service, clock):
-        pet = adopt_common(service, clock)
-        clock.now = pet.hatched_at + 2 * DAY  # hunger 60
-        fed = service.on_match_win([100], TEST_GUILD_ID)
-        fed_pet, _amount = fed[0]
-        assert fed_pet.last_fed_at == clock.now
-        assert fed_pet.hunger_at_last_fed == 70
 
     def test_pack_cama_gets_bonus(self, service, clock):
         pet = adopt_species(service, "Donkey", "courier_cama")
