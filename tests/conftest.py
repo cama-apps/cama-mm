@@ -58,6 +58,10 @@ def _test_get_connection(self):
 
 
 BaseRepository.get_connection = _test_get_connection
+# The unpatched production opener, for tests that assert on how production
+# connections are configured (see tests/test_database_connection_setup.py).
+# Without this they would measure the patch above instead.
+BaseRepository.durable_get_connection = _durable_get_connection
 
 TEST_GUILD_ID_SECONDARY = 67890
 """Secondary guild ID for multi-guild isolation tests."""

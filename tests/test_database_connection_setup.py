@@ -24,9 +24,12 @@ def _capture_connection_setup(monkeypatch, sqlite_module, opener):
 
 
 def _assert_runtime_configuration(connection, setup_statements):
-    normalized = tuple(statement.strip().upper() for statement in setup_statements)
-    assert not any("JOURNAL_MODE" in statement for statement in normalized)
-    assert not any("BUSY_TIMEOUT" in statement for statement in normalized)
+    # The point of this regression test is that opening a runtime connection
+    # costs NO setup round-trips: WAL is persistent on the file and the busy
+    # timeout comes from the connect() argument. Assert the statement list is
+    # empty rather than naming individual pragmas, so any newly introduced
+    # per-connection setup SQL fails here.
+    assert setup_statements == ()
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
 
@@ -38,7 +41,11 @@ def test_repository_connection_reuses_schema_sqlite_configuration(
     connection, setup_statements = _capture_connection_setup(
         monkeypatch,
         base_repository_module.sqlite3,
-        repository.get_connection,
+        # The production opener, not the suite-wide synchronous=OFF wrapper
+        # conftest installs — otherwise this measures the test harness.
+        lambda: base_repository_module.BaseRepository.durable_get_connection(
+            repository
+        ),
     )
     try:
         _assert_runtime_configuration(connection, setup_statements)
