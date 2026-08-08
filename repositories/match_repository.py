@@ -19,6 +19,22 @@ from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 logger = logging.getLogger("cama_bot.repositories.match")
 
 
+def _select_referral_rewards_for_match(
+    cursor, match_id: int, guild_id: int
+) -> list[dict]:
+    """Read deterministic referral reward rows on the caller's connection."""
+    rows = cursor.execute(
+        """
+        SELECT referred_id, referrer_id, reward_amount
+        FROM referrals
+        WHERE guild_id = ? AND rewarded_match_id = ?
+        ORDER BY referred_id
+        """,
+        (guild_id, match_id),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _replace_match_bans(cursor, match_id: int, enrichment_data: str | None) -> None:
     """Replace Scout's compact ban projection inside the caller's transaction."""
     cursor.execute("DELETE FROM match_bans WHERE match_id = ?", (match_id,))
@@ -283,6 +299,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
         win_reward_jc: int | None = None,
+        referral_rewards_out: list[dict] | None = None,
     ) -> int:
         """Record a match and all dependent rating/pairings/consumable writes
         atomically.
@@ -293,12 +310,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
         every downstream consumer (leaderboards, prediction stats, rating
         graphs) relies on.
 
-        The ``players`` balance side (bet settlement, loan repayment) is NOT
-        included: those writes have independent recovery paths (a pending bet
-        stays pending until settled; an outstanding loan stays outstanding
-        until repaid on the next recorded match) and keeping them outside
-        this txn avoids locking the money tables for the duration of match
-        recording.
+        First-match referral rewards are included because their eligibility
+        and exact-once claim must commit with the match. Other ``players``
+        balance writes (bet settlement, loan repayment) remain outside: those
+        writes have independent recovery paths (a pending bet stays pending
+        until settled; an outstanding loan stays outstanding until repaid on
+        the next recorded match).
+
+        When supplied, ``referral_rewards_out`` is replaced with the persisted
+        reward rows for the returned match without changing the integer return
+        contract or opening another connection.
 
         Returns the new match_id.
         """
@@ -326,6 +347,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 )
                 existing = cursor.fetchone()
                 if existing:
+                    if referral_rewards_out is not None:
+                        referral_rewards_out[:] = _select_referral_rewards_for_match(
+                            cursor,
+                            int(existing["match_id"]),
+                            normalized_guild,
+                        )
                     return existing["match_id"]
 
             # The rating calculation happened before this transaction began.
@@ -396,7 +423,104 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     [(match_id, pid, normalized_guild, not team1_won) for pid in team2_ids],
                 )
 
-            # 3. win/loss counters
+            # 3. First-match referral rewards. Eligibility is checked before
+            # counters change, while both beneficiary accounts and the
+            # unclaimed referral row are protected by this transaction's write
+            # lock. Joining both accounts prevents a partial recruit-only
+            # payout when the referrer account no longer exists.
+            participant_ids = team1_ids + team2_ids
+            referral_jc_changes: dict[int, int] = {}
+            if participant_ids:
+                placeholders = ",".join("?" * len(participant_ids))
+                eligible_referrals = cursor.execute(
+                    f"""
+                    SELECT r.referred_id, r.referrer_id
+                    FROM referrals r
+                    JOIN players referred
+                      ON referred.guild_id = r.guild_id
+                     AND referred.discord_id = r.referred_id
+                    JOIN players referrer
+                      ON referrer.guild_id = r.guild_id
+                     AND referrer.discord_id = r.referrer_id
+                    WHERE r.guild_id = ?
+                      AND r.rewarded_match_id IS NULL
+                      AND r.referred_id IN ({placeholders})
+                      AND COALESCE(referred.wins, 0)
+                          + COALESCE(referred.losses, 0) = 0
+                    ORDER BY r.referred_id
+                    """,
+                    (normalized_guild, *participant_ids),
+                ).fetchall()
+
+                rewarded_at = int(time.time())
+                for referral in eligible_referrals:
+                    referred_id = int(referral["referred_id"])
+                    referrer_id = int(referral["referrer_id"])
+                    try:
+                        for beneficiary_id, beneficiary_role in (
+                            (referred_id, "referred"),
+                            (referrer_id, "referrer"),
+                        ):
+                            self._set_economy_ledger_context(
+                                cursor,
+                                source="referral_reward",
+                                related_type="referral",
+                                related_id=referred_id,
+                                reason="First-match referral reward",
+                                metadata={
+                                    "match_id": match_id,
+                                    "referrer_id": referrer_id,
+                                    "referred_id": referred_id,
+                                    "beneficiary_role": beneficiary_role,
+                                },
+                            )
+                            cursor.execute(
+                                """
+                                UPDATE players
+                                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + 100,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE guild_id = ? AND discord_id = ?
+                                """,
+                                (normalized_guild, beneficiary_id),
+                            )
+
+                        cursor.execute(
+                            """
+                            UPDATE referrals
+                            SET rewarded_match_id = ?, reward_amount = 100,
+                                rewarded_at = ?
+                            WHERE guild_id = ? AND referred_id = ?
+                              AND rewarded_match_id IS NULL
+                            """,
+                            (match_id, rewarded_at, normalized_guild, referred_id),
+                        )
+                        for beneficiary_id in (referred_id, referrer_id):
+                            referral_jc_changes[beneficiary_id] = (
+                                referral_jc_changes.get(beneficiary_id, 0) + 100
+                            )
+                    finally:
+                        self._clear_economy_ledger_context(cursor)
+
+            if referral_jc_changes:
+                cursor.execute(
+                    """
+                    UPDATE matches
+                    SET jc_changes = ?
+                    WHERE match_id = ? AND guild_id = ?
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                str(beneficiary_id): {"referral": amount}
+                                for beneficiary_id, amount in referral_jc_changes.items()
+                            }
+                        ),
+                        match_id,
+                        normalized_guild,
+                    ),
+                )
+
+            # 4. win/loss counters
             if winning_ids:
                 cursor.executemany(
                     """
@@ -871,6 +995,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     normalized_guild,
                 )
 
+            if referral_rewards_out is not None:
+                referral_rewards_out[:] = _select_referral_rewards_for_match(
+                    cursor,
+                    match_id,
+                    normalized_guild,
+                )
             return match_id
 
     def add_rating_history(
@@ -1288,6 +1418,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
             }
             for discord_id, components in json.loads(row["jc_changes"]).items()
         }
+
+    def get_referral_rewards_for_match(
+        self, match_id: int, guild_id: int | None
+    ) -> list[dict]:
+        """Return referral rewards settled by a guild's recorded match."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            return _select_referral_rewards_for_match(
+                conn.cursor(),
+                match_id,
+                normalized_guild,
+            )
 
     def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None:
         """Get parsed enrichment_data JSON for a match, or None if not enriched."""

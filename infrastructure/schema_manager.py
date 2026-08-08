@@ -836,9 +836,28 @@ class SchemaManager:
                 "add_streak_threshold_to_rating_history",
                 self._migration_add_streak_threshold_to_rating_history,
             ),
+            ("create_referrals", self._migration_create_referrals),
         ]
 
     # --- Migrations ---
+
+    def _migration_create_referrals(self, cursor) -> None:
+        """Create durable, guild-scoped referral enrollment records."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referrals (
+                guild_id          INTEGER NOT NULL DEFAULT 0,
+                referred_id       INTEGER NOT NULL,
+                referrer_id       INTEGER NOT NULL,
+                created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                rewarded_match_id INTEGER,
+                reward_amount     INTEGER,
+                rewarded_at       TIMESTAMP,
+                PRIMARY KEY (guild_id, referred_id),
+                CHECK (referrer_id != referred_id)
+            )
+            """
+        )
 
     def _migration_create_survey_tables(self, cursor) -> None:
         """Create one-off survey campaigns, questions, recipients, and answers."""

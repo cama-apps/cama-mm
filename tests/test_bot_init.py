@@ -107,6 +107,7 @@ def test_bot_commands_registered(tmp_path):
                     "leaderboard",
                     "help",
                     "blameluke",
+                    "refer",
                     "survey",
                 )
                 for command_name in expected_commands:
@@ -143,7 +144,7 @@ def test_bot_commands_registered(tmp_path):
                     "survey close",
                 }
                 assert expected_paths <= qualified_names
-                expected_top_level_count = 44 if "ask" in command_names else 43
+                expected_top_level_count = 45 if "ask" in command_names else 44
                 assert len(bot.bot.tree.get_commands()) == expected_top_level_count
                 assert len(bot.bot.tree.get_commands()) <= 100
                 for command in bot.bot.tree.walk_commands():
