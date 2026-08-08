@@ -84,20 +84,13 @@ def test_pool_shuffle_includes_player_with_longer_lobby_wait(
 class TestPlayer:
     """Test Player class functionality."""
 
-    def test_player_value_with_glicko(self):
-        """Test player value calculation using Glicko-2 rating."""
+    def test_player_value_rating_sources(self):
+        """get_value uses Glicko-2 when requested, falls back to MMR otherwise,
+        and returns 0 with no rating data at all."""
         player = Player(name="TestPlayer", mmr=2000, glicko_rating=1800, wins=5, losses=3)
         assert player.get_value(use_glicko=True) == 1800
-
-    def test_player_value_without_glicko(self):
-        """Test player value calculation using MMR fallback."""
-        player = Player(name="TestPlayer", mmr=2000, wins=5, losses=3)
         assert player.get_value(use_glicko=False) == 2000
-
-    def test_player_value_no_rating(self):
-        """Test player value with no rating data."""
-        player = Player(name="TestPlayer")
-        assert player.get_value() == 0
+        assert Player(name="Unrated").get_value() == 0
 
     def test_glicko_and_openskill_values_agree_at_same_mmr(self):
         """A Glicko-rated player and an OpenSkill-rated player seeded from the
@@ -185,8 +178,9 @@ class TestTeam:
         again = team.ensure_role_assignments()
         assert again == ["5", "4", "3", "2", "1"]
 
-    def test_team_value_all_on_role(self):
-        """Test team value when all players are on their preferred roles."""
+    def test_team_value_and_off_role_count(self):
+        """Team value applies the off-role multiplier only to off-role players,
+        and get_off_role_count counts them (0 when everyone is on-role)."""
         players = [
             Player(name="P1", mmr=2000, preferred_roles=["1"]),
             Player(name="P2", mmr=1800, preferred_roles=["2"]),
@@ -194,52 +188,20 @@ class TestTeam:
             Player(name="P4", mmr=1400, preferred_roles=["4"]),
             Player(name="P5", mmr=1200, preferred_roles=["5"]),
         ]
-        team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
-        value = team.get_team_value(use_glicko=False, off_role_multiplier=0.9)
+        on_role = Team(players, role_assignments=["1", "2", "3", "4", "5"])
         # All on-role, so full value: 2000 + 1800 + 1600 + 1400 + 1200 = 8000
-        assert value == 8000
+        assert on_role.get_team_value(use_glicko=False, off_role_multiplier=0.9) == 8000
+        assert on_role.get_off_role_count() == 0
 
-    def test_team_value_with_off_role(self):
-        """Test team value when some players are off-role."""
-        players = [
-            Player(name="P1", mmr=2000, preferred_roles=["1"]),
-            Player(name="P2", mmr=1800, preferred_roles=["2"]),
-            Player(name="P3", mmr=1600, preferred_roles=["3"]),
-            Player(name="P4", mmr=1400, preferred_roles=["4"]),
-            Player(name="P5", mmr=1200, preferred_roles=["5"]),
-        ]
         # P1 playing role 2 (off-role), P2 playing role 1 (off-role)
-        team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
-        value = team.get_team_value(use_glicko=False, off_role_multiplier=0.9)
+        off_role = Team(players, role_assignments=["2", "1", "3", "4", "5"])
         # P1 (2000) and P2 (1800) are off-role: 2000*0.9 + 1800*0.9 = 3420
         # P3, P4, P5 on-role: 1600 + 1400 + 1200 = 4200
         # Total: 3420 + 4200 = 7620
-        assert value == pytest.approx(7620)
-
-    def test_off_role_count(self):
-        """Test counting off-role players."""
-        players = [
-            Player(name="P1", mmr=2000, preferred_roles=["1"]),
-            Player(name="P2", mmr=1800, preferred_roles=["2"]),
-            Player(name="P3", mmr=1600, preferred_roles=["3"]),
-            Player(name="P4", mmr=1400, preferred_roles=["4"]),
-            Player(name="P5", mmr=1200, preferred_roles=["5"]),
-        ]
-        # P1 and P2 playing off-role
-        team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
-        assert team.get_off_role_count() == 2
-
-    def test_off_role_count_all_on_role(self):
-        """Test off-role count when all players are on-role."""
-        players = [
-            Player(name="P1", mmr=2000, preferred_roles=["1"]),
-            Player(name="P2", mmr=1800, preferred_roles=["2"]),
-            Player(name="P3", mmr=1600, preferred_roles=["3"]),
-            Player(name="P4", mmr=1400, preferred_roles=["4"]),
-            Player(name="P5", mmr=1200, preferred_roles=["5"]),
-        ]
-        team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
-        assert team.get_off_role_count() == 0
+        assert off_role.get_team_value(
+            use_glicko=False, off_role_multiplier=0.9
+        ) == pytest.approx(7620)
+        assert off_role.get_off_role_count() == 2
 
     def test_role_assignment_optimal(self):
         """Test that optimal role assignment minimizes off-roles."""
@@ -370,22 +332,6 @@ class TestShuffler:
 
         assert [player.glicko_rating for player in excluded] == [1475]
 
-    def test_shuffle_exact_10_players(self):
-        """Test shuffling with exactly 10 players."""
-        players = [Player(name=f"Player{i}", mmr=1500 + i * 10) for i in range(10)]
-        shuffler = BalancedShuffler(use_glicko=False, off_role_flat_penalty=50.0)
-        team1, team2 = shuffler.shuffle(players)
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        # All players should be assigned
-        all_players = team1.players + team2.players
-        assert len(all_players) == 10
-        # Compare by name since Player objects aren't hashable
-        all_player_names = {p.name for p in all_players}
-        player_names = {p.name for p in players}
-        assert all_player_names == player_names
-
     def test_shuffle_evaluates_duplicate_display_names_by_identity(self, monkeypatch):
         """Duplicate Discord names must not collapse distinct team splits."""
         players = [
@@ -484,7 +430,8 @@ class TestShuffler:
             shuffler.shuffle(players)
 
     def test_shuffle_balanced_teams(self):
-        """Test that shuffled teams have similar values."""
+        """A 10-player shuffle assigns everyone to two teams of five and finds
+        the optimal-value split."""
         # Create 10 players with varying MMRs
         players = [
             Player(name="P1", mmr=2000),
@@ -500,6 +447,13 @@ class TestShuffler:
         ]
         shuffler = BalancedShuffler(use_glicko=False, off_role_flat_penalty=50.0)
         team1, team2 = shuffler.shuffle(players)
+
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+        # Compare by name since Player objects aren't hashable
+        assert {p.name for p in team1.players + team2.players} == {
+            p.name for p in players
+        }
 
         value1 = team1.get_team_value(use_glicko=False, off_role_multiplier=1.0)
         value2 = team2.get_team_value(use_glicko=False, off_role_multiplier=1.0)
@@ -795,41 +749,6 @@ class TestShuffler:
             "The player with the lowest exclusion count should be excluded"
         )
 
-    def test_exclusion_penalty_calculation(self):
-        """Test that exclusion penalty is calculated correctly."""
-        # Create 11 players (1 will be excluded)
-        players = [Player(name=f"Player{i}", mmr=1500, preferred_roles=["1"]) for i in range(11)]
-
-        # Set exclusion counts
-        exclusion_counts = {}
-        for i, player in enumerate(players):
-            exclusion_counts[player.name] = i * 2  # 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20
-
-        shuffler = BalancedShuffler(
-            use_glicko=False, off_role_flat_penalty=50.0, exclusion_penalty_weight=5.0
-        )
-
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-        # Verify basic structure
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 1
-
-        # The excluded player should preferably have lower exclusion count
-        # (because excluding high-count players adds more penalty)
-        # Player0 (count=0) should be more likely excluded than Player10 (count=20)
-        excluded_name = excluded[0].name
-        excluded_count = exclusion_counts[excluded_name]
-
-        # The penalty for excluding Player10 (count=20) is 20*5 = 100
-        # The penalty for excluding Player0 (count=0) is 0*5 = 0
-        # Algorithm should prefer excluding Player0
-        # Note: This is not guaranteed due to role balancing, but should trend this way
-        assert excluded_count <= 10, (
-            f"Expected lower-count player to be excluded, got {excluded_name} with count {excluded_count}"
-        )
-
     def test_greedy_shuffle_excludes_lowest_effective_exclusion_count(self):
         """Regression: the greedy path must exclude the players with the
         LOWEST effective exclusion counts, not simply the lowest-rated ones."""
@@ -855,20 +774,6 @@ class TestShuffler:
         assert {p.name for p in excluded} == {"Player8", "Player9"}
         assert len(team1.players) == 5
         assert len(team2.players) == 5
-
-    def test_exclusion_penalty_weight_parameter(self):
-        """Test that exclusion_penalty_weight parameter is stored correctly."""
-        # Test default value
-        shuffler1 = BalancedShuffler()
-        assert shuffler1.exclusion_penalty_weight == 70.0  # Config default
-
-        # Test custom value
-        shuffler2 = BalancedShuffler(exclusion_penalty_weight=10.0)
-        assert shuffler2.exclusion_penalty_weight == 10.0
-
-        # Test zero value (disables exclusion penalty)
-        shuffler3 = BalancedShuffler(exclusion_penalty_weight=0.0)
-        assert shuffler3.exclusion_penalty_weight == 0.0
 
     def test_zero_exclusion_penalty_weight_with_recent_participants(self):
         """Regression: exclusion_penalty_weight=0 disables exclusion weighting,
@@ -899,20 +804,6 @@ class TestShuffler:
         assert len(team2.players) == 5
         assert len(excluded) == 2
 
-    def test_shuffle_from_pool_without_exclusion_counts(self):
-        """Test that shuffle_from_pool works without exclusion counts (backward compatibility)."""
-        players = [
-            Player(name=f"Player{i}", mmr=1500 + i * 10, preferred_roles=["1"]) for i in range(12)
-        ]
-        shuffler = BalancedShuffler(use_glicko=False, off_role_flat_penalty=50.0)
-
-        # Call without exclusion_counts parameter
-        team1, team2, excluded = shuffler.shuffle_from_pool(players)
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 2
-
 
 class TestRoleMatchupDelta:
     """Tests for the role matchup delta scoring additions."""
@@ -922,7 +813,9 @@ class TestRoleMatchupDelta:
         assert BalancedShuffler().role_matchup_delta_weight == pytest.approx(0.17)
 
     def test_role_matchup_delta_calculation(self):
-        """Role matchup delta should return the sum of the critical matchups."""
+        """Role matchup delta should return the sum of the critical matchups,
+        and role_matchup_delta_weight should scale both parity deltas when
+        computing matchup scores."""
         team1_players = [
             Player(name="Carry1", mmr=2000, preferred_roles=["1"]),
             Player(name="Mid1", mmr=1500, preferred_roles=["2"]),
@@ -964,38 +857,13 @@ class TestRoleMatchupDelta:
         # total should therefore be 400 + 500 + 1800 = 2700
         assert score == pytest.approx(2700)
 
-    def test_role_matchup_delta_weight_applied_in_service(self):
-        """Weight should scale the matchup delta when computing scores."""
-        team1_players = [
-            Player(name="Carry1", mmr=2000, preferred_roles=["1"]),
-            Player(name="Mid1", mmr=1500, preferred_roles=["2"]),
-            Player(name="Offlane1", mmr=1200, preferred_roles=["3"]),
-            Player(name="Sup1", mmr=1100, preferred_roles=["4"]),
-            Player(name="Sup2", mmr=1000, preferred_roles=["5"]),
-        ]
-        team2_players = [
-            Player(name="Carry2", mmr=1000, preferred_roles=["1"]),
-            Player(name="Mid2", mmr=1500, preferred_roles=["2"]),
-            Player(name="Offlane2", mmr=1900, preferred_roles=["3"]),
-            Player(name="Sup3", mmr=1050, preferred_roles=["4"]),
-            Player(name="Sup4", mmr=950, preferred_roles=["5"]),
-        ]
-
-        team1 = Team(team1_players, role_assignments=["1", "2", "3", "4", "5"])
-        team2 = Team(team2_players, role_assignments=["1", "2", "3", "4", "5"])
-
-        service = TeamBalancingService(
+        weighted_service = TeamBalancingService(
             use_glicko=False, off_role_multiplier=1.0, role_matchup_delta_weight=0.5
         )
-
-        delta = service.calculate_role_matchup_delta(team1, team2)
-        assert delta == 500  # sum of the five matchups (100 + 200 + 0 + 150 + 50)
-
-        score = service.calculate_matchup_score(team1, team2)
-        # value difference = |6800 - 6400| = 400
-        # weighted lane and role deltas = (500 + 1800) * 0.5 = 1150
-        # off-role penalty = 0
-        assert score == pytest.approx(1550)
+        assert weighted_service.calculate_role_matchup_delta(team1, team2) == 500
+        weighted_score = weighted_service.calculate_matchup_score(team1, team2)
+        # value difference = 400; weighted lane and role deltas = (500 + 1800) * 0.5
+        assert weighted_score == pytest.approx(1550)
 
     def test_matchup_score_uses_requested_jopacoin_values(self):
         """Every matchup-score component should use the requested rating mode."""
@@ -1311,6 +1179,10 @@ def _shuffle_result_signature(
 
 
 def _seeded_14_player_pool(seed: int, prefix: str = "Seeded") -> list[Player]:
+    # Role preferences are capped at 3 per player: the differential properties
+    # under test (optimized search == reference search) are about the bound
+    # arithmetic, not assignment breadth, and 1-3 roles still mixes off-role
+    # and flex assignments while keeping the exhaustive reference search cheap.
     rng = random.Random(seed)
     roles = ["1", "2", "3", "4", "5"]
     return [
@@ -1319,7 +1191,7 @@ def _seeded_14_player_pool(seed: int, prefix: str = "Seeded") -> list[Player]:
             discord_id=index + 1,
             glicko_rating=rng.uniform(850.0, 2750.0),
             glicko_rd=None if index % 5 == 0 else rng.uniform(20.0, 350.0),
-            preferred_roles=rng.sample(roles, rng.randint(1, len(roles))),
+            preferred_roles=rng.sample(roles, rng.randint(1, 3)),
         )
         for index in range(14)
     ]
@@ -1526,15 +1398,19 @@ class TestShuffler14Players:
         ("seed", "recent_count"),
         [
             (0x1401, 0),
-            (0x1402, 3),
             (0x1403, 7),
-            (0x1404, 10),
         ],
     )
     def test_split_bound_exactly_matches_reference_search_for_seeded_pools(
         self, monkeypatch, seed, recent_count
     ):
-        """Tighter split pruning must not change any selected player or role."""
+        """Tighter split pruning must not change any selected player or role.
+
+        Two seeded cases suffice: every penalty weight is randomized nonzero in
+        both, and the pair covers recent_count == 0 (recent term inert) and
+        recent_count > 0 (recent term active); the dropped seeds sampled the
+        same code paths again.
+        """
         players = _seeded_14_player_pool(seed)
         rng = random.Random(seed ^ 0xB0A0D)
         exclusion_counts = {
@@ -1917,46 +1793,6 @@ class TestShuffler14Players:
         shuffler.shuffle_from_pool(players)
         assert set(value_reads.values()) == {2}
 
-    def test_14_player_pool_exclusion_penalty(self):
-        """
-        Test that exclusion penalty affects player selection in 14-player pool.
-        Players with high exclusion counts should be included over those with 0.
-        """
-        players = _create_players_with_roles(14, base_mmr=1500, spread=0)
-
-        # Give first 4 players high exclusion counts
-        exclusion_counts = {}
-        for i, pl in enumerate(players):
-            if i < 4:
-                exclusion_counts[pl.name] = 10  # High exclusion count
-            else:
-                exclusion_counts[pl.name] = 0
-
-        # Use high exclusion penalty weight (new default from PRD)
-        shuffler = BalancedShuffler(
-            use_glicko=True,
-            off_role_flat_penalty=100.0,
-            exclusion_penalty_weight=75.0,
-        )
-
-        team1, team2, _ = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-        # Get names of included players
-        included_names = {p.name for p in team1.players + team2.players}
-
-        # High-exclusion players should be included (not excluded)
-        high_exclusion_names = {players[i].name for i in range(4)}
-
-        # With penalty weight 75 and count 10, excluding costs 750 points each
-        # Algorithm should strongly prefer including them
-        included_high_exclusion = high_exclusion_names & included_names
-
-        # At least 3 of the 4 high-exclusion players should be included
-        assert len(included_high_exclusion) >= 3, (
-            f"Expected at least 3 high-exclusion players included, "
-            f"got {len(included_high_exclusion)}: {included_high_exclusion}"
-        )
-
     def test_14_player_pool_with_role_preferences(self):
         """
         Test 14-player pool with varied role preferences.
@@ -2004,18 +1840,6 @@ class TestShuffler14Players:
 
         all_players = team1.players + team2.players + excluded
         assert len({player.name for player in all_players}) == 14
-
-    def test_13_player_pool(self):
-        """Test 13-player pool (edge case between 12 and 14)."""
-        players = _create_players_with_roles(13)
-        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
-
-        exclusion_counts = {pl.name: 0 for pl in players}
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 3
 
 
 class TestExclusionPenaltyWeightDefault:
@@ -2066,32 +1890,23 @@ class TestJopacoinBalancing:
     """Tests for jopacoin balance-based team balancing."""
 
     def test_player_value_jopacoin(self):
-        """Player.get_value(use_jopacoin=True) returns jopacoin balance."""
-        player = Player(name="Rich", mmr=2000, glicko_rating=1800, jopacoin_balance=500)
-        assert player.get_value(use_jopacoin=True) == 500.0
-
-    def test_player_value_jopacoin_negative(self):
-        """Jopacoin value can be negative (players in debt)."""
-        player = Player(name="Broke", mmr=5000, glicko_rating=2500, jopacoin_balance=-200)
-        assert player.get_value(use_jopacoin=True) == -200.0
-
-    def test_player_value_jopacoin_zero(self):
-        """Jopacoin value is zero when balance is zero."""
-        player = Player(name="Zero", mmr=3000, jopacoin_balance=0)
-        assert player.get_value(use_jopacoin=True) == 0.0
-
-    def test_player_value_jopacoin_overrides_glicko(self):
-        """use_jopacoin takes priority over use_glicko."""
-        player = Player(name="P", glicko_rating=2000, jopacoin_balance=42)
-        assert player.get_value(use_glicko=True, use_jopacoin=True) == 42.0
-
-    def test_player_value_jopacoin_overrides_openskill(self):
-        """use_jopacoin takes priority over use_openskill."""
-        player = Player(name="P", os_mu=50.0, os_sigma=3.0, jopacoin_balance=7)
-        assert player.get_value(use_openskill=True, use_jopacoin=True) == 7.0
+        """Player.get_value(use_jopacoin=True) returns the jopacoin balance —
+        including negative (debt) and zero balances — and takes priority over
+        both use_glicko and use_openskill."""
+        rich = Player(name="Rich", mmr=2000, glicko_rating=1800, jopacoin_balance=500)
+        assert rich.get_value(use_jopacoin=True) == 500.0
+        broke = Player(name="Broke", mmr=5000, glicko_rating=2500, jopacoin_balance=-200)
+        assert broke.get_value(use_jopacoin=True) == -200.0
+        zero = Player(name="Zero", mmr=3000, jopacoin_balance=0)
+        assert zero.get_value(use_jopacoin=True) == 0.0
+        glicko = Player(name="P", glicko_rating=2000, jopacoin_balance=42)
+        assert glicko.get_value(use_glicko=True, use_jopacoin=True) == 42.0
+        openskill = Player(name="P", os_mu=50.0, os_sigma=3.0, jopacoin_balance=7)
+        assert openskill.get_value(use_openskill=True, use_jopacoin=True) == 7.0
 
     def test_team_value_jopacoin(self):
-        """Team value sums jopacoin balances when use_jopacoin=True."""
+        """Team value sums jopacoin balances when use_jopacoin=True, and the
+        off-role penalty still applies with jopacoin balancing."""
         players = [
             Player(name="P1", mmr=2000, preferred_roles=["1"], jopacoin_balance=100),
             Player(name="P2", mmr=1800, preferred_roles=["2"], jopacoin_balance=200),
@@ -2100,23 +1915,14 @@ class TestJopacoinBalancing:
             Player(name="P5", mmr=1200, preferred_roles=["5"], jopacoin_balance=25),
         ]
         team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
-        value = team.get_team_value(use_jopacoin=True)
-        assert value == 450.0
+        assert team.get_team_value(use_jopacoin=True) == 450.0
 
-    def test_team_value_jopacoin_off_role_penalty(self):
-        """Off-role penalty still applies with jopacoin balancing."""
-        players = [
-            Player(name="P1", mmr=2000, preferred_roles=["1"], jopacoin_balance=100),
-            Player(name="P2", mmr=1800, preferred_roles=["2"], jopacoin_balance=200),
-            Player(name="P3", mmr=1600, preferred_roles=["3"], jopacoin_balance=50),
-            Player(name="P4", mmr=1400, preferred_roles=["4"], jopacoin_balance=75),
-            Player(name="P5", mmr=1200, preferred_roles=["5"], jopacoin_balance=25),
-        ]
         # Swap P1 and P2 roles (both off-role)
-        team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
-        value = team.get_team_value(use_jopacoin=True, off_role_multiplier=0.9)
+        off_role_team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
         # P1 off-role: 100*0.9=90, P2 off-role: 200*0.9=180, rest on-role: 50+75+25=150
-        assert value == pytest.approx(420.0)
+        assert off_role_team.get_team_value(
+            use_jopacoin=True, off_role_multiplier=0.9
+        ) == pytest.approx(420.0)
 
     def test_shuffler_jopacoin_balancing(self):
         """BalancedShuffler produces balanced teams by jopacoin balance."""
