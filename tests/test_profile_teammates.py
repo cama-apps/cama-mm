@@ -10,28 +10,18 @@ from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.pairings_service import PairingsService
 from tests.conftest import TEST_GUILD_ID
-from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture
-def temp_db_path(tmp_path):
-    """Create a temporary database path for testing."""
-    db_path = str(tmp_path / "test_profile_teammates.db")
-    # Initialize schema
-    Database(db_path)
-    return db_path
-
-
-@pytest.fixture
-def pairings_repo(temp_db_path):
+def pairings_repo(repo_db_path):
     """Create a PairingsRepository instance."""
-    return PairingsRepository(temp_db_path)
+    return PairingsRepository(repo_db_path)
 
 
 @pytest.fixture
-def player_repo(temp_db_path):
+def player_repo(repo_db_path):
     """Create a PlayerRepository instance."""
-    return PlayerRepository(temp_db_path)
+    return PlayerRepository(repo_db_path)
 
 
 def register_players(player_repo, player_ids):
@@ -100,7 +90,11 @@ class TestTeammatesEmbed:
 
     @pytest.mark.asyncio
     async def test_teammates_embed_with_data(self, profile_cog, player_repo, pairings_repo):
-        """Test embed shows correct teammate data."""
+        """Test embed shows correct teammate data and a min-games footer.
+
+        Merged with test_teammates_embed_footer_has_counts: same scenario,
+        same embed — footer assertion folded in here.
+        """
         players = list(range(1, 16))
         register_players(player_repo, players)
 
@@ -144,10 +138,21 @@ class TestTeammatesEmbed:
         assert "<@3>" in worst_field.value or "Player3" in worst_field.value
         assert "0%" in worst_field.value
 
+        # Footer should mention minimum games
+        assert embed.footer is not None
+        assert "Min" in embed.footer.text or "min" in embed.footer.text
+
     @pytest.mark.asyncio
-    async def test_teammates_embed_dominates_section(self, profile_cog, player_repo, pairings_repo):
-        """Test that dominates (best matchups) section is populated."""
-        players = list(range(1, 16))
+    async def test_teammates_embed_dominates_and_struggles_sections(
+        self, profile_cog, player_repo, pairings_repo
+    ):
+        """Best (Dominates) and worst (Struggles) matchup sections are populated.
+
+        Merged from test_teammates_embed_dominates_section and
+        test_teammates_embed_struggles_section: one dataset where Player 1
+        always beats team [10..14] and always loses to team [15..19].
+        """
+        players = list(range(1, 20))
         register_players(player_repo, players)
 
         # Player 1 dominates player 10 (always wins against)
@@ -158,6 +163,15 @@ class TestTeammatesEmbed:
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=1,
+            )
+        # Player 1 struggles against player 15 (always loses)
+        for i in range(4):
+            pairings_repo.update_pairings_for_match(
+                match_id=200 + i,
+                guild_id=TEST_GUILD_ID,
+                team1_ids=[1, 2, 3, 4, 5],
+                team2_ids=[15, 16, 17, 18, 19],
+                winning_team=2,
             )
 
         user = MockUser(1)
@@ -170,30 +184,11 @@ class TestTeammatesEmbed:
         assert "<@10>" in dominates_field.value or "Player10" in dominates_field.value
         assert "100%" in dominates_field.value
 
-    @pytest.mark.asyncio
-    async def test_teammates_embed_struggles_section(self, profile_cog, player_repo, pairings_repo):
-        """Test that struggles against (worst matchups) section is populated."""
-        players = list(range(1, 16))
-        register_players(player_repo, players)
-
-        # Player 1 struggles against player 10 (always loses)
-        for i in range(4):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[10, 11, 12, 13, 14],
-                winning_team=2,
-            )
-
-        user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
-
         # Find the struggles field
         struggles_field = next((f for f in embed.fields if "Struggles" in f.name), None)
         assert struggles_field is not None
-        # Player 10 should appear
-        assert "<@10>" in struggles_field.value or "Player10" in struggles_field.value
+        # Player 15 should appear
+        assert "<@15>" in struggles_field.value or "Player15" in struggles_field.value
         assert "0%" in struggles_field.value
 
     @pytest.mark.asyncio
@@ -266,28 +261,6 @@ class TestTeammatesEmbed:
         )
         assert "<@2>" in even_teammates.value or "Player2" in even_teammates.value
         assert "2W/2L" in even_teammates.value
-
-    @pytest.mark.asyncio
-    async def test_teammates_embed_footer_has_counts(self, profile_cog, player_repo, pairings_repo):
-        """Test that footer shows pairing counts."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Record a match
-        pairings_repo.update_pairings_for_match(
-            match_id=1,
-            guild_id=TEST_GUILD_ID,
-            team1_ids=[1, 2, 3, 4, 5],
-            team2_ids=[6, 7, 8, 9, 10],
-            winning_team=1,
-        )
-
-        user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
-
-        # Footer should mention minimum games
-        assert embed.footer is not None
-        assert "Min" in embed.footer.text or "min" in embed.footer.text
 
 
 class TestTeammatesEmbedEdgeCases:

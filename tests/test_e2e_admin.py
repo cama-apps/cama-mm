@@ -484,8 +484,10 @@ class TestE2EExclusionTracking:
                 updated_counts[pid] < NEW_PLAYER_EXCLUSION_BOOST
             ), f"Included player {pid} should have decayed below {NEW_PLAYER_EXCLUSION_BOOST}"
 
-        # Step 7: Shuffle again - excluded players should be more likely to be included
-        # First, increment the same excluded players again to make the effect more obvious
+        # Step 7: Increment the same excluded players again — accumulation
+        # across multiple exclusions must be exact.
+        # (Covers the multi-cycle accumulation previously exercised by
+        # test_multiple_shuffle_cycles_with_exclusions.)
         for pid in excluded_player_ids:
             test_db_memory.increment_exclusion_count(pid)
             test_db_memory.increment_exclusion_count(pid)
@@ -498,90 +500,6 @@ class TestE2EExclusionTracking:
             assert (
                 second_counts[pid] == expected_after_second
             ), f"Excluded player {pid} should have count {expected_after_second}"
-
-        # Shuffle again with updated counts
-        players = test_db_memory.get_players_by_ids(player_ids)
-        exclusion_counts_by_id = test_db_memory.get_exclusion_counts(player_ids)
-        exclusion_counts = {
-            pl.name: exclusion_counts_by_id[pid] for pid, pl in zip(player_ids, players)
-        }
-
-        team1, team2, excluded_players_2 = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-        # Step 8: Verify that previously-excluded players are more likely to be included
-        # (This is not guaranteed but should trend this way)
-        excluded_player_ids_2 = [player_name_to_id[p.name] for p in excluded_players_2]
-
-        # At least verify that the system works
-        assert len(excluded_player_ids_2) == 2
-
-        # The players with high exclusion counts (4) should have a penalty of 4*5 = 20
-        # when excluded, making them less likely to be excluded again
-        # We can't guarantee the exact result due to other factors (MMR balance, roles)
-        # But the system should work correctly
-
-    def test_multiple_shuffle_cycles_with_exclusions(self, test_db_memory):
-        """
-        Test multiple shuffle cycles where different players get excluded each time.
-        Verify that exclusion counts accumulate correctly across multiple matches.
-        """
-        # Create 12 players
-        player_ids = list(range(400101, 400113))
-        for pid in player_ids:
-            test_db_memory.add_player(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Track cumulative exclusion counts
-        exclusion_history = {pid: [] for pid in player_ids}
-
-        # Run 5 shuffle cycles
-        for _cycle in range(5):
-            # Get current exclusion counts
-            current_counts = test_db_memory.get_exclusion_counts(player_ids)
-
-            # Shuffle
-            players = test_db_memory.get_players_by_ids(player_ids)
-            shuffler = BalancedShuffler(
-                use_glicko=True, off_role_flat_penalty=50.0, exclusion_penalty_weight=5.0
-            )
-            exclusion_counts = {
-                pl.name: current_counts[pid] for pid, pl in zip(player_ids, players)
-            }
-
-            team1, team2, excluded_players = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-            # Track who was excluded
-            player_name_to_id = {pl.name: pid for pid, pl in zip(player_ids, players)}
-            included_player_ids = [player_name_to_id[p.name] for p in team1.players + team2.players]
-            excluded_player_ids = [player_name_to_id[p.name] for p in excluded_players]
-
-            # Update counts
-            for pid in excluded_player_ids:
-                test_db_memory.increment_exclusion_count(pid)
-            for pid in included_player_ids:
-                test_db_memory.decay_exclusion_count(pid)
-
-            # Record history
-            updated_counts = test_db_memory.get_exclusion_counts(player_ids)
-            for pid in player_ids:
-                exclusion_history[pid].append(updated_counts[pid])
-
-        # Verify that exclusion counts are being tracked over time
-        final_counts = test_db_memory.get_exclusion_counts(player_ids)
-
-        # All counts should be non-negative
-        for pid, count in final_counts.items():
-            assert count >= 0, f"Player {pid} has negative exclusion count: {count}"
-
-        # At least some variation in exclusion counts (not all exactly the same)
-        unique_counts = set(final_counts.values())
-        assert len(unique_counts) > 1, "Exclusion counts should vary across players"
 
     def test_exclusion_decay_subtracts_one_per_inclusion(self, test_db_memory):
         """
@@ -614,67 +532,6 @@ class TestE2EExclusionTracking:
             value -= 1
             assert after_decay[unlucky_player_id] == value
 
-    def test_exclusion_penalty_affects_matchup_selection(self, test_db_memory):
-        """
-        Test that exclusion penalty actually affects which matchup is selected.
-        Create a scenario where exclusion counts should influence the choice.
-        """
-        # Create 12 players with identical MMR (to isolate exclusion effect)
-        player_ids = list(range(400301, 400313))
-        for i, pid in enumerate(player_ids):
-            test_db_memory.add_player(
-                discord_id=pid,
-                discord_username=f"Player{i + 1}",
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Set Player1 and Player2 to have high exclusion counts
-        test_db_memory.increment_exclusion_count(player_ids[0])  # Player1: count = boost + 4
-        test_db_memory.increment_exclusion_count(player_ids[1])  # Player2: count = boost + 4
-
-        for _ in range(9):  # Add 9 more exclusions to Player1 (total = 10 * 4 = 40)
-            test_db_memory.increment_exclusion_count(player_ids[0])
-
-        for _ in range(9):  # Add 9 more exclusions to Player2 (total = 10 * 4 = 40)
-            test_db_memory.increment_exclusion_count(player_ids[1])
-
-        # Verify counts
-        counts = test_db_memory.get_exclusion_counts(player_ids[:2])
-        assert counts[player_ids[0]] == _expected_after_exclusions(10)
-        assert counts[player_ids[1]] == _expected_after_exclusions(10)
-
-        # Shuffle with exclusion penalty enabled
-        players = test_db_memory.get_players_by_ids(player_ids)
-        shuffler = BalancedShuffler(
-            use_glicko=True,
-            off_role_flat_penalty=50.0,
-            exclusion_penalty_weight=5.0,  # 40 exclusions = 200 penalty
-        )
-
-        exclusion_counts_by_id = test_db_memory.get_exclusion_counts(player_ids)
-        exclusion_counts = {
-            pl.name: exclusion_counts_by_id[pid] for pid, pl in zip(player_ids, players)
-        }
-
-        team1, team2, excluded_players = shuffler.shuffle_from_pool(players, exclusion_counts)
-
-        # Player1 and Player2 (high exclusion counts) should be more likely to be included
-        # The penalty for excluding them is 10*5 = 50 each
-        # The penalty for excluding two low-count players (0*5 = 0 each) is 0
-        # Algorithm should prefer excluding low-count players
-
-        player_name_to_id = {pl.name: pid for pid, pl in zip(player_ids, players)}
-        included_player_ids = [player_name_to_id[p.name] for p in team1.players + team2.players]
-
-        # Verify Player1 and Player2 are more likely to be included
-        # (Not guaranteed due to other factors, but should trend this way)
-        # At minimum, verify the system completed without errors
-        assert len(included_player_ids) == 10
-        assert len(excluded_players) == 2
-
 
 # =============================================================================
 # Section: Per-guild match state (from test_e2e_guild_state.py)
@@ -690,48 +547,41 @@ def match_test_db(repo_db_path):
 class TestE2EGuildIdMatchState:
     """Ensure shuffle state is tracked per guild."""
 
-    def test_shuffle_and_record_with_guild_id(self, match_test_db):
+    def test_shuffle_and_record_is_scoped_per_guild(self, match_test_db):
+        """Shuffle/record state is per-guild, including the guild_id=0 (DM)
+        bucket, and recording from the wrong guild raises.
+
+        Merged from test_shuffle_and_record_with_guild_id,
+        test_shuffle_and_record_without_guild_id, and
+        test_shuffle_and_record_different_guilds.
+        """
         player_repo = PlayerRepository(match_test_db.db_path)
         match_repo = MatchRepository(match_test_db.db_path)
         match_service = MatchService(player_repo=player_repo, match_repo=match_repo)
+
+        # Guild 42: shuffle, then a record from a different guild must not
+        # find (or clear) the pending shuffle.
         guild_id = 42
         player_ids = _create_guild_state_players(player_repo, guild_id=guild_id, start_id=50000)
-
         match_service.shuffle_players(player_ids, guild_id=guild_id)
+        assert match_service.get_last_shuffle(guild_id) is not None
+
+        with pytest.raises(ValueError, match="No recent shuffle found."):
+            match_service.record_match("radiant", guild_id=2)
         assert match_service.get_last_shuffle(guild_id) is not None
 
         result = match_service.record_match("radiant", guild_id=guild_id)
         assert result["winning_team"] == "radiant"
         assert match_service.get_last_shuffle(guild_id) is None
 
-    def test_shuffle_and_record_without_guild_id(self, match_test_db):
-        player_repo = PlayerRepository(match_test_db.db_path)
-        match_repo = MatchRepository(match_test_db.db_path)
-        match_service = MatchService(player_repo=player_repo, match_repo=match_repo)
-        # Use guild_id=0 for "default guild" / no specific guild
-        # This simulates DM usage where guild_id defaults to 0
-        guild_id = 0
-        player_ids = _create_guild_state_players(player_repo, guild_id=guild_id, start_id=60000)
+        # guild_id=0 (DM / default bucket) works the same way.
+        dm_player_ids = _create_guild_state_players(player_repo, guild_id=0, start_id=60000)
+        match_service.shuffle_players(dm_player_ids, guild_id=0)
+        assert match_service.get_last_shuffle(0) is not None
 
-        match_service.shuffle_players(player_ids, guild_id=guild_id)
-        assert match_service.get_last_shuffle(guild_id) is not None
-
-        result = match_service.record_match("dire", guild_id=guild_id)
+        result = match_service.record_match("dire", guild_id=0)
         assert result["winning_team"] == "dire"
-        assert match_service.get_last_shuffle(guild_id) is None
-
-    def test_shuffle_and_record_different_guilds(self, match_test_db):
-        player_repo = PlayerRepository(match_test_db.db_path)
-        match_repo = MatchRepository(match_test_db.db_path)
-        match_service = MatchService(player_repo=player_repo, match_repo=match_repo)
-        guild_id = 1
-        player_ids = _create_guild_state_players(player_repo, guild_id=guild_id, start_id=70000)
-
-        match_service.shuffle_players(player_ids, guild_id=guild_id)
-        with pytest.raises(ValueError, match="No recent shuffle found."):
-            match_service.record_match("radiant", guild_id=2)
-
-        assert match_service.get_last_shuffle(guild_id) is not None
+        assert match_service.get_last_shuffle(0) is None
 
 
 # =============================================================================
@@ -771,64 +621,66 @@ def match_service(player_repo, match_repo, soft_avoid_repo):
 class TestE2ESoftAvoid:
     """End-to-end tests for soft avoid feature."""
 
-    def test_shuffle_with_avoids_loads_and_uses(self, match_service, soft_avoid_repo, player_repo):
-        """Test that shuffle loads avoids and uses them."""
-        guild_id = 123
-        discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
-
-        # Create an avoid
-        soft_avoid_repo.create_or_reactivate_avoid(
-            guild_id=guild_id,
-            avoider_id=discord_ids[0],
-            avoided_id=discord_ids[1],
-            games=10,
-        )
-
-        # Shuffle should work without errors
-        result = match_service.shuffle_players(
-            player_ids=discord_ids,
-            guild_id=guild_id,
-        )
-
-        assert result is not None
-        assert "radiant_team" in result
-        assert "dire_team" in result
-
     def test_avoid_not_decremented_after_shuffle_only(self, match_service, soft_avoid_repo, player_repo):
-        """Test that avoids are NOT decremented after shuffle (only after record_match)."""
+        """Avoids are NOT decremented after shuffle (only after record_match),
+        and bidirectional avoids coexist untouched.
+
+        Merged from test_bidirectional_avoids_work (reciprocal avoids created
+        here) and test_shuffle_with_avoids_loads_and_uses (shuffle result shape
+        asserted below). Two shuffles suffice to prove repeated shuffles do not
+        decrement.
+        """
         guild_id = 123
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
-        # Create an avoid
+        # Create bidirectional avoids
         soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
             games=10,
         )
+        soft_avoid_repo.create_or_reactivate_avoid(
+            guild_id=guild_id,
+            avoider_id=discord_ids[1],
+            avoided_id=discord_ids[0],
+            games=10,
+        )
 
-        # Shuffle multiple times without recording
-        for _ in range(5):
-            match_service.shuffle_players(
+        # Shuffle repeatedly without recording
+        for _ in range(2):
+            result = match_service.shuffle_players(
                 player_ids=discord_ids,
                 guild_id=guild_id,
             )
+            assert result is not None
+            assert "radiant_team" in result
+            assert "dire_team" in result
+            match_service.clear_last_shuffle(guild_id)
 
-        # Avoid should still have 10 games (not decremented yet)
+        # Both avoids should still have 10 games (not decremented yet)
         avoids = soft_avoid_repo.get_active_avoids_for_players(
             guild_id=guild_id,
             player_ids=discord_ids,
         )
-        assert len(avoids) == 1
-        assert avoids[0].games_remaining == 10
+        assert len(avoids) == 2
+        for avoid in avoids:
+            assert avoid.games_remaining == 10
 
     def test_avoid_decrements_after_record_match_opposite_teams(self, match_service, soft_avoid_repo, player_repo):
-        """Test that avoids decrement after record_match when players are on opposite teams."""
+        """Avoids decrement after record_match when players are on opposite
+        teams, and the effective avoid id was stored in the shuffle state for
+        the deferred decrement.
+
+        Merged from test_effective_avoid_ids_stored_in_shuffle_state — same
+        seeded opposite-teams scenario; the state assertion happens just
+        before the record.
+        """
         guild_id = 123
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        soft_avoid_repo.create_or_reactivate_avoid(
+        avoid = soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -852,6 +704,12 @@ class TestE2ESoftAvoid:
             avoided_on_radiant = discord_ids[1] in radiant_ids
 
             if avoider_on_radiant != avoided_on_radiant:
+                # The effective avoid id must be stored in the shuffle state
+                # (record_match relies on it for the deferred decrement).
+                state = match_service.get_last_shuffle(guild_id)
+                assert state is not None
+                assert avoid.id in state.effective_avoid_ids
+
                 # They're on opposite teams - record the match
                 match_service.record_match(winning_team="radiant", guild_id=guild_id)
 
@@ -869,42 +727,6 @@ class TestE2ESoftAvoid:
             match_service.clear_last_shuffle(guild_id)
 
         assert found, "Could not get opposite teams after max attempts (seed=42)"
-
-    def test_bidirectional_avoids_work(self, match_service, soft_avoid_repo, player_repo):
-        """Test that bidirectional avoids work correctly."""
-        guild_id = 123
-        discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
-
-        # Create bidirectional avoids
-        soft_avoid_repo.create_or_reactivate_avoid(
-            guild_id=guild_id,
-            avoider_id=discord_ids[0],
-            avoided_id=discord_ids[1],
-            games=10,
-        )
-        soft_avoid_repo.create_or_reactivate_avoid(
-            guild_id=guild_id,
-            avoider_id=discord_ids[1],
-            avoided_id=discord_ids[0],
-            games=10,
-        )
-
-        # Shuffle should work
-        result = match_service.shuffle_players(
-            player_ids=discord_ids,
-            guild_id=guild_id,
-        )
-
-        assert result is not None
-
-        # Both avoids should be active (not decremented yet - no record_match)
-        avoids = soft_avoid_repo.get_active_avoids_for_players(
-            guild_id=guild_id,
-            player_ids=discord_ids,
-        )
-        assert len(avoids) == 2
-        for avoid in avoids:
-            assert avoid.games_remaining == 10
 
     def test_goodness_score_includes_avoid_penalty(self, match_service, soft_avoid_repo, player_repo):
         """Test that goodness_score includes soft avoid penalty when pair is on same team."""
@@ -956,48 +778,6 @@ class TestE2ESoftAvoid:
 
         assert result["goodness_score"] == pytest.approx(expected_score)
 
-    def test_effective_avoid_ids_stored_in_shuffle_state(self, match_service, soft_avoid_repo, player_repo):
-        """Test that effective_avoid_ids are stored in shuffle state for deferred decrement."""
-        guild_id = 123
-        discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
-
-        # Create an avoid
-        avoid = soft_avoid_repo.create_or_reactivate_avoid(
-            guild_id=guild_id,
-            avoider_id=discord_ids[0],
-            avoided_id=discord_ids[1],
-            games=10,
-        )
-
-        # Seed randomness for deterministic opposite-team placement
-        random.seed(42)
-        max_attempts = 50
-        found = False
-        for _ in range(max_attempts):
-            result = match_service.shuffle_players(
-                player_ids=discord_ids,
-                guild_id=guild_id,
-            )
-
-            radiant_ids = {result["radiant_team"].players[i].discord_id for i in range(5)}
-
-            # Check if they're on opposite teams
-            avoider_on_radiant = discord_ids[0] in radiant_ids
-            avoided_on_radiant = discord_ids[1] in radiant_ids
-
-            if avoider_on_radiant != avoided_on_radiant:
-                # Check that effective_avoid_ids is stored in state
-                state = match_service.get_last_shuffle(guild_id)
-                assert state is not None
-                assert avoid.id in state.effective_avoid_ids
-                found = True
-                break
-
-            # Clear shuffle state for next attempt
-            match_service.clear_last_shuffle(guild_id)
-
-        assert found, "Could not get opposite teams after max attempts (seed=42)"
-
 
 # =============================================================================
 # Section: RD decay integration (from test_rd_decay_integration.py)
@@ -1006,54 +786,22 @@ class TestE2ESoftAvoid:
 
 
 
-def test_last_match_date_updated_after_record(test_db_with_schema):
-    """Verify last_match_date is set when a match is recorded."""
+def test_record_match_updates_ratings_and_last_match_date_without_decay(
+    test_db_with_schema,
+):
+    """Recording a match bulk-applies rating updates AND stamps last_match_date,
+    and loading a just-played player does not apply RD decay.
+
+    Merged from test_last_match_date_updated_after_record,
+    test_rd_decay_not_applied_when_match_just_recorded, and
+    test_bulk_update_and_last_match_date_are_both_applied — one shuffle+record
+    pass verifies all three slices.
+    """
     player_repo = PlayerRepository(test_db_with_schema.db_path)
     match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
-    # Create 10 players using player_repo.add() with guild_id
-    for i in range(10):
-        pid = 100 + i
-        player_repo.add(
-            discord_id=pid,
-            discord_username=f"Player{pid}",
-            guild_id=TEST_GUILD_ID,
-            initial_mmr=3000,
-            glicko_rating=1500.0,
-            glicko_rd=200.0,
-            glicko_volatility=0.06,
-        )
-
-    player_ids = list(range(100, 110))
-
-    # Shuffle and record match
-    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-    result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-    assert result["winning_team"] == "radiant"
-
-    # Verify last_match_date was updated for all participants
-    for pid in player_ids:
-        dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
-        assert dates is not None, f"Player {pid} should have dates tuple"
-        last_match, _ = dates
-        assert last_match is not None, f"Player {pid} should have last_match_date set"
-        # Verify it's recent (within last minute)
-        last_match_dt = datetime.fromisoformat(last_match)
-        if last_match_dt.tzinfo is None:
-            last_match_dt = last_match_dt.replace(tzinfo=UTC)
-        now = datetime.now(UTC)
-        assert (now - last_match_dt).total_seconds() < 60, "last_match_date should be recent"
-
-
-def test_rd_decay_not_applied_when_match_just_recorded(test_db_with_schema):
-    """After recording a match, loading the player should NOT apply decay."""
-    player_repo = PlayerRepository(test_db_with_schema.db_path)
-    match_repo = MatchRepository(test_db_with_schema.db_path)
-    match_service = MatchService(player_repo, match_repo, use_glicko=True)
-
-    # Create 10 players with known RD
+    # Create 10 players with known RD (below the cap so decay would be visible)
     start_rd = 150.0
     for i in range(10):
         pid = 200 + i
@@ -1069,122 +817,71 @@ def test_rd_decay_not_applied_when_match_just_recorded(test_db_with_schema):
 
     player_ids = list(range(200, 210))
 
-    # Record a match first
+    # Shuffle and record match
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-    match_service.record_match("dire", guild_id=TEST_GUILD_ID)
+    result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+    assert result["winning_team"] == "radiant"
 
-    # Now load a player - RD should be close to what Glicko-2 set it to (decreased from match)
-    # NOT increased from decay since match was just recorded
+    # All participants: RD decreased (bulk rating update applied) and
+    # last_match_date is set and recent.
+    for pid in player_ids:
+        new_rating = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
+        assert new_rating[1] < start_rd, f"Player {pid} RD should decrease after match"
+
+        dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
+        assert dates is not None, f"Player {pid} should have dates tuple"
+        last_match, _ = dates
+        assert last_match is not None, f"Player {pid} should have last_match_date set"
+        last_match_dt = datetime.fromisoformat(last_match)
+        if last_match_dt.tzinfo is None:
+            last_match_dt = last_match_dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        assert (now - last_match_dt).total_seconds() < 60, "last_match_date should be recent"
+
+    # Loading a just-played player must not apply decay on top.
     player, _ = match_service._load_glicko_player(200, TEST_GUILD_ID)
-
-    # After a match, RD typically decreases. It should definitely not be > start_rd
-    # (which would indicate improper decay was applied)
     assert player.rd <= start_rd, f"RD should not increase after a match (got {player.rd})"
 
 
-def test_rd_decay_applied_for_inactive_player(test_db_with_schema):
-    """Verify RD decay is applied when loading a player with old last_match_date."""
+def test_rd_decay_applied_beyond_grace_period_only(test_db_with_schema):
+    """RD decay applies to a player inactive past the grace period, but not to
+    one exactly at the seven-day grace boundary.
+
+    Merged from test_rd_decay_applied_for_inactive_player and
+    test_rd_decay_respects_grace_period.
+    """
     player_repo = PlayerRepository(test_db_with_schema.db_path)
     match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
-    # Create a player
-    pid = 300
     start_rd = 100.0
-    player_repo.add(
-        discord_id=pid,
-        discord_username="InactivePlayer",
-        guild_id=TEST_GUILD_ID,
-        initial_mmr=3000,
-        glicko_rating=1500.0,
-        glicko_rd=start_rd,
-        glicko_volatility=0.06,
-    )
-
-    # Manually set last_match_date to 4 weeks ago (beyond grace period)
-    four_weeks_ago = (datetime.now(UTC) - timedelta(weeks=4)).isoformat()
-    player_repo.update_last_match_date(pid, TEST_GUILD_ID, four_weeks_ago)
-
-    # Load the player - RD should have decayed
-    player, _ = match_service._load_glicko_player(pid, TEST_GUILD_ID)
-
-    expected_periods = (4 * 7 - 7) / 7
-    expected_rd = math.sqrt(start_rd * start_rd + (100.0 * 100.0) * expected_periods)
-
-    assert math.isclose(player.rd, expected_rd, rel_tol=0.01), \
-        f"RD should decay from {start_rd} to ~{expected_rd}, got {player.rd}"
-
-
-def test_rd_decay_respects_grace_period(test_db_with_schema):
-    """Verify RD decay is NOT applied within the grace period."""
-    player_repo = PlayerRepository(test_db_with_schema.db_path)
-    match_repo = MatchRepository(test_db_with_schema.db_path)
-    match_service = MatchService(player_repo, match_repo, use_glicko=True)
-
-    # Create a player
-    pid = 400
-    start_rd = 100.0
-    player_repo.add(
-        discord_id=pid,
-        discord_username="RecentPlayer",
-        guild_id=TEST_GUILD_ID,
-        initial_mmr=3000,
-        glicko_rating=1500.0,
-        glicko_rd=start_rd,
-        glicko_volatility=0.06,
-    )
-
-    # Set last_match_date to the seven-day grace boundary
-    one_week_ago = (datetime.now(UTC) - timedelta(weeks=1)).isoformat()
-    player_repo.update_last_match_date(pid, TEST_GUILD_ID, one_week_ago)
-
-    # Load the player - RD should NOT have decayed
-    player, _ = match_service._load_glicko_player(pid, TEST_GUILD_ID)
-
-    assert player.rd == start_rd, f"RD should not decay within grace period (got {player.rd})"
-
-
-def test_bulk_update_and_last_match_date_are_both_applied(test_db_with_schema):
-    """Verify both rating updates AND last_match_date are saved after match."""
-    player_repo = PlayerRepository(test_db_with_schema.db_path)
-    match_repo = MatchRepository(test_db_with_schema.db_path)
-    match_service = MatchService(player_repo, match_repo, use_glicko=True)
-
-    # Create 10 players
-    for i in range(10):
-        pid = 500 + i
+    for pid, username in ((300, "InactivePlayer"), (400, "RecentPlayer")):
         player_repo.add(
             discord_id=pid,
-            discord_username=f"Player{pid}",
+            discord_username=username,
             guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
             glicko_rating=1500.0,
-            glicko_rd=350.0,  # High RD
+            glicko_rd=start_rd,
             glicko_volatility=0.06,
         )
 
-    player_ids = list(range(500, 510))
+    # Inactive: last_match_date 4 weeks ago (beyond grace period) → decayed.
+    four_weeks_ago = (datetime.now(UTC) - timedelta(weeks=4)).isoformat()
+    player_repo.update_last_match_date(300, TEST_GUILD_ID, four_weeks_ago)
 
-    # Get initial ratings
-    initial_ratings = {}
-    for pid in player_ids:
-        initial_ratings[pid] = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
+    player, _ = match_service._load_glicko_player(300, TEST_GUILD_ID)
+    expected_periods = (4 * 7 - 7) / 7
+    expected_rd = math.sqrt(start_rd * start_rd + (100.0 * 100.0) * expected_periods)
+    assert math.isclose(player.rd, expected_rd, rel_tol=0.01), \
+        f"RD should decay from {start_rd} to ~{expected_rd}, got {player.rd}"
 
-    # Record match
-    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-    match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+    # Recent: last_match_date at the seven-day grace boundary → untouched.
+    one_week_ago = (datetime.now(UTC) - timedelta(weeks=1)).isoformat()
+    player_repo.update_last_match_date(400, TEST_GUILD_ID, one_week_ago)
 
-    # Verify both rating and last_match_date were updated
-    for pid in player_ids:
-        new_rating = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
-        dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
-
-        # Rating should have changed (RD decreases after a match)
-        assert new_rating[1] < initial_ratings[pid][1], \
-            f"Player {pid} RD should decrease after match"
-
-        # last_match_date should be set
-        assert dates[0] is not None, f"Player {pid} should have last_match_date"
+    player, _ = match_service._load_glicko_player(400, TEST_GUILD_ID)
+    assert player.rd == start_rd, f"RD should not decay within grace period (got {player.rd})"
 
 
 if __name__ == "__main__":

@@ -2,9 +2,6 @@
 Unit tests for lobby management.
 """
 
-import os
-import sys
-import time
 from datetime import datetime
 from unittest.mock import Mock
 
@@ -14,29 +11,6 @@ from domain.models.lobby import Lobby
 from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from tests.fakes.lobby_repo import FakeLobbyRepo
-
-
-def _cleanup_db_file(db_path: str) -> None:
-    """Close sqlite handles and remove temp db; retry once on Windows PermissionError."""
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    try:
-        os.unlink(db_path)
-        return
-    except FileNotFoundError:
-        return
-    except PermissionError:
-        # Windows can hold the file briefly after the connection closes.
-        if sys.platform == "win32":
-            time.sleep(0.2)
-        try:
-            os.unlink(db_path)
-        except Exception:
-            pass
 
 
 class TestLobby:
@@ -68,44 +42,35 @@ class TestLobby:
         assert lobby.get_total_count() == 9
         assert lobby.player_join_times == {1: 100.0}
 
-    def test_add_player(self):
-        """Test adding a player to the lobby."""
+    def test_add_and_remove_player(self):
+        """Add/remove player lifecycle: success, duplicate add, closed lobby,
+        and removing a player who isn't in the lobby.
+
+        Merged from test_add_player, test_add_player_duplicate,
+        test_add_player_closed_lobby, test_remove_player, and
+        test_remove_player_not_in_lobby.
+        """
         lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        result = lobby.add_player(1001)
-        assert result is True
+
+        # Removing a player who isn't in the lobby fails.
+        assert lobby.remove_player(1001) is False
+
+        # Adding succeeds once; the duplicate add is rejected.
+        assert lobby.add_player(1001) is True
         assert 1001 in lobby.players
         assert lobby.get_player_count() == 1
-
-    def test_add_player_duplicate(self):
-        """Test adding the same player twice."""
-        lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        lobby.add_player(1001)
-        result = lobby.add_player(1001)  # Try to add again
-        assert result is False
+        assert lobby.add_player(1001) is False
         assert lobby.get_player_count() == 1
 
-    def test_add_player_closed_lobby(self):
-        """Test adding a player to a closed lobby."""
-        lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        lobby.status = "closed"
-        result = lobby.add_player(1001)
-        assert result is False
-        assert 1001 not in lobby.players
-
-    def test_remove_player(self):
-        """Test removing a player from the lobby."""
-        lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        lobby.add_player(1001)
-        result = lobby.remove_player(1001)
-        assert result is True
+        # Removing succeeds.
+        assert lobby.remove_player(1001) is True
         assert 1001 not in lobby.players
         assert lobby.get_player_count() == 0
 
-    def test_remove_player_not_in_lobby(self):
-        """Test removing a player who isn't in the lobby."""
-        lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        result = lobby.remove_player(1001)
-        assert result is False
+        # A closed lobby rejects joins.
+        lobby.status = "closed"
+        assert lobby.add_player(1002) is False
+        assert 1002 not in lobby.players
 
     def test_is_ready(self):
         """Test checking if lobby is ready."""
@@ -117,7 +82,9 @@ class TestLobby:
         assert lobby.is_ready(min_players=12) is False
 
     def test_can_create_teams(self):
-        """Test checking if lobby can create balanced teams."""
+        """can_create_teams: True with full role diversity, False when all
+        players share one role (merged from test_can_create_teams_insufficient_roles).
+        """
         lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
         # Add 10 players with roles
         player_roles = {}
@@ -128,103 +95,61 @@ class TestLobby:
 
         assert lobby.can_create_teams(player_roles) is True
 
-    def test_can_create_teams_insufficient_roles(self):
-        """Test that lobby can't create teams with insufficient role diversity."""
-        lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
-        # Add 10 players but all with same role
-        player_roles = {}
-        for i in range(10):
-            player_id = 1000 + i
-            lobby.add_player(player_id)
-            player_roles[player_id] = ["1"]  # All carry
-
-        assert lobby.can_create_teams(player_roles) is False
+        # All-carry role map cannot form balanced teams.
+        all_carry_roles = {player_id: ["1"] for player_id in player_roles}
+        assert lobby.can_create_teams(all_carry_roles) is False
 
 
 class TestLobbyManager:
     """Test LobbyManager class functionality."""
 
-    def test_get_or_create_lobby(self):
-        """Test getting or creating a lobby."""
-        manager = LobbyManager(FakeLobbyRepo())
-        lobby = manager.get_or_create_lobby(creator_id=12345)
-        assert lobby is not None
-        assert lobby.created_by == 12345
+    def test_get_or_create_and_get_lobby_lifecycle(self):
+        """get_or_create/get lifecycle: none exists → None, create, retrieve,
+        closed lobbies not returned.
 
-    def test_get_lobby_none(self):
-        """Test getting lobby when none exists."""
+        Merged from test_get_or_create_lobby, test_get_lobby_none,
+        test_get_lobby_exists, and test_get_lobby_closed.
+        """
         manager = LobbyManager(FakeLobbyRepo())
-        lobby = manager.get_lobby()
-        assert lobby is None
+        assert manager.get_lobby() is None
 
-    def test_get_lobby_exists(self):
-        """Test getting existing lobby."""
-        manager = LobbyManager(FakeLobbyRepo())
-        manager.get_or_create_lobby(creator_id=12345)
-        lobby = manager.get_lobby()
-        assert lobby is not None
+        created = manager.get_or_create_lobby(creator_id=12345)
+        assert created is not None
+        assert created.created_by == 12345
+        assert manager.get_lobby() is not None
 
-    def test_get_lobby_closed(self):
-        """Test that closed lobbies aren't returned."""
-        manager = LobbyManager(FakeLobbyRepo())
-        lobby = manager.get_or_create_lobby()
-        lobby.status = "closed"
-        result = manager.get_lobby()
-        assert result is None
+        created.status = "closed"
+        assert manager.get_lobby() is None
 
-    def test_join_lobby(self):
-        """Test joining a lobby."""
-        manager = LobbyManager(FakeLobbyRepo())
-        result = manager.join_lobby(1001)
-        assert result == "ok"
-        lobby = manager.get_lobby()
-        assert 1001 in lobby.players
+    def test_join_and_leave_lobby(self):
+        """Join/leave through the manager: join ok, leave ok, leave when not
+        in lobby fails, join when full rejected.
 
-    def test_join_lobby_full(self):
-        """Test joining a full lobby."""
+        Merged from test_join_lobby, test_join_lobby_full, test_leave_lobby,
+        and test_leave_lobby_not_in_lobby.
+        """
         manager = LobbyManager(FakeLobbyRepo())
-        # Fill lobby to 12 players
+        assert manager.leave_lobby(1001) is False
+
+        assert manager.join_lobby(1001) == "ok"
+        assert 1001 in manager.get_lobby().players
+        assert manager.leave_lobby(1001) is True
+        assert 1001 not in manager.get_lobby().players
+
+        # Fill lobby to 12 players; the 13th join is rejected.
         for i in range(12):
-            manager.join_lobby(1000 + i)
-
-        # Try to join when full
-        result = manager.join_lobby(9999)
-        assert result == "full"
+            manager.join_lobby(2000 + i)
+        assert manager.join_lobby(9999) == "full"
         lobby = manager.get_lobby()
         assert 9999 not in lobby.players
         assert lobby.get_player_count() == 12
 
-    def test_leave_lobby(self):
-        """Test leaving a lobby."""
-        manager = LobbyManager(FakeLobbyRepo())
-        manager.join_lobby(1001)
-        result = manager.leave_lobby(1001)
-        assert result is True
-        lobby = manager.get_lobby()
-        assert 1001 not in lobby.players
-
-    def test_leave_lobby_not_in_lobby(self):
-        """Test leaving when not in lobby."""
-        manager = LobbyManager(FakeLobbyRepo())
-        result = manager.leave_lobby(1001)
-        assert result is False
-
     def test_reset_lobby(self):
-        """Test resetting the lobby."""
+        """Resetting the lobby clears the lobby, message_id, and channel_id
+        (merged from test_reset_lobby_clears_channel_id)."""
         manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby()
         manager.join_lobby(1001)
-        manager.set_lobby_message(message_id=12345, channel_id=None)
-
-        manager.reset_lobby()
-
-        assert manager.get_lobby(guild_id=0) is None
-        assert manager.get_lobby_message_id(guild_id=0) is None
-
-    def test_reset_lobby_clears_channel_id(self):
-        """Test that resetting the lobby also clears channel_id."""
-        manager = LobbyManager(FakeLobbyRepo())
-        manager.get_or_create_lobby()
         manager.set_lobby_message(message_id=12345, channel_id=67890)
 
         manager.reset_lobby()
@@ -363,352 +288,102 @@ class TestLobbyPersistence:
         assert stored["message_id"] == 100
         assert stored["channel_id"] == 200
 
-    def test_message_and_channel_ids_persist_across_restart(self, repo_db_path):
-        """Test that message_id and channel_id are restored after restart."""
-        # First "session" - create lobby and set message
-        manager1 = LobbyManager(LobbyRepository(repo_db_path))
-        manager1.get_or_create_lobby(creator_id=12345)
-        manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
+    def test_restart_scenario_preserves_lobby_and_message_state(self, tmp_path):
+        """Full restart scenario for lobby persistence.
 
-        # Verify IDs are set
+        Merged from: test_message_and_channel_ids_persist_across_restart,
+        test_players_persist_across_restart, test_can_join_lobby_after_restart,
+        test_can_leave_lobby_after_restart, test_lobby_creator_persists_across_restart,
+        test_lobby_status_persists_across_restart,
+        test_set_lobby_message_persists_immediately,
+        test_join_persists_message_id, test_leave_persists_message_id, and
+        test_multiple_restarts_preserve_state — all slices of the same
+        create → mutate → restart → verify flow.
+        """
+        db_path = str(tmp_path / "lobby_restart.db")
+
+        # Session 1: create lobby, add players, set message ids. No explicit
+        # save call — set_lobby_message must persist immediately.
+        manager1 = LobbyManager(LobbyRepository(db_path))
+        manager1.get_or_create_lobby(creator_id=99999)
+        manager1.join_lobby(1001)
+        manager1.join_lobby(1002)
+        manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
         assert manager1.get_lobby_message_id(guild_id=0) == 111222333
         assert manager1.get_lobby_channel_id(guild_id=0) == 444555666
 
-        # Simulate restart - create new manager with same DB
-        manager2 = LobbyManager(LobbyRepository(repo_db_path))
-
-        # Verify IDs are restored
+        # Session 2 (restart): creator, status, players and message ids restored.
+        manager2 = LobbyManager(LobbyRepository(db_path))
+        lobby = manager2.get_lobby()
+        assert lobby is not None
+        assert lobby.created_by == 99999
+        assert lobby.status == "open"
+        assert lobby.players == {1001, 1002}
         assert manager2.get_lobby_message_id(guild_id=0) == 111222333
         assert manager2.get_lobby_channel_id(guild_id=0) == 444555666
 
-    def test_players_persist_across_restart(self):
-        """Test that lobby players are restored after restart."""
-        import tempfile
+        # Join and leave still work after the restart (both persist).
+        assert manager2.join_lobby(1003) == "ok"
+        assert manager2.leave_lobby(1001) is True
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
+        # Session 3 (second restart): the post-restart join/leave stuck, and
+        # message ids survived the join/leave persists.
+        manager3 = LobbyManager(LobbyRepository(db_path))
+        lobby3 = manager3.get_lobby()
+        assert lobby3 is not None
+        assert lobby3.players == {1002, 1003}
+        assert manager3.get_lobby_message_id(guild_id=0) == 111222333
+        assert manager3.get_lobby_channel_id(guild_id=0) == 444555666
 
-        try:
-            # First session - create lobby and add players
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.join_lobby(1002)
-            manager1.join_lobby(1003)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # Verify players are restored
-            lobby = manager2.get_lobby()
-            assert lobby is not None
-            assert 1001 in lobby.players
-            assert 1002 in lobby.players
-            assert 1003 in lobby.players
-            assert lobby.get_player_count() == 3
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_can_join_lobby_after_restart(self):
-        """Test that new players can join the lobby after restart."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            # First session
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # New player joins after restart
-            result = manager2.join_lobby(1002)
-            assert result == "ok"
-
-            lobby = manager2.get_lobby()
-            assert 1001 in lobby.players
-            assert 1002 in lobby.players
-            assert lobby.get_player_count() == 2
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_can_leave_lobby_after_restart(self):
-        """Test that players can leave the lobby after restart."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            # First session
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.join_lobby(1002)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # Player leaves after restart
-            result = manager2.leave_lobby(1001)
-            assert result is True
-
-            lobby = manager2.get_lobby()
-            assert 1001 not in lobby.players
-            assert 1002 in lobby.players
-            assert lobby.get_player_count() == 1
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_lobby_creator_persists_across_restart(self):
-        """Test that lobby creator info is preserved after restart."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=99999)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            lobby = manager2.get_lobby()
-            assert lobby is not None
-            assert lobby.created_by == 99999
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_lobby_status_persists_across_restart(self):
-        """Test that lobby status is preserved after restart."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            lobby = manager2.get_lobby()
-            assert lobby is not None
-            assert lobby.status == "open"
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_closed_lobby_not_restored_after_restart(self):
+    def test_closed_lobby_not_restored_after_restart(self, tmp_path):
         """Test that a closed lobby doesn't restore message IDs."""
-        import tempfile
+        db_path = str(tmp_path / "lobby_closed.db")
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
+        manager1 = LobbyManager(LobbyRepository(db_path))
+        manager1.get_or_create_lobby(creator_id=12345)
+        manager1.set_lobby_message(message_id=111, channel_id=222)
+        manager1.reset_lobby()  # Close the lobby
 
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-            manager1.reset_lobby()  # Close the lobby
+        # Simulate restart
+        manager2 = LobbyManager(LobbyRepository(db_path))
 
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
+        # Lobby should not exist
+        assert manager2.get_lobby() is None
+        # Message IDs should be None since lobby was reset
+        assert manager2.get_lobby_message_id(guild_id=0) is None
+        assert manager2.get_lobby_channel_id(guild_id=0) is None
 
-            # Lobby should not exist
-            assert manager2.get_lobby() is None
-            # Message IDs should be None since lobby was reset
-            assert manager2.get_lobby_message_id(guild_id=0) is None
-            assert manager2.get_lobby_channel_id(guild_id=0) is None
-        finally:
-            _cleanup_db_file(db_path)
+    def test_message_id_edge_cases_persist(self, tmp_path):
+        """Message-id persistence edge cases across restarts.
 
-    def test_message_id_without_channel_id(self):
-        """Test handling when message_id is set but channel_id is None."""
-        import tempfile
+        Merged from: test_message_id_without_channel_id,
+        test_empty_lobby_still_has_message_id, and
+        test_update_message_id_persists.
+        """
+        db_path = str(tmp_path / "lobby_message_edges.db")
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
+        # message_id set with channel_id=None; a player joins then leaves so
+        # the lobby ends up empty.
+        manager1 = LobbyManager(LobbyRepository(db_path))
+        manager1.get_or_create_lobby(creator_id=12345)
+        manager1.set_lobby_message(message_id=111, channel_id=None)
+        manager1.join_lobby(1001)
+        manager1.leave_lobby(1001)
 
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            # Set only message_id, not channel_id
-            manager1.set_lobby_message(message_id=111, channel_id=None)
+        # Restart: message_id restored, channel_id None, empty lobby usable.
+        manager2 = LobbyManager(LobbyRepository(db_path))
+        assert manager2.get_lobby_message_id(guild_id=0) == 111
+        assert manager2.get_lobby_channel_id(guild_id=0) is None
+        lobby = manager2.get_lobby()
+        assert lobby is not None
+        assert lobby.get_player_count() == 0
 
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            assert manager2.get_lobby_message_id(guild_id=0) == 111
-            assert manager2.get_lobby_channel_id(guild_id=0) is None
-            # Lobby should still be usable
-            lobby = manager2.get_lobby()
-            assert lobby is not None
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_set_lobby_message_persists_immediately(self):
-        """Test that set_lobby_message triggers immediate persistence."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-
-            # Set message IDs
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Immediately create new manager (no explicit save call needed)
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            assert manager2.get_lobby_message_id(guild_id=0) == 111
-            assert manager2.get_lobby_channel_id(guild_id=0) == 222
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_multiple_restarts_preserve_state(self):
-        """Test that state is preserved across multiple restarts."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            # First session
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Second session - add more players
-            manager2 = LobbyManager(LobbyRepository(db_path))
-            manager2.join_lobby(1002)
-
-            # Third session - verify all state preserved
-            manager3 = LobbyManager(LobbyRepository(db_path))
-
-            assert manager3.get_lobby_message_id(guild_id=0) == 111
-            assert manager3.get_lobby_channel_id(guild_id=0) == 222
-            lobby = manager3.get_lobby()
-            assert 1001 in lobby.players
-            assert 1002 in lobby.players
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_join_persists_message_id(self):
-        """Test that joining lobby also persists message_id if already set."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Join lobby - this triggers _persist_lobby
-            manager1.join_lobby(1001)
-
-            # Verify message IDs still persisted
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            assert manager2.get_lobby_message_id(guild_id=0) == 111
-            assert manager2.get_lobby_channel_id(guild_id=0) == 222
-            assert 1001 in manager2.get_lobby().players
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_leave_persists_message_id(self):
-        """Test that leaving lobby preserves message_id."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.join_lobby(1002)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Player leaves - this triggers _persist_lobby
-            manager1.leave_lobby(1001)
-
-            # Verify message IDs still persisted
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            assert manager2.get_lobby_message_id(guild_id=0) == 111
-            assert manager2.get_lobby_channel_id(guild_id=0) == 222
-            assert 1001 not in manager2.get_lobby().players
-            assert 1002 in manager2.get_lobby().players
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_empty_lobby_still_has_message_id(self):
-        """Test that an empty lobby (all players left) still has message_id."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.join_lobby(1001)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-            manager1.leave_lobby(1001)  # Lobby now empty
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # Message IDs should still be there
-            assert manager2.get_lobby_message_id(guild_id=0) == 111
-            assert manager2.get_lobby_channel_id(guild_id=0) == 222
-            # Lobby should still exist but be empty
-            lobby = manager2.get_lobby()
-            assert lobby is not None
-            assert lobby.get_player_count() == 0
-        finally:
-            _cleanup_db_file(db_path)
-
-    def test_update_message_id_persists(self):
-        """Test that updating message_id to a new value persists correctly."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
-
-        try:
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(message_id=111, channel_id=222)
-
-            # Update to new message (e.g., lobby command run again)
-            manager1.set_lobby_message(message_id=333, channel_id=444)
-
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # Should have the new values
-            assert manager2.get_lobby_message_id(guild_id=0) == 333
-            assert manager2.get_lobby_channel_id(guild_id=0) == 444
-        finally:
-            _cleanup_db_file(db_path)
+        # Update to a new message (e.g., lobby command run again); the new
+        # values win after another restart.
+        manager2.set_lobby_message(message_id=333, channel_id=444)
+        manager3 = LobbyManager(LobbyRepository(db_path))
+        assert manager3.get_lobby_message_id(guild_id=0) == 333
+        assert manager3.get_lobby_channel_id(guild_id=0) == 444
 
 
 class TestLobbyMultiGuildIsolation:

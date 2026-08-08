@@ -96,21 +96,19 @@ class TestDotaInfoHeroLookup:
         assert all(isinstance(h, tuple) and len(h) == 2 for h in heroes)
         assert all(isinstance(h[0], str) and isinstance(h[1], int) for h in heroes)
 
-    @pytest.mark.parametrize(
-        "query,expected_name,expected_id",
-        [
-            ("Anti-Mage", "Anti-Mage", 1),
-            ("anti-mage", "Anti-Mage", 1),
-            ("am", "Anti-Mage", 1),
-        ],
-    )
-    def test_hero_by_name_finds(self, query, expected_name, expected_id):
-        hero = _get_hero_by_name(query)
-        assert hero is not None
-        assert hero.localized_name == expected_name
-        assert hero.id == expected_id
+    def test_hero_by_name_lookup(self):
+        """Exact, case-insensitive, and alias lookups find the hero; a
+        nonsense name returns None.
 
-    def test_hero_by_name_missing_returns_none(self):
+        Merged from the test_hero_by_name_finds parametrization and
+        test_hero_by_name_missing_returns_none.
+        """
+        for query in ("Anti-Mage", "anti-mage", "am"):
+            hero = _get_hero_by_name(query)
+            assert hero is not None, query
+            assert hero.localized_name == "Anti-Mage"
+            assert hero.id == 1
+
         assert _get_hero_by_name("NotARealHero123") is None
 
     def test_hero_abilities_and_talents(self):
@@ -146,16 +144,21 @@ class TestAbilityLookup:
         assert len(abilities) > 200
         assert all(isinstance(a, tuple) and len(a) == 2 for a in abilities)
 
-    @pytest.mark.parametrize("query", ["Meat Hook", "meat hook"])
-    def test_ability_by_name_finds(self, query):
-        ability = _get_ability_by_name(query)
-        assert ability is not None
-        assert ability.localized_name == "Meat Hook"
+    def test_ability_by_name_lookup(self):
+        """Exact and case-insensitive lookups find the ability, a nonsense
+        name returns None, and a found ability carries a description.
 
-    def test_ability_by_name_missing_returns_none(self):
+        Merged from the test_ability_by_name_finds parametrization,
+        test_ability_by_name_missing_returns_none, and
+        test_ability_has_description.
+        """
+        for query in ("Meat Hook", "meat hook"):
+            ability = _get_ability_by_name(query)
+            assert ability is not None, query
+            assert ability.localized_name == "Meat Hook"
+
         assert _get_ability_by_name("NotARealAbility123") is None
 
-    def test_ability_has_description(self):
         blink = _get_ability_by_name("Blink")
         assert blink is not None
         assert blink.description and len(blink.description) > 0
@@ -163,13 +166,15 @@ class TestAbilityLookup:
 
 class TestFormatting:
 
-    def test_format_ability_values_empty(self):
-        class MockAbility:
+    def test_format_ability_values(self):
+        """Empty ability_special yields '', populated data is rendered
+        (merged from test_format_ability_values_empty and _with_data)."""
+
+        class EmptyAbility:
             ability_special = None
 
-        assert _format_ability_values(MockAbility()) == ""
+        assert _format_ability_values(EmptyAbility()) == ""
 
-    def test_format_ability_values_with_data(self):
         class MockAbility:
             ability_special = [
                 {"header": "DAMAGE:", "value": "90 180 270 360"},
@@ -182,20 +187,22 @@ class TestFormatting:
 
 
 class TestHeroAttributes:
-    @pytest.mark.parametrize(
-        "name,attr",
-        [
+    def test_hero_attributes_and_roles(self):
+        """Primary attribute mapping (all three attributes), base stats, and
+        roles come through the hero lookup.
+
+        Merged from the test_hero_primary_attr parametrization,
+        test_hero_base_stats_present, and test_hero_has_roles.
+        """
+        for name, attr in (
             ("Axe", "strength"),
             ("Phantom Assassin", "agility"),
             ("Crystal Maiden", "intelligence"),
-        ],
-    )
-    def test_hero_primary_attr(self, name, attr):
-        hero = _get_hero_by_name(name)
-        assert hero is not None
-        assert hero.attr_primary == attr
+        ):
+            hero = _get_hero_by_name(name)
+            assert hero is not None, name
+            assert hero.attr_primary == attr
 
-    def test_hero_base_stats_present(self):
         pudge = _get_hero_by_name("Pudge")
         assert pudge is not None
         assert pudge.attr_strength_base is not None
@@ -204,7 +211,6 @@ class TestHeroAttributes:
         assert pudge.base_movement is not None
         assert pudge.base_armor is not None
 
-    def test_hero_has_roles(self):
         lion = _get_hero_by_name("Lion")
         assert lion is not None
         assert "Support" in lion.roles or "Disabler" in lion.roles

@@ -374,20 +374,13 @@ async def test_first_game_pool_loop_isolates_lobby_refresh_failures_across_guild
     ]
 
 
-async def test_supervised_loop_returns_on_clean_exit(bot_module):
-    """A body that returns cleanly ends the supervisor without a restart."""
-    calls = 0
-
-    async def body():
-        nonlocal calls
-        calls += 1
-
-    await bot_module._supervised_loop("test", body)
-    assert calls == 1
-
-
 async def test_supervised_loop_restarts_after_crash(bot_module, caplog):
-    """A crashing body is logged and restarted; clean return then ends the loop."""
+    """A crashing body is logged and restarted; clean return then ends the loop.
+
+    (Also covers the clean-exit contract previously pinned by
+    test_supervised_loop_returns_on_clean_exit: the exact calls == 2 assertion
+    proves a clean return ends the supervisor without further restarts.)
+    """
     calls = 0
 
     async def body():
@@ -692,7 +685,15 @@ async def test_update_lobby_message_reports_failed_edit(bot_module):
     assert updated is False
 
 
-async def test_update_lobby_message_skips_recreated_lobby_generation(bot_module):
+async def test_update_lobby_message_generation_check(bot_module):
+    """update_lobby_message skips (no edit) when the stored message id no
+    longer matches the expected one — a recreated lobby generation — and
+    edits when the generation matches.
+
+    Merged from test_update_lobby_message_skips_recreated_lobby_generation
+    and test_update_lobby_message_edits_current_lobby_generation.
+    """
+    # Stale generation: stored message id 202 != expected 101 → no edit.
     stale_lobby = SimpleNamespace(get_player_count=MagicMock(return_value=1))
     current_lobby = SimpleNamespace(get_player_count=MagicMock(return_value=2))
     lobby_service = MagicMock()
@@ -716,15 +717,11 @@ async def test_update_lobby_message_skips_recreated_lobby_generation(bot_module)
     assert updated is False
     message.edit.assert_not_awaited()
 
-
-async def test_update_lobby_message_edits_current_lobby_generation(bot_module):
-    lobby = SimpleNamespace(get_player_count=MagicMock(return_value=2))
+    # Current generation: stored id matches → edit with the built embed.
     embed = object()
-    lobby_service = MagicMock()
     lobby_service.build_lobby_embed.return_value = embed
-    lobby_service.get_lobby.return_value = lobby
+    lobby_service.get_lobby.return_value = current_lobby
     lobby_service.get_lobby_message_id.return_value = 101
-    message = SimpleNamespace(edit=AsyncMock())
 
     with (
         patch.object(bot_module, "_init_services"),
@@ -732,7 +729,7 @@ async def test_update_lobby_message_edits_current_lobby_generation(bot_module):
     ):
         updated = await bot_module.update_lobby_message(
             message,
-            lobby,
+            current_lobby,
             42,
             expected_message_id=101,
             lobby_kind=bot_module.LobbyKind.OPEN,
@@ -2785,29 +2782,29 @@ def _utc(hour, minute=0):
     return dt.datetime(2026, 6, 22, hour, minute, tzinfo=dt.UTC)
 
 
-def test_next_digest_run_picks_soonest_anchor_later_today(bot_module):
-    """At 06:00 with anchors {0,12}, the next run is today's 12:00."""
-    nxt = bot_module._next_digest_run(_utc(6), [0, 12])
-    assert nxt == _utc(12)
+def test_next_digest_run_schedules_strictly_future_anchor(bot_module):
+    """_next_digest_run picks the soonest strictly-future anchor: later today
+    when one remains, tomorrow's first anchor after (or exactly at) the last
+    one, always 12h apart for {0,12}.
 
+    Merged from test_next_digest_run_picks_soonest_anchor_later_today,
+    test_next_digest_run_rolls_to_tomorrow_after_last_anchor,
+    test_next_digest_run_anchors_are_twelve_hours_apart, and
+    test_next_digest_run_strictly_future_when_exactly_on_anchor.
+    """
+    # At 06:00 with anchors {0,12}, the next run is today's 12:00.
+    assert bot_module._next_digest_run(_utc(6), [0, 12]) == _utc(12)
 
-def test_next_digest_run_rolls_to_tomorrow_after_last_anchor(bot_module):
-    """At 13:00 both of today's anchors have passed, so roll to tomorrow 00:00."""
-    nxt = bot_module._next_digest_run(_utc(13), [0, 12])
-    assert nxt == _utc(0) + dt.timedelta(days=1)
+    # At 13:00 both of today's anchors have passed, so roll to tomorrow 00:00.
+    assert bot_module._next_digest_run(_utc(13), [0, 12]) == _utc(0) + dt.timedelta(days=1)
 
-
-def test_next_digest_run_anchors_are_twelve_hours_apart(bot_module):
-    """From just after one anchor, the following anchor is exactly 12h away."""
+    # From just after one anchor, the following anchor is exactly 12h away.
     nxt = bot_module._next_digest_run(_utc(0, 1), [0, 12])
     assert nxt == _utc(12)
     assert (nxt - _utc(0)) == dt.timedelta(hours=12)
 
-
-def test_next_digest_run_strictly_future_when_exactly_on_anchor(bot_module):
-    """Exactly at an anchor, the run is the NEXT anchor (never fire twice)."""
-    nxt = bot_module._next_digest_run(_utc(12), [0, 12])
-    assert nxt == _utc(0) + dt.timedelta(days=1)
+    # Exactly at an anchor, the run is the NEXT anchor (never fire twice).
+    assert bot_module._next_digest_run(_utc(12), [0, 12]) == _utc(0) + dt.timedelta(days=1)
 
 
 # --------------------------------------------------------------------------- #
