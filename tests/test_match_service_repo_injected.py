@@ -10,13 +10,17 @@ from tests.conftest import TEST_GUILD_ID
 
 
 def _seed_players(repo: PlayerRepository, count: int = 10, *, os_mu=None, os_sigma=None):
+    # Cycling single-role preferences keep the shuffle search cheap (one role
+    # assignment per team instead of hundreds of permutations for all-role
+    # players). Every assertion in this module is either structural or a
+    # selection-wide score delta, so narrower role preferences change nothing.
     for i in range(count):
         pid = 1000 + i
         repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
             guild_id=TEST_GUILD_ID,
-            preferred_roles=["1", "2", "3", "4", "5"],
+            preferred_roles=[str(i % 5 + 1)],
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=350.0,
@@ -28,6 +32,14 @@ def _seed_players(repo: PlayerRepository, count: int = 10, *, os_mu=None, os_sig
 
 
 def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
+    """Shuffle then record persists the match, and
+    get_last_match_participant_ids forwards guild_id to the repo without
+    TypeError.
+
+    Regression (participant lookup): the service method called the repo with
+    zero args while the repo requires guild_id, raising TypeError on every real
+    call (herogrid fallback).
+    """
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     service = MatchService(
@@ -36,6 +48,9 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
         use_glicko=False,
         betting_service=None,
     )
+
+    # No matches yet -> empty result, but the call itself must not raise.
+    assert service.get_last_match_participant_ids(TEST_GUILD_ID) == []
 
     player_ids = _seed_players(player_repo, 10)
 
@@ -51,6 +66,10 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     recorded = match_repo.get_match(result["match_id"], TEST_GUILD_ID)
     assert recorded is not None
     assert recorded["winning_team"] in (1, 2)
+
+    # The recorded participants come back for that guild.
+    participants = service.get_last_match_participant_ids(TEST_GUILD_ID)
+    assert set(participants) == set(player_ids)
 
 
 def test_shuffle_accounts_for_all_sixteen_players(repo_db_path):
@@ -187,8 +206,10 @@ def test_goodness_adds_230_for_selected_last_match_player(
     )
 
 
-def test_shuffle_uses_three_database_connections(repo_db_path, monkeypatch):
-    """Player data plus metadata should share one of the three shuffle reads."""
+def test_shuffle_and_record_connection_budgets(repo_db_path, monkeypatch):
+    """Shuffle uses three connections (player data plus metadata share one of
+    the reads) and record_match uses six, guarding the bulk rating/outcome read
+    path against point-query regressions."""
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     service = MatchService(
@@ -212,30 +233,7 @@ def test_shuffle_uses_three_database_connections(repo_db_path, monkeypatch):
 
     assert connection_count == 3
 
-
-def test_record_match_uses_six_database_connections(repo_db_path, monkeypatch):
-    """Guard the bulk rating/outcome read path against point-query regressions."""
-    player_repo = PlayerRepository(repo_db_path)
-    match_repo = MatchRepository(repo_db_path)
-    service = MatchService(
-        player_repo=player_repo,
-        match_repo=match_repo,
-        use_glicko=False,
-        betting_service=None,
-    )
-    player_ids = _seed_players(player_repo, 10)
-    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-
     connection_count = 0
-    original_get_connection = BaseRepository.get_connection
-
-    def counted_get_connection(repository):
-        nonlocal connection_count
-        connection_count += 1
-        return original_get_connection(repository)
-
-    monkeypatch.setattr(BaseRepository, "get_connection", counted_get_connection)
-
     result = service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
     assert result["match_id"] > 0
@@ -451,30 +449,3 @@ def test_region_shuffle_mode_splits_usw_and_use(repo_db_path):
         for team in (result["radiant_team"], result["dire_team"])
     }
     assert team_region_sets == {frozenset({"USW"}), frozenset({"USE"})}
-
-
-def test_get_last_match_participant_ids_passes_guild_id(repo_db_path):
-    """get_last_match_participant_ids forwards guild_id to the repo without TypeError.
-
-    Regression: the service method called the repo with zero args while the repo
-    requires guild_id, raising TypeError on every real call (herogrid fallback).
-    """
-    player_repo = PlayerRepository(repo_db_path)
-    match_repo = MatchRepository(repo_db_path)
-    service = MatchService(
-        player_repo=player_repo,
-        match_repo=match_repo,
-        use_glicko=False,
-        betting_service=None,
-    )
-
-    # No matches yet -> empty result, but the call itself must not raise.
-    assert service.get_last_match_participant_ids(TEST_GUILD_ID) == []
-
-    # Record a match and confirm the participants come back for that guild.
-    player_ids = _seed_players(player_repo, 10)
-    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-    service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-    participants = service.get_last_match_participant_ids(TEST_GUILD_ID)
-    assert set(participants) == set(player_ids)
