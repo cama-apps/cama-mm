@@ -1698,6 +1698,23 @@ class TestLatePrestigeBossLocking:
 
         monkeypatch.setattr(random, "Random", RejectBossRandom)
 
+    @staticmethod
+    def _capture_pool(monkeypatch):
+        """Record the pool _ensure_boss_locked actually samples from.
+
+        Asserting on the captured pool is strictly stronger than sampling the
+        roll many times: it proves gated bosses are excluded outright.
+        """
+        captured: list[list[str]] = []
+
+        class CapturingRandom:
+            def choice(self, pool):
+                captured.append([boss.boss_id for boss in pool])
+                return pool[0]
+
+        monkeypatch.setattr(random, "Random", CapturingRandom)
+        return captured
+
     def test_p0_player_never_locks_late_prestige_boss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
@@ -1709,14 +1726,13 @@ class TestLatePrestigeBossLocking:
             10001, TEST_GUILD_ID,
             depth=200, prestige_level=0, boss_progress="{}",
         )
-        seen: set[str] = set()
-        for _ in range(50):
-            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
-            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
-            seen.add(boss.boss_id)
-        assert "lilith" not in seen, "P0 player should never lock the P3 boss"
-        assert seen <= {"chronofrost", "faceless_void", "weaver"}
+        captured = self._capture_pool(monkeypatch)
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
+        assert captured, "no pool was sampled"
+        assert set(captured[0]) == {"chronofrost", "faceless_void", "weaver"}, (
+            "P0 pool must contain exactly the ungated tier-200 bosses"
+        )
 
     def test_p3_player_can_lock_late_prestige_boss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -1730,14 +1746,10 @@ class TestLatePrestigeBossLocking:
             10001, TEST_GUILD_ID,
             depth=200, prestige_level=3, boss_progress="{}",
         )
-        seen: set[str] = set()
-        for _ in range(50):
-            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
-            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
-            seen.add(boss.boss_id)
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
         # The chooser is pinned so this proves runtime selection, not probability.
-        assert "lilith" in seen, "P3 player should be able to lock the P3 boss"
+        assert boss.boss_id == "lilith", "P3 player should be able to lock the P3 boss"
 
     def test_p1_player_never_locks_prestige2_boss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -1750,14 +1762,13 @@ class TestLatePrestigeBossLocking:
             10001, TEST_GUILD_ID,
             depth=150, prestige_level=1, boss_progress="{}",
         )
-        seen: set[str] = set()
-        for _ in range(50):
-            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
-            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
-            seen.add(boss.boss_id)
-        assert "aegis_warden" not in seen, "P1 player should never lock the P2 boss"
-        assert seen <= {"sporeling_sovereign", "treant_protector", "broodmother"}
+        captured = self._capture_pool(monkeypatch)
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
+        assert captured, "no pool was sampled"
+        assert set(captured[0]) == {
+            "sporeling_sovereign", "treant_protector", "broodmother",
+        }, "P1 pool must contain exactly the ungated tier-150 bosses"
 
     def test_p2_player_can_lock_prestige2_boss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -1771,13 +1782,11 @@ class TestLatePrestigeBossLocking:
             10001, TEST_GUILD_ID,
             depth=150, prestige_level=2, boss_progress="{}",
         )
-        seen: set[str] = set()
-        for _ in range(50):
-            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
-            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
-            seen.add(boss.boss_id)
-        assert "aegis_warden" in seen, "P2 player should be able to lock the P2 boss"
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
+        assert boss.boss_id == "aegis_warden", (
+            "P2 player should be able to lock the P2 boss"
+        )
 
     @pytest.mark.parametrize(
         ("tier", "boss_id"),
