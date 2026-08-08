@@ -28,6 +28,7 @@ from utils.formatting import (
     get_player_display_name,
 )
 from utils.interaction_safety import safe_defer
+from utils.lobby_selection import resolve_lobby_kind
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.region import summarize_region
 
@@ -444,6 +445,33 @@ class DraftCommands(commands.Cog):
             ephemeral=True,
         )
         return None
+
+    async def _evict_drafted_players_from_other_lobbies(
+        self,
+        player_ids: list[int],
+        *,
+        guild_id: int | None,
+        popped_kind: LobbyKind,
+    ) -> None:
+        """Release the other lobby's seats for the players a draft just matched."""
+        lobby_cog = self.bot.get_cog("LobbyCommands")
+        evict = getattr(lobby_cog, "evict_matched_players_from_other_lobbies", None)
+        if evict is None:
+            return
+        try:
+            await evict(
+                player_ids,
+                guild_id=guild_id,
+                popped_kind=popped_kind,
+            )
+        except Exception as exc:
+            # A started draft must never be unwound by lobby bookkeeping.
+            logger.warning(
+                "Failed to clear the other lobby after the %s draft started: %s",
+                popped_kind.value,
+                exc,
+                exc_info=True,
+            )
 
     async def _release_draft_players(self, state: DraftState) -> None:
         """Release the lobby participants owned by a finished draft attempt."""
@@ -1064,6 +1092,13 @@ class DraftCommands(commands.Cog):
     @app_commands.describe(
         captain1="(Optional) Specify first captain",
         captain2="(Optional) Specify second captain",
+        lobby="Lobby to draft from (defaults to the lobby you're in)",
+    )
+    @app_commands.choices(
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ]
     )
     @require_guild
     async def startdraft(
@@ -1071,6 +1106,7 @@ class DraftCommands(commands.Cog):
         interaction: discord.Interaction,
         captain1: discord.Member | None = None,
         captain2: discord.Member | None = None,
+        lobby: app_commands.Choice[str] | None = None,
     ):
         """Start an Immortal Draft session."""
         guild_id = interaction.guild.id
@@ -1082,16 +1118,18 @@ class DraftCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_manager.get_lobby_kind_for_player,
+        member_kinds = await asyncio.to_thread(
+            self.lobby_manager.get_lobby_kinds_for_player,
             interaction.user.id,
             guild_id,
         )
-        if lobby_kind is None:
-            await interaction.followup.send(
-                "❌ Join a lobby before using `/draft start`.",
-                ephemeral=True,
-            )
+        lobby_kind, selection_error = resolve_lobby_kind(
+            member_kinds,
+            lobby,
+            no_lobby_message="❌ Join a lobby before using `/draft start`.",
+        )
+        if selection_error is not None:
+            await interaction.followup.send(selection_error, ephemeral=True)
             return
 
         # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
@@ -1163,8 +1201,10 @@ class DraftCommands(commands.Cog):
             return
 
         # Note: We don't block on existing pending matches here.
-        # The lobby service already prevents players from joining if they're in a pending match,
-        # so by the time /startdraft is called, all lobby players are guaranteed to be available.
+        # The lobby service prevents players from joining while they're in a pending match, and
+        # a lobby that pops evicts its matched players from the other lobby, so a seated player
+        # is normally available. The authoritative check is reserve_lobby_players below: it
+        # fails if any of the pool is already reserved by the other lobby's shuffle or draft.
 
         # Check lobby
         kind = LobbyKind.normalize(lobby_kind)
@@ -2041,6 +2081,21 @@ class DraftCommands(commands.Cog):
                 )
                 await self._edit_interaction_message(interaction, embed=embed, view=None)
                 return
+
+            # The match is durable, so the drafted players lose the seat they
+            # were still holding in the other lobby. Deliberately here and not
+            # at /draft start: an abandoned draft (restart, idle timeout, a
+            # Discord failure) preserves its own lobby, and evicting earlier
+            # would strand those players out of the other queue with no match
+            # and no path back. Waiting costs nothing — the pool is reserved
+            # for the whole draft, and _can_reserve_locked rejects a selection
+            # holding any player reserved by another kind, so the other lobby
+            # already cannot shuffle them while the draft runs.
+            await self._evict_drafted_players_from_other_lobbies(
+                list(state.radiant_player_ids) + list(state.dire_player_ids),
+                guild_id=guild_id,
+                popped_kind=kind,
+            )
 
             # Get pending state for betting display (use specific pending_match_id for concurrent match support)
             pending_state = await asyncio.to_thread(

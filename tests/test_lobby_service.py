@@ -140,7 +140,7 @@ def test_lowskill_join_uses_strict_1400_cutoff(
         assert pending_info is None
 
 
-def test_player_cannot_join_both_lobby_kinds():
+def test_player_can_join_both_lobby_kinds():
     lobby_manager = LobbyManagerService(FakeLobbyRepo())
     player_repo = MagicMock()
     player_repo.get_by_id.return_value = _player_with_rating(1, 1200)
@@ -160,13 +160,76 @@ def test_player_cannot_join_both_lobby_kinds():
         lobby_kind="lowskill",
     )
 
+    assert success is True
+    assert reason == ""
+    assert pending_info == "ok"
+    assert service.get_lobby(guild_id=99, lobby_kind="open").players == {1}
+    assert service.get_lobby(guild_id=99, lobby_kind="lowskill").players == {1}
+
+
+def test_lowskill_eligibility_still_gates_the_second_queue():
+    """Sitting in open is not a back door into the lowskill queue."""
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    player_repo = MagicMock()
+    player_repo.get_by_id.return_value = _player_with_rating(1, 1400)
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
+
+    service.get_or_create_lobby(guild_id=99, lobby_kind="open")
+    lobby_manager.get_or_create_lobby(
+        creator_id=2,
+        guild_id=99,
+        lobby_kind="lowskill",
+    )
+    assert service.join_lobby(1, guild_id=99, lobby_kind="open")[0] is True
+
+    success, reason, pending_info = service.join_lobby(
+        1,
+        guild_id=99,
+        lobby_kind="lowskill",
+    )
+
     assert success is False
-    assert reason == "in_other_lobby"
+    assert reason == "rating_too_high"
     assert pending_info is None
     assert service.get_lobby(guild_id=99, lobby_kind="lowskill").players == set()
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [LobbyKind.OPEN]
 
 
-def test_reserved_player_cannot_leave_or_switch_lobbies_until_released():
+def test_get_lobby_kinds_for_player_lists_every_seat_in_declaration_order():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    player_repo = MagicMock()
+    player_repo.get_by_id.return_value = _player_with_rating(1, 1200)
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
+
+    service.get_or_create_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    service.get_or_create_lobby(
+        creator_id=1,
+        guild_id=99,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == []
+
+    assert service.join_lobby(1, guild_id=99, lobby_kind=LobbyKind.OPEN)[0]
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [LobbyKind.OPEN]
+
+    assert service.join_lobby(1, guild_id=99, lobby_kind=LobbyKind.LOWSKILL)[0]
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+
+    # Join order never leaks into the answer: it is LobbyKind order, so
+    # callers can rely on open coming first when they format the labels.
+    assert service.join_lobby(2, guild_id=99, lobby_kind=LobbyKind.LOWSKILL)[0]
+    assert service.join_lobby(2, guild_id=99, lobby_kind=LobbyKind.OPEN)[0]
+    assert service.get_lobby_kinds_for_player(2, guild_id=99) == [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+
+
+def test_reserved_player_cannot_leave_or_join_the_other_lobby_until_released():
     lobby_manager = LobbyManagerService(FakeLobbyRepo())
     player_repo = MagicMock()
     player_repo.get_by_id.return_value = _player_with_rating(1, 1200)
@@ -191,15 +254,99 @@ def test_reserved_player_cannot_leave_or_switch_lobbies_until_released():
         "in_flight",
         None,
     )
-    assert service.get_lobby_kind_for_player(1, guild_id=99) is LobbyKind.OPEN
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [LobbyKind.OPEN]
 
     service.release_lobby_players(
         [1],
         guild_id=99,
         lobby_kind=LobbyKind.OPEN,
     )
-    assert service.leave_lobby(1, guild_id=99, lobby_kind=LobbyKind.OPEN) is True
+    # No leave-then-rejoin dance: the released player queues in the other
+    # lobby while keeping the open seat.
     assert service.join_lobby(1, guild_id=99, lobby_kind=LobbyKind.LOWSKILL)[0]
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+    assert service.leave_lobby(1, guild_id=99, lobby_kind=LobbyKind.OPEN) is True
+
+
+def test_open_reservation_does_not_pin_the_lowskill_seat():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    player_repo = MagicMock()
+    player_repo.get_by_id.return_value = _player_with_rating(1, 1200)
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
+
+    service.get_or_create_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    service.get_or_create_lobby(
+        creator_id=1,
+        guild_id=99,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    assert service.join_lobby(1, guild_id=99, lobby_kind=LobbyKind.OPEN)[0]
+    assert service.join_lobby(1, guild_id=99, lobby_kind=LobbyKind.LOWSKILL)[0]
+    assert service.reserve_lobby_players(
+        [1],
+        guild_id=99,
+        lobby_kind=LobbyKind.OPEN,
+    )
+
+    # Only the reserving kind pins a seat.
+    assert service.leave_lobby(1, guild_id=99, lobby_kind=LobbyKind.LOWSKILL) is True
+    assert service.leave_lobby(1, guild_id=99, lobby_kind=LobbyKind.OPEN) is False
+    assert service.get_lobby_kinds_for_player(1, guild_id=99) == [LobbyKind.OPEN]
+
+
+def test_remove_players_from_lobby_drops_only_the_seated_ids_it_was_given():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=MagicMock())
+    lobby = service.get_or_create_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    lobby.players.update({1, 2, 3})
+
+    removed = service.remove_players_from_lobby(
+        [1, 2, 4],
+        guild_id=99,
+        lobby_kind=LobbyKind.OPEN,
+    )
+
+    assert removed == {1, 2}
+    assert lobby.players == {3}
+
+
+def test_remove_players_from_lobby_is_a_no_op_when_the_lobby_is_absent():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=MagicMock())
+    service.get_or_create_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+
+    removed = service.remove_players_from_lobby(
+        [1, 2],
+        guild_id=99,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+    assert removed == set()
+    assert service.get_lobby(guild_id=99, lobby_kind=LobbyKind.LOWSKILL) is None
+
+
+def test_remove_players_from_lobby_skips_players_its_own_match_reserved():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=MagicMock())
+    lobby = service.get_or_create_lobby(guild_id=99, lobby_kind=LobbyKind.OPEN)
+    lobby.players.update({1, 2})
+    assert service.reserve_lobby_players(
+        [1],
+        guild_id=99,
+        lobby_kind=LobbyKind.OPEN,
+    )
+
+    removed = service.remove_players_from_lobby(
+        [1, 2],
+        guild_id=99,
+        lobby_kind=LobbyKind.OPEN,
+    )
+
+    assert removed == {2}
+    assert lobby.players == {1}
 
 
 def test_same_lobby_players_cannot_be_reserved_by_two_match_starts():

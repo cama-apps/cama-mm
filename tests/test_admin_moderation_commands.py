@@ -7,6 +7,8 @@ import pytest
 from discord import app_commands
 
 from commands.admin import AdminCommands
+from domain.models.lobby import LobbyKind
+from utils.lobby_selection import format_lobby_labels
 
 
 def _interaction(*, admin_id: int = 900, guild_id: int = 77):
@@ -43,11 +45,11 @@ def _state(**overrides):
     return SimpleNamespace(**values)
 
 
-def _commands():
+def _commands(lobby_cog=None):
     moderation_service = MagicMock()
     lobby_service = MagicMock()
-    lobby_service.get_lobby_kind_for_player.return_value = None
-    bot = SimpleNamespace(get_cog=MagicMock(return_value=None))
+    lobby_service.get_lobby_kinds_for_player.return_value = []
+    bot = SimpleNamespace(get_cog=MagicMock(return_value=lobby_cog))
     commands = AdminCommands(
         bot=bot,
         lobby_service=lobby_service,
@@ -223,13 +225,98 @@ async def test_suspend_creates_exact_time_scoped_state_and_notifies_privately(
         now=1_000,
     )
     moderation_service.replace_suspension.assert_not_called()
-    lobby_service.get_lobby_kind_for_player.assert_called_once_with(42, 77)
+    lobby_service.get_lobby_kinds_for_player.assert_called_once_with(42, 77)
     player.send.assert_awaited_once()
     assert "repeat abandonment" in player.send.await_args.args[0]
     assert "<t:8200:F>" in player.send.await_args.args[0]
     safe_defer.assert_awaited_once_with(interaction, ephemeral=True)
     assert safe_followup.await_args.kwargs["ephemeral"] is True
     assert "Suspended <@42>" in safe_followup.await_args.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_all_scope_suspension_evicts_every_queued_lobby(monkeypatch):
+    """A player queued in both lobbies loses both seats to an all-lobbies term."""
+    lobby_cog = SimpleNamespace(eject_lobby_player=AsyncMock(return_value=True))
+    commands, moderation_service, lobby_service = _commands(lobby_cog=lobby_cog)
+    interaction = _interaction()
+    player = _target()
+    lobby_service.get_lobby_kinds_for_player.return_value = [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+    moderation_service.parse_expiry.return_value = 8_200
+    moderation_service.create_suspension.return_value = _state()
+    # An "all" scope is active against whichever lobby it is checked against.
+    moderation_service.get_active_suspension.return_value = _state()
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
+    monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.admin.safe_followup", safe_followup)
+    monkeypatch.setattr("commands.admin.time.time", lambda: 1_000)
+
+    await commands.moderation_suspend.callback(
+        commands,
+        interaction,
+        player,
+        reason="repeat abandonment",
+        duration="2h",
+    )
+
+    evicted_kinds = [
+        call.kwargs["lobby_kind"]
+        for call in lobby_cog.eject_lobby_player.await_args_list
+    ]
+    assert evicted_kinds == [LobbyKind.OPEN, LobbyKind.LOWSKILL]
+    lobby_service.leave_lobby.assert_not_called()
+    # The confirmation names both lobbies it actually cleared.
+    content = safe_followup.await_args.kwargs["content"]
+    assert f"Removed from {format_lobby_labels(evicted_kinds)}." in content
+    assert "already-starting match" not in content
+
+
+@pytest.mark.asyncio
+async def test_lowskill_scoped_suspension_leaves_the_open_seat_intact(monkeypatch):
+    """A kind-scoped term clears its own lobby and only its own lobby."""
+    lobby_cog = SimpleNamespace(eject_lobby_player=AsyncMock(return_value=True))
+    commands, moderation_service, lobby_service = _commands(lobby_cog=lobby_cog)
+    interaction = _interaction()
+    player = _target()
+    lobby_service.get_lobby_kinds_for_player.return_value = [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+    state = _state(scope="lowskill")
+    moderation_service.parse_expiry.return_value = 8_200
+    moderation_service.create_suspension.return_value = state
+    moderation_service.get_active_suspension.side_effect = (
+        lambda _discord_id, _guild_id, kind: state if kind is LobbyKind.LOWSKILL else None
+    )
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
+    monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.admin.safe_followup", safe_followup)
+    monkeypatch.setattr("commands.admin.time.time", lambda: 1_000)
+
+    await commands.moderation_suspend.callback(
+        commands,
+        interaction,
+        player,
+        reason="repeat abandonment",
+        duration="2h",
+        lobby=app_commands.Choice(name="Whine & Cheese", value="lowskill"),
+    )
+
+    moderation_service.create_suspension.assert_called_once()
+    assert moderation_service.create_suspension.call_args.kwargs["scope"] == "lowskill"
+    lobby_cog.eject_lobby_player.assert_awaited_once()
+    assert (
+        lobby_cog.eject_lobby_player.await_args.kwargs["lobby_kind"]
+        is LobbyKind.LOWSKILL
+    )
+    content = safe_followup.await_args.kwargs["content"]
+    assert f"Removed from {LobbyKind.LOWSKILL.label}." in content
+    assert LobbyKind.OPEN.label not in content.split("Removed from")[-1]
 
 
 @pytest.mark.asyncio

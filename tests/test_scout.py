@@ -13,6 +13,7 @@ from commands.scout import ScoutCommands
 from domain.models.lobby import LobbyKind
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
+from utils.lobby_selection import AMBIGUOUS_LOBBY_MESSAGE
 
 
 class TestScoutRepositoryMethods:
@@ -590,7 +591,7 @@ def _make_scout_cog(
         bot.draft_state_manager = draft_state_manager
     lobby_manager = SimpleNamespace(
         get_lobby=lambda guild_id=None, lobby_kind=None: lobby,
-        get_lobby_kind_for_player=lambda discord_id, guild_id=None: None,
+        get_lobby_kinds_for_player=lambda discord_id, guild_id=None: [],
     )
     return ScoutCommands(bot, match_service, player_service, lobby_manager)
 
@@ -668,8 +669,8 @@ class TestResolveTeamContext:
             get_last_shuffle=lambda guild_id: open_match,
         )
         lobby_manager = SimpleNamespace(
-            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
-                LobbyKind.LOWSKILL if discord_id == 7 else None
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: (
+                [LobbyKind.LOWSKILL] if discord_id == 7 else []
             ),
             get_lobby=lambda guild_id=None, lobby_kind=None: {
                 LobbyKind.OPEN: open_lobby,
@@ -682,6 +683,34 @@ class TestResolveTeamContext:
 
         assert set(ctx.flat) == {7, 8}
         assert ctx.source_label == LobbyKind.LOWSKILL.label
+
+    def test_bystander_with_no_seat_still_sees_the_guilds_live_match(self):
+        """A caster, an admin, or a benched player can still scout the game.
+
+        The shuffle resets its source lobby, so someone with no pending match
+        and no lobby seat has nothing left to fall back on but the guild's
+        match. get_last_shuffle returns None while several are pending, so
+        this can never surface the wrong one.
+        """
+        live_match = SimpleNamespace(radiant_team_ids=[1, 2], dire_team_ids=[3, 4])
+        match_service = SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_pending_match_for_player=lambda guild_id, discord_id: None
+            ),
+            get_last_shuffle=lambda guild_id: live_match,
+        )
+        lobby_manager = SimpleNamespace(
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: [],
+            get_lobby=lambda guild_id=None, lobby_kind=None: None,
+        )
+        cog = ScoutCommands(SimpleNamespace(), match_service, None, lobby_manager)
+
+        ctx = cog._resolve_team_context(TEST_GUILD_ID, invoking_user_id=99)
+
+        assert ctx.split is True
+        assert list(ctx.radiant) == [1, 2]
+        assert list(ctx.dire) == [3, 4]
+        assert ctx.source_label == "Active Match"
 
     def test_invokers_pending_match_is_selected_when_two_are_active(self):
         lowskill_match = SimpleNamespace(
@@ -697,7 +726,7 @@ class TestResolveTeamContext:
             get_last_shuffle=lambda guild_id: None,
         )
         lobby_manager = SimpleNamespace(
-            get_lobby_kind_for_player=lambda discord_id, guild_id=None: None,
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: [],
             get_lobby=lambda guild_id=None, lobby_kind=None: None,
         )
         cog = ScoutCommands(SimpleNamespace(), match_service, None, lobby_manager)
@@ -743,20 +772,32 @@ class TestResolvePlayerContextRegression:
 
 
 class TestScoutReportLobbyContext:
-    async def test_uses_invokers_whine_and_cheese_roster_and_label(self, monkeypatch):
-        """A Whine & Cheese member scouts that lobby rather than the open lobby."""
+    """Which lobby /scout report reads, now that a caller may sit in both."""
+
+    def _patch_rendering(self, monkeypatch):
+        """Patch defer/followup/drawing; return the safe_followup AsyncMock."""
+        followup = AsyncMock(return_value=None)
+        monkeypatch.setattr("commands.scout.safe_defer", AsyncMock(return_value=True))
+        monkeypatch.setattr("commands.scout.safe_followup", followup)
+        monkeypatch.setattr(
+            "commands.scout.draw_scout_report",
+            lambda **kwargs: BytesIO(b"scout"),
+        )
+        return followup
+
+    def _cog(self, member_kinds, seen_player_ids, *, pending_match=None):
+        """A cog whose invoker (id 7) is queued in exactly ``member_kinds``."""
         open_lobby = SimpleNamespace(players={1, 2}, kind=LobbyKind.OPEN)
         lowskill_lobby = SimpleNamespace(players={7, 8}, kind=LobbyKind.LOWSKILL)
         lobby_manager = SimpleNamespace(
-            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
-                LobbyKind.LOWSKILL if discord_id == 7 else None
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: (
+                list(member_kinds) if discord_id == 7 else []
             ),
             get_lobby=lambda guild_id=None, lobby_kind=None: {
                 LobbyKind.OPEN: open_lobby,
                 LobbyKind.LOWSKILL: lowskill_lobby,
             }[LobbyKind.normalize(lobby_kind)],
         )
-        seen_player_ids = []
 
         def get_scout_data(player_ids, guild_id, *, limit):
             seen_player_ids.extend(player_ids)
@@ -765,9 +806,18 @@ class TestScoutReportLobbyContext:
                 "total_matches": 1,
             }
 
-        cog = ScoutCommands(
+        match_service = SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_pending_match_for_player=lambda guild_id, discord_id: (
+                    pending_match if discord_id == 7 else None
+                )
+            ),
+            get_last_shuffle=lambda guild_id: None,
+            get_scout_data=get_scout_data,
+        )
+        return ScoutCommands(
             SimpleNamespace(),
-            SimpleNamespace(get_last_shuffle=lambda guild_id: None, get_scout_data=get_scout_data),
+            match_service,
             SimpleNamespace(
                 get_by_ids=lambda player_ids, guild_id: [
                     SimpleNamespace(discord_id=player_id, name=f"P{player_id}")
@@ -776,23 +826,69 @@ class TestScoutReportLobbyContext:
             ),
             lobby_manager,
         )
-        followup = AsyncMock(return_value=None)
-        monkeypatch.setattr("commands.scout.safe_defer", AsyncMock(return_value=True))
-        monkeypatch.setattr("commands.scout.safe_followup", followup)
-        monkeypatch.setattr(
-            "commands.scout.draw_scout_report",
-            lambda **kwargs: BytesIO(b"scout"),
-        )
-        interaction = SimpleNamespace(
+
+    def _interaction(self):
+        return SimpleNamespace(
             guild=SimpleNamespace(id=TEST_GUILD_ID),
             user=SimpleNamespace(id=7),
         )
 
-        await _report_cmd(cog).callback(cog, interaction)
+    async def test_uses_invokers_whine_and_cheese_roster_and_label(self, monkeypatch):
+        """A Whine & Cheese member scouts that lobby rather than the open lobby."""
+        followup = self._patch_rendering(monkeypatch)
+        seen_player_ids = []
+        cog = self._cog([LobbyKind.LOWSKILL], seen_player_ids)
+
+        await _report_cmd(cog).callback(cog, self._interaction())
 
         assert set(seen_player_ids) == {7, 8}
         embed = followup.await_args.kwargs["embed"]
         assert embed.title == f"SCOUT: {LobbyKind.LOWSKILL.label}"
+
+    async def test_both_lobbies_without_a_choice_asks_which_one(self, monkeypatch):
+        """Queued in both and no `lobby` option: say so and render nothing."""
+        followup = self._patch_rendering(monkeypatch)
+        seen_player_ids = []
+        cog = self._cog([LobbyKind.OPEN, LobbyKind.LOWSKILL], seen_player_ids)
+
+        await _report_cmd(cog).callback(cog, self._interaction())
+
+        followup.assert_awaited_once()
+        assert followup.await_args.kwargs["content"] == AMBIGUOUS_LOBBY_MESSAGE
+        assert "embed" not in followup.await_args.kwargs
+        assert seen_player_ids == []
+
+    async def test_both_lobbies_with_a_choice_scouts_that_lobby(self, monkeypatch):
+        """The `lobby` option picks the roster and the label out of the tie."""
+        followup = self._patch_rendering(monkeypatch)
+        seen_player_ids = []
+        cog = self._cog([LobbyKind.OPEN, LobbyKind.LOWSKILL], seen_player_ids)
+
+        await _report_cmd(cog).callback(
+            cog, self._interaction(), lobby=SimpleNamespace(value="open")
+        )
+
+        assert set(seen_player_ids) == {1, 2}
+        embed = followup.await_args.kwargs["embed"]
+        assert embed.title == f"SCOUT: {LobbyKind.OPEN.label}"
+
+    async def test_pending_match_outranks_the_lobby_ambiguity(self, monkeypatch):
+        """Being in both lobbies is moot while the invoker has a pending match."""
+        followup = self._patch_rendering(monkeypatch)
+        seen_player_ids = []
+        cog = self._cog(
+            [LobbyKind.OPEN, LobbyKind.LOWSKILL],
+            seen_player_ids,
+            pending_match=SimpleNamespace(
+                radiant_team_ids=[7, 9], dire_team_ids=[8, 10]
+            ),
+        )
+
+        await _report_cmd(cog).callback(cog, self._interaction())
+
+        assert set(seen_player_ids) == {7, 8, 9, 10}
+        embed = followup.await_args.kwargs["embed"]
+        assert embed.title == "SCOUT: Active Match"
 
 
 class TestBuildLinkLines:
@@ -873,7 +969,9 @@ class TestScoutLinksCommand:
         """With nothing active, the command explains how to use it."""
         followup = self._patch_interaction_safety(monkeypatch)
         cog = _make_scout_cog()
-        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID), user=SimpleNamespace(id=1)
+        )
 
         await _links_cmd(cog).callback(cog, interaction)
 
@@ -896,7 +994,9 @@ class TestScoutLinksCommand:
             match_service=_match_service([1, 2], [3, 4]),
             player_service=player_service,
         )
-        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID), user=SimpleNamespace(id=1)
+        )
 
         await _links_cmd(cog).callback(cog, interaction)
 
@@ -937,7 +1037,9 @@ class TestScoutLinksCommand:
             lobby=SimpleNamespace(players={5, 6}, conditional_players=set()),
             player_service=player_service,
         )
-        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID), user=SimpleNamespace(id=5)
+        )
 
         await _links_cmd(cog).callback(cog, interaction)
 
@@ -947,6 +1049,98 @@ class TestScoutLinksCommand:
         value = embed.fields[0].value
         assert "https://www.dotabuff.com/players/55" in value
         assert "https://www.dotabuff.com/players/66" in value
+
+    def _dual_lobby_cog(self, member_kinds, *, pending_match=None):
+        """A cog whose invoker (id 7) is queued in exactly ``member_kinds``.
+
+        The two lobbies hold disjoint rosters so the rendered links reveal
+        which one the command actually read.
+        """
+        open_lobby = SimpleNamespace(players={1, 2}, conditional_players=set())
+        lowskill_lobby = SimpleNamespace(players={7, 8}, conditional_players=set())
+        lobby_manager = SimpleNamespace(
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: (
+                list(member_kinds) if discord_id == 7 else []
+            ),
+            get_lobby=lambda guild_id=None, lobby_kind=None: {
+                LobbyKind.OPEN: open_lobby,
+                LobbyKind.LOWSKILL: lowskill_lobby,
+            }[LobbyKind.normalize(lobby_kind)],
+        )
+        match_service = SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_pending_match_for_player=lambda guild_id, discord_id: (
+                    pending_match if discord_id == 7 else None
+                )
+            ),
+            get_last_shuffle=lambda guild_id: None,
+        )
+        player_service = SimpleNamespace(
+            get_steam_ids_bulk=lambda ids: {player_id: [player_id * 11] for player_id in ids},
+            get_by_ids=lambda ids, guild_id: [
+                SimpleNamespace(discord_id=player_id, name=f"P{player_id}")
+                for player_id in ids
+            ],
+        )
+        return ScoutCommands(
+            SimpleNamespace(), match_service, player_service, lobby_manager
+        )
+
+    def _dual_lobby_interaction(self):
+        return SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID), user=SimpleNamespace(id=7)
+        )
+
+    async def test_uses_invokers_whine_and_cheese_roster(self, monkeypatch):
+        """A Whine & Cheese member lists that lobby, not the open one."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        cog = self._dual_lobby_cog([LobbyKind.LOWSKILL])
+
+        await _links_cmd(cog).callback(cog, self._dual_lobby_interaction())
+
+        value = followup.await_args.kwargs["embed"].fields[0].value
+        assert "players/77" in value and "players/88" in value
+        assert "players/11" not in value
+
+    async def test_both_lobbies_without_a_choice_asks_which_one(self, monkeypatch):
+        """Queued in both and no `lobby` option: say so and render nothing."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        cog = self._dual_lobby_cog([LobbyKind.OPEN, LobbyKind.LOWSKILL])
+
+        await _links_cmd(cog).callback(cog, self._dual_lobby_interaction())
+
+        followup.assert_awaited_once()
+        assert followup.await_args.kwargs["content"] == AMBIGUOUS_LOBBY_MESSAGE
+        assert "embed" not in followup.await_args.kwargs
+
+    async def test_both_lobbies_with_a_choice_lists_that_lobby(self, monkeypatch):
+        """The `lobby` option picks the roster out of the tie."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        cog = self._dual_lobby_cog([LobbyKind.OPEN, LobbyKind.LOWSKILL])
+
+        await _links_cmd(cog).callback(
+            cog, self._dual_lobby_interaction(), lobby=SimpleNamespace(value="open")
+        )
+
+        value = followup.await_args.kwargs["embed"].fields[0].value
+        assert "players/11" in value and "players/22" in value
+        assert "players/77" not in value
+
+    async def test_pending_match_outranks_the_lobby_ambiguity(self, monkeypatch):
+        """Being in both lobbies is moot while the invoker has a pending match."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        cog = self._dual_lobby_cog(
+            [LobbyKind.OPEN, LobbyKind.LOWSKILL],
+            pending_match=SimpleNamespace(
+                radiant_team_ids=[7, 9], dire_team_ids=[8, 10]
+            ),
+        )
+
+        await _links_cmd(cog).callback(cog, self._dual_lobby_interaction())
+
+        embed = followup.await_args.kwargs["embed"]
+        assert [f.name for f in embed.fields] == ["Radiant", "Dire"]
+        assert "players/99" in embed.fields[0].value
 
     async def test_team_filter_lists_only_that_team(self, monkeypatch):
         """team=radiant lists only the Radiant side in a single field."""
@@ -961,7 +1155,9 @@ class TestScoutLinksCommand:
             match_service=_match_service([1, 2], [3, 4]),
             player_service=player_service,
         )
-        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=TEST_GUILD_ID), user=SimpleNamespace(id=1)
+        )
 
         await _links_cmd(cog).callback(
             cog, interaction, team=SimpleNamespace(value="radiant")

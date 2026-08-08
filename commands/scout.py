@@ -22,6 +22,7 @@ from domain.models.lobby import LobbyKind
 from utils.drawing import draw_scout_report
 from utils.embeds import COLOR_BLUE
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.lobby_selection import AmbiguousLobbyError, choice_to_lobby_kind
 
 logger = logging.getLogger("cama_bot.commands.scout")
 
@@ -187,6 +188,7 @@ class ScoutCommands(commands.Cog):
         self,
         guild_id: int | None,
         invoking_user_id: int | None = None,
+        lobby_kind: LobbyKind | None = None,
     ) -> TeamContext:
         """
         Resolve players from active match/draft/lobby context, keeping teams split.
@@ -196,20 +198,29 @@ class ScoutCommands(commands.Cog):
         Args:
             guild_id: Guild ID for context lookup
             invoking_user_id: User whose lobby membership selects the lobby kind
+            lobby_kind: Explicit lobby to read, overriding that membership
 
         Returns:
             A TeamContext. When no context is found every list is empty and
             ``source_label`` is None.
+
+        Raises:
+            AmbiguousLobbyError: the chain reached the lobby, the invoker is
+                queued in both, and no explicit kind was given.
         """
-        invoker_lobby_kind = None
-        if invoking_user_id is not None:
-            invoker_lobby_kind = self.lobby_manager.get_lobby_kind_for_player(
+        candidate_kinds: list[LobbyKind] = []
+        if lobby_kind is not None:
+            candidate_kinds = [lobby_kind]
+        elif invoking_user_id is not None:
+            candidate_kinds = self.lobby_manager.get_lobby_kinds_for_player(
                 invoking_user_id,
                 guild_id,
             )
 
         # Priority 1: The invoker's pending match (post-shuffle). A guild-wide
-        # fallback is only safe for legacy/internal callers without user context.
+        # fallback is only safe for legacy/internal callers without user context;
+        # for everyone else it waits until Priority 4, so that a sibling's match
+        # can never hide the invoker's own lobby.
         if self.match_service:
             try:
                 state_service = getattr(self.match_service, "state_service", None)
@@ -241,10 +252,9 @@ class ScoutCommands(commands.Cog):
                 draft_state = draft_state_manager.get_state(guild_id)
                 if draft_state:
                     draft_matches_invoker = (
-                        invoking_user_id is None
-                        or invoker_lobby_kind is None
+                        not candidate_kinds
                         or LobbyKind.normalize(draft_state.lobby_kind)
-                        is LobbyKind.normalize(invoker_lobby_kind)
+                        in candidate_kinds
                     )
                 else:
                     draft_matches_invoker = False
@@ -264,14 +274,34 @@ class ScoutCommands(commands.Cog):
                 logger.debug("Failed to check draft state", exc_info=True)
 
         # Priority 3: Active lobby
-        lobby_kind = invoker_lobby_kind or LobbyKind.OPEN
+        if len(candidate_kinds) > 1:
+            raise AmbiguousLobbyError()
+        resolved_kind = candidate_kinds[0] if candidate_kinds else LobbyKind.OPEN
         lobby = self.lobby_manager.get_lobby(
             guild_id=guild_id,
-            lobby_kind=lobby_kind,
+            lobby_kind=resolved_kind,
         )
         if lobby and lobby.players:
             player_ids = list(lobby.players)
-            return TeamContext([], [], player_ids, lobby_kind.label, False, "")
+            return TeamContext([], [], player_ids, resolved_kind.label, False, "")
+
+        # Priority 4: the guild's live match, for someone with no stake of their
+        # own — a caster, an admin, or a player the shuffler benched. Reached
+        # only once the invoker has no match and no seated lobby, so it cannot
+        # shadow either. get_last_shuffle returns None while more than one match
+        # is pending, so it can never surface the wrong one.
+        if self.match_service is not None:
+            try:
+                last_shuffle = self.match_service.get_last_shuffle(guild_id)
+                if last_shuffle:
+                    radiant = list(last_shuffle.radiant_team_ids or [])
+                    dire = list(last_shuffle.dire_team_ids or [])
+                    if radiant or dire:
+                        return TeamContext(
+                            radiant, dire, radiant + dire, "Active Match", True, ""
+                        )
+            except Exception:
+                logger.debug("Failed to check the guild's pending match", exc_info=True)
 
         return TeamContext([], [], [], None, False, "")
 
@@ -280,6 +310,7 @@ class ScoutCommands(commands.Cog):
         guild_id: int | None,
         team_filter: str | None = None,
         invoking_user_id: int | None = None,
+        lobby_kind: LobbyKind | None = None,
     ) -> tuple[list[int], str | None]:
         """
         Resolve players from active match/lobby context.
@@ -291,11 +322,12 @@ class ScoutCommands(commands.Cog):
             guild_id: Guild ID for context lookup
             team_filter: Optional "radiant" or "dire" to filter to specific team
             invoking_user_id: User whose lobby membership selects the lobby kind
+            lobby_kind: Explicit lobby to read, overriding that membership
 
         Returns:
             (player_ids, source_label)
         """
-        ctx = self._resolve_team_context(guild_id, invoking_user_id)
+        ctx = self._resolve_team_context(guild_id, invoking_user_id, lobby_kind)
         if not ctx.flat:
             return [], None
         if ctx.split and team_filter == "radiant":
@@ -395,12 +427,17 @@ class ScoutCommands(commands.Cog):
     @app_commands.describe(
         players="@mention players to scout (optional)",
         team="Team to scout from active match: radiant or dire",
+        lobby="Lobby to scout (defaults to the lobby you're in)",
     )
     @app_commands.choices(
         team=[
             app_commands.Choice(name="Radiant", value="radiant"),
             app_commands.Choice(name="Dire", value="dire"),
-        ]
+        ],
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ],
     )
     @require_guild
     async def report(
@@ -408,6 +445,7 @@ class ScoutCommands(commands.Cog):
         interaction: discord.Interaction,
         players: str | None = None,
         team: app_commands.Choice[str] | None = None,
+        lobby: app_commands.Choice[str] | None = None,
     ):
         """Generate a visual hero scouting report."""
         if not await safe_defer(interaction):
@@ -429,12 +467,17 @@ class ScoutCommands(commands.Cog):
 
         if not player_ids:
             # Use context resolution with optional team filter
-            player_ids, source_label = await asyncio.to_thread(
-                self._resolve_player_context,
-                guild_id,
-                team_value,
-                interaction.user.id,
-            )
+            try:
+                player_ids, source_label = await asyncio.to_thread(
+                    self._resolve_player_context,
+                    guild_id,
+                    team_value,
+                    interaction.user.id,
+                    choice_to_lobby_kind(lobby),
+                )
+            except AmbiguousLobbyError as exc:
+                await safe_followup(interaction, content=exc.message)
+                return
 
         if not player_ids:
             await safe_followup(
@@ -501,12 +544,17 @@ class ScoutCommands(commands.Cog):
     @app_commands.describe(
         players="@mention players to look up (optional)",
         team="Team to list from active match: radiant or dire",
+        lobby="Lobby to list (defaults to the lobby you're in)",
     )
     @app_commands.choices(
         team=[
             app_commands.Choice(name="Radiant", value="radiant"),
             app_commands.Choice(name="Dire", value="dire"),
-        ]
+        ],
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ],
     )
     @require_guild
     async def links(
@@ -514,6 +562,7 @@ class ScoutCommands(commands.Cog):
         interaction: discord.Interaction,
         players: str | None = None,
         team: app_commands.Choice[str] | None = None,
+        lobby: app_commands.Choice[str] | None = None,
     ):
         """List Dotabuff profile links for players in the current game."""
         if not await safe_defer(interaction):
@@ -536,7 +585,16 @@ class ScoutCommands(commands.Cog):
                 source_label = f"{len(flat_ids)} Player{'s' if len(flat_ids) > 1 else ''}"
 
         if not flat_ids:
-            ctx = await asyncio.to_thread(self._resolve_team_context, guild_id)
+            try:
+                ctx = await asyncio.to_thread(
+                    self._resolve_team_context,
+                    guild_id,
+                    interaction.user.id,
+                    choice_to_lobby_kind(lobby),
+                )
+            except AmbiguousLobbyError as exc:
+                await safe_followup(interaction, content=exc.message)
+                return
             if ctx.split and team_value == "radiant":
                 flat_ids, source_label = list(ctx.radiant), f"{ctx.filtered_prefix}Radiant"
             elif ctx.split and team_value == "dire":

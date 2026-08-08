@@ -1985,7 +1985,6 @@ async def on_raw_reaction_add(payload):
                         f"{LobbyKind.LOWSKILL.label} is limited to "
                         f"{LobbyKind.LOWSKILL.eligibility_text.lower()}."
                     ),
-                    "in_other_lobby": "Leave your current lobby before joining another.",
                     "in_flight": (
                         "You can't switch lobbies while your current shuffle or draft "
                         "is in progress."

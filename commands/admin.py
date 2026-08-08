@@ -25,6 +25,7 @@ from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.lobby_selection import format_lobby_labels
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.suspension_format import (
     format_suspension_scope,
@@ -497,25 +498,31 @@ class AdminCommands(commands.Cog):
             logger.debug("Failed to DM suspended player %s: %s", player.id, exc)
 
         evicted = False
-        current_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
+        # The player may be queued in both lobbies, so check the suspension
+        # against each seat: a kind-scoped suspension clears only its own
+        # lobby, an all-lobbies one clears them both.
+        current_kinds = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kinds_for_player,
             player.id,
             guild_id,
         )
-        applies_here = (
-            current_kind is not None
-            and await asyncio.to_thread(
+        applicable_kinds = [
+            kind
+            for kind in current_kinds
+            if await asyncio.to_thread(
                 self.moderation_service.get_active_suspension,
                 player.id,
                 guild_id,
-                current_kind,
+                kind,
             )
             is not None
-        )
-        if applies_here:
+        ]
+        applies_here = bool(applicable_kinds)
+        evicted_kinds: list[LobbyKind] = []
+        for current_kind in applicable_kinds:
             lobby_cog = self.bot.get_cog("LobbyCommands")
             if lobby_cog is not None and hasattr(lobby_cog, "eject_lobby_player"):
-                evicted = await lobby_cog.eject_lobby_player(
+                kind_evicted = await lobby_cog.eject_lobby_player(
                     player,
                     guild_id=guild_id,
                     lobby_kind=current_kind,
@@ -526,17 +533,25 @@ class AdminCommands(commands.Cog):
                     dm_message=None,
                 )
             else:
-                evicted = await asyncio.to_thread(
+                kind_evicted = await asyncio.to_thread(
                     self.lobby_service.leave_lobby,
                     player.id,
                     guild_id,
                     current_kind,
                 )
+            if kind_evicted:
+                evicted_kinds.append(current_kind)
+        evicted = bool(evicted_kinds)
 
         action = "Replaced the active suspension for" if existing else "Suspended"
-        outcome = " Removed from their lobby." if evicted else ""
+        outcome = (
+            f" Removed from {format_lobby_labels(evicted_kinds)}." if evicted else ""
+        )
         if applies_here and not evicted:
             outcome = " Their already-starting match was left intact."
+        elif len(evicted_kinds) < len(applicable_kinds):
+            # A seat their own starting match is holding survives the suspension.
+            outcome += " Their already-starting match was left intact."
         await safe_followup(
             interaction,
             content=(

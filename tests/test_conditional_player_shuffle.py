@@ -1,5 +1,6 @@
 """Regression coverage for the deprecated Frogling conditional queue."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -212,7 +213,8 @@ async def test_execute_shuffle_refreshes_pool_exactly_once_after_finalize(monkey
     player_ids = list(range(100, 110))
     lobby = SimpleNamespace(get_player_count=lambda: 10)
     team_players = [
-        SimpleNamespace(get_value=lambda *args, **kwargs: 100.0) for _ in range(5)
+        SimpleNamespace(discord_id=player_id, get_value=lambda *args, **kwargs: 100.0)
+        for player_id in player_ids[:5]
     ]
     team = SimpleNamespace(players=team_players, get_off_role_count=lambda: 0)
     match_service = MagicMock()
@@ -229,6 +231,11 @@ async def test_execute_shuffle_refreshes_pool_exactly_once_after_finalize(monkey
     }
     bot = MagicMock()
     bot.betting_service = None
+    # A real cog, so the eviction succeeds instead of failing into its own
+    # best-effort handler — this test is about ordering, not that guard.
+    bot.get_cog.return_value = SimpleNamespace(
+        evict_matched_players_from_other_lobbies=AsyncMock(return_value={})
+    )
     interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
     cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
     order = []
@@ -259,6 +266,161 @@ async def test_execute_shuffle_refreshes_pool_exactly_once_after_finalize(monkey
     finalize.assert_awaited_once()
     refresh_pool_lobbies.assert_awaited_once_with(TEST_GUILD_ID)
     assert order == ["finalize", "refresh"]
+
+
+@pytest.mark.asyncio
+async def test_execute_shuffle_evicts_only_the_matched_players_before_releasing(
+    monkeypatch,
+):
+    """The other lobby loses the ten who got a game — while they are still reserved.
+
+    Evicting before the reservation is released is what makes it race-free: the
+    other lobby cannot shuffle over a reserved player, and once they are out of
+    its roster it never can. The five the shuffler benched keep their seat there.
+    """
+    player_ids = list(range(100, 115))
+    radiant_ids = player_ids[:5]
+    dire_ids = player_ids[5:10]
+    benched_ids = player_ids[10:]
+    players = [
+        Player(name=f"Player {player_id}", discord_id=player_id)
+        for player_id in player_ids
+    ]
+    lobby = SimpleNamespace(get_player_count=lambda: 15)
+
+    def _team(team_ids):
+        return SimpleNamespace(
+            players=[
+                SimpleNamespace(
+                    discord_id=player_id, get_value=lambda *args, **kwargs: 100.0
+                )
+                for player_id in team_ids
+            ],
+            get_off_role_count=lambda: 0,
+        )
+
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.return_value = {
+        "radiant_team": _team(radiant_ids),
+        "dire_team": _team(dire_ids),
+        "radiant_roles": ["1", "2", "3", "4", "5"],
+        "dire_roles": ["1", "2", "3", "4", "5"],
+        "value_diff": 0.0,
+        "first_pick_team": "Radiant",
+        "excluded_ids": benched_ids,
+        "pending_match_id": 7,
+    }
+    order = []
+    evict = AsyncMock(side_effect=lambda *args, **kwargs: order.append("evict"))
+    bot = MagicMock()
+    bot.betting_service = None
+    bot.get_cog.return_value = SimpleNamespace(
+        evict_matched_players_from_other_lobbies=evict
+    )
+    lobby_service = MagicMock()
+    lobby_service.release_lobby_players.side_effect = lambda *args: order.append(
+        "release"
+    )
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(bot, lobby_service, match_service, MagicMock())
+    monkeypatch.setattr(
+        cog,
+        "_validate_shuffle_preconditions",
+        AsyncMock(return_value=lobby),
+    )
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, players, [], benched_ids, {})),
+    )
+    monkeypatch.setattr(cog, "_format_team_lines", lambda *args, **kwargs: ["line"] * 5)
+    monkeypatch.setattr("commands.match.summarize_region", lambda players: "USE")
+    monkeypatch.setattr(cog, "_finalize_shuffle", AsyncMock(), raising=False)
+    monkeypatch.setattr(cog, "_refresh_bonus_pool_lobbies", AsyncMock(), raising=False)
+
+    await cog._execute_shuffle(
+        interaction,
+        None,
+        TEST_GUILD_ID,
+        None,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+    bot.get_cog.assert_called_with("LobbyCommands")
+    evict.assert_awaited_once_with(
+        set(radiant_ids + dire_ids),
+        guild_id=TEST_GUILD_ID,
+        popped_kind=LobbyKind.LOWSKILL,
+    )
+    lobby_service.release_lobby_players.assert_called_once_with(
+        player_ids,
+        TEST_GUILD_ID,
+        LobbyKind.LOWSKILL,
+    )
+    assert order == ["evict", "release"]
+
+
+@pytest.mark.asyncio
+async def test_eviction_failure_does_not_abort_the_started_shuffle(monkeypatch, caplog):
+    """Lobby bookkeeping must never unwind a match that already exists.
+
+    The mirror of the draft's guard. Without an explicit test the only thing
+    exercising this handler was an accident in an unrelated test, which the
+    next person to tidy that test would have silently erased.
+    """
+    player_ids = list(range(100, 110))
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    team_players = [
+        SimpleNamespace(discord_id=player_id, get_value=lambda *args, **kwargs: 100.0)
+        for player_id in player_ids[:5]
+    ]
+    team = SimpleNamespace(players=team_players, get_off_role_count=lambda: 0)
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.return_value = {
+        "radiant_team": team,
+        "dire_team": team,
+        "radiant_roles": ["1", "2", "3", "4", "5"],
+        "dire_roles": ["1", "2", "3", "4", "5"],
+        "value_diff": 0.0,
+        "first_pick_team": "Radiant",
+        "excluded_ids": [],
+        "pending_match_id": 7,
+    }
+    bot = MagicMock()
+    bot.betting_service = None
+    bot.get_cog.return_value = SimpleNamespace(
+        evict_matched_players_from_other_lobbies=AsyncMock(
+            side_effect=RuntimeError("simulated lobby eviction failure")
+        )
+    )
+    lobby_service = MagicMock()
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(bot, lobby_service, match_service, MagicMock())
+    finalize = AsyncMock()
+    monkeypatch.setattr(
+        cog,
+        "_validate_shuffle_preconditions",
+        AsyncMock(return_value=lobby),
+    )
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, [], [], [], {})),
+    )
+    monkeypatch.setattr(cog, "_format_team_lines", lambda *args, **kwargs: ["line"] * 5)
+    monkeypatch.setattr("commands.match.summarize_region", lambda players: "USE")
+    monkeypatch.setattr(cog, "_finalize_shuffle", finalize, raising=False)
+    monkeypatch.setattr(cog, "_refresh_bonus_pool_lobbies", AsyncMock(), raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="cama_bot.commands.match"):
+        await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    # The match still finalizes and the reservation is still released.
+    finalize.assert_awaited_once()
+    lobby_service.release_lobby_players.assert_called_once()
+    assert "simulated lobby eviction failure" in caplog.text
 
 
 @pytest.mark.asyncio

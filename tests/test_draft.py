@@ -4,11 +4,13 @@ Tests for Immortal Draft functionality.
 
 import asyncio
 import inspect
+import logging
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from discord import app_commands
 
 from commands.draft import DraftCommands
 from commands.match import MatchCommands
@@ -19,6 +21,7 @@ from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
 from tests.conftest import TEST_GUILD_ID
+from utils.lobby_selection import AMBIGUOUS_LOBBY_MESSAGE
 
 
 def test_captain_opt_in_command_is_removed():
@@ -1055,14 +1058,34 @@ def _register_draft_players(player_repo, guild_id, count, *, start_id=50001):
     return ids
 
 
+def _make_lobby_cog_stub():
+    """A stand-in LobbyCommands cog whose cross-lobby eviction is observable."""
+    return SimpleNamespace(
+        evict_matched_players_from_other_lobbies=AsyncMock(return_value={}),
+    )
+
+
+def _make_draft_bot(*, lobby_cog=None, **attrs):
+    """A stub bot that answers ``get_cog("LobbyCommands")`` like the real one."""
+    if lobby_cog is None:
+        lobby_cog = _make_lobby_cog_stub()
+    return SimpleNamespace(
+        get_cog=lambda name: lobby_cog if name == "LobbyCommands" else None,
+        **attrs,
+    )
+
+
 def _make_draft_cog(player_repo, *, bot=None, lobby_manager=None):
     """Build a DraftCommands cog with real services and a stub bot."""
     if lobby_manager is None:
         lobby_manager = MagicMock()
         lobby_manager.get_origin_channel_id.return_value = None
         lobby_manager.get_lobby_channel_id.return_value = None
+    if bot is None:
+        bot = MagicMock()
+        bot.get_cog.return_value = _make_lobby_cog_stub()
     return DraftCommands(
-        bot=bot or MagicMock(),
+        bot=bot,
         player_repo=player_repo,
         lobby_manager=lobby_manager,
         draft_state_manager=DraftStateManager(),
@@ -1085,7 +1108,7 @@ async def test_startdraft_command_infers_lowskill_membership(
 ):
     guild_id = TEST_GUILD_ID
     lobby_manager = MagicMock()
-    lobby_manager.get_lobby_kind_for_player.return_value = LobbyKind.LOWSKILL
+    lobby_manager.get_lobby_kinds_for_player.return_value = [LobbyKind.LOWSKILL]
     lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
     cog = _make_draft_cog(player_repository, lobby_manager=lobby_manager)
     cog._execute_startdraft = AsyncMock()
@@ -1101,6 +1124,71 @@ async def test_startdraft_command_infers_lowskill_membership(
         None,
         lobby_kind=LobbyKind.LOWSKILL,
     )
+
+
+@pytest.mark.asyncio
+async def test_startdraft_command_requires_a_lobby_choice_when_queued_in_both(
+    player_repository,
+    monkeypatch,
+):
+    """Queued in both lobbies with no `lobby` option — refuse, don't guess."""
+    guild_id = TEST_GUILD_ID
+    lobby_manager = MagicMock()
+    lobby_manager.get_lobby_kinds_for_player.return_value = [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+    lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
+    cog = _make_draft_cog(player_repository, lobby_manager=lobby_manager)
+    cog._execute_startdraft = AsyncMock()
+    interaction = _FakeInteraction(guild_id)
+    monkeypatch.setattr("commands.draft.safe_defer", AsyncMock(return_value=True))
+
+    await cog.startdraft.callback(cog, interaction)
+
+    cog._execute_startdraft.assert_not_awaited()
+    assert [m.content for m in interaction.followup.messages] == [
+        AMBIGUOUS_LOBBY_MESSAGE
+    ]
+    # the shuffle lock is never taken for a draft that was never started
+    lobby_manager.get_shuffle_lock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startdraft_command_drafts_from_the_explicit_lobby_choice(
+    player_repository,
+    monkeypatch,
+):
+    """An explicit `lobby` option picks the lobby even when both are joined."""
+    guild_id = TEST_GUILD_ID
+    player_ids = _register_draft_players(player_repository, guild_id, 9)
+    interaction = _FakeInteraction(guild_id)
+    lowskill_lobby = _make_lobby([interaction.user.id, *player_ids])
+    lobby_manager = MagicMock()
+    lobby_manager.get_lobby_kinds_for_player.return_value = [
+        LobbyKind.OPEN,
+        LobbyKind.LOWSKILL,
+    ]
+    lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
+    lobby_manager.get_lobby.return_value = lowskill_lobby
+    cog = _make_draft_cog(player_repository, lobby_manager=lobby_manager)
+    execute_draft = AsyncMock(return_value=True)
+    monkeypatch.setattr(cog, "_execute_draft", execute_draft)
+    monkeypatch.setattr("commands.draft.safe_defer", AsyncMock(return_value=True))
+
+    await cog.startdraft.callback(
+        cog,
+        interaction,
+        lobby=app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+    )
+
+    lobby_manager.get_lobby.assert_called_once_with(
+        guild_id=guild_id,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+    execute_draft.assert_awaited_once()
+    assert execute_draft.await_args.args[2] is lowskill_lobby
+    assert execute_draft.await_args.kwargs["lobby_kind"] is LobbyKind.LOWSKILL
 
 
 class TestExecuteDraft:
@@ -1245,7 +1333,7 @@ class TestExecuteDraft:
         lobby_manager = MagicMock()
         lobby_manager.get_lobby_channel_id.return_value = lobby_channel.id
         lobby_manager.get_origin_channel_id.return_value = origin_channel.id
-        bot = SimpleNamespace(
+        bot = _make_draft_bot(
             get_channel=lambda channel_id: {
                 lobby_channel.id: lobby_channel,
                 origin_channel.id: origin_channel,
@@ -1292,7 +1380,7 @@ class TestExecuteDraft:
         lobby_manager = MagicMock()
         lobby_manager.get_lobby_channel_id.return_value = origin_channel.id
         lobby_manager.get_origin_channel_id.return_value = origin_channel.id
-        bot = SimpleNamespace(get_channel=lambda _channel_id: origin_channel)
+        bot = _make_draft_bot(get_channel=lambda _channel_id: origin_channel)
         cog = _make_draft_cog(
             player_repository,
             bot=bot,
@@ -1322,7 +1410,7 @@ class TestExecuteDraft:
         async def fail_fetch(_channel_id):
             raise RuntimeError("simulated origin channel fetch failure")
 
-        bot = SimpleNamespace(
+        bot = _make_draft_bot(
             get_channel=lambda _channel_id: None,
             fetch_channel=fail_fetch,
         )
@@ -1358,7 +1446,7 @@ class TestExecuteDraft:
                 return origin_channel
             raise RuntimeError("simulated lobby channel fetch failure")
 
-        bot = SimpleNamespace(
+        bot = _make_draft_bot(
             get_channel=lambda channel_id: (
                 origin_channel if channel_id == origin_channel.id else None
             ),
@@ -1512,6 +1600,83 @@ class TestExecuteDraft:
         assert released_guild_id == guild_id
         assert released_kind is LobbyKind.OPEN
 
+    async def test_starting_a_draft_does_not_evict_from_the_other_lobby(
+        self, player_repository
+    ):
+        """Locking a pool is not a match — the other lobby keeps its seats.
+
+        A draft can still be restarted, time out, or fail before it ever
+        produces a match, and none of those paths re-seat anyone. Eviction
+        therefore waits for completion. Nothing is lost by waiting: the pool
+        is reserved for the whole draft, so the other lobby cannot shuffle
+        those players regardless.
+        """
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 16)
+        lobby_cog = _make_lobby_cog_stub()
+        cog = _make_draft_cog(player_repository, bot=_make_draft_bot(lobby_cog=lobby_cog))
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(
+            interaction,
+            guild_id,
+            _make_lobby(player_ids),
+            lobby_kind=LobbyKind.LOWSKILL,
+        )
+
+        assert result is True
+        assert cog.draft_state_manager.get_state(guild_id) is not None
+        lobby_cog.evict_matched_players_from_other_lobbies.assert_not_awaited()
+
+    async def test_abandoning_a_draft_leaves_the_other_lobby_untouched(
+        self, player_repository
+    ):
+        """Every unwind path releases the pool and strands nobody elsewhere."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_cog = _make_lobby_cog_stub()
+        cog = _make_draft_cog(player_repository, bot=_make_draft_bot(lobby_cog=lobby_cog))
+        interaction = _FakeInteraction(guild_id)
+
+        await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+
+        # The single choke point every abandon path funnels through:
+        # /draft restart, the pre-draft idle timeout, and post-creation errors.
+        await cog._release_draft_players(state)
+
+        cog.lobby_manager.release_lobby_players.assert_called_once()
+        lobby_cog.evict_matched_players_from_other_lobbies.assert_not_awaited()
+
+    async def test_failed_draft_creation_skips_eviction_and_releases_the_pool(
+        self, player_repository
+    ):
+        """Nothing was committed, so the other lobby must keep everyone."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_cog = _make_lobby_cog_stub()
+        cog = _make_draft_cog(player_repository, bot=_make_draft_bot(lobby_cog=lobby_cog))
+        cog.draft_state_manager.create_draft = MagicMock(
+            side_effect=ValueError("A draft is already in progress.")
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        assert result is False
+        lobby_cog.evict_matched_players_from_other_lobbies.assert_not_awaited()
+        cog.lobby_manager.release_lobby_players.assert_called_once()
+        released_ids, released_guild_id, released_kind = (
+            cog.lobby_manager.release_lobby_players.call_args.args
+        )
+        assert set(released_ids) == set(player_ids)
+        assert released_guild_id == guild_id
+        assert released_kind is LobbyKind.OPEN
+        assert interaction.followup.messages[0].deleted is True
+        assert interaction.followup.messages[-1].content.startswith("❌")
+
+
 def _make_final_pick_scenario(
     player_repository, guild_id, player_ids, *, bot, match_service, lobby_manager=None
 ):
@@ -1601,6 +1766,74 @@ class TestHandlePlayerPick:
         assert new_state.current_pick_index == 0
         assert new_state.radiant_player_ids == [player_ids[0]]
         assert cog.draft_state_manager.get_state(guild_id) is new_state
+
+    async def test_completion_evicts_the_matched_players_from_the_other_lobby(
+        self, player_repository
+    ):
+        """The draft only reaches across queues once it has produced a match."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 12)
+        lobby_cog = _make_lobby_cog_stub()
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids[:10],
+            bot=_make_draft_bot(
+                lobby_cog=lobby_cog, betting_service=None, lobby_service=None
+            ),
+            match_service=_FakeDraftMatchService(),
+            lobby_manager=MagicMock(),
+        )
+        state.radiant_player_ids.append(player_ids[9])
+        # Benched: never drafted, so they keep their seat in the other lobby.
+        state.excluded_player_ids = [player_ids[10], player_ids[11]]
+
+        await cog._complete_draft(
+            _FakeComponentInteraction(guild_id, user_id=player_ids[0]), guild_id, state
+        )
+
+        lobby_cog.evict_matched_players_from_other_lobbies.assert_awaited_once()
+        evicted, kwargs = (
+            lobby_cog.evict_matched_players_from_other_lobbies.await_args.args[0],
+            lobby_cog.evict_matched_players_from_other_lobbies.await_args.kwargs,
+        )
+        assert set(evicted) == set(state.radiant_player_ids) | set(state.dire_player_ids)
+        assert set(evicted).isdisjoint(state.excluded_player_ids)
+        assert kwargs == {"guild_id": guild_id, "popped_kind": LobbyKind.OPEN}
+
+    async def test_eviction_failure_does_not_abort_a_completed_draft(
+        self, player_repository, caplog
+    ):
+        """Lobby bookkeeping must never unwind a match that already exists."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_cog = _make_lobby_cog_stub()
+        lobby_cog.evict_matched_players_from_other_lobbies.side_effect = RuntimeError(
+            "simulated lobby eviction failure"
+        )
+        match_service = _FakeDraftMatchService()
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=_make_draft_bot(
+                lobby_cog=lobby_cog, betting_service=None, lobby_service=None
+            ),
+            match_service=match_service,
+            lobby_manager=MagicMock(),
+        )
+        state.radiant_player_ids.append(player_ids[9])
+
+        with caplog.at_level(logging.WARNING, logger="cama_bot.commands.draft"):
+            await cog._complete_draft(
+                _FakeComponentInteraction(guild_id, user_id=player_ids[0]),
+                guild_id,
+                state,
+            )
+
+        assert match_service.state is not None
+        cog.lobby_manager.reset_lobby.assert_called_once()
+        assert "simulated lobby eviction failure" in caplog.text
 
     async def test_completion_embed_identifies_lobby_and_pending_match(
         self,

@@ -24,6 +24,7 @@ from utils.formatting import (
     format_duration_short,
 )
 from utils.interaction_safety import safe_defer, safe_followup, update_lobby_message_closed
+from utils.lobby_selection import format_lobby_labels, resolve_lobby_kind
 from utils.neon_helpers import get_neon_service
 from utils.pin_helpers import safe_unpin_message
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -1027,8 +1028,6 @@ class LobbyCommands(commands.Cog):
                     f"ℹ️ You can view {lobby.kind.label}, but only players "
                     f"below {LOWSKILL_CUTOFF_TEXT} Glicko can join.",
                 )
-            if reason == "in_other_lobby":
-                return False, "ℹ️ Leave your current lobby before joining this one."
             if reason == "in_flight":
                 return (
                     False,
@@ -1288,7 +1287,7 @@ class LobbyCommands(commands.Cog):
 
     @app_commands.command(
         name="kick",
-        description="Kick a player from the lobby (Admin or lobby creator only)",
+        description="Kick a player from every lobby they're in (Admin or lobby creator only)",
     )
     @app_commands.describe(
         player="The player to kick from the lobby",
@@ -1306,40 +1305,42 @@ class LobbyCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
+        target_kinds = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kinds_for_player,
             player.id,
             guild_id,
         )
-        if lobby_kind is None:
+        lobbies: dict[LobbyKind, object] = {}
+        for kind in target_kinds:
+            lobby = await asyncio.to_thread(
+                self.lobby_service.get_lobby,
+                guild_id=guild_id,
+                lobby_kind=kind,
+            )
+            if lobby is not None:
+                lobbies[kind] = lobby
+        if not lobbies:
             await safe_followup(
                 interaction,
                 content=f"⚠️ {player.mention} is not in a lobby.",
                 ephemeral=True,
             )
             return
-        lobby = await asyncio.to_thread(
-            self.lobby_service.get_lobby,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-        )
-        if not lobby:
-            await safe_followup(
-                interaction,
-                content=f"⚠️ No active {lobby_kind.label} lobby.",
-                ephemeral=True,
-            )
-            return
 
         is_admin = has_admin_permission(interaction)
-        # Lobby ownership is not durable moderation authority. A creator who
-        # has left (or was suspended and evicted) no longer gets to kick people
-        # remotely from the lobby they originally opened.
-        is_creator = (
-            lobby.created_by == interaction.user.id
-            and interaction.user.id in lobby.players
-        )
-        if not (is_admin or is_creator):
+        # Lobby ownership is not durable moderation authority, and it does not
+        # reach across queues: a creator can only kick out of the lobby they
+        # opened and are still sitting in. Admins reach every lobby.
+        if is_admin:
+            kickable = list(lobbies)
+        else:
+            kickable = [
+                kind
+                for kind, lobby in lobbies.items()
+                if lobby.created_by == interaction.user.id
+                and interaction.user.id in lobby.players
+            ]
+        if not kickable:
             await safe_followup(
                 interaction, content="❌ Permission denied. Admin or lobby creator only.",
                 ephemeral=True,
@@ -1353,12 +1354,6 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        if player.id not in lobby.players:
-            await safe_followup(
-                interaction, content=f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
-            )
-            return
-
         target_name = getattr(player, "display_name", player.mention)
         actor_name = getattr(
             interaction.user,
@@ -1366,41 +1361,58 @@ class LobbyCommands(commands.Cog):
             getattr(interaction.user, "mention", str(interaction.user.id)),
         )
         public_message = f"👢 **{target_name}** was kicked by {actor_name}."
-        dm_message = (
-            f"You were kicked from {lobby_kind.label} "
-            f"by {interaction.user.mention}."
-        )
-        if reason:
-            dm_message += f"\nReason: {reason}"
 
-        removed = await self.eject_lobby_player(
-            player,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-            public_message=public_message,
-            dm_message=dm_message,
-        )
-        if removed:
+        kicked_kinds: list[LobbyKind] = []
+        for kind in kickable:
+            if await self.eject_lobby_player(
+                player,
+                guild_id=guild_id,
+                lobby_kind=kind,
+                public_message=public_message,
+                # One DM covers the whole kick, sent below once the set of
+                # lobbies they actually lost is known.
+                dm_message=None,
+            ):
+                kicked_kinds.append(kind)
+
+        if kicked_kinds:
+            dm_message = (
+                f"You were kicked from {format_lobby_labels(kicked_kinds)} "
+                f"by {interaction.user.mention}."
+            )
+            if reason:
+                dm_message += f"\nReason: {reason}"
+            try:
+                await player.send(dm_message)
+            except Exception as exc:
+                logger.debug("Failed to DM kicked player: %s", exc)
+
             await safe_followup(
                 interaction,
-                content=f"✅ Kicked {player.mention} from {lobby_kind.label}.",
+                content=(
+                    f"✅ Kicked {player.mention} from "
+                    f"{format_lobby_labels(kicked_kinds)}."
+                ),
                 ephemeral=True,
             )
 
             moderation_service = getattr(self.bot, "moderation_service", None)
             if moderation_service is not None:
-                try:
-                    await asyncio.to_thread(
-                        moderation_service.record_kick,
-                        player.id,
-                        guild_id,
-                        actor_id=interaction.user.id,
-                        lobby_kind=lobby_kind.value,
-                        reason=reason,
-                        source="admin" if is_admin else "creator",
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to audit lobby kick: %s", exc)
+                # The audit trail is per lobby kind — record_kick rejects an
+                # all-lobbies scope — so a two-lobby kick logs two entries.
+                for kind in kicked_kinds:
+                    try:
+                        await asyncio.to_thread(
+                            moderation_service.record_kick,
+                            player.id,
+                            guild_id,
+                            actor_id=interaction.user.id,
+                            lobby_kind=kind.value,
+                            reason=reason,
+                            source="admin" if is_admin else "creator",
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to audit lobby kick: %s", exc)
         else:
             await safe_followup(interaction, content=f"❌ Failed to kick {player.mention}.", ephemeral=True)
 
@@ -1463,6 +1475,137 @@ class LobbyCommands(commands.Cog):
             except Exception as exc:
                 logger.debug("Failed to DM ejected player: %s", exc)
         return True
+
+    async def evict_matched_players_from_other_lobbies(
+        self,
+        player_ids: list[int] | set[int],
+        *,
+        guild_id: int | None,
+        popped_kind: LobbyKind | str,
+    ) -> dict[LobbyKind, set[int]]:
+        """Pull a freshly matched roster out of every lobby it did not play in.
+
+        Queueing in both lobbies at once is allowed, so a shuffle or draft that
+        commits players to a match has to release the seats they are still
+        holding elsewhere. Returns the ids actually removed, per lobby kind.
+
+        Call this while the popped lobby still holds its reservation on these
+        players: that is what makes the eviction race-free. Until the other
+        lobby loses them from its roster, ``_can_reserve_locked`` refuses to
+        start a second shuffle over the same people, so nobody can be popped
+        into two matches at once.
+
+        Membership is mutated first and the Discord upkeep is best-effort — a
+        failed embed edit must never unwind a match that has already started.
+        """
+        kind = LobbyKind.normalize(popped_kind)
+        ids = set(player_ids)
+        evicted: dict[LobbyKind, set[int]] = {}
+        if not ids:
+            return evicted
+
+        for other in LobbyKind:
+            if other is kind:
+                continue
+            removed = await asyncio.to_thread(
+                self.lobby_service.remove_players_from_lobby,
+                ids,
+                guild_id,
+                other,
+            )
+            if not removed:
+                continue
+            evicted[other] = removed
+            try:
+                await self._publish_cross_lobby_eviction(
+                    removed,
+                    guild_id=guild_id,
+                    other_kind=other,
+                    popped_kind=kind,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to publish %s eviction after the %s match started: %s",
+                    other.value,
+                    kind.value,
+                    exc,
+                )
+        return evicted
+
+    async def _rearm_readycheck_notice(
+        self,
+        guild_id: int | None,
+        lobby_kind: LobbyKind,
+    ) -> None:
+        """Let the completion notice fire again if the drain broke the quorum.
+
+        The notice is memoised once per ready-check generation. Losing players
+        to the other lobby's match can drop a lobby back under the threshold,
+        and it should be able to announce again when it refills — but only
+        then. Clearing the memo unconditionally would let the very next resync
+        re-send the notice for a lobby that never stopped being ready.
+        """
+        confirmed = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_reacted,
+            guild_id=guild_id,
+            lobby_kind=lobby_kind,
+        )
+        if len(confirmed) >= self.lobby_service.ready_threshold:
+            return
+        key = (guild_id, lobby_kind)
+        # Scoped to the pop alone: notify_readycheck_complete writes this dict
+        # under the same lock, and it is not reentrant, so holding it across
+        # the display resync would deadlock.
+        async with self._readycheck_shuffle_notification_locks.setdefault(
+            key,
+            asyncio.Lock(),
+        ):
+            self._readycheck_shuffle_notified.pop(key, None)
+
+    async def _publish_cross_lobby_eviction(
+        self,
+        removed_ids: set[int],
+        *,
+        guild_id: int | None,
+        other_kind: LobbyKind,
+        popped_kind: LobbyKind,
+    ) -> None:
+        """Repaint the drained lobby and tell its thread who left."""
+        lobby = await asyncio.to_thread(
+            self.lobby_service.get_lobby,
+            guild_id=guild_id,
+            lobby_kind=other_kind,
+        )
+        if lobby is not None:
+            # Before the memo below, so this resync cannot itself re-announce.
+            await self._sync_lobby_displays(lobby, guild_id)
+        await self._rearm_readycheck_notice(guild_id, other_kind)
+
+        for player_id in sorted(removed_ids):
+            await self._remove_user_lobby_reactions(
+                discord.Object(id=player_id),
+                guild_id=guild_id,
+                lobby_kind=other_kind,
+            )
+
+        thread_id = await asyncio.to_thread(
+            self.lobby_service.get_lobby_thread_id,
+            guild_id=guild_id,
+            lobby_kind=other_kind,
+        )
+        if not thread_id:
+            return
+        mentions = ", ".join(f"<@{player_id}>" for player_id in sorted(removed_ids))
+        try:
+            thread = self.bot.get_channel(thread_id)
+            if not thread:
+                thread = await self.bot.fetch_channel(thread_id)
+            await thread.send(
+                f"🔀 {mentions} left for the {popped_kind.label} match.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            logger.warning("Failed to post cross-lobby eviction activity: %s", exc)
 
     @app_commands.command(name="join", description="Join a matchmaking lobby")
     @app_commands.describe(lobby="Lobby to join")
@@ -1548,12 +1691,6 @@ class LobbyCommands(commands.Cog):
                         f"❌ {LobbyKind.LOWSKILL.label} is limited to players "
                         f"below {LOWSKILL_CUTOFF_TEXT} Glicko."
                     ),
-                    ephemeral=True,
-                )
-            elif reason == "in_other_lobby":
-                await safe_followup(
-                    interaction,
-                    content="❌ Leave your current lobby before joining another one.",
                     ephemeral=True,
                 )
             elif reason == "in_flight":
@@ -1642,111 +1779,117 @@ class LobbyCommands(commands.Cog):
         except Exception as e:
             logger.debug(f"Neon lobby join hook error: {e}")
 
-    @app_commands.command(name="leave", description="Leave the matchmaking lobby")
+    @app_commands.command(
+        name="leave",
+        description="Leave every matchmaking lobby you're queued in",
+    )
     @require_guild
     async def leave(self, interaction: discord.Interaction):
-        """Leave the matchmaking lobby from any channel."""
+        """Leave every lobby the caller is queued in, from any channel.
+
+        Deliberately takes no lobby argument: leaving is never ambiguous
+        because leaving everything is always what the caller meant.
+        """
         logger.info(f"Leave command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=True):
             return
 
         guild_id = interaction.guild.id
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
+        member_kinds = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kinds_for_player,
             interaction.user.id,
             guild_id,
         )
-        if lobby_kind is not None and not isinstance(
-            lobby_kind,
-            (LobbyKind, str),
-        ):
-            lobby_kind = LobbyKind.OPEN
-        if lobby_kind is None:
+        if not member_kinds:
             await safe_followup(
                 interaction,
                 content="⚠️ You're not in a lobby.",
                 ephemeral=True,
             )
             return
-        lobby = await asyncio.to_thread(
-            self.lobby_service.get_lobby,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-        )
-        if not lobby:
+
+        left_kinds: list[LobbyKind] = []
+        pinned_kinds: list[LobbyKind] = []
+        for kind in member_kinds:
+            if await asyncio.to_thread(
+                self.lobby_service.leave_lobby,
+                interaction.user.id,
+                guild_id,
+                kind,
+            ):
+                left_kinds.append(kind)
+            elif (
+                await asyncio.to_thread(
+                    self.lobby_service.get_in_flight_lobby_kind_for_player,
+                    interaction.user.id,
+                    guild_id,
+                )
+                is kind
+            ):
+                pinned_kinds.append(kind)
+            # Otherwise the lobby closed under us and there is nothing to leave.
+
+        if not left_kinds:
             await safe_followup(
                 interaction,
-                content=f"⚠️ No active {lobby_kind.label} lobby.",
+                content=(
+                    f"❌ You can’t leave {format_lobby_labels(pinned_kinds)} "
+                    "while its shuffle or draft is in progress."
+                    if pinned_kinds
+                    else "⚠️ You’re no longer in the lobby."
+                ),
                 ephemeral=True,
             )
             return
 
-        if interaction.user.id not in lobby.players:
-            await safe_followup(interaction, content="⚠️ You're not in the lobby.", ephemeral=True)
-            return
-
-        left = await asyncio.to_thread(
-            self.lobby_service.leave_lobby,
-            interaction.user.id,
-            guild_id,
-            lobby_kind,
-        )
-        if not left:
-            in_flight_kind = await asyncio.to_thread(
-                self.lobby_service.get_in_flight_lobby_kind_for_player,
-                interaction.user.id,
-                guild_id,
+        maintenance: list[tuple[str, Awaitable[object]]] = []
+        for kind in left_kinds:
+            # Re-fetch each lobby after removal so its embed reflects the
+            # current roster.
+            lobby = await asyncio.to_thread(
+                self.lobby_service.get_lobby,
+                guild_id=guild_id,
+                lobby_kind=kind,
             )
-            if in_flight_kind is not None:
-                await safe_followup(
-                    interaction,
-                    content=(
-                        f"❌ You can’t leave {lobby_kind.label} while its "
-                        "shuffle or draft is in progress."
+            if lobby is not None:
+                maintenance.append(
+                    (
+                        f"display sync after leave ({kind.value})",
+                        self._sync_lobby_displays(lobby, guild_id),
+                    )
+                )
+            maintenance.extend(
+                [
+                    (
+                        f"reaction cleanup after leave ({kind.value})",
+                        self._remove_user_lobby_reactions(
+                            interaction.user,
+                            guild_id=guild_id,
+                            lobby_kind=kind,
+                        ),
                     ),
-                    ephemeral=True,
-                )
-            else:
-                await safe_followup(
-                    interaction,
-                    content="⚠️ You’re no longer in the lobby.",
-                    ephemeral=True,
-                )
-            return
+                    (
+                        f"thread publication after leave ({kind.value})",
+                        self._publish_leave_activity(
+                            interaction.user,
+                            guild_id,
+                            kind,
+                        ),
+                    ),
+                ]
+            )
 
-        # Re-fetch lobby after removal so the embed reflects the current state.
-        lobby = await asyncio.to_thread(
-            self.lobby_service.get_lobby,
-            guild_id=guild_id,
-            lobby_kind=lobby_kind,
-        )
-
+        content = f"✅ Left {format_lobby_labels(left_kinds)}."
+        if pinned_kinds:
+            content += (
+                f"\n⚠️ Still in {format_lobby_labels(pinned_kinds)} — its "
+                "shuffle or draft is in progress."
+            )
         await self._run_lobby_publication_wave(
-            [
-                (
-                    "display sync after leave",
-                    self._sync_lobby_displays(lobby, guild_id),
-                ),
-                (
-                    "reaction cleanup after leave",
-                    self._remove_user_lobby_reactions(
-                        interaction.user,
-                        guild_id=guild_id,
-                        lobby_kind=lobby_kind,
-                    ),
-                ),
-                (
-                    "thread publication after leave",
-                    self._publish_leave_activity(
-                        interaction.user,
-                        guild_id,
-                        lobby_kind,
-                    ),
-                ),
-            ],
+            maintenance,
             followup=safe_followup(
                 interaction,
-                content=f"✅ Left {lobby_kind.label}.",
+                content=content,
                 ephemeral=True,
             ),
         )
@@ -1779,28 +1922,27 @@ class LobbyCommands(commands.Cog):
             # below runs against the resolved lobby either way.
             lobby_kind = LobbyKind.normalize(lobby.value)
         else:
-            lobby_kind = await asyncio.to_thread(
-                self.lobby_service.get_lobby_kind_for_player,
+            member_kinds = await asyncio.to_thread(
+                self.lobby_service.get_lobby_kinds_for_player,
                 interaction.user.id,
                 guild_id,
             )
-            if lobby_kind is not None and not isinstance(
-                lobby_kind,
-                (LobbyKind, str),
-            ):
-                lobby_kind = LobbyKind.OPEN
-            if lobby_kind is None:
+            lobby_kind, selection_error = resolve_lobby_kind(
+                member_kinds,
+                None,
+                no_lobby_message=(
+                    "❌ Join a lobby, or pass the `lobby` option to "
+                    "pick which lobby to reset."
+                ),
+            )
+            if selection_error is not None:
                 if can_respond:
                     await safe_followup(
                         interaction,
-                        content=(
-                            "❌ Join a lobby, or pass the `lobby` option to "
-                            "pick which lobby to reset."
-                        ),
+                        content=selection_error,
                         ephemeral=True,
                     )
                 return
-            lobby_kind = LobbyKind.normalize(lobby_kind)
 
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
@@ -2086,23 +2228,39 @@ class LobbyCommands(commands.Cog):
         name="readycheck",
         description="Check lobby players' online status and ping those who are away",
     )
+    @app_commands.describe(lobby="Lobby to check (defaults to the lobby you're in)")
+    @app_commands.choices(
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ]
+    )
     @require_guild
-    async def readycheck(self, interaction: discord.Interaction):
+    async def readycheck(
+        self,
+        interaction: discord.Interaction,
+        lobby: app_commands.Choice[str] | None = None,
+    ):
         logger.info(f"Readycheck command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=False):
             return
 
         guild = interaction.guild
         guild_id = guild.id
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
+        member_kinds = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kinds_for_player,
             interaction.user.id,
             guild_id,
         )
-        if lobby_kind is None:
+        lobby_kind, selection_error = resolve_lobby_kind(
+            member_kinds,
+            lobby,
+            no_lobby_message="❌ Join a lobby before running a ready check.",
+        )
+        if selection_error is not None:
             await safe_followup(
                 interaction,
-                content="❌ Join a lobby before running a ready check.",
+                content=selection_error,
                 ephemeral=True,
             )
             return

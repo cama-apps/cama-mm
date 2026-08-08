@@ -6,6 +6,7 @@ from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from PIL import Image
 
 from commands.herogrid import HeroGridCommands
@@ -14,6 +15,7 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID
 from utils.drawing import draw_hero_grid
+from utils.lobby_selection import AMBIGUOUS_LOBBY_MESSAGE, AmbiguousLobbyError
 
 # ---------------------------------------------------------------------------
 # Repository tests
@@ -339,12 +341,14 @@ def _make_cog(
     last_match_ids=None,
     enriched_players=None,
     has_draft_state_manager=None,
+    member_kinds=None,
 ):
     """Build a HeroGridCommands cog with mocked dependencies."""
     bot = SimpleNamespace()
 
     # Lobby manager
     lobby_manager = MagicMock()
+    lobby_manager.get_lobby_kinds_for_player.return_value = list(member_kinds or [])
     if lobby_players is not None:
         lobby = SimpleNamespace(
             players=set(lobby_players),
@@ -501,8 +505,8 @@ class TestResolvePlayerIds:
         open_lobby = SimpleNamespace(players={1, 2}, kind=LobbyKind.OPEN)
         lowskill_lobby = SimpleNamespace(players={7, 8}, kind=LobbyKind.LOWSKILL)
         lobby_manager = SimpleNamespace(
-            get_lobby_kind_for_player=lambda discord_id, guild_id=None: (
-                LobbyKind.LOWSKILL if discord_id == 7 else None
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: (
+                [LobbyKind.LOWSKILL] if discord_id == 7 else []
             ),
             get_lobby=lambda guild_id=None, lobby_kind=None: {
                 LobbyKind.OPEN: open_lobby,
@@ -544,6 +548,82 @@ class TestResolvePlayerIds:
         assert set(requested_ids) == {7, 8}
         embed = followup.await_args.kwargs["embed"]
         assert embed.title == f"Hero Grid: {LobbyKind.LOWSKILL.label}"
+
+    def test_dual_membership_without_explicit_lobby_is_ambiguous(self):
+        """Queued in both lobbies with no `lobby` option -> refuse to guess."""
+        cog = _make_cog(
+            lobby_players=[1, 2],
+            member_kinds=[LobbyKind.OPEN, LobbyKind.LOWSKILL],
+        )
+
+        with pytest.raises(AmbiguousLobbyError) as excinfo:
+            cog._resolve_player_ids("auto", guild_id=99, invoking_user_id=7)
+
+        assert excinfo.value.message == AMBIGUOUS_LOBBY_MESSAGE
+        cog.lobby_manager.get_lobby.assert_not_called()
+
+    def test_explicit_lobby_kind_beats_dual_membership(self):
+        """An explicit kind answers the question, so membership is never read."""
+        cog = _make_cog(
+            lobby_players=[1, 2],
+            member_kinds=[LobbyKind.OPEN, LobbyKind.LOWSKILL],
+        )
+
+        ids, label = cog._resolve_player_ids(
+            "auto",
+            guild_id=99,
+            invoking_user_id=7,
+            lobby_kind=LobbyKind.LOWSKILL,
+        )
+
+        assert set(ids) == {1, 2}
+        assert label == LobbyKind.LOWSKILL.label
+        cog.lobby_manager.get_lobby_kinds_for_player.assert_not_called()
+        assert cog.lobby_manager.get_lobby.call_args.kwargs["lobby_kind"] is LobbyKind.LOWSKILL
+
+    def test_source_all_short_circuits_before_the_lobby_branch(self):
+        """source=all never consults the lobby, so it can't be ambiguous."""
+        cog = _make_cog(
+            lobby_players=[1, 2],
+            member_kinds=[LobbyKind.OPEN, LobbyKind.LOWSKILL],
+            enriched_players=[100, 200],
+        )
+
+        ids, label = cog._resolve_player_ids("all", guild_id=99, invoking_user_id=7)
+
+        assert ids == [100, 200]
+        assert label is None
+        cog.lobby_manager.get_lobby_kinds_for_player.assert_not_called()
+
+    async def test_command_reports_ambiguity_instead_of_raising(self, monkeypatch):
+        """The ambiguity reaches the caller as copy, not as a traceback."""
+        lobby_manager = SimpleNamespace(
+            get_lobby_kinds_for_player=lambda discord_id, guild_id=None: [
+                LobbyKind.OPEN,
+                LobbyKind.LOWSKILL,
+            ],
+            get_lobby=lambda guild_id=None, lobby_kind=None: None,
+        )
+        match_service = MagicMock()
+        cog = HeroGridCommands(
+            SimpleNamespace(), match_service, SimpleNamespace(), lobby_manager
+        )
+        followup = AsyncMock(return_value=None)
+        monkeypatch.setattr("commands.herogrid.safe_defer", AsyncMock(return_value=True))
+        monkeypatch.setattr("commands.herogrid.safe_followup", followup)
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=99),
+            user=SimpleNamespace(id=7),
+        )
+
+        await HeroGridCommands.herogrid.callback(
+            cog,
+            interaction,
+            source=SimpleNamespace(value="lobby"),
+        )
+
+        assert followup.await_args.kwargs["content"] == AMBIGUOUS_LOBBY_MESSAGE
+        match_service.get_multi_player_hero_stats.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

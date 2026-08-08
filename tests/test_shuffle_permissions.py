@@ -3,11 +3,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from discord import app_commands
 
 from commands.match import MatchCommands
 from domain.models.lobby import LobbyKind
 from domain.models.pending_match_state import PendingMatchState
 from tests.conftest import TEST_GUILD_ID
+from utils.lobby_selection import AMBIGUOUS_LOBBY_MESSAGE
 
 
 def _make_interaction(user_id: int):
@@ -157,20 +159,29 @@ async def test_active_draft_only_blocks_its_source_lobby(monkeypatch):
     )
 
 
-@pytest.mark.asyncio
-async def test_shuffle_command_infers_lowskill_membership(monkeypatch):
-    guild_id = TEST_GUILD_ID
-    interaction = SimpleNamespace(
-        user=SimpleNamespace(id=1),
-        guild=SimpleNamespace(id=guild_id),
+def _command_interaction(user_id: int):
+    """An interaction complete enough to drive the `/shuffle` callback itself."""
+    return SimpleNamespace(
+        user=SimpleNamespace(id=user_id),
+        guild=SimpleNamespace(id=TEST_GUILD_ID),
         response=SimpleNamespace(send_message=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
     )
+
+
+def _command_cog(member_kinds):
     lobby_service = MagicMock()
-    lobby_service.get_lobby_kind_for_player.return_value = LobbyKind.LOWSKILL
+    lobby_service.get_lobby_kinds_for_player.return_value = member_kinds
     lobby_service.lobby_manager.get_shuffle_lock.return_value = asyncio.Lock()
     cog = MatchCommands(MagicMock(), lobby_service, MagicMock(), MagicMock())
     cog._execute_shuffle = AsyncMock()
+    return cog
+
+
+@pytest.mark.asyncio
+async def test_shuffle_command_infers_lowskill_membership(monkeypatch):
+    interaction = _command_interaction(1)
+    cog = _command_cog([LobbyKind.LOWSKILL])
     monkeypatch.setattr("commands.match.safe_defer", AsyncMock(return_value=True))
 
     await cog.shuffle.callback(cog, interaction)
@@ -178,7 +189,47 @@ async def test_shuffle_command_infers_lowskill_membership(monkeypatch):
     cog._execute_shuffle.assert_awaited_once_with(
         interaction,
         interaction.guild,
-        guild_id,
+        TEST_GUILD_ID,
+        None,
+        None,
+        lobby_kind=LobbyKind.LOWSKILL,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shuffle_command_requires_a_lobby_when_queued_in_both(monkeypatch):
+    """Ambiguity is refused before the lock, so neither lobby is pinned by it."""
+    interaction = _command_interaction(2)
+    cog = _command_cog([LobbyKind.OPEN, LobbyKind.LOWSKILL])
+    monkeypatch.setattr("commands.match.safe_defer", AsyncMock(return_value=True))
+
+    await cog.shuffle.callback(cog, interaction)
+
+    interaction.followup.send.assert_awaited_once_with(
+        AMBIGUOUS_LOBBY_MESSAGE,
+        ephemeral=True,
+    )
+    cog.lobby_service.lobby_manager.get_shuffle_lock.assert_not_called()
+    cog._execute_shuffle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shuffle_command_honours_explicit_lobby_when_queued_in_both(monkeypatch):
+    interaction = _command_interaction(3)
+    cog = _command_cog([LobbyKind.OPEN, LobbyKind.LOWSKILL])
+    monkeypatch.setattr("commands.match.safe_defer", AsyncMock(return_value=True))
+
+    await cog.shuffle.callback(
+        cog,
+        interaction,
+        lobby=app_commands.Choice(name="Whine & Cheese", value="lowskill"),
+    )
+
+    interaction.followup.send.assert_not_called()
+    cog._execute_shuffle.assert_awaited_once_with(
+        interaction,
+        interaction.guild,
+        TEST_GUILD_ID,
         None,
         None,
         lobby_kind=LobbyKind.LOWSKILL,

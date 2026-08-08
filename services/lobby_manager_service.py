@@ -265,19 +265,25 @@ class LobbyManagerService:
         lobby = self.lobbies.get(self._lobby_key(guild_id, lobby_kind))
         return lobby if lobby and lobby.status == "open" else None
 
-    def get_lobby_kind_for_player(
+    def get_lobby_kinds_for_player(
         self,
         discord_id: int,
         guild_id: int | None = None,
-    ) -> LobbyKind | None:
-        """Return the one open lobby kind containing a player."""
+    ) -> list[LobbyKind]:
+        """Return every open lobby kind containing a player, in kind order.
+
+        Plural by design: a player may queue in both kinds at once, and a
+        scalar answer would silently hide the second seat.
+        """
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
-            for kind in LobbyKind:
-                lobby = self.lobbies.get((normalized, kind))
-                if lobby and lobby.status == "open" and discord_id in lobby.players:
-                    return kind
-        return None
+            return [
+                kind
+                for kind in LobbyKind
+                if (lobby := self.lobbies.get((normalized, kind))) is not None
+                and lobby.status == "open"
+                and discord_id in lobby.players
+            ]
 
     def get_in_flight_lobby_kind_for_player(
         self,
@@ -506,16 +512,18 @@ class LobbyManagerService:
                 drop_shell = False
                 with self._persist_lock:
                     with self._state_lock:
-                        # A player already reserved by an in-flight
-                        # shuffle/draft keeps their seat: a suspension racing
-                        # a reservation lets the starting match proceed with
-                        # membership intact (same policy as leave_lobby and
-                        # the admin suspend eviction).
+                        # A player reserved by *this* kind's in-flight
+                        # shuffle/draft keeps their seat: a suspension racing a
+                        # reservation lets the starting match proceed with
+                        # membership intact (same policy as leave_lobby and the
+                        # admin suspend eviction). A reservation held by the
+                        # other kind has no claim on this seat, so the join is
+                        # still rolled back.
                         if (
                             self._in_flight_player_kinds.get(
                                 (normalized, discord_id)
                             )
-                            is None
+                            is not target_kind
                         ):
                             rolled_back = True
                             current = self.lobbies.get((normalized, target_kind))
@@ -587,15 +595,17 @@ class LobbyManagerService:
         normalized: int,
         target_kind: LobbyKind,
     ) -> str | None:
-        """Return a blocking join result, if any. Caller holds ``_state_lock``."""
+        """Return a blocking join result, if any. Caller holds ``_state_lock``.
+
+        Queueing in both kinds at once is allowed; only a reservation held by
+        the *other* kind blocks, because that shuffle or draft is already
+        deciding whether this player is committed to a match.
+        """
         reserved_kind = self._in_flight_player_kinds.get(
             (normalized, discord_id)
         )
         if reserved_kind is not None and reserved_kind is not target_kind:
             return "in_flight"
-        current_kind = self.get_lobby_kind_for_player(discord_id, normalized)
-        if current_kind is not None and current_kind is not target_kind:
-            return "in_other_lobby"
         return None
 
     def join_lobby_conditional(
@@ -610,9 +620,12 @@ class LobbyManagerService:
         guild_id: int | None = None,
         lobby_kind: LobbyKind | str | None = None,
     ) -> bool:
-        key = self._lobby_key(guild_id, lobby_kind)
+        normalized, kind = self._lobby_key(guild_id, lobby_kind)
+        key = (normalized, kind)
         with self._state_lock:
-            if self._in_flight_player_kinds.get((key[0], discord_id)) is not None:
+            # Only *this* kind's reservation pins the seat. A shuffle running
+            # in the other lobby has no claim on this membership.
+            if self._in_flight_player_kinds.get((normalized, discord_id)) is kind:
                 return False
             lobby = self.lobbies.get(key)
             if not lobby:
@@ -621,6 +634,34 @@ class LobbyManagerService:
         if success:
             self._persist_lobby(lobby.guild_id, lobby.kind)
         return success
+
+    def remove_players_from_lobby(
+        self,
+        player_ids: list[int] | set[int],
+        guild_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
+    ) -> set[int]:
+        """Drop several players from one lobby, persisting once.
+
+        The batched counterpart to :meth:`leave_lobby`, for evicting a whole
+        match roster from the lobby it did not play in. Returns the ids that
+        were actually seated; players pinned by this kind's own in-flight
+        shuffle or draft are left alone, as they are by ``leave_lobby``.
+        """
+        normalized, kind = self._lobby_key(guild_id, lobby_kind)
+        removed: set[int] = set()
+        with self._state_lock:
+            lobby = self.lobbies.get((normalized, kind))
+            if lobby is None:
+                return removed
+            for player_id in player_ids:
+                if self._in_flight_player_kinds.get((normalized, player_id)) is kind:
+                    continue
+                if lobby.remove_player(player_id):
+                    removed.add(player_id)
+        if removed:
+            self._persist_lobby(normalized, kind)
+        return removed
 
     def leave_lobby_conditional(
         self,
@@ -631,7 +672,7 @@ class LobbyManagerService:
         """Remove player from conditional queue."""
         key = self._lobby_key(guild_id, lobby_kind)
         with self._state_lock:
-            if self._in_flight_player_kinds.get((key[0], discord_id)) is not None:
+            if self._in_flight_player_kinds.get((key[0], discord_id)) is key[1]:
                 return False
             lobby = self.lobbies.get(key)
             if not lobby:
