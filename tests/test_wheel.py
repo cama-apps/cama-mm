@@ -750,25 +750,40 @@ async def test_wheel_jackpot_result():
     assert log_kwargs["outcome_code"] == "NUMERIC_100"
 
 
-def test_wheel_wedges_has_correct_count():
-    """Verify WHEEL_WEDGES has exactly 24 wedges."""
+def test_wheel_wedges_distribution():
+    """Verify the wheel's composition matches spec: 24 wedges, the numeric
+    distribution, 2 always-negative BANKRUPTs, and the 6 special string wedges.
+
+    (Merged from test_wheel_wedges_has_correct_count,
+    test_wheel_bankrupt_always_negative, and
+    test_wheel_special_wedges_have_string_values.)
+    """
     assert len(WHEEL_WEDGES) == 24
 
-
-def test_wheel_wedges_distribution():
-    """Verify the distribution of wheel wedges matches spec."""
     # Bankrupt wedges have negative integer values
-    bankrupt_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0)
+    bankrupt_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
     lose_turn_count = sum(1 for w in WHEEL_WEDGES if w[1] == 0)
     positive_values = sorted(w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0)
     jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 100)
-    special_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
+    special_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
 
-    assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
+    assert len(bankrupt_wedges) == 2, f"Expected 2 Bankrupt wedges, got {len(bankrupt_wedges)}"
+    for w in bankrupt_wedges:
+        assert w[1] <= -1, f"Bankrupt value {w[1]} should be <= -1"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
     assert positive_values == [5, 10, 10, 15, 20, 25, 30, 40, 50, 50, 60, 70, 80, 100, 100]
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
-    assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
+
+    assert len(special_wedges) == 6, "Should have exactly 6 special wedges"
+    special_values = {w[1] for w in special_wedges}
+    assert special_values == {
+        "RED_SHELL",
+        "BLUE_SHELL",
+        "LIGHTNING_BOLT",
+        "BANANA_PEEL",
+        "GREEN_SHELL",
+        "BOMB_OMB",
+    }
 
 
 def test_wheel_hazard_ceilings_are_ten_percent_stronger_again():
@@ -824,28 +839,6 @@ def test_wheel_expected_value_matches_config():
         f"Wheel EV {expected_value:.2f} outside sane [-50, 5] range — "
         "wedge table may be misconfigured"
     )
-
-
-def test_wheel_bankrupt_always_negative():
-    """Verify BANKRUPT wedges are always negative (capped at -1 minimum)."""
-    bankrupt_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
-    assert len(bankrupt_wedges) == 2, "Should have exactly 2 bankrupt wedges"
-    for w in bankrupt_wedges:
-        assert w[1] <= -1, f"Bankrupt value {w[1]} should be <= -1"
-
-
-def test_wheel_special_wedges_have_string_values():
-    """Verify special wedges have string values for special handling."""
-    special_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
-    assert len(special_wedges) == 6, "Should have exactly 6 special wedges"
-
-    special_values = {w[1] for w in special_wedges}
-    assert "RED_SHELL" in special_values, "Should have RED_SHELL wedge"
-    assert "BLUE_SHELL" in special_values, "Should have BLUE_SHELL wedge"
-    assert "LIGHTNING_BOLT" in special_values, "Should have LIGHTNING_BOLT wedge"
-    assert "BANANA_PEEL" in special_values, "Should have BANANA_PEEL wedge"
-    assert "GREEN_SHELL" in special_values, "Should have GREEN_SHELL wedge"
-    assert "BOMB_OMB" in special_values, "Should have BOMB_OMB wedge"
 
 
 @pytest.mark.asyncio
@@ -1626,76 +1619,73 @@ async def test_wheel_commune_skips_players_below_auto_blind_threshold():
 # Bankrupt Wheel Tests (for players in bankruptcy penalty)
 # ============================================================================
 
-def test_bankrupt_wheel_has_correct_numbered_count():
-    """Bankrupt wheel keeps a meaningful pool of positive numeric wedges after the
-    Mario Kart trio took 3 slots."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+def test_bankrupt_wheel_composition():
+    """The bankrupt wheel's composition matches spec.
 
-    numbered = sum(
-        1 for w in BANKRUPT_WHEEL_WEDGES
-        if isinstance(w[1], int) and w[1] > 0
+    Merged from the per-property tests: 24 wedges total; a meaningful pool of
+    6 positive numeric wedges (reaching >= 75 JC for positive EV, with a floor
+    wedge <= 50); the shells/bolt specials retained; both dark-red EXTEND
+    slices; every unique bankrupt-wheel mechanic slice present (and REVEAL
+    absent); 2 recalculated always-negative BANKRUPT wedges that impose a real
+    penalty (at least one <= -5 — if all are clamped near -1, the bankrupt
+    wheel target EV is too high and the wheel becomes a free roll); and the
+    100-JC jackpot in the same gold as the regular wheel.
+    """
+    assert len(BANKRUPT_WHEEL_WEDGES) == 24, (
+        f"Expected 24 wedges, got {len(BANKRUPT_WHEEL_WEDGES)}"
     )
-    assert numbered == 6, f"Expected 6 numbered wedges, got {numbered}"
-
-
-def test_bankrupt_wheel_has_positive_numeric_wedges():
-    """Bankrupt wheel should still have a few sizeable positive numeric wedges."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert len(values) >= 5, f"Expected at least 5 positive numerics, got {len(values)}"
+    assert len(values) == 6, f"Expected 6 numbered wedges, got {len(values)}"
     assert max(values) >= 75, "Bankrupt wheel should reach at least 75 JC to deliver positive EV"
+    assert min(values) <= 50, (
+        f"Bankrupt wheel should have at least one wedge ≤50 JC, smallest is {min(values)}"
+    )
 
-
-def test_bankrupt_wheel_keeps_special_wedges():
-    """Non-numbered wedges (shells, bolt, lose, bankrupt) remain."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    special = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)]
-    assert "RED_SHELL" in special, "RED_SHELL should remain on bankrupt wheel"
-    assert "BLUE_SHELL" in special, "BLUE_SHELL should remain on bankrupt wheel"
-    assert "LIGHTNING_BOLT" in special, "LIGHTNING_BOLT should remain on bankrupt wheel"
-
-
-def test_bankrupt_wheel_has_extension_slices():
-    """Bankrupt wheel should have EXTEND_1 and EXTEND_2 slices."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    special = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)]
-    assert "EXTEND_1" in special, "EXTEND_1 should be on bankrupt wheel"
-    assert "EXTEND_2" in special, "EXTEND_2 should be on bankrupt wheel"
-
-
-def test_bankrupt_wheel_total_wedge_count():
-    """Bankrupt wheel should have 24 wedges total (matches normal wheel count)."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    assert len(BANKRUPT_WHEEL_WEDGES) == 24, f"Expected 24 wedges, got {len(BANKRUPT_WHEEL_WEDGES)}"
-
-
-def test_bankrupt_wheel_has_a_floor_wedge():
-    """Bankrupt wheel should have at least one small-value wedge as a floor outcome."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert min(values) <= 50, f"Bankrupt wheel should have at least one wedge ≤50 JC, smallest is {min(values)}"
-
-
-def test_bankrupt_wheel_extension_slices_have_dark_red_colors():
-    """Extension slices should have dark red colors."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+    special = {w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)}
+    for kept in ("RED_SHELL", "BLUE_SHELL", "LIGHTNING_BOLT", "EXTEND_1", "EXTEND_2"):
+        assert kept in special, f"{kept} should be on bankrupt wheel"
+    for mechanic in (
+        "JAILBREAK",
+        "CHAIN_REACTION",
+        "TOWN_TRIAL",
+        "DISCOVER",
+        "EMERGENCY",
+        "COMMUNE",
+        "COMEBACK",
+    ):
+        assert mechanic in special, f"{mechanic} should be on bankrupt wheel"
+    assert "REVEAL" not in special, "REVEAL should NOT be on bankrupt wheel"
 
     extend_wedges = [w for w in BANKRUPT_WHEEL_WEDGES if w[1] in ("EXTEND_1", "EXTEND_2")]
     assert len(extend_wedges) == 2, "Should have exactly 2 extension wedges"
-
     for _, _, color in extend_wedges:
         # Colors should be dark red variants (#8B0000, #660000)
         assert color.startswith("#"), f"Color should be hex format, got {color}"
-        # Convert hex to RGB and check it's reddish
         r = int(color[1:3], 16)
         g = int(color[3:5], 16)
         b = int(color[5:7], 16)
         assert r > g and r > b, f"Extension slice color should be red-dominant, got {color}"
+
+    # BANKRUPT wedge labels are rewritten to the computed value (e.g. "-24") at
+    # build time, so identify them by negative int value, not by label.
+    bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
+    assert len(bankrupt_values) == 2, "Bankrupt wheel must have exactly 2 BANKRUPT wedges"
+    for v in bankrupt_values:
+        assert v < 0, f"BANKRUPT value should be negative, got {v}"
+    assert any(v <= -5 for v in bankrupt_values), (
+        f"At least one BANKRUPT wedge must have value <= -5 (got {bankrupt_values}); "
+        "if all are clamped near -1, the bankrupt wheel target EV is too high."
+    )
+
+    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 100}
+    bankrupt_jackpot_colors = {
+        w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 100
+    }
+    assert bankrupt_jackpot_colors == regular_jackpot_colors == {"#f1c40f"}, (
+        f"Jackpot color should be gold #f1c40f on both wheels, got "
+        f"regular={regular_jackpot_colors}, bankrupt={bankrupt_jackpot_colors}"
+    )
 
 
 def test_get_wheel_wedges_returns_correct_wheel():
@@ -1709,38 +1699,6 @@ def test_get_wheel_wedges_returns_correct_wheel():
     assert bankrupt is BANKRUPT_WHEEL_WEDGES, "Should return bankrupt wheel when bankrupt"
     assert len(normal) == 24, "Normal wheel should have 24 wedges"
     assert len(bankrupt) == 24, "Bankrupt wheel should have 24 wedges"
-
-
-def test_bankrupt_wheel_bankrupt_value_recalculated():
-    """BANKRUPT wedges should have recalculated value on the bankrupt wheel."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
-
-    normal_bankrupt_values = [w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
-    bankrupt_bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
-
-    # Both should have exactly 2 BANKRUPT wedges
-    assert len(normal_bankrupt_values) == 2
-    assert len(bankrupt_bankrupt_values) == 2
-
-    # All BANKRUPT values should be negative
-    for v in normal_bankrupt_values + bankrupt_bankrupt_values:
-        assert v < 0, f"BANKRUPT value should be negative, got {v}"
-
-
-def test_bankrupt_wheel_has_all_new_slices():
-    """Bankrupt wheel should contain all new unique mechanic slices."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    special_values = {w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)}
-
-    assert "JAILBREAK" in special_values, "JAILBREAK should be on bankrupt wheel"
-    assert "CHAIN_REACTION" in special_values, "CHAIN_REACTION should be on bankrupt wheel"
-    assert "TOWN_TRIAL" in special_values, "TOWN_TRIAL should be on bankrupt wheel"
-    assert "DISCOVER" in special_values, "DISCOVER should be on bankrupt wheel"
-    assert "EMERGENCY" in special_values, "EMERGENCY should be on bankrupt wheel"
-    assert "COMMUNE" in special_values, "COMMUNE should be on bankrupt wheel"
-    assert "COMEBACK" in special_values, "COMEBACK should be on bankrupt wheel"
-    assert "REVEAL" not in special_values, "REVEAL should NOT be on bankrupt wheel"
 
 
 def test_bankrupt_wheel_ev_maintained():
@@ -1805,23 +1763,6 @@ def test_wheels_in_rainbow_order():
     # Concrete rainbow semantics: red precedes green precedes blue on the regular wheel.
     colors = [w[2].lower() for w in WHEEL_WEDGES]
     assert colors.index("#e74c3c") < colors.index("#228b22") < colors.index("#3498db")
-
-
-def test_bankrupt_wheel_jackpot_is_gold():
-    """Bankrupt and regular 100-JC jackpots share the same gold color."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
-
-    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 100}
-    bankrupt_jackpot_colors = {
-        w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 100
-    }
-
-    assert bankrupt_jackpot_colors == regular_jackpot_colors, (
-        f"Bankrupt jackpot colors {bankrupt_jackpot_colors} should match regular {regular_jackpot_colors}"
-    )
-    assert bankrupt_jackpot_colors == {"#f1c40f"}, (
-        f"Jackpot color should be gold #f1c40f, got {bankrupt_jackpot_colors}"
-    )
 
 
 def _make_wheel_interaction(user_id: int):
@@ -2736,23 +2677,6 @@ async def test_deflation_wedges_do_not_credit_nonprofit(wedge_value):
                     await cmds.gamba.callback(cmds, interaction)
 
     loan_service.add_to_nonprofit_fund.assert_not_called()
-
-
-def test_bankrupt_wheel_bankrupt_value_is_real_penalty():
-    """BANKRUPT wedges on the bankrupt wheel must impose a meaningful loss.
-
-    Pins the current ~+12 EV target. Reverting target to ~+25 would clamp the
-    computed BANKRUPT value to -1, which makes the wheel a free roll — this
-    test will fail in that case to surface the regression.
-    """
-    # BANKRUPT wedge labels are rewritten to the computed value (e.g. "-24") at
-    # build time, so identify them by negative int value, not by label.
-    bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
-    assert bankrupt_values, "Bankrupt wheel must contain at least one BANKRUPT wedge"
-    assert any(v <= -5 for v in bankrupt_values), (
-        f"At least one BANKRUPT wedge must have value <= -5 (got {bankrupt_values}); "
-        "if all are clamped near -1, the bankrupt wheel target EV is too high."
-    )
 
 
 @pytest.mark.asyncio

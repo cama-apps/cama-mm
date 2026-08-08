@@ -143,6 +143,23 @@ def test_all_renders_produce_ansi_block_under_45_lines():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def stub_neon_gifs(monkeypatch):
+    """Stub the animated-GIF generators for orchestration tests whose behavior
+    (gating, layers, one-time persistence) does not depend on the animation
+    bytes. Real renders stay covered by test_neon_gif_generates_under_4mb,
+    test_terminal_crash_gif_preserves_frame_timing_and_seekability, and the
+    unstubbed end-to-end hook tests (e.g. test_on_bankruptcy_always_fires)."""
+    import utils.neon_drawing as nd
+
+    def stub(*_args, **_kwargs):
+        return io.BytesIO(b"GIF89a-stub")
+
+    for name in dir(nd):
+        if name.startswith("create_") and name.endswith("_gif"):
+            monkeypatch.setattr(nd, name, stub)
+
+
 class TestNeonDegenService:
     def _make_service(self) -> NeonDegenService:
         return NeonDegenService()
@@ -167,7 +184,7 @@ class TestNeonDegenService:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("filing_number", [1, 3])
-    async def test_on_bankruptcy_high_layer(self, filing_number):
+    async def test_on_bankruptcy_high_layer(self, filing_number, stub_neon_gifs):
         service = self._make_service()
         result = await service.on_bankruptcy(
             123, 456, debt_cleared=200, filing_number=filing_number
@@ -176,7 +193,7 @@ class TestNeonDegenService:
         assert result.layer >= 2
 
     @pytest.mark.asyncio
-    async def test_cooldown_prevents_rapid_fire(self):
+    async def test_cooldown_prevents_rapid_fire(self, stub_neon_gifs):
         service = self._make_service()
         first = await service.on_bankruptcy(123, 456, debt_cleared=100, filing_number=2)
         assert first is not None
@@ -337,8 +354,9 @@ class TestNeonDegenService:
 # ---------------------------------------------------------------------------
 
 
+# create_terminal_crash_gif is covered (including the 4MB bound) by
+# test_terminal_crash_gif_preserves_frame_timing_and_seekability below.
 GIF_CASES = [
-    ("create_terminal_crash_gif", ("TestUser", 5)),
     ("create_void_welcome_gif", ("TestUser",)),
     ("create_debt_collector_gif", ("TestUser", 500)),
     ("create_freefall_gif", ("TestUser", 200, 0)),
@@ -400,7 +418,8 @@ def test_neon_frames_share_one_adaptive_palette(monkeypatch):
 
 
 def test_terminal_crash_gif_preserves_frame_timing_and_seekability():
-    """Shared quantization keeps the terminal animation's playback contract."""
+    """Shared quantization keeps the terminal animation's playback contract,
+    and the render stays valid GIF bytes under Discord's 4MB upload limit."""
     import utils.neon_drawing as nd
 
     random_state = random.getstate()
@@ -409,6 +428,10 @@ def test_terminal_crash_gif_preserves_frame_timing_and_seekability():
         buffer = nd.create_terminal_crash_gif("TestUser", 5)
     finally:
         random.setstate(random_state)
+
+    data = buffer.getvalue()
+    assert data[:3] == b"GIF"
+    assert len(data) < 4 * 1024 * 1024
 
     with Image.open(buffer) as image:
         assert image.n_frames == 58
@@ -445,7 +468,9 @@ def test_neon_gif_generates_under_4mb(fn_name, args):
 
 class TestNeonDegenPersistence:
     @pytest.mark.asyncio
-    async def test_degen_milestone_persists_across_instances(self, repo_db_path):
+    async def test_degen_milestone_persists_across_instances(
+        self, repo_db_path, stub_neon_gifs
+    ):
         from repositories.neon_event_repository import NeonEventRepository
         from repositories.player_repository import PlayerRepository
 
@@ -496,7 +521,7 @@ class TestNeonDegenPersistence:
             repo.persist_one_time_event(123, 456, "registration", 1)
 
     @pytest.mark.asyncio
-    async def test_one_time_db_fallback_without_repo(self):
+    async def test_one_time_db_fallback_without_repo(self, stub_neon_gifs):
         svc = NeonDegenService()
         assert await svc.on_degen_milestone(999, 456, 95) is not None
         assert await svc.on_degen_milestone(999, 456, 95) is None
@@ -506,7 +531,7 @@ class TestNeonDegenPersistence:
         assert await svc2.on_degen_milestone(999, 456, 95) is not None
 
     @pytest.mark.asyncio
-    async def test_different_triggers_independent(self, repo_db_path):
+    async def test_different_triggers_independent(self, repo_db_path, stub_neon_gifs):
         from repositories.player_repository import PlayerRepository
 
         player_repo = PlayerRepository(repo_db_path)
@@ -517,7 +542,7 @@ class TestNeonDegenPersistence:
         assert svc._check_one_time(123, 456, "degen_90") is False
 
     @pytest.mark.asyncio
-    async def test_different_guilds_independent(self, repo_db_path):
+    async def test_different_guilds_independent(self, repo_db_path, stub_neon_gifs):
         from repositories.player_repository import PlayerRepository
 
         player_repo = PlayerRepository(repo_db_path)
