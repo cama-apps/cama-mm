@@ -46,7 +46,13 @@ class TestMatchStorageInvariants:
         return player_ids
 
     def test_radiant_wins_stores_winning_team_1(self, test_db, test_players):
-        """Test that Radiant winning stores winning_team=1."""
+        """Radiant winning stores winning_team=1 with team1=Radiant and
+        team2=Dire, populates match_participants.side for every participant,
+        and credits wins/losses to the right sides.
+
+        Merges test_match_participants_side_populated and
+        test_wins_losses_correct_for_radiant_win.
+        """
         radiant_ids = test_players[:5]
         dire_ids = test_players[5:]
 
@@ -63,7 +69,6 @@ class TestMatchStorageInvariants:
             (match_id,),
         )
         row = cursor.fetchone()
-        conn.close()
 
         import json
 
@@ -71,8 +76,35 @@ class TestMatchStorageInvariants:
         assert json.loads(row["team2_players"]) == dire_ids, "team2 should be Dire"
         assert row["winning_team"] == 1, "Radiant winning should store winning_team=1"
 
+        # match_participants.side is populated for every participant.
+        cursor.execute(
+            "SELECT discord_id, side FROM match_participants WHERE match_id = ?",
+            (match_id,),
+        )
+        sides = {r["discord_id"]: r["side"] for r in cursor.fetchall()}
+        conn.close()
+        assert len(sides) == 10
+        for pid in radiant_ids:
+            assert sides[pid] == "radiant", f"Player {pid} should have side='radiant'"
+        for pid in dire_ids:
+            assert sides[pid] == "dire", f"Player {pid} should have side='dire'"
+
+        # Wins/losses land on the right sides.
+        for pid in radiant_ids:
+            player = test_db.get_player(pid)
+            assert player.wins == 1, f"Radiant player {pid} should have 1 win"
+            assert player.losses == 0, f"Radiant player {pid} should have 0 losses"
+        for pid in dire_ids:
+            player = test_db.get_player(pid)
+            assert player.wins == 0, f"Dire player {pid} should have 0 wins"
+            assert player.losses == 1, f"Dire player {pid} should have 1 loss"
+
     def test_dire_wins_stores_winning_team_2(self, test_db, test_players):
-        """Test that Dire winning stores winning_team=2."""
+        """Dire winning stores winning_team=2 (teams stay Radiant=team1,
+        Dire=team2) and credits wins to Dire, losses to Radiant.
+
+        Merges test_wins_losses_correct_for_dire_win.
+        """
         radiant_ids = test_players[:5]
         dire_ids = test_players[5:]
 
@@ -97,83 +129,11 @@ class TestMatchStorageInvariants:
         assert json.loads(row["team2_players"]) == dire_ids, "team2 should be Dire"
         assert row["winning_team"] == 2, "Dire winning should store winning_team=2"
 
-    def test_match_participants_side_populated(self, test_db, test_players):
-        """Test that match_participants.side is populated for all participants."""
-        radiant_ids = test_players[:5]
-        dire_ids = test_players[5:]
-
-        match_id = test_db.record_match(
-            radiant_team_ids=radiant_ids,
-            dire_team_ids=dire_ids,
-            winning_team="radiant",
-        )
-
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
-
-        # Check Radiant players have side='radiant'
-        for pid in radiant_ids:
-            cursor.execute(
-                "SELECT side FROM match_participants WHERE match_id = ? AND discord_id = ?",
-                (match_id, pid),
-            )
-            row = cursor.fetchone()
-            assert row is not None, f"Player {pid} should be in match_participants"
-            assert row["side"] == "radiant", f"Player {pid} should have side='radiant'"
-
-        # Check Dire players have side='dire'
-        for pid in dire_ids:
-            cursor.execute(
-                "SELECT side FROM match_participants WHERE match_id = ? AND discord_id = ?",
-                (match_id, pid),
-            )
-            row = cursor.fetchone()
-            assert row is not None, f"Player {pid} should be in match_participants"
-            assert row["side"] == "dire", f"Player {pid} should have side='dire'"
-
-        conn.close()
-
-    def test_wins_losses_correct_for_radiant_win(self, test_db, test_players):
-        """Test that wins/losses are correct when Radiant wins."""
-        radiant_ids = test_players[:5]
-        dire_ids = test_players[5:]
-
-        test_db.record_match(
-            radiant_team_ids=radiant_ids,
-            dire_team_ids=dire_ids,
-            winning_team="radiant",
-        )
-
-        # Radiant players should have wins
-        for pid in radiant_ids:
-            player = test_db.get_player(pid)
-            assert player.wins == 1, f"Radiant player {pid} should have 1 win"
-            assert player.losses == 0, f"Radiant player {pid} should have 0 losses"
-
-        # Dire players should have losses
-        for pid in dire_ids:
-            player = test_db.get_player(pid)
-            assert player.wins == 0, f"Dire player {pid} should have 0 wins"
-            assert player.losses == 1, f"Dire player {pid} should have 1 loss"
-
-    def test_wins_losses_correct_for_dire_win(self, test_db, test_players):
-        """Test that wins/losses are correct when Dire wins."""
-        radiant_ids = test_players[:5]
-        dire_ids = test_players[5:]
-
-        test_db.record_match(
-            radiant_team_ids=radiant_ids,
-            dire_team_ids=dire_ids,
-            winning_team="dire",
-        )
-
-        # Dire players should have wins
+        # Dire players should have wins, Radiant players losses.
         for pid in dire_ids:
             player = test_db.get_player(pid)
             assert player.wins == 1, f"Dire player {pid} should have 1 win"
             assert player.losses == 0, f"Dire player {pid} should have 0 losses"
-
-        # Radiant players should have losses
         for pid in radiant_ids:
             player = test_db.get_player(pid)
             assert player.wins == 0, f"Radiant player {pid} should have 0 wins"
@@ -209,24 +169,6 @@ class TestConcurrencyGuard:
                 preferred_roles=["1", "2", "3", "4", "5"],
             )
         return player_ids
-
-    def test_double_record_fails(self, test_db, player_repo, test_players):
-        """Test that attempting to record twice fails."""
-        match_repo = MatchRepository(test_db.db_path)
-        match_service = MatchService(
-            player_repo=player_repo, match_repo=match_repo, use_glicko=True
-        )
-
-        # Shuffle to create pending match
-        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-
-        # First record should succeed
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        assert result["match_id"] is not None
-
-        # Second record should fail (no pending match)
-        with pytest.raises(ValueError, match="No recent shuffle found"):
-            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
     def test_no_double_record_when_post_core_step_fails(
         self, test_db, player_repo, test_players

@@ -171,30 +171,13 @@ class TestConcurrentMatchCreation:
         assert open_state.lobby_kind == LobbyKind.OPEN.value
         assert low_state.lobby_kind == LobbyKind.LOWSKILL.value
 
-    def test_get_all_pending_matches_returns_both(self, services):
-        """get_all_pending_matches returns all concurrent matches."""
+    def test_get_last_shuffle_with_specific_id_returns_correct_match(self, services):
+        """get_last_shuffle with a specific pending_match_id returns that match,
+        while calling it without an id returns None when multiple matches exist
+        (forcing explicit selection — merges
+        test_get_last_shuffle_returns_none_with_multiple_matches)."""
         match_service = services["match_service"]
         match_repo = services["match_repo"]
-        player_repo = services["player_repo"]
-
-        # Register 20 players
-        players_match1 = list(range(1000, 1010))
-        players_match2 = list(range(2000, 2010))
-        _register_players(player_repo, players_match1)
-        _register_players(player_repo, players_match2)
-
-        # Create two shuffles
-        match_service.shuffle_players(players_match1, guild_id=TEST_GUILD_ID)
-        match_service.shuffle_players(players_match2, guild_id=TEST_GUILD_ID)
-
-        # Get all pending matches
-        pending_matches = match_repo.get_pending_matches(TEST_GUILD_ID)
-
-        assert len(pending_matches) == 2
-
-    def test_get_last_shuffle_returns_none_with_multiple_matches(self, services):
-        """get_last_shuffle returns None when multiple matches exist (forces explicit selection)."""
-        match_service = services["match_service"]
         player_repo = services["player_repo"]
 
         # Register 20 players
@@ -208,24 +191,7 @@ class TestConcurrentMatchCreation:
         match_service.shuffle_players(players_match2, guild_id=TEST_GUILD_ID)
 
         # get_last_shuffle without pending_match_id should return None
-        result = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert result is None
-
-    def test_get_last_shuffle_with_specific_id_returns_correct_match(self, services):
-        """get_last_shuffle with specific pending_match_id returns that match."""
-        match_service = services["match_service"]
-        match_repo = services["match_repo"]
-        player_repo = services["player_repo"]
-
-        # Register 20 players
-        players_match1 = list(range(1000, 1010))
-        players_match2 = list(range(2000, 2010))
-        _register_players(player_repo, players_match1)
-        _register_players(player_repo, players_match2)
-
-        # Create two shuffles
-        match_service.shuffle_players(players_match1, guild_id=TEST_GUILD_ID)
-        match_service.shuffle_players(players_match2, guild_id=TEST_GUILD_ID)
+        assert match_service.get_last_shuffle(TEST_GUILD_ID) is None
 
         # Get pending match IDs from DB
         pending_matches = match_repo.get_pending_matches(TEST_GUILD_ID)
@@ -256,7 +222,10 @@ class TestConcurrentMatchBettingIsolation:
     """Tests that betting is properly isolated between concurrent matches."""
 
     def test_get_pot_odds_isolated_between_matches(self, services):
-        """get_pot_odds returns odds only for the specified match."""
+        """get_pot_odds and get_all_pending_bets each return data only for the
+        specified match (merges
+        test_get_all_pending_bets_isolated_between_matches — same setup, both
+        read paths asserted on one pair of bets)."""
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
 
@@ -282,25 +251,7 @@ class TestConcurrentMatchBettingIsolation:
         assert odds2["radiant"] == 0
         assert odds2["dire"] == 30
 
-    def test_get_all_pending_bets_isolated_between_matches(self, services):
-        """get_all_pending_bets returns bets only for the specified match."""
-        betting_service = services["betting_service"]
-        player_repo = services["player_repo"]
-
-        # Create two concurrent matches
-        players_match1 = list(range(1000, 1010))
-        players_match2 = list(range(2000, 2010))
-        state1, state2 = _create_two_concurrent_matches(services, players_match1, players_match2)
-
-        # Register spectators
-        spectator1, spectator2 = 3001, 3002
-        _register_players(player_repo, [spectator1, spectator2])
-
-        # Place bets on different matches
-        betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 50, state1)
-        betting_service.place_bet(TEST_GUILD_ID, spectator2, "dire", 30, state2)
-
-        # Verify pending bets are isolated
+        # Verify pending bets are isolated too
         bets1 = betting_service.get_all_pending_bets(TEST_GUILD_ID, state1)
         bets2 = betting_service.get_all_pending_bets(TEST_GUILD_ID, state2)
 
@@ -349,8 +300,13 @@ class TestConcurrentMatchRecordingIsolation:
     """Tests that recording one match doesn't affect other pending matches."""
 
     def test_record_match_1_preserves_match_2_state(self, services):
-        """Recording Match #1 should not affect Match #2's pending state."""
+        """Recording (and settling) Match #1 must not affect Match #2's pending
+        state or its pending bets (merges
+        test_settle_bets_only_affects_target_match — same record, both the
+        state survival and the bet survival asserted)."""
         match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
 
         # Create two concurrent matches
         players_match1 = list(range(1000, 1010))
@@ -360,7 +316,13 @@ class TestConcurrentMatchRecordingIsolation:
         pmid1 = state1.pending_match_id
         pmid2 = state2.pending_match_id
 
-        # Record match 1
+        # Register spectators and place bets on both matches
+        spectator1, spectator2 = 3001, 3002
+        _register_players(player_repo, [spectator1, spectator2])
+        betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 50, state1)
+        betting_service.place_bet(TEST_GUILD_ID, spectator2, "dire", 30, state2)
+
+        # Record and settle match 1
         match_service.record_match(
             "radiant",
             guild_id=TEST_GUILD_ID,
@@ -376,35 +338,8 @@ class TestConcurrentMatchRecordingIsolation:
         state1_after = match_service.get_last_shuffle(TEST_GUILD_ID, pending_match_id=pmid1)
         assert state1_after is None
 
-    def test_settle_bets_only_affects_target_match(self, services):
-        """Settling bets for Match #1 should not touch Match #2's pending bets."""
-        match_service = services["match_service"]
-        betting_service = services["betting_service"]
-        player_repo = services["player_repo"]
-
-        # Create two concurrent matches
-        players_match1 = list(range(1000, 1010))
-        players_match2 = list(range(2000, 2010))
-        state1, state2 = _create_two_concurrent_matches(services, players_match1, players_match2)
-
-        # Register spectators
-        spectator1, spectator2 = 3001, 3002
-        _register_players(player_repo, [spectator1, spectator2])
-
-        # Place bets on both matches
-        betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 50, state1)
-        betting_service.place_bet(TEST_GUILD_ID, spectator2, "dire", 30, state2)
-
-        # Record and settle match 1
-        match_service.record_match(
-            "radiant",
-            guild_id=TEST_GUILD_ID,
-            pending_match_id=state1.pending_match_id,
-        )
-
-        # Verify match 2's bet is still pending (refresh state from DB)
-        state2_fresh = match_service.get_last_shuffle(TEST_GUILD_ID, state2.pending_match_id)
-        bet2 = betting_service.get_pending_bet(TEST_GUILD_ID, spectator2, state2_fresh)
+        # Verify match 2's bet is still pending
+        bet2 = betting_service.get_pending_bet(TEST_GUILD_ID, spectator2, state2_after)
         assert bet2 is not None
         # Pending bets have match_id = None (not yet settled to a match)
         assert bet2["match_id"] is None
@@ -513,8 +448,11 @@ class TestConcurrentMatchCleanupIsolation:
     """Tests that cleanup operations are properly isolated."""
 
     def test_clear_specific_match_preserves_others(self, services):
-        """Clearing a specific match by ID doesn't affect other matches."""
+        """Clearing a specific match by ID doesn't affect other matches, while
+        clearing without an ID removes every pending match (merges
+        test_clear_all_matches_removes_all)."""
         match_service = services["match_service"]
+        match_repo = services["match_repo"]
 
         # Create two concurrent matches using helper
         players_match1 = list(range(1000, 1010))
@@ -536,28 +474,9 @@ class TestConcurrentMatchCleanupIsolation:
         assert state2_after is not None
         assert state2_after.pending_match_id == pmid2
 
-    def test_clear_all_matches_removes_all(self, services):
-        """Clearing without specific ID removes all pending matches."""
-        match_service = services["match_service"]
-        match_repo = services["match_repo"]
-        player_repo = services["player_repo"]
-
-        # Register players for two matches
-        players_match1 = list(range(1000, 1010))
-        players_match2 = list(range(2000, 2010))
-        _register_players(player_repo, players_match1)
-        _register_players(player_repo, players_match2)
-
-        # Create two concurrent matches
-        match_service.shuffle_players(players_match1, guild_id=TEST_GUILD_ID)
-        match_service.shuffle_players(players_match2, guild_id=TEST_GUILD_ID)
-
-        # Clear all matches
+        # Clearing without a specific ID removes all remaining matches
         match_service.clear_last_shuffle(TEST_GUILD_ID)
-
-        # Both should be gone
-        pending = match_repo.get_pending_matches(TEST_GUILD_ID)
-        assert len(pending) == 0
+        assert len(match_repo.get_pending_matches(TEST_GUILD_ID)) == 0
 
 
 class TestRecordFinalizeThreadIsolation:
