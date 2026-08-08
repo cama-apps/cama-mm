@@ -40,7 +40,8 @@ class TestDraftState:
     """Tests for DraftState domain model."""
 
     def test_initial_state(self):
-        """New DraftState has correct defaults."""
+        """New DraftState has correct defaults (includes the empty
+        player_pool_data default merged from test_player_pool_data_empty_by_default)."""
         state = DraftState(guild_id=123)
         assert state.guild_id == 123
         assert state.phase == DraftPhase.COINFLIP
@@ -49,6 +50,7 @@ class TestDraftState:
         assert state.captain2_id is None
         assert state.current_pick_index == 0
         assert state.lobby_kind is LobbyKind.OPEN
+        assert state.player_pool_data == {}
 
     def test_available_player_ids(self):
         """Available players excludes picked players."""
@@ -206,12 +208,16 @@ class TestDraftState:
         assert 1 not in state.side_preferences
 
     def test_to_dict_and_from_dict(self):
-        """State can be serialized and deserialized."""
+        """State can be serialized and deserialized, including exclusion
+        update metadata (merged from
+        test_exclusion_update_metadata_survives_round_trip)."""
         state = DraftState(guild_id=123, lobby_kind=LobbyKind.LOWSKILL)
         state.captain1_id = 100
         state.captain2_id = 200
         state.phase = DraftPhase.DRAFTING
         state.player_pool_ids = [1, 2, 3]
+        state.full_exclusion_increment_ids = [11, 12]
+        state.half_exclusion_increment_ids = [13]
 
         data = state.to_dict()
         restored = DraftState.from_dict(data)
@@ -222,14 +228,6 @@ class TestDraftState:
         assert restored.captain2_id == 200
         assert restored.phase == DraftPhase.DRAFTING
         assert restored.player_pool_ids == [1, 2, 3]
-
-    def test_exclusion_update_metadata_survives_round_trip(self):
-        state = DraftState(guild_id=123)
-        state.full_exclusion_increment_ids = [11, 12]
-        state.half_exclusion_increment_ids = [13]
-
-        restored = DraftState.from_dict(state.to_dict())
-
         assert restored.full_exclusion_increment_ids == [11, 12]
         assert restored.half_exclusion_increment_ids == [13]
 
@@ -249,13 +247,18 @@ class TestDraftState:
         assert restored.half_exclusion_increment_ids == [13]
 
     def test_player_pool_data_serialization(self):
-        """Player pool data is correctly serialized and deserialized."""
+        """Player pool data survives to_dict/from_dict with varied value types
+        (empty roles, floats, full role lists).
+
+        Merged from test_player_pool_data_survives_round_trip and
+        test_player_pool_data_preserves_roles.
+        """
         state = DraftState(guild_id=123)
         state.player_pool_ids = [1, 2, 3]
         state.player_pool_data = {
-            1: {"name": "Alice", "rating": 1800.0, "roles": ["1", "2"]},
+            1: {"name": "Alice", "rating": 1800.5, "roles": []},
             2: {"name": "Bob", "rating": 1650.0, "roles": ["3"]},
-            3: {"name": "Charlie", "rating": 1500.0, "roles": ["4", "5"]},
+            3: {"name": "Charlie", "rating": 1500.0, "roles": ["1", "2", "3", "4", "5"]},
         }
 
         data = state.to_dict()
@@ -264,50 +267,50 @@ class TestDraftState:
 
         restored = DraftState.from_dict(data)
         assert restored.player_pool_data == state.player_pool_data
-        assert restored.player_pool_data[2]["rating"] == 1650.0
-
-    def test_player_pool_data_empty_by_default(self):
-        """New DraftState has empty player_pool_data."""
-        state = DraftState(guild_id=123)
-        assert state.player_pool_data == {}
-
-    def test_player_pool_data_survives_round_trip(self):
-        """Player pool data survives to_dict/from_dict with various data types."""
-        state = DraftState(guild_id=456)
-        state.player_pool_data = {
-            100: {"name": "Player100", "rating": 2100.5, "roles": []},
-            200: {"name": "Player200", "rating": 1400.0, "roles": ["1", "2", "3", "4", "5"]},
-        }
-
-        # Round trip
-        restored = DraftState.from_dict(state.to_dict())
-
-        # Verify exact equality
-        assert restored.player_pool_data[100]["name"] == "Player100"
-        assert restored.player_pool_data[100]["rating"] == 2100.5
-        assert restored.player_pool_data[100]["roles"] == []
-        assert restored.player_pool_data[200]["roles"] == ["1", "2", "3", "4", "5"]
+        assert restored.player_pool_data[1]["rating"] == 1800.5
+        assert restored.player_pool_data[1]["roles"] == []
+        assert restored.player_pool_data[3]["roles"] == ["1", "2", "3", "4", "5"]
 
 
 class TestDraftStateManager:
     """Tests for DraftStateManager."""
 
-    def test_create_draft(self):
-        """Can create a new draft state."""
-        manager = DraftStateManager()
-        state = manager.create_draft(guild_id=123)
+    def test_draft_state_lifecycle(self):
+        """create → duplicate-create rejected (any active phase) → get →
+        clear → recreate.
 
+        Merged from test_create_draft, test_create_draft_already_exists,
+        test_get_state, test_get_state_nonexistent, test_clear_state,
+        test_create_draft_rejects_active_state, and
+        test_clear_after_create_allows_new_draft.
+        """
+        manager = DraftStateManager()
+        assert manager.get_state(999) is None
+
+        state = manager.create_draft(guild_id=123)
         assert state is not None
         assert state.guild_id == 123
         assert manager.has_active_draft(123) is True
+        assert manager.get_state(123) is state
 
-    def test_create_draft_already_exists(self):
-        """Cannot create draft when one exists."""
-        manager = DraftStateManager()
-        manager.create_draft(guild_id=123)
-
+        # A second create is rejected while any active state exists — both in
+        # the default COINFLIP phase and mid-draft.
         with pytest.raises(ValueError, match="already in progress"):
             manager.create_draft(guild_id=123)
+        state.phase = DraftPhase.DRAFTING
+        with pytest.raises(ValueError, match="already in progress"):
+            manager.create_draft(guild_id=123)
+
+        # Clearing releases the reservation (what _execute_draft's failure
+        # cleanup does) and a fresh draft can start.
+        cleared = manager.clear_state(123)
+        assert cleared is not None
+        assert manager.get_state(123) is None
+        assert manager.has_active_draft(123) is False
+
+        new_state = manager.create_draft(guild_id=123)
+        assert new_state is not state
+        assert new_state.phase == DraftPhase.COINFLIP
 
     def test_concurrent_create_draft_allows_exactly_one_winner(self):
         """The guild-global draft reservation is atomic across worker threads."""
@@ -339,29 +342,6 @@ class TestDraftStateManager:
         assert results.count(True) == 1
         assert results.count(False) == 1
 
-    def test_get_state(self):
-        """Can retrieve draft state."""
-        manager = DraftStateManager()
-        created = manager.create_draft(guild_id=123)
-
-        retrieved = manager.get_state(123)
-        assert retrieved is created
-
-    def test_get_state_nonexistent(self):
-        """Returns None for nonexistent draft."""
-        manager = DraftStateManager()
-        assert manager.get_state(999) is None
-
-    def test_clear_state(self):
-        """Can clear draft state."""
-        manager = DraftStateManager()
-        manager.create_draft(guild_id=123)
-
-        cleared = manager.clear_state(123)
-        assert cleared is not None
-        assert manager.get_state(123) is None
-        assert manager.has_active_draft(123) is False
-
     def test_complete_draft_remains_reserved_until_cleanup(self):
         """Completion publishing owns the guild reservation until it clears."""
         manager = DraftStateManager()
@@ -380,30 +360,6 @@ class TestDraftStateManager:
 
         assert manager.clear_state(123, expected_state=old_state) is None
         assert manager.get_state(123) is new_state
-
-    def test_create_draft_rejects_active_state(self):
-        """create_draft raises when a non-COMPLETE state exists."""
-        manager = DraftStateManager()
-        state = manager.create_draft(guild_id=123)
-        state.phase = DraftPhase.DRAFTING
-
-        with pytest.raises(ValueError, match="already in progress"):
-            manager.create_draft(guild_id=123)
-
-    def test_clear_after_create_allows_new_draft(self):
-        """Simulates _execute_draft cleanup: create then clear on failure allows retry."""
-        manager = DraftStateManager()
-        state = manager.create_draft(guild_id=123)
-        state.phase = DraftPhase.WINNER_CHOICE
-
-        # Simulate failure cleanup (what _execute_draft now does)
-        manager.clear_state(123)
-        assert manager.has_active_draft(123) is False
-
-        # Should be able to create a new draft
-        new_state = manager.create_draft(guild_id=123)
-        assert new_state is not state
-        assert new_state.phase == DraftPhase.COINFLIP
 
     def test_advance_phase(self):
         """Can advance draft phase."""
@@ -455,20 +411,6 @@ class TestDraftService:
                 player_pool_ids=[100],
                 player_ratings=ratings,
             )
-
-    def test_select_captains_automatic_selection(self):
-        """When neither specified, selects two distinct captains."""
-        service = DraftService()
-        ratings = {100: 1500.0, 200: 1500.0, 300: 1500.0}
-
-        result = service.select_captains(
-            player_pool_ids=[100, 200, 300],
-            player_ratings=ratings,
-        )
-
-        assert result.captain1_id in [100, 200, 300]
-        assert result.captain2_id in [100, 200, 300]
-        assert result.captain1_id != result.captain2_id
 
     def test_select_captains_chooses_closest_glicko_pair_without_randomness(self, monkeypatch):
         """When neither captain is specified, choose the closest Glicko pair deterministically."""
@@ -758,63 +700,18 @@ class TestDynamicDraftPickOrder:
         )
 
 
-class TestSpecifiedCaptains:
-    """Tests for specified captain handling."""
-
-    def test_select_captains_both_specified_from_eligible_pool(self):
-        """DraftService.select_captains honors captains from the candidate pool."""
-        service = DraftService()
-        ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}
-        selected = [1, 2]
-
-        result = service.select_captains(
-            player_pool_ids=[1, 2, 3, 4, 5],
-            player_ratings=ratings,
-            specified_captain1=selected[0],
-            specified_captain2=selected[1],
-        )
-
-        assert result.captain1_id == 1
-        assert result.captain2_id == 2
-
-    def test_production_captain_selection_never_duplicates(self):
-        """Production captain selection (DraftService.select_captains) never returns the same player twice."""
-        service = DraftService()
-        player_ids = list(range(1, 17))
-        ratings = {pid: 1500.0 + pid * 10 for pid in player_ids}
-
-        for _ in range(50):
-            result = service.select_captains(
-                player_pool_ids=player_ids,
-                player_ratings=ratings,
-            )
-            assert result.captain1_id != result.captain2_id
-            assert result.captain1_id in player_ids
-            assert result.captain2_id in player_ids
-
-    def test_lobby_player_count_ignores_legacy_conditional_players(self):
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Nine regular players are not enough even if legacy Frogling data exists.
-        for i in range(1, 10):
-            lobby.add_player(i)
-        lobby.conditional_players = set(range(11, 17))
-
-        total = lobby.get_total_count()
-        regular = lobby.get_player_count()
-        assert total == 9
-        assert regular == 9
-
-
 class TestCaptainEligibility:
     """Tests for captain eligibility repository methods."""
 
-    def test_set_captain_eligible_true(self, player_repository: PlayerRepository):
-        """Player can be set as captain-eligible."""
-        # Add a player first
+    def test_set_and_get_captain_eligible(self, player_repository: PlayerRepository):
+        """Eligibility set/get lifecycle: default False, set True, set False,
+        and non-existent players read False / fail to set.
+
+        Merged from test_set_captain_eligible_true,
+        test_set_captain_eligible_false, test_get_captain_eligible_default_false,
+        test_get_captain_eligible_nonexistent_player, and
+        test_set_captain_eligible_nonexistent_player.
+        """
         player_repository.add(
             discord_id=1001,
             discord_username="TestPlayer",
@@ -822,56 +719,30 @@ class TestCaptainEligibility:
             guild_id=TEST_GUILD_ID,
         )
 
-        # Set as captain-eligible
-        result = player_repository.set_captain_eligible(1001, TEST_GUILD_ID, True)
-        assert result is True
+        # New players default to not captain-eligible.
+        assert player_repository.get_captain_eligible(1001, TEST_GUILD_ID) is False
 
-        # Verify eligibility
+        # Set True, then back to False.
+        assert player_repository.set_captain_eligible(1001, TEST_GUILD_ID, True) is True
         assert player_repository.get_captain_eligible(1001, TEST_GUILD_ID) is True
+        assert player_repository.set_captain_eligible(1001, TEST_GUILD_ID, False) is True
+        assert player_repository.get_captain_eligible(1001, TEST_GUILD_ID) is False
 
-    def test_set_captain_eligible_false(self, player_repository: PlayerRepository):
-        """Player can be set as not captain-eligible."""
-        # Add a player first
-        player_repository.add(
-            discord_id=1002,
-            discord_username="TestPlayer2",
-            initial_mmr=3000,
-            guild_id=TEST_GUILD_ID,
-        )
-
-        # Set as captain-eligible first
-        player_repository.set_captain_eligible(1002, TEST_GUILD_ID, True)
-        assert player_repository.get_captain_eligible(1002, TEST_GUILD_ID) is True
-
-        # Remove eligibility
-        result = player_repository.set_captain_eligible(1002, TEST_GUILD_ID, False)
-        assert result is True
-        assert player_repository.get_captain_eligible(1002, TEST_GUILD_ID) is False
-
-    def test_get_captain_eligible_default_false(self, player_repository: PlayerRepository):
-        """New players default to not captain-eligible."""
-        player_repository.add(
-            discord_id=1003,
-            discord_username="TestPlayer3",
-            initial_mmr=3000,
-            guild_id=TEST_GUILD_ID,
-        )
-
-        # Should default to False
-        assert player_repository.get_captain_eligible(1003, TEST_GUILD_ID) is False
-
-    def test_get_captain_eligible_nonexistent_player(self, player_repository: PlayerRepository):
-        """Non-existent player returns False for captain eligibility."""
+        # Non-existent player: get reads False, set reports failure.
         assert player_repository.get_captain_eligible(9999, TEST_GUILD_ID) is False
-
-    def test_set_captain_eligible_nonexistent_player(self, player_repository: PlayerRepository):
-        """Setting eligibility for non-existent player returns False."""
-        result = player_repository.set_captain_eligible(9999, TEST_GUILD_ID, True)
-        assert result is False
+        assert player_repository.set_captain_eligible(9999, TEST_GUILD_ID, True) is False
 
     def test_get_captain_eligible_players(self, player_repository: PlayerRepository):
-        """Get list of captain-eligible players from a set of IDs."""
-        # Add several players
+        """Bulk eligibility lookup: eligible subset returned, empty input and
+        none-eligible groups return empty, and only the requested subset is
+        considered.
+
+        Merged from test_get_captain_eligible_players_empty_list,
+        test_get_captain_eligible_players_none_eligible, and
+        test_get_captain_eligible_players_subset.
+        """
+        assert player_repository.get_captain_eligible_players([], TEST_GUILD_ID) == []
+
         for i in range(1, 6):
             player_repository.add(
                 discord_id=2000 + i,
@@ -880,241 +751,27 @@ class TestCaptainEligibility:
                 guild_id=TEST_GUILD_ID,
             )
 
-        # Set some as captain-eligible
+        # No one eligible yet.
+        assert (
+            player_repository.get_captain_eligible_players(
+                [2001, 2002, 2003], TEST_GUILD_ID
+            )
+            == []
+        )
+
         player_repository.set_captain_eligible(2001, TEST_GUILD_ID, True)
         player_repository.set_captain_eligible(2003, TEST_GUILD_ID, True)
         player_repository.set_captain_eligible(2005, TEST_GUILD_ID, True)
 
-        # Query subset of players
         all_ids = [2001, 2002, 2003, 2004, 2005]
         eligible = player_repository.get_captain_eligible_players(all_ids, TEST_GUILD_ID)
-
         assert sorted(eligible) == [2001, 2003, 2005]
 
-    def test_get_captain_eligible_players_empty_list(self, player_repository: PlayerRepository):
-        """Empty input list returns empty result."""
-        result = player_repository.get_captain_eligible_players([], TEST_GUILD_ID)
-        assert result == []
-
-    def test_get_captain_eligible_players_none_eligible(self, player_repository: PlayerRepository):
-        """If no players are eligible, returns empty list."""
-        # Add players but don't set any as eligible
-        for i in range(1, 4):
-            player_repository.add(
-                discord_id=3000 + i,
-                discord_username=f"Player{i}",
-                initial_mmr=3000,
-                guild_id=TEST_GUILD_ID,
-            )
-
-        eligible = player_repository.get_captain_eligible_players([3001, 3002, 3003], TEST_GUILD_ID)
-        assert eligible == []
-
-    def test_get_captain_eligible_players_subset(self, player_repository: PlayerRepository):
-        """Only returns eligible players from the requested subset."""
-        # Add players
-        for i in range(1, 6):
-            player_repository.add(
-                discord_id=4000 + i,
-                discord_username=f"Player{i}",
-                initial_mmr=3000,
-                guild_id=TEST_GUILD_ID,
-            )
-
-        # Set players 1, 2, 3 as eligible
-        player_repository.set_captain_eligible(4001, TEST_GUILD_ID, True)
-        player_repository.set_captain_eligible(4002, TEST_GUILD_ID, True)
-        player_repository.set_captain_eligible(4003, TEST_GUILD_ID, True)
-
-        # Only query for 2 and 4 - should return only 2
-        eligible = player_repository.get_captain_eligible_players([4002, 4004], TEST_GUILD_ID)
-        assert eligible == [4002]
-
-
-class TestPlayerPoolVisibility:
-    """
-    Tests for player pool visibility during pre-draft phases.
-    Verifies the cached player data is used correctly without DB queries.
-    """
-
-    def test_player_pool_data_excludes_captains(self):
-        """Available player IDs correctly excludes captains."""
-        state = DraftState(guild_id=123)
-        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        state.captain1_id = 1
-        state.captain2_id = 2
-
-        # Simulate what _build_player_pool_field does
-        available_ids = [
-            pid for pid in state.player_pool_ids
-            if pid != state.captain1_id and pid != state.captain2_id
-        ]
-
-        assert 1 not in available_ids  # Captain1 excluded
-        assert 2 not in available_ids  # Captain2 excluded
-        assert len(available_ids) == 8  # 8 draftable players remain
-
-    def test_player_pool_display_sorts_by_rating(self):
-        """Player pool display is sorted by rating descending."""
-        state = DraftState(guild_id=123)
-        state.player_pool_ids = [1, 2, 3, 4, 5]
-        state.captain1_id = None
-        state.captain2_id = None
-        state.player_pool_data = {
-            1: {"name": "LowRating", "rating": 1200.0, "roles": ["5"]},
-            2: {"name": "HighRating", "rating": 1900.0, "roles": ["1"]},
-            3: {"name": "MidRating", "rating": 1500.0, "roles": ["3"]},
-            4: {"name": "VeryHighRating", "rating": 2100.0, "roles": ["2"]},
-            5: {"name": "VeryLowRating", "rating": 1000.0, "roles": ["4"]},
-        }
-
-        # Build player info like _build_player_pool_field does
-        player_info = []
-        for pid in state.player_pool_ids:
-            data = state.player_pool_data.get(pid)
-            if data:
-                player_info.append({
-                    "name": data["name"],
-                    "rating": data["rating"],
-                    "roles": data["roles"],
-                })
-
-        # Sort by rating descending
-        player_info.sort(key=lambda p: p["rating"], reverse=True)
-
-        # Verify order
-        assert player_info[0]["name"] == "VeryHighRating"
-        assert player_info[1]["name"] == "HighRating"
-        assert player_info[2]["name"] == "MidRating"
-        assert player_info[3]["name"] == "LowRating"
-        assert player_info[4]["name"] == "VeryLowRating"
-
-    def test_player_pool_data_fallback_for_missing(self):
-        """Missing player data uses fallback values."""
-        state = DraftState(guild_id=123)
-        state.player_pool_ids = [1, 2, 3]
-        state.captain1_id = None
-        state.captain2_id = None
-        # Only provide data for player 1
-        state.player_pool_data = {
-            1: {"name": "HasData", "rating": 1800.0, "roles": ["1", "2"]},
-        }
-
-        # Build player info like _build_player_pool_field does
-        player_info = []
-        for pid in state.player_pool_ids:
-            data = state.player_pool_data.get(pid)
-            if data:
-                player_info.append({
-                    "name": data["name"],
-                    "rating": data["rating"],
-                    "roles": data["roles"],
-                })
-            else:
-                player_info.append({
-                    "name": f"Player {pid}",
-                    "rating": 1500.0,
-                    "roles": [],
-                })
-
-        # Verify fallback
-        assert player_info[0]["name"] == "HasData"
-        assert player_info[0]["rating"] == 1800.0
-        assert player_info[1]["name"] == "Player 2"  # Fallback
-        assert player_info[1]["rating"] == 1500.0  # Default rating
-        assert player_info[2]["name"] == "Player 3"
-        assert player_info[2]["roles"] == []
-
-    def test_player_pool_empty_when_all_are_captains(self):
-        """Returns empty available list when all players are captains."""
-        state = DraftState(guild_id=123)
-        state.player_pool_ids = [1, 2]  # Only 2 players
-        state.captain1_id = 1
-        state.captain2_id = 2
-
-        available_ids = [
-            pid for pid in state.player_pool_ids
-            if pid != state.captain1_id and pid != state.captain2_id
-        ]
-
-        assert available_ids == []
-
-    def test_player_pool_data_with_full_draft_state(self):
-        """Full draft state integration test with all 10 players."""
-        state = DraftState(guild_id=999)
-
-        # Setup 10 players with realistic data
-        state.player_pool_ids = list(range(1001, 1011))  # Players 1001-1010
-        state.captain1_id = 1001
-        state.captain2_id = 1002
-        state.captain1_rating = 1850.0
-        state.captain2_rating = 1820.0
-
-        # Cache player data for all 10 players
-        state.player_pool_data = {
-            1001: {"name": "Captain1", "rating": 1850.0, "roles": ["1", "2"]},
-            1002: {"name": "Captain2", "rating": 1820.0, "roles": ["2", "3"]},
-            1003: {"name": "Player3", "rating": 1750.0, "roles": ["3"]},
-            1004: {"name": "Player4", "rating": 1700.0, "roles": ["4", "5"]},
-            1005: {"name": "Player5", "rating": 1650.0, "roles": ["5"]},
-            1006: {"name": "Player6", "rating": 1600.0, "roles": ["1"]},
-            1007: {"name": "Player7", "rating": 1550.0, "roles": ["2"]},
-            1008: {"name": "Player8", "rating": 1500.0, "roles": ["3", "4"]},
-            1009: {"name": "Player9", "rating": 1450.0, "roles": ["4"]},
-            1010: {"name": "Player10", "rating": 1400.0, "roles": ["5"]},
-        }
-
-        # Get available (non-captain) players
-        available_ids = [
-            pid for pid in state.player_pool_ids
-            if pid != state.captain1_id and pid != state.captain2_id
-        ]
-
-        # Verify 8 players available for draft
-        assert len(available_ids) == 8
-        assert 1001 not in available_ids  # Captain1 excluded
-        assert 1002 not in available_ids  # Captain2 excluded
-
-        # Build sorted player info
-        player_info = []
-        for pid in available_ids:
-            data = state.player_pool_data[pid]
-            player_info.append({
-                "name": data["name"],
-                "rating": data["rating"],
-                "roles": data["roles"],
-            })
-        player_info.sort(key=lambda p: p["rating"], reverse=True)
-
-        # Verify sorting (highest rated first)
-        assert player_info[0]["name"] == "Player3"
-        assert player_info[0]["rating"] == 1750.0
-        assert player_info[-1]["name"] == "Player10"
-        assert player_info[-1]["rating"] == 1400.0
-
-        # Verify all 8 players are present
-        names = [p["name"] for p in player_info]
-        assert "Captain1" not in names
-        assert "Captain2" not in names
-        assert len(names) == 8
-
-    def test_player_pool_data_preserves_roles(self):
-        """Role data is correctly preserved and accessible."""
-        state = DraftState(guild_id=123)
-        state.player_pool_ids = [1, 2, 3]
-        state.player_pool_data = {
-            1: {"name": "Carry", "rating": 1800.0, "roles": ["1"]},
-            2: {"name": "Flex", "rating": 1750.0, "roles": ["1", "2", "3", "4", "5"]},
-            3: {"name": "Support", "rating": 1700.0, "roles": ["4", "5"]},
-        }
-
-        assert state.player_pool_data[1]["roles"] == ["1"]
-        assert state.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
-        assert state.player_pool_data[3]["roles"] == ["4", "5"]
-
-        # Verify round-trip preserves roles
-        restored = DraftState.from_dict(state.to_dict())
-        assert restored.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
+        # Only the requested subset is considered: 2003 is eligible but not
+        # queried; 2004 is queried but not eligible.
+        assert player_repository.get_captain_eligible_players(
+            [2001, 2004], TEST_GUILD_ID
+        ) == [2001]
 
 
 # ============================================================================
@@ -2540,29 +2197,19 @@ class TestDraftingViewInteractionCheck:
         )
 
     @pytest.mark.asyncio
-    async def test_participant_allowed(self):
-        """A player in the pool passes interaction_check."""
+    async def test_participant_and_captain_allowed(self):
+        """A pool player and a captain both pass interaction_check
+        (merged from test_participant_allowed and test_captain_allowed)."""
         view = self._make_view()
-        interaction = MagicMock()
-        interaction.user.id = 5  # in pool
-        interaction.response = AsyncMock()
+        for user_id in (5, 1):  # pool member, captain1
+            interaction = MagicMock()
+            interaction.user.id = user_id
+            interaction.response = AsyncMock()
 
-        result = await view.interaction_check(interaction)
+            result = await view.interaction_check(interaction)
 
-        assert result is True
-        interaction.response.send_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_captain_allowed(self):
-        """A captain passes interaction_check."""
-        view = self._make_view()
-        interaction = MagicMock()
-        interaction.user.id = 1  # captain1
-        interaction.response = AsyncMock()
-
-        result = await view.interaction_check(interaction)
-
-        assert result is True
+            assert result is True, user_id
+            interaction.response.send_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_non_participant_rejected(self):

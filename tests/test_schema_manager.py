@@ -11,16 +11,43 @@ from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID
 
 
-def test_schema_manager_initializes_tables(tmp_path):
-    """Test that SchemaManager creates all required tables."""
-    db_path = str(tmp_path / "test.db")
-    mgr = SchemaManager(db_path)
-    mgr.initialize()
+def test_schema_manager_initializes_tables(repo_db_path):
+    """The fully migrated schema has all required tables, region columns, and
+    the reminder-preference column/index.
 
-    with sqlite3.connect(db_path) as conn:
+    Uses the session schema template (built by a real ``initialize()``) instead
+    of re-running all migrations. Merged from
+    test_schema_manager_adds_region_columns and
+    test_schema_manager_adds_lobby_reminder_preference.
+    """
+    with sqlite3.connect(repo_db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {row[0] for row in cursor.fetchall()}
+
+        player_columns = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
+
+        reminder_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(reminder_preferences)")
+        }
+        reminder_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(reminder_preferences)")
+        }
+        conn.execute(
+            """
+            INSERT INTO reminder_preferences (discord_id, guild_id)
+            VALUES (?, ?)
+            """,
+            (123, TEST_GUILD_ID),
+        )
+        lobby_enabled = conn.execute(
+            """
+            SELECT lobby_enabled
+            FROM reminder_preferences
+            WHERE discord_id = ? AND guild_id = ?
+            """,
+            (123, TEST_GUILD_ID),
+        ).fetchone()[0]
 
     required = {
         "players",
@@ -40,51 +67,27 @@ def test_schema_manager_initializes_tables(tmp_path):
     assert required.issubset(tables)
     assert {"wheel_wars", "war_bets", "protected_hero_purchases"}.isdisjoint(tables)
 
+    assert {"preferred_region", "inferred_region"}.issubset(player_columns)
 
-def test_schema_manager_drops_retired_wheel_war_tables(tmp_path):
-    db_path = str(tmp_path / "legacy-wheel-war.db")
+    assert "lobby_enabled" in reminder_columns
+    assert "idx_reminder_prefs_lobby" in reminder_indexes
+    assert lobby_enabled == 0
+
+
+def test_schema_manager_drops_retired_tables(tmp_path):
+    """One initialize drops every retired legacy table.
+
+    Merged from test_schema_manager_drops_retired_wheel_war_tables,
+    test_schema_manager_drops_retired_protected_hero_table, and
+    test_schema_manager_drops_retired_curses_table — one initialize covers
+    all three drop migrations.
+    """
+    db_path = str(tmp_path / "legacy-retired-tables.db")
+    manager = SchemaManager(db_path)
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE wheel_wars (war_id INTEGER PRIMARY KEY)")
         conn.execute("CREATE TABLE war_bets (bet_id INTEGER PRIMARY KEY)")
-
-    SchemaManager(db_path).initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        remaining = conn.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name IN ('wheel_wars', 'war_bets')
-            """
-        ).fetchall()
-
-    assert remaining == []
-
-
-def test_schema_manager_drops_retired_protected_hero_table(tmp_path):
-    db_path = str(tmp_path / "legacy-protected-heroes.db")
-    manager = SchemaManager(db_path)
-    with sqlite3.connect(db_path) as conn:
         manager._migration_create_protected_hero_purchases_table(conn.cursor())
-
-    manager.initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        remaining = conn.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'protected_hero_purchases'
-            """
-        ).fetchall()
-
-    assert remaining == []
-
-
-def test_schema_manager_drops_retired_curses_table(tmp_path):
-    db_path = str(tmp_path / "legacy-curses.db")
-    manager = SchemaManager(db_path)
-    with sqlite3.connect(db_path) as conn:
         manager._migration_create_curses_table(conn.cursor())
 
     manager.initialize()
@@ -94,64 +97,17 @@ def test_schema_manager_drops_retired_curses_table(tmp_path):
             """
             SELECT name
             FROM sqlite_master
-            WHERE type = 'table' AND name = 'curses'
+            WHERE type = 'table' AND name IN
+                ('wheel_wars', 'war_bets', 'protected_hero_purchases', 'curses')
             """
         ).fetchall()
 
     assert remaining == []
 
 
-def test_schema_manager_adds_region_columns(tmp_path):
-    """The region migration adds preferred_region and inferred_region to players."""
-    db_path = str(tmp_path / "test.db")
-    mgr = SchemaManager(db_path)
-    mgr.initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(players)")
-        columns = {row[1] for row in cursor.fetchall()}
-
-    assert {"preferred_region", "inferred_region"}.issubset(columns)
-
-
-def test_schema_manager_adds_lobby_reminder_preference(tmp_path):
-    """Lobby auto-notify is an opt-in indexed by guild."""
-    db_path = str(tmp_path / "test.db")
-    SchemaManager(db_path).initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(reminder_preferences)")
-        }
-        indexes = {
-            row[1] for row in conn.execute("PRAGMA index_list(reminder_preferences)")
-        }
-        conn.execute(
-            """
-            INSERT INTO reminder_preferences (discord_id, guild_id)
-            VALUES (?, ?)
-            """,
-            (123, TEST_GUILD_ID),
-        )
-        lobby_enabled = conn.execute(
-            """
-            SELECT lobby_enabled
-            FROM reminder_preferences
-            WHERE discord_id = ? AND guild_id = ?
-            """,
-            (123, TEST_GUILD_ID),
-        ).fetchone()[0]
-
-    assert "lobby_enabled" in columns
-    assert "idx_reminder_prefs_lobby" in indexes
-    assert lobby_enabled == 0
-
-
-def test_schema_manager_adds_lobby_target_subscription_table_and_index(tmp_path):
+def test_schema_manager_adds_lobby_target_subscription_table_and_index(repo_db_path):
     """One-shot player watches have their own target-keyed unique index."""
-    db_path = str(tmp_path / "test.db")
-    SchemaManager(db_path).initialize()
+    db_path = repo_db_path
 
     with sqlite3.connect(db_path) as conn:
         columns = conn.execute(
@@ -452,10 +408,15 @@ def test_prediction_probability_migration_recomputes_history_symmetrically(repo_
     assert stored_history == pytest.approx([(1, expected), (2, 1.0 - expected)])
 
 
-def test_soft_avoid_duration_migration_caps_legacy_stacks(tmp_path):
-    db_path = str(tmp_path / "legacy-soft-avoid-stack.db")
+def test_duration_migrations_cap_legacy_stacks(repo_db_path):
+    """The soft-avoid and package-deal cap migrations clamp legacy stacks to 10.
+
+    Merged from test_soft_avoid_duration_migration_caps_legacy_stacks and
+    test_package_deal_duration_migration_caps_legacy_stacks — one re-run of
+    initialize over the session schema template covers both.
+    """
+    db_path = repo_db_path
     manager = SchemaManager(db_path)
-    manager.initialize()
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -465,31 +426,6 @@ def test_soft_avoid_duration_migration_caps_legacy_stacks(tmp_path):
             VALUES (123, 100, 200, 25, 1, 1)
             """
         )
-        conn.execute(
-            "DELETE FROM schema_migrations WHERE name = ?",
-            ("cap_soft_avoid_games_remaining",),
-        )
-
-    manager.initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        games_remaining = conn.execute(
-            """
-            SELECT games_remaining
-            FROM soft_avoids
-            WHERE guild_id = 123 AND avoider_discord_id = 100 AND avoided_discord_id = 200
-            """
-        ).fetchone()[0]
-
-    assert games_remaining == 10
-
-
-def test_package_deal_duration_migration_caps_legacy_stacks(tmp_path):
-    db_path = str(tmp_path / "legacy-package-deal-stack.db")
-    manager = SchemaManager(db_path)
-    manager.initialize()
-
-    with sqlite3.connect(db_path) as conn:
         conn.execute("DROP TRIGGER trg_package_deals_games_remaining_insert_cap")
         conn.execute("DROP TRIGGER trg_package_deals_games_remaining_update_cap")
         conn.execute(
@@ -500,14 +436,21 @@ def test_package_deal_duration_migration_caps_legacy_stacks(tmp_path):
             """
         )
         conn.execute(
-            "DELETE FROM schema_migrations WHERE name = ?",
-            ("cap_package_deal_games_remaining",),
+            "DELETE FROM schema_migrations WHERE name IN (?, ?)",
+            ("cap_soft_avoid_games_remaining", "cap_package_deal_games_remaining"),
         )
 
     manager.initialize()
 
     with sqlite3.connect(db_path) as conn:
-        games_remaining = conn.execute(
+        avoid_games_remaining = conn.execute(
+            """
+            SELECT games_remaining
+            FROM soft_avoids
+            WHERE guild_id = 123 AND avoider_discord_id = 100 AND avoided_discord_id = 200
+            """
+        ).fetchone()[0]
+        deal_games_remaining = conn.execute(
             """
             SELECT games_remaining
             FROM package_deals
@@ -515,12 +458,12 @@ def test_package_deal_duration_migration_caps_legacy_stacks(tmp_path):
             """
         ).fetchone()[0]
 
-    assert games_remaining == 10
+    assert avoid_games_remaining == 10
+    assert deal_games_remaining == 10
 
 
-def test_package_deal_duration_cap_is_enforced_after_migrations(tmp_path):
-    db_path = str(tmp_path / "package-deal-duration-cap.db")
-    SchemaManager(db_path).initialize()
+def test_package_deal_duration_cap_is_enforced_after_migrations(repo_db_path):
+    db_path = repo_db_path
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -554,47 +497,15 @@ def test_package_deal_duration_cap_is_enforced_after_migrations(tmp_path):
             )
 
 
-def test_failed_pending_batch_rolls_back_all_schema_and_migration_rows(tmp_path):
-    db_path = str(tmp_path / "failed-pending-batch.db")
-    manager = SchemaManager(db_path)
-    migration_names = ("synthetic_batch_a", "synthetic_batch_b")
+def test_failed_pending_batch_rolls_back_and_retries_cleanly(tmp_path):
+    """A failed migration batch rolls back all schema and ledger rows, and a
+    later retry applies cleanly and idempotently.
 
-    def migration_a(cursor):
-        cursor.execute("CREATE TABLE synthetic_batch_a (value TEXT NOT NULL)")
-        cursor.execute("INSERT INTO synthetic_batch_a (value) VALUES ('a')")
-
-    def migration_b(cursor):
-        cursor.execute("CREATE TABLE synthetic_batch_b (value TEXT NOT NULL)")
-        cursor.execute("INSERT INTO synthetic_batch_b (value) VALUES ('b')")
-        raise RuntimeError("synthetic migration B failed")
-
-    manager._get_migrations = lambda: [
-        (migration_names[0], migration_a),
-        (migration_names[1], migration_b),
-    ]
-
-    with pytest.raises(RuntimeError, match="synthetic migration B failed"):
-        manager.initialize()
-
-    with sqlite3.connect(db_path) as conn:
-        rolled_back_tables = conn.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name IN (?, ?)
-            """,
-            migration_names,
-        ).fetchall()
-        migration_rows = conn.execute(
-            "SELECT name FROM schema_migrations WHERE name IN (?, ?)",
-            migration_names,
-        ).fetchall()
-
-    assert rolled_back_tables == []
-    assert migration_rows == []
-
-
-def test_failed_pending_batch_retries_cleanly(tmp_path):
+    Merged from test_failed_pending_batch_rolls_back_all_schema_and_migration_rows
+    and test_failed_pending_batch_retries_cleanly — the retry test starts from
+    the exact rolled-back state the first test asserted, so both live in one
+    fail → verify-rollback → retry → verify flow.
+    """
     db_path = str(tmp_path / "retry-pending-batch.db")
     manager = SchemaManager(db_path)
     migration_names = ("synthetic_retry_a", "synthetic_retry_b")
@@ -615,6 +526,24 @@ def test_failed_pending_batch_retries_cleanly(tmp_path):
 
     with pytest.raises(RuntimeError, match="synthetic migration B failed"):
         manager.initialize()
+
+    # The whole batch — tables AND migration-ledger rows — was rolled back.
+    with sqlite3.connect(db_path) as conn:
+        rolled_back_tables = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name IN (?, ?)
+            """,
+            migration_names,
+        ).fetchall()
+        migration_rows = conn.execute(
+            "SELECT name FROM schema_migrations WHERE name IN (?, ?)",
+            migration_names,
+        ).fetchall()
+
+    assert rolled_back_tables == []
+    assert migration_rows == []
 
     def successful_migration_a(cursor):
         cursor.execute("CREATE TABLE synthetic_retry_a (value TEXT NOT NULL)")
@@ -673,36 +602,34 @@ def test_failed_pending_batch_retries_cleanly(tmp_path):
     }
 
 
-def test_migration_normalize_null_guild_id_registered_on_initialize(tmp_path):
-    """NULL guild_id backfill migration is applied during schema init."""
-    db_path = str(tmp_path / "test.db")
+def test_migration_normalize_null_guild_id_registered_and_safe_on_clean_db(
+    repo_db_path,
+):
+    """NULL guild_id backfill migration is applied during schema init and is a
+    no-op when no legacy NULL guild_id rows exist.
+
+    Merged from test_migration_normalize_null_guild_id_registered_on_initialize
+    and test_migration_normalize_null_guild_id_sql_is_safe_on_clean_db; both
+    read from the session schema template built by a real initialize().
+    """
+    db_path = repo_db_path
     mgr = SchemaManager(db_path)
-    mgr.initialize()
 
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "SELECT 1 FROM schema_migrations WHERE name = ?",
             ("normalize_null_guild_id_pairings_and_neon",),
         ).fetchone()
+        assert row is not None
 
-    assert row is not None
-
-
-def test_migration_normalize_null_guild_id_sql_is_safe_on_clean_db(tmp_path):
-    """Backfill migration is a no-op when no legacy NULL guild_id rows exist."""
-    db_path = str(tmp_path / "test.db")
-    mgr = SchemaManager(db_path)
-    mgr.initialize()
-
-    with sqlite3.connect(db_path) as conn:
+        # Re-running the backfill helper on a clean db must not raise.
         cursor = conn.cursor()
         mgr._migration_normalize_null_guild_id_pairings_and_neon(cursor)
         conn.commit()
 
 
-def test_economy_ledger_triggers_record_player_and_nonprofit_changes(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    SchemaManager(db_path).initialize()
+def test_economy_ledger_triggers_record_player_and_nonprofit_changes(repo_db_path):
+    db_path = repo_db_path
 
     player_repo = PlayerRepository(db_path)
     loan_repo = LoanRepository(db_path)
@@ -725,10 +652,9 @@ def test_economy_ledger_triggers_record_player_and_nonprofit_changes(tmp_path):
     assert ("nonprofit", 123, 20, 0, 20, "nonprofit_insert") in rows
 
 
-def test_economy_ledger_migration_backfills_existing_balances(tmp_path):
-    db_path = str(tmp_path / "test.db")
+def test_economy_ledger_migration_backfills_existing_balances(repo_db_path):
+    db_path = repo_db_path
     mgr = SchemaManager(db_path)
-    mgr.initialize()
 
     player_repo = PlayerRepository(db_path)
     loan_repo = LoanRepository(db_path)
@@ -756,11 +682,10 @@ def test_economy_ledger_migration_backfills_existing_balances(tmp_path):
 
 
 def test_economy_event_severity_migration_preserves_history_and_allows_level_five(
-    tmp_path,
+    repo_db_path,
 ):
-    db_path = str(tmp_path / "legacy-economy-event-severity.db")
+    db_path = repo_db_path
     manager = SchemaManager(db_path)
-    manager.initialize()
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -840,10 +765,9 @@ def test_economy_event_severity_migration_preserves_history_and_allows_level_fiv
     assert legacy == (1, "Legacy Edict", 3, 110)
 
 
-def test_followup_ledger_backfill_accounts_for_existing_deltas(tmp_path):
-    db_path = str(tmp_path / "test.db")
+def test_followup_ledger_backfill_accounts_for_existing_deltas(repo_db_path):
+    db_path = repo_db_path
     mgr = SchemaManager(db_path)
-    mgr.initialize()
 
     player_repo = PlayerRepository(db_path)
     player_repo.add(333, "partially-logged", 123)
@@ -877,7 +801,7 @@ def test_followup_ledger_backfill_accounts_for_existing_deltas(tmp_path):
     ]
 
 
-def test_tunnels_columns_stay_in_sync_with_dig_update_whitelist(tmp_path):
+def test_tunnels_columns_stay_in_sync_with_dig_update_whitelist(repo_db_path):
     """Every tunnels column must be update_tunnel-writable or explicitly excluded.
 
     Pins the known failure class where a migration adds a tunnels column
@@ -889,8 +813,7 @@ def test_tunnels_columns_stay_in_sync_with_dig_update_whitelist(tmp_path):
     """
     from repositories.dig_repository import DigRepository
 
-    db_path = str(tmp_path / "test.db")
-    SchemaManager(db_path).initialize()
+    db_path = repo_db_path
 
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(tunnels)")}

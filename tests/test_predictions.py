@@ -69,34 +69,53 @@ def _add_player(player_repo: PlayerRepository, discord_id: int, balance: int = 1
 
 
 def test_schema_has_orderbook_tables(prediction_repo):
-    """The migration creates prediction_levels, prediction_positions, prediction_trades."""
+    """The migration creates the order-book tables, the order-book columns on
+    predictions, and the last_fill_price column on trades.
+
+    Merged from test_predictions_has_orderbook_columns and
+    test_prediction_trades_record_last_fill_price.
+    """
     with prediction_repo.connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {row["name"] for row in cursor.fetchall()}
+        cursor.execute("PRAGMA table_info(predictions)")
+        prediction_cols = {row["name"] for row in cursor.fetchall()}
+        cursor.execute("PRAGMA table_info(prediction_trades)")
+        trade_cols = {row["name"] for row in cursor.fetchall()}
+
     assert "prediction_levels" in tables
     assert "prediction_positions" in tables
     assert "prediction_trades" in tables
+    for col in ("current_price", "initial_fair", "last_refresh_at", "lp_pnl"):
+        assert col in prediction_cols, f"missing column: {col}"
+    assert "last_fill_price" in trade_cols
 
 
-def test_prediction_positions_user_index_supports_direct_lookup(prediction_repo):
-    """The user-leading position index is stable and selected for user lookups."""
+def test_prediction_indexes_support_user_and_refresh_lookups(prediction_repo):
+    """The user-leading position index and the market/time trade index are
+    stable across re-initialization and selected by the query planner.
+
+    Merged from test_prediction_positions_user_index_supports_direct_lookup
+    and test_prediction_trade_time_index_supports_refresh_volume — one
+    double-initialize covers both index-stability claims.
+    """
     manager = SchemaManager(prediction_repo.db_path)
     manager.initialize()
     manager.initialize()
 
     with prediction_repo.connection() as conn:
-        indexes = [
+        position_indexes = [
             row["name"]
             for row in conn.execute("PRAGMA index_list(prediction_positions)")
         ]
-        columns = [
+        position_columns = [
             row["name"]
             for row in conn.execute(
                 "PRAGMA index_info('idx_prediction_positions_user')"
             )
         ]
-        plan = conn.execute(
+        position_plan = conn.execute(
             """
             EXPLAIN QUERY PLAN
             SELECT prediction_id
@@ -106,32 +125,17 @@ def test_prediction_positions_user_index_supports_direct_lookup(prediction_repo)
             (12345,),
         ).fetchall()
 
-    assert indexes.count("idx_prediction_positions_user") == 1
-    assert columns == ["discord_id", "prediction_id"]
-    assert any(
-        "idx_prediction_positions_user" in row["detail"]
-        for row in plan
-    ), [row["detail"] for row in plan]
-
-
-def test_prediction_trade_time_index_supports_refresh_volume(prediction_repo):
-    """Refresh-window volume uses the market/time covering index."""
-    manager = SchemaManager(prediction_repo.db_path)
-    manager.initialize()
-    manager.initialize()
-
-    with prediction_repo.connection() as conn:
-        indexes = [
+        trade_indexes = [
             row["name"]
             for row in conn.execute("PRAGMA index_list(prediction_trades)")
         ]
-        columns = [
+        trade_columns = [
             row["name"]
             for row in conn.execute(
                 "PRAGMA index_info('idx_pred_trades_pred_time')"
             )
         ]
-        plan = conn.execute(
+        trade_plan = conn.execute(
             """
             EXPLAIN QUERY PLAN
             SELECT COALESCE(SUM(contracts), 0)
@@ -141,12 +145,19 @@ def test_prediction_trade_time_index_supports_refresh_volume(prediction_repo):
             (12345, 1000),
         ).fetchall()
 
-    assert indexes.count("idx_pred_trades_pred_time") == 1
-    assert columns == ["prediction_id", "trade_time"]
+    assert position_indexes.count("idx_prediction_positions_user") == 1
+    assert position_columns == ["discord_id", "prediction_id"]
+    assert any(
+        "idx_prediction_positions_user" in row["detail"]
+        for row in position_plan
+    ), [row["detail"] for row in position_plan]
+
+    assert trade_indexes.count("idx_pred_trades_pred_time") == 1
+    assert trade_columns == ["prediction_id", "trade_time"]
     assert any(
         "idx_pred_trades_pred_time" in row["detail"]
-        for row in plan
-    ), [row["detail"] for row in plan]
+        for row in trade_plan
+    ), [row["detail"] for row in trade_plan]
 
 
 def test_position_transfer_rejects_non_open_market(prediction_repo):
@@ -223,23 +234,6 @@ def test_position_transfer_rejects_unregistered_recipient(
     recipient = prediction_repo.get_position(market_id, 1002)
     assert recipient["yes_contracts"] == 4
     assert recipient["yes_cost_basis_total"] == 12
-
-
-def test_predictions_has_orderbook_columns(prediction_repo):
-    with prediction_repo.connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(predictions)")
-        cols = {row["name"] for row in cursor.fetchall()}
-    for col in ("current_price", "initial_fair", "last_refresh_at", "lp_pnl"):
-        assert col in cols, f"missing column: {col}"
-
-
-def test_prediction_trades_record_last_fill_price(prediction_repo):
-    with prediction_repo.connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(prediction_trades)")
-        cols = {row["name"] for row in cursor.fetchall()}
-    assert "last_fill_price" in cols
 
 
 # --------------------------------------------------------------------------- #
@@ -734,14 +728,14 @@ def test_create_at_fair_bounds_keeps_normal_ladder_and_filters_outer_levels(
         assert book["yes_asks"] == [(97, 50), (98, 50), (99, 50)]
 
 
-def test_create_rejects_question_too_short(prediction_service):
+def test_create_rejects_invalid_inputs(prediction_service):
+    """Too-short questions and out-of-range initial_fair are rejected
+    (merged from test_create_rejects_question_too_short and
+    test_create_rejects_initial_fair_out_of_range)."""
     with pytest.raises(ValueError, match="at least 5"):
         prediction_service.create_orderbook_prediction(
             guild_id=TEST_GUILD_ID, creator_id=1, question="hi", initial_fair=50,
         )
-
-
-def test_create_rejects_initial_fair_out_of_range(prediction_service):
     with pytest.raises(ValueError, match="initial_fair"):
         prediction_service.create_orderbook_prediction(
             guild_id=TEST_GUILD_ID, creator_id=1, question="ok question", initial_fair=99,
@@ -790,25 +784,65 @@ def test_buy_yes_walks_deeper(prediction_service, prediction_repo, player_reposi
     assert result["total_cost"] == _quote_total(take_l1 * 52 + take_l2 * 53, "buy")
 
 
-def test_buy_yes_rejects_insufficient_depth(prediction_service, player_repository):
-    _add_player(player_repository, 1, balance=1_000_000)
+def test_buy_rejections(prediction_service, player_repository):
+    """All buy rejection paths against one market: insufficient depth,
+    insufficient balance, non-positive contracts, per-trade cap, and debt.
+
+    Merged from test_buy_yes_rejects_insufficient_depth,
+    test_buy_yes_rejects_insufficient_balance,
+    test_buy_rejects_negative_or_zero_contracts,
+    test_buy_rejects_above_per_trade_cap, and test_buy_yes_rejects_in_debt.
+    """
+    from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
+
+    _add_player(player_repository, 1, balance=1_000_000)  # rich
+    _add_player(player_repository, 2, balance=10)  # broke
+    _add_player(player_repository, 3, balance=-50)  # in debt
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market c?", initial_fair=50,
     )["prediction_id"]
+
     full_depth = 200
     with pytest.raises(ValueError, match="Insufficient depth"):
         prediction_service.buy_contracts(
             prediction_id=pid, discord_id=1, side="yes", contracts=full_depth + 1,
+        )
+    with pytest.raises(ValueError, match="Insufficient balance"):
+        prediction_service.buy_contracts(
+            prediction_id=pid, discord_id=2, side="yes", contracts=5,
+        )
+    with pytest.raises(ValueError, match="positive"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=0)
+    with pytest.raises(ValueError, match="positive"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=-5)
+    with pytest.raises(ValueError, match=f"capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE}"):
+        prediction_service.buy_contracts(
+            prediction_id=pid, discord_id=1, side="yes",
+            contracts=PREDICTION_MAX_CONTRACTS_PER_TRADE + 1,
+        )
+    with pytest.raises(ValueError, match="in debt"):
+        prediction_service.buy_contracts(
+            prediction_id=pid, discord_id=3, side="yes", contracts=1,
         )
 
 
 def test_refresh_uses_widened_drift_bounds(
     prediction_service, prediction_repo, monkeypatch,
 ):
-    """Daily refresh random walk uses the configured inclusive drift range."""
+    """Daily refresh random walk uses the configured inclusive drift range,
+    stamps the OLD current_price as prev_price for the digest delta, and
+    appends a fair-history snapshot carrying the new fair.
+
+    Merged from test_apply_refresh_stamps_prev_price and
+    test_apply_refresh_appends_fair_snapshot — same single-refresh scenario.
+    """
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market drift?", initial_fair=50,
     )["prediction_id"]
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 50
+    assert pred["prev_price"] is None  # never refreshed yet
+
     bounds = {}
 
     def capture_randint(lo, hi):
@@ -823,52 +857,13 @@ def test_refresh_uses_widened_drift_bounds(
     assert bounds == {"lo": -3, "hi": 3}
     assert summary["drift"] == 3
 
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 53
+    assert pred["prev_price"] == 50  # OLD price was stamped as prev_price
 
-def test_buy_yes_rejects_insufficient_balance(prediction_service, player_repository):
-    _add_player(player_repository, 1, balance=10)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market d?", initial_fair=50,
-    )["prediction_id"]
-    with pytest.raises(ValueError, match="Insufficient balance"):
-        prediction_service.buy_contracts(
-            prediction_id=pid, discord_id=1, side="yes", contracts=5,
-        )
-
-
-def test_buy_rejects_negative_or_zero_contracts(prediction_service, player_repository):
-    _add_player(player_repository, 1)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market neg?", initial_fair=50,
-    )["prediction_id"]
-    with pytest.raises(ValueError, match="positive"):
-        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=0)
-    with pytest.raises(ValueError, match="positive"):
-        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=-5)
-
-
-def test_buy_rejects_above_per_trade_cap(prediction_service, player_repository):
-    """Per-trade cap rejects more than PREDICTION_MAX_CONTRACTS_PER_TRADE in one go."""
-    from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
-    _add_player(player_repository, 1, balance=1_000_000)  # plenty of jopa
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market cap?", initial_fair=50,
-    )["prediction_id"]
-    with pytest.raises(ValueError, match=f"capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE}"):
-        prediction_service.buy_contracts(
-            prediction_id=pid, discord_id=1, side="yes",
-            contracts=PREDICTION_MAX_CONTRACTS_PER_TRADE + 1,
-        )
-
-
-def test_buy_yes_rejects_in_debt(prediction_service, player_repository):
-    _add_player(player_repository, 1, balance=-50)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market e?", initial_fair=50,
-    )["prediction_id"]
-    with pytest.raises(ValueError, match="in debt"):
-        prediction_service.buy_contracts(
-            prediction_id=pid, discord_id=1, side="yes", contracts=1,
-        )
+    history = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
+    assert len(history) >= 2
+    assert history[-1][1] == 53
 
 
 def test_buy_no_mirrors_yes_bid(prediction_service, prediction_repo, player_repository):
@@ -1197,8 +1192,17 @@ def post_helper(book):
         yield (("yes_bid", price), size)
 
 
-def test_refresh_locked_level_at_top_bid_is_kept(prediction_service, prediction_repo):
-    """An old ask at exactly the new top bid is locked (not crossed) — keep it."""
+def test_refresh_locked_levels_at_book_boundaries_are_kept(
+    prediction_service, prediction_repo
+):
+    """Locked (not crossed) levels survive a refresh on both sides: an old ask
+    at exactly the new top bid, and symmetrically an old bid at exactly the
+    new top ask.
+
+    Merged from test_refresh_locked_level_at_top_bid_is_kept and
+    test_refresh_locked_bid_at_top_ask_is_kept.
+    """
+    # Ask-at-the-bid boundary.
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mx?", initial_fair=50,
     )["prediction_id"]
@@ -1219,6 +1223,25 @@ def test_refresh_locked_level_at_top_bid_is_kept(prediction_service, prediction_
     # New ladder positions added.
     assert post[("yes_ask", 52)] == 3
     assert post[("yes_bid", 51)] == 3
+
+    # Symmetric bid-at-the-ask boundary on a second market.
+    pid2 = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mxd?", initial_fair=50,
+    )["prediction_id"]
+    prediction_repo.replace_levels(pid2, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
+
+    # Apply an explicit one-level ladder with ask 49 and bid 48.
+    prediction_repo.apply_refresh(
+        pid2,
+        new_price=48,
+        levels=[("yes_ask", 49, 3), ("yes_bid", 48, 3)],
+        now_ts=10**9,
+    )
+    post = dict(post_helper(prediction_repo.get_book(pid2)))
+    # Old bid at 49 is at-the-ask (locked, not crossed) — must survive.
+    assert post[("yes_bid", 49)] == 5
+    assert post[("yes_bid", 48)] == 3
+    assert post[("yes_ask", 49)] == 3
 
 
 def test_refresh_preserves_crossing_ask_for_arb(prediction_repo, prediction_service):
@@ -1250,16 +1273,29 @@ def test_refresh_preserves_crossing_ask_for_arb(prediction_repo, prediction_serv
 
 
 def test_set_fair_manual_changes_price_and_layers_ladder(
-    prediction_service, prediction_repo,
+    prediction_service, prediction_repo, player_repository,
 ):
+    """Admin set_fair moves the price, layers a fresh ladder while preserving
+    old (even crossing) levels, stamps prev_price, appends a fair-history
+    snapshot, and leaves user holdings untouched.
+
+    Merged from test_set_fair_manual_stamps_prev_price,
+    test_set_fair_manual_appends_fair_snapshot, and
+    test_set_fair_with_open_position_preserves_user_holdings.
+    """
+    _add_player(player_repository, 1, balance=1000)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market sf?", initial_fair=50,
     )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=3)
+    pos_before = prediction_repo.get_position(pid, 1)
+
     result = prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
     assert result["old_price"] == 50
     assert result["new_price"] == 60
     pred = prediction_repo.get_prediction(pid)
     assert pred["current_price"] == 60
+    assert pred["prev_price"] == 50  # digest delta footprint
     book = prediction_repo.get_book(pid)
     ask_prices = sorted(p for p, _ in book["yes_asks"])
     bid_prices = sorted((p for p, _ in book["yes_bids"]), reverse=True)
@@ -1270,6 +1306,16 @@ def test_set_fair_manual_changes_price_and_layers_ladder(
     # that now cross the new bid/ask. Whoever spots a stale price arbs it.
     assert 52 in ask_prices and 53 in ask_prices and 54 in ask_prices
     assert 46 in bid_prices and 47 in bid_prices and 48 in bid_prices
+
+    # A fair-history snapshot was appended with the new fair.
+    history = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
+    assert history[-1][1] == 60
+
+    # User contracts and cost basis are untouched; the mark moved up.
+    pos_after = prediction_repo.get_position(pid, 1)
+    assert pos_after["yes_contracts"] == pos_before["yes_contracts"]
+    assert pos_after["yes_cost_basis_total"] == pos_before["yes_cost_basis_total"]
+    assert book["yes_bids"][0][0] > 50  # mark moved up
 
 
 def test_refresh_layers_with_refresh_params_not_initial(
@@ -1319,36 +1365,13 @@ def test_refresh_layers_with_refresh_params_not_initial(
     assert seed_outer_offset >= PREDICTION_REFRESH_SPREAD_TICKS
 
 
-def test_apply_refresh_stamps_prev_price(
-    prediction_service, prediction_repo, monkeypatch,
+def test_set_fair_manual_rejects_out_of_range_and_resolved(
+    prediction_service, player_repository
 ):
-    """Each refresh records the OLD current_price as prev_price for the digest delta."""
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market pp?", initial_fair=50,
-    )["prediction_id"]
-    pred = prediction_repo.get_prediction(pid)
-    assert pred["current_price"] == 50
-    assert pred["prev_price"] is None  # never refreshed yet
-
-    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # drift +2 → new price 52
-    prediction_service.refresh_market(pid)
-    pred = prediction_repo.get_prediction(pid)
-    assert pred["current_price"] == 52
-    assert pred["prev_price"] == 50  # OLD price was stamped as prev_price
-
-
-def test_set_fair_manual_stamps_prev_price(prediction_service, prediction_repo):
-    """Admin override also leaves a prev_price footprint so the digest reflects the move."""
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfp?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.set_fair_manual(prediction_id=pid, new_price=80)
-    pred = prediction_repo.get_prediction(pid)
-    assert pred["current_price"] == 80
-    assert pred["prev_price"] == 50
-
-
-def test_set_fair_manual_rejects_out_of_range(prediction_service):
+    """set_fair rejects out-of-range prices and resolved markets (merged from
+    test_set_fair_manual_rejects_out_of_range and
+    test_set_fair_manual_rejects_resolved_market)."""
+    _add_player(player_repository, 1)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market sfo?", initial_fair=50,
     )["prediction_id"]
@@ -1357,59 +1380,10 @@ def test_set_fair_manual_rejects_out_of_range(prediction_service):
     with pytest.raises(ValueError, match="new_price"):
         prediction_service.set_fair_manual(prediction_id=pid, new_price=2)
 
-
-def test_set_fair_manual_rejects_resolved_market(prediction_service, player_repository):
-    _add_player(player_repository, 1)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfr?", initial_fair=50,
-    )["prediction_id"]
     prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
     prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
     with pytest.raises(ValueError, match="resolved"):
         prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
-
-
-def test_refresh_locked_bid_at_top_ask_is_kept(prediction_service, prediction_repo):
-    """Symmetric: an old bid at exactly the new top ask is locked, not crossed."""
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market mxd?", initial_fair=50,
-    )["prediction_id"]
-    prediction_repo.replace_levels(pid, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
-
-    # Apply an explicit one-level ladder with ask 49 and bid 48.
-    prediction_repo.apply_refresh(
-        pid,
-        new_price=48,
-        levels=[("yes_ask", 49, 3), ("yes_bid", 48, 3)],
-        now_ts=10**9,
-    )
-    post = dict(post_helper(prediction_repo.get_book(pid)))
-    # Old bid at 49 is at-the-ask (locked, not crossed) — must survive.
-    assert post[("yes_bid", 49)] == 5
-    assert post[("yes_bid", 48)] == 3
-    assert post[("yes_ask", 49)] == 3
-
-
-def test_set_fair_with_open_position_preserves_user_holdings(
-    prediction_service, prediction_repo, player_repository,
-):
-    """An admin set_fair must not touch user contracts or cost basis."""
-    _add_player(player_repository, 1, balance=1000)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfp?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=3)
-    pos_before = prediction_repo.get_position(pid, 1)
-
-    prediction_service.set_fair_manual(prediction_id=pid, new_price=80)
-    pos_after = prediction_repo.get_position(pid, 1)
-
-    assert pos_after["yes_contracts"] == pos_before["yes_contracts"]
-    assert pos_after["yes_cost_basis_total"] == pos_before["yes_cost_basis_total"]
-    # Mark moves: user's position is now worth more on paper because fair jumped.
-    book = prediction_repo.get_book(pid)
-    new_top_bid = book["yes_bids"][0][0]
-    assert new_top_bid > 50  # mark moved up
 
 
 def test_get_markets_due_for_refresh(prediction_service, prediction_repo):
@@ -1428,6 +1402,14 @@ def test_get_markets_due_for_refresh(prediction_service, prediction_repo):
 
 
 def test_resolve_yes_pays_yes_holders(prediction_service, prediction_repo, player_repository):
+    """Resolution pays YES holders full contract value, leaves NO holders'
+    balances untouched, balances lp_pnl as collected − paid, records
+    resolved_by, and blocks further trades.
+
+    Merged from test_resolve_lp_pnl_balances_collected_minus_paid,
+    test_resolve_marks_status_and_blocks_further_trades, and
+    test_resolve_records_resolved_by — one resolution covers all slices.
+    """
     _add_player(player_repository, 1, balance=1000)
     _add_player(player_repository, 2, balance=1000)
     pid = prediction_service.create_orderbook_prediction(
@@ -1438,7 +1420,9 @@ def test_resolve_yes_pays_yes_holders(prediction_service, prediction_repo, playe
     bal_1_pre = player_repository.get_balance(1, TEST_GUILD_ID)
     bal_2_pre = player_repository.get_balance(2, TEST_GUILD_ID)
 
-    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    result = prediction_service.resolve_orderbook(
+        prediction_id=pid, outcome="yes", resolved_by=12345
+    )
 
     assert result["total_payout"] == 5 * PREDICTION_CONTRACT_VALUE
     bal_1_post = player_repository.get_balance(1, TEST_GUILD_ID)
@@ -1446,39 +1430,16 @@ def test_resolve_yes_pays_yes_holders(prediction_service, prediction_repo, playe
     assert bal_1_post - bal_1_pre == 5 * PREDICTION_CONTRACT_VALUE
     assert bal_2_post == bal_2_pre
 
-
-def test_resolve_lp_pnl_balances_collected_minus_paid(prediction_service, player_repository):
-    _add_player(player_repository, 1)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market p?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
-    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
-    expected_collected = _quote_total(5 * 52, "buy")
+    # lp_pnl = everything collected from both sides minus the payout.
+    expected_collected = _quote_total(5 * 52, "buy") + _quote_total(4 * (100 - 48), "buy")
     expected_paid = 5 * PREDICTION_CONTRACT_VALUE
     assert result["lp_pnl"] == expected_collected - expected_paid
 
-
-def test_resolve_marks_status_and_blocks_further_trades(prediction_service, player_repository):
-    _add_player(player_repository, 1)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market q?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=2)
-    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
-    with pytest.raises(ValueError, match="not open"):
-        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
-
-
-def test_resolve_records_resolved_by(prediction_service, prediction_repo, player_repository):
-    _add_player(player_repository, 1)
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="market qq?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
-    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes", resolved_by=12345)
     pred = prediction_repo.get_prediction(pid)
     assert pred["resolved_by"] == 12345
+
+    with pytest.raises(ValueError, match="not open"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
 
 
 def test_apply_refresh_skips_resolved_market(prediction_service, prediction_repo, player_repository):
@@ -1662,14 +1623,14 @@ def test_get_user_open_positions_marks_missing_book_side_as_none(
 
 
 def test_position_mark_helper():
+    """Marks come from the opposing top-of-book; an empty side yields None
+    (merged from test_position_mark_falls_back_when_side_empty)."""
     book = {"yes_asks": [(55, 5), (56, 5)], "yes_bids": [(45, 5), (44, 5)]}
     assert PredictionService.position_mark(book, "yes") == 45
     assert PredictionService.position_mark(book, "no") == 100 - 55  # = 45
 
-
-def test_position_mark_falls_back_when_side_empty():
-    book = {"yes_asks": [], "yes_bids": [(45, 5)]}
-    assert PredictionService.position_mark(book, "no") is None
+    one_sided = {"yes_asks": [], "yes_bids": [(45, 5)]}
+    assert PredictionService.position_mark(one_sided, "no") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -2928,32 +2889,10 @@ def test_create_orderbook_writes_initial_fair_snapshot(prediction_service, predi
     assert history[0][1] == 42
 
 
-def test_apply_refresh_appends_fair_snapshot(
-    prediction_service, prediction_repo, monkeypatch,
-):
-    """Each refresh adds a fair-history row carrying the new fair."""
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="snap b?", initial_fair=50,
-    )["prediction_id"]
-    monkeypatch.setattr(random, "randint", lambda lo, hi: 3)  # +3 drift
-    prediction_service.refresh_market(pid)
-    history = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
-    assert len(history) >= 2
-    assert history[-1][1] == 53
-
-
-def test_set_fair_manual_appends_fair_snapshot(prediction_service, prediction_repo):
-    """Admin set_fair stamps a snapshot the chart can render alongside refresh ones."""
-    pid = prediction_service.create_orderbook_prediction(
-        guild_id=TEST_GUILD_ID, creator_id=1, question="snap c?", initial_fair=50,
-    )["prediction_id"]
-    prediction_service.set_fair_manual(prediction_id=pid, new_price=70)
-    history = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
-    assert history[-1][1] == 70
-
-
 def test_pop_one_shot_flag_self_clears(prediction_repo):
-    """``pop_one_shot_flag`` returns True once and never again."""
+    """``pop_one_shot_flag`` returns True once and never again; a guild with
+    no sentinel row never sees the banner (merged from
+    test_pop_one_shot_flag_missing_returns_false)."""
     with prediction_repo.connection() as conn:
         conn.execute(
             "INSERT INTO app_kv (guild_id, key, value) VALUES (?, ?, '0')",
@@ -2961,10 +2900,6 @@ def test_pop_one_shot_flag_self_clears(prediction_repo):
         )
     assert prediction_repo.pop_one_shot_flag(TEST_GUILD_ID, "test_banner") is True
     assert prediction_repo.pop_one_shot_flag(TEST_GUILD_ID, "test_banner") is False
-
-
-def test_pop_one_shot_flag_missing_returns_false(prediction_repo):
-    """Guilds with no sentinel row never see the banner."""
     assert prediction_repo.pop_one_shot_flag(TEST_GUILD_ID, "nope") is False
 
 
@@ -3130,16 +3065,19 @@ def test_market_chart_auto_zooms_for_narrow_band_markets():
 # --------------------------------------------------------------------------- #
 
 
-def test_get_user_orderbook_stats_empty(prediction_repo):
-    """A user with no order-book activity gets zeroed stats."""
-    stats = prediction_repo.get_user_orderbook_stats(12345, TEST_GUILD_ID)
-    assert stats == {"realized_pnl": 0, "wins": 0, "losses": 0, "resolved_markets": 0}
-
-
 def test_get_user_orderbook_stats_realized_pnl(
     prediction_service, prediction_repo, player_repository
 ):
-    """Realized P&L sums resolved markets only; wins/losses split on P&L sign."""
+    """Realized P&L sums resolved markets only; wins/losses split on P&L sign.
+    A user with no activity gets zeroed stats (merged from
+    test_get_user_orderbook_stats_empty)."""
+    assert prediction_repo.get_user_orderbook_stats(12345, TEST_GUILD_ID) == {
+        "realized_pnl": 0,
+        "wins": 0,
+        "losses": 0,
+        "resolved_markets": 0,
+    }
+
     _add_player(player_repository, 1, balance=100_000)
 
     # Win market: buy YES, resolve YES.
