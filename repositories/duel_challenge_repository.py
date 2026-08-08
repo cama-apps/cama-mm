@@ -805,6 +805,11 @@ class DuelChallengeRepository(BaseRepository):
                 challenge.created_at
                 + ((now - challenge.created_at) // 86400 + 1) * 86400
             )
+            # An off-grid backoff retry can land just under the boundary;
+            # skip it rather than ping twice minutes apart (600s matches the
+            # service-side retry backoff). Expiry still caps the schedule.
+            if daily_boundary - now < 600:
+                daily_boundary += 86400
             next_reminder_at = min(daily_boundary, challenge.expires_at)
             cursor.execute(
                 """

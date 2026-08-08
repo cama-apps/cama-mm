@@ -1536,6 +1536,27 @@ async def test_results_view_failed_click_retires_via_the_previous_token():
 
 
 @pytest.mark.asyncio
+async def test_results_view_transient_click_failure_keeps_the_view_alive():
+    """A transient error (5xx/disconnect) must not permanently retire the
+    report — only a dead click token warrants the eager retire."""
+    pages = [SimpleNamespace(), SimpleNamespace()]
+    original = _interaction(user_id=900)
+    view = survey_commands.SurveyResultsView(
+        owner_id=900,
+        pages=pages,
+        interaction=original,
+    )
+    flaky_click = _interaction(user_id=900)
+    flaky_click.response.edit_message.side_effect = RuntimeError("disconnected")
+
+    with pytest.raises(RuntimeError):
+        await view.next.callback(flaky_click)
+
+    assert not view.is_finished()
+    original.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_results_command_wires_timeout_interaction_into_pagination(monkeypatch):
     interaction = _interaction(user_id=900, guild=SimpleNamespace(id=77))
     report = SurveyResults(

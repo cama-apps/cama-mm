@@ -2186,6 +2186,7 @@ class LobbyCommands(commands.Cog):
         guild_id: int | None,
         invoker_id: int,
         lobby_kind: LobbyKind | str | None = None,
+        confirm_invoker: bool = True,
     ) -> tuple[str, dict]:
         """Run the readycheck flow. Returns (status, info).
 
@@ -2194,7 +2195,10 @@ class LobbyCommands(commands.Cog):
         Discord interaction object — callers translate the status into the
         appropriate user-facing feedback (ephemeral followup or reaction
         removal). ``invoker_id`` is the user who triggered the check; they are
-        never pruned and are auto-counted as ready.
+        never pruned and, when ``confirm_invoker`` is True (the explicit
+        /readycheck command — a fresh readiness signal), auto-counted as
+        ready even over their own earlier withdrawal. The 🔔 shortcut passes
+        False: its intent is to re-ping others, not to declare readiness.
 
         status: one of "ok" | "no_lobby" | "not_member" | "no_thread"
                 | "cooldown" | "no_guild" | "error"
@@ -2360,7 +2364,9 @@ class LobbyCommands(commands.Cog):
                         msg,
                         player_data,
                         guild_id,
-                        auto_confirm_ids={invoker_id},
+                        auto_confirm_ids=(
+                            {invoker_id} if confirm_invoker else set()
+                        ),
                         lobby_kind=kind,
                     )
                 )

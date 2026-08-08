@@ -62,6 +62,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
+async def _send_pre_defer_notice(
+    interaction: discord.Interaction, message: str
+) -> None:
+    """Ephemeral validation notice sent before any defer.
+
+    The validation chain's DB reads can outlast the interaction's 3s ack
+    window under contention; a lapsed token must not crash the handler -
+    there is nothing to roll back.
+    """
+    try:
+        await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        logger.warning(
+            "Shop notice could not be sent for %s", interaction.user.id
+        )
+
+
 SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
 SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
@@ -542,7 +559,7 @@ class ShopCommands(commands.Cog):
                 msg = f"Recalibration is on cooldown. You can recalibrate again <t:{ends_at}:R>."
             else:
                 msg = "You cannot recalibrate right now."
-            await interaction.response.send_message(msg, ephemeral=True)
+            await _send_pre_defer_notice(interaction, msg)
             return
 
         # Apply mana discount on info-style items.
@@ -565,10 +582,10 @@ class ShopCommands(commands.Cog):
             self.player_service.get_balance, user_id, guild_id
         )
         if balance < recal_cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You need **{recal_cost}** {JOPACOIN_EMOTE} to recalibrate "
                 f"but only have **{balance}** {JOPACOIN_EMOTE}.",
-                ephemeral=True,
             )
             return
 
@@ -675,20 +692,20 @@ class ShopCommands(commands.Cog):
         # Check if registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can shop. "
                 "Hard to flex wealth you don't have.",
-                ephemeral=True,
             )
             return
 
         # Check balance
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}. "
                 "Maybe try earning some money before flexing?",
-                ephemeral=True,
             )
             return
 
@@ -969,17 +986,17 @@ class ShopCommands(commands.Cog):
 
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can shop.",
-                ephemeral=True,
             )
             return
 
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                ephemeral=True,
             )
             return
 
@@ -1035,17 +1052,17 @@ class ShopCommands(commands.Cog):
 
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can shop.",
-                ephemeral=True,
             )
             return
 
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                ephemeral=True,
             )
             return
 
@@ -1102,10 +1119,10 @@ class ShopCommands(commands.Cog):
         # Check if registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can gamble. "
                 "Can't double nothing if you have nothing.",
-                ephemeral=True,
             )
             return
 
@@ -1129,10 +1146,10 @@ class ShopCommands(commands.Cog):
                     time_str += f"{hours}h "
                 if minutes > 0 or not time_str:
                     time_str += f"{minutes}m"
-                await interaction.response.send_message(
+                await _send_pre_defer_notice(
+                    interaction,
                     f"You already tempted fate recently. "
                     f"Wait **{time_str.strip()}** before your next Double or Nothing.",
-                    ephemeral=True,
                 )
                 # Neon Degen Terminal hook (cooldown hit)
                 try:
@@ -1161,26 +1178,26 @@ class ShopCommands(commands.Cog):
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         if balance < 0:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You're in debt ({balance} {JOPACOIN_EMOTE}). "
                 "You can't double debt. Pay it off first!",
-                ephemeral=True,
             )
             return
 
         if balance < cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}. "
                 "Can't afford the ante.",
-                ephemeral=True,
             )
             return
 
         if balance == cost:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 f"You only have {balance} {JOPACOIN_EMOTE} — exactly the ante cost. "
                 "Nothing left to double! Earn more first.",
-                ephemeral=True,
             )
             return
 
@@ -1372,9 +1389,9 @@ class ShopCommands(commands.Cog):
         # Check if registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can shop.",
-                ephemeral=True,
             )
             return
 
@@ -1511,9 +1528,9 @@ class ShopCommands(commands.Cog):
         # Check if registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.response.send_message(
+            await _send_pre_defer_notice(
+                interaction,
                 "You need to `/player register` before you can shop.",
-                ephemeral=True,
             )
             return
 
