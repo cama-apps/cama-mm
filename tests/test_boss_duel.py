@@ -94,28 +94,6 @@ def _at_boss(dig_service, dig_repo, player_repository, monkeypatch, *, depth=24,
 class TestDuelDeterministicOutcomes:
     """With ``random.random`` pinned to extremes, duel outcomes are deterministic."""
 
-    def test_cautious_always_hit_wins(self, dig_service, dig_repo, player_repository, monkeypatch):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        monkeypatch.setattr(random, "random", lambda: 0.01)
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
-        assert result["success"]
-        assert result["won"] is True
-        # Round log is included in the response.
-        assert len(result["round_log"]) >= 1
-
-    def test_never_hit_triggers_round_cap_loss(self, dig_service, dig_repo, player_repository, monkeypatch):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        # Snapshot balance just before the fight (the first dig may have
-        # credited 1-5 JC from the guaranteed first-dig payout).
-        balance_before_fight = player_repository.get_balance(10001, TEST_GUILD_ID)
-
-        # Nobody can roll under 0.999; round cap fires and the boss takes it.
-        monkeypatch.setattr(random, "random", lambda: 0.999)
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
-        assert result["won"] is False
-        assert BOSS_LOSS_KNOCKBACK_MIN <= result["knockback"] <= BOSS_LOSS_KNOCKBACK_MAX
-        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before_fight - 10
-
     def test_player_first_one_shot_boss_never_swings(self, dig_service, dig_repo, player_repository, monkeypatch):
         """Reckless always-hit: boss dies round 1 before it can counterattack."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -394,6 +372,10 @@ class TestDuelPayout:
         assert result["payout"] == scale_positive_dig_jc(22)
 
     def test_win_pays_from_payout_table(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """Below the taper knee a wagered win pays the authored (log-capped)
+        payout-table profit plus the flat base reward, and the boss_fight
+        audit log's detail.jc_delta equals the JC actually credited — not a
+        separate gross-loot estimate."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.0)
@@ -405,6 +387,8 @@ class TestDuelPayout:
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is True
+        # Round log is included in the response.
+        assert len(result["round_log"]) >= 1
         expected_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (_capped(expected_multiplier) - 1))
         # Every victory pays the flat base reward on top of the wager profit.
@@ -415,22 +399,6 @@ class TestDuelPayout:
         # Reported payout is the real net credited, not the gross return.
         assert result["payout"] == expected_credit
 
-    def test_audit_log_jc_delta_matches_real_payout(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        """The boss_fight audit log's detail.jc_delta must equal the JC the
-        player actually received — not a separate gross-loot estimate."""
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
-        monkeypatch.setattr(random, "random", lambda: 0.0)
-        monkeypatch.setattr(
-            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
-        )
-
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
-        assert result["won"] is True
-        real_payout = player_repository.get_balance(10001, TEST_GUILD_ID) - balance_before
-
         actions = dig_repo.get_recent_actions(
             10001, TEST_GUILD_ID, action_type="boss_fight",
         )
@@ -438,8 +406,7 @@ class TestDuelPayout:
         detail = json.loads(actions[0]["detail"])
         assert detail["won"] is True
         # The logged delta is the actual JC change, matching result["payout"].
-        assert detail["jc_delta"] == real_payout
-        assert detail["jc_delta"] == result["payout"]
+        assert detail["jc_delta"] == expected_credit
 
     def test_duel_audit_log_jc_delta_matches_real_payout(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -470,13 +437,15 @@ class TestDuelPayout:
         assert detail["jc_delta"] == result["payout"]
 
     def test_loss_applies_knockback(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """Boss loss knocks the player back and clears cheers."""
+        """A round-cap loss (nobody ever hits) knocks the player back within
+        the authored range and forfeits the wager."""
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated"})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=99, boss_progress=bp_defeated)
+        balance_before_fight = player_repository.get_balance(10001, TEST_GUILD_ID)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.999)
 
@@ -486,41 +455,21 @@ class TestDuelPayout:
         assert BOSS_LOSS_KNOCKBACK_MIN <= knockback <= BOSS_LOSS_KNOCKBACK_MAX
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["depth"] == 99 - knockback
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before_fight - 10
 
     def test_loss_takes_extra_gear_tick_and_extends_cooldown(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """A boss loss is harsher than a win: gear takes an extra durability tick
-        beyond the per-fight tick, and the next-dig cooldown is pushed forward."""
+        """A boss loss is harsher than a win: the armor that fought takes
+        BOSS_LOSS_EXTRA_GEAR_TICKS beyond the per-fight tick (other equipped
+        pieces take only the per-fight tick), and the next-dig cooldown is
+        pushed forward."""
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated"})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=99, boss_progress=bp_defeated)
-        gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
-        dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "armor")
-        dur_before = dig_repo.get_gear_by_id(gid)["durability"]
-
-        fight_time = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: fight_time)
-        monkeypatch.setattr(random, "random", lambda: 0.999)  # guaranteed loss
-
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
-        assert result["won"] is False
-
-        # One per-fight tick + BOSS_LOSS_EXTRA_GEAR_TICKS on the loss.
-        dur_after = dig_repo.get_gear_by_id(gid)["durability"]
-        assert dur_before - dur_after == 1 + BOSS_LOSS_EXTRA_GEAR_TICKS
-        # The legacy path applies no stinger, so the cooldown is exactly the
-        # flat post-loss extension on top of the fight timestamp.
-        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
-        assert tunnel["last_dig_at"] == fight_time + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
-
-    def test_loss_extra_wear_only_hits_the_armor_that_fought(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         weapon_id = dig_repo.get_equipped_gear(10001, TEST_GUILD_ID)["weapon"]["id"]
         armor_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
         boots_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "boots", 1)
@@ -532,13 +481,15 @@ class TestDuelPayout:
             gear_id: dig_repo.get_gear_by_id(gear_id)["durability"]
             for gear_id in (weapon_id, armor_id, boots_id, amulet_id)
         }
-        monkeypatch.setattr(random, "random", lambda: 0.999)
 
-        result = dig_service.fight_boss(
-            10001, TEST_GUILD_ID, "cautious", wager=10,
-        )
+        fight_time = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: fight_time)
+        monkeypatch.setattr(random, "random", lambda: 0.999)  # guaranteed loss
 
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
+
+        # One per-fight tick + BOSS_LOSS_EXTRA_GEAR_TICKS on the armor only.
         assert dig_repo.get_gear_by_id(armor_id)["durability"] == (
             durability_before[armor_id] - 1 - BOSS_LOSS_EXTRA_GEAR_TICKS
         )
@@ -546,6 +497,10 @@ class TestDuelPayout:
             assert dig_repo.get_gear_by_id(gear_id)["durability"] == (
                 durability_before[gear_id] - 1
             )
+        # The legacy path applies no stinger, so the cooldown is exactly the
+        # flat post-loss extension on top of the fight timestamp.
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        assert tunnel["last_dig_at"] == fight_time + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
     def test_loss_suppresses_soften_line_when_no_chip_damage(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -653,33 +608,28 @@ class TestMilestoneAntiFarm:
 
 
 class TestApproxWinProb:
-    """The Monte Carlo estimator should be in the right ballpark."""
+    """The Monte Carlo estimator should be in the right ballpark.
 
-    def test_cautious_first_boss_is_high(self):
-        stats = BOSS_DUEL_STATS["cautious"]
-        prob = _approx_duel_win_prob(
-            player_hp=int(stats["player_hp"]),
-            boss_hp=int(stats["boss_hp"]),
-            player_hit=float(stats["player_hit"]),
-            player_dmg=int(stats["player_dmg"]),
-            boss_hit=float(stats["boss_hit"]),
-            boss_dmg=int(stats["boss_dmg"]),
-            trials=2000,
-        )
-        assert prob > 0.65
+    Pure-function check: 2000 trials keeps the binomial standard error under
+    ~0.011, so the >0.65 / <0.35 bands sit many sigma from the true means and
+    cannot flake.
+    """
 
-    def test_reckless_first_boss_is_low(self):
-        stats = BOSS_DUEL_STATS["reckless"]
-        prob = _approx_duel_win_prob(
-            player_hp=int(stats["player_hp"]),
-            boss_hp=int(stats["boss_hp"]),
-            player_hit=float(stats["player_hit"]),
-            player_dmg=int(stats["player_dmg"]),
-            boss_hit=float(stats["boss_hit"]),
-            boss_dmg=int(stats["boss_dmg"]),
-            trials=2000,
-        )
-        assert prob < 0.35
+    def test_cautious_high_and_reckless_low_on_first_boss(self):
+        def prob_for(risk_tier):
+            stats = BOSS_DUEL_STATS[risk_tier]
+            return _approx_duel_win_prob(
+                player_hp=int(stats["player_hp"]),
+                boss_hp=int(stats["boss_hp"]),
+                player_hit=float(stats["player_hit"]),
+                player_dmg=int(stats["player_dmg"]),
+                boss_hit=float(stats["boss_hit"]),
+                boss_dmg=int(stats["boss_dmg"]),
+                trials=2000,
+            )
+
+        assert prob_for("cautious") > 0.65
+        assert prob_for("reckless") < 0.35
 
 
 class TestBossScouting:
@@ -766,18 +716,6 @@ class TestBossScouting:
 
 class TestBossEchoWeakening:
     """After a guild-first kill, subsequent fighters see a weakened boss for 24h."""
-
-    def test_first_kill_records_echo(self, dig_service, dig_repo, player_repository, monkeypatch):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        monkeypatch.setattr(random, "random", lambda: 0.0)
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
-        assert result["won"] is True
-        assert result.get("echo_applied") is False
-        # _at_boss leaves boss_progress unset so the locked boss falls back to
-        # the grandfathered "grothak" at tier 25.
-        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak")
-        assert row is not None
-        assert row["killer_discord_id"] == 10001
 
     @pytest.mark.parametrize("entrypoint", ["legacy", "state_machine"])
     def test_second_kill_reduces_only_wager_profit(
@@ -992,12 +930,17 @@ class TestBossEchoWeakening:
         assert result.get("echo_applied") is False
 
     def test_beneficiary_kill_refreshes_echo_to_themselves(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """A player who benefits from an active echo and then clears the boss
+        """A guild-first kill fights un-echoed and records the echo under the
+        killer; a player who then benefits from that echo and clears the boss
         becomes the new attributed killer and restarts the window."""
-        # First digger kills Grothak → echo written for 10001.
+        # First digger kills Grothak → echo written for 10001. _at_boss leaves
+        # boss_progress pinned to grothak so the echo keys deterministically.
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.0)
-        dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+        first = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+        assert first["won"] is True
+        # No echo existed yet, so the first kill fights the boss at full power.
+        assert first.get("echo_applied") is False
         assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak")["killer_discord_id"] == 10001
 
         # Second digger arrives under the echo and wins.
@@ -1095,50 +1038,14 @@ class TestAbandonedDuelCleanup:
         # paused before ticking), so durability dropped by precisely 1.
         assert dig_repo.get_gear_by_id(gid)["durability"] == dur_before - 1
 
-    def test_stale_cleanup_ticks_snapshot_gear_not_current_gear(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        """Finding-21: the stale-duel cleanup must tick the gear that fought
-        the abandoned duel (its start-time snapshot), NOT the player's current
-        equipment.
-
-        Old behavior called tick_gear_durability (current equipped loadout),
-        so a player who swapped/repaired gear during the abandoned pause would
-        have the WRONG pieces ticked — the snapshot pieces that actually fought
-        escape wear, while a freshly-equipped piece is wrongly worn. The fix
-        ticks the gear_snapshot_ids recorded with the duel. This test fails on
-        the old path (snapshot piece untouched) and passes on the fix."""
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        # The piece that "fought" the stale duel — recorded in the snapshot but
-        # NOT currently equipped (the player swapped it out during the pause).
-        snapshot_gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
-        # No gear is equipped now, so the old current-loadout tick bites nothing.
-
-        state = {
-            "boss_id": "grothak", "tier": 25, "mechanic_id": "fake_mechanic",
-            "risk_tier": "cautious", "wager": 0, "player_hp": 5, "boss_hp": 5,
-            "round_num": 3, "round_log": "[]", "pending_prompt": "{}",
-            "rng_state": "",
-            "status_effects": json.dumps({"gear_snapshot_ids": [snapshot_gid]}),
-            "echo_applied": 0, "echo_killer_id": None,
-            "player_hit": 0.6, "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1,
-        }
-        dig_repo.save_active_duel(10001, TEST_GUILD_ID, state)
-
-        durability_before = dig_repo.get_gear_by_id(snapshot_gid)["durability"]
-        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
-
-        # The snapshot piece (the one that actually fought) lost durability,
-        # even though it is unequipped — only tick_gear_durability_ids reaches
-        # an unequipped piece, so this proves the cleanup ticked the snapshot.
-        durability_after = dig_repo.get_gear_by_id(snapshot_gid)["durability"]
-        assert durability_after == durability_before - 1, (
-            "stale cleanup did not tick the snapshot gear that fought the duel"
-        )
-
     def test_stale_cleanup_reports_snapshot_gear_that_breaks(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
+        """Finding-21: the stale-duel cleanup must tick the gear that fought
+        the abandoned duel (its start-time gear_snapshot_ids), NOT the
+        player's current equipment — the snapshot piece here is UNEQUIPPED, so
+        only the snapshot-ids path can reach it — and a piece the cleanup tick
+        breaks is reported to the new fight's caller."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         snapshot_gid = dig_repo.add_gear(
             10001, TEST_GUILD_ID, "armor", 1, durability=1,
@@ -1392,27 +1299,6 @@ class TestWagerTaper:
     softening a boss to a near-sure win then betting big stops printing money.
     """
 
-    def test_wager_payout_untouched_below_knee(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        # A genuine ~50/50 bet sits below the taper knee: the authored
-        # BOSS_PAYOUTS multiplier reaches settlement untapered (only the
-        # log profit cap applies).
-        monkeypatch.setattr(
-            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
-        )
-        monkeypatch.setattr(random, "random", lambda: 0.0)  # deterministic win
-        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
-
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
-
-        assert result["won"] is True
-        wager_profit = int(100 * (_capped(BOSS_PAYOUTS[25][0]) - 1))
-        expected = scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + wager_profit
-        assert (player_repository.get_balance(10001, TEST_GUILD_ID)
-                == balance_before + expected)
-
     def test_wager_payout_tapers_at_high_win_chance(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
@@ -1508,27 +1394,6 @@ def _at_boss_for_duel(
 class TestLiveDuelPathWagerAtomicity:
     """Finding-11: start_boss_duel → _resolve_duel_outcome must commit balance
     and tunnel changes atomically, and wager payouts must match reality."""
-
-    def test_win_pays_wager_and_boss_jc(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """A win via start_boss_duel must credit wager*multiplier + base JC."""
-        uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30001)
-        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
-        # Force a guaranteed win (all random rolls succeed)
-        monkeypatch.setattr(random, "random", lambda: 0.0)
-        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
-
-        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=20)
-        assert result["success"]
-        assert result["won"] is True
-
-        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
-        real_delta = balance_after - balance_before
-        # Win must credit the player (net positive)
-        assert real_delta > 0, f"win paid nothing: balance_after={balance_after}, before={balance_before}"
-        # Reported payout must exactly match the real balance change
-        assert result["payout"] == real_delta, (
-            f"reported payout {result['payout']} != real balance change {real_delta}"
-        )
 
     def test_first_clear_stat_point_commits_with_boss_clear_and_is_idempotent(
         self, dig_service, dig_repo, player_repository, monkeypatch

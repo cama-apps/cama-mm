@@ -226,6 +226,8 @@ class TestBossLocking:
     """_ensure_boss_locked rolls + persists, then returns the same boss."""
 
     def test_ensure_locks_on_first_call(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """First call rolls from the tier pool and persists the lock; a
+        second call returns the same boss instead of rerolling."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
 
@@ -237,15 +239,10 @@ class TestBossLocking:
         progress = json.loads(fresh["boss_progress"])
         assert progress["25"]["boss_id"] == boss.boss_id
 
-    def test_second_call_returns_same_boss(self, dig_service, dig_repo, player_repository, monkeypatch):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-
-        boss1 = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 25)
-        # Reload tunnel between calls.
+        # Reload tunnel between calls: the persisted lock wins over a reroll.
         tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
         boss2 = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 25)
-        assert boss1.boss_id == boss2.boss_id
+        assert boss2.boss_id == boss.boss_id
 
     def test_rolls_when_locked_boss_id_is_empty(
         self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
@@ -370,27 +367,6 @@ class TestBossProgressJson:
 
 class TestStartBossDuel:
     """``start_boss_duel`` resolves or pauses based on the rolled mechanic."""
-
-    def test_pauses_at_mechanic_trigger_round(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        # Force auto-rounds to be non-terminating until the trigger.
-        monkeypatch.setattr(random, "random", lambda: 0.5)
-        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
-        # The duel should either pause with a pending_prompt OR resolve.
-        # With a 3-round trigger mechanic (grothak's is round 3), pause is likely.
-        assert result["success"]
-
-        # Check DB state — if paused, a row exists; if resolved, no row.
-        row = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
-        if result.get("pending_prompt"):
-            assert row is not None
-            assert row["boss_id"] in {b.boss_id for b in get_boss_pool_for_tier(25)}
-            assert row["mechanic_id"] in MECHANIC_REGISTRY
-            assert row["round_num"] >= 1
-        else:
-            assert row is None
 
     def test_resume_clears_state_row(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -615,6 +591,12 @@ class TestStartBossDuel:
         for i, opt in enumerate(pp["options"]):
             assert opt["option_idx"] == i
             assert opt["label"]
+        # The paused fight persisted a consistent duel row.
+        row = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert row is not None
+        assert row["boss_id"] in {b.boss_id for b in get_boss_pool_for_tier(25)}
+        assert row["mechanic_id"] in MECHANIC_REGISTRY
+        assert row["round_num"] >= 1
 
 
 class TestPersistedHPCarry:

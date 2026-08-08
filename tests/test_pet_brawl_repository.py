@@ -125,11 +125,17 @@ def settle(brawl_repo, brawl, winner_pet, loser_pet, winner_id, *, now=NOW + 60,
 
 class TestLifecycle:
     def test_create_and_read(self, brawl_repo, insert_pet):
-        brawl, pet_a, _ = make_pending(brawl_repo, insert_pet)
+        """Create/read a pending brawl; accepting binds the recipient pet."""
+        brawl, pet_a, pet_b = make_pending(brawl_repo, insert_pet)
         assert brawl.status == "pending"
         assert brawl.challenger_pet_id == pet_a
         assert brawl.recipient_pet_id is None
         assert brawl_repo.get_brawl(brawl.brawl_id, TEST_GUILD_ID) == brawl
+        accepted = brawl_repo.accept_atomic(
+            brawl.brawl_id, TEST_GUILD_ID, 200, pet_b, NOW + 5
+        )
+        assert accepted.status == "active"
+        assert accepted.recipient_pet_id == pet_b
 
     def test_one_open_brawl_per_player_cross_role(self, brawl_repo, insert_pet):
         make_pending(brawl_repo, insert_pet, challenger=100, recipient=200)
@@ -158,14 +164,6 @@ class TestLifecycle:
             TEST_GUILD_ID, 555, 100, 200, pet_a, now=NOW + 100, expires_at=NOW + 280
         )
         assert again.status == "pending"
-
-    def test_accept_binds_recipient_pet(self, brawl_repo, insert_pet):
-        brawl, _, pet_b = make_pending(brawl_repo, insert_pet)
-        accepted = brawl_repo.accept_atomic(
-            brawl.brawl_id, TEST_GUILD_ID, 200, pet_b, NOW + 5
-        )
-        assert accepted.status == "active"
-        assert accepted.recipient_pet_id == pet_b
 
     def test_accept_guards(self, brawl_repo, insert_pet):
         brawl, _, pet_b = make_pending(brawl_repo, insert_pet)
@@ -210,19 +208,6 @@ class TestLifecycle:
         with pytest.raises(ValueError, match="not_pending"):
             brawl_repo.withdraw_atomic(active.brawl_id, TEST_GUILD_ID, 300, NOW + 6)
         assert brawl_repo.get_brawl(active.brawl_id, TEST_GUILD_ID).status == "active"
-
-    def test_sweep_stale(self, brawl_repo, insert_pet):
-        pending, _, _ = make_pending(brawl_repo, insert_pet, 100, 200)
-        active, _, _ = make_active(brawl_repo, insert_pet, 300, 400)
-        counts = brawl_repo.sweep_stale(NOW + 10_000, active_ttl_seconds=1800)
-        assert counts == {"expired": 1, "voided": 1}
-        assert brawl_repo.get_brawl(pending.brawl_id, TEST_GUILD_ID).status == "expired"
-        assert brawl_repo.get_brawl(active.brawl_id, TEST_GUILD_ID).status == "void"
-        # Fresh rows untouched.
-        fresh, _, _ = make_pending(brawl_repo, insert_pet, 500, 600)
-        counts = brawl_repo.sweep_stale(NOW + 20, active_ttl_seconds=1800)
-        assert counts == {"expired": 0, "voided": 0}
-        assert brawl_repo.get_brawl(fresh.brawl_id, TEST_GUILD_ID).status == "pending"
 
 
 class TestWagerEconomy:
@@ -371,6 +356,8 @@ class TestWagerEconomy:
     def test_stale_sweep_refunds_pending_and_active_wagers(
         self, repo_db_path, brawl_repo, insert_pet
     ):
+        """Stale pending brawls expire and active ones void, refunding all
+        escrow; fresh rows are left untouched by a sweep."""
         players = seed_player(repo_db_path, 100, 100)
         for player_id in (200, 300, 400):
             seed_player(repo_db_path, player_id, 100)
@@ -383,6 +370,13 @@ class TestWagerEconomy:
         brawl_repo.accept_atomic(
             active.brawl_id, TEST_GUILD_ID, 400, active_pet, NOW + 1
         )
+
+        # A sweep before anything is stale touches nothing.
+        counts = brawl_repo.sweep_stale(NOW + 20, active_ttl_seconds=1_800)
+        assert counts == {"expired": 0, "voided": 0}
+        assert brawl_repo.get_brawl(
+            pending.brawl_id, TEST_GUILD_ID
+        ).status == "pending"
 
         counts = brawl_repo.sweep_stale(
             NOW + 10_000, active_ttl_seconds=1_800
@@ -448,6 +442,8 @@ class TestSettlement:
         assert result["loser_delta"] == -15
         assert self.hunger_of(pet_repo, pet_a) == 60
         assert self.hunger_of(pet_repo, pet_b) == 85
+        # A settlement loss never kills the loser.
+        assert pet_repo.get_pet_by_id(pet_b, TEST_GUILD_ID).died_at is None
         done = brawl_repo.get_brawl(brawl.brawl_id, TEST_GUILD_ID)
         assert done.status == "done"
         assert done.winner_id == 100
@@ -500,13 +496,9 @@ class TestSettlement:
         )
         assert done.personality_event_key == "str.victory"
 
-    def test_winner_gain_caps_at_full(self, brawl_repo, pet_repo, insert_pet):
-        brawl, pet_a, pet_b = make_active(brawl_repo, insert_pet)
-        result = settle(brawl_repo, brawl, pet_a, pet_b, 100)
-        assert result["winner_delta"] == 0  # already at 100
-        assert self.hunger_of(pet_repo, pet_a) <= 100
-
     def test_loser_loss_floors_at_ten(self, brawl_repo, pet_repo, insert_pet):
+        """Loser hunger floors at 10 (or is untouched when already below);
+        a winner already at full hunger gains nothing."""
         brawl, pet_a, pet_b = make_active(brawl_repo, insert_pet)
         with sqlite3.connect(brawl_repo.db_path) as conn:
             conn.execute(
@@ -517,6 +509,9 @@ class TestSettlement:
         result = settle(brawl_repo, brawl, pet_a, pet_b, 100)
         assert result["loser_delta"] == -2
         assert self.hunger_of(pet_repo, pet_b) == 10
+        # Winner pet_a was untouched at full hunger: gain caps at 100.
+        assert result["winner_delta"] == 0
+        assert self.hunger_of(pet_repo, pet_a) <= 100
 
         brawl2, pet_c, pet_d = make_active(brawl_repo, insert_pet, 300, 400)
         with sqlite3.connect(brawl_repo.db_path) as conn:
@@ -528,11 +523,6 @@ class TestSettlement:
         result = settle(brawl_repo, brawl2, pet_c, pet_d, 300)
         assert result["loser_delta"] == 0
         assert self.hunger_of(pet_repo, pet_d) == 8
-
-    def test_settlement_never_kills(self, brawl_repo, pet_repo, insert_pet):
-        brawl, pet_a, pet_b = make_active(brawl_repo, insert_pet)
-        settle(brawl_repo, brawl, pet_a, pet_b, 100)
-        assert pet_repo.get_pet_by_id(pet_b, TEST_GUILD_ID).died_at is None
 
     def test_skips_pet_that_died_mid_brawl(self, brawl_repo, pet_repo, insert_pet):
         brawl, pet_a, pet_b = make_active(brawl_repo, insert_pet)
@@ -577,8 +567,12 @@ class TestSettlement:
     def test_daily_win_cap_and_next_day_reset(
         self, brawl_repo, pet_repo, insert_pet
     ):
+        """The 4th same-day win earns neither hunger gain nor XP (both daily
+        caps fire together); the record still counts, and both reset the next
+        game-day."""
         winner_pet = insert_pet(100, hunger=50)
         deltas = []
+        xp_deltas = []
         for i in range(4):
             opponent = 200 + i
             opp_pet = insert_pet(opponent)
@@ -590,10 +584,15 @@ class TestSettlement:
                 brawl.brawl_id, TEST_GUILD_ID, opponent, opp_pet, NOW + i * 10 + 1
             )
             result = settle(
-                brawl_repo, brawl, winner_pet, opp_pet, 100, now=NOW + i * 10 + 2
+                brawl_repo, brawl, winner_pet, opp_pet, 100,
+                now=NOW + i * 10 + 2, winner_stat_gain="dex",
             )
             deltas.append(result["winner_delta"])
+            xp_deltas.append(result["winner_xp_delta"])
         assert deltas == [10, 10, 10, 0]  # 4th same-day win unrewarded
+        assert xp_deltas == [2, 2, 2, 0]  # XP capped on the 4th too
+        trained = pet_repo.get_pet_by_id(winner_pet, TEST_GUILD_ID)
+        assert (trained.training_xp, trained.training_dex) == (6, 1)
         wins, losses = brawl_repo.get_pet_record(winner_pet, TEST_GUILD_ID)
         assert (wins, losses) == (4, 0)  # record still counts capped wins
 
@@ -609,45 +608,6 @@ class TestSettlement:
         )
         result = settle(brawl_repo, brawl, winner_pet, opp_pet, 100, now=later + 2)
         assert result["winner_delta"] > 0
-
-    def test_daily_xp_cap_stops_fourth_completed_brawl(
-        self, brawl_repo, pet_repo, insert_pet
-    ):
-        winner_pet = insert_pet(100)
-        xp_deltas = []
-        for i in range(4):
-            opponent = 300 + i
-            opp_pet = insert_pet(opponent)
-            brawl = brawl_repo.create_brawl_atomic(
-                TEST_GUILD_ID,
-                555,
-                100,
-                opponent,
-                winner_pet,
-                now=NOW + i * 10,
-                expires_at=NOW + i * 10 + 180,
-            )
-            brawl = brawl_repo.accept_atomic(
-                brawl.brawl_id,
-                TEST_GUILD_ID,
-                opponent,
-                opp_pet,
-                NOW + i * 10 + 1,
-            )
-            result = settle(
-                brawl_repo,
-                brawl,
-                winner_pet,
-                opp_pet,
-                100,
-                now=NOW + i * 10 + 2,
-                winner_stat_gain="dex",
-            )
-            xp_deltas.append(result["winner_xp_delta"])
-
-        assert xp_deltas == [2, 2, 2, 0]
-        trained = pet_repo.get_pet_by_id(winner_pet, TEST_GUILD_ID)
-        assert (trained.training_xp, trained.training_dex) == (6, 1)
 
 
 class TestRecords:
