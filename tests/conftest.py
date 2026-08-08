@@ -16,6 +16,7 @@ import pytest
 
 from database import Database
 from domain.models.player import Player
+from repositories.base_repository import BaseRepository
 from repositories.bet_repository import BetRepository
 from repositories.guild_config_repository import GuildConfigRepository
 from repositories.lobby_repository import LobbyRepository
@@ -37,6 +38,26 @@ from tests.repository_harness import RepositoryTestDatabase
 
 TEST_GUILD_ID = 12345
 """Standard guild ID for single-guild tests. Import and use this constant."""
+
+# =============================================================================
+# TEST-ONLY SQLITE TUNING
+# =============================================================================
+# Skip fsync on every repository connection: durability across a power loss is
+# meaningless inside a test run, and the per-commit fsyncs dominated DB-heavy
+# test time (measured: -59% on test_concurrent_matches, -31% on
+# test_match_correction). Locking and WAL semantics — what the concurrency and
+# BEGIN IMMEDIATE tests exercise — are unaffected by ``synchronous``.
+
+_durable_get_connection = BaseRepository.get_connection
+
+
+def _test_get_connection(self):
+    conn = _durable_get_connection(self)
+    conn.execute("PRAGMA synchronous=OFF")
+    return conn
+
+
+BaseRepository.get_connection = _test_get_connection
 
 TEST_GUILD_ID_SECONDARY = 67890
 """Secondary guild ID for multi-guild isolation tests."""
