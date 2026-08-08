@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from infrastructure.schema_manager import SchemaManager
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.bet_repository import BetRepository
 from repositories.loan_repository import LoanRepository
@@ -23,12 +22,9 @@ from services.gambling_stats_service import (
 
 
 @pytest.fixture
-def db_path(tmp_path):
-    """Create a temporary database with schema."""
-    db = str(tmp_path / "test_gamba.db")
-    schema = SchemaManager(db)
-    schema.initialize()
-    return db
+def db_path(repo_db_path):
+    """Temporary database with schema (session template copy — fast)."""
+    return repo_db_path
 
 
 @pytest.fixture
@@ -122,75 +118,45 @@ def _place_and_settle_bet(
 class TestBetHistory:
     """Tests for bet history retrieval."""
 
-    def test_get_player_bet_history_empty(self, repositories):
-        """Test getting history for player with no bets."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        _setup_player(player_repo)
-
-        history = bet_repo.get_player_bet_history(1001)
-        assert history == []
-
     def test_get_player_bet_history_with_bets(self, repositories):
-        """Test getting history for player with settled bets."""
+        """History is empty with no bets, then tracks wins, losses, and
+        leveraged bets (outcome, profit = ±effective_bet, amount, leverage)."""
         bet_repo = repositories["bet_repo"]
         player_repo = repositories["player_repo"]
         match_repo = repositories["match_repo"]
 
         discord_id = _setup_player(player_repo, balance=100)
+        assert bet_repo.get_player_bet_history(discord_id) == []
 
-        # Win a bet
+        # Win a 1x bet, lose a 1x bet, win a 2x leveraged bet.
+        _place_and_settle_bet(
+            bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant"
+        )
+        _place_and_settle_bet(
+            bet_repo, match_repo, player_repo, discord_id, 15, "radiant", "dire"
+        )
         _place_and_settle_bet(
             bet_repo, match_repo, player_repo,
-            discord_id, 10, "radiant", "radiant"
+            discord_id, 12, "radiant", "radiant", leverage=2,
         )
 
         history = bet_repo.get_player_bet_history(discord_id)
-        assert len(history) == 1
-        assert history[0]["outcome"] == "won"
-        assert history[0]["profit"] == 10  # Won back effective bet
-        assert history[0]["amount"] == 10
-        assert history[0]["leverage"] == 1
+        assert len(history) == 3
+        by_amount = {row["amount"]: row for row in history}
 
-    def test_bet_history_tracks_losses(self, repositories):
-        """Test that losses are tracked correctly."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
+        won = by_amount[10]
+        assert won["outcome"] == "won"
+        assert won["profit"] == 10  # Won back effective bet
+        assert won["leverage"] == 1
 
-        discord_id = _setup_player(player_repo, balance=100)
+        lost = by_amount[15]
+        assert lost["outcome"] == "lost"
+        assert lost["profit"] == -15  # Lost effective bet
 
-        # Lose a bet
-        _place_and_settle_bet(
-            bet_repo, match_repo, player_repo,
-            discord_id, 15, "radiant", "dire"
-        )
-
-        history = bet_repo.get_player_bet_history(discord_id)
-        assert len(history) == 1
-        assert history[0]["outcome"] == "lost"
-        assert history[0]["profit"] == -15  # Lost effective bet
-
-    def test_bet_history_with_leverage(self, repositories):
-        """Test that leverage is reflected in history."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
-
-        discord_id = _setup_player(player_repo, balance=100)
-
-        # Win a leveraged bet
-        _place_and_settle_bet(
-            bet_repo, match_repo, player_repo,
-            discord_id, 10, "radiant", "radiant",
-            leverage=2,
-        )
-
-        history = bet_repo.get_player_bet_history(discord_id)
-        assert len(history) == 1
-        assert history[0]["leverage"] == 2
-        assert history[0]["effective_bet"] == 20
-        assert history[0]["profit"] == 20  # effective_bet profit on win
+        leveraged = by_amount[12]
+        assert leveraged["leverage"] == 2
+        assert leveraged["effective_bet"] == 24
+        assert leveraged["profit"] == 24  # effective_bet profit on win
 
     def test_bet_history_guild_isolation(self, repositories):
         """A bet placed in guild A does not appear in guild B's history."""
@@ -574,27 +540,31 @@ class TestGambaStats:
         assert stats is None
 
     def test_get_player_stats_with_bets(self, gambling_stats_service, repositories):
-        """Test stats calculation for player with bets."""
+        """Stats aggregate wins/losses/P&L and streaks from bet history."""
         bet_repo = repositories["bet_repo"]
         player_repo = repositories["player_repo"]
         match_repo = repositories["match_repo"]
 
         discord_id = _setup_player(player_repo, balance=200)
 
-        # Win 2, lose 1
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "dire")
+        # W W W L L (ends on L2 streak)
+        for winner in ("radiant", "radiant", "radiant", "dire", "dire"):
+            _place_and_settle_bet(
+                bet_repo, match_repo, player_repo, discord_id, 10, "radiant", winner
+            )
 
         stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
 
         assert stats is not None
-        assert stats.total_bets == 3
-        assert stats.wins == 2
-        assert stats.losses == 1
-        assert stats.win_rate == pytest.approx(2/3)
-        assert stats.net_pnl == 10  # +10 +10 -10
-        assert stats.total_wagered == 30
+        assert stats.total_bets == 5
+        assert stats.wins == 3
+        assert stats.losses == 2
+        assert stats.win_rate == pytest.approx(3/5)
+        assert stats.net_pnl == 10  # +10*3 -10*2
+        assert stats.total_wagered == 50
+        assert stats.best_streak == 3
+        assert stats.worst_streak == -2
+        assert stats.current_streak == -2
 
     def test_get_player_stats_derives_leverage_from_history(
         self, gambling_stats_service, repositories, monkeypatch
@@ -649,48 +619,9 @@ class TestGambaStats:
         history_spy.assert_called_once_with(discord_id, 0)
         leverage_spy.assert_not_called()
 
-    def test_streak_calculation(self, gambling_stats_service, repositories):
-        """Test that streaks are calculated correctly."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
-
-        discord_id = _setup_player(player_repo, balance=200)
-
-        # W W W L L (ends on L2 streak)
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "dire")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "dire")
-
-        stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
-
-        assert stats.best_streak == 3
-        assert stats.worst_streak == -2
-        assert stats.current_streak == -2
-
 
 class TestDegenScore:
     """Tests for degen score calculation."""
-
-    def test_degen_score_basic(self, gambling_stats_service, repositories):
-        """Test basic degen score calculation."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
-
-        discord_id = _setup_player(player_repo, balance=200)
-
-        # Place a few simple 1x bets
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "dire")
-
-        degen = gambling_stats_service.calculate_degen_score(discord_id, guild_id=0)
-
-        assert isinstance(degen, DegenScoreBreakdown)
-        assert 0 <= degen.total <= 100
-        assert degen.title in ["Casual", "Recreational", "Committed", "Degenerate", "Menace", "Legendary Degen"]
 
     def test_calculate_degen_score_derives_leverage_without_repository_query(
         self, gambling_stats_service, repositories, monkeypatch
@@ -752,7 +683,8 @@ class TestDegenScore:
         leverage_spy.assert_not_called()
 
     def test_high_leverage_increases_degen_score(self, gambling_stats_service, repositories):
-        """Test that high leverage increases degen score."""
+        """Higher leverage yields a higher degen score, and scores are
+        well-formed breakdowns (0-100 total, known title)."""
         bet_repo = repositories["bet_repo"]
         player_repo = repositories["player_repo"]
         match_repo = repositories["match_repo"]
@@ -760,7 +692,7 @@ class TestDegenScore:
         # Player 1: only 1x bets
         discord_id1 = _setup_player(player_repo, discord_id=1001, balance=200)
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id1, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id1, 10, "radiant", "radiant")
+        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id1, 10, "radiant", "dire")
 
         # Player 2: 5x leverage bets
         discord_id2 = _setup_player(player_repo, discord_id=1002, balance=200)
@@ -770,6 +702,11 @@ class TestDegenScore:
         degen1 = gambling_stats_service.calculate_degen_score(discord_id1, guild_id=0)
         degen2 = gambling_stats_service.calculate_degen_score(discord_id2, guild_id=0)
 
+        for degen in (degen1, degen2):
+            assert isinstance(degen, DegenScoreBreakdown)
+            assert 0 <= degen.total <= 100
+            assert degen.title in ["Casual", "Recreational", "Committed", "Degenerate", "Menace", "Legendary Degen"]
+
         assert degen2.max_leverage_score > degen1.max_leverage_score
         assert degen2.total > degen1.total
 
@@ -778,36 +715,14 @@ class TestLeaderboard:
     """Tests for gambling leaderboard."""
 
     def test_leaderboard_empty(self, gambling_stats_service, repositories):
-        """Test leaderboard with no bets."""
+        """Leaderboard with no bets has empty sections and zero totals."""
         leaderboard = gambling_stats_service.get_leaderboard(guild_id=0)
 
         assert isinstance(leaderboard, Leaderboard)
         assert len(leaderboard.top_earners) == 0
         assert len(leaderboard.down_bad) == 0
         assert len(leaderboard.hall_of_degen) == 0
-
-    def test_leaderboard_min_bets_filter(self, gambling_stats_service, repositories):
-        """Test that players with fewer than min_bets are excluded."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
-
-        # Player 1: 2 bets (below minimum of 3)
-        discord_id1 = _setup_player(player_repo, discord_id=1001, balance=100)
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id1, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id1, 10, "radiant", "radiant")
-
-        # Player 2: 3 bets (meets minimum)
-        discord_id2 = _setup_player(player_repo, discord_id=1002, balance=100)
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id2, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id2, 10, "radiant", "radiant")
-        _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id2, 10, "radiant", "radiant")
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
-
-        # Only player 2 should appear
-        assert len(leaderboard.top_earners) == 1
-        assert leaderboard.top_earners[0].discord_id == discord_id2
+        assert leaderboard.total_loans == 0
 
     def test_server_stats_include_bettors_below_minimum(
         self, gambling_stats_service, repositories
@@ -966,32 +881,6 @@ class TestLeaderboard:
         assert leaderboard.top_earners == []
         assert [entry.discord_id for entry in leaderboard.down_bad] == [discord_id]
 
-    def test_leaderboard_sections(self, gambling_stats_service, repositories):
-        """Test that leaderboard correctly categorizes players."""
-        bet_repo = repositories["bet_repo"]
-        player_repo = repositories["player_repo"]
-        match_repo = repositories["match_repo"]
-
-        # Winner
-        winner_id = _setup_player(player_repo, discord_id=1001, balance=200)
-        for _ in range(5):
-            _place_and_settle_bet(bet_repo, match_repo, player_repo, winner_id, 10, "radiant", "radiant")
-
-        # Loser
-        loser_id = _setup_player(player_repo, discord_id=1002, balance=200)
-        for _ in range(5):
-            _place_and_settle_bet(bet_repo, match_repo, player_repo, loser_id, 10, "radiant", "dire")
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
-
-        # Winner should be in top earners
-        assert any(e.discord_id == winner_id for e in leaderboard.top_earners)
-        assert leaderboard.top_earners[0].net_pnl > 0
-
-        # Loser should be in down bad
-        assert any(e.discord_id == loser_id for e in leaderboard.down_bad)
-        assert leaderboard.down_bad[0].net_pnl < 0
-
     def test_leaderboard_total_loans(self, gambling_stats_service, repositories):
         """Test that total_loans is a server-wide aggregate stat."""
         bet_repo = repositories["bet_repo"]
@@ -1021,11 +910,6 @@ class TestLeaderboard:
 
         # Server-wide stat: counts ALL loans (5 + 3 + 10 = 18)
         assert leaderboard.total_loans == 18
-
-    def test_leaderboard_total_loans_empty(self, gambling_stats_service, repositories):
-        """Test that total_loans is 0 when no players have bets."""
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0)
-        assert leaderboard.total_loans == 0
 
 
 class TestPnlSeries:

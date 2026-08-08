@@ -12,15 +12,12 @@ import pytest
 
 from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID
-from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture
-def temp_db_path(tmp_path):
-    """Create a temporary database path for testing."""
-    db_path = str(tmp_path / "test_leaderboard.db")
-    Database(db_path)
-    return db_path
+def temp_db_path(repo_db_path):
+    """Temporary database with schema (session template copy — fast)."""
+    return repo_db_path
 
 
 @pytest.fixture
@@ -146,41 +143,26 @@ class TestLeaderboardTypeRouting:
     async def test_leaderboard_default_is_balance(
         self, info_cog, player_repo, mock_rate_limiter, mock_discord_helpers
     ):
-        """Test that leaderboard with no type defaults to balance."""
+        """Leaderboard with no type defaults to balance, and type=balance
+        routes to the same balance leaderboard."""
         player_ids = [1, 2, 3, 4, 5]
         register_players(player_repo, player_ids)
-        interaction = MockInteraction()
-        interaction.guild.members = create_mock_members(player_ids)
-
-        await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=20)
-
         mock_followup = mock_discord_helpers["followup"]
-        mock_followup.assert_called_once()
-        call_kwargs = mock_followup.call_args.kwargs
-        assert "embed" in call_kwargs
-        # Unified view uses "LEADERBOARD > Balance" format
-        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
-    @pytest.mark.asyncio
-    async def test_leaderboard_type_balance(
-        self, info_cog, player_repo, mock_rate_limiter, mock_discord_helpers
-    ):
-        """Test that type=balance routes to balance leaderboard."""
-        player_ids = [1, 2, 3, 4, 5]
-        register_players(player_repo, player_ids)
-        interaction = MockInteraction()
-        interaction.guild.members = create_mock_members(player_ids)
+        for type_choice in (None, MockChoice("balance")):
+            mock_followup.reset_mock()
+            interaction = MockInteraction()
+            interaction.guild.members = create_mock_members(player_ids)
 
-        await info_cog.leaderboard.callback(
-            info_cog, interaction, type=MockChoice("balance"), limit=20
-        )
+            await info_cog.leaderboard.callback(
+                info_cog, interaction, type=type_choice, limit=20
+            )
 
-        mock_followup = mock_discord_helpers["followup"]
-        mock_followup.assert_called_once()
-        call_kwargs = mock_followup.call_args.kwargs
-        assert "embed" in call_kwargs
-        # Unified view uses "LEADERBOARD > Balance" format
-        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
+            mock_followup.assert_called_once()
+            call_kwargs = mock_followup.call_args.kwargs
+            assert "embed" in call_kwargs
+            # Unified view uses "LEADERBOARD > Balance" format
+            assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
     @pytest.mark.asyncio
     async def test_leaderboard_type_gambling_routes_correctly(
@@ -253,35 +235,21 @@ class TestLeaderboardLimitParameter:
     async def test_leaderboard_invalid_limit_clamped(
         self, info_cog, mock_rate_limiter, mock_discord_helpers
     ):
-        """Test that invalid limits are clamped to valid range."""
-        interaction = MockInteraction()
-        interaction.guild.members = []  # Will be populated with matching players
-
-        await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=150)
-
+        """Out-of-range limits (150 -> 100, 0 -> 1) are clamped, not rejected."""
         mock_followup = mock_discord_helpers["followup"]
-        mock_followup.assert_called_once()
-        call_kwargs = mock_followup.call_args.kwargs
-        # Should succeed with embed (limit clamped to 100)
-        assert "embed" in call_kwargs
-        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
-    @pytest.mark.asyncio
-    async def test_leaderboard_limit_zero_clamped(
-        self, info_cog, mock_rate_limiter, mock_discord_helpers
-    ):
-        """Test that limit=0 is clamped to 1."""
-        interaction = MockInteraction()
-        interaction.guild.members = []  # Will be populated with matching players
+        for limit in (150, 0):
+            mock_followup.reset_mock()
+            interaction = MockInteraction()
+            interaction.guild.members = []  # Will be populated with matching players
 
-        await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=0)
+            await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=limit)
 
-        mock_followup = mock_discord_helpers["followup"]
-        mock_followup.assert_called_once()
-        call_kwargs = mock_followup.call_args.kwargs
-        # Should succeed with embed (limit clamped to 1)
-        assert "embed" in call_kwargs
-        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
+            mock_followup.assert_called_once()
+            call_kwargs = mock_followup.call_args.kwargs
+            # Should succeed with embed (limit clamped into 1-100)
+            assert "embed" in call_kwargs
+            assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
 
 class TestLeaderboardGamblingContent:
@@ -368,13 +336,9 @@ class TestGamblingLeaderboardIntegration:
     """
 
     @pytest.fixture
-    def gambling_db_path(self, tmp_path):
-        """Create a temporary database with schema for gambling tests."""
-        from database import Database
-
-        db_path = str(tmp_path / "test_gambling_integration.db")
-        Database(db_path)
-        return db_path
+    def gambling_db_path(self, repo_db_path):
+        """Temporary database with schema (session template copy — fast)."""
+        return repo_db_path
 
     @pytest.fixture
     def gambling_repos(self, gambling_db_path):
@@ -465,79 +429,40 @@ class TestGamblingLeaderboardIntegration:
             )
             conn.commit()
 
-    def test_leaderboard_has_biggest_gamblers_field(self, gambling_stats_service, gambling_repos):
-        """Test that Leaderboard dataclass has biggest_gamblers field."""
-        self._seed_test_data(gambling_repos)
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
-
-        # Verify biggest_gamblers exists and is a list
-        assert hasattr(leaderboard, "biggest_gamblers"), "Leaderboard missing biggest_gamblers field"
-        assert isinstance(leaderboard.biggest_gamblers, list)
-
-    def test_leaderboard_has_server_stats_field(self, gambling_stats_service, gambling_repos):
-        """Test that Leaderboard dataclass has server_stats field."""
-        self._seed_test_data(gambling_repos)
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
-
-        # Verify server_stats exists and has required keys
-        assert hasattr(leaderboard, "server_stats"), "Leaderboard missing server_stats field"
-        assert "total_bets" in leaderboard.server_stats
-        assert "total_wagered" in leaderboard.server_stats
-        assert "unique_gamblers" in leaderboard.server_stats
-        assert "avg_bet_size" in leaderboard.server_stats
-        assert "total_bankruptcies" in leaderboard.server_stats
-
-    def test_leaderboard_entry_has_degen_emoji(self, gambling_stats_service, gambling_repos):
-        """Test that LeaderboardEntry has degen_emoji field."""
-        self._seed_test_data(gambling_repos)
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
-
-        # hall_of_degen entries should have degen_emoji
-        assert leaderboard.hall_of_degen, "seed data should populate hall_of_degen"
-        entry = leaderboard.hall_of_degen[0]
-        assert hasattr(entry, "degen_emoji"), "LeaderboardEntry missing degen_emoji field"
-
-    def test_leaderboard_entry_has_total_wagered(self, gambling_stats_service, gambling_repos):
-        """Test that LeaderboardEntry has total_wagered field."""
+    def test_leaderboard_dataclass_shape_and_sorting(self, gambling_stats_service, gambling_repos):
+        """One real get_leaderboard call verifies the dataclass surface the
+        command relies on: biggest_gamblers populated (even when nobody has
+        positive P&L for Top Earners) and sorted by total_wagered descending,
+        server_stats carrying all footer keys, and every entry field the embed
+        reads being attribute-accessible (incl. degen fields on hall_of_degen)."""
         self._seed_test_data(gambling_repos)
 
         leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
         # Every qualifying bettor appears in biggest_gamblers even when nobody
-        # has positive P&L for the Top Earners section.
-        assert leaderboard.biggest_gamblers, "seed data should populate biggest_gamblers"
-        entry = leaderboard.biggest_gamblers[0]
-        assert hasattr(entry, "total_wagered"), "LeaderboardEntry missing total_wagered field"
-        assert isinstance(entry.total_wagered, int)
-
-    def test_biggest_gamblers_sorted_by_total_wagered(self, gambling_stats_service, gambling_repos):
-        """Test that biggest_gamblers is sorted by total_wagered descending."""
-        self._seed_test_data(gambling_repos)
-
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
-
+        # has positive P&L for the Top Earners section — sorted by total_wagered.
+        assert isinstance(leaderboard.biggest_gamblers, list)
         assert len(leaderboard.biggest_gamblers) >= 2, "seed data should populate biggest_gamblers"
         for i in range(len(leaderboard.biggest_gamblers) - 1):
             assert leaderboard.biggest_gamblers[i].total_wagered >= leaderboard.biggest_gamblers[i + 1].total_wagered
 
-    def test_leaderboard_entries_use_attribute_access(self, gambling_stats_service, gambling_repos):
-        """Test that LeaderboardEntry fields can be accessed with attribute syntax."""
-        self._seed_test_data(gambling_repos)
+        # server_stats has every footer key.
+        for key in (
+            "total_bets",
+            "total_wagered",
+            "unique_gamblers",
+            "avg_bet_size",
+            "total_bankruptcies",
+        ):
+            assert key in leaderboard.server_stats, f"server_stats missing {key}"
 
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
-
-        # Verify attribute access works (not dict access)
-        assert leaderboard.biggest_gamblers, "seed data should populate biggest_gamblers"
+        # Entry fields the embed reads are attribute-accessible (not dict access).
         entry = leaderboard.biggest_gamblers[0]
-        # These should NOT raise AttributeError
+        assert isinstance(entry.total_wagered, int)
         _ = entry.discord_id
         _ = entry.net_pnl
         _ = entry.win_rate
         _ = entry.total_bets
-        _ = entry.total_wagered
 
         assert leaderboard.hall_of_degen, "seed data should populate hall_of_degen"
         entry = leaderboard.hall_of_degen[0]

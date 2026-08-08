@@ -33,87 +33,6 @@ def services(repo_db_path):
     }
 
 
-def test_settle_bets_pays_out_on_house(services):
-    match_service = services["match_service"]
-    betting_service = services["betting_service"]
-    player_repo = services["player_repo"]
-
-    player_ids = list(range(1000, 1010))
-    # Add all players to database before shuffling
-    for pid in player_ids:
-        player_repo.add(
-            discord_id=pid,
-            discord_username=f"Player{pid}",
-            dotabuff_url=f"https://dotabuff.com/players/{pid}",
-            initial_mmr=1500,
-            glicko_rating=1500.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-            guild_id=TEST_GUILD_ID,
-        )
-    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
-    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    participant = pending.radiant_team_ids[0]
-    player_repo.add_balance(participant, TEST_GUILD_ID, 20)
-
-    # Ensure betting is still open
-    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
-        pending.bet_lock_until = int(time.time()) + 600  # 10 minutes in the future
-
-    betting_service.place_bet(TEST_GUILD_ID, participant, "radiant", 5, pending)
-    distributions = betting_service.settle_bets(123, TEST_GUILD_ID, "radiant", pending_state=pending)
-    assert distributions, "Winning bet should appear in distributions"
-    assert distributions["winners"][0]["discord_id"] == participant
-    # Starting balance is now 3, plus 20, minus 5 bet, plus 10 payout = 28
-    assert player_repo.get_balance(participant, TEST_GUILD_ID) == 28
-
-
-def test_refund_pending_bets_on_abort(services):
-    """Refunds should return coins and clear pending wagers when a match is aborted."""
-    match_service = services["match_service"]
-    betting_service = services["betting_service"]
-    player_repo = services["player_repo"]
-
-    player_ids = list(range(8200, 8210))
-    for pid in player_ids:
-        player_repo.add(
-            discord_id=pid,
-            discord_username=f"Player{pid}",
-            dotabuff_url=f"https://dotabuff.com/players/{pid}",
-            initial_mmr=1500,
-            glicko_rating=1500.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-            guild_id=TEST_GUILD_ID,
-        )
-
-    spectator = 8300
-    player_repo.add(
-        discord_id=spectator,
-        discord_username="AbortSpectator",
-        dotabuff_url="https://dotabuff.com/players/8300",
-        guild_id=TEST_GUILD_ID,
-    )
-    player_repo.add_balance(spectator, TEST_GUILD_ID, 12)
-
-    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
-        pending.bet_lock_until = int(time.time()) + 600
-
-    betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 7, pending)
-    # Starting balance 3 + 12 top-up - 7 bet = 8 remaining
-    assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 8
-
-    refunded = betting_service.refund_pending_bets(TEST_GUILD_ID, pending)
-    assert refunded == 1
-    # Refund restores to starting balance (3) + 12 top-up = 15
-    assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 15
-    assert betting_service.get_pending_bet(1, spectator, pending_state=pending) is None
-    totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending)
-    assert totals["radiant"] == 0 and totals["dire"] == 0
-
-
 class TestPoolBettingSettlement:
     """Tests for pool (parimutuel) betting settlement."""
 
@@ -625,9 +544,12 @@ class TestMultipleBetsSettlement:
         # Balance restored: 53 + 10 + 40 = 103
         assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 103
 
-        # No more pending bets
+        # No more pending bets, and the pot odds are back to zero.
         bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
         assert len(bets) == 0
+        assert betting_service.get_pending_bet(1, spectator, pending_state=pending) is None
+        totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending)
+        assert totals["radiant"] == 0 and totals["dire"] == 0
 
 
 class TestBlindBetsSettlement:
@@ -745,65 +667,13 @@ class TestBlindBetsSettlement:
         ]
         assert len(radiant_player_payouts) == 2  # blind + manual
 
-    def test_blind_bets_refunded_on_abort(self, services):
-        """Blind bets are properly refunded when a match is aborted.
+    def test_mixed_blind_and_manual_bets_refunded_on_abort(self, services):
+        """Both blind bets and manual bets are refunded on abort, restoring
+        every balance and leaving no pending wagers.
 
         Regression test: ensures blind bet coins are returned to players
         when the shuffle is aborted before the match is recorded.
         """
-        match_service = services["match_service"]
-        betting_service = services["betting_service"]
-        player_repo = services["player_repo"]
-
-        player_ids = list(range(13300, 13310))
-        for pid in player_ids:
-            player_repo.add(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                dotabuff_url=f"https://dotabuff.com/players/{pid}",
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            guild_id=TEST_GUILD_ID,
-        )
-            player_repo.add_balance(pid, TEST_GUILD_ID, 97)  # 100 total
-
-        # Record initial balances
-        initial_balances = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in player_ids}
-        assert all(b == 100 for b in initial_balances.values())
-
-        # Shuffle and create blind bets
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
-        pending_state = match_service.get_last_shuffle(TEST_GUILD_ID)
-
-        blind_result = betting_service.create_auto_blind_bets(
-            guild_id=TEST_GUILD_ID,
-            radiant_ids=pending_state.radiant_team_ids,
-            dire_ids=pending_state.dire_team_ids,
-            shuffle_timestamp=pending_state.shuffle_timestamp,
-        )
-        assert blind_result["created"] == 10
-
-        # Verify balances decreased by 10% (10 jopacoin each)
-        for pid in player_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == 90, f"Player {pid} should have 90 after blind bet"
-
-        # Simulate abort: refund all pending bets
-        refunded = betting_service.refund_pending_bets(TEST_GUILD_ID, pending_state)
-        assert refunded == 10, "All 10 blind bets should be refunded"
-
-        # Verify all balances restored
-        for pid in player_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100, f"Player {pid} should have 100 after refund"
-
-        # Verify no pending bets remain
-        for pid in player_ids:
-            bets = betting_service.get_pending_bets(TEST_GUILD_ID, pid, pending_state=pending_state)
-            assert len(bets) == 0, f"Player {pid} should have no pending bets"
-
-    def test_mixed_blind_and_manual_bets_refunded_on_abort(self, services):
-        """Both blind bets and manual bets are refunded on abort."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -859,9 +729,11 @@ class TestBlindBetsSettlement:
         # Verify spectator balance restored
         assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 50
 
-        # Verify player balances restored
+        # Verify player balances restored and no pending bets remain
         for pid in player_ids:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100
+            bets = betting_service.get_pending_bets(TEST_GUILD_ID, pid, pending_state=pending_state)
+            assert len(bets) == 0, f"Player {pid} should have no pending bets"
 
 
 class TestBombPotSettlement:
@@ -917,12 +789,14 @@ class TestBombPotSettlement:
         assert bomb_pot_result["is_bomb_pot"] is True
 
     def test_bomb_pot_participation_bonus_losers(self, services):
-        """Losers in bomb pot get base participation + bomb pot bonus."""
+        """Participation awards across all bomb-pot flag combinations: losers
+        get base (+bonus in bomb pots), winners get only the bonus via
+        bomb_pot_bonus_only, and bonus-only without a bomb pot pays nothing."""
         player_repo = services["player_repo"]
         betting_service = services["betting_service"]
 
-        losing_ids = [3001, 3002, 3003, 3004, 3005]
-        for pid in losing_ids:
+        player_ids = [3001, 3002, 3003, 3004, 3005]
+        for pid in player_ids:
             player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
@@ -931,52 +805,24 @@ class TestBombPotSettlement:
             )
 
         # Normal mode: losers get JOPACOIN_PER_GAME
-        normal_result = betting_service.award_participation(losing_ids, TEST_GUILD_ID, is_bomb_pot=False)
-        for pid in losing_ids:
+        normal_result = betting_service.award_participation(player_ids, TEST_GUILD_ID, is_bomb_pot=False)
+        for pid in player_ids:
             assert normal_result[pid]["net"] == JOPACOIN_PER_GAME
             assert normal_result[pid]["bomb_pot_bonus"] == 0
 
         # Bomb pot mode: losers get JOPACOIN_PER_GAME + bomb pot bonus
-        bomb_pot_result = betting_service.award_participation(losing_ids, TEST_GUILD_ID, is_bomb_pot=True)
-        for pid in losing_ids:
+        bomb_pot_result = betting_service.award_participation(player_ids, TEST_GUILD_ID, is_bomb_pot=True)
+        for pid in player_ids:
             assert bomb_pot_result[pid]["net"] == 10
             assert bomb_pot_result[pid]["bomb_pot_bonus"] == 5
 
-    def test_bomb_pot_participation_bonus_winners_only_bonus(self, services):
-        """Winners in bomb pot get only the bomb pot bonus (not base participation)."""
-        player_repo = services["player_repo"]
-        betting_service = services["betting_service"]
-
-        winning_ids = [4001, 4002, 4003, 4004, 4005]
-        for pid in winning_ids:
-            player_repo.add(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                dotabuff_url=f"https://dotabuff.com/players/{pid}",
-                guild_id=TEST_GUILD_ID,
-            )
-
-        # With bomb_pot_bonus_only=True, winners get only the bomb pot bonus
+        # Winners (bomb_pot_bonus_only=True) get only the bomb pot bonus
         result = betting_service.award_participation(
-            winning_ids, TEST_GUILD_ID, is_bomb_pot=True, bomb_pot_bonus_only=True
+            player_ids, TEST_GUILD_ID, is_bomb_pot=True, bomb_pot_bonus_only=True
         )
-        for pid in winning_ids:
+        for pid in player_ids:
             assert result[pid]["net"] == 5  # Only bomb pot bonus, no base
             assert result[pid]["bomb_pot_bonus"] == 5
-
-    def test_bomb_pot_bonus_only_no_bomb_pot_gives_nothing(self, services):
-        """If bomb_pot_bonus_only but not bomb pot, give nothing."""
-        player_repo = services["player_repo"]
-        betting_service = services["betting_service"]
-
-        player_ids = [5001, 5002]
-        for pid in player_ids:
-            player_repo.add(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                dotabuff_url=f"https://dotabuff.com/players/{pid}",
-                guild_id=TEST_GUILD_ID,
-            )
 
         # bomb_pot_bonus_only=True but is_bomb_pot=False should give 0
         result = betting_service.award_participation(

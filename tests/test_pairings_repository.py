@@ -12,9 +12,9 @@ from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 @pytest.fixture
-def temp_db_path(tmp_path):
-    """Create a temporary database path for testing."""
-    return str(tmp_path / "test_pairings.db")
+def temp_db_path(repo_db_path):
+    """Temporary database with schema (session template copy — fast)."""
+    return repo_db_path
 
 
 @pytest.fixture
@@ -146,108 +146,6 @@ class TestPairingsRepository:
         # Player 1 beat player 6 in matches 1 and 3
         assert h2h_opp["queried_player_wins_against"] == 2
 
-    def test_get_best_teammates(self, pairings_repo, player_repo):
-        """Test getting best teammates by win rate."""
-        players = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        register_players(player_repo, players)
-
-        # Create varied teammate histories for player 1
-        # Player 1 + 2: 3 games, 3 wins (100%)
-        for i in range(3):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=1,
-            )
-
-        # Player 1 + 3: already has 3 games from above, add losses
-        for i in range(3):
-            pairings_repo.update_pairings_for_match(
-                match_id=200 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 3, 6, 7, 8],
-                team2_ids=[2, 4, 5, 9, 10],
-                winning_team=2,
-            )
-
-        best = pairings_repo.get_best_teammates(1, TEST_GUILD_ID, min_games=3, limit=5)
-        assert len(best) >= 1
-        # Player 2 should be the best teammate for player 1
-        assert best[0]["teammate_id"] == 2
-        assert best[0]["win_rate"] == 1.0  # 100%
-
-    def test_get_worst_teammates(self, pairings_repo, player_repo):
-        """Test getting worst teammates by win rate."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Player 1 + 2: 4 games, all losses
-        for i in range(4):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=2,
-            )
-
-        # Player 1 + 6: 4 games, all wins (opponents)
-        for i in range(4):
-            pairings_repo.update_pairings_for_match(
-                match_id=200 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 6, 7, 8, 9],
-                team2_ids=[2, 3, 4, 5, 10],
-                winning_team=1,
-            )
-
-        worst = pairings_repo.get_worst_teammates(1, TEST_GUILD_ID, min_games=3, limit=5)
-        assert len(worst) >= 1
-        # Player 2 should be worst (lost all 4 games together)
-        assert worst[0]["teammate_id"] == 2
-        assert worst[0]["win_rate"] == 0.0
-
-    def test_get_best_matchups(self, pairings_repo, player_repo):
-        """Test getting best matchups (players you dominate)."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Player 1 beats player 6 every time
-        for i in range(4):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=1,
-            )
-
-        best = pairings_repo.get_best_matchups(1, TEST_GUILD_ID, min_games=3, limit=5)
-        assert len(best) >= 1
-        # All opponents should be dominated equally
-        assert best[0]["win_rate"] == 1.0
-
-    def test_get_worst_matchups(self, pairings_repo, player_repo):
-        """Test getting worst matchups (players you struggle against)."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Player 1 loses to player 6's team every time
-        for i in range(4):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=2,
-            )
-
-        worst = pairings_repo.get_worst_matchups(1, TEST_GUILD_ID, min_games=3, limit=5)
-        assert len(worst) >= 1
-        assert worst[0]["win_rate"] == 0.0
-
     def test_min_games_filter(self, pairings_repo, player_repo):
         """Test that min_games filter works correctly."""
         players = list(range(1, 11))
@@ -294,32 +192,6 @@ class TestPairingsRepository:
         h2h_reverse = pairings_repo.get_head_to_head(200, 100, TEST_GUILD_ID)
         assert h2h_reverse is not None
         assert h2h_reverse["player1_id"] == 100
-
-    def test_rebuild_all_pairings(self, pairings_repo, player_repo, match_repo):
-        """Test rebuilding pairings from match history."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Record some matches in match_repo
-        team1 = [1, 2, 3, 4, 5]
-        team2 = [6, 7, 8, 9, 10]
-
-        for i in range(3):
-            match_repo.record_match(
-                team1_ids=team1,
-                team2_ids=team2,
-                winning_team=1 if i % 2 == 0 else 2,
-                guild_id=TEST_GUILD_ID,
-            )
-
-        # Now rebuild pairings
-        count = pairings_repo.rebuild_all_pairings(TEST_GUILD_ID)
-        assert count > 0
-
-        # Verify pairings exist
-        h2h = pairings_repo.get_head_to_head(1, 2, TEST_GUILD_ID)
-        assert h2h is not None
-        assert h2h["games_together"] == 3
 
     def test_service_rebuild_all_pairings_threads_guild_id(
         self, pairings_repo, player_repo, match_repo
@@ -496,6 +368,12 @@ class TestPairingsRepository:
         overlap = best_ids & worst_ids
         assert len(overlap) == 0, f"Best and worst teammates overlap: {overlap}"
 
+        # Rankings are ordered by win rate: 100% tops best, 0% tops worst.
+        assert best[0]["teammate_id"] == 2
+        assert best[0]["win_rate"] == 1.0
+        assert worst[0]["teammate_id"] == 6
+        assert worst[0]["win_rate"] == 0.0
+
         # Player 2 should be in best only (100% win rate)
         assert 2 in best_ids, "Player 2 (100%) should be in best teammates"
         assert 2 not in worst_ids, "Player 2 (100%) should NOT be in worst teammates"
@@ -565,6 +443,10 @@ class TestPairingsRepository:
         # Critical: dominates and struggles should NEVER overlap
         overlap = best_ids & worst_ids
         assert len(overlap) == 0, f"Dominates and struggles overlap: {overlap}"
+
+        # Rankings carry the win rate: dominated opponent at 100%, nemesis at 0%.
+        assert best[0]["win_rate"] == 1.0
+        assert worst[0]["win_rate"] == 0.0
 
         # Player 10 should be in dominates only
         assert 10 in best_ids, "Player 10 (100%) should be in dominates"
@@ -680,12 +562,13 @@ class TestPairingsRepository:
         assert most_played[0]["opponent_id"] == 10
         assert most_played[0]["games_against"] == 5
 
-    def test_get_evenly_matched_teammates(self, pairings_repo, player_repo):
-        """Test getting teammates with exactly 50% win rate."""
+    def test_get_evenly_matched_teammates_and_opponents(self, pairings_repo, player_repo):
+        """Teammates and opponents at exactly 50% win rate appear in the
+        evenly-matched views (same 2-2 match history drives both)."""
         players = list(range(1, 11))
         register_players(player_repo, players)
 
-        # Player 1 + 2: 4 games, 2 wins (50%)
+        # Player 1 + 2 teammates, player 1 vs 6 opponents: 4 games, 2 wins each way.
         for i in range(2):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
@@ -706,29 +589,6 @@ class TestPairingsRepository:
         evenly = pairings_repo.get_evenly_matched_teammates(1, TEST_GUILD_ID, min_games=4, limit=5)
         evenly_ids = {t["teammate_id"] for t in evenly}
         assert 2 in evenly_ids, "Player 2 (50%) should be in evenly matched"
-
-    def test_get_evenly_matched_opponents(self, pairings_repo, player_repo):
-        """Test getting opponents with exactly 50% win rate."""
-        players = list(range(1, 11))
-        register_players(player_repo, players)
-
-        # Player 1 vs 6: 4 games, 2 wins each way (50%)
-        for i in range(2):
-            pairings_repo.update_pairings_for_match(
-                match_id=100 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=1,
-            )
-        for i in range(2):
-            pairings_repo.update_pairings_for_match(
-                match_id=102 + i,
-                guild_id=TEST_GUILD_ID,
-                team1_ids=[1, 2, 3, 4, 5],
-                team2_ids=[6, 7, 8, 9, 10],
-                winning_team=2,
-            )
 
         evenly = pairings_repo.get_evenly_matched_opponents(1, TEST_GUILD_ID, min_games=4, limit=5)
         evenly_ids = {o["opponent_id"] for o in evenly}

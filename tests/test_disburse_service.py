@@ -89,83 +89,45 @@ class TestEvenDistribution:
     """Test even distribution calculation."""
 
     def test_even_distribution_basic(self, disburse_service):
-        """Test even split between two debtors."""
-        debtors = [
-            {"discord_id": 1001, "balance": -100},
-            {"discord_id": 1002, "balance": -100},
-        ]
-        distributions = disburse_service._calculate_even_distribution(200, debtors)
+        """Even split between debtors; per-player shares are capped at each
+        player's debt (freed headroom flows to uncapped debtors) and the total
+        distributed never exceeds total debt."""
+        # Plain even split.
+        distributions = disburse_service._calculate_even_distribution(
+            200,
+            [{"discord_id": 1001, "balance": -100}, {"discord_id": 1002, "balance": -100}],
+        )
+        assert {d[0]: d[1] for d in distributions} == {1001: 100, 1002: 100}
 
-        assert len(distributions) == 2
-        amounts = {d[0]: d[1] for d in distributions}
-        assert amounts[1001] == 100
-        assert amounts[1002] == 100
+        # Capped at debt: 1001 only needs 10, remainder goes to 1002.
+        distributions = disburse_service._calculate_even_distribution(
+            200,
+            [{"discord_id": 1001, "balance": -10}, {"discord_id": 1002, "balance": -500}],
+        )
+        assert {d[0]: d[1] for d in distributions} == {1001: 10, 1002: 190}
 
-    def test_even_distribution_capped_at_debt(self, disburse_service):
-        """Test that distribution is capped at each player's debt."""
-        debtors = [
-            {"discord_id": 1001, "balance": -10},  # Only needs 10
-            {"discord_id": 1002, "balance": -500},  # Needs 500
-        ]
-        distributions = disburse_service._calculate_even_distribution(200, debtors)
+        # Fund exceeds total debt: only the debt total (50) is distributed.
+        distributions = disburse_service._calculate_even_distribution(
+            100,
+            [{"discord_id": 1001, "balance": -30}, {"discord_id": 1002, "balance": -20}],
+        )
+        assert {d[0]: d[1] for d in distributions} == {1001: 30, 1002: 20}
 
-        amounts = {d[0]: d[1] for d in distributions}
-        # Player 1001 should only get 10 (their debt)
-        # Player 1002 should get the remaining 190
-        assert amounts[1001] == 10
-        assert amounts[1002] == 190
-
-    def test_even_distribution_excess_fund(self, disburse_service):
-        """Test when fund exceeds total debt."""
-        debtors = [
-            {"discord_id": 1001, "balance": -30},
-            {"discord_id": 1002, "balance": -20},
-        ]
-        distributions = disburse_service._calculate_even_distribution(100, debtors)
-
-        amounts = {d[0]: d[1] for d in distributions}
-        # Total debt is 50, so only 50 should be distributed
-        total_distributed = sum(amounts.values())
-        assert total_distributed == 50
-        assert amounts[1001] == 30
-        assert amounts[1002] == 20
-
-    def test_even_distribution_many_small_debts(self, disburse_service):
-        """Test even distribution with many small debts."""
-        debtors = [
-            {"discord_id": i, "balance": -5}
-            for i in range(1, 11)  # 10 players, each -5 debt
-        ]
-        distributions = disburse_service._calculate_even_distribution(100, debtors)
-
-        # Total debt is 50, so only 50 should be distributed
-        # Each should get 5
+        # Many small debts: 10 players each -5 → each gets exactly 5.
+        distributions = disburse_service._calculate_even_distribution(
+            100, [{"discord_id": i, "balance": -5} for i in range(1, 11)]
+        )
         amounts = {d[0]: d[1] for d in distributions}
         assert sum(amounts.values()) == 50
-        for _, amount in amounts.items():
-            assert amount == 5
+        assert set(amounts.values()) == {5}
 
 
 class TestProportionalDistribution:
     """Test proportional distribution calculation."""
 
-    def test_proportional_distribution_basic(self, disburse_service):
-        """Test proportional split based on debt."""
-        debtors = [
-            {"discord_id": 1001, "balance": -300},  # 60% of total debt
-            {"discord_id": 1002, "balance": -200},  # 40% of total debt
-        ]
-        distributions = disburse_service._calculate_proportional_distribution(100, debtors)
-
-        amounts = {d[0]: d[1] for d in distributions}
-        # Should be roughly 60/40 split
-        assert amounts[1001] >= 55  # ~60
-        assert amounts[1002] >= 35  # ~40
-        assert sum(amounts.values()) == 100
-
     def test_proportional_distribution_capped(self, disburse_service):
-        """Test proportional distribution caps a small debtor and routes the freed
-        headroom to the larger uncapped debtor.
+        """Proportional split follows debt shares, caps a small debtor, and
+        routes the freed headroom to the larger uncapped debtor.
 
         With debts of 10 and 1000 and a 100 fund, the proportional shares are
         ~1 and ~99. The fix must distribute the FULL 100 (not leave it stranded)
@@ -173,6 +135,17 @@ class TestProportionalDistribution:
         amounts are asserted so a degenerate all-zeros (or under-distributing)
         result can't pass.
         """
+        # Roughly-60/40 split when nobody is capped.
+        distributions = disburse_service._calculate_proportional_distribution(
+            100,
+            [{"discord_id": 1001, "balance": -300}, {"discord_id": 1002, "balance": -200}],
+        )
+        amounts = {d[0]: d[1] for d in distributions}
+        assert amounts[1001] >= 55  # ~60
+        assert amounts[1002] >= 35  # ~40
+        assert sum(amounts.values()) == 100
+
+        # Capping case.
         debtors = [
             {"discord_id": 1001, "balance": -10},   # capped at its 10 debt
             {"discord_id": 1002, "balance": -1000},  # absorbs the remainder
@@ -193,7 +166,7 @@ class TestNeediestDistribution:
     """Test neediest distribution calculation."""
 
     def test_neediest_distribution_basic(self, disburse_service):
-        """Test all funds go to most indebted player."""
+        """All funds go to the most indebted player, capped at their debt."""
         debtors = [
             {"discord_id": 1001, "balance": -100},
             {"discord_id": 1002, "balance": -500},  # Neediest
@@ -201,20 +174,13 @@ class TestNeediestDistribution:
         ]
         distributions = disburse_service._calculate_neediest_distribution(200, debtors)
 
-        assert len(distributions) == 1
-        assert distributions[0][0] == 1002  # Neediest player
-        assert distributions[0][1] == 200
+        assert distributions == [(1002, 200)]  # Neediest player takes all
 
-    def test_neediest_distribution_capped(self, disburse_service):
-        """Test neediest distribution capped at debt."""
-        debtors = [
-            {"discord_id": 1001, "balance": -50},  # Only needs 50
-        ]
-        distributions = disburse_service._calculate_neediest_distribution(200, debtors)
-
-        assert len(distributions) == 1
-        assert distributions[0][0] == 1001
-        assert distributions[0][1] == 50  # Capped at debt
+        # Capped at debt when the fund exceeds it.
+        distributions = disburse_service._calculate_neediest_distribution(
+            200, [{"discord_id": 1001, "balance": -50}]
+        )
+        assert distributions == [(1001, 50)]
 
 
 class TestProposalLifecycle:
@@ -232,18 +198,6 @@ class TestProposalLifecycle:
         self, disburse_service, setup_players, setup_nonprofit_fund
     ):
         """Test proposal can be created when conditions are met."""
-        can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
-        assert can
-        assert reason == ""
-
-    def test_can_propose_no_eligible_recipients(
-        self, disburse_service, player_repo, setup_nonprofit_fund
-    ):
-        """Burn and next-pot votes allow a proposal without player recipients."""
-        # Create only 1 player with positive balance (not enough for stimulus)
-        player_repo.add(discord_id=9999, discord_username="RichGuy", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-        player_repo.update_balance(9999, TEST_GUILD_ID, 1000)
-
         can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
         assert can
         assert reason == ""
@@ -272,7 +226,8 @@ class TestProposalLifecycle:
     def test_add_vote(
         self, disburse_service, setup_players, setup_nonprofit_fund
     ):
-        """Test voting on a proposal."""
+        """Voting records a ballot below quorum, and re-voting replaces the
+        player's earlier ballot instead of adding a second one."""
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         result = disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
@@ -281,18 +236,9 @@ class TestProposalLifecycle:
         assert result["total_votes"] == 1
         assert not result["quorum_reached"]
 
-    def test_vote_change(
-        self, disburse_service, setup_players, setup_nonprofit_fund
-    ):
-        """Test that a player can change their vote."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-
-        # Vote even
-        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
-        # Change to proportional
+        # Change to proportional: 1 vote for proportional, 0 for even.
         result = disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="proportional")
 
-        # Should have 1 vote for proportional, 0 for even
         assert result["votes"]["proportional"] == 1
         assert result["votes"]["even"] == 0
         assert result["total_votes"] == 1
@@ -301,20 +247,14 @@ class TestProposalLifecycle:
 class TestQuorumAndExecution:
     """Test quorum checking and disbursement execution."""
 
-    def test_quorum_calculation(
+    def test_quorum_reached(
         self, disburse_service, setup_players, setup_nonprofit_fund
     ):
-        """Test quorum is correctly calculated."""
+        """Quorum is 40% of players (2 of 5) and is detected once met."""
         proposal = disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         # 5 players, 40% quorum = 2 votes needed
         assert proposal.quorum_required == 2
-
-    def test_quorum_reached(
-        self, disburse_service, setup_players, setup_nonprofit_fund
-    ):
-        """Test quorum detection."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         # Add 2 votes (40% of 5 players)
         disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
@@ -486,21 +426,6 @@ class TestQuorumAndExecution:
         # The recipient's actual on-ledger delta matches the reported amount/total.
         assert player_repo.get_balance(1001, TEST_GUILD_ID) - before == amount
         assert amount == result["total_disbursed"]
-
-    def test_disbursement_marks_complete(
-        self, disburse_service, setup_players, setup_nonprofit_fund
-    ):
-        """Test that disbursement marks proposal as completed."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
-        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="even")
-
-        disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
-
-        # Should be able to create a new proposal now
-        _, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
-        # Note: might fail due to no more funds, but not due to active proposal
-        assert reason != "active_proposal_exists"
 
 
 class TestResetProposal:
@@ -723,6 +648,11 @@ class TestDisbursementHistory:
         assert last["recipient_count"] == 2
         assert len(last["recipients"]) == 2
 
+        # Execution completes the proposal: a new proposal is no longer blocked
+        # by an active one.
+        _, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
+        assert reason != "active_proposal_exists"
+
     def test_no_history(self, disburse_service):
         """Test when no disbursement history exists."""
         last = disburse_service.get_last_disbursement(guild_id=TEST_GUILD_ID)
@@ -763,69 +693,67 @@ class TestStimulusDistribution:
     """Test stimulus distribution calculation."""
 
     def test_stimulus_distribution_basic(self, disburse_service):
-        """Test even split among eligible players."""
-        # 4 eligible players (non-debtors, not top 3)
-        eligible = [
-            {"discord_id": 1001, "balance": 50},
-            {"discord_id": 1002, "balance": 40},
-            {"discord_id": 1003, "balance": 30},
-            {"discord_id": 1004, "balance": 20},
-        ]
-        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
-
-        assert len(distributions) == 4
+        """Even split among eligible players, remainder to the first players;
+        empty and single-player edge cases."""
+        # 100 / 4 = 25 each.
+        distributions = disburse_service._calculate_stimulus_distribution(
+            100,
+            [
+                {"discord_id": 1001, "balance": 50},
+                {"discord_id": 1002, "balance": 40},
+                {"discord_id": 1003, "balance": 30},
+                {"discord_id": 1004, "balance": 20},
+            ],
+        )
         amounts = {d[0]: d[1] for d in distributions}
-        # 100 / 4 = 25 each
         assert sum(amounts.values()) == 100
-        for _, amount in amounts.items():
-            assert amount == 25
+        assert set(amounts.values()) == {25}
 
-    def test_stimulus_distribution_with_remainder(self, disburse_service):
-        """Test stimulus split with remainder distributed to first players."""
-        eligible = [
-            {"discord_id": 1001, "balance": 50},
-            {"discord_id": 1002, "balance": 40},
-            {"discord_id": 1003, "balance": 30},
-        ]
-        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
+        # 100 / 3 = 33 each with 1 remainder -> first player gets 34.
+        distributions = disburse_service._calculate_stimulus_distribution(
+            100,
+            [
+                {"discord_id": 1001, "balance": 50},
+                {"discord_id": 1002, "balance": 40},
+                {"discord_id": 1003, "balance": 30},
+            ],
+        )
+        assert {d[0]: d[1] for d in distributions} == {1001: 34, 1002: 33, 1003: 33}
 
-        amounts = {d[0]: d[1] for d in distributions}
-        # 100 / 3 = 33 each, with 1 remainder
-        assert sum(amounts.values()) == 100
-        # First player gets remainder
-        assert amounts[1001] == 34
-        assert amounts[1002] == 33
-        assert amounts[1003] == 33
-
-    def test_stimulus_distribution_empty(self, disburse_service):
-        """Test stimulus with no eligible players."""
-        distributions = disburse_service._calculate_stimulus_distribution(100, [])
-        assert distributions == []
-
-    def test_stimulus_distribution_single_player(self, disburse_service):
-        """Test stimulus with single eligible player."""
-        eligible = [{"discord_id": 1001, "balance": 50}]
-        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
-
-        assert len(distributions) == 1
-        assert distributions[0] == (1001, 100)
+        # Edge cases: nobody eligible; single recipient takes all.
+        assert disburse_service._calculate_stimulus_distribution(100, []) == []
+        assert disburse_service._calculate_stimulus_distribution(
+            100, [{"discord_id": 1001, "balance": 50}]
+        ) == [(1001, 100)]
 
 
 class TestLotteryEligibility:
     """Test lottery eligibility in repository (activity-filtered)."""
 
     def test_get_all_registered_players_for_lottery(self, player_repo):
-        """Test that recently active players are returned for lottery."""
-        # Create 5 players with recent activity
-        for i in range(1, 6):
-            player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-            player_repo.update_last_match_date(i, TEST_GUILD_ID)
+        """Lottery eligibility follows the 14-day activity window: players
+        active now or within the window qualify; players who never played or
+        last played outside the window are excluded."""
+        from datetime import datetime, timedelta
+
+        player_repo.add(discord_id=1, discord_username="ActiveNow", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Recent", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Inactive", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=4, discord_username="NeverPlayed", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        player_repo.update_last_match_date(1, TEST_GUILD_ID)
+        # Played 10 days ago (within the 14-day window).
+        recent_date = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        player_repo.update_last_match_date(2, TEST_GUILD_ID, timestamp=recent_date)
+        # Played 30 days ago (outside the window).
+        old_date = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        player_repo.update_last_match_date(3, TEST_GUILD_ID, timestamp=old_date)
+        # Player 4 never played: no last_match_date.
 
         eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
 
-        assert len(eligible) == 5
         eligible_ids = {p["discord_id"] for p in eligible}
-        assert eligible_ids == {1, 2, 3, 4, 5}
+        assert eligible_ids == {1, 2}
 
     def test_get_all_registered_players_for_lottery_includes_debtors(self, player_repo):
         """Test that debtors with recent activity are included in lottery."""
@@ -844,54 +772,6 @@ class TestLotteryEligibility:
         eligible_ids = {p["discord_id"] for p in eligible}
         assert 1 in eligible_ids
         assert 2 in eligible_ids  # Debtors included
-
-    def test_lottery_excludes_player_with_no_last_match_date(self, player_repo):
-        """Test that players who have never played are excluded from lottery."""
-        player_repo.add(discord_id=1, discord_username="Active", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-        player_repo.add(discord_id=2, discord_username="NeverPlayed", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-
-        # Only player 1 has a match date
-        player_repo.update_last_match_date(1, TEST_GUILD_ID)
-
-        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
-
-        eligible_ids = {p["discord_id"] for p in eligible}
-        assert 1 in eligible_ids
-        assert 2 not in eligible_ids
-
-    def test_lottery_excludes_player_with_old_last_match_date(self, player_repo):
-        """Test that players inactive for more than 14 days are excluded."""
-        from datetime import datetime, timedelta
-
-        player_repo.add(discord_id=1, discord_username="Active", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-        player_repo.add(discord_id=2, discord_username="Inactive", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-
-        # Player 1 played recently
-        player_repo.update_last_match_date(1, TEST_GUILD_ID)
-        # Player 2 played 30 days ago
-        old_date = (datetime.now(UTC) - timedelta(days=30)).isoformat()
-        player_repo.update_last_match_date(2, TEST_GUILD_ID, timestamp=old_date)
-
-        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
-
-        eligible_ids = {p["discord_id"] for p in eligible}
-        assert 1 in eligible_ids
-        assert 2 not in eligible_ids
-
-    def test_lottery_includes_player_within_activity_window(self, player_repo):
-        """Test that players who played within 14 days are included."""
-        from datetime import datetime, timedelta
-
-        player_repo.add(discord_id=1, discord_username="Recent", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-
-        # Player played 10 days ago (within 14-day window)
-        recent_date = (datetime.now(UTC) - timedelta(days=10)).isoformat()
-        player_repo.update_last_match_date(1, TEST_GUILD_ID, timestamp=recent_date)
-
-        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
-
-        assert len(eligible) == 1
-        assert eligible[0]["discord_id"] == 1
 
 
 class TestSocialSecurityEligibility:
@@ -1107,7 +987,8 @@ class TestLotteryDistribution:
     """Test lottery distribution calculation."""
 
     def test_lottery_distribution_basic(self, disburse_service):
-        """Test that lottery picks one random player who gets all funds."""
+        """Lottery picks one random player who gets all funds; single-player
+        and empty edge cases."""
         players = [
             {"discord_id": 1001},
             {"discord_id": 1002},
@@ -1119,25 +1000,18 @@ class TestLotteryDistribution:
         assert distributions[0][1] == 100  # Winner takes all
         assert distributions[0][0] in [1001, 1002, 1003]
 
-    def test_lottery_distribution_single_player(self, disburse_service):
-        """Test lottery with single player."""
-        players = [{"discord_id": 1001}]
-        distributions = disburse_service._calculate_lottery_distribution(100, players)
-
-        assert len(distributions) == 1
-        assert distributions[0] == (1001, 100)
-
-    def test_lottery_distribution_empty(self, disburse_service):
-        """Test lottery with no players."""
-        distributions = disburse_service._calculate_lottery_distribution(100, [])
-        assert distributions == []
+        assert disburse_service._calculate_lottery_distribution(
+            100, [{"discord_id": 1001}]
+        ) == [(1001, 100)]
+        assert disburse_service._calculate_lottery_distribution(100, []) == []
 
 
 class TestSocialSecurityDistribution:
     """Test social security distribution calculation."""
 
     def test_social_security_distribution_basic(self, disburse_service):
-        """Test proportional distribution by games played."""
+        """Proportional-by-games-played split distributing the whole fund;
+        single-player, empty, and all-zero-games edge cases."""
         players = [
             {"discord_id": 1001, "games_played": 30},  # 30% of 100 games
             {"discord_id": 1002, "games_played": 50},  # 50% of 100 games
@@ -1152,16 +1026,22 @@ class TestSocialSecurityDistribution:
         assert amounts[1002] >= amounts[1001]
         assert amounts[1002] >= amounts[1003]
 
-    def test_social_security_distribution_single_player(self, disburse_service):
-        """Test social security with single player."""
-        players = [{"discord_id": 1001, "games_played": 10}]
-        distributions = disburse_service._calculate_social_security_distribution(100, players)
+        # Single player takes the whole fund (no cap).
+        assert disburse_service._calculate_social_security_distribution(
+            100, [{"discord_id": 1001, "games_played": 10}]
+        ) == [(1001, 100)]
 
-        assert len(distributions) == 1
-        assert distributions[0] == (1001, 100)
+        # Equal games -> whole fund still fully distributed.
+        distributions = disburse_service._calculate_social_security_distribution(
+            100,
+            [
+                {"discord_id": 1001, "games_played": 10},
+                {"discord_id": 1002, "games_played": 10},
+            ],
+        )
+        assert sum(d[1] for d in distributions) == 100
 
-    def test_social_security_distribution_empty(self, disburse_service):
-        """Test social security with no players."""
+        # No players.
         distributions = disburse_service._calculate_social_security_distribution(100, [])
         assert distributions == []
 
@@ -1174,53 +1054,40 @@ class TestSocialSecurityDistribution:
         distributions = disburse_service._calculate_social_security_distribution(100, players)
         assert distributions == []
 
-    def test_social_security_distributes_all_funds(self, disburse_service):
-        """Test that all funds are distributed (no cap)."""
-        players = [
-            {"discord_id": 1001, "games_played": 10},
-            {"discord_id": 1002, "games_played": 10},
-        ]
-        distributions = disburse_service._calculate_social_security_distribution(100, players)
-
-        total = sum(d[1] for d in distributions)
-        assert total == 100
-
 
 class TestRichestDistribution:
     """Test richest distribution calculation."""
 
     def test_richest_distribution_basic(self, disburse_service):
-        """Test that all funds go to the richest player."""
-        richest = {"discord_id": 1001, "jopacoin_balance": 500}
-        distributions = disburse_service._calculate_richest_distribution(100, richest)
-
-        assert len(distributions) == 1
-        assert distributions[0] == (1001, 100)
-
-    def test_richest_distribution_empty(self, disburse_service):
-        """Test richest with no player."""
-        distributions = disburse_service._calculate_richest_distribution(100, None)
-        assert distributions == []
-
-    def test_richest_distributes_all_funds(self, disburse_service):
-        """Test that all funds are distributed (no cap)."""
-        richest = {"discord_id": 1001, "jopacoin_balance": 10}
-        distributions = disburse_service._calculate_richest_distribution(500, richest)
-
-        assert len(distributions) == 1
-        total = sum(d[1] for d in distributions)
-        assert total == 500
+        """All funds go to the richest player (no cap); empty edge case."""
+        assert disburse_service._calculate_richest_distribution(
+            100, {"discord_id": 1001, "jopacoin_balance": 500}
+        ) == [(1001, 100)]
+        # No cap at the recipient's balance: the whole fund is distributed.
+        assert disburse_service._calculate_richest_distribution(
+            500, {"discord_id": 1001, "jopacoin_balance": 10}
+        ) == [(1001, 500)]
+        # No player.
+        assert disburse_service._calculate_richest_distribution(100, None) == []
 
 
 class TestRichestEligibility:
     """Test richest eligibility in repository."""
 
     def test_get_richest_player_basic(self, player_repo):
-        """Test that the richest player is returned."""
+        """Richest lookup: None with no players, single player, then the
+        highest balance among several."""
+        assert player_repo.get_richest_player(TEST_GUILD_ID) is None
+
         player_repo.add(discord_id=1, discord_username="Poor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 50)
+        richest = player_repo.get_richest_player(TEST_GUILD_ID)
+        assert richest is not None
+        assert richest["discord_id"] == 1
+        assert richest["jopacoin_balance"] == 50
+
         player_repo.add(discord_id=2, discord_username="Middle", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=3, discord_username="Rich", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-
         player_repo.update_balance(1, TEST_GUILD_ID, -100)  # Debtor
         player_repo.update_balance(2, TEST_GUILD_ID, 100)   # Middle
         player_repo.update_balance(3, TEST_GUILD_ID, 1000)  # Richest
@@ -1230,22 +1097,6 @@ class TestRichestEligibility:
         assert richest is not None
         assert richest["discord_id"] == 3
         assert richest["jopacoin_balance"] == 1000
-
-    def test_get_richest_player_no_players(self, player_repo):
-        """Test that None is returned when no players exist."""
-        richest = player_repo.get_richest_player(TEST_GUILD_ID)
-        assert richest is None
-
-    def test_get_richest_player_single_player(self, player_repo):
-        """Test with a single player."""
-        player_repo.add(discord_id=1, discord_username="Solo", guild_id=TEST_GUILD_ID, initial_mmr=3000)
-        player_repo.update_balance(1, TEST_GUILD_ID, 50)
-
-        richest = player_repo.get_richest_player(TEST_GUILD_ID)
-
-        assert richest is not None
-        assert richest["discord_id"] == 1
-        assert richest["jopacoin_balance"] == 50
 
     def test_get_richest_player_includes_debtors(self, player_repo):
         """Test that debtors can still be richest (if they're the least poor)."""
@@ -1300,21 +1151,6 @@ class TestCancelDisbursement:
         quorum_reached, winner = disburse_service.check_quorum(guild_id=TEST_GUILD_ID)
         assert quorum_reached
         assert winner == "even"  # Even wins tiebreaker
-
-    def test_cancel_preserves_fund(
-        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
-    ):
-        """Test that cancel preserves funds in nonprofit."""
-        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="cancel")
-        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="cancel")
-
-        disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
-
-        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-        assert final_fund == initial_fund
 
 
 class TestLotteryExecution:
@@ -1491,32 +1327,6 @@ class TestRichestExecution:
 class TestFundReservation:
     """Test that funds are reserved on proposal creation and returned on cancel/reset."""
 
-    def test_fund_decreases_on_proposal_creation(
-        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
-    ):
-        """Fund should decrease when a proposal is created (funds are reserved)."""
-        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-        assert initial_fund == 300
-
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-
-        fund_after = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-        assert fund_after == 0  # 300 reserved
-
-    def test_fund_returns_on_admin_reset(
-        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
-    ):
-        """Fund should return to original level after admin reset."""
-        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
-
-        disburse_service.reset_proposal(guild_id=TEST_GUILD_ID)
-
-        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
-        assert final_fund == initial_fund
-
     def test_fund_returns_on_vote_cancel(
         self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
     ):
@@ -1577,11 +1387,13 @@ class TestFundReservation:
     def test_fund_accrued_during_proposal_preserved(
         self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
     ):
-        """New income added during active proposal should survive cancel/reset."""
+        """Proposal creation reserves the whole fund; income accrued during the
+        active proposal survives an admin reset alongside the returned reserve."""
         initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert initial_fund == 300
 
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
+        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0  # reserved
 
         # Simulate new loan fees arriving while proposal is active
         loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=50)
@@ -1597,32 +1409,6 @@ class TestFundReservation:
 class TestGetIndividualVotes:
     """Test get_individual_votes repository method."""
 
-    def test_get_individual_votes_basic(
-        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
-    ):
-        """Test retrieving individual vote records."""
-        # Create proposal
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-
-        # Add votes
-        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
-        disburse_service.add_vote(TEST_GUILD_ID, 1004, "proportional")
-        disburse_service.add_vote(TEST_GUILD_ID, 1005, "neediest")
-
-        # Get individual votes
-        votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
-
-        assert len(votes) == 3
-        assert all("discord_id" in v for v in votes)
-        assert all("vote_method" in v for v in votes)
-        assert all("voted_at" in v for v in votes)
-
-        # Check specific votes
-        vote_map = {v["discord_id"]: v["vote_method"] for v in votes}
-        assert vote_map[1003] == "even"
-        assert vote_map[1004] == "proportional"
-        assert vote_map[1005] == "neediest"
-
     def test_get_individual_votes_no_proposal(self, disburse_repo):
         """Test getting votes when no active proposal."""
         votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
@@ -1631,7 +1417,8 @@ class TestGetIndividualVotes:
     def test_get_individual_votes_chronological(
         self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund, monkeypatch
     ):
-        """Test votes are returned in chronological order (ORDER BY voted_at ASC).
+        """Votes come back with full records in chronological order
+        (ORDER BY voted_at ASC), and are empty before anyone votes.
 
         voted_at is recorded as ``int(time.time())`` in the repository, so a
         real-time delay of 0.01s almost never changes the integer second and the
@@ -1640,6 +1427,7 @@ class TestGetIndividualVotes:
         deterministically and out-of-order insertion would still surface.
         """
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        assert disburse_repo.get_individual_votes(TEST_GUILD_ID) == []  # no votes yet
 
         # Stamp distinct, increasing timestamps onto each successive vote.
         import repositories.disburse_repository as disburse_repo_module
@@ -1653,10 +1441,9 @@ class TestGetIndividualVotes:
 
         votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
 
-        # Should be chronological by voted_at.
-        assert votes[0]["discord_id"] == 1003
-        assert votes[1]["discord_id"] == 1004
-        assert votes[2]["discord_id"] == 1005
+        # Full records, chronological by voted_at.
+        assert [v["discord_id"] for v in votes] == [1003, 1004, 1005]
+        assert [v["vote_method"] for v in votes] == ["even", "proportional", "neediest"]
         assert [v["voted_at"] for v in votes] == [1_700_000_010, 1_700_000_020, 1_700_000_030]
 
     def test_get_individual_votes_vote_change(
@@ -1675,15 +1462,6 @@ class TestGetIndividualVotes:
         assert len(votes) == 1
         assert votes[0]["discord_id"] == 1003
         assert votes[0]["vote_method"] == "proportional"
-
-    def test_get_individual_votes_no_votes_yet(
-        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
-    ):
-        """Test getting votes when proposal exists but no votes yet."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
-
-        votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
-        assert votes == []
 
 
 class TestForceExecute:

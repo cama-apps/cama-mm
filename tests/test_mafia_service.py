@@ -131,25 +131,13 @@ def _seed_activity_only_players(
 
 
 def test_below_min_returns_none(mafia_repo, mafia_service):
+    """No game starts when signups are below MIN_ROSTER, and dig activity
+    alone (no signup) does not enroll players toward the minimum."""
     _seed_signed_up_players(mafia_repo, [1, 2, 3])  # only 3 < MIN_ROSTER=5
+    _seed_activity_only_players(mafia_repo, list(range(101, 110)))  # active, unsigned
     result = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert result is None
     assert mafia_repo.get_game_for_date(TEST_GUILD_ID, "2026-04-24") is None
-
-
-def test_activity_alone_does_not_enroll_players(mafia_repo, mafia_service):
-    _seed_activity_only_players(mafia_repo, list(range(101, 110)))
-
-    assert mafia_service.start_game(TEST_GUILD_ID, force=True) is None
-
-
-def test_idempotent_start(mafia_repo, mafia_service):
-    _seed_signed_up_players(mafia_repo, list(range(101, 110)))  # 9 players
-    first = mafia_service.start_game(TEST_GUILD_ID, force=True)
-    assert first is not None
-    second = mafia_service.start_game(TEST_GUILD_ID, force=True)
-    assert second is not None
-    assert first.game_id == second.game_id
 
 
 def test_start_returns_game_created_by_concurrent_caller(
@@ -271,42 +259,43 @@ def test_signup_roster_excludes_players_past_entry_fee_debt_floor(
     assert len(rostered) == 5
 
 
-@pytest.mark.parametrize("roster_size", list(range(5, 16)))
-def test_role_assignment_table(mafia_repo, mafia_service, roster_size):
-    ids = list(range(101, 101 + roster_size))
-    _seed_signed_up_players(mafia_repo, ids)
-    # Force jester probability to 0 for this test (deterministic counts)
-    mafia_service._rng = random.Random(0)
-    # Patch JESTER_PROBABILITY indirectly: we assert ignoring jester swap below
-    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
-    assert game is not None
+def test_role_assignment_table(mafia_service):
+    """Role counts match ROLE_TABLE for every legal roster size (5-15).
 
-    players = mafia_repo.get_players(game.game_id)
-    counts: dict[MafiaRole, int] = dict.fromkeys(MafiaRole, 0)
-    for p in players:
-        counts[p.role] += 1
+    Exercises _assign_roles directly (it is DB-free); the start_game →
+    _assign_roles wiring is covered by test_godfather_always_among_mafia and
+    test_oversized_roster_capped, which drive the full service+DB path.
+    """
+    for roster_size in range(5, 16):
+        mafia_service._rng = random.Random(roster_size)
+        players = mafia_service._assign_roles(
+            0, TEST_GUILD_ID, list(range(101, 101 + roster_size))
+        )
+        counts: dict[MafiaRole, int] = dict.fromkeys(MafiaRole, 0)
+        for p in players:
+            counts[p.role] += 1
 
-    expected = ROLE_TABLE[roster_size]
-    # Jester (if rolled) replaces a townie. So mafia/doctor/detective/vigilante are exact;
-    # townie + jester sums to remainder.
-    assert counts[MafiaRole.MAFIA] == expected["mafia"]
-    assert counts[MafiaRole.DOCTOR] == expected["doctor"]
-    assert counts[MafiaRole.DETECTIVE] == expected["detective"]
-    assert counts[MafiaRole.VIGILANTE] == expected["vigilante"]
-    townie_pool = (
-        roster_size
-        - expected["mafia"]
-        - expected["doctor"]
-        - expected["detective"]
-        - expected["vigilante"]
-    )
-    # Jester and Bookie are optional swap-ins that each replace a townie.
-    assert (
-        counts[MafiaRole.TOWNIE]
-        + counts[MafiaRole.JESTER]
-        + counts[MafiaRole.BOOKIE]
-        == townie_pool
-    )
+        expected = ROLE_TABLE[roster_size]
+        # Jester (if rolled) replaces a townie. So mafia/doctor/detective/vigilante
+        # are exact; townie + jester + bookie sums to remainder.
+        assert counts[MafiaRole.MAFIA] == expected["mafia"], roster_size
+        assert counts[MafiaRole.DOCTOR] == expected["doctor"], roster_size
+        assert counts[MafiaRole.DETECTIVE] == expected["detective"], roster_size
+        assert counts[MafiaRole.VIGILANTE] == expected["vigilante"], roster_size
+        townie_pool = (
+            roster_size
+            - expected["mafia"]
+            - expected["doctor"]
+            - expected["detective"]
+            - expected["vigilante"]
+        )
+        # Jester and Bookie are optional swap-ins that each replace a townie.
+        assert (
+            counts[MafiaRole.TOWNIE]
+            + counts[MafiaRole.JESTER]
+            + counts[MafiaRole.BOOKIE]
+            == townie_pool
+        ), roster_size
 
 
 def test_godfather_always_among_mafia(mafia_repo, mafia_service):
@@ -377,19 +366,7 @@ def _new_game(mafia_repo, players: list[tuple[int, MafiaRole, bool]], date: str 
 
 
 def test_night_action_role_validation(mafia_service, mafia_repo):
-    _new_game(
-        mafia_repo,
-        [
-            (1, MafiaRole.MAFIA, True),
-            (2, MafiaRole.TOWNIE, False),
-        ],
-    )
-    # Townie can't kill
-    res = mafia_service.submit_night_action(TEST_GUILD_ID, 2, 1, MafiaActionType.KILL)
-    assert res["ok"] is False
-
-
-def test_mafia_cannot_kill_mafia(mafia_service, mafia_repo):
+    """Townies can't kill, and mafia can't target fellow mafia."""
     _new_game(
         mafia_repo,
         [
@@ -398,6 +375,10 @@ def test_mafia_cannot_kill_mafia(mafia_service, mafia_repo):
             (3, MafiaRole.TOWNIE, False),
         ],
     )
+    # Townie can't kill
+    res = mafia_service.submit_night_action(TEST_GUILD_ID, 3, 1, MafiaActionType.KILL)
+    assert res["ok"] is False
+    # Mafia can't kill mafia
     res = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 2, MafiaActionType.KILL)
     assert res["ok"] is False
 
@@ -895,7 +876,11 @@ def test_phase_ready_gating(mafia_service, mafia_repo):
     assert mafia_service.day_ready(g) is True
 
 
-def test_active_optout_skips_required_night_action(mafia_service, mafia_repo):
+def test_active_optout_skips_required_night_action_and_day_vote(
+    mafia_service, mafia_repo
+):
+    """Opted-out players are excluded from the required-action rosters, so the
+    night and day phases can become ready without them."""
     _new_game(
         mafia_repo,
         [
@@ -917,25 +902,15 @@ def test_active_optout_skips_required_night_action(mafia_service, mafia_repo):
     )
     assert mafia_service.night_ready(game) is True
 
-
-def test_active_optout_skips_required_day_vote(mafia_service, mafia_repo):
-    _new_game(
-        mafia_repo,
-        [
-            (1, MafiaRole.MAFIA, False),
-            (2, MafiaRole.DOCTOR, False),
-            (3, MafiaRole.DETECTIVE, False),
-            (4, MafiaRole.TOWNIE, False),
-            (5, MafiaRole.TOWNIE, False),
-        ],
-    )
+    # Day: the opted-out doctor (2) and a newly opted-out townie (5) are both
+    # excluded from the required-vote roster.
     _force_phase(mafia_repo, MafiaPhase.DAY)
     game = mafia_repo.get_active_game(TEST_GUILD_ID)
     mafia_service.set_optout(TEST_GUILD_ID, 5, True)
 
-    assert mafia_service.players_needing_day_vote(game) == [1, 2, 3, 4]
+    assert mafia_service.players_needing_day_vote(game) == [1, 3, 4]
 
-    for voter in (1, 2, 3, 4):
+    for voter in (1, 3, 4):
         mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 5)
     assert mafia_service.day_ready(game) is True
 
@@ -943,6 +918,8 @@ def test_active_optout_skips_required_day_vote(mafia_service, mafia_repo):
 def test_public_status_excludes_opted_out_players_from_vote_progress(
     mafia_service, mafia_repo
 ):
+    """Public day status counts only opted-in voters and never leaks the
+    per-target vote breakdown."""
     _new_game(
         mafia_repo,
         [
@@ -960,8 +937,11 @@ def test_public_status_excludes_opted_out_players_from_vote_progress(
 
     status = mafia_service.get_public_status(TEST_GUILD_ID)
 
+    assert status["active"]
     assert status["voted_count"] == 2
     assert status["alive_voters"] == 4
+    # No vote_breakdown key in public status
+    assert "vote_breakdown" not in status
 
 
 def test_join_rejects_unregistered_player(mafia_service, mafia_repo):
@@ -1609,29 +1589,8 @@ def test_finalize_day_resolution_applies_audited_vanity_tax(
 # ── Status & role views ───────────────────────────────────────────────────
 
 
-def test_status_hides_breakdown_during_day(mafia_service, mafia_repo):
-    _new_game(
-        mafia_repo,
-        [
-            (1, MafiaRole.MAFIA, True),
-            (2, MafiaRole.TOWNIE, False),
-            (3, MafiaRole.DOCTOR, False),
-            (4, MafiaRole.DETECTIVE, False),
-            (5, MafiaRole.TOWNIE, False),
-        ],
-    )
-    _force_phase(mafia_repo, MafiaPhase.DAY)
-    mafia_service.submit_day_vote(TEST_GUILD_ID, 2, 1)
-    mafia_service.submit_day_vote(TEST_GUILD_ID, 3, 1)
-
-    s = mafia_service.get_public_status(TEST_GUILD_ID)
-    assert s["active"]
-    assert s["voted_count"] == 2
-    # No vote_breakdown key in public status
-    assert "vote_breakdown" not in s
-
-
 def test_player_role_includes_allies_for_mafia(mafia_service, mafia_repo):
+    """Mafia role view lists fellow mafia as allies; non-players get None."""
     _new_game(
         mafia_repo,
         [
@@ -1648,10 +1607,4 @@ def test_player_role_includes_allies_for_mafia(mafia_service, mafia_repo):
     ally_ids = {a["discord_id"] for a in info["allies"]}
     assert ally_ids == {2}
 
-
-def test_player_role_for_non_player_returns_none(mafia_service, mafia_repo):
-    _new_game(mafia_repo, [(1, MafiaRole.MAFIA, True), (2, MafiaRole.TOWNIE, False),
-                            (3, MafiaRole.TOWNIE, False), (4, MafiaRole.DOCTOR, False),
-                            (5, MafiaRole.DETECTIVE, False)])
-    info = mafia_service.get_player_role(TEST_GUILD_ID, 9999)
-    assert info is None
+    assert mafia_service.get_player_role(TEST_GUILD_ID, 9999) is None
