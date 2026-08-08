@@ -774,6 +774,52 @@ class TestCaptainEligibility:
         ) == [2001]
 
 
+class TestPlayerPoolField:
+    """The pre-draft pool display is produced by the real cog helper.
+
+    Replaces the old TestPlayerPoolVisibility class, whose tests re-implemented
+    `_build_player_pool_field`'s logic in the test body and therefore asserted
+    nothing about production.
+    """
+
+    @staticmethod
+    def _build(state: DraftState) -> str:
+        # Pure helper: uses only `state`, so no cog instance is needed.
+        return DraftCommands._build_player_pool_field(None, state)
+
+    def test_excludes_captains_sorts_by_rating_and_falls_back(self):
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3, 4, 5]
+        state.captain1_id = 1
+        state.captain2_id = 2
+        state.player_pool_data = {
+            1: {"name": "Captain1", "rating": 1850.0, "roles": ["1"]},
+            2: {"name": "Captain2", "rating": 1820.0, "roles": ["2"]},
+            3: {"name": "LowRating", "rating": 1200.0, "roles": ["5"]},
+            4: {"name": "HighRating", "rating": 1900.0, "roles": []},
+            # Player 5 deliberately has no cached data -> fallback entry.
+        }
+
+        lines = self._build(state).split("\n")
+
+        # Captains are excluded; the three draftable players remain.
+        assert len(lines) == 3
+        assert "Captain1" not in self._build(state)
+        assert "Captain2" not in self._build(state)
+        # Sorted by rating descending, with the 1500.0 fallback in the middle.
+        assert lines[0].startswith("HighRating (1900)")
+        assert lines[1].startswith("Player 5 (1500)")
+        assert lines[2].startswith("LowRating (1200)")
+
+    def test_empty_pool_when_all_players_are_captains(self):
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2]
+        state.captain1_id = 1
+        state.captain2_id = 2
+
+        assert self._build(state) == "No players in pool"
+
+
 # ============================================================================
 # Integration tests for _execute_draft (the immortal-draft execution path)
 # ============================================================================

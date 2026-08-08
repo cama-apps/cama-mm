@@ -627,8 +627,9 @@ class TestE2ESoftAvoid:
 
         Merged from test_bidirectional_avoids_work (reciprocal avoids created
         here) and test_shuffle_with_avoids_loads_and_uses (shuffle result shape
-        asserted below). Two shuffles suffice to prove repeated shuffles do not
-        decrement.
+        asserted below). Repeated shuffles run WITHOUT clearing the pending
+        shuffle in between — re-rolling over a live pending shuffle is the
+        production path, and it must still not decrement.
         """
         guild_id = 123
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
@@ -647,8 +648,9 @@ class TestE2ESoftAvoid:
             games=10,
         )
 
-        # Shuffle repeatedly without recording
-        for _ in range(2):
+        # Shuffle repeatedly without recording and without clearing the
+        # pending shuffle (each re-roll overwrites the previous one).
+        for _ in range(3):
             result = match_service.shuffle_players(
                 player_ids=discord_ids,
                 guild_id=guild_id,
@@ -656,7 +658,6 @@ class TestE2ESoftAvoid:
             assert result is not None
             assert "radiant_team" in result
             assert "dire_team" in result
-            match_service.clear_last_shuffle(guild_id)
 
         # Both avoids should still have 10 games (not decremented yet)
         avoids = soft_avoid_repo.get_active_avoids_for_players(
