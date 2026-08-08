@@ -40,16 +40,22 @@ class TestRenderPetCard:
 
     def test_all_species_stages_moods_render_valid_pngs(self):
         """Every species renders a valid card at both stages, and every mood
-        renders at both stages for one species. The mood axis selects the
-        face/expression variant independently of the species sprite (see
-        test_mood_variants_differ), so the full 15x2x3 grid re-rendered the
-        same code paths 90 times for no extra coverage."""
+        renders at both stages for one species. Mood normally only selects the
+        face/expression variant (see test_mood_variants_differ), so the full
+        15x2x3 grid re-rendered the same code paths 90 times.
+
+        The exceptions are the two species whose geometry branches on
+        species_id where mood also applies: banana_ears (oversized ears, which
+        the 'hungry' droop offsets) and rama (grumpy brows drawn over the
+        hungry eye overlay). Those combinations are rendered explicitly."""
         for species_id in SPECIES:
             for stage in STAGES:
                 _assert_valid_card(render_pet_card(species_id, stage, "neutral", seed=7))
         for stage in STAGES:
             for mood in MOODS:
                 _assert_valid_card(render_pet_card("common_cama", stage, mood, seed=7))
+        for species_id in ("banana_ears", "rama"):
+            _assert_valid_card(render_pet_card(species_id, "adult", "hungry", seed=7))
 
     def test_mood_variants_differ(self):
         happy = render_pet_card("jopacama", "adult", "happy", seed=5).getvalue()

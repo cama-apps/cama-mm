@@ -433,6 +433,10 @@ class TestDuelPayout:
         assert actions, "expected a boss_fight audit row"
         detail = json.loads(actions[0]["detail"])
         assert detail["won"] is True
+        # A win must actually pay: without this the three equality assertions
+        # below are all satisfied by a regression that credits nothing on the
+        # un-echoed live path (real_payout == payout == jc_delta == 0).
+        assert real_payout > 0
         assert detail["jc_delta"] == real_payout
         assert detail["jc_delta"] == result["payout"]
 

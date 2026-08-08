@@ -247,9 +247,52 @@ def test_wedge_label_sprite_cache_is_custom_safe_and_bounded():
 
     # Boundedness: the sprite cache is an lru_cache wired to the configured
     # maxsize, so unbounded growth is impossible by construction. (A former
-    # 2080-iteration overflow loop only re-proved stdlib lru_cache eviction.)
+    # 2080-iteration overflow loop only re-proved stdlib lru_cache eviction,
+    # which costs 2050 renders here because maxsize is 2048.)
     cache_info = wheel_drawing._get_wedge_label_sprite.cache_info()
     assert cache_info.maxsize == wheel_drawing._WEDGE_LABEL_SPRITE_CACHE_SIZE
+
+    # What the overflow loop did prove cheaply, and what eviction alone does
+    # not: every distinct wedge set and sub-pixel phase gets its OWN cache
+    # entry. A key collision here would make a warm cache serve a neighbouring
+    # frame's sprite — the wheel would render text at the wrong offset with no
+    # size or timing symptom.
+    # Start from empty so the entry count is exact: the label draws above
+    # already cached whichever phases rotation 0 happened to land on.
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
+    phases = [(0, 1), (1, 0), (1, 1)]
+    sprites = [
+        wheel_drawing._get_wedge_label_sprite(
+            500,
+            first_key,
+            first_layout,
+            phase_x,
+            phase_y,
+            wheel_drawing._WEDGE_LABEL_TEXT_STYLE,
+        )[0]
+        for phase_x, phase_y in phases
+    ]
+    assert (
+        wheel_drawing._get_wedge_label_sprite.cache_info().currsize == len(phases)
+    ), "each phase must occupy a distinct cache entry"
+    rendered = [(s.size, s.tobytes()) for s in sprites]
+    assert len(set(rendered)) == len(phases), "phases must render distinctly"
+
+    # A warm cache returns the same entry for a repeated key, and still the
+    # right one for its neighbours.
+    for (phase_x, phase_y), expected in zip(phases, rendered):
+        warm = wheel_drawing._get_wedge_label_sprite(
+            500,
+            first_key,
+            first_layout,
+            phase_x,
+            phase_y,
+            wheel_drawing._WEDGE_LABEL_TEXT_STYLE,
+        )[0]
+        assert (warm.size, warm.tobytes()) == expected
+    warm_info = wheel_drawing._get_wedge_label_sprite.cache_info()
+    assert warm_info.currsize == len(phases), "warm hits must not create entries"
+    assert warm_info.hits == len(phases)
 
 
 def test_wheel_gif_reuses_palette_seed_without_changing_timing():

@@ -191,7 +191,7 @@ class TestGamblingStatsServiceBettingImpact:
         gambling_stats_service = services["gambling_stats_service"]
 
         player_ids = list(range(1000, 1010))
-        spectator_ids = [2001, 2002, 2003]
+        spectator_ids = [2001, 2002, 2003, 2004]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
             player_repo.add_balance(sid, TEST_GUILD_ID, 100)
@@ -202,10 +202,13 @@ class TestGamblingStatsServiceBettingImpact:
 
         target_player = pending.radiant_team_ids[0]
 
-        # Bets FOR target (radiant): 45 + 30 = 75; AGAINST (dire): 25.
+        # Bets FOR target (radiant): 45 + 30 = 75; AGAINST (dire): 15 + 10 = 25.
+        # Both sides carry two competing stakes so biggest_fan/biggest_hater
+        # must actually pick the maximum rather than the only candidate.
         betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 45, pending)
         betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 30, pending)
-        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 25, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 15, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2004, "dire", 10, pending)
 
         # Radiant wins - supporters profit, haters lose
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
@@ -221,23 +224,24 @@ class TestGamblingStatsServiceBettingImpact:
         # 75 / (75 + 25) = 0.75
         assert impact.market_favorability == 0.75
         assert impact.unique_supporters == 2
-        assert impact.unique_haters == 1
-        assert impact.total_bets == 3
-        # Supporters: 2 bets, 2 wins = 100%; haters: 1 bet, 0 wins = 0%.
+        assert impact.unique_haters == 2
+        assert impact.total_bets == 4
+        # Supporters: 2 bets, 2 wins = 100%; haters: 2 bets, 0 wins = 0%.
         assert impact.supporter_win_rate == 1.0
         assert impact.supporter_bets_count == 2
         assert impact.hater_win_rate == 0.0
-        assert impact.hater_bets_count == 1
-        # Biggest fan/hater by wagered amount.
+        assert impact.hater_bets_count == 2
+        # Biggest fan/hater is the MAX stake on each side, not merely a
+        # participant: 45 beats 30 for, 15 beats 10 against.
         assert impact.biggest_fan is not None
         assert impact.biggest_fan.discord_id == 2001
         assert impact.biggest_fan.total_wagered_for == 45
         assert impact.biggest_hater is not None
         assert impact.biggest_hater.discord_id == 2003
-        assert impact.biggest_hater.total_wagered_against == 25
-        # Extremes across individual bets.
+        assert impact.biggest_hater.total_wagered_against == 15
+        # Extremes across individual bets, each chosen from two candidates.
         assert impact.biggest_single_win == 45
-        assert impact.biggest_single_loss == -25
+        assert impact.biggest_single_loss == -15
 
     def test_blessing_only_set_if_positive(self, services):
         """blessing is None when all supporters lost; luckiest_hater is None
