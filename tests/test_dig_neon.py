@@ -61,9 +61,14 @@ class TestDigGifGenerators:
             dig_drawing.animate_dig_reveal("Nonexistent Layer", motion="unearth", title="X")
         )
 
-    @pytest.mark.parametrize("source", ["match", "prediction", "gamba"])
-    @pytest.mark.parametrize("flavor", ["bigwin", "top_dog", "underdog"])
+    @pytest.mark.parametrize(
+        ("source", "flavor"),
+        [("match", "bigwin"), ("prediction", "top_dog"), ("gamba", "underdog")],
+    )
     def test_bigwin_gif(self, source, flavor):
+        """Each source and each flavor renders a valid GIF. The axes only pick
+        caption/text styling, so a diagonal covers every value of both without
+        rendering all nine combinations."""
         _assert_valid_gif(create_bigwin_gif("pf", 3200, source=source, flavor=flavor))
 
 
@@ -90,6 +95,30 @@ class TestDigPersonas:
 @pytest.fixture
 def enabled(monkeypatch):
     monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", True)
+
+
+@pytest.fixture
+def stub_gif_renders(monkeypatch):
+    """Stub the animated renders for pure gating/routing tests.
+
+    The real hook->generator wiring stays covered end-to-end by
+    test_boss_victory_fires_with_attribution, test_legendary_relic_fires,
+    test_cave_in_requires_rollback, test_prestige_fires, and
+    test_big_win_fires_above_floor; the generators themselves by
+    TestDigGifGenerators."""
+    import utils.neon_drawing as nd
+
+    def stub(*_args, **_kwargs):
+        return io.BytesIO(b"GIF89a-stub")
+
+    for name in (
+        "animate_dig_reveal",
+        "animate_legendary_relic",
+        "animate_cave_in",
+        "animate_pinnacle",
+    ):
+        monkeypatch.setattr(dig_drawing, name, stub)
+    monkeypatch.setattr(nd, "create_bigwin_gif", stub)
 
 
 def _force_roll(service, value):
@@ -190,19 +219,19 @@ class TestDigNeonHooks:
         assert seen[1] > seen[0]
         assert seen[1] <= 0.95 + 1e-9
 
-    async def test_wheel_win_routes_to_big_win(self, enabled):
+    async def test_wheel_win_routes_to_big_win(self, enabled, stub_gif_renders):
         svc = NeonDegenService()
         _force_roll(svc, True)
         r = await svc.on_wheel_result(1, 0, result_value=4000, new_balance=5000)
         assert r and r.gif_file is not None
 
-    async def test_don_big_win_routes_to_big_win(self, enabled):
+    async def test_don_big_win_routes_to_big_win(self, enabled, stub_gif_renders):
         svc = NeonDegenService()
         _force_roll(svc, True)
         r = await svc.on_double_or_nothing(1, 0, won=True, balance_at_risk=3000, final_balance=6000)
         assert r and r.gif_file is not None
 
-    async def test_cooldown_blocks_second_fire(self, enabled):
+    async def test_cooldown_blocks_second_fire(self, enabled, stub_gif_renders):
         svc = NeonDegenService()
         _force_roll(svc, True)
         r1 = await svc.on_dig_boss_victory(1, 0, boss_name="x", boundary=100, layer_name="Magma")
