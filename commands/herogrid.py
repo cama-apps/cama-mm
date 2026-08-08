@@ -16,6 +16,7 @@ from commands.checks import require_guild
 from domain.models.lobby import LobbyKind
 from utils.drawing import draw_hero_grid
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
+from utils.lobby_selection import AmbiguousLobbyError, choice_to_lobby_kind
 
 logger = logging.getLogger("cama_bot.commands.herogrid")
 
@@ -34,25 +35,30 @@ class HeroGridCommands(commands.Cog):
         source_value: str,
         guild_id: int | None,
         invoking_user_id: int | None = None,
+        lobby_kind: LobbyKind | None = None,
     ) -> tuple[list[int], str | None]:
         """Resolve player IDs using a priority chain.
 
         Returns:
             (player_ids, source_label) where source_label is None for the all-players fallback.
+
+        Raises:
+            AmbiguousLobbyError: the invoker is queued in both lobbies and gave
+                no explicit kind.
         """
         if source_value == "all":
             enriched_players = self.match_service.get_players_with_enriched_data(guild_id)
             return [p["discord_id"] for p in enriched_players], None
 
         # Priority 1: Active lobby
-        lobby_kind = LobbyKind.OPEN
-        if invoking_user_id is not None:
-            lobby_kind = (
-                self.lobby_manager.get_lobby_kind_for_player(
-                    invoking_user_id, guild_id
-                )
-                or LobbyKind.OPEN
+        if lobby_kind is None and invoking_user_id is not None:
+            member_kinds = self.lobby_manager.get_lobby_kinds_for_player(
+                invoking_user_id, guild_id
             )
+            if len(member_kinds) > 1:
+                raise AmbiguousLobbyError()
+            lobby_kind = member_kinds[0] if member_kinds else None
+        lobby_kind = lobby_kind or LobbyKind.OPEN
         lobby = self.lobby_manager.get_lobby(
             guild_id=guild_id,
             lobby_kind=lobby_kind,
@@ -118,13 +124,18 @@ class HeroGridCommands(commands.Cog):
         source="Player source: auto picks lobby if available, otherwise all players",
         min_games="Minimum games on a hero for it to appear (default: 2)",
         limit="Maximum number of players to include",
+        lobby="Lobby to read (defaults to the lobby you're in)",
     )
     @app_commands.choices(
         source=[
             app_commands.Choice(name="Auto (lobby if available)", value="auto"),
             app_commands.Choice(name="Current Lobby", value="lobby"),
             app_commands.Choice(name="All Players", value="all"),
-        ]
+        ],
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ],
     )
     @require_guild
     async def herogrid(
@@ -133,6 +144,7 @@ class HeroGridCommands(commands.Cog):
         source: app_commands.Choice[str] | None = None,
         min_games: int = 2,
         limit: int | None = None,
+        lobby: app_commands.Choice[str] | None = None,
     ):
         """Generate a player x hero grid image."""
         if not await safe_defer(interaction):
@@ -142,12 +154,17 @@ class HeroGridCommands(commands.Cog):
         guild_id = interaction.guild.id
 
         # Determine player list via priority chain
-        player_ids, source_label = await asyncio.to_thread(
-            self._resolve_player_ids,
-            source_value,
-            guild_id,
-            interaction.user.id,
-        )
+        try:
+            player_ids, source_label = await asyncio.to_thread(
+                self._resolve_player_ids,
+                source_value,
+                guild_id,
+                interaction.user.id,
+                choice_to_lobby_kind(lobby),
+            )
+        except AmbiguousLobbyError as exc:
+            await safe_followup(interaction, content=exc.message)
+            return
 
         if not player_ids and source_value == "lobby":
             await safe_followup(

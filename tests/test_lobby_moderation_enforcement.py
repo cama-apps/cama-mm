@@ -340,6 +340,53 @@ def test_join_rollback_leaves_reserved_player_seated():
     assert any(10 in row["players"] for row in repo.load_all_lobby_states())
 
 
+def test_join_rollback_ignores_the_other_lobbys_reservation():
+    """Only this lobby's own shuffle earns a player their seat back.
+
+    Dual queueing makes the cross-kind case reachable: a shuffle running in
+    All You Can Feed has no claim on a Whine & Cheese seat, so a suspension
+    landing mid-join must still roll that join back.
+    """
+
+    class RacingModerationService(FakeModerationService):
+        manager: LobbyManagerService
+
+        def get_active_suspension(
+            self,
+            discord_id: int,
+            guild_id: int,
+            lobby_kind: str | None = None,
+        ) -> FakeSuspension | None:
+            result = super().get_active_suspension(
+                discord_id,
+                guild_id,
+                lobby_kind,
+            )
+            if result is None and not self.suspensions:
+                # Pre-join gate: the admin commits the suspension just after
+                # this read, so the join proceeds and seats the player.
+                self.suspend(discord_id, guild_id, "all")
+                return None
+            # Post-add re-read: by now the OTHER lobby's shuffle has reserved
+            # them. That reservation must not save this seat.
+            self.manager._in_flight_player_kinds[(99, discord_id)] = (
+                LobbyKind.OPEN
+            )
+            return result
+
+    moderation = RacingModerationService()
+    repo = FakeLobbyRepo()
+    manager = LobbyManagerService(repo, moderation_service=moderation)
+    moderation.manager = manager
+
+    result = manager.join_lobby(10, guild_id=99, lobby_kind=LobbyKind.LOWSKILL)
+
+    assert result == "lobby_suspended"
+    lobby = manager.get_lobby(guild_id=99, lobby_kind=LobbyKind.LOWSKILL)
+    assert lobby is None or 10 not in lobby.players
+    assert not any(10 in row["players"] for row in repo.load_all_lobby_states())
+
+
 def test_moderation_queries_run_outside_manager_state_lock():
     """Suspension lookups are DB I/O (and can issue a lapsed-suspension close
     write), so they must never run inside the process-wide ``_state_lock``

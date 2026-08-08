@@ -1328,6 +1328,8 @@ class TestResetLobbyDedicatedChannel:
         bot.draft_state_manager = None
 
         lobby_service = MagicMock()
+        # The invoker sits in exactly one lobby, so the kind is inferred.
+        lobby_service.get_lobby_kinds_for_player.return_value = [LobbyKind.OPEN]
         lobby_service.get_lobby_channel_id.return_value = lobby_channel_id
         lobby_service.get_lobby_message_id.return_value = 321
         lobby_service.get_lobby.return_value = MagicMock(created_by=12345)
@@ -1410,6 +1412,37 @@ class TestResetLobbyDedicatedChannel:
         bot.get_channel.assert_not_called()
         unpin_mock.assert_awaited_once_with(interaction.channel, 321)
         lobby_service.reset_lobby.assert_called_once_with(1, LobbyKind.OPEN)
+
+    @pytest.mark.asyncio
+    async def test_resetlobby_without_option_refuses_when_queued_in_both(self):
+        """A caller in both lobbies must name one; neither lobby is reset."""
+        from utils.lobby_selection import AMBIGUOUS_LOBBY_MESSAGE
+
+        cog, bot, lobby_service, interaction = self._make_cog_and_interaction(
+            lobby_channel_id=100
+        )
+        lobby_service.get_lobby_kinds_for_player.return_value = [
+            LobbyKind.OPEN,
+            LobbyKind.LOWSKILL,
+        ]
+        followup_mock = AsyncMock()
+        unpin_mock = AsyncMock(return_value=0)
+
+        with (
+            patch("commands.lobby.safe_defer", AsyncMock(return_value=True)),
+            patch("commands.lobby.safe_followup", followup_mock),
+            patch("commands.lobby.safe_unpin_message", unpin_mock),
+            patch.object(cog, "_update_channel_message_closed", AsyncMock()),
+            patch.object(cog, "_archive_lobby_thread", AsyncMock()),
+        ):
+            await cog.resetlobby.callback(cog, interaction)
+
+        followup_mock.assert_awaited_once()
+        assert followup_mock.await_args.kwargs["content"] == AMBIGUOUS_LOBBY_MESSAGE
+        assert followup_mock.await_args.kwargs["ephemeral"] is True
+        lobby_service.reset_lobby.assert_not_called()
+        unpin_mock.assert_not_awaited()
+        bot.get_channel.assert_not_called()
 
 
 class TestSchemaMigration:

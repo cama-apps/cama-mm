@@ -39,6 +39,7 @@ from utils.formatting import (
 )
 from utils.guild import normalize_guild_id
 from utils.interaction_safety import safe_defer
+from utils.lobby_selection import resolve_lobby_kind
 from utils.match_views import EnrichedMatchView
 from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
@@ -453,6 +454,7 @@ class MatchCommands(commands.Cog):
     @app_commands.describe(
         mode="Team-shuffle mode",
         rating_system="Rating system for team balancing (experimental)",
+        lobby="Lobby to shuffle (defaults to the lobby you're in)",
     )
     @app_commands.choices(
         mode=[
@@ -463,13 +465,18 @@ class MatchCommands(commands.Cog):
             app_commands.Choice(name="Glicko-2 (default)", value="glicko"),
             app_commands.Choice(name="OpenSkill (experimental)", value="openskill"),
             app_commands.Choice(name="Jopacoin Balance", value="jopacoin"),
-        ]
+        ],
+        lobby=[
+            app_commands.Choice(name="🍽️ All You Can Feed", value="open"),
+            app_commands.Choice(name="🧀 Whine & Cheese", value="lowskill"),
+        ],
     )
     async def shuffle(
         self,
         interaction: discord.Interaction,
         mode: app_commands.Choice[str] | None = None,
         rating_system: app_commands.Choice[str] | None = None,
+        lobby: app_commands.Choice[str] | None = None,
     ):
         logger.info(f"Shuffle command: User {interaction.user.id} ({interaction.user})")
         guild = interaction.guild if hasattr(interaction, "guild") else None
@@ -492,16 +499,18 @@ class MatchCommands(commands.Cog):
             return
 
         guild_id = guild.id if guild else None
-        lobby_kind = await asyncio.to_thread(
-            self.lobby_service.get_lobby_kind_for_player,
+        member_kinds = await asyncio.to_thread(
+            self.lobby_service.get_lobby_kinds_for_player,
             interaction.user.id,
             guild_id,
         )
-        if lobby_kind is None:
-            await interaction.followup.send(
-                "❌ Join a lobby before using `/shuffle`.",
-                ephemeral=True,
-            )
+        lobby_kind, selection_error = resolve_lobby_kind(
+            member_kinds,
+            lobby,
+            no_lobby_message="❌ Join a lobby before using `/shuffle`.",
+        )
+        if selection_error is not None:
+            await interaction.followup.send(selection_error, ephemeral=True)
             return
 
         # Acquire shuffle lock to prevent race conditions
@@ -800,6 +809,19 @@ class MatchCommands(commands.Cog):
                     "❌ Unexpected error while shuffling. Please try again.", ephemeral=True
                 )
                 return
+
+            # The match is now durable, so the players in it lose the seat
+            # they were still holding in the other lobby. This runs before the
+            # reservation is released on purpose: while these players are
+            # reserved the other lobby cannot start its own shuffle over them,
+            # and once they are out of its roster it never can. Releasing
+            # first would leave a window where both lobbies pop the same
+            # person into two matches.
+            await self._evict_matched_players_from_other_lobbies(
+                result,
+                guild_id=guild_id,
+                popped_kind=kind,
+            )
         finally:
             await asyncio.to_thread(
                 self.lobby_service.release_lobby_players,
@@ -1113,6 +1135,46 @@ class MatchCommands(commands.Cog):
             # reset on success, and still runs if a later step fails so lobby
             # embeds reflect the consumed first-game pool.
             await self._refresh_bonus_pool_lobbies(guild_id)
+
+    async def _evict_matched_players_from_other_lobbies(
+        self,
+        shuffle_result: dict,
+        *,
+        guild_id: int | None,
+        popped_kind: LobbyKind,
+    ) -> None:
+        """Release the other lobby's seats for the players who just got a match.
+
+        Only the ten who are actually playing are evicted. The lobby can seat
+        up to ``LOBBY_MAX_PLAYERS``, and everyone the shuffler benched keeps
+        their place in the other queue — they did not get a game.
+        """
+        matched_ids = {
+            player.discord_id
+            for team_key in ("radiant_team", "dire_team")
+            for player in getattr(shuffle_result.get(team_key), "players", [])
+            if player.discord_id is not None
+        }
+        if not matched_ids:
+            return
+        lobby_cog = self.bot.get_cog("LobbyCommands")
+        evict = getattr(lobby_cog, "evict_matched_players_from_other_lobbies", None)
+        if evict is None:
+            return
+        try:
+            await evict(
+                matched_ids,
+                guild_id=guild_id,
+                popped_kind=popped_kind,
+            )
+        except Exception as exc:
+            # A started match must never be unwound by lobby bookkeeping.
+            logger.warning(
+                "Failed to clear the other lobby after the %s shuffle: %s",
+                popped_kind.value,
+                exc,
+                exc_info=True,
+            )
 
     async def _refresh_bonus_pool_lobbies(self, guild_id: int | None) -> None:
         """Refresh current lobby displays after betting-pool availability changes."""

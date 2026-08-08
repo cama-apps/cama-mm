@@ -114,12 +114,12 @@ class LobbyService:
             lobby_kind=lobby_kind,
         )
 
-    def get_lobby_kind_for_player(
+    def get_lobby_kinds_for_player(
         self,
         discord_id: int,
         guild_id: int | None = None,
-    ) -> LobbyKind | None:
-        return self.lobby_manager.get_lobby_kind_for_player(discord_id, guild_id)
+    ) -> list[LobbyKind]:
+        return self.lobby_manager.get_lobby_kinds_for_player(discord_id, guild_id)
 
     def join_lobby(
         self,
@@ -137,7 +137,8 @@ class LobbyService:
         Returns:
             Tuple of (success, reason, pending_info):
             - success: True if joined, False otherwise
-            - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
+            - reason: "" on success, or one of: "in_pending_match", "lobby_full",
+              "already_joined", "rating_too_high", "in_flight", "lobby_suspended"
             - pending_info: PendingMatchState for an existing match, the active
               suspension for ``"lobby_suspended"``, the manager join result
               (carrying ``joined_at_ns``) on success, or None otherwise
@@ -171,8 +172,6 @@ class LobbyService:
             return True, "", reason
         if reason == "full":
             return False, "lobby_full", None
-        if reason == "in_other_lobby":
-            return False, "in_other_lobby", None
         if reason == "in_flight":
             return False, "in_flight", None
         if reason == "lobby_suspended":
@@ -249,6 +248,18 @@ class LobbyService:
             discord_id,
             guild_id=guild_id,
             lobby_kind=lobby_kind,
+        )
+
+    def remove_players_from_lobby(
+        self,
+        player_ids: list[int] | set[int],
+        guild_id: int | None = None,
+        lobby_kind: LobbyKind | str | None = None,
+    ) -> set[int]:
+        return self.lobby_manager.remove_players_from_lobby(
+            player_ids,
+            guild_id,
+            lobby_kind,
         )
 
     def leave_lobby_conditional(

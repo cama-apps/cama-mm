@@ -103,29 +103,51 @@ complete list, and Discord's slash-command autocomplete shows per-option details
 
 ### Lobby & Shuffle
 
+There are two lobbies — 🍽️ All You Can Feed (open to all ratings) and 🧀 Whine & Cheese
+(Glicko below 1400) — and you can queue in **both at once** if you're eligible. Whichever one
+shuffles or drafts first takes you; you're removed from the other automatically, and the
+players it benched keep their place in it.
+
+Because of that, any command that would otherwise read "the lobby you're in" takes a `lobby`
+option. It's inferred when you're only in one and required when you're in both.
+
 #### `/lobby`
-Create or view the matchmaking lobby. Use buttons in the thread to join/leave. Requires 10+ players to shuffle.
+Create or view a matchmaking lobby. Use buttons in the thread to join/leave. Requires 10+ players to shuffle.
+
+**Options:**
+- `lobby` (optional): Which lobby to create or view (defaults to All You Can Feed)
 
 #### `/join`
-Join the matchmaking lobby from any channel.
+Join a matchmaking lobby from any channel.
+
+**Options:**
+- `lobby` (optional): Which lobby to join (defaults to All You Can Feed)
 
 #### `/leave`
-Leave the matchmaking lobby.
+Leave every matchmaking lobby you're queued in. A lobby whose shuffle or draft has already
+started keeps you until it finishes.
 
 #### `/readycheck`
 Check lobby players' online status and ping those who are away.
 
+**Options:**
+- `lobby` (optional): Which lobby to check (defaults to the lobby you're in)
+
 #### `/kick`
-Kick a player from the current lobby once. This does not prevent them from rejoining.
+Kick a player from the lobbies they're in, once. This does not prevent them from rejoining.
 
 **Options:**
 - `player`: The Discord user to kick from the lobby
 - `reason` (optional): Private reason shown to the player and retained in admin history
 
-**Permissions:** Admin, or the lobby creator while the creator is still in that lobby
+**Permissions:** Admin — reaches both lobbies. A lobby creator reaches only the lobby they
+created, while they are still in it.
 
 #### `/resetlobby`
-Reset the current lobby (clears all players).
+Reset a lobby (clears all players).
+
+**Options:**
+- `lobby` (optional): Which lobby to reset (defaults to the lobby you're in)
 
 **Permissions:** Admin or lobby creator only
 
@@ -135,6 +157,7 @@ Create balanced teams from the lobby (requires at least 10 players). Uses pool b
 **Options:**
 - `mode` (optional): "Balanced" (default) or "Region Split" (US West vs US East)
 - `rating_system` (optional): "Glicko-2" (default), "OpenSkill" (experimental), or "Jopacoin Balance"
+- `lobby` (optional): Which lobby to shuffle (defaults to the lobby you're in)
 
 ### Captain's Draft — `/draft`
 
@@ -144,6 +167,10 @@ Start an Immortal Draft with captain-based player selection: coinflip, side/pick
 **Options:**
 - `captain1` (optional): Specify first captain
 - `captain2` (optional): Specify second captain
+- `lobby` (optional): Which lobby to draft from (defaults to the lobby you're in)
+
+Locking the draft pool counts as the lobby popping: those players are removed from the other
+lobby when the draft starts, not when it finishes.
 
 #### `/draft restart`
 Restart the current Immortal Draft, preserving the lobby. Captains or admins only.
