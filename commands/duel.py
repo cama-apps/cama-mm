@@ -141,6 +141,8 @@ class DuelCommands(commands.Cog):
         self._configured_rescue_failed_at: dict[int, float] = {}
         # Per-guild (timestamp, channel) of successful rescues.
         self._configured_rescue_channel: dict[int, tuple[float, object]] = {}
+        # Per-guild throttle for the no-sendable-channel warning.
+        self._deferred_warned_at: dict[int, float] = {}
 
     @duel.command(name="issue", description="Challenge a player to a duel of honor")
     async def issue(
@@ -577,6 +579,19 @@ class DuelCommands(commands.Cog):
         if challenge is None:
             return
         deferred = not await self._get_lifecycle_channels(challenge)
+        if deferred:
+            # The per-resolution channel logs are debug-level, so without
+            # this a guild whose reminders stall on unresolvable channels
+            # would stall silently. Throttled per guild.
+            last = self._deferred_warned_at.get(guild_id, float("-inf"))
+            if time.monotonic() - last >= self.CONFIGURED_RESCUE_RETRY_SECONDS:
+                self._deferred_warned_at[guild_id] = time.monotonic()
+                logger.warning(
+                    "No sendable channel for due duel work; deferring "
+                    "reminder claims. guild=%s challenge=%s",
+                    guild_id,
+                    challenge_id,
+                )
         result = await asyncio.to_thread(
             self.duel_service.process_due,
             challenge_id,

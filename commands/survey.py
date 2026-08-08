@@ -565,11 +565,13 @@ class SurveyResultsView(discord.ui.View):
                 view=self,
                 allowed_mentions=_ALLOWED_MENTIONS,
             )
-        except Exception:
-            # A failed click still refreshed the view timeout, but its
-            # unacknowledged token cannot edit — and the kept token may not
-            # survive until the pushed-back on_timeout. Retire the report now
-            # through the token that still works instead of gambling.
+        except discord.NotFound:
+            # This click's token is dead, yet the click still refreshed the
+            # view timeout — and the kept token may not survive until the
+            # pushed-back on_timeout. Retire the report now through the
+            # token that still works instead of gambling. Transient errors
+            # (5xx, disconnects) deliberately do NOT retire: the view stays
+            # usable and the next click simply works.
             await self._retire_now()
             raise
         # discord.py pushes the view timeout forward on every click; keep the
@@ -590,8 +592,9 @@ class SurveyResultsView(discord.ui.View):
                 view=self,
                 allowed_mentions=_ALLOWED_MENTIONS,
             )
-        except Exception:
-            # See previous(): retire through the still-working token.
+        except discord.NotFound:
+            # See previous(): retire through the still-working token only on
+            # a dead click token; transient errors leave the view usable.
             await self._retire_now()
             raise
         # See previous(): only adopt the token once the edit succeeded.

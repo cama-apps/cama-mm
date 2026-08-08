@@ -95,9 +95,12 @@ def _streak_rate(match: Any) -> float:
 def _streak_threshold(match: Any) -> int:
     """Return the rating-streak threshold recorded for a match.
 
-    Matches recorded before the threshold column existed all used the
-    historical threshold of 3, so replay falls back to that legacy value
-    rather than today's configuration.
+    Two regimes: rows that exist in rating_history carry the recorded
+    threshold (the migration backfills pre-column rows with the config
+    value in force at recording time). Matches with NO history row predate
+    the streak feature entirely — no boost was applied when they were
+    recorded — and replay deliberately applies the legacy 3 to them rather
+    than today's configuration.
     """
     return recorded_streak_threshold(_value(match, "streak_threshold"))
 
