@@ -530,18 +530,24 @@ class TestShuffler:
         }
         assert team_region_sets == {frozenset({"USW"}), frozenset({"USE"})}
 
-    def test_shuffle_from_pool(self):
-        """Test shuffling from a pool of more than 10 players."""
-        players = [Player(name=f"Player{i}", mmr=1500 + i * 10) for i in range(12)]
+    @pytest.mark.parametrize("pool_size", [12, 13])
+    def test_shuffle_from_pool(self, pool_size):
+        """Test shuffling from a pool of more than 10 players.
+
+        Both an even and an odd oversized pool: 12 sits out 2, 13 sits out 3.
+        """
+        players = [
+            Player(name=f"Player{i}", mmr=1500 + i * 10) for i in range(pool_size)
+        ]
         shuffler = BalancedShuffler(use_glicko=False, off_role_flat_penalty=50.0)
         team1, team2, excluded = shuffler.shuffle_from_pool(players)
 
         assert len(team1.players) == 5
         assert len(team2.players) == 5
-        assert len(excluded) == 2
+        assert len(excluded) == pool_size - 10
         # All players should be accounted for
         all_players = team1.players + team2.players + excluded
-        assert len(all_players) == 12
+        assert len(all_players) == pool_size
         # Compare by name since Player objects aren't hashable
         all_player_names = {p.name for p in all_players}
         player_names = {p.name for p in players}
@@ -1178,11 +1184,15 @@ def _shuffle_result_signature(
     )
 
 
-def _seeded_14_player_pool(seed: int, prefix: str = "Seeded") -> list[Player]:
-    # Role preferences are capped at 3 per player: the differential properties
-    # under test (optimized search == reference search) are about the bound
-    # arithmetic, not assignment breadth, and 1-3 roles still mixes off-role
-    # and flex assignments while keeping the exhaustive reference search cheap.
+def _seeded_14_player_pool(
+    seed: int, prefix: str = "Seeded", max_roles: int = 3
+) -> list[Player]:
+    # Role preferences default to 1-3 per player, which still mixes off-role
+    # and flex assignments while keeping the exhaustive reference search
+    # cheap. Callers pass max_roles=5 to get full-flex players, the regime
+    # with the largest role-assignment candidate sets (and so the most room
+    # for the split bound to prune wrongly); at least one differential case
+    # must exercise it.
     rng = random.Random(seed)
     roles = ["1", "2", "3", "4", "5"]
     return [
@@ -1191,7 +1201,7 @@ def _seeded_14_player_pool(seed: int, prefix: str = "Seeded") -> list[Player]:
             discord_id=index + 1,
             glicko_rating=rng.uniform(850.0, 2750.0),
             glicko_rd=None if index % 5 == 0 else rng.uniform(20.0, 350.0),
-            preferred_roles=rng.sample(roles, rng.randint(1, 3)),
+            preferred_roles=rng.sample(roles, rng.randint(1, max_roles)),
         )
         for index in range(14)
     ]
@@ -1395,23 +1405,25 @@ class TestShuffler14Players:
         assert len(summarized_teams) <= math.comb(14, 5)
 
     @pytest.mark.parametrize(
-        ("seed", "recent_count"),
+        ("seed", "recent_count", "max_roles"),
         [
-            (0x1401, 0),
-            (0x1403, 7),
+            (0x1401, 0, 5),
+            (0x1403, 7, 3),
         ],
     )
     def test_split_bound_exactly_matches_reference_search_for_seeded_pools(
-        self, monkeypatch, seed, recent_count
+        self, monkeypatch, seed, recent_count, max_roles
     ):
         """Tighter split pruning must not change any selected player or role.
 
         Two seeded cases suffice: every penalty weight is randomized nonzero in
         both, and the pair covers recent_count == 0 (recent term inert) and
         recent_count > 0 (recent term active); the dropped seeds sampled the
-        same code paths again.
+        same code paths again. The first case uses full-flex (1-5 role)
+        players so the widest role-assignment candidate sets — where the
+        bound has the most to prune — stay covered.
         """
-        players = _seeded_14_player_pool(seed)
+        players = _seeded_14_player_pool(seed, max_roles=max_roles)
         rng = random.Random(seed ^ 0xB0A0D)
         exclusion_counts = {
             player.name: rng.randint(0, 5) for player in players

@@ -9,18 +9,27 @@ from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
 
 
-def _seed_players(repo: PlayerRepository, count: int = 10, *, os_mu=None, os_sigma=None):
+def _seed_players(
+    repo: PlayerRepository,
+    count: int = 10,
+    *,
+    os_mu=None,
+    os_sigma=None,
+    flex_roles: bool = False,
+):
     # Cycling single-role preferences keep the shuffle search cheap (one role
     # assignment per team instead of hundreds of permutations for all-role
     # players). Every assertion in this module is either structural or a
     # selection-wide score delta, so narrower role preferences change nothing.
+    # flex_roles=True restores all-role players for the one test that must
+    # drive the service -> shuffler wiring through the permutation search.
     for i in range(count):
         pid = 1000 + i
         repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
             guild_id=TEST_GUILD_ID,
-            preferred_roles=[str(i % 5 + 1)],
+            preferred_roles=["1", "2", "3", "4", "5"] if flex_roles else [str(i % 5 + 1)],
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=350.0,
@@ -52,7 +61,10 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     # No matches yet -> empty result, but the call itself must not raise.
     assert service.get_last_match_participant_ids(TEST_GUILD_ID) == []
 
-    player_ids = _seed_players(player_repo, 10)
+    # Flex-role players here (and only here) so one service-level shuffle
+    # still crosses the shuffler's role-permutation search rather than the
+    # trivial one-assignment-per-team path the cheap seeding takes.
+    player_ids = _seed_players(player_repo, 10, flex_roles=True)
 
     shuffle_result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     assert shuffle_result["radiant_team"]

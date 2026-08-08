@@ -120,9 +120,12 @@ class TestEventVariance:
         within the economy-scaled jitter range, with visible variance.
 
         Sigma note: the base-3 jitter rolls int(round(3*U(0.5,1.5))), whose
-        scaled per-roll sigma is ~0.8, so n=60 gives SE ~0.10; the 1.8..2.2
-        mean band is ~2 SE around the true mean 2.0 — and the run is fully
-        seeded (random.seed(i+1)), so the outcome is deterministic anyway.
+        scaled per-roll sigma is ~0.8, so n=60 gives SE ~0.10; the 1.7..2.3
+        mean band is ~3 SE around the true mean 2.0. The run is fully seeded
+        (random.seed(i+1)) so it is deterministic today, but the seeds reach
+        outcomes through the service's RNG consumption order — a 3 SE band
+        keeps an unrelated refactor that reorders a random call from failing
+        this test spuriously.
         Also proves jitter is wired in end-to-end (>= 2 unique rolls),
         subsuming the old test_jitter_actually_varies_across_seeds."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -142,7 +145,7 @@ class TestEventVariance:
             scale_minigame_jc_delta(4)
         )
         mean = sum(rolls) / len(rolls)
-        assert 1.8 <= mean <= 2.2, f"mean {mean} not within scaled base-3 range"
+        assert 1.7 <= mean <= 2.3, f"mean {mean} not within scaled base-3 range"
         assert len({*rolls}) >= 2, "no jitter visible across 60 rolls"
 
     def test_zero_jc_outcome_stays_zero(
@@ -208,8 +211,10 @@ class TestEventVariance:
         raw range is [0, 4]; sign clamp must lift any non-positive roll
         to +1 so a successful event never reverses into a retreat.
 
-        With jitter -2 hit at p=0.2 per roll, 30 seeded iterations reach the
-        clamp path many times (deterministic under the fixed seeds)."""
+        The seeded sweep alone cannot prove the clamp: an unclamped -1 shift
+        also yields +1, so a clamped result is indistinguishable in the
+        output. The sweep therefore covers the surrounding range, and the
+        clamp itself is pinned by forcing the -2 shift outright."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository, depth=10)
 
@@ -223,6 +228,23 @@ class TestEventVariance:
                 f"advance {r.get('depth_delta')} on iter {i} retreated from "
                 "a positive-base success"
             )
+
+        # Force the only shift that drives advance non-positive (+2 base
+        # with -2 jitter = 0): the clamp must lift it to exactly +1.
+        real_randint = random.randint
+
+        def forced_low_jitter(low, high):
+            if (low, high) == (-2, 2):
+                return -2
+            return real_randint(low, high)
+
+        monkeypatch.setattr(random, "randint", forced_low_jitter)
+        dig_repo.update_tunnel(10001, 12345, depth=10)
+        clamped = dig_service.resolve_event(10001, 12345, "friendly_mole", "safe")
+        assert clamped["success"]
+        assert clamped.get("depth_delta", 0) == 1, (
+            "a +2 advance jittered to 0 must clamp up to +1, not stall or retreat"
+        )
 
     def test_negative_jc_stays_negative(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,

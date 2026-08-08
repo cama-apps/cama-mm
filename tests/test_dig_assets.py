@@ -243,9 +243,12 @@ class TestPinnaclePhaseDrawing:
     def test_pinnacle_phase3_effects_are_deterministic(self, boss_id, secret):
         """A fresh render is byte-identical to the shared cached render.
 
-        Determinism comes from the seeded effect pipeline shared by every
-        theme, so one normal and one secret case cover it; repeating the
-        double-render for all 6 bosses x 2 palettes added no coverage.
+        The phase-3 pipeline (_pinnacle_phase_base -> _draw_pinnacle_atmosphere
+        -> cosine easing -> quantize) contains no RNG at all: output is a pure
+        function of the source bytes and the theme constants, so determinism
+        cannot vary per boss. One normal and one secret case therefore cover
+        it, and repeating the double-render for all 6 bosses x 2 palettes only
+        re-proved purity at ~0.1s per render.
         """
         source = (
             ASSETS_DIR / "bosses" / f"{boss_id}_encounter.png"
