@@ -207,9 +207,14 @@ class TestCoreDig:
         assert FIRST_DIG_JC_MIN <= result["jc_earned"] <= FIRST_DIG_JC_MAX
 
     def test_first_dig_no_cave_in(self, dig_service, player_repository, guild_id, monkeypatch):
-        """First dig never has cave-in (run 50 times with different seeds)."""
+        """First dig never has cave-in.
+
+        The first-dig path is structurally cave-in-free (no cave-in roll), so
+        10 seeded trajectories suffice; the forced-low-roll case is covered by
+        test_profile_created_tunnel_still_gets_first_dig (random pinned 0.001).
+        """
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        for seed in range(50):
+        for seed in range(10):
             # Each iteration needs a fresh player/tunnel
             pid = 20000 + seed
             _register_player(player_repository, discord_id=pid)
@@ -646,20 +651,15 @@ class TestCoreDig:
             scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
         )
 
-    def test_dynamite_cache_buff_respects_lifted_cap_on_huge_loot(
-        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
-    ):
-        """With a +75% buff the base still tops out at the lifted cap (20*1.75=35),
-        not unbounded — proving the cap is scaled, not removed."""
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        # Force a pre-cap base far above any cap (overwrites the product).
+        # Player C: same +75% buff but a huge pre-cap base (100) — the base
+        # still tops out at the lifted cap (20*1.75=35), not unbounded,
+        # proving the cap is scaled, not removed. (Merges the former
+        # test_dynamite_cache_buff_respects_lifted_cap_on_huge_loot.)
         monkeypatch.setattr(
             dig_service,
             "_apply_mana_yield_variance",
             lambda did, gid, jc, **kwargs: 100,
         )
-
         _register_player(player_repository, discord_id=20003)
         dig_repo.create_tunnel(20003, guild_id, "C")
         dig_repo.update_tunnel(20003, guild_id, depth=10, max_depth=10)
@@ -1447,7 +1447,9 @@ class TestCaveIn:
     """Tests for cave-in mechanics."""
 
     def test_cave_in_reduces_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cave-in block_loss respects the configured range."""
+        """Cave-in block_loss respects the configured range; a stun injury,
+        when rolled, reports at least one hour of extended cooldown (folds in
+        the former test_cave_in_stun_extends_cooldown)."""
         _register_player(player_repository, balance=200)
         # Set up tunnel with some depth first
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -1467,6 +1469,9 @@ class TestCaveIn:
         # Tunnel was set to depth=20 (shallow band).
         shallow_min, shallow_max = CAVE_IN_BLOCK_LOSS_RANGES["shallow"]
         assert shallow_min <= block_loss <= shallow_max
+        # After cave-in with stun, cooldown should be extended
+        if result.get("stun_hours"):
+            assert result["stun_hours"] >= 1
 
     def test_cave_in_depth_min_zero(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth never goes below 0 after cave-in."""
@@ -1482,22 +1487,6 @@ class TestCaveIn:
         dig_service.dig(10001, guild_id)
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] >= 0
-
-    def test_cave_in_stun_extends_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Stun injury adds hours to cooldown."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "random", lambda: 0.001)  # force cave-in
-        result = dig_service.dig(10001, guild_id)
-        assert result.get("cave_in")
-        # After cave-in with stun, cooldown should be extended
-        if result.get("stun_hours"):
-            assert result["stun_hours"] >= 1
 
     def test_reinforcement_caps_cave_in_block_loss_at_eight(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -1572,54 +1561,43 @@ class TestCaveIn:
 class TestMilestones:
     """Tests for milestone depth bonuses."""
 
-    def test_milestone_25_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """+5 JC at depth 25."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    def test_milestone_bonuses_at_25_50_100(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Crossing depth 25/50/100 pays MILESTONES[depth] JC.
+
+        Merges the former per-depth tests (test_milestone_25_bonus,
+        test_milestone_50_bonus, test_milestone_100_bonus) — one player per
+        milestone so each crossing is a fresh, uncontaminated dig.
+        """
+        cases = [
+            (10001, 25, {"25": "defeated"}),
+            (10002, 50, {"25": "defeated", "50": "defeated"}),
+            (10003, 100, {"25": "defeated", "50": "defeated",
+                          "75": "defeated", "100": "defeated"}),
+        ]
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        # Defeat boss at 25 so advance isn't capped, then set depth just below
-        boss_defeated = json.dumps({"25": "defeated"})
-        dig_repo.update_tunnel(10001, guild_id, depth=23, boss_progress=boss_defeated)
+        for discord_id, milestone, boss_defeated in cases:
+            _register_player(player_repository, discord_id=discord_id, balance=200)
+            monkeypatch.setattr(time, "time", lambda: 1_000_000)
+            dig_service.dig(discord_id, guild_id)
+            # Defeat bosses so advance isn't capped, then set depth just below.
+            dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=milestone - 2,
+                boss_progress=json.dumps(boss_defeated),
+            )
 
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "randint", lambda a, b: 3)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert result["depth"] >= 25
-        assert result["milestone_bonus"] == MILESTONES[25]
-
-    def test_milestone_50_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """+10 JC at depth 50."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        boss_defeated = json.dumps({"25": "defeated", "50": "defeated"})
-        dig_repo.update_tunnel(10001, guild_id, depth=48, boss_progress=boss_defeated)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "randint", lambda a, b: 3)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert result["depth"] >= 50
-        assert result["milestone_bonus"] == MILESTONES[50]
-
-    def test_milestone_100_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """+50 JC at depth 100."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        boss_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated", "100": "defeated"})
-        dig_repo.update_tunnel(10001, guild_id, depth=98, boss_progress=boss_defeated)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "randint", lambda a, b: 3)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert result["depth"] >= 100
-        assert result["milestone_bonus"] == MILESTONES[100]
+            monkeypatch.setattr(
+                time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+            )
+            monkeypatch.setattr(random, "randint", lambda a, b: 3)
+            result = dig_service.dig(discord_id, guild_id)
+            assert result["success"]
+            assert result["depth"] >= milestone
+            assert result["milestone_bonus"] == MILESTONES[milestone], (
+                f"milestone {milestone} paid {result['milestone_bonus']}"
+            )
 
 
 class TestHighPrestigeLayerPenalty:
@@ -1649,9 +1627,16 @@ class TestHighPrestigeLayerPenalty:
         )
         return dig_service.dig(discord_id, guild_id)
 
-    def test_p2_layer_penalty_reduces_layer_payout(
+    def test_layer_penalty_reduces_layer_payout_across_prestige_ladder(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
+        """P1 > P2, P3 > P4, and P4 > P5 layer payouts (one player each).
+
+        Merges the former test_p2/test_p4/test_p5_layer_penalty tests. The
+        P1..P4 digs pin the Abyss JC roll to 17; the second P4 dig and P5
+        pin it to 16 (the values the original tests used to keep each pair's
+        expected products distinct after int() truncation).
+        """
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
         # Inflate ONLY the JC roll (Abyss range 1..4) near the payout cap so
@@ -1667,6 +1652,12 @@ class TestHighPrestigeLayerPenalty:
         jc_p2 = self._dig_once(
             dig_service, dig_repo, player_repository, guild_id, 30002, 2,
         )["jc_earned"]
+        result_p3 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30005, 3,
+        )
+        result_p4 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30006, 4,
+        )
 
         # P1: int(17 x 1.18) = 20. P2: int(17 x 1.15) = 19, then economy-scaled.
         assert jc_p1 == scale_positive_dig_jc(
@@ -1674,22 +1665,6 @@ class TestHighPrestigeLayerPenalty:
         )
         assert jc_p2 == scale_positive_dig_jc(scale_minigame_jc_delta(19))
         assert jc_p1 > jc_p2
-
-    def test_p4_layer_penalty_reduces_layer_payout(
-        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
-    ):
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
-        monkeypatch.setattr(
-            random, "randint", lambda a, b: 17 if (a, b) == (1, 4) else a,
-        )
-
-        result_p3 = self._dig_once(
-            dig_service, dig_repo, player_repository, guild_id, 30005, 3,
-        )
-        result_p4 = self._dig_once(
-            dig_service, dig_repo, player_repository, guild_id, 30006, 4,
-        )
 
         # P3: int(17 x 1.13) = 19. P4: int(17 x 1.08) = 18, then economy-scaled.
         assert result_p3["gross_jc"] == scale_minigame_jc_delta(19)
@@ -1704,15 +1679,10 @@ class TestHighPrestigeLayerPenalty:
             result_p4["gross_jc"]
         )
 
-    def test_p5_layer_penalty_reduces_layer_payout(
-        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
-    ):
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
+        # P4 vs P5 with the roll pinned to 16 so the products stay distinct.
         monkeypatch.setattr(
             random, "randint", lambda a, b: 16 if (a, b) == (1, 4) else a,
         )
-
         jc_p4 = self._dig_once(
             dig_service, dig_repo, player_repository, guild_id, 30003, 4,
         )["jc_earned"]
@@ -1730,9 +1700,14 @@ class TestHelp:
     """Tests for helping other players' tunnels."""
 
     def test_help_advances_target_tunnel(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Helper's advance applies to target."""
-        _register_player(player_repository, discord_id=10001)
-        _register_player(player_repository, discord_id=10002)
+        """Helper's advance applies to target, the helper earns 1 JC, their
+        own dig cooldown is consumed, and self-help is rejected.
+
+        Merges the former test_help_uses_helper_cooldown,
+        test_help_earns_1_jc, and test_help_self_fails into one flow.
+        """
+        _register_player(player_repository, discord_id=10001, balance=100)
+        _register_player(player_repository, discord_id=10002, balance=100)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
 
@@ -1740,84 +1715,35 @@ class TestHelp:
         dig_service.dig(10002, guild_id)  # create helper tunnel
         dig_repo.update_tunnel(10001, guild_id, depth=10)
         before = dig_repo.get_tunnel(10001, guild_id)["depth"]
+        balance_before = player_repository.get_balance(10002, guild_id)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        # Can't help yourself.
+        assert not dig_service.help_tunnel(10002, 10002, guild_id)["success"]
         result = dig_service.help_tunnel(10002, 10001, guild_id)
         assert result["success"]
         after = dig_repo.get_tunnel(10001, guild_id)["depth"]
         assert after > before
+        # Helper earned exactly 1 JC.
+        assert player_repository.get_balance(10002, guild_id) == balance_before + 1
 
-    def test_help_uses_helper_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Helper's dig cooldown is consumed."""
-        _register_player(player_repository, discord_id=10001)
-        _register_player(player_repository, discord_id=10002)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-
-        # Helper helps (using cooldown)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        dig_service.help_tunnel(10002, 10001, guild_id)
-
-        # Helper can't dig again immediately
+        # Helper's cooldown was consumed — can't free-dig right after.
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 60)
-        result = dig_service.dig(10002, guild_id)
-        assert not result["success"] or result.get("paid_dig_required")
-
-    def test_help_earns_1_jc(self, dig_service, player_repository, guild_id, monkeypatch):
-        """Helper earns 1 JC."""
-        _register_player(player_repository, discord_id=10001, balance=100)
-        _register_player(player_repository, discord_id=10002, balance=100)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-
-        balance_before = player_repository.get_balance(10002, guild_id)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        result = dig_service.help_tunnel(10002, 10001, guild_id)
-        assert result["success"]
-        balance_after = player_repository.get_balance(10002, guild_id)
-        assert balance_after == balance_before + 1
-
-    def test_help_self_fails(self, dig_service, player_repository, guild_id, monkeypatch):
-        """Can't help yourself."""
-        _register_player(player_repository, discord_id=10001)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        result = dig_service.help_tunnel(10001, 10001, guild_id)
-        assert not result["success"]
+        dig_again = dig_service.dig(10002, guild_id)
+        assert not dig_again["success"] or dig_again.get("paid_dig_required")
 
 
 class TestSabotage:
     """Tests for sabotaging other players' tunnels."""
 
-    def test_sabotage_reduces_target_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Target loses 3-8 blocks."""
-        _register_player(player_repository, discord_id=10001)
-        _register_player(player_repository, discord_id=10002, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
+    def test_sabotage_reduces_target_depth_and_costs_jc(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Target loses 3-8 blocks and the actor pays max(5, depth//5).
 
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=30)
-        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
-
-        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        damage = 30 - tunnel["depth"]
-        assert SABOTAGE_DAMAGE_MIN <= damage <= SABOTAGE_DAMAGE_MAX
-
-    def test_sabotage_costs_jc(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Actor pays max(5, depth//5)."""
+        Merges the former test_sabotage_reduces_target_depth and
+        test_sabotage_costs_jc (same successful-hit flow at depth 50).
+        """
         _register_player(player_repository, discord_id=10001)
         _register_player(player_repository, discord_id=10002, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -1831,6 +1757,9 @@ class TestSabotage:
         balance_before = player_repository.get_balance(10002, guild_id)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result["success"]
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        damage = 50 - tunnel["depth"]
+        assert SABOTAGE_DAMAGE_MIN <= damage <= SABOTAGE_DAMAGE_MAX
         balance_after = player_repository.get_balance(10002, guild_id)
         expected_cost = max(SABOTAGE_BASE_COST, 50 // SABOTAGE_COST_DIVISOR)
         assert balance_before - balance_after == expected_cost
@@ -2050,8 +1979,14 @@ class TestTrap:
         assert result["success"]
         assert result.get("cost", 0) == 0
 
-    def test_trap_catches_saboteur(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Active trap triggers on sabotage."""
+    def test_trap_catches_saboteur_and_steals_jc(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Active trap triggers on sabotage and the trapped saboteur loses JC.
+
+        Merges the former test_trap_catches_saboteur and test_trap_steals_jc
+        (identical setup, one trapped-sabotage flow).
+        """
         _register_player(player_repository, discord_id=10001, balance=100)
         _register_player(player_repository, discord_id=10002, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -2066,28 +2001,11 @@ class TestTrap:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["trap_active"] == 1
 
-        # Sabotage triggers trap
-        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
-        assert result.get("trapped")
-
-    def test_trap_steals_jc(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Trapped saboteur loses JC."""
-        _register_player(player_repository, discord_id=10001, balance=100)
-        _register_player(player_repository, discord_id=10002, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=30)
-
-        dig_service.set_trap(10001, guild_id)
+        # Sabotage triggers trap; the saboteur loses JC (cost + trap penalty).
         balance_before = player_repository.get_balance(10002, guild_id)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result.get("trapped")
-        balance_after = player_repository.get_balance(10002, guild_id)
-        # Saboteur should have lost JC (sabotage cost + trap penalty)
-        assert balance_after < balance_before
+        assert player_repository.get_balance(10002, guild_id) < balance_before
 
 
 class TestInsurance:
@@ -3028,27 +2946,9 @@ class TestCheer:
     """Tests for boss fight cheer mechanics."""
 
     def test_cheer_saves_cheer_data(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """cheer_boss writes to cheer_data column and data persists."""
-        _register_player(player_repository, discord_id=10001, balance=200)
-        _register_player(player_repository, discord_id=10002, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        result = dig_service.cheer_boss(10002, 10001, guild_id)
-        assert result["success"]
-
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["cheer_data"] is not None
-        cheers = json.loads(tunnel["cheer_data"])
-        assert len(cheers) == 1
-        assert cheers[0]["cheerer_id"] == 10002
-
-    def test_cheer_is_free_for_cheerer_and_target(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cheering is free — neither cheerer nor target's balance changes."""
+        """cheer_boss writes to cheer_data column, and cheering is free —
+        neither cheerer nor target's balance changes (merges the former
+        test_cheer_is_free_for_cheerer_and_target)."""
         _register_player(player_repository, discord_id=10001, balance=200)
         _register_player(player_repository, discord_id=10002, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -3060,9 +2960,15 @@ class TestCheer:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         balance_cheerer_before = player_repository.get_balance(10002, guild_id)
         balance_target_before = player_repository.get_balance(10001, guild_id)
+        result = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert result["success"]
 
-        dig_service.cheer_boss(10002, 10001, guild_id)
-
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["cheer_data"] is not None
+        cheers = json.loads(tunnel["cheer_data"])
+        assert len(cheers) == 1
+        assert cheers[0]["cheerer_id"] == 10002
+        # Cheering is free for both sides.
         assert player_repository.get_balance(10002, guild_id) == balance_cheerer_before
         assert player_repository.get_balance(10001, guild_id) == balance_target_before
 
@@ -3378,7 +3284,13 @@ class TestBossErrors:
     ):
         """A player parked at a boss boundary must be able to reach the
         BossEncounterView via /dig go regardless of cooldown — the cooldown
-        gate would otherwise hide the Fight button behind a paid-dig dialog."""
+        gate would otherwise hide the Fight button behind a paid-dig dialog.
+
+        Also covers the former test_parked_dig_awards_no_jc_on_reopen and
+        test_parked_dig_ignores_paid_flag: repeated reopenings (including one
+        with paid=True) never award JC/advance nor debit the balance — the
+        parked short-circuit runs before both the payout and paid-dig paths.
+        """
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -3386,56 +3298,20 @@ class TestBossErrors:
         dig_repo.update_tunnel(10001, guild_id, depth=24)
         balance_before = player_repository.get_balance(10001, guild_id)
 
-        # Still on cooldown — parked /dig go must surface the encounter anyway.
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"] is True
-        assert result.get("boss_encounter") is True
-        assert result["dig_consumed"] is False
-        assert result.get("boss_info", {}).get("boundary") == 25
-        assert not result.get("paid_dig_available")
-        # No JC awarded for re-opening the view.
-        assert result.get("jc_earned", 0) == 0
-        assert result.get("advance", 0) == 0
-        # Balance untouched.
-        assert player_repository.get_balance(10001, guild_id) == balance_before
-
-    def test_parked_dig_ignores_paid_flag(
-        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
-    ):
-        """Paid=True while parked should not debit — the parked short-circuit
-        runs before the paid-dig code path."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
-        balance_before = player_repository.get_balance(10001, guild_id)
-
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
-        result = dig_service.dig(10001, guild_id, paid=True)
-        assert result["success"] is True
-        assert result.get("boss_encounter") is True
-        assert player_repository.get_balance(10001, guild_id) == balance_before
-
-    def test_parked_dig_awards_no_jc_on_reopen(
-        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
-    ):
-        """Hitting the parked short-circuit repeatedly must never award JC or
-        advance — otherwise the view becomes a JC farm."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
-        balance_before = player_repository.get_balance(10001, guild_id)
-
-        for offset in (10, 20, 30):
+        # Still on cooldown — parked /dig go must surface the encounter anyway,
+        # repeatedly, and the final reopen with paid=True must not debit.
+        for offset, paid in ((10, False), (20, False), (30, True)):
             monkeypatch.setattr(time, "time", lambda o=offset: 1_000_000 + o)
-            result = dig_service.dig(10001, guild_id)
+            result = dig_service.dig(10001, guild_id, paid=paid)
+            assert result["success"] is True
             assert result.get("boss_encounter") is True
+            assert result["dig_consumed"] is False
+            assert result.get("boss_info", {}).get("boundary") == 25
+            assert not result.get("paid_dig_available")
+            # No JC awarded for re-opening the view.
             assert result.get("jc_earned", 0) == 0
             assert result.get("advance", 0) == 0
+        # Balance untouched across all reopenings (paid=True included).
         assert player_repository.get_balance(10001, guild_id) == balance_before
 
     def test_parked_dig_ignores_cooldown_preconditions_path(

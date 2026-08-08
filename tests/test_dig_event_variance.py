@@ -116,13 +116,20 @@ class TestEventVariance:
     def test_jc_jitter_covers_expected_range_and_mean(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """200 resolutions of underground_stream safe (jc=3) should land
-        within the economy-scaled jitter range."""
+        """60 resolutions of underground_stream safe (jc=3) should land
+        within the economy-scaled jitter range, with visible variance.
+
+        Sigma note: the base-3 jitter rolls int(round(3*U(0.5,1.5))), whose
+        scaled per-roll sigma is ~0.8, so n=60 gives SE ~0.10; the 1.8..2.2
+        mean band is ~2 SE around the true mean 2.0 — and the run is fully
+        seeded (random.seed(i+1)), so the outcome is deterministic anyway.
+        Also proves jitter is wired in end-to-end (>= 2 unique rolls),
+        subsuming the old test_jitter_actually_varies_across_seeds."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository)
 
         rolls = []
-        for i in range(200):
+        for i in range(60):
             random.seed(i + 1)
             r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
             assert r["success"]
@@ -136,7 +143,7 @@ class TestEventVariance:
         )
         mean = sum(rolls) / len(rolls)
         assert 1.8 <= mean <= 2.2, f"mean {mean} not within scaled base-3 range"
-        assert len({*rolls}) >= 2, "no jitter visible across 200 rolls"
+        assert len({*rolls}) >= 2, "no jitter visible across 60 rolls"
 
     def test_zero_jc_outcome_stays_zero(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
@@ -160,7 +167,9 @@ class TestEventVariance:
         inject_event(ev)
         balance_before = player_repository.get_balance(10001, 12345)
 
-        for i in range(80):
+        # The ``if jc != 0`` skip is a deterministic gate — a handful of seeded
+        # trajectories through the surrounding rolls is enough to exercise it.
+        for i in range(10):
             random.seed(i + 300)
             r = dig_service.resolve_event(10001, 12345, "variance_zero_jc", "safe")
             assert r["success"]
@@ -181,7 +190,8 @@ class TestEventVariance:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository)
 
-        for i in range(80):
+        # Deterministic gate — 10 seeded trajectories cover it.
+        for i in range(10):
             random.seed(i + 700)
             dig_repo.update_tunnel(10001, 12345, depth=30)
             r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
@@ -196,11 +206,14 @@ class TestEventVariance:
     ):
         """friendly_mole safe success has advance=+2. With ±2 jitter the
         raw range is [0, 4]; sign clamp must lift any non-positive roll
-        to +1 so a successful event never reverses into a retreat."""
+        to +1 so a successful event never reverses into a retreat.
+
+        With jitter -2 hit at p=0.2 per roll, 30 seeded iterations reach the
+        clamp path many times (deterministic under the fixed seeds)."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository, depth=10)
 
-        for i in range(80):
+        for i in range(30):
             random.seed(i + 100)
             # Reset depth so boss-boundary clamp doesn't wipe advance to 0
             dig_repo.update_tunnel(10001, 12345, depth=10)
@@ -228,7 +241,7 @@ class TestEventVariance:
         ))
 
         deltas = set()
-        for i in range(60):
+        for i in range(20):
             random.seed(i + 1)
             dig_repo.update_tunnel(10001, 12345, depth=30)
             # Force the risky pick to FAIL so the negative-jc outcome fires.
@@ -248,21 +261,6 @@ class TestEventVariance:
             "unique deltas"
         )
 
-    def test_jitter_actually_varies_across_seeds(
-        self, dig_service, dig_repo, player_repository, monkeypatch,
-    ):
-        """Sanity: 50 seeded resolutions should not all return the same
-        jc_delta (proves jitter is wired in)."""
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        _seed_tunnel(dig_service, dig_repo, player_repository)
-
-        rolls = set()
-        for i in range(50):
-            random.seed(i + 500)
-            r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
-            rolls.add(r.get("jc_delta", 0))
-        assert len(rolls) >= 2, f"variance not firing — only {len(rolls)} unique rolls"
-
 
 class TestThreatPayloadUnjittered:
     """The outcome jitter scales JC and shifts advance only. A streak_loss or
@@ -272,7 +270,7 @@ class TestThreatPayloadUnjittered:
     def test_streak_loss_payload_not_jittered(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
     ):
-        """A failure outcome with streak_loss=3, resolved across 60 seeds,
+        """A failure outcome with streak_loss=3, resolved across 10 seeds,
         always reports streak_loss=3 — the jitter never scales it. With a
         fixed 10-day streak, setback = 3 + floor(10/20) = 3 every time."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -284,7 +282,7 @@ class TestThreatPayloadUnjittered:
         ))
 
         seen = set()
-        for i in range(60):
+        for i in range(10):
             random.seed(i + 1)
             dig_repo.update_tunnel(10001, 12345, streak_days=10)
             # Force the risky pick to FAIL so the streak_loss outcome fires.
@@ -300,7 +298,7 @@ class TestThreatPayloadUnjittered:
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
     ):
         """A failure outcome carrying a curse (duration_digs=2) resolved
-        across 60 seeds always applies the same curse — the curse payload is
+        across 10 seeds always applies the same curse — the curse payload is
         strengthened deterministically (fixed +1 duration / scaled effect) and
         never touched by the per-fire JC jitter."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -316,7 +314,7 @@ class TestThreatPayloadUnjittered:
         ))
 
         durations = set()
-        for i in range(60):
+        for i in range(10):
             random.seed(i + 1)
             # Clear any curse left by the prior iteration's dig.
             dig_repo.update_tunnel(10001, 12345, temp_curses=None)

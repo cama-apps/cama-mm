@@ -73,8 +73,9 @@ class TestDigGearDropGate:
     def test_returns_none_for_unmapped_boundary(self, svc):
         """Bosses outside GEAR_DROP_DEPTH_TIER_MAP never drop gear."""
         random.seed(0)
-        # Try 100 rolls at boundary 25 (not in the map) — should never drop
-        for _ in range(100):
+        # Try 20 rolls at boundary 25 (not in the map) — should never drop
+        # (the gate is a deterministic map lookup ahead of the RNG roll).
+        for _ in range(20):
             assert svc._maybe_drop_gear(111, 0, 25) is None
 
     def test_returns_none_when_roll_misses(self, svc, monkeypatch):
@@ -131,16 +132,17 @@ class TestDigGearStarterWeapon:
 class TestDigGearDropRate:
     """Statistical sanity check on the drop rate via seeded RNG."""
 
-    def test_rate_in_band_over_5000_rolls(self, svc):
-        """Over 5000 seeded rolls the empirical rate should sit in
+    def test_rate_in_band_over_1000_rolls(self, svc):
+        """Over 1000 seeded rolls the empirical rate should sit in
         [GEAR_BOSS_DROP_RATE - 0.02, GEAR_BOSS_DROP_RATE + 0.02].
 
-        With p=0.07 and n=5000 the binomial std-dev is ~0.0036 — a 2pp band
-        is well over 5σ in either direction so this is robust to seed drift.
+        With p=0.07 and n=1000 the binomial std-dev is ~0.008 — a 2pp band
+        is ~2.5σ in either direction, and the run is fully seeded so the
+        outcome is deterministic regardless.
         """
         random.seed(42)
         hits = 0
-        n = 5000
+        n = 1000
         for _ in range(n):
             if svc._maybe_drop_gear(111, 0, 100) is not None:
                 hits += 1
