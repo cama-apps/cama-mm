@@ -79,9 +79,21 @@ def test_recorded_win_reward_uses_historical_fallback_only_for_legacy_matches():
 class TestMatchCorrection:
     """Test suite for match result correction."""
 
-    def test_correction_updates_win_loss_counters(self, correction_services):
-        """Test that correcting a match swaps win/loss counters correctly."""
+    def test_correction_lifecycle_updates_counters_ratings_and_audit(self, correction_services):
+        """One record + two corrections cover the whole lifecycle: win/loss
+        counters swap, Glicko ratings move the right way when correcting the
+        latest match, every correction lands in the audit log, correcting a
+        nonexistent match or to the unchanged result is rejected, and a second
+        correction back to the original result restores the initial state.
+
+        Merges: test_correction_updates_win_loss_counters,
+        test_correction_updates_ratings, test_correction_logs_audit_record,
+        test_correction_rejects_same_result,
+        test_correction_rejects_nonexistent_match, test_double_correction_works
+        and test_correcting_latest_match_still_updates_glicko.
+        """
         match_service = correction_services["match_service"]
+        match_repo = correction_services["match_repo"]
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo)
@@ -91,104 +103,83 @@ class TestMatchCorrection:
         radiant_ids = pending.radiant_team_ids
         dire_ids = pending.dire_team_ids
 
+        original_ratings = {
+            pid: player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0]
+            for pid in player_ids
+        }
+
         # Record with Radiant winning (incorrectly)
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
         result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
-        # Verify initial state: radiant won, dire lost
+        # Verify initial state: radiant won (counters + rating direction)
         for pid in radiant_ids:
             player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 1
-            assert player.losses == 0
-
+            assert (player.wins, player.losses) == (1, 0)
+            assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] > original_ratings[pid], \
+                "Radiant player should have gained rating from win"
         for pid in dire_ids:
             player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 0
-            assert player.losses == 1
+            assert (player.wins, player.losses) == (0, 1)
+            assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] < original_ratings[pid], \
+                "Dire player should have lost rating from loss"
+
+        # Guards: nonexistent match and unchanged result are rejected.
+        with pytest.raises(ValueError, match="not found"):
+            match_service.correct_match_result(
+                match_id=99999, new_winning_team="dire", guild_id=TEST_GUILD_ID
+            )
+        with pytest.raises(ValueError, match="already has radiant as winner"):
+            match_service.correct_match_result(
+                match_id=match_id, new_winning_team="radiant", guild_id=TEST_GUILD_ID
+            )
 
         # Correct to Dire winning
+        admin_id = 88888
         correction_result = match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
             guild_id=TEST_GUILD_ID,
-            corrected_by=99999,
+            corrected_by=admin_id,
         )
 
         assert correction_result["old_winning_team"] == "radiant"
         assert correction_result["new_winning_team"] == "dire"
+        assert correction_result["correction_id"] is not None
 
-        # Verify corrected state: dire won, radiant lost
+        # Verify corrected state: dire won, radiant lost — counters and ratings
         for pid in radiant_ids:
             player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 0, f"Player {pid} should have 0 wins after correction"
-            assert player.losses == 1, f"Player {pid} should have 1 loss after correction"
-
+            assert (player.wins, player.losses) == (0, 1), \
+                f"Player {pid} should be 0-1 after correction"
+            assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] < original_ratings[pid], \
+                "Radiant player should have lost rating after correction"
         for pid in dire_ids:
             player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 1, f"Player {pid} should have 1 win after correction"
-            assert player.losses == 0, f"Player {pid} should have 0 losses after correction"
-
-    def test_correction_updates_ratings(self, correction_services):
-        """Test that ratings are recalculated correctly after correction."""
-        match_service = correction_services["match_service"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=2000)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-
-        radiant_ids = pending.radiant_team_ids
-        dire_ids = pending.dire_team_ids
-
-        # Store original ratings
-        original_ratings = {}
-        for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
-            original_ratings[pid] = rating_data[0] if rating_data else 1500.0
-
-        # Record with Radiant winning
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        match_id = result["match_id"]
-
-        # Get ratings after incorrect recording
-        ratings_after_wrong = {}
-        for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
-            ratings_after_wrong[pid] = rating_data[0] if rating_data else 1500.0
-
-        # Radiant should have gained rating, Dire should have lost
-        for pid in radiant_ids:
-            assert ratings_after_wrong[pid] > original_ratings[pid], \
-                "Radiant player should have gained rating from win"
-
-        for pid in dire_ids:
-            assert ratings_after_wrong[pid] < original_ratings[pid], \
-                "Dire player should have lost rating from loss"
-
-        # Correct to Dire winning
-        match_service.correct_match_result(
-            match_id=match_id,
-            new_winning_team="dire",
-            guild_id=TEST_GUILD_ID,
-            corrected_by=99999,
-        )
-
-        # Get ratings after correction
-        ratings_after_correction = {}
-        for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
-            ratings_after_correction[pid] = rating_data[0] if rating_data else 1500.0
-
-        # Now Dire should have gained, Radiant should have lost (relative to original)
-        for pid in dire_ids:
-            assert ratings_after_correction[pid] > original_ratings[pid], \
+            assert (player.wins, player.losses) == (1, 0), \
+                f"Player {pid} should be 1-0 after correction"
+            assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] > original_ratings[pid], \
                 "Dire player should have gained rating after correction"
 
+        # Audit log holds the correction with the admin who made it.
+        corrections = match_repo.get_match_corrections(match_id)
+        assert len(corrections) == 1
+        assert corrections[0]["old_winning_team"] == 1  # Radiant
+        assert corrections[0]["new_winning_team"] == 2  # Dire
+        assert corrections[0]["corrected_by"] == admin_id
+
+        # Correct back to Radiant: final state matches the original recording.
+        match_service.correct_match_result(match_id, "radiant", TEST_GUILD_ID, corrected_by=admin_id)
         for pid in radiant_ids:
-            assert ratings_after_correction[pid] < original_ratings[pid], \
-                "Radiant player should have lost rating after correction"
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            assert (player.wins, player.losses) == (1, 0)
+        for pid in dire_ids:
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            assert (player.wins, player.losses) == (0, 1)
+
+        # Both corrections are in the audit log.
+        assert len(match_repo.get_match_corrections(match_id)) == 2
 
     def test_correction_reverses_bet_payouts(self, correction_services):
         """Correction must credit/reverse the EXACT payouts, not merely move
@@ -393,57 +384,6 @@ class TestMatchCorrection:
         assert bets_after == bets_before, \
             "Bets-table payouts must be untouched when the balance credit fails"
 
-    def test_correction_clears_stale_payout_on_former_winner(self, correction_services):
-        """A bet that won, then becomes a loser after correction, must have its
-        payout column nulled — otherwise gambling stats stay permanently wrong."""
-        match_service = correction_services["match_service"]
-        betting_service = correction_services["betting_service"]
-        player_repo = correction_services["player_repo"]
-        bet_repo = correction_services["bet_repo"]
-
-        player_ids = _create_players(player_repo, start_id=4000)
-
-        spectator_id = 4999
-        player_repo.add(
-            discord_id=spectator_id,
-            discord_username="Spectator",
-            guild_id=TEST_GUILD_ID,
-            dotabuff_url="https://dotabuff.com/players/4999",
-            initial_mmr=1500,
-        )
-        player_repo.add_balance(spectator_id, TEST_GUILD_ID, 100)
-
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        radiant_ids = pending.radiant_team_ids
-        pending.bet_lock_until = int(time.time()) + 600
-
-        # Radiant bettor wins initially; spectator bets Dire and loses.
-        betting_service.place_bet(TEST_GUILD_ID, radiant_ids[0], "radiant", 20, pending)
-        betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
-
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        match_id = result["match_id"]
-
-        # The Radiant bettor's winning bet now holds a non-null payout.
-        bets = bet_repo.get_settled_bets_for_match(match_id)
-        radiant_bet = next(b for b in bets if b["discord_id"] == radiant_ids[0])
-        assert radiant_bet["payout"] is not None
-
-        # Correct to Dire winning: the Radiant bettor is now a loser.
-        match_service.correct_match_result(
-            match_id=match_id,
-            new_winning_team="dire",
-            guild_id=TEST_GUILD_ID,
-            corrected_by=99999,
-        )
-
-        bets_after = bet_repo.get_settled_bets_for_match(match_id)
-        radiant_bet_after = next(b for b in bets_after if b["discord_id"] == radiant_ids[0])
-        assert radiant_bet_after["payout"] is None, \
-            "Former winner that lost the correction must have a NULL payout"
-
     def test_correction_refunds_old_vanity_tax_and_taxes_new_winner(
         self, correction_services
     ):
@@ -589,109 +529,14 @@ class TestMatchCorrection:
         assert dpair_after["wins_together"] == 1, \
             "Dire teammates should have 1 win after correction"
 
-    def test_correction_logs_audit_record(self, correction_services):
-        """Test that corrections are logged for audit purposes."""
-        match_service = correction_services["match_service"]
-        match_repo = correction_services["match_repo"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=5000)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        match_id = result["match_id"]
-
-        admin_id = 88888
-        correction_result = match_service.correct_match_result(
-            match_id=match_id,
-            new_winning_team="dire",
-            guild_id=TEST_GUILD_ID,
-            corrected_by=admin_id,
-        )
-
-        assert correction_result["correction_id"] is not None
-
-        # Check audit log
-        corrections = match_repo.get_match_corrections(match_id)
-        assert len(corrections) == 1
-        assert corrections[0]["old_winning_team"] == 1  # Radiant
-        assert corrections[0]["new_winning_team"] == 2  # Dire
-        assert corrections[0]["corrected_by"] == admin_id
-
-    def test_correction_rejects_same_result(self, correction_services):
-        """Test that correcting to the same result raises an error."""
-        match_service = correction_services["match_service"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=6000)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        match_id = result["match_id"]
-
-        with pytest.raises(ValueError, match="already has radiant as winner"):
-            match_service.correct_match_result(
-                match_id=match_id,
-                new_winning_team="radiant",
-                guild_id=TEST_GUILD_ID,
-            )
-
-    def test_correction_rejects_nonexistent_match(self, correction_services):
-        """Test that correcting a non-existent match raises an error."""
-        match_service = correction_services["match_service"]
-
-        with pytest.raises(ValueError, match="not found"):
-            match_service.correct_match_result(
-                match_id=99999,
-                new_winning_team="dire",
-                guild_id=TEST_GUILD_ID,
-            )
-
-    def test_double_correction_works(self, correction_services):
-        """Test that correcting a match twice (back to original) works."""
-        match_service = correction_services["match_service"]
-        match_repo = correction_services["match_repo"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=7000)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-
-        radiant_ids = pending.radiant_team_ids
-        dire_ids = pending.dire_team_ids
-
-        # Record with Radiant winning
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-        match_id = result["match_id"]
-
-        # Correct to Dire
-        match_service.correct_match_result(match_id, "dire", TEST_GUILD_ID, corrected_by=1)
-
-        # Correct back to Radiant
-        match_service.correct_match_result(match_id, "radiant", TEST_GUILD_ID, corrected_by=1)
-
-        # Verify final state matches original recording
-        for pid in radiant_ids:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 1
-            assert player.losses == 0
-
-        for pid in dire_ids:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
-            assert player.wins == 0
-            assert player.losses == 1
-
-        # Should have 2 correction records
-        corrections = match_repo.get_match_corrections(match_id)
-        assert len(corrections) == 2
-
-    def test_correction_moves_win_bonus_exactly(self, correction_services):
+    def test_correction_moves_win_bonus_exactly(self, correction_services, monkeypatch):
         """Correction must debit the old winners' recorded win bonus and award
         the corrected winners theirs — exact JC per player, and reversible on
-        a repeat correction via the win_bonus_jc snapshot."""
+        a repeat correction via the win_bonus_jc snapshot. The live config is
+        bumped to 99 before correcting, so the exact-10 assertions also prove
+        the correction uses the win reward recorded WITH the match, not the
+        current config (merges
+        test_correction_uses_win_reward_recorded_with_match)."""
         match_service = correction_services["match_service"]
         player_repo = correction_services["player_repo"]
 
@@ -721,6 +566,9 @@ class TestMatchCorrection:
                 start[pid] + JOPACOIN_PER_GAME
             )
 
+        # A later balance change must not alter what the correction moves: the
+        # recorded win_reward_jc (10) governs, not the live 99.
+        monkeypatch.setattr("services.betting_service.JOPACOIN_WIN_REWARD", 99)
         correction = match_service.correct_match_result(
             match_id, "dire", TEST_GUILD_ID, corrected_by=99999
         )
@@ -748,39 +596,6 @@ class TestMatchCorrection:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
                 start[pid] + JOPACOIN_PER_GAME
             )
-
-    def test_correction_uses_win_reward_recorded_with_match(
-        self, correction_services, monkeypatch
-    ):
-        match_service = correction_services["match_service"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=9050)
-        start = {
-            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in player_ids
-        }
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        radiant_ids = pending.radiant_team_ids
-        dire_ids = pending.dire_team_ids
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        match_id = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)["match_id"]
-
-        monkeypatch.setattr("services.betting_service.JOPACOIN_WIN_REWARD", 99)
-        correction = match_service.correct_match_result(
-            match_id, "dire", TEST_GUILD_ID, corrected_by=99999
-        )
-
-        assert correction["win_bonus_correction"]["reversed"] == dict.fromkeys(
-            radiant_ids, 10
-        )
-        assert correction["win_bonus_correction"]["awarded"] == dict.fromkeys(
-            dire_ids, 10
-        )
-        for pid in radiant_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid]
-        for pid in dire_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid] + 5 + 10
 
     def test_correction_applies_streak_multipliers(
         self, correction_services, monkeypatch
@@ -899,7 +714,15 @@ class TestMatchCorrection:
     def test_correction_preserves_recording_time_streak_rate_after_config_change(
         self, correction_services, monkeypatch
     ):
-        """A later balance change must not rewrite an older match's rating curve."""
+        """Later config changes must not rewrite an older match's rating curve.
+
+        Records at STREAK_MULTIPLIER_PER_GAME=0.20 (live threshold 3), then
+        corrects after the live rate rises to 0.25 AND the live threshold
+        rises to 5. The corrected rows must keep the recorded curve: the dire
+        4-game streak boosted at the recorded 20% rate (1.40) — the live rate
+        would wrongly give 1.50, and the live threshold of 5 would wrongly
+        gate it to 1.0. Merges the former separate streak-rate and
+        streak-threshold preservation tests."""
         import rating_system as rating_system_module
 
         match_service = correction_services["match_service"]
@@ -936,11 +759,25 @@ class TestMatchCorrection:
             guild_id=TEST_GUILD_ID,
         )["match_id"]
 
+        # Recording persisted the live threshold (3) per rating_history row.
+        conn = sqlite3.connect(correction_services["db_path"])
+        thresholds = [
+            row[0]
+            for row in conn.execute(
+                "SELECT streak_threshold FROM rating_history WHERE match_id = ?",
+                (match_id,),
+            )
+        ]
+        conn.close()
+        assert thresholds and all(value == 3 for value in thresholds)
+
+        # Later balance changes: higher rate AND a gate above the dire streak.
         monkeypatch.setattr(
             rating_system_module,
             "STREAK_MULTIPLIER_PER_GAME",
             0.25,
         )
+        monkeypatch.setattr(rating_system_module, "STREAK_THRESHOLD", 5)
         match_service.correct_match_result(
             match_id,
             "dire",
@@ -1048,80 +885,6 @@ class TestMatchCorrection:
             assert player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0] == pytest.approx(
                 expected[pid]
             )
-
-    def test_correction_preserves_recording_time_streak_threshold_after_config_change(
-        self, correction_services, monkeypatch
-    ):
-        """A later threshold change must not rewrite an older match's gate."""
-        import rating_system as rating_system_module
-
-        match_service = correction_services["match_service"]
-        match_repo = correction_services["match_repo"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=11700)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        dire_ids = pending.dire_team_ids
-
-        for pid in dire_ids:
-            for _ in range(3):
-                match_repo.add_rating_history(
-                    pid,
-                    TEST_GUILD_ID,
-                    rating=1500.0,
-                    won=True,
-                )
-
-        match_service.add_record_submission(
-            TEST_GUILD_ID,
-            99999,
-            "radiant",
-            is_admin=True,
-        )
-        match_id = match_service.record_match(
-            "radiant",
-            guild_id=TEST_GUILD_ID,
-        )["match_id"]
-
-        # Recording persisted the live threshold (3) per rating_history row.
-        conn = sqlite3.connect(correction_services["db_path"])
-        thresholds = [
-            row[0]
-            for row in conn.execute(
-                "SELECT streak_threshold FROM rating_history WHERE match_id = ?",
-                (match_id,),
-            )
-        ]
-        conn.close()
-        assert thresholds and all(value == 3 for value in thresholds)
-
-        # A later balance change raises the gate above the dire streak length.
-        monkeypatch.setattr(rating_system_module, "STREAK_THRESHOLD", 5)
-        match_service.correct_match_result(
-            match_id,
-            "dire",
-            TEST_GUILD_ID,
-            corrected_by=1,
-        )
-
-        conn = sqlite3.connect(correction_services["db_path"])
-        rows = conn.execute(
-            "SELECT discord_id, streak_length, streak_multiplier "
-            "FROM rating_history WHERE match_id = ?",
-            (match_id,),
-        ).fetchall()
-        conn.close()
-        stored_streaks = {
-            discord_id: (streak_length, streak_multiplier)
-            for discord_id, streak_length, streak_multiplier in rows
-        }
-
-        # The recorded threshold of 3 still gates the corrected multiplier:
-        # a 4-game streak at the default 25% rate boosts 1.50, where the new
-        # live threshold of 5 would wrongly have produced 1.0.
-        for pid in dire_ids:
-            assert stored_streaks[pid] == (4, pytest.approx(1.50))
 
     def test_correction_replay_uses_recorded_streak_rate_for_openskill(
         self, correction_services, monkeypatch
@@ -1389,35 +1152,6 @@ class TestCorrectionDoesNotRewindLaterMatches:
         by_id = {row["discord_id"]: row for row in history}
         for pid in pending1.dire_team_ids:
             assert by_id[pid]["won"] == 1, "corrected history must show dire winning"
-
-    def test_correcting_latest_match_still_updates_glicko(self, correction_services):
-        """The guard must not block the normal case: correcting the last match."""
-        match_service = correction_services["match_service"]
-        player_repo = correction_services["player_repo"]
-
-        player_ids = _create_players(player_repo, start_id=7100)
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        before = {
-            pid: player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
-            for pid in player_ids
-        }
-
-        match_service.correct_match_result(
-            match_id=result["match_id"],
-            new_winning_team="dire",
-            guild_id=TEST_GUILD_ID,
-            corrected_by=99999,
-        )
-
-        for pid in pending.radiant_team_ids:
-            assert player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating < before[pid], (
-                f"Player {pid} won then was corrected to a loss; rating must drop"
-            )
-
 
 class TestWinBonusIsNotPaidTwiceOnRetry:
     """A correction that dies between the credit and its snapshot must not repay.

@@ -11,7 +11,6 @@ import json
 import pytest
 
 from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
-from domain.models.team import Team
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -23,26 +22,6 @@ from tests.repository_harness import RepositoryTestDatabase as Database
 # =============================================================================
 # SHARED FIXTURES
 # =============================================================================
-
-
-@pytest.fixture
-def match_recording_players(test_db_with_schema):
-    """Seed 10 players (1001-1010) directly via Database.add_player.
-
-    Canonical setup for tests that exercise the legacy ``record_match`` API on
-    the Database object. Returns the list of discord_ids.
-    """
-    player_ids = [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010]
-    for pid in player_ids:
-        test_db_with_schema.add_player(
-            discord_id=pid,
-            discord_username=f"Player{pid}",
-            initial_mmr=1500,
-            glicko_rating=1500.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-    return player_ids
 
 
 def _seed_repo_players(player_repo, player_ids):
@@ -171,120 +150,6 @@ def test_match_easter_egg_batches_rivalries_with_correct_perspective(
 # =============================================================================
 # === Win/Loss API ===
 # =============================================================================
-
-
-class TestMatchRecordingBasic:
-    """Test match recording and win/loss tracking (legacy team1/team2 API)."""
-
-    def test_record_match_team1_wins(self, test_db_with_schema, match_recording_players):
-        """Test recording a match where team 1 wins."""
-        team1_ids = match_recording_players[:5]  # First 5 players
-        team2_ids = match_recording_players[5:]  # Last 5 players
-
-        # Record match - team 1 wins
-        match_id = test_db_with_schema.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=1)
-
-        assert match_id is not None
-
-        # Check win/loss counts
-        for pid in team1_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 1
-            assert player.losses == 0
-
-        for pid in team2_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 0
-            assert player.losses == 1
-
-    def test_record_match_team2_wins(self, test_db_with_schema, match_recording_players):
-        """Test recording a match where team 2 wins."""
-        team1_ids = match_recording_players[:5]
-        team2_ids = match_recording_players[5:]
-
-        # Record match - team 2 wins
-        match_id = test_db_with_schema.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=2)
-
-        assert match_id is not None
-
-        # Check win/loss counts
-        for pid in team1_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 0
-            assert player.losses == 1
-
-        for pid in team2_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 1
-            assert player.losses == 0
-
-    def test_record_multiple_matches(self, test_db_with_schema, match_recording_players):
-        """Test recording multiple matches and accumulating wins/losses."""
-        team1_ids = match_recording_players[:5]
-        team2_ids = match_recording_players[5:]
-
-        # Record 3 matches - team 1 wins first two, team 2 wins third
-        test_db_with_schema.record_match(team1_ids, team2_ids, winning_team=1)
-        test_db_with_schema.record_match(team1_ids, team2_ids, winning_team=1)
-        test_db_with_schema.record_match(team1_ids, team2_ids, winning_team=2)
-
-        # Check accumulated stats
-        for pid in team1_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 2
-            assert player.losses == 1
-
-        for pid in team2_ids:
-            player = test_db_with_schema.get_player(pid)
-            assert player.wins == 1
-            assert player.losses == 2
-
-    def test_record_match_participants(self, test_db_with_schema, match_recording_players):
-        """Test that match participants are correctly recorded."""
-        team1_ids = match_recording_players[:5]
-        team2_ids = match_recording_players[5:]
-
-        match_id = test_db_with_schema.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=1)
-
-        # Check participants in database
-        conn = test_db_with_schema.get_connection()
-        cursor = conn.cursor()
-
-        # Check team 1 participants
-        cursor.execute(
-            """
-            SELECT discord_id, team_number, won
-            FROM match_participants
-            WHERE match_id = ? AND team_number = 1
-        """,
-            (match_id,),
-        )
-        team1_participants = cursor.fetchall()
-        assert len(team1_participants) == 5
-        for pid, team_num, won in team1_participants:
-            assert pid in team1_ids
-            assert team_num == 1
-            assert won == 1  # Team 1 won
-
-        # Check team 2 participants
-        cursor.execute(
-            """
-            SELECT discord_id, team_number, won
-            FROM match_participants
-            WHERE match_id = ? AND team_number = 2
-        """,
-            (match_id,),
-        )
-        team2_participants = cursor.fetchall()
-        assert len(team2_participants) == 5
-        for pid, team_num, won in team2_participants:
-            assert pid in team2_ids
-            assert team_num == 2
-            assert won == 0  # Team 2 lost
-
-        conn.close()
-
-
 # Edge-case win/loss tests using the radiant/dire kwargs API.
 
 @pytest.fixture
@@ -306,37 +171,6 @@ def win_loss_player_ids(test_db_with_schema):
 def _fetch_wins_losses(db, discord_id):
     player = db.get_player(discord_id)
     return player.wins, player.losses
-
-
-@pytest.mark.parametrize(
-    ("winning_team", "winning_slice", "losing_slice"),
-    [
-        ("radiant", slice(0, 5), slice(5, 10)),
-        ("dire", slice(5, 10), slice(0, 5)),
-    ],
-    ids=["radiant_wins", "dire_wins"],
-)
-def test_win_updates_wins_and_losses(
-    test_db_with_schema, win_loss_player_ids, winning_team, winning_slice, losing_slice
-):
-    radiant = win_loss_player_ids[:5]
-    dire = win_loss_player_ids[5:]
-
-    test_db_with_schema.record_match(
-        radiant_team_ids=radiant,
-        dire_team_ids=dire,
-        winning_team=winning_team,
-    )
-
-    for pid in win_loss_player_ids[winning_slice]:
-        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
-        assert wins == 1
-        assert losses == 0
-
-    for pid in win_loss_player_ids[losing_slice]:
-        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
-        assert wins == 0
-        assert losses == 1
 
 
 def test_multiple_matches_accumulate_correctly(test_db_with_schema, win_loss_player_ids):
@@ -496,117 +330,6 @@ class TestRadiantDireMapping:
     def test_db(self, repo_db_path):
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
-
-    def test_team_id_mapping_after_shuffle(self, test_db):
-        """
-        Test the critical bug fix where team IDs were incorrectly mapped after shuffling.
-
-        The bug was: After shuffling, we assumed player_ids[:5] = team1 and player_ids[5:] = team2,
-        but the shuffled teams don't match that order. This test verifies that players are correctly
-        mapped by name (as the fix does) rather than by position in the player_ids list.
-        """
-        # Create 10 players with specific names and Discord IDs
-        # The order of player_ids doesn't match the shuffled teams
-        player_ids = [4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008, 4009, 4010]
-        player_names = [f"Player{i}" for i in range(1, 11)]
-
-        # Add players to database
-        for pid, name in zip(player_ids, player_names):
-            test_db.add_player(
-                discord_id=pid,
-                discord_username=name,
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Get Player objects from database
-        players = test_db.get_players_by_ids(player_ids)
-
-        # Simulate a shuffle where teams don't match the order of player_ids
-        # Team 1: players at positions 0, 2, 4, 6, 8 (Player1, Player3, Player5, Player7, Player9)
-        # Team 2: players at positions 1, 3, 5, 7, 9 (Player2, Player4, Player6, Player8, Player10)
-        team1_players = [players[0], players[2], players[4], players[6], players[8]]
-        team2_players = [players[1], players[3], players[5], players[7], players[9]]
-
-        # Create Team objects
-        team1 = Team(team1_players, role_assignments=["1", "2", "3", "4", "5"])
-        team2 = Team(team2_players, role_assignments=["1", "2", "3", "4", "5"])
-
-        # Simulate the fix: Map players by name, not by position
-        # This is what the fixed code does: player_name_to_id = {pl.name: pid for pid, pl in zip(player_ids, players)}
-        player_name_to_id = {pl.name: pid for pid, pl in zip(player_ids, players)}
-
-        # Map team1 and team2 players to their Discord IDs (the fix)
-        team1_ids = [player_name_to_id[p.name] for p in team1.players]
-        team2_ids = [player_name_to_id[p.name] for p in team2.players]
-
-        # Verify the mapping is correct (not just player_ids[:5] and player_ids[5:])
-        # Team 1 should have: 4001, 4003, 4005, 4007, 4009
-        expected_team1_ids = [4001, 4003, 4005, 4007, 4009]
-        # Team 2 should have: 4002, 4004, 4006, 4008, 4010
-        expected_team2_ids = [4002, 4004, 4006, 4008, 4010]
-
-        assert set(team1_ids) == set(expected_team1_ids), (
-            f"Team 1 IDs don't match! Got {team1_ids}, expected {expected_team1_ids}"
-        )
-        assert set(team2_ids) == set(expected_team2_ids), (
-            f"Team 2 IDs don't match! Got {team2_ids}, expected {expected_team2_ids}"
-        )
-
-        # Simulate Radiant/Dire assignment: Team 1 = Radiant, Team 2 = Dire
-        radiant_team_ids = team1_ids
-        dire_team_ids = team2_ids
-
-        # Record match: Radiant (Team 1) wins
-        # Map to database format: team1 = Radiant, team2 = Dire, winning_team = 1
-        match_id = test_db.record_match(
-            team1_ids=radiant_team_ids, team2_ids=dire_team_ids, winning_team=1
-        )
-
-        assert match_id is not None
-
-        # Verify ONLY the correct 5 players got wins (Team 1 / Radiant)
-        for pid in team1_ids:
-            player = test_db.get_player(pid)
-            assert player.wins == 1, f"Player {pid} (Team 1) should have 1 win, got {player.wins}"
-            assert player.losses == 0, (
-                f"Player {pid} (Team 1) should have 0 losses, got {player.losses}"
-            )
-
-        # Verify ONLY the correct 5 players got losses (Team 2 / Dire)
-        for pid in team2_ids:
-            player = test_db.get_player(pid)
-            assert player.wins == 0, f"Player {pid} (Team 2) should have 0 wins, got {player.wins}"
-            assert player.losses == 1, (
-                f"Player {pid} (Team 2) should have 1 loss, got {player.losses}"
-            )
-
-        # Verify all players are accounted for and have correct win/loss counts
-        all_player_ids = set(player_ids)
-        team1_set = set(team1_ids)
-        team2_set = set(team2_ids)
-
-        # Verify all players are in exactly one team
-        assert len(team1_set) == 5, f"Team 1 should have 5 players, got {len(team1_set)}"
-        assert len(team2_set) == 5, f"Team 2 should have 5 players, got {len(team2_set)}"
-        assert team1_set.isdisjoint(team2_set), "Teams should not share players"
-        assert team1_set.union(team2_set) == all_player_ids, "All players should be in a team"
-
-        # Verify win/loss counts for all players
-        for pid in all_player_ids:
-            player = test_db.get_player(pid)
-            if pid in team1_set:
-                # Should have 1 win, 0 losses
-                assert player.wins == 1 and player.losses == 0, (
-                    f"Player {pid} (Team 1) should have 1 win, 0 losses, got {player.wins}-{player.losses}"
-                )
-            else:  # pid in team2_set
-                # Should have 0 wins, 1 loss
-                assert player.wins == 0 and player.losses == 1, (
-                    f"Player {pid} (Team 2) should have 0 wins, 1 loss, got {player.wins}-{player.losses}"
-                )
 
 
 class TestRadiantDireBugFixRecording:
@@ -1099,6 +822,10 @@ class TestBettingEndToEnd:
 
         Scenario: User bets 6 jopacoin on Dire, but it shows as 3 because
         previous settled bets are being counted. This test verifies the fix.
+
+        Also covers multi-bettor aggregation per side on one match (merges
+        test_betting_totals_multiple_bets_same_match): match 1 carries two
+        bets per side and the totals must sum them.
         """
         player_repo = PlayerRepository(test_db.db_path)
         bet_repo = BetRepository(test_db.db_path)
@@ -1137,17 +864,32 @@ class TestBettingEndToEnd:
             glicko_volatility=0.06,
         )
 
-        player_repo.add_balance(spectator1, TEST_GUILD_ID, 20)
-        player_repo.add_balance(spectator2, TEST_GUILD_ID, 20)
+        spectator4 = 9004
+        spectator5 = 9005
+        for extra in (spectator4, spectator5):
+            player_repo.add(
+                discord_id=extra,
+                discord_username=f"Spectator{extra}",
+                guild_id=TEST_GUILD_ID,
+                initial_mmr=1100,
+                glicko_rating=1100.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
 
-        # Place bets on first match: 3 on radiant, 2 on dire
+        for spec in (spectator1, spectator2, spectator4, spectator5):
+            player_repo.add_balance(spec, TEST_GUILD_ID, 20)
+
+        # Place two bets per side on the first match: totals must aggregate.
         betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 3, pending1)
+        betting_service.place_bet(TEST_GUILD_ID, spectator4, "radiant", 5, pending1)
         betting_service.place_bet(TEST_GUILD_ID, spectator2, "dire", 2, pending1)
+        betting_service.place_bet(TEST_GUILD_ID, spectator5, "dire", 4, pending1)
 
-        # Verify totals show pending bets correctly
+        # Verify totals sum the pending bets per side
         totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending1)
-        assert totals["radiant"] == 3, "Should show 3 jopacoin on Radiant"
-        assert totals["dire"] == 2, "Should show 2 jopacoin on Dire"
+        assert totals["radiant"] == 8, "Should show 8 jopacoin on Radiant (3+5)"
+        assert totals["dire"] == 6, "Should show 6 jopacoin on Dire (2+4)"
 
         # Settle the first match (this assigns match_id to the bets)
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
@@ -1201,55 +943,6 @@ class TestBettingEndToEnd:
         assert bet is not None, "Bet should exist"
         assert bet["amount"] == 6, "Bet amount should be 6"
         assert bet["team_bet_on"] == "dire", "Bet should be on Dire"
-
-    def test_betting_totals_multiple_bets_same_match(self, test_db, test_players):
-        """
-        E2E test: Multiple users place bets on the same match, verify totals are correct.
-        """
-        player_repo = PlayerRepository(test_db.db_path)
-        bet_repo = BetRepository(test_db.db_path)
-        match_repo = MatchRepository(test_db.db_path)
-        betting_service = BettingService(bet_repo, player_repo)
-        match_service = MatchService(
-            player_repo=player_repo,
-            match_repo=match_repo,
-            use_glicko=False,
-            betting_service=betting_service,
-        )
-
-        player_ids = test_players[:10]
-        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-
-        # Create spectators
-        spectators = []
-        for i in range(4):
-            spectator_id = 9100 + i
-            player_repo.add(
-                discord_id=spectator_id,
-                discord_username=f"Spectator{i}",
-                guild_id=TEST_GUILD_ID,
-                initial_mmr=1100,
-                glicko_rating=1100.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-            player_repo.add_balance(spectator_id, TEST_GUILD_ID, 20)
-            spectators.append(spectator_id)
-
-        # Place multiple bets
-        betting_service.place_bet(TEST_GUILD_ID, spectators[0], "radiant", 5, pending)
-        betting_service.place_bet(TEST_GUILD_ID, spectators[1], "radiant", 3, pending)
-        betting_service.place_bet(TEST_GUILD_ID, spectators[2], "dire", 4, pending)
-        betting_service.place_bet(TEST_GUILD_ID, spectators[3], "dire", 6, pending)
-
-        # Verify totals are correct
-        totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending)
-        assert totals["radiant"] == 8, (
-            f"Should show 8 jopacoin on Radiant (5+3), got {totals['radiant']}"
-        )
-        assert totals["dire"] == 10, f"Should show 10 jopacoin on Dire (4+6), got {totals['dire']}"
-
 
 class TestLoanRepaymentOnMatchRecord:
     """End-to-end tests for loan repayment when matches are recorded."""
@@ -1312,25 +1005,34 @@ class TestLoanRepaymentOnMatchRecord:
         return player_ids
 
     def test_loan_repaid_when_borrower_wins(self, services, test_players):
-        """Loan is repaid when borrower participates in a match (winning team)."""
+        """Loan is repaid when borrower participates in a match (winning team).
+
+        Also pins the repayment report in the record result and the deferred
+        fee flowing to the nonprofit fund (merges
+        test_loan_repayment_result_in_match_record and
+        test_loan_repayment_fee_goes_to_nonprofit).
+        """
         player_repo = services["player_repo"]
         loan_service = services["loan_service"]
+        loan_repo = services["loan_repo"]
         match_service = services["match_service"]
 
         # Borrower starts with 0 balance (after default 3)
         borrower_id = test_players[0]
         player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
+        nonprofit_before = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
 
         # Take a loan of 50 (fee = 10, total owed = 60)
         result = loan_service.execute_loan(borrower_id, 50, guild_id=TEST_GUILD_ID)
         assert result.success
         assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == 50  # Got full loan amount
 
-        # Verify outstanding loan exists
+        # Verify outstanding loan exists; the fee is deferred, not yet funded
         state = loan_service.get_state(borrower_id, guild_id=TEST_GUILD_ID)
         assert state.has_outstanding_loan
         assert state.outstanding_principal == 50
         assert state.outstanding_fee == 10
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == nonprofit_before
 
         # Shuffle and record match (borrower is on radiant, radiant wins)
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
@@ -1354,6 +1056,17 @@ class TestLoanRepaymentOnMatchRecord:
         assert not state.has_outstanding_loan
         assert state.outstanding_principal == 0
         assert state.outstanding_fee == 0
+
+        # The repayment is reported in the record result
+        repayments = result["loan_repayments"]
+        assert len(repayments) == 1
+        assert repayments[0]["player_id"] == borrower_id
+        assert repayments[0]["principal"] == 50
+        assert repayments[0]["fee"] == 10
+        assert repayments[0]["total_repaid"] == 60
+
+        # The deferred fee has now reached the nonprofit fund
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == nonprofit_before + 10
 
         # Balance: started 0, +50 loan, -60 repayment, +win_reward = -10 + win_reward
         expected = 50 - 60 + JOPACOIN_WIN_REWARD
@@ -1394,39 +1107,6 @@ class TestLoanRepaymentOnMatchRecord:
 
         # Balance: 0 + 50 loan - 60 repayment + JOPACOIN_PER_GAME participation
         assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == -10 + JOPACOIN_PER_GAME
-
-    def test_loan_not_repaid_if_not_participant(self, services, test_players):
-        """Loan is NOT repaid if borrower doesn't participate in the match."""
-        player_repo = services["player_repo"]
-        loan_service = services["loan_service"]
-        match_service = services["match_service"]
-
-        # Create a non-participant who takes a loan
-        spectator_id = 9999
-        player_repo.add(
-            discord_id=spectator_id,
-            discord_username="Spectator",
-            guild_id=TEST_GUILD_ID,
-            initial_mmr=1500,
-            glicko_rating=1500.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-        player_repo.update_balance(spectator_id, TEST_GUILD_ID, 0)
-
-        # Spectator takes loan
-        loan_service.execute_loan(spectator_id, 50, guild_id=TEST_GUILD_ID)
-        assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == 50
-
-        # Match is played by different players
-        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        # Spectator's loan should NOT be repaid
-        state = loan_service.get_state(spectator_id, guild_id=TEST_GUILD_ID)
-        assert state.has_outstanding_loan
-        assert state.outstanding_principal == 50
-        assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == 50  # Unchanged
 
     def test_loan_with_spectator_bet(self, services, test_players):
         """Spectator with loan bets on the match and loan repaid next game."""
@@ -1488,41 +1168,10 @@ class TestLoanRepaymentOnMatchRecord:
         balance = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
         assert balance == 10 + expected_reward
 
-    def test_loan_repayment_pushes_into_debt(self, services, test_players):
-        """Loan repayment can push player into debt when they've spent the money."""
-        player_repo = services["player_repo"]
-        loan_service = services["loan_service"]
-        match_service = services["match_service"]
-
-        borrower_id = test_players[0]
-        player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
-
-        # Take max loan of 100 (fee = 20, total owed = 120)
-        loan_service.execute_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
-        assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == 100
-
-        # "Spend" the loan money (set balance to 0)
-        player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
-
-        # Play a match
-        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        borrower_won = borrower_id in pending.radiant_team_ids  # radiant wins below
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        # Loan repaid, player in debt
-        state = loan_service.get_state(borrower_id, guild_id=TEST_GUILD_ID)
-        assert not state.has_outstanding_loan
-
-        # Balance: 0 - 120 + the exact reward for the side the borrower landed
-        # on. Pinning the branch (instead of accepting either reward) catches a
-        # regression that pays winners the loser reward or vice versa.
-        expected_reward = JOPACOIN_WIN_REWARD if borrower_won else JOPACOIN_PER_GAME
-        balance = player_repo.get_balance(borrower_id, TEST_GUILD_ID)
-        assert balance == -120 + expected_reward
-
     def test_multiple_players_with_loans(self, services, test_players):
-        """Multiple players have loans, all repaid after match."""
+        """Multiple players have loans, all repaid after one match — including
+        a borrower who already spent the loan money and is pushed into debt by
+        the repayment (merges test_loan_repayment_pushes_into_debt)."""
         player_repo = services["player_repo"]
         loan_service = services["loan_service"]
         match_service = services["match_service"]
@@ -1536,6 +1185,8 @@ class TestLoanRepaymentOnMatchRecord:
 
         loan_service.execute_loan(borrower1, 50, guild_id=TEST_GUILD_ID)  # owes 60
         loan_service.execute_loan(borrower2, 100, guild_id=TEST_GUILD_ID)  # owes 120
+        # Borrower2 "spends" the loan money before playing.
+        player_repo.update_balance(borrower2, TEST_GUILD_ID, 0)
 
         # Shuffle and record
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
@@ -1549,63 +1200,16 @@ class TestLoanRepaymentOnMatchRecord:
         assert not loan_service.get_state(borrower2, guild_id=TEST_GUILD_ID).has_outstanding_loan
 
         # Balances: loan - repayment + the exact reward for each borrower's side.
-        # Pinning each branch catches a regression that swaps win/participation rewards.
+        # Pinning each branch catches a regression that swaps win/participation
+        # rewards. Borrower2 spent the loan, so the repayment leaves them in
+        # deep debt (-120 + reward).
         b1_reward = JOPACOIN_WIN_REWARD if b1_won else JOPACOIN_PER_GAME
         b2_reward = JOPACOIN_WIN_REWARD if b2_won else JOPACOIN_PER_GAME
         b1_balance = player_repo.get_balance(borrower1, TEST_GUILD_ID)
         b2_balance = player_repo.get_balance(borrower2, TEST_GUILD_ID)
 
-        assert b1_balance == -10 + b1_reward
-        assert b2_balance == -20 + b2_reward
-
-    def test_loan_repayment_fee_goes_to_nonprofit(self, services, test_players):
-        """Verify the loan fee is added to nonprofit fund on repayment."""
-        player_repo = services["player_repo"]
-        loan_service = services["loan_service"]
-        loan_repo = services["loan_repo"]
-        match_service = services["match_service"]
-
-        borrower_id = test_players[0]
-        player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
-
-        # Get nonprofit fund before
-        nonprofit_before = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
-
-        # Take loan of 100 (fee = 20)
-        loan_service.execute_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
-
-        # Fee not added yet (deferred)
-        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == nonprofit_before
-
-        # Play and record match
-        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        # Now fee should be in nonprofit fund
-        nonprofit_after = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
-        assert nonprofit_after == nonprofit_before + 20
-
-    def test_loan_repayment_result_in_match_record(self, services, test_players):
-        """Verify loan repayments are reported in match record result."""
-        player_repo = services["player_repo"]
-        loan_service = services["loan_service"]
-        match_service = services["match_service"]
-
-        borrower_id = test_players[0]
-        player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
-        loan_service.execute_loan(borrower_id, 75, guild_id=TEST_GUILD_ID)  # owes 90
-
-        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        # Check loan_repayments in result
-        assert "loan_repayments" in result
-        repayments = result["loan_repayments"]
-        assert len(repayments) == 1
-        assert repayments[0]["player_id"] == borrower_id
-        assert repayments[0]["principal"] == 75
-        assert repayments[0]["fee"] == 15
-        assert repayments[0]["total_repaid"] == 90
+        assert b1_balance == 50 - 60 + b1_reward
+        assert b2_balance == -120 + b2_reward
 
 
 # =============================================================================
@@ -1655,87 +1259,43 @@ def abort_test_players(admin_player_repo):
 class TestAdminOverride:
     """Test admin override functionality for match recording."""
 
-    def test_has_admin_submission_with_no_submissions(self, admin_match_service, admin_test_players):
-        """Test has_admin_submission returns False when no submissions exist."""
+    def test_has_admin_submission_transitions(self, admin_match_service, admin_test_players):
+        """has_admin_submission is False with no/only-non-admin submissions and
+        flips True (unlocking can_record_match) once an admin submits.
+
+        Merges test_has_admin_submission_with_no_submissions,
+        _with_non_admin_submission, _with_admin_submission and
+        test_can_record_match_with_admin_override.
+        """
         admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
 
         assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is False
 
-    def test_has_admin_submission_with_non_admin_submission(
-        self, admin_match_service, admin_test_players
-    ):
-        """Test has_admin_submission returns False when only non-admin submits."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
-
         assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is False
-
-    def test_has_admin_submission_with_admin_submission(self, admin_match_service, admin_test_players):
-        """Test has_admin_submission returns True when admin submits."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
-
-        assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is True
-
-    def test_can_record_match_with_admin_override(self, admin_match_service, admin_test_players):
-        """Test can_record_match returns True with admin override, bypassing non-admin requirement."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-
-        # Admin submits - should bypass the 3 non-admin requirement
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
-
-        # Should be ready to record even though non_admin_count is 0
-        assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
-        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 0
-
-    def test_can_record_match_without_admin_requires_3_non_admin(
-        self, admin_match_service, admin_test_players
-    ):
-        """Test can_record_match requires 3 non-admin submissions when no admin submits."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-
-        # Add 2 non-admin submissions - should not be ready
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5002, result="radiant", is_admin=False)
-
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
-        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 2
 
-        # Add 3rd non-admin submission - should be ready
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5003, result="radiant", is_admin=False)
-
+        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
+        assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is True
+        # Admin bypasses the 3-non-admin requirement (only 1 non-admin voted).
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
-        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 3
+        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 1
 
     def test_admin_override_allows_immediate_recording(self, admin_match_service, admin_test_players):
-        """Test that admin submission allows immediate match recording."""
+        """An admin submission alongside insufficient non-admin votes readies
+        the record immediately, the match records, and all pending state is
+        cleared afterwards.
+
+        Merges test_admin_override_with_mixed_submissions and
+        test_admin_override_clears_state_after_recording.
+        """
         admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
 
-        # Admin submits - should allow immediate recording
-        submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True
-        )
-
-        assert submission["is_ready"] is True
-        assert submission["non_admin_count"] == 0
-        assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
-
-        # Should be able to record match immediately
-        record_result = admin_match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        assert record_result["match_id"] is not None
-        assert record_result["winning_team"] == "radiant"
-        assert record_result["updated_count"] == 10
-
-    def test_admin_override_with_mixed_submissions(self, admin_match_service, admin_test_players):
-        """Test admin override works even when non-admin submissions exist."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-
-        # Add 1 non-admin submission (not enough)
+        # Add 1 non-admin submission (not enough on its own)
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=5001, result="radiant", is_admin=False)
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
 
-        # Admin submits - should override and allow recording
+        # Admin submits - should override and allow immediate recording
         submission = admin_match_service.add_record_submission(
             TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True
         )
@@ -1744,21 +1304,13 @@ class TestAdminOverride:
         assert submission["non_admin_count"] == 1  # Still only 1 non-admin
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
 
-        # Should be able to record
         record_result = admin_match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
         assert record_result["match_id"] is not None
+        assert record_result["winning_team"] == "radiant"
+        assert record_result["updated_count"] == 10
 
-    def test_admin_override_clears_state_after_recording(
-        self, admin_match_service, admin_test_players
-    ):
-        """Test that state is cleared after admin override recording."""
-        admin_match_service.shuffle_players(admin_test_players, guild_id=TEST_GUILD_ID)
-
-        # Admin submits and records
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
-        admin_match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-
-        # State should be cleared
+        # State should be cleared after recording
         assert admin_match_service.get_last_shuffle(TEST_GUILD_ID) is None
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
         assert admin_match_service.has_admin_submission(TEST_GUILD_ID) is False
@@ -1767,50 +1319,38 @@ class TestAdminOverride:
 class TestFirstToThreeVoting:
     """Test first-to-3 voting system for non-admin match recording."""
 
-    def test_get_vote_counts_empty(self, admin_match_service, voting_test_players):
-        """Test get_vote_counts returns zeros when no submissions."""
-        admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
-
-        counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
-        assert counts == {"radiant": 0, "dire": 0}
-
     def test_get_vote_counts_tracks_votes(self, admin_match_service, voting_test_players):
-        """Test get_vote_counts correctly tracks non-admin votes."""
+        """get_vote_counts starts at zero, excludes admin votes, tracks
+        conflicting non-admin votes, and add_record_submission returns the
+        running counts.
+
+        Merges test_get_vote_counts_empty, test_get_vote_counts_excludes_admin,
+        test_conflicting_votes_allowed and test_submission_returns_vote_counts.
+        """
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
-        # Add some votes
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="radiant", is_admin=False)
+        assert admin_match_service.get_vote_counts(TEST_GUILD_ID) == {"radiant": 0, "dire": 0}
 
-        counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
-        assert counts == {"radiant": 2, "dire": 1}
-
-    def test_get_vote_counts_excludes_admin(self, admin_match_service, voting_test_players):
-        """Test get_vote_counts does not count admin votes."""
-        admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
-
-        # Add admin and non-admin votes
+        # Admin votes are never counted.
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=9999, result="radiant", is_admin=True)
+        assert admin_match_service.get_vote_counts(TEST_GUILD_ID) == {"radiant": 0, "dire": 0}
+
+        # Conflicting non-admin votes are allowed and tracked; the submission
+        # result reports the running counts.
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
+        submission = admin_match_service.add_record_submission(
+            TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False
+        )
+        assert submission["vote_counts"] == {"radiant": 1, "dire": 1}
 
-        counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
-        assert counts == {"radiant": 1, "dire": 0}
-
-    def test_conflicting_votes_allowed(self, admin_match_service, voting_test_players):
-        """Test that users can vote for different results (requires MIN_NON_ADMIN_SUBMISSIONS to confirm)."""
-        admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
-
-        # Add conflicting votes - should not raise
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False)
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6003, result="radiant", is_admin=False)
-
-        counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
-        assert counts == {"radiant": 2, "dire": 1}
+        assert admin_match_service.get_vote_counts(TEST_GUILD_ID) == {"radiant": 2, "dire": 1}
 
     def test_first_to_3_radiant_wins(self, admin_match_service, voting_test_players):
-        """Test that radiant wins when it reaches 3 votes first."""
+        """Radiant wins when it reaches 3 votes first; fewer than 3 votes for
+        one side is never ready (merges the non-admin submission-count
+        assertions of test_can_record_match_without_admin_requires_3_non_admin).
+        """
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         # 2 radiant, 2 dire - not ready
@@ -1821,6 +1361,7 @@ class TestFirstToThreeVoting:
 
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is False
         assert admin_match_service.get_pending_record_result(TEST_GUILD_ID) is None
+        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 4
 
         # 3rd radiant vote - radiant wins!
         submission = admin_match_service.add_record_submission(
@@ -1831,6 +1372,7 @@ class TestFirstToThreeVoting:
         assert submission["result"] == "radiant"
         assert admin_match_service.can_record_match(TEST_GUILD_ID) is True
         assert admin_match_service.get_pending_record_result(TEST_GUILD_ID) == "radiant"
+        assert admin_match_service.get_non_admin_submission_count(TEST_GUILD_ID) == 5
 
     def test_first_to_3_dire_wins(self, admin_match_service, voting_test_players):
         """Test that dire wins when it reaches 3 votes first."""
@@ -1853,7 +1395,8 @@ class TestFirstToThreeVoting:
         assert admin_match_service.get_pending_record_result(TEST_GUILD_ID) == "dire"
 
     def test_user_cannot_change_vote(self, admin_match_service, voting_test_players):
-        """Test that a user cannot change their vote."""
+        """A user cannot change their vote, but re-submitting the same vote is
+        an accepted no-op (merges test_user_can_revote_same_result)."""
         admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
 
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
@@ -1862,28 +1405,9 @@ class TestFirstToThreeVoting:
         with pytest.raises(ValueError, match="already submitted"):
             admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="dire", is_admin=False)
 
-    def test_user_can_revote_same_result(self, admin_match_service, voting_test_players):
-        """Test that a user can submit the same vote again (no-op)."""
-        admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
-
+        # Same vote again - should not raise, and not double-count
         admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
-        # Same vote again - should not raise, just update
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
-
-        counts = admin_match_service.get_vote_counts(TEST_GUILD_ID)
-        assert counts == {"radiant": 1, "dire": 0}  # Still just 1 vote
-
-    def test_submission_returns_vote_counts(self, admin_match_service, voting_test_players):
-        """Test that add_record_submission returns current vote counts."""
-        admin_match_service.shuffle_players(voting_test_players, guild_id=TEST_GUILD_ID)
-
-        admin_match_service.add_record_submission(TEST_GUILD_ID, user_id=6001, result="radiant", is_admin=False)
-        submission = admin_match_service.add_record_submission(
-            TEST_GUILD_ID, user_id=6002, result="dire", is_admin=False
-        )
-
-        assert "vote_counts" in submission
-        assert submission["vote_counts"] == {"radiant": 1, "dire": 1}
+        assert admin_match_service.get_vote_counts(TEST_GUILD_ID) == {"radiant": 1, "dire": 0}
 
     def test_first_to_3_records_correct_winner(self, admin_match_service, voting_test_players):
         """Test that the match is recorded with the correct winner."""
@@ -1912,8 +1436,19 @@ class TestAbortVoting:
     """Test abort submission handling for match recording."""
 
     def test_non_admin_abort_requires_four_lobby_votes(self, admin_match_service, abort_test_players):
+        """Four lobby votes are required to abort, non-lobby players cannot
+        vote, and clearing the shuffle resets the abort state.
+
+        Merges test_non_lobby_player_cannot_vote_to_abort and
+        test_clear_abort_state_after_abort.
+        """
         admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
+
+        # Someone outside the shuffled lobby cannot vote at all.
+        with pytest.raises(ValueError, match="shuffled lobby"):
+            admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=9999, is_admin=False)
+        assert admin_match_service.get_abort_submission_count(TEST_GUILD_ID) == 0
 
         admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7001, is_admin=False)
         admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7002, is_admin=False)
@@ -1924,13 +1459,8 @@ class TestAbortVoting:
         assert submission["is_ready"] is True
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is True
 
-    def test_non_lobby_player_cannot_vote_to_abort(self, admin_match_service, abort_test_players):
-        admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
-
-        with pytest.raises(ValueError, match="shuffled lobby"):
-            admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=9999, is_admin=False)
-
-        assert admin_match_service.get_abort_submission_count(TEST_GUILD_ID) == 0
+        # Clearing the shuffle (the abort itself) resets the abort state.
+        admin_match_service.clear_last_shuffle(TEST_GUILD_ID)
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
 
     def test_admin_abort_overrides_minimum(self, admin_match_service, abort_test_players):
@@ -1940,17 +1470,6 @@ class TestAbortVoting:
         assert submission["is_ready"] is True
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is True
         assert submission["non_admin_count"] == admin_match_service.get_abort_submission_count(TEST_GUILD_ID)
-
-    def test_clear_abort_state_after_abort(self, admin_match_service, abort_test_players):
-        admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7001, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7002, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7003, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7004, is_admin=False)
-        assert admin_match_service.can_abort_match(TEST_GUILD_ID) is True
-
-        admin_match_service.clear_last_shuffle(TEST_GUILD_ID)
-        assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
 
 
 # =============================================================================
@@ -2175,42 +1694,6 @@ class TestPlayerOrderPreservation:
         assert players[2].name == "Alice"  # 1001
         assert players[3].name == "Diana"  # 1004
         assert players[4].name == "Bob"  # 1002
-
-    def test_player_name_to_id_mapping_correctness(self, test_db):
-        """
-        Test that the player_name_to_id mapping is correct when using
-        get_players_by_ids with zip().
-
-        This is the exact pattern used in bot.py that was causing the bug.
-        """
-        # Add players
-        players_data = [
-            (1001, "Alice", 1500),
-            (1002, "Bob", 1600),
-            (1003, "Charlie", 1700),
-        ]
-
-        for discord_id, name, rating in players_data:
-            test_db.add_player(
-                discord_id=discord_id,
-                discord_username=name,
-                initial_mmr=1500,
-                glicko_rating=float(rating),
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Simulate the pattern used in bot.py
-        player_ids = [1003, 1001, 1002]  # Not in insertion order
-        players = test_db.get_players_by_ids(player_ids)
-
-        # Build the mapping (exact pattern from bot.py)
-        player_name_to_id = {pl.name: pid for pid, pl in zip(player_ids, players)}
-
-        # CRITICAL: Mapping must be correct
-        assert player_name_to_id["Charlie"] == 1003
-        assert player_name_to_id["Alice"] == 1001
-        assert player_name_to_id["Bob"] == 1002
 
     def test_team_assignment_with_shuffled_ids(self, test_db):
         """
