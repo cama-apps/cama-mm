@@ -60,6 +60,62 @@ class RegistrationCommands(commands.Cog):
                 exc,
             )
 
+    @app_commands.command(name="refer", description="Refer a new player")
+    @app_commands.checks.cooldown(1, 5.0)
+    @require_guild
+    async def refer(self, interaction: discord.Interaction, player: discord.Member):
+        """Enroll a new player and share the registration steps."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        if player.bot:
+            await safe_followup(
+                interaction,
+                content="❌ You can only refer human players.",
+                ephemeral=True,
+            )
+            return
+        if player.id == interaction.user.id:
+            await safe_followup(
+                interaction,
+                content="❌ You can't refer yourself.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                self.player_service.create_referral,
+                interaction.user.id,
+                player.id,
+                interaction.guild.id,
+            )
+        except ValueError as exc:
+            await safe_followup(interaction, content=f"❌ {exc}", ephemeral=True)
+            return
+
+        await safe_followup(
+            interaction,
+            content="✅ Referral created.",
+            ephemeral=True,
+        )
+        await safe_followup(
+            interaction,
+            content=(
+                f"**Referral: {player.mention}**\n"
+                "1. Run `/player register` with your Steam32 ID "
+                "(the number in your Dotabuff URL).\n"
+                "2. Run `/player roles` with your Dota positions (1-5).\n"
+                "3. Run `/join` for an active lobby, or `/lobby` to start one."
+            ),
+            allowed_mentions=discord.AllowedMentions(
+                users=[player],
+                roles=False,
+                everyone=False,
+                replied_user=False,
+            ),
+        )
+
     @player_lobby.command(
         name="autonotify",
         description="Manage public lobby alerts or watch a player's next signup",

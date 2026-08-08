@@ -36,10 +36,21 @@ class RecordingMixin:
         excluded_player_ids: list[int],
         last_shuffle: PendingMatchState,
         guild_id: int | None,
+        initial_jc_changes: dict[int, dict[str, int]] | None = None,
     ) -> dict:
         """Pay participation, win, bomb-pot, and exclusion bonuses, then settle
         the pot. Returns the bet distributions (empty dict if no betting service)."""
         distributions: dict = {"winners": [], "losers": []}
+        jc_changes: dict[int, dict[str, int]] = {}
+        if self.betting_service:
+            get_stored_jc_changes = getattr(
+                self.match_repo, "get_match_jc_changes", None
+            )
+            if callable(get_stored_jc_changes):
+                jc_changes.update(get_stored_jc_changes(match_id, guild_id))
+        for discord_id, components in (initial_jc_changes or {}).items():
+            jc_changes.setdefault(discord_id, {}).update(components)
+        distributions["jc_changes"] = jc_changes
         if not self.betting_service:
             return distributions
 
@@ -48,11 +59,7 @@ class RecordingMixin:
         # match_participants. Without this, balance-history reconstruction
         # would silently drift if reward constants or penalty rules change.
         bonus_net: dict[int, int] = {}
-        jc_changes: dict[int, dict[str, int]] = {}
         bonus_components: dict[int, dict[str, int]] = {}
-        get_stored_jc_changes = getattr(self.match_repo, "get_match_jc_changes", None)
-        if callable(get_stored_jc_changes):
-            jc_changes.update(get_stored_jc_changes(match_id, guild_id))
         get_stored_bet_skims = getattr(
             self.betting_service.bet_repo, "get_match_blood_pact_skims", None
         )
@@ -691,11 +698,11 @@ class RecordingMixin:
                 half_exclusion_increment_ids = list(last_shuffle.half_exclusion_increment_ids)
 
             # ---- ATOMIC WRITE: match + participants + wins/losses + glicko +
-            # OpenSkill + last_match_date + first_calibrated_at + match_prediction
-            # + rating_history + pairings + consumable decrements, all in one
-            # BEGIN IMMEDIATE. A crash here rolls the whole match back, so the
-            # invariant "every committed match has matching rating_history and
-            # pairings" holds.
+            # OpenSkill + first-match referral rewards + last_match_date +
+            # first_calibrated_at + match_prediction + rating_history + pairings
+            # + consumable decrements, all in one BEGIN IMMEDIATE. A crash here
+            # rolls the whole match back, so the invariant "every committed
+            # match has matching rating_history and pairings" holds.
             now_iso = datetime.now(UTC).isoformat()
             match_prediction = {
                 "radiant_rating": radiant_rating,
@@ -707,6 +714,7 @@ class RecordingMixin:
                 "openskill_raw_radiant_win_prob": (openskill_raw_radiant_win_prob),
             }
 
+            referral_rewards: list[dict] = []
             match_id = self.match_repo.record_match_core_atomic(
                 team1_ids=radiant_team_ids,
                 team2_ids=dire_team_ids,
@@ -734,12 +742,24 @@ class RecordingMixin:
                 half_exclusion_increment_ids=half_exclusion_increment_ids,
                 expected_openskill_revision=expected_openskill_revision,
                 win_reward_jc=JOPACOIN_WIN_REWARD,
+                referral_rewards_out=referral_rewards,
             )
             updated_count = len(glicko_updates)
 
-            # ---- POST-MATCH: money side (bets + loans) runs in its own
-            # transactions. Pending bets stay pending and loans stay outstanding
-            # if these fail, so retry/recovery happens via the usual paths.
+            # ---- POST-MATCH: the remaining money side (bets + loans) runs in
+            # its own transactions. Pending bets stay pending and loans stay
+            # outstanding if these fail, so retry/recovery happens via the
+            # usual paths.
+            referral_jc_changes: dict[int, int] = {}
+            for reward in referral_rewards:
+                reward_amount = int(reward["reward_amount"])
+                for beneficiary_id in (
+                    int(reward["referred_id"]),
+                    int(reward["referrer_id"]),
+                ):
+                    referral_jc_changes[beneficiary_id] = (
+                        referral_jc_changes.get(beneficiary_id, 0) + reward_amount
+                    )
             distributions = self._settle_match_bets_and_bonuses(
                 match_id,
                 winning_team,
@@ -748,6 +768,10 @@ class RecordingMixin:
                 excluded_player_ids,
                 last_shuffle,
                 guild_id,
+                initial_jc_changes={
+                    beneficiary_id: {"referral": amount}
+                    for beneficiary_id, amount in referral_jc_changes.items()
+                },
             )
             loan_repayments = self._repay_outstanding_loans(winning_ids + losing_ids, guild_id)
 
@@ -787,6 +811,7 @@ class RecordingMixin:
                 "bet_distributions": distributions,
                 "jc_changes": distributions.get("jc_changes", {}),
                 "loan_repayments": loan_repayments,
+                "referral_rewards": referral_rewards,
                 "notable_streak": notable_streak,
                 "easter_egg_data": easter_egg_data,
             }
