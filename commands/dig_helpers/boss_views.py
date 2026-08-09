@@ -30,7 +30,86 @@ logger = logging.getLogger("cama_bot.commands.dig")
 
 _ECHO_EFFECT_COPY = "-25% max HP and 30% less wager profit"
 
+_PET_ASSIST_FLAVOR = {
+    "common_cama": "barrels into the fray",
+    "dromedary_cross": "leans in with a stubborn shoulder-check",
+    "banana_ears": "hums a battle note and charges",
+    "embergear_cama": "builds steam and rockets forward",
+    "jopacama": "finds a suspiciously profitable weak spot",
+    "pudge_cama": "takes a bite out of the opposition",
+    "courier_cama": "delivers a hit straight to the boss",
+    "riverglow_cama": "skates through the dark and clips the boss",
+    "aegis_cama": "slams its glowing shell into the boss",
+    "invoker_cama": "assembles several extremely learned sparks",
+    "crystal_cama": "freezes the boss's footing",
+    "prismwool_cama": "refracts the torchlight into a sharp flash",
+    "rama": "spits with historic contempt",
+    "moondrift_cama": "drifts through the boss's guard",
+    "sunspun_cama": "flares gold and strikes",
+}
+
 BossResolvedCallback = Callable[[int, int | None], Awaitable[None]]
+
+
+def _as_plain_dict(value) -> dict | None:
+    if hasattr(value, "_d"):
+        value = value._d
+    return value if isinstance(value, dict) else None
+
+
+def _pet_assist_from_result(result) -> tuple[dict | None, int]:
+    raw = result._d if hasattr(result, "_d") else (
+        result if isinstance(result, dict) else {}
+    )
+    assist = _as_plain_dict(
+        getattr(result, "pet_assist", None) or raw.get("pet_assist")
+    )
+    bonus_damage = 0
+    round_log = getattr(result, "round_log", None) or raw.get("round_log") or []
+    for entry_value in round_log:
+        entry = _as_plain_dict(entry_value)
+        if entry is None:
+            continue
+        if assist is None:
+            assist = _as_plain_dict(entry.get("pet_assist"))
+        bonus_damage += int(entry.get("pet_assist_damage") or 0)
+    return assist, bonus_damage
+
+
+def _format_pet_assist(assist: dict, *, bonus_damage: int | None) -> str:
+    pet_name = str(assist.get("pet_name") or "Your pet")
+    species_name = str(assist.get("species_name") or "Cama")
+    species_id = str(assist.get("species_id") or "")
+    bonus_pct = int(assist.get("bonus_pct") or 0)
+    flavor = _PET_ASSIST_FLAVOR.get(species_id, "lunges at the boss")
+    line = (
+        f"**{pet_name}** ({species_name}) {flavor}, lending a "
+        f"**{bonus_pct}%** damage assist."
+    )
+    if bonus_damage is None:
+        return line
+    if bonus_damage > 0:
+        return f"{line}\nIt contributed **{bonus_damage} bonus damage**."
+    return f"{line}\nNo opening appeared this time."
+
+
+def _add_pet_assist_notice(
+    embed: discord.Embed,
+    result,
+    *,
+    include_outcome: bool,
+) -> None:
+    assist, bonus_damage = _pet_assist_from_result(result)
+    if assist is None:
+        return
+    embed.add_field(
+        name="Pet Assist",
+        value=_format_pet_assist(
+            assist,
+            bonus_damage=bonus_damage if include_outcome else None,
+        ),
+        inline=False,
+    )
 
 
 def _add_gear_broken_notice(embed: discord.Embed, result) -> None:
@@ -333,6 +412,7 @@ class BossWagerModal(discord.ui.Modal):
                 if boss_narrative:
                     embed.add_field(name="​", value=f"*{boss_narrative}*", inline=False)
             _add_gear_broken_notice(embed, self.result)
+            _add_pet_assist_notice(embed, self.result, include_outcome=True)
             embed.add_field(
                 name="Details",
                 value=(
@@ -522,6 +602,7 @@ async def _post_phase_transition_followup(
             inline=False,
         )
     _add_gear_broken_notice(transition_embed, result)
+    _add_pet_assist_notice(transition_embed, result, include_outcome=True)
     if getattr(result, "is_pinnacle", False):
         event_flavor = getattr(result, "phase_event_flavor", "")
         event_description = getattr(result, "phase_event_description", "")
@@ -812,6 +893,7 @@ async def _resolve_phase_fight_without_modal(
     if soften_line:
         embed.add_field(name="​", value=soften_line, inline=False)
     _add_gear_broken_notice(embed, result)
+    _add_pet_assist_notice(embed, result, include_outcome=True)
     embed.add_field(
         name="Details",
         value=(
@@ -885,6 +967,7 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     if lum_line:
         embed.add_field(name="​", value=lum_line, inline=False)
     _add_gear_broken_notice(embed, result)
+    _add_pet_assist_notice(embed, result, include_outcome=False)
     opts = pp.get("options") or []
     if opts:
         lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
@@ -1005,6 +1088,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
 
     raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
     _add_gear_broken_notice(embed, result)
+    _add_pet_assist_notice(embed, result, include_outcome=True)
 
     # Surface the mid-fight option the player picked plus its rolled narrative.
     # Without this, picking a button on the reactive prompt jumps straight to
@@ -1459,6 +1543,11 @@ class BossEncounterView(discord.ui.View):
             if odds and hasattr(odds, "_d"):
                 odds = odds._d
             lines = [f"**{boss_name}** — Intel Report\n"]
+            scout_assist = _as_plain_dict(getattr(info, "pet_assist", None))
+            if scout_assist is not None:
+                lines.append(
+                    _format_pet_assist(scout_assist, bonus_damage=None) + "\n"
+                )
             if getattr(info, "echo_applied", False):
                 killer_id = getattr(info, "echo_killer_id", None)
                 killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"

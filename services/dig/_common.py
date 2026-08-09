@@ -37,6 +37,20 @@ STAMINA_COOLDOWN_REDUCTION = 0.04
 STAMINA_MAX_REDUCTION = 0.50
 
 
+def _roll_fractional_damage_bonus(
+    damage: int,
+    bonus_pct: int,
+    *,
+    rng=random,
+) -> int:
+    """Stochastically round a percentage bonus while preserving its mean."""
+    scaled = max(0, int(damage)) * max(0, int(bonus_pct))
+    guaranteed, remainder = divmod(scaled, 100)
+    if remainder and rng.random() < remainder / 100:
+        guaranteed += 1
+    return guaranteed
+
+
 def _splash_trigger_matches(trigger: str, succeeded: bool) -> bool:
     """Does the event's splash config fire on this outcome?"""
     if trigger == "always":
@@ -71,6 +85,7 @@ def _approx_duel_win_prob(
     player_hit: float, player_dmg: int,
     boss_hit: float, boss_dmg: int,
     crit_chance: float = 0.0, crit_bonus: int = 0,
+    player_damage_bonus_pct: int = 0,
     trials: int = 500,
 ) -> float:
     """Estimate the probability the player wins a boss HP duel.
@@ -93,6 +108,11 @@ def _approx_duel_win_prob(
                 dmg = player_dmg
                 if crit_chance > 0 and rng.random() < crit_chance:
                     dmg += crit_bonus
+                dmg += _roll_fractional_damage_bonus(
+                    dmg,
+                    player_damage_bonus_pct,
+                    rng=rng,
+                )
                 bhp -= dmg
             if bhp <= 0:
                 wins += 1

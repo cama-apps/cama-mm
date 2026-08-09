@@ -227,6 +227,15 @@ def test_phase_transition_forwards_callback_to_replacement_encounter(monkeypatch
                 boss_name="Test Boss",
                 wager=12,
                 gear_broken=["Stone Cuirass"],
+                round_log=[{
+                    "pet_assist": {
+                        "pet_name": "Dane",
+                        "species_id": "common_cama",
+                        "species_name": "Common Cama",
+                        "bonus_pct": 10,
+                    },
+                    "pet_assist_damage": 2,
+                }],
             ),
             on_boss_resolved=callback,
         )
@@ -238,6 +247,12 @@ def test_phase_transition_forwards_callback_to_replacement_encounter(monkeypatch
         )
         assert broken_field is not None
         assert "Stone Cuirass" in broken_field.value
+        assist_field = next(
+            (field for field in transition_embed.fields if field.name == "Pet Assist"),
+            None,
+        )
+        assert assist_field is not None
+        assert "2 bonus damage" in assist_field.value
         assert encounter_factory.call_args.kwargs["on_boss_resolved"] is callback
         assert encounter.message is channel.send.return_value
 
@@ -531,6 +546,89 @@ def test_duel_prompt_surfaces_stale_cleanup_break_notification():
     )
     assert broken_field is not None
     assert "Stone Cuirass" in broken_field.value
+
+
+def test_duel_prompt_surfaces_active_pet_assist():
+    result = _result(
+        pending_prompt={
+            "prompt_title": "Choose",
+            "prompt_description": "React.",
+            "options": [],
+        },
+        round_num=2,
+        player_hp=4,
+        player_hp_max=5,
+        boss_hp=5,
+        boss_hp_max=6,
+        pet_assist={
+            "pet_name": "Dane",
+            "species_id": "common_cama",
+            "species_name": "Common Cama",
+            "bonus_pct": 12,
+        },
+    )
+
+    embed = bv._build_duel_prompt_embed(result)
+    assist_field = next(
+        (field for field in embed.fields if field.name == "Pet Assist"), None,
+    )
+
+    assert assist_field is not None
+    assert "Dane" in assist_field.value
+    assert "Common Cama" in assist_field.value
+    assert "12%" in assist_field.value
+    assert "barrels into the fray" in assist_field.value
+
+
+def test_boss_result_reports_species_flavor_and_pet_damage():
+    assist = {
+        "pet_name": "Rama",
+        "species_id": "rama",
+        "species_name": "Rama the First",
+        "bonus_pct": 10,
+    }
+    result = bv._wrap(_result(round_log=[
+        {"round": 1, "pet_assist": assist, "pet_assist_damage": 1},
+        {"round": 2, "pet_assist": assist, "pet_assist_damage": 1},
+    ]))
+
+    embed = bv._build_boss_fight_result_embed(
+        result=result,
+        risk_tier="cautious",
+        amount=0,
+    )
+    assist_field = next(
+        (field for field in embed.fields if field.name == "Pet Assist"), None,
+    )
+
+    assert assist_field is not None
+    assert "Rama" in assist_field.value
+    assert "historic contempt" in assist_field.value
+    assert "2 bonus damage" in assist_field.value
+
+
+def test_boss_result_reports_when_pet_found_no_opening():
+    assist = {
+        "pet_name": "Dane",
+        "species_id": "common_cama",
+        "species_name": "Common Cama",
+        "bonus_pct": 12,
+    }
+    result = bv._wrap(_result(round_log=[
+        {"round": 1, "pet_assist": assist},
+    ]))
+
+    embed = bv._build_boss_fight_result_embed(
+        result=result,
+        risk_tier="cautious",
+        amount=0,
+    )
+    assist_field = next(
+        (field for field in embed.fields if field.name == "Pet Assist"), None,
+    )
+
+    assert assist_field is not None
+    assert "No opening appeared this time" in assist_field.value
 
 
 def test_no_wager_resolution_surfaces_break_notification(monkeypatch):

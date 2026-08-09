@@ -17,9 +17,12 @@ from domain.models.boss_stingers import (
     CURSE_HALVE_NEXT_WAGER,
     CURSE_NO_SCOUT_NEXT_DIG,
 )
+from domain.models.pet import PetStage
+from domain.pet_constants import BRAWL_TRAINING_XP_CAP, get_species
 from repositories.dig_repository import TunnelStateConflictError
 from services.dig._common import (
     _luminosity_combat_penalty,
+    _roll_fractional_damage_bonus,
 )
 from services.dig_constants import (
     BOSS_ARCHETYPE_BY_ID,
@@ -60,6 +63,13 @@ from services.dig_constants import (
     get_phase3_for,
 )
 
+_PET_BOSS_ASSIST_PCT = {
+    "happy": 12,
+    "content": 10,
+    "hungry": 8,
+    "starving": 5,
+}
+
 
 class BossCombatMixin:
     """BossCombatMixin — see module docstring.
@@ -67,6 +77,55 @@ class BossCombatMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
+
+    def _get_pet_boss_assist(
+        self,
+        discord_id: int,
+        guild_id,
+    ) -> dict | None:
+        """Snapshot a fully trained adult pet's boss-assist strength."""
+        if self.pet_service is None:
+            return None
+        result = self.pet_service.get_status(discord_id, guild_id)
+        if not result.success or result.value is None:
+            return None
+        status = result.value
+        pet = status.pet
+        if (
+            pet is None
+            or status.stage is not PetStage.ADULT
+            or pet.training_xp < BRAWL_TRAINING_XP_CAP
+        ):
+            return None
+        mood = getattr(status.mood, "value", status.mood)
+        bonus_pct = _PET_BOSS_ASSIST_PCT.get(mood)
+        if bonus_pct is None:
+            return None
+        return {
+            "pet_name": pet.name,
+            "species_id": pet.species,
+            "species_name": get_species(pet.species).display_name,
+            "bonus_pct": bonus_pct,
+        }
+
+    @staticmethod
+    def _apply_pet_boss_assist(
+        damage: int,
+        status_effects: dict,
+        entry: dict,
+    ) -> int:
+        assist = status_effects.get("pet_boss_assist")
+        if not isinstance(assist, dict):
+            return damage
+        entry.setdefault("pet_assist", dict(assist))
+        bonus = _roll_fractional_damage_bonus(
+            damage,
+            int(assist.get("bonus_pct") or 0),
+            rng=random,
+        )
+        if bonus:
+            entry["pet_assist_damage"] = bonus
+        return damage + bonus
 
     @staticmethod
     def _get_stinger_curses(tunnel: dict) -> dict:
@@ -1143,6 +1202,9 @@ class BossCombatMixin:
         legacy_status = self._trophy_status_seed(
             discord_id, guild_id, player_start_hp=player_hp,
         )
+        pet_assist = self._get_pet_boss_assist(discord_id, guild_id)
+        if pet_assist is not None:
+            legacy_status["pet_boss_assist"] = pet_assist
 
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
@@ -1156,6 +1218,9 @@ class BossCombatMixin:
             boss_dmg=boss_dmg,
             crit_chance=crit_chance,
             crit_bonus=crit_bonus,
+            player_damage_bonus_pct=(
+                int(pet_assist["bonus_pct"]) if pet_assist is not None else 0
+            ),
         )
         # Wager payout tapers toward break-even once the fight is near-certain,
         # so softening a boss then betting big no longer prints money.
@@ -1165,6 +1230,7 @@ class BossCombatMixin:
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             entry: dict = {"round": round_num}
+            self._apply_pet_boss_assist(0, legacy_status, entry)
             player_roll = BossCombatMixin._roll_player_hit(
                 player_hit, legacy_status, entry,
             )
@@ -1185,6 +1251,11 @@ class BossCombatMixin:
                         )
                         legacy_status["gear_heal_first_crit"] = False
                         entry["blood_locket_heal"] = True
+                dmg_this_round = self._apply_pet_boss_assist(
+                    dmg_this_round,
+                    legacy_status,
+                    entry,
+                )
                 boss_hp -= dmg_this_round
             entry["player_hit"] = player_roll
             entry["crit"] = crit_this_round
@@ -2006,6 +2077,7 @@ class BossCombatMixin:
             )
         )
         player_hp_max = player_hp
+        pet_assist = self._get_pet_boss_assist(discord_id, guild_id)
 
         win_chance = dig_service._approx_duel_win_prob(
             player_hp=player_hp,
@@ -2016,6 +2088,9 @@ class BossCombatMixin:
             boss_dmg=boss_dmg,
             crit_chance=crit_chance,
             crit_bonus=crit_bonus,
+            player_damage_bonus_pct=(
+                int(pet_assist["bonus_pct"]) if pet_assist is not None else 0
+            ),
         )
         # Wager payout tapers toward break-even once the fight is near-certain.
         multiplier = self._effective_wager_multiplier(multiplier, win_chance)
@@ -2034,6 +2109,8 @@ class BossCombatMixin:
             status_effects["boss_prep"] = dict(active_prep)
         if shifting_idol_bonus:
             status_effects["shifting_idol_bonus"] = shifting_idol_bonus
+        if pet_assist is not None:
+            status_effects["pet_boss_assist"] = pet_assist
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             # If a mechanic is scheduled for THIS round, pause and persist.
@@ -2109,6 +2186,7 @@ class BossCombatMixin:
                     round_num=round_num,
                     round_log=round_log,
                     win_chance=round(win_chance, 2),
+                    pet_assist=pet_assist,
                     echo_applied=echo_applied,
                     echo_killer_id=(
                         active_echo.get("killer_discord_id")
@@ -2229,7 +2307,7 @@ class BossCombatMixin:
                     status_effects=status_effects,
                 )
             )
-        round_log.append({
+        mechanic_entry = {
             "round": round_num,
             "mechanic_id": state_row["mechanic_id"],
             "option_idx": option_idx,
@@ -2238,7 +2316,11 @@ class BossCombatMixin:
             "warding_salts_blocked": warding_blocked,
             "player_hp": max(0, player_hp),
             "boss_hp": max(0, boss_hp),
-        })
+        }
+        pet_assist = status_effects.get("pet_boss_assist")
+        if pet_assist is not None:
+            mechanic_entry["pet_assist"] = dict(pet_assist)
+        round_log.append(mechanic_entry)
 
         # Immediate HP check after option outcome.
         won: bool | None = None
@@ -2394,6 +2476,7 @@ class BossCombatMixin:
         to decrement DOTs and clear one-shot effects.
         """
         entry: dict = {"round": round_num}
+        BossCombatMixin._apply_pet_boss_assist(0, status_effects, entry)
         hp_at_round_start = player_hp  # snapshot for Aching Spine regrowth
 
         # Start-of-round effects
@@ -2468,6 +2551,11 @@ class BossCombatMixin:
                         )
                         status_effects["gear_heal_first_crit"] = False
                         entry["blood_locket_heal"] = True
+                dmg_this_round = BossCombatMixin._apply_pet_boss_assist(
+                    dmg_this_round,
+                    status_effects,
+                    entry,
+                )
                 boss_hp -= dmg_this_round
                 # Trophy — Runebitten Shard: heal 1 on the first landed hit.
                 if status_effects.get("trophy_lifesteal"):
@@ -3548,6 +3636,10 @@ class BossCombatMixin:
         # Luminosity penalty applies to the previewed odds as well.
         lum_value = self._get_luminosity(tunnel)
         lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(lum_value)
+        pet_assist = self._get_pet_boss_assist(discord_id, guild_id)
+        pet_bonus_pct = (
+            int(pet_assist["bonus_pct"]) if pet_assist is not None else 0
+        )
 
         odds = {}
         for i, tier in enumerate(("cautious", "bold", "reckless")):
@@ -3644,6 +3736,7 @@ class BossCombatMixin:
                 boss_dmg=boss_dmg_eff,
                 crit_chance=_scout_crit_chance,
                 crit_bonus=_scout_crit_bonus,
+                player_damage_bonus_pct=pet_bonus_pct,
             )
             free_win_pct = dig_service._approx_duel_win_prob(
                 player_hp=player_hp,
@@ -3654,6 +3747,7 @@ class BossCombatMixin:
                 boss_dmg=boss_dmg_eff,
                 crit_chance=_scout_crit_chance,
                 crit_bonus=_scout_crit_bonus,
+                player_damage_bonus_pct=pet_bonus_pct,
             )
             base_multiplier = payouts[i] if i < len(payouts) else 2.0
             effective_multiplier = self._settled_wager_multiplier(
@@ -3713,6 +3807,7 @@ class BossCombatMixin:
             enhanced=enhanced,
             mechanic_pool=mechanic_pool_preview,
             stinger=stinger_preview,
+            pet_assist=pet_assist,
         )
         if not enhanced:
             # Base lantern is single-use, but only after a valid scout result.
