@@ -3,7 +3,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from domain.models.lobby import LobbyKind
+from domain.models.lobby import LOWSKILL_RATING_CUTOFF, LobbyKind
 from utils.formatting import escape_discord_text
 
 if TYPE_CHECKING:
@@ -122,8 +122,25 @@ class ReminderService:
         if ready_at > now:
             schedule(bot, discord_id, guild_id, ready_at, preference_enabled=True)
 
-    def get_lobby_subscriber_ids(self, guild_id: int) -> list[int]:
-        return self._notification_repo.get_enabled_users_for_type(guild_id, "lobby")
+    def get_lobby_subscriber_ids(
+        self,
+        guild_id: int,
+        lobby_kind: LobbyKind | str | None = None,
+    ) -> list[int]:
+        subscriber_ids = self._notification_repo.get_enabled_users_for_type(
+            guild_id,
+            "lobby",
+        )
+        if LobbyKind.normalize(lobby_kind) is not LobbyKind.LOWSKILL:
+            return subscriber_ids
+
+        players = self._player_repo.get_by_ids(subscriber_ids, guild_id)
+        return [
+            player.discord_id
+            for player in players
+            if player.glicko_rating is not None
+            and player.glicko_rating < LOWSKILL_RATING_CUTOFF
+        ]
 
     def add_lobby_player_subscription(
         self,

@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from domain.models.lobby import LobbyKind
 from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
+from services.reminder_service import ReminderService
 from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
@@ -1020,7 +1022,55 @@ class TestNotifyLobbyRally:
         send_kwargs = reaction_channel.send.await_args.kwargs
         assert send_kwargs["content"] == "<@10>"
         assert [user.id for user in send_kwargs["allowed_mentions"].users] == [10]
-        mock_bot.reminder_service.get_lobby_subscriber_ids.assert_called_once_with(1)
+        mock_bot.reminder_service.get_lobby_subscriber_ids.assert_called_once_with(
+            1,
+            LobbyKind.OPEN,
+        )
+
+    @pytest.mark.asyncio
+    async def test_lowskill_rally_excludes_auto_subscribers_at_or_above_1400(self):
+        """Whine & Cheese auto-notify follows the lobby's strict rating cutoff."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players={12}, kind=LobbyKind.LOWSKILL)
+        lobby.get_total_count.return_value = 8
+
+        notification_repo = MagicMock()
+        notification_repo.get_enabled_users_for_type.return_value = [10, 11, 13]
+        player_repo = MagicMock()
+        player_repo.get_by_ids.return_value = [
+            SimpleNamespace(discord_id=10, glicko_rating=1399.0),
+            SimpleNamespace(discord_id=11, glicko_rating=1400.0),
+            SimpleNamespace(discord_id=13, glicko_rating=1500.0),
+        ]
+
+        mock_bot = MagicMock()
+        mock_bot.user.id = 999
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        mock_bot.lobby_service.get_lobby_message_id.return_value = None
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = None
+        mock_bot.reminder_service = ReminderService(notification_repo, player_repo)
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+        ):
+            result = await notify_lobby_rally(
+                reaction_channel,
+                thread,
+                lobby,
+                guild_id=1,
+                lobby_kind=LobbyKind.LOWSKILL,
+            )
+
+        assert result is True
+        send_kwargs = reaction_channel.send.await_args.kwargs
+        assert send_kwargs["content"] == "<@10>"
+        assert [user.id for user in send_kwargs["allowed_mentions"].users] == [10]
 
     @pytest.mark.asyncio
     async def test_rally_deduplicates_reaction_and_persistent_subscribers(self):

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -322,6 +323,25 @@ class TestReminderServicePreferences:
 
         assert reminder_service.set_preference(1, TEST_GUILD_ID, "lobby", False) is False
         assert reminder_service.get_lobby_subscriber_ids(TEST_GUILD_ID) == []
+
+    def test_lowskill_lobby_subscribers_require_rating_below_1400(
+        self,
+        reminder_service,
+        notification_repo,
+        player_repo_mock,
+    ):
+        for discord_id in (1, 2, 3, 4):
+            notification_repo.set_preference(discord_id, TEST_GUILD_ID, "lobby", True)
+        player_repo_mock.get_by_ids.return_value = [
+            SimpleNamespace(discord_id=1, glicko_rating=1399.0),
+            SimpleNamespace(discord_id=2, glicko_rating=1400.0),
+            SimpleNamespace(discord_id=3, glicko_rating=1401.0),
+        ]
+
+        assert reminder_service.get_lobby_subscriber_ids(
+            TEST_GUILD_ID,
+            LobbyKind.LOWSKILL,
+        ) == [1]
 
 
 class TestLobbyPlayerNotifications:
