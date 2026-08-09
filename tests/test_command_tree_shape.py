@@ -118,6 +118,7 @@ def test_commands_use_approved_consolidated_paths():
         "/economy loan",
         "/economy reserve",
         "/economy disburse",
+        "/economy invest",
         "/shop buy",
         "/shop pingedash",
         "/shop pingedkevin",

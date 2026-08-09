@@ -128,6 +128,7 @@ def test_bot_commands_registered(tmp_path):
                     "economy loan",
                     "economy reserve",
                     "economy disburse",
+                    "economy invest",
                     "shop buy",
                     "shop pingedash",
                     "shop pingedkevin",

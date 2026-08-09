@@ -488,6 +488,32 @@ class IBetRepository(ABC):
         ...
 
     @abstractmethod
+    def set_investment(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+        target_id: int,
+        direction: str,
+        percentage: int,
+    ) -> int:
+        """Create or replace one target investment and return its new configured total."""
+        ...
+
+    @abstractmethod
+    def remove_investment(
+        self, guild_id: int | None, *, investor_id: int, target_id: int
+    ) -> bool: ...
+
+    @abstractmethod
+    def get_investments(self, guild_id: int | None, *, investor_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_investments_for_targets(
+        self, guild_id: int | None, *, target_ids: list[int]
+    ) -> list[dict]: ...
+
+    @abstractmethod
     def place_bet_against_pending_match_atomic(
         self,
         *,

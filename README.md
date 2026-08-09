@@ -210,6 +210,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 ### Economy — `/economy`
 
 - `/economy tip` — Give jopacoin to another player (1% fee goes to the Jopacoin Reserve)
+- `/economy invest` — Configure free shuffle-time long/short wagers (`set`, `remove`, `list`), capped at 10% per target and 50% total; activates at 50+ jopacoin
 - `/economy paydebt` — Help another player pay off their debt
 - `/economy bankruptcy` — Declare bankruptcy to clear debt (1-week cooldown; win-reward penalty for your next 3 wins)
 - `/economy loan` — Borrow up to 100 jopacoin with a 20% fee, auto-repaid after your next match

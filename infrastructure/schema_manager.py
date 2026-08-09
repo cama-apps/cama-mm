@@ -837,6 +837,7 @@ class SchemaManager:
                 self._migration_add_streak_threshold_to_rating_history,
             ),
             ("create_referrals", self._migration_create_referrals),
+            ("create_autobet_investments", self._migration_create_autobet_investments),
         ]
 
     # --- Migrations ---
@@ -6776,5 +6777,28 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_mana_protection_victim
             ON mana_protection_events(guild_id, victim_id, created_at)
+            """
+        )
+
+    def _migration_create_autobet_investments(self, cursor) -> None:
+        """Store one long/short automatic wager preference per target."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS autobet_investments (
+                guild_id    INTEGER NOT NULL DEFAULT 0,
+                investor_id INTEGER NOT NULL,
+                target_id   INTEGER NOT NULL,
+                direction   TEXT NOT NULL CHECK(direction IN ('long', 'short')),
+                percentage  INTEGER NOT NULL CHECK(percentage BETWEEN 1 AND 10),
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, investor_id, target_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_autobet_investments_target
+            ON autobet_investments(guild_id, target_id)
             """
         )

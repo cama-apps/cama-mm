@@ -171,6 +171,111 @@ class BetRepository(BaseRepository, IBetRepository):
 
             yield place_bet
 
+    def set_investment(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+        target_id: int,
+        direction: str,
+        percentage: int,
+    ) -> int:
+        """Atomically create or replace one configured target investment."""
+        if direction not in {"long", "short"}:
+            raise ValueError("Direction must be long or short.")
+        if not 1 <= percentage <= 10:
+            raise ValueError("Investment percentage must be between 1% and 10%.")
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(percentage), 0) AS total
+                FROM autobet_investments
+                WHERE guild_id = ? AND investor_id = ? AND target_id != ?
+                """,
+                (normalized_guild, investor_id, target_id),
+            )
+            configured_total = int(cursor.fetchone()["total"]) + percentage
+            if configured_total > 50:
+                raise ValueError("Total configured investment percentage cannot exceed 50%.")
+
+            cursor.execute(
+                """
+                INSERT INTO autobet_investments (
+                    guild_id, investor_id, target_id, direction, percentage
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, investor_id, target_id) DO UPDATE SET
+                    direction = excluded.direction,
+                    percentage = excluded.percentage,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_guild, investor_id, target_id, direction, percentage),
+            )
+            return configured_total
+
+    def remove_investment(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+        target_id: int,
+    ) -> bool:
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM autobet_investments
+                WHERE guild_id = ? AND investor_id = ? AND target_id = ?
+                """,
+                (normalized_guild, investor_id, target_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_investments(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+    ) -> list[dict]:
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT guild_id, investor_id, target_id, direction, percentage
+                FROM autobet_investments
+                WHERE guild_id = ? AND investor_id = ?
+                ORDER BY target_id
+                """,
+                (normalized_guild, investor_id),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_investments_for_targets(
+        self,
+        guild_id: int | None,
+        *,
+        target_ids: list[int],
+    ) -> list[dict]:
+        unique_target_ids = list(dict.fromkeys(target_ids))
+        if not unique_target_ids:
+            return []
+        normalized_guild = self.normalize_guild_id(guild_id)
+        placeholders = ", ".join("?" for _ in unique_target_ids)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT guild_id, investor_id, target_id, direction, percentage
+                FROM autobet_investments
+                WHERE guild_id = ? AND target_id IN ({placeholders})
+                ORDER BY investor_id, target_id
+                """,
+                (normalized_guild, *unique_target_ids),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def _validate_bet_placement(self, *, team: str, amount: int, leverage: int) -> None:
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
