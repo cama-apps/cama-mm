@@ -95,6 +95,55 @@ def channel():
 
 class TestSweepDelivery:
     @pytest.mark.asyncio
+    async def test_eaten_death_retry_uses_the_exact_durable_outcome(
+        self, channel, monkeypatch
+    ):
+        pet = make_pet(
+            died_at=T0 + 9 * DAY,
+            death_cause="eaten",
+        )
+        notice = DeathNotice(
+            pet=pet,
+            eating_outcome={
+                "reward": 888,
+                "penalty_games_added": 4,
+                "penalty_games_remaining": 7,
+                "new_balance": 1888,
+            },
+        )
+        cog = make_cog()
+        cog.bot.reminder_service = None
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
+
+        await cog._deliver_death(notice)
+
+        embed = channel.send.await_args.kwargs["embed"]
+        copy = f"{embed.title}\n{embed.description}"
+        assert "888" in copy
+        assert "4" in copy
+        assert "7 remaining" in copy
+        assert "1,888" in copy
+        cog.pet_service.mark_death_announced.assert_called_once_with(pet)
+
+    @pytest.mark.asyncio
+    async def test_sweep_skips_a_death_being_delivered_by_the_command(self):
+        pet = make_pet(died_at=T0 + 9 * DAY, death_cause="eaten")
+        cog = make_cog(
+            {
+                "hatches": [],
+                "evolutions": [],
+                "deaths": [DeathNotice(pet=pet)],
+                "refunds": [],
+            }
+        )
+        cog._direct_death_deliveries = {pet.pet_id: 1}
+        cog._deliver_death = AsyncMock()
+
+        await cog._pet_sweep_loop.coro(cog)
+
+        cog._deliver_death.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_evolution_posts_before_death_and_marks_independently(
         self, channel, monkeypatch
     ):

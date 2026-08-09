@@ -8,6 +8,8 @@ references it via an attachment:// URL.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import discord
 
 from domain.models.pet import Pet, PetMood, PetStage, PetStatus, RefundNotice
@@ -48,6 +50,25 @@ MOOD_COLOR = {
     PetMood.HUNGRY: COLOR_ORANGE,
     PetMood.STARVING: COLOR_RED,
 }
+
+
+def build_eating_outcome_embed(
+    pet: Pet, outcome: Mapping[str, int]
+) -> discord.Embed:
+    """Exact, replayable result of eating an adult cama."""
+    added = outcome["penalty_games_added"]
+    remaining = outcome["penalty_games_remaining"]
+    return discord.Embed(
+        title=f"🍖 {pet.name} was delicious",
+        description=(
+            f"You received **{outcome['reward']:,}** {JOPACOIN_EMOTE}.\n\n"
+            f"Bad karma adds **{added}** game(s) to your sentence "
+            f"(**{remaining} remaining**). Your future earnings are taxed "
+            "until you win your way free.\n\n"
+            f"Balance: **{outcome['new_balance']:,}** {JOPACOIN_EMOTE}."
+        ),
+        color=COLOR_DEAD,
+    )
 TIER_BADGE = {
     "common": "",
     "uncommon": "🔹 ",
@@ -165,10 +186,15 @@ def _build_petless_embed(
     identity = f"{species_label(dead)}"
     if calling:
         identity += f" · {calling}"
+    death_phrase = (
+        "was eaten"
+        if dead.death_cause == "eaten"
+        else f"died of {dead.death_cause or 'starvation'}"
+    )
     embed = discord.Embed(
         title=f"In memoriam: {dead.name}",
         description=(
-            f"{identity} · died of {dead.death_cause or 'starvation'}, "
+            f"{identity} · {death_phrase}, "
             f"{age} — <t:{dead.died_at}:R>\n\n"
             f"_{species.blurb}_\n\n"
             f"F.\n\nAdopt again with `/pet adopt` — {next_fee} {JOPACOIN_EMOTE}"
@@ -427,11 +453,12 @@ def build_death_embed(
     flavor_text: str | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     age = format_age(pet.age_seconds(pet.died_at or pet.adopted_at))
-    cause = (
-        "was given to the altar"
-        if pet.death_cause == "sacrifice"
-        else "starved"
-    )
+    if pet.death_cause == "sacrifice":
+        cause = "was given to the altar"
+    elif pet.death_cause == "eaten":
+        cause = "was eaten"
+    else:
+        cause = "starved"
     calling = calling_label(pet)
     embed = discord.Embed(
         title=f"🪦 {pet.name} has died",

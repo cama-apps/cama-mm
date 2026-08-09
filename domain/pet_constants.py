@@ -19,6 +19,10 @@ DEFAULT_HUNGER_DECAY_PER_DAY = 20  # full -> dead in 5 days; config may override
 EGG_HATCH_SECONDS = 24 * 3600
 ADULT_AGE_SECONDS = 7 * 24 * 3600
 UNHATCHED_SPECIES = "unhatched"
+PET_EAT_REWARD_MIN = 500
+PET_EAT_REWARD_MAX = 1000
+PET_EAT_PENALTY_GAMES_MIN = 3
+PET_EAT_PENALTY_GAMES_MAX = 5
 
 # Mood bands on current hunger (lower bound of each band).
 MOOD_HAPPY_MIN = 70

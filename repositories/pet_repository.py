@@ -21,6 +21,7 @@ import sqlite3
 
 from domain.models.pet import Pet, RefundNotice, RefundPayout
 from domain.pet_constants import (
+    ADULT_AGE_SECONDS,
     BRAWL_TRAINING_LEVEL_CAP,
     BRAWL_TRAINING_STAT_CAP,
     BRAWL_TRAINING_XP_CAP,
@@ -123,6 +124,20 @@ class PetRepository(BaseRepository):
                 (pet_id, gid),
             ).fetchone()
         return _row_to_pet(row) if row else None
+
+    def has_open_brawl(
+        self, discord_id: int, guild_id: int | None, *, now: int
+    ) -> bool:
+        """Whether a player is in an active or unexpired pending pet brawl."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pet_brawls WHERE guild_id = ? "
+                "AND (status = 'active' OR (status = 'pending' AND expires_at > ?)) "
+                "AND (challenger_id = ? OR recipient_id = ?) LIMIT 1",
+                (gid, now, discord_id, discord_id),
+            ).fetchone()
+        return row is not None
 
     def train_solo_atomic(
         self,
@@ -583,6 +598,191 @@ class PetRepository(BaseRepository):
             ).fetchone()
             return _row_to_pet(dead_row), _row_to_pet(egg_row)
 
+    def eat_adult_pet_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        pet_id: int,
+        expected_last_fed_at: int,
+        expected_hunger: int,
+        reward: int,
+        penalty_games: int,
+        now: int,
+    ) -> tuple[Pet, int, int]:
+        """Consume an adult pet, credit its reward, and add bad karma atomically."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            mid_brawl = cursor.execute(
+                "SELECT 1 FROM pet_brawls WHERE guild_id = ? "
+                "AND (status = 'active' OR (status = 'pending' AND expires_at > ?)) "
+                "AND (challenger_id = ? OR recipient_id = ?) LIMIT 1",
+                (gid, now, discord_id, discord_id),
+            ).fetchone()
+            if mid_brawl:
+                raise ValueError("in_brawl")
+
+            cursor.execute(
+                """
+                UPDATE pets
+                SET died_at = ?,
+                    death_cause = 'eaten',
+                    evolved_at = CASE
+                        WHEN evolution_due_at < ? THEN evolved_at
+                        ELSE NULL
+                    END,
+                    evolution_calling = CASE
+                        WHEN evolution_due_at < ? THEN evolution_calling
+                        ELSE NULL
+                    END,
+                    evolution_primary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_primary
+                        ELSE NULL
+                    END,
+                    evolution_secondary = CASE
+                        WHEN evolution_due_at < ? THEN evolution_secondary
+                        ELSE NULL
+                    END,
+                    evolution_announced_at = CASE
+                        WHEN evolution_due_at < ? AND evolved_at IS NOT NULL
+                        THEN COALESCE(evolution_announced_at, ?)
+                        ELSE NULL
+                    END
+                WHERE pet_id = ? AND guild_id = ? AND discord_id = ?
+                  AND died_at IS NULL
+                  AND hatched_at <= ?
+                  AND last_fed_at = ? AND hunger_at_last_fed = ?
+                """,
+                (
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
+                    now,
+                    pet_id,
+                    gid,
+                    discord_id,
+                    now - ADULT_AGE_SECONDS,
+                    expected_last_fed_at,
+                    expected_hunger,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = cursor.execute(
+                    "SELECT died_at, hatched_at FROM pets "
+                    "WHERE pet_id = ? AND guild_id = ? AND discord_id = ?",
+                    (pet_id, gid, discord_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("no_pet")
+                if row["died_at"] is not None:
+                    raise ValueError("pet_dead")
+                if row["hatched_at"] > now - ADULT_AGE_SECONDS:
+                    raise ValueError("not_adult")
+                raise ValueError("stale_pet")
+
+            dead_row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ? AND guild_id = ?",
+                (pet_id, gid),
+            ).fetchone()
+            dead_pet = _row_to_pet(dead_row)
+
+            player_row = cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) AS balance FROM players "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            ).fetchone()
+            if player_row is None:
+                raise ValueError("player_not_found")
+            penalty_row = cursor.execute(
+                "SELECT COALESCE(penalty_games_remaining, 0) AS games "
+                "FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            ).fetchone()
+            new_balance = int(player_row["balance"]) + reward
+            penalty_total = (
+                int(penalty_row["games"]) if penalty_row is not None else 0
+            ) + penalty_games
+
+            self._set_economy_ledger_context(
+                cursor,
+                source="pet",
+                actor_id=discord_id,
+                related_type="pet_eating",
+                related_id=pet_id,
+                reason=f"ate pet {dead_pet.name}",
+                metadata={
+                    "pet_id": pet_id,
+                    "species": dead_pet.species,
+                    "reward": reward,
+                    "penalty_games": penalty_games,
+                    "penalty_games_remaining": penalty_total,
+                },
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (reward, discord_id, gid),
+                )
+                credited = cursor.rowcount
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            if credited != 1:
+                raise ValueError("player_not_found")
+
+            cursor.execute(
+                """
+                INSERT INTO bankruptcy_state (
+                    discord_id, guild_id, last_bankruptcy_at,
+                    penalty_games_remaining, bankruptcy_count, updated_at
+                )
+                VALUES (?, ?, NULL, ?, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    penalty_games_remaining =
+                        COALESCE(bankruptcy_state.penalty_games_remaining, 0)
+                        + excluded.penalty_games_remaining,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (discord_id, gid, penalty_games),
+            )
+            return dead_pet, new_balance, penalty_total
+
+    def get_eating_outcome(
+        self, pet_id: int, guild_id: int | None
+    ) -> dict[str, int] | None:
+        """Reconstruct the exact durable result of eating one pet."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT delta, balance_after, metadata "
+                "FROM economy_ledger_entries "
+                "WHERE guild_id = ? AND account_type = 'player' "
+                "AND source = 'pet' AND related_type = 'pet_eating' "
+                "AND related_id = ? ORDER BY ledger_id DESC LIMIT 1",
+                (gid, str(pet_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        metadata = safe_json_loads(
+            row["metadata"], {}, context=f"pet eating outcome {pet_id}"
+        )
+        if not isinstance(metadata, dict) or "penalty_games_remaining" not in metadata:
+            return None
+        return {
+            "reward": int(row["delta"]),
+            "penalty_games_added": int(metadata["penalty_games"]),
+            "penalty_games_remaining": int(metadata["penalty_games_remaining"]),
+            "new_balance": int(row["balance_after"]),
+        }
+
     def buy_supplies(
         self,
         discord_id: int,
@@ -882,12 +1082,12 @@ class PetRepository(BaseRepository):
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             rows = conn.execute(
-                # Altar sacrifices are excluded (before the LIMIT, so a
-                # sandwiched sacrifice neither counts toward nor resets a
-                # common streak) — pity is for bad luck, not for rerolling.
+                # Voluntary deaths are excluded before the LIMIT, so they
+                # neither count toward nor reset a common streak. Pity is for
+                # bad luck, not intentional pet turnover.
                 "SELECT species FROM pets "
                 "WHERE discord_id = ? AND guild_id = ? AND died_at IS NOT NULL "
-                "AND COALESCE(death_cause, '') != 'sacrifice' "
+                "AND COALESCE(death_cause, '') NOT IN ('sacrifice', 'eaten') "
                 "ORDER BY adopted_at DESC LIMIT ?",
                 (discord_id, gid, limit),
             ).fetchall()

@@ -1,6 +1,6 @@
 """Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
 
-Command surface is the /pet group (12 subcommands). A 10-minute background
+Command surface is the /pet group (13 subcommands). A 10-minute background
 sweep detects hatches and starvation deaths (both computed lazily from
 anchors — the loop only announces), expires/voids stale brawls, and pays the
 weekly nonprofit care refund. Public posts go to PET_CHANNEL_ID when
@@ -23,7 +23,11 @@ from commands.checks import require_guild, require_pet_channel
 from commands.pet_helpers import brawl_embeds
 from commands.pet_helpers import embeds as pet_embeds
 from commands.pet_helpers.brawl_views import PetBrawlChallengeView, PetBrawlSession
-from commands.pet_helpers.views import ConfirmSacrificeView, PetStatusView
+from commands.pet_helpers.views import (
+    ConfirmEatView,
+    ConfirmSacrificeView,
+    PetStatusView,
+)
 from config import PET_CHANNEL_ID
 from domain.models.pet import PetStage
 from domain.pet_constants import (
@@ -98,6 +102,8 @@ class PetCommands(commands.Cog):
         self.pet_evolution_service = pet_evolution_service
         # In-memory battle state per active brawl (see brawl_views docstring).
         self._brawl_sessions: dict[int, PetBrawlSession] = {}
+        # Prevent the sweep from racing a command's direct death delivery.
+        self._direct_death_deliveries: dict[int, int] = {}
 
     async def cog_load(self) -> None:
         self._pet_sweep_loop.start()
@@ -843,6 +849,123 @@ class PetCommands(commands.Cog):
             await asyncio.to_thread(self.pet_service.mark_death_announced, dead)
         await self._rearm_warning(egg)
 
+    @pet.command(
+        name="eat",
+        description="Make an irreversible choice about your adult cama",
+    )
+    @require_guild
+    async def eat(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="pet",
+            guild_id=guild_id or 0,
+            user_id=interaction.user.id,
+            limit=6,
+            per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s.", ephemeral=True
+            )
+            return
+        preview = await asyncio.to_thread(
+            self.pet_service.eat_preview, interaction.user.id, guild_id
+        )
+        if not preview.success:
+            await interaction.response.send_message(
+                f"❌ {preview.error}", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        pet = preview.value
+        warning = discord.Embed(
+            title="🍽️ A terrible hunger stirs…",
+            description=(
+                f"Eat **{pet.name}**?\n\n"
+                "You may be rewarded handsomely—but bad karma will tax your "
+                "future earnings until you win your way free.\n\n"
+                f"**This cannot be undone. {pet.name} will be gone forever.**"
+            ),
+            color=pet_embeds.COLOR_DEAD,
+        )
+        view = ConfirmEatView(interaction.user.id)
+        message = await safe_followup(interaction, embed=warning, view=view)
+        view.message = message
+        await view.wait()
+        if not view.value:
+            spared = discord.Embed(
+                title="The hunger passes",
+                description=f"**{pet.name}** lives to graze another day.",
+                color=pet_embeds.COLOR_BLUE,
+            )
+            if message is not None:
+                try:
+                    await message.edit(embed=spared, view=None)
+                except discord.HTTPException:
+                    pass
+            return
+
+        direct_deliveries = self._direct_death_deliveries
+        direct_deliveries[pet.pet_id] = direct_deliveries.get(pet.pet_id, 0) + 1
+        try:
+            result = await asyncio.to_thread(
+                self.pet_service.eat, interaction.user.id, guild_id
+            )
+            if not result.success:
+                await safe_followup(
+                    interaction, content=f"❌ {result.error}", ephemeral=True
+                )
+                if message is not None:
+                    try:
+                        await message.edit(view=None)
+                    except discord.HTTPException:
+                        pass
+                return
+            await self._deliver_eating_outcome(interaction, message, result.value)
+        finally:
+            remaining_deliveries = direct_deliveries[pet.pet_id] - 1
+            if remaining_deliveries:
+                direct_deliveries[pet.pet_id] = remaining_deliveries
+            else:
+                direct_deliveries.pop(pet.pet_id)
+
+    async def _deliver_eating_outcome(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message | None,
+        outcome: dict,
+    ) -> None:
+        dead = outcome["pet"]
+        embed = pet_embeds.build_eating_outcome_embed(dead, outcome)
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc is not None:
+            reminder_svc.cancel_pet_reminder(dead.discord_id, dead.guild_id)
+
+        if message is not None:
+            posted = await edit_message_with_fallback(
+                message,
+                send_fallback=partial(safe_followup, interaction),
+                log_label="Pet eating outcome",
+                edit_exceptions=(discord.HTTPException,),
+                embed=embed,
+                view=None,
+            )
+        else:
+            posted = False
+            try:
+                await safe_followup(interaction, embed=embed)
+                posted = True
+            except discord.HTTPException:
+                pass
+        if not posted:
+            logger.warning(
+                "Pet eating outcome for pet %s failed to post; sweep will retry",
+                dead.pet_id,
+            )
+        if posted:
+            await asyncio.to_thread(self.pet_service.mark_death_announced, dead)
+
     @pet.command(name="graveyard", description="Visit the cama memorial garden")
     @app_commands.describe(user="Whose graveyard to visit")
     @require_guild
@@ -929,6 +1052,10 @@ class PetCommands(commands.Cog):
                     evolution.pet.pet_id,
                 )
         for death in result["deaths"]:
+            if getattr(self, "_direct_death_deliveries", {}).get(
+                death.pet.pet_id, 0
+            ):
+                continue
             try:
                 await self._deliver_death(death)
             except Exception:
@@ -1001,16 +1128,24 @@ class PetCommands(commands.Cog):
         pet = notice.pet
         channel = self._pet_channel(pet.guild_id)
         flavor_text = None
+        eating_embed = (
+            pet_embeds.build_eating_outcome_embed(pet, notice.eating_outcome)
+            if notice.eating_outcome is not None
+            else None
+        )
         if channel is not None:
-            flavor_text = await self._generate_pet_flavor(
-                PetFlavorEvent.DIED,
-                pet,
-            )
-            embed, file = await asyncio.to_thread(
-                pet_embeds.build_death_embed,
-                pet,
-                flavor_text=flavor_text,
-            )
+            if eating_embed is not None:
+                embed, file = eating_embed, None
+            else:
+                flavor_text = await self._generate_pet_flavor(
+                    PetFlavorEvent.DIED,
+                    pet,
+                )
+                embed, file = await asyncio.to_thread(
+                    pet_embeds.build_death_embed,
+                    pet,
+                    flavor_text=flavor_text,
+                )
             try:
                 await channel.send(embed=embed, file=file)
             except discord.Forbidden:
@@ -1018,10 +1153,20 @@ class PetCommands(commands.Cog):
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is not None:
             reminder_svc.cancel_pet_reminder(pet.discord_id, pet.guild_id)
-        await self._dm_death_notice(pet, flavor_text=flavor_text)
+        await self._dm_death_notice(
+            pet,
+            flavor_text=flavor_text,
+            embed_override=eating_embed,
+        )
         await asyncio.to_thread(self.pet_service.mark_death_announced, pet)
 
-    async def _dm_death_notice(self, pet, *, flavor_text: str | None = None) -> None:
+    async def _dm_death_notice(
+        self,
+        pet,
+        *,
+        flavor_text: str | None = None,
+        embed_override: discord.Embed | None = None,
+    ) -> None:
         """Best-effort opt-in death DM; never blocks announcement bookkeeping."""
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is None:
@@ -1035,16 +1180,19 @@ class PetCommands(commands.Cog):
             user = self.bot.get_user(pet.discord_id) or await self.bot.fetch_user(
                 pet.discord_id
             )
-            if flavor_text is None:
-                flavor_text = await self._generate_pet_flavor(
-                    PetFlavorEvent.DIED,
+            if embed_override is not None:
+                embed, file = embed_override, None
+            else:
+                if flavor_text is None:
+                    flavor_text = await self._generate_pet_flavor(
+                        PetFlavorEvent.DIED,
+                        pet,
+                    )
+                embed, file = await asyncio.to_thread(
+                    pet_embeds.build_death_embed,
                     pet,
+                    flavor_text=flavor_text,
                 )
-            embed, file = await asyncio.to_thread(
-                pet_embeds.build_death_embed,
-                pet,
-                flavor_text=flavor_text,
-            )
             await user.send(embed=embed, file=file)
         except Exception:
             logger.debug(

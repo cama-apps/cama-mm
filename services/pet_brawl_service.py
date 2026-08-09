@@ -92,6 +92,14 @@ _REPO_ERRORS = {
         "Those pets do not match the accepted brawl.",
         error_codes.VALIDATION_ERROR,
     ),
+    "challenger_pet_unavailable": (
+        "Your cama is no longer ready to brawl.",
+        error_codes.PET_DEAD,
+    ),
+    "recipient_pet_unavailable": (
+        "Your opponent's cama is no longer ready to brawl.",
+        error_codes.PET_DEAD,
+    ),
     "no_pet": ("You have no living pet to train.", error_codes.NO_PET),
     "pet_dead": ("Your pet has passed away.", error_codes.PET_DEAD),
     "pet_egg": ("Eggs need to hatch before they can train.", error_codes.PET_EGG),

@@ -50,6 +50,10 @@ from domain.pet_constants import (
     MATCH_WIN_HUNGER,
     MAX_BUY_QTY,
     MAX_HUNGER,
+    PET_EAT_PENALTY_GAMES_MAX,
+    PET_EAT_PENALTY_GAMES_MIN,
+    PET_EAT_REWARD_MAX,
+    PET_EAT_REWARD_MIN,
     PET_NAME_MAX_LEN,
     PITY_THRESHOLD,
     PITY_TIER_WEIGHTS,
@@ -483,6 +487,73 @@ class PetService:
             code=error_codes.VALIDATION_ERROR,
         )
 
+    # --- adult pet consumption ---
+
+    def _edible_pet(
+        self, discord_id: int, guild_id: int | None, now: int
+    ) -> Result | Pet:
+        pet = self.living_pet(discord_id, guild_id, now)
+        if pet is None:
+            return Result.fail(
+                "You have no living pet to eat.", code=error_codes.NO_PET
+            )
+        if pet.stage(now) is not PetStage.ADULT:
+            return Result.fail(
+                "Only a fully grown adult cama can be eaten.",
+                code=error_codes.PET_NOT_ADULT,
+            )
+        if self.pet_repo.has_open_brawl(discord_id, guild_id, now=now):
+            return Result.fail(
+                "Your cama has an open brawl—settle that first.",
+                code=error_codes.BRAWL_BUSY,
+            )
+        return pet
+
+    def eat_preview(self, discord_id: int, guild_id: int | None) -> Result[Pet]:
+        pet = self._edible_pet(discord_id, guild_id, self._now())
+        return pet if isinstance(pet, Result) else Result.ok(pet)
+
+    def eat(self, discord_id: int, guild_id: int | None) -> Result[dict]:
+        for _ in range(2):
+            now = self._now()
+            pet = self._edible_pet(discord_id, guild_id, now)
+            if isinstance(pet, Result):
+                return pet
+            reward = random.randint(PET_EAT_REWARD_MIN, PET_EAT_REWARD_MAX)
+            penalty_games = random.randint(
+                PET_EAT_PENALTY_GAMES_MIN, PET_EAT_PENALTY_GAMES_MAX
+            )
+            try:
+                dead_pet, new_balance, penalty_total = (
+                    self.pet_repo.eat_adult_pet_atomic(
+                        discord_id,
+                        guild_id,
+                        pet_id=pet.pet_id,
+                        expected_last_fed_at=pet.last_fed_at,
+                        expected_hunger=pet.hunger_at_last_fed,
+                        reward=reward,
+                        penalty_games=penalty_games,
+                        now=now,
+                    )
+                )
+            except ValueError as exc:
+                if str(exc) == "stale_pet":
+                    continue
+                return self._map_repo_error(exc)
+            return Result.ok(
+                {
+                    "pet": dead_pet,
+                    "reward": reward,
+                    "penalty_games_added": penalty_games,
+                    "penalty_games_remaining": penalty_total,
+                    "new_balance": new_balance,
+                }
+            )
+        return Result.fail(
+            "Your pet's state changed before the deed — try again.",
+            code=error_codes.VALIDATION_ERROR,
+        )
+
     def _roll_species_tiered(self, tier_weights: dict[str, int]) -> str:
         tiers = list(tier_weights)
         tier = random.choices(tiers, weights=list(tier_weights.values()), k=1)[0]
@@ -858,7 +929,17 @@ class PetService:
         for pet in candidates:
             self.resolve_starvation(pet, now)
 
-        deaths = [DeathNotice(pet=p) for p in self.pet_repo.get_unannounced_deaths()]
+        deaths = [
+            DeathNotice(
+                pet=p,
+                eating_outcome=(
+                    self.pet_repo.get_eating_outcome(p.pet_id, p.guild_id)
+                    if p.death_cause == "eaten"
+                    else None
+                ),
+            )
+            for p in self.pet_repo.get_unannounced_deaths()
+        ]
         hatches = [
             HatchNotice(pet=self._resolve_hatch(pet, now))
             for pet in self.pet_repo.find_unannounced_hatches(now)
@@ -1020,6 +1101,10 @@ class PetService:
             ),
             "no_pet": ("You have no living pet.", error_codes.NO_PET),
             "pet_dead": ("Your pet has passed away.", error_codes.PET_DEAD),
+            "not_adult": (
+                "Only a fully grown adult cama can be eaten.",
+                error_codes.PET_NOT_ADULT,
+            ),
             "pet_hatched": (
                 "Only an unhatched egg can be upgraded.",
                 error_codes.PET_HATCHED,
