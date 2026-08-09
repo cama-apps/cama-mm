@@ -299,6 +299,7 @@ class TrinketOutcome:
 @dataclass(frozen=True, slots=True)
 class DeathNotice:
     pet: Pet
+    eating_outcome: Mapping[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -275,6 +275,20 @@ class PetBrawlRepository(BaseRepository):
             ).fetchone()
             if busy:
                 raise ValueError("brawl_busy")
+            challenger_pet = cursor.execute(
+                "SELECT 1 FROM pets WHERE pet_id = ? AND discord_id = ? "
+                "AND guild_id = ? AND died_at IS NULL AND hatched_at <= ?",
+                (challenger_pet_id, challenger_id, gid, now),
+            ).fetchone()
+            if challenger_pet is None:
+                raise ValueError("challenger_pet_unavailable")
+            recipient_pet = cursor.execute(
+                "SELECT 1 FROM pets WHERE discord_id = ? AND guild_id = ? "
+                "AND died_at IS NULL AND hatched_at <= ? LIMIT 1",
+                (recipient_id, gid, now),
+            ).fetchone()
+            if recipient_pet is None:
+                raise ValueError("recipient_pet_unavailable")
             if wager:
                 balances = {}
                 for player_id in (challenger_id, recipient_id):

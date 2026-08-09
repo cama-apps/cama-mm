@@ -63,7 +63,15 @@ def balance(player_repo):
     return player_repo.get_balance(100, TEST_GUILD_ID)
 
 
-def make_living_pet(pet_repo, clock, *, species="common_cama", hatched_ago=3600):
+def make_living_pet(
+    pet_repo,
+    clock,
+    *,
+    species="common_cama",
+    hatched_ago=3600,
+    owner_id=100,
+    name="Blep",
+):
     """Insert a living hatched pet directly, species already concrete —
     matching a resolved hatch under the roll-at-hatch design."""
     hatched_at = clock.now - hatched_ago
@@ -72,10 +80,11 @@ def make_living_pet(pet_repo, clock, *, species="common_cama", hatched_ago=3600)
             "INSERT INTO pets (discord_id, guild_id, name, species, "
             "adopted_at, hatched_at, adopt_fee, last_fed_at, "
             "hunger_at_last_fed, dig_work_units, dig_work_at) "
-            "VALUES (?, ?, 'Blep', ?, ?, ?, 20, ?, 100, 0, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, 20, ?, 100, 0, ?)",
             (
-                100,
+                owner_id,
                 TEST_GUILD_ID,
+                name,
                 species,
                 hatched_at - DAY,
                 hatched_at,
@@ -170,8 +179,12 @@ class TestRepository:
                 100, TEST_GUILD_ID, name="Shiny", premium=230, now=clock.now
             )
 
-    def test_mid_brawl_guard(self, repo_db_path, pet_repo, clock):
+    def test_mid_brawl_guard(
+        self, repo_db_path, pet_repo, player_repo, clock
+    ):
         pet = make_living_pet(pet_repo, clock)
+        player_repo.add(200, "Opponent", TEST_GUILD_ID)
+        make_living_pet(pet_repo, clock, owner_id=200, name="Spit")
         brawl_repo = PetBrawlRepository(repo_db_path)
         brawl_repo.create_brawl_atomic(
             TEST_GUILD_ID, 5, 100, 200, pet.pet_id,
@@ -303,8 +316,12 @@ class TestService:
         # But it DOES escalate the fee: 4 dead total + next one on the altar.
         assert pet_repo.count_dead_pets(100, TEST_GUILD_ID) == 4
 
-    def test_blocked_while_in_brawl(self, service, repo_db_path, pet_repo, clock):
+    def test_blocked_while_in_brawl(
+        self, service, repo_db_path, pet_repo, player_repo, clock
+    ):
         pet = make_living_pet(pet_repo, clock)
+        player_repo.add(200, "Opponent", TEST_GUILD_ID)
+        make_living_pet(pet_repo, clock, owner_id=200, name="Spit")
         PetBrawlRepository(repo_db_path).create_brawl_atomic(
             TEST_GUILD_ID, 5, 100, 200, pet.pet_id,
             now=clock.now, expires_at=clock.now + 180,

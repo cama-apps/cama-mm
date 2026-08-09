@@ -56,6 +56,38 @@ class ConfirmSacrificeView(discord.ui.View):
         self.stop()
 
 
+class ConfirmEatView(discord.ui.View):
+    """Owner-only confirmation for permanently eating an adult cama."""
+
+    def __init__(self, owner_id: int, *, timeout: float = 60):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.value: bool | None = None
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This terrible choice isn't yours to make.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Eat them", style=discord.ButtonStyle.danger, emoji="🍽️"
+    )
+    async def confirm(self, interaction: discord.Interaction, _):
+        self.value = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Let them live", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _):
+        self.value = False
+        await interaction.response.defer()
+        self.stop()
+
+
 class PetStatusView(discord.ui.View):
     def __init__(
         self,
