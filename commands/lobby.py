@@ -2598,6 +2598,18 @@ class LobbyCommands(commands.Cog):
 
         # Post to lobby thread (target_channel is guaranteed to exist here)
         msg = await target_channel.send(embed=embed)
+        # Register the generation without yielding so a fast user reaction
+        # cannot arrive before this message becomes authoritative. This setter
+        # only takes the lobby manager's in-memory lock; it performs no I/O.
+        self.lobby_service.set_readycheck_state(
+            msg.id,
+            msg.channel.id,
+            current_lobby_set,
+            player_data,
+            guild_id=guild_id,
+            lobby_kind=kind,
+            initial_reacted=reacted,
+        )
         try:
             await msg.add_reaction("✅")
         except Exception as e:
@@ -2605,24 +2617,6 @@ class LobbyCommands(commands.Cog):
         if ping_content:
             await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
 
-        await asyncio.to_thread(
-            self.lobby_service.set_readycheck_state,
-            msg.id,
-            msg.channel.id,
-            current_lobby_set,
-            player_data,
-            guild_id=guild_id,
-            lobby_kind=kind,
-        )
-        for auto_confirm_id in reacted:
-            await asyncio.to_thread(
-                self.lobby_service.add_readycheck_reaction,
-                auto_confirm_id,
-                f"<@{auto_confirm_id}>",
-                guild_id=guild_id,
-                expected_message_id=msg.id,
-                lobby_kind=kind,
-            )
         await self.notify_readycheck_completion_if_ready(
             guild_id or 0,
             msg.id,

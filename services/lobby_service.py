@@ -363,8 +363,9 @@ class LobbyService:
         guild_id: int | None = None,
         created_at: float | None = None,
         lobby_kind: LobbyKind | str | None = None,
+        initial_reacted: dict[int, str] | None = None,
     ) -> None:
-        """Store readycheck message info and classification data. Resets reacted set."""
+        """Store readycheck message info, classification, and initial confirmations."""
         self.lobby_manager.set_readycheck_state(
             message_id,
             channel_id,
@@ -373,6 +374,7 @@ class LobbyService:
             guild_id=guild_id,
             created_at=created_at,
             lobby_kind=lobby_kind,
+            initial_reacted=initial_reacted,
         )
 
     def update_readycheck_data(
