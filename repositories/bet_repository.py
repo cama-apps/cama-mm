@@ -106,6 +106,8 @@ class BetRepository(BaseRepository, IBetRepository):
         odds_at_placement: float | None = None,
         allow_negative: bool = False,
         pending_match_id: int | None = None,
+        investment_target_id: int | None = None,
+        investment_direction: str | None = None,
     ) -> int:
         """
         Atomically place a bet with optional leverage:
@@ -115,10 +117,12 @@ class BetRepository(BaseRepository, IBetRepository):
         - insert bet row with leverage
 
         Args:
-            is_blind: True if this is an auto-liquidity blind bet
+            is_blind: True if this is any automatic wager.
             odds_at_placement: The odds multiplier at time of bet placement (for /bets display)
             allow_negative: If True, allows going into debt at 1x leverage (for bomb pot antes)
             pending_match_id: Optional ID of the pending match this bet is for (for concurrent matches)
+            investment_target_id: Target player for a configured player investment.
+            investment_direction: Snapshotted ``long``/``short`` preference.
 
         This prevents race conditions where concurrent calls could double-spend.
         """
@@ -139,6 +143,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 odds_at_placement=odds_at_placement,
                 allow_negative=allow_negative,
                 pending_match_id=pending_match_id,
+                investment_target_id=investment_target_id,
+                investment_direction=investment_direction,
             )
 
     @contextmanager
@@ -300,9 +306,19 @@ class BetRepository(BaseRepository, IBetRepository):
         odds_at_placement: float | None = None,
         allow_negative: bool = False,
         pending_match_id: int | None = None,
+        investment_target_id: int | None = None,
+        investment_direction: str | None = None,
     ) -> int:
         """Validate, debit, and insert one bet using the caller's transaction."""
         self._validate_bet_placement(team=team, amount=amount, leverage=leverage)
+        if investment_target_id is None:
+            if investment_direction is not None:
+                raise ValueError("Investment direction requires a target player.")
+        else:
+            if not is_blind:
+                raise ValueError("Player-investment attribution requires an automatic bet.")
+            if investment_direction not in {"long", "short"}:
+                raise ValueError("Investment direction must be long or short.")
         effective_bet = amount * leverage
         normalized_guild = self.normalize_guild_id(guild_id)
 
@@ -401,6 +417,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 "leverage": leverage,
                 "is_blind": is_blind,
                 "allow_negative": allow_negative,
+                "investment_target_id": investment_target_id,
+                "investment_direction": investment_direction,
             },
         )
         try:
@@ -417,8 +435,12 @@ class BetRepository(BaseRepository, IBetRepository):
 
         cursor.execute(
             """
-            INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
-            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bets (
+                guild_id, match_id, discord_id, team_bet_on, amount, bet_time,
+                leverage, is_blind, odds_at_placement, pending_match_id,
+                investment_target_id, investment_direction
+            )
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_guild,
@@ -430,6 +452,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 1 if is_blind else 0,
                 odds_at_placement,
                 pending_match_id,
+                investment_target_id,
+                investment_direction,
             ),
         )
         return cursor.lastrowid
@@ -1817,8 +1841,10 @@ class BetRepository(BaseRepository, IBetRepository):
         """
         Get all settled bets for a player with outcome derived from match result.
 
-        Returns list of dicts with: bet_id, amount, leverage, effective_bet, team_bet_on,
-        bet_time, match_id, payout, outcome ('won'/'lost'), profit (net P&L for this bet)
+        Returns list of dicts with: bet_id, amount, leverage, effective_bet,
+        team_bet_on, is_blind, investment_target_id, investment_direction,
+        bet_time, match_id, payout, outcome ('won'/'lost'), and profit (net
+        P&L for this bet).
         """
         normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
@@ -1831,6 +1857,9 @@ class BetRepository(BaseRepository, IBetRepository):
                     COALESCE(b.leverage, 1) as leverage,
                     b.amount * COALESCE(b.leverage, 1) as effective_bet,
                     b.team_bet_on,
+                    COALESCE(b.is_blind, 0) AS is_blind,
+                    b.investment_target_id,
+                    b.investment_direction,
                     b.bet_time,
                     b.match_id,
                     b.payout,

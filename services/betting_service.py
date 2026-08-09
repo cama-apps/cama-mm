@@ -957,6 +957,8 @@ class BettingService:
                         is_blind=True,
                         odds_at_placement=odds_at_placement,
                         pending_match_id=pending_match_id,
+                        investment_target_id=target_id,
+                        investment_direction=str(position["direction"]),
                     )
                 except ValueError as exc:
                     result["skipped"].append({

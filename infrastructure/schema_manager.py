@@ -839,6 +839,10 @@ class SchemaManager:
             ("create_referrals", self._migration_create_referrals),
             ("create_autobet_investments", self._migration_create_autobet_investments),
             (
+                "add_autobet_attribution_to_bets",
+                self._migration_add_autobet_attribution_to_bets,
+            ),
+            (
                 "create_match_correction_claims",
                 self._migration_create_match_correction_claims,
             ),
@@ -6864,5 +6868,31 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_autobet_investments_target
             ON autobet_investments(guild_id, target_id)
+            """
+        )
+
+    def _migration_add_autobet_attribution_to_bets(self, cursor) -> None:
+        """Retain the player preference that produced an automatic bet.
+
+        ``is_blind`` continues to identify every automatic wager. A NULL
+        target therefore means the pre-existing generic participant/spectator
+        auto-bet, while a populated target identifies a player investment.
+        """
+        self._add_column_if_not_exists(
+            cursor,
+            "bets",
+            "investment_target_id",
+            "INTEGER",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "bets",
+            "investment_direction",
+            "TEXT",
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bets_autobet_profile
+            ON bets(guild_id, discord_id, match_id, is_blind, investment_target_id)
             """
         )
