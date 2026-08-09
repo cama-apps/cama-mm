@@ -1179,6 +1179,7 @@ async def _send_lobby_rally(
                 subscriber_ids = await asyncio.to_thread(
                     reminder_service.get_lobby_subscriber_ids,
                     guild_id,
+                    kind,
                 )
                 return list(subscriber_ids)
             except Exception as exc:
