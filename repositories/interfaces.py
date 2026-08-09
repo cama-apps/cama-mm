@@ -493,6 +493,8 @@ class IBetRepository(ABC):
         odds_at_placement: float | None = None,
         allow_negative: bool = False,
         pending_match_id: int | None = None,
+        investment_target_id: int | None = None,
+        investment_direction: str | None = None,
     ) -> int:
         """Atomically place a bet (balance debit + bet insert in one transaction)."""
         ...

@@ -1066,6 +1066,16 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
+        # Lifetime automatic-bet performance. ``getattr`` keeps older service
+        # doubles and cached data compatible while the new stats roll out.
+        auto_bet_performance = getattr(stats, "auto_bet_performance", None)
+        if auto_bet_performance is not None:
+            from commands.profile_helpers.gambling import (
+                add_auto_bet_performance_field,
+            )
+
+            add_auto_bet_performance_field(embed, auto_bet_performance)
+
         chart_file = None
         if chart_bytes is not None:
             chart_file = discord.File(chart_bytes, filename="gamba_chart.png")

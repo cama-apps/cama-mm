@@ -2,7 +2,7 @@
 Service for gambling statistics and degen score calculation.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
@@ -69,6 +69,38 @@ class DegenScoreBreakdown:
 
 
 @dataclass
+class AutoBetGroupStats:
+    """Settled P&L for one disjoint automatic-betting category."""
+
+    bet_count: int
+    wins: int
+    total_wagered: int
+    net_pnl: int
+
+
+@dataclass
+class PlayerAutoBetStats:
+    """Settled automatic-bet P&L attributed to one target player."""
+
+    target_id: int
+    directions: tuple[str, ...]
+    bet_count: int
+    wins: int
+    total_wagered: int
+    net_pnl: int
+
+
+@dataclass
+class AutoBetPerformance:
+    """Automatic-bet and opposing-manual-bet performance for a player."""
+
+    total: AutoBetGroupStats
+    generic: AutoBetGroupStats
+    targets: list[PlayerAutoBetStats]
+    arbitrage: AutoBetGroupStats
+
+
+@dataclass
 class GambaStats:
     """Complete gambling statistics for a player."""
 
@@ -92,6 +124,7 @@ class GambaStats:
     degen_score: DegenScoreBreakdown
     paper_hands_count: int
     matches_played: int
+    auto_bet_performance: AutoBetPerformance
 
 
 @dataclass
@@ -208,6 +241,92 @@ def _leverage_distribution_from_history(history: list[dict]) -> dict[int, int]:
         leverage = bet.get("leverage")
         leverage_counts[1 if leverage is None else leverage] += 1
     return dict(leverage_counts)
+
+
+def _auto_bet_group_stats(bets: list[dict]) -> AutoBetGroupStats:
+    """Aggregate already-settled bet-history rows without another DB scan."""
+    return AutoBetGroupStats(
+        bet_count=len(bets),
+        wins=sum(1 for bet in bets if bet.get("outcome") == "won"),
+        total_wagered=sum(int(bet.get("effective_bet") or 0) for bet in bets),
+        net_pnl=sum(int(bet.get("profit") or 0) for bet in bets),
+    )
+
+
+def _calculate_auto_bet_performance(history: list[dict]) -> AutoBetPerformance:
+    """Group auto-bet P&L and identify opposite-side manual hedges.
+
+    A manual bet is arbitrage when the player has any automatic bet on the
+    other team in the same settled match. The manual row is counted once even
+    when several player preferences resolved to that opposing team.
+    """
+    automatic_bets = [bet for bet in history if bool(bet.get("is_blind"))]
+    generic_bets: list[dict] = []
+    target_bets: dict[int, list[dict]] = defaultdict(list)
+    target_directions: dict[int, set[str]] = defaultdict(set)
+
+    for bet in automatic_bets:
+        target_id = bet.get("investment_target_id")
+        if target_id is None:
+            generic_bets.append(bet)
+            continue
+        try:
+            normalized_target_id = int(target_id)
+        except (TypeError, ValueError):
+            # Malformed/legacy attribution remains visible as generic auto P&L
+            # rather than disappearing from the aggregate.
+            generic_bets.append(bet)
+            continue
+        target_bets[normalized_target_id].append(bet)
+        direction = bet.get("investment_direction")
+        if direction in {"long", "short"}:
+            target_directions[normalized_target_id].add(str(direction))
+
+    auto_teams_by_match: dict[int, set[str]] = defaultdict(set)
+    for bet in automatic_bets:
+        match_id = bet.get("match_id")
+        team = bet.get("team_bet_on")
+        if match_id is not None and team in {"radiant", "dire"}:
+            auto_teams_by_match[int(match_id)].add(str(team))
+
+    arbitrage_bets: list[dict] = []
+    for bet in history:
+        if bool(bet.get("is_blind")):
+            continue
+        match_id = bet.get("match_id")
+        team = bet.get("team_bet_on")
+        if match_id is None or team not in {"radiant", "dire"}:
+            continue
+        opposing_team = "dire" if team == "radiant" else "radiant"
+        if opposing_team in auto_teams_by_match.get(int(match_id), set()):
+            arbitrage_bets.append(bet)
+
+    targets: list[PlayerAutoBetStats] = []
+    for target_id, bets in target_bets.items():
+        aggregate = _auto_bet_group_stats(bets)
+        directions = tuple(
+            direction
+            for direction in ("long", "short")
+            if direction in target_directions[target_id]
+        )
+        targets.append(
+            PlayerAutoBetStats(
+                target_id=target_id,
+                directions=directions,
+                bet_count=aggregate.bet_count,
+                wins=aggregate.wins,
+                total_wagered=aggregate.total_wagered,
+                net_pnl=aggregate.net_pnl,
+            )
+        )
+    targets.sort(key=lambda item: (-item.total_wagered, -item.bet_count, item.target_id))
+
+    return AutoBetPerformance(
+        total=_auto_bet_group_stats(automatic_bets),
+        generic=_auto_bet_group_stats(generic_bets),
+        targets=targets,
+        arbitrage=_auto_bet_group_stats(arbitrage_bets),
+    )
 
 
 def _compute_degen_score(
@@ -365,6 +484,7 @@ class GamblingStatsService:
         total_wagered = sum(b["effective_bet"] for b in history)
         roi = net_pnl / total_wagered if total_wagered > 0 else 0
         avg_bet_size = total_wagered / total_bets if total_bets > 0 else 0
+        auto_bet_performance = _calculate_auto_bet_performance(history)
 
         # Leverage is already included in the full history, so avoid repeating
         # the same filtered scan with a separate aggregate query.
@@ -412,6 +532,7 @@ class GamblingStatsService:
             degen_score=degen_score,
             paper_hands_count=paper_hands_count,
             matches_played=matches_played,
+            auto_bet_performance=auto_bet_performance,
         )
 
     def calculate_degen_score(
