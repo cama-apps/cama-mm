@@ -759,6 +759,274 @@ class BettingService:
         pending_state.first_game_pool_reserved = 0
         return refunded
 
+    def prepare_investments(
+        self,
+        guild_id: int | None,
+        *,
+        target_ids: list[int],
+    ) -> list[dict]:
+        """Snapshot applicable investment positions and shuffle-start balances."""
+        positions = self.bet_repo.get_investments_for_targets(
+            guild_id,
+            target_ids=target_ids,
+        )
+        if not positions:
+            return []
+        balances = self.player_repo.get_balances_bulk(
+            [int(position["investor_id"]) for position in positions],
+            guild_id,
+        )
+        return [
+            {
+                **position,
+                "starting_balance": balances.get(int(position["investor_id"]), 0),
+            }
+            for position in positions
+        ]
+
+    def configure_investment(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+        target_id: int,
+        direction: str,
+        percentage: int,
+    ) -> int:
+        """Validate and persist one free long/short investment preference."""
+        if not self.player_repo.exists(investor_id, guild_id):
+            raise ValueError("You must be registered before configuring investments.")
+        if not self.player_repo.exists(target_id, guild_id):
+            raise ValueError("Target player is not registered.")
+        if investor_id == target_id and direction == "short":
+            raise ValueError("You cannot short yourself.")
+        return self.bet_repo.set_investment(
+            guild_id,
+            investor_id=investor_id,
+            target_id=target_id,
+            direction=direction,
+            percentage=percentage,
+        )
+
+    def remove_investment(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+        target_id: int,
+    ) -> bool:
+        return self.bet_repo.remove_investment(
+            guild_id,
+            investor_id=investor_id,
+            target_id=target_id,
+        )
+
+    def get_investments(
+        self,
+        guild_id: int | None,
+        *,
+        investor_id: int,
+    ) -> list[dict]:
+        return self.bet_repo.get_investments(guild_id, investor_id=investor_id)
+
+    def create_investment_bets(
+        self,
+        *,
+        guild_id: int | None,
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        shuffle_timestamp: int,
+        prepared_investments: list[dict] | None = None,
+        pending_match_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Place configured long/short wagers without betting against a participant."""
+        result: dict[str, Any] = {
+            "created": 0,
+            "total_radiant": 0,
+            "total_dire": 0,
+            "bets": [],
+            "skipped": [],
+        }
+        investments = (
+            prepared_investments
+            if prepared_investments is not None
+            else self.prepare_investments(
+                guild_id,
+                target_ids=radiant_ids + dire_ids,
+            )
+        )
+        if not investments:
+            return result
+
+        team_by_player = {
+            **dict.fromkeys(radiant_ids, "radiant"),
+            **dict.fromkeys(dire_ids, "dire"),
+        }
+        balances = self.player_repo.get_balances_bulk(
+            [int(position["investor_id"]) for position in investments],
+            guild_id,
+        )
+        cached_totals = self.bet_repo.get_total_bets_by_guild(
+            guild_id,
+            since_ts=shuffle_timestamp,
+            pending_match_id=pending_match_id,
+        )
+        automatic_bets: list[tuple[dict, str, int]] = []
+        for position in investments:
+            investor_id = int(position["investor_id"])
+            target_id = int(position["target_id"])
+            target_team = team_by_player.get(target_id)
+            if target_team is None:
+                continue
+
+            starting_balance = int(position.get("starting_balance", 0))
+            if starting_balance < 50:
+                result["skipped"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "reason": f"shuffle-start balance {starting_balance} < 50",
+                })
+                continue
+
+            balance = int(balances.get(investor_id, 0))
+            if balance <= 0:
+                result["skipped"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "reason": f"balance {balance} is not positive",
+                })
+                continue
+
+            direction = str(position["direction"])
+            if direction == "short" and investor_id == target_id:
+                result["skipped"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "reason": "cannot short yourself",
+                })
+                continue
+            team = (
+                target_team
+                if direction == "long"
+                else "dire" if target_team == "radiant" else "radiant"
+            )
+            investor_team = team_by_player.get(investor_id)
+            if investor_team is not None and team != investor_team:
+                result["skipped"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "reason": "investment would bet against the investor's team",
+                })
+                continue
+
+            percentage = int(position["percentage"])
+            amount = balance * percentage // 100
+            if amount < 1:
+                result["skipped"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "reason": f"investment amount {amount} < 1",
+                })
+                continue
+            automatic_bets.append((position, team, amount))
+
+        if not automatic_bets:
+            return result
+
+        with self.bet_repo.automatic_bet_batch() as place_bet:
+            for position, team, amount in automatic_bets:
+                investor_id = int(position["investor_id"])
+                target_id = int(position["target_id"])
+                total_pool = cached_totals["radiant"] + cached_totals["dire"]
+                team_total = cached_totals[team]
+                odds_at_placement = (
+                    total_pool / team_total
+                    if team_total > 0 and total_pool > 0
+                    else None
+                )
+                try:
+                    place_bet(
+                        guild_id=guild_id,
+                        discord_id=investor_id,
+                        team=team,
+                        amount=amount,
+                        bet_time=shuffle_timestamp,
+                        since_ts=shuffle_timestamp,
+                        leverage=1,
+                        max_debt=self.max_debt,
+                        is_blind=True,
+                        odds_at_placement=odds_at_placement,
+                        pending_match_id=pending_match_id,
+                    )
+                except ValueError as exc:
+                    result["skipped"].append({
+                        "investor_id": investor_id,
+                        "target_id": target_id,
+                        "reason": str(exc),
+                    })
+                    continue
+
+                percentage = int(position["percentage"])
+                result["created"] += 1
+                result["bets"].append({
+                    "investor_id": investor_id,
+                    "target_id": target_id,
+                    "direction": position["direction"],
+                    "percentage": percentage,
+                    "team": team,
+                    "amount": amount,
+                })
+                cached_totals[team] += amount
+                result[f"total_{team}"] += amount
+
+        return result
+
+    def create_match_automatic_bets(
+        self,
+        *,
+        guild_id: int | None,
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        shuffle_timestamp: int,
+        is_bomb_pot: bool = False,
+        pending_match_id: int | None = None,
+        ante_overrides: dict[int, int] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Create automatic bets in balance-snapshot order for a finalized match."""
+        prepared_investments = self.prepare_investments(
+            guild_id,
+            target_ids=radiant_ids + dire_ids,
+        )
+        blind_bets = self.create_auto_blind_bets(
+            guild_id=guild_id,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=shuffle_timestamp,
+            is_bomb_pot=is_bomb_pot,
+            pending_match_id=pending_match_id,
+            ante_overrides=ante_overrides,
+        )
+        investment_bets = self.create_investment_bets(
+            guild_id=guild_id,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=shuffle_timestamp,
+            prepared_investments=prepared_investments,
+            pending_match_id=pending_match_id,
+        )
+        spectator_bets = self.create_auto_spectator_bets(
+            guild_id=guild_id,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=shuffle_timestamp,
+            pending_match_id=pending_match_id,
+        )
+        return {
+            "blind_bets": blind_bets,
+            "investment_bets": investment_bets,
+            "spectator_bets": spectator_bets,
+        }
+
     def create_auto_blind_bets(
         self,
         guild_id: int | None,

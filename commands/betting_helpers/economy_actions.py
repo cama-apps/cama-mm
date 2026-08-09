@@ -44,6 +44,127 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.commands.betting")
 
 
+async def invest_action(
+    cog: BettingCommands,
+    interaction: discord.Interaction,
+    *,
+    action,
+    player: discord.Member | None,
+    direction,
+    percentage: int | None,
+    position: int | None = None,
+) -> None:
+    """Set, remove, or list free automatic match investments."""
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+        return
+
+    guild_id = interaction.guild.id
+    investor_id = interaction.user.id
+    action_value = action.value
+
+    if action_value == "list":
+        positions = await asyncio.to_thread(
+            cog.betting_service.get_investments,
+            guild_id,
+            investor_id=investor_id,
+        )
+        if not positions:
+            content = "You have no configured investments."
+        else:
+            lines = [
+                f"{index}. {configured['direction'].upper()} "
+                f"<@{configured['target_id']}> — {configured['percentage']}%"
+                for index, configured in enumerate(positions, start=1)
+            ]
+            total = sum(int(position["percentage"]) for position in positions)
+            content = "**Configured investments**\n" + "\n".join(lines)
+            content += f"\nTotal: **{total}% / 50%**"
+        await interaction.response.send_message(content, ephemeral=True)
+        return
+
+    if action_value == "remove":
+        if player is not None and position is not None:
+            await interaction.response.send_message(
+                "Choose either a target player or a listed position number, not both.",
+                ephemeral=True,
+            )
+            return
+        if position is not None:
+            positions = await asyncio.to_thread(
+                cog.betting_service.get_investments,
+                guild_id,
+                investor_id=investor_id,
+            )
+            if position > len(positions):
+                await interaction.response.send_message(
+                    f"Investment position {position} does not exist. "
+                    "Run `/economy invest list` to see the current numbers.",
+                    ephemeral=True,
+                )
+                return
+            target_id = int(positions[position - 1]["target_id"])
+        elif player is not None:
+            target_id = player.id
+        else:
+            await interaction.response.send_message(
+                "Choose a target player or a listed position number to remove.",
+                ephemeral=True,
+            )
+            return
+        removed = await asyncio.to_thread(
+            cog.betting_service.remove_investment,
+            guild_id,
+            investor_id=investor_id,
+            target_id=target_id,
+        )
+        content = (
+            f"Removed your investment in <@{target_id}>."
+            if removed
+            else f"You do not have an investment in <@{target_id}>."
+        )
+        await interaction.response.send_message(content, ephemeral=True)
+        return
+
+    if action_value != "set":
+        await interaction.response.send_message("Invalid investment action.", ephemeral=True)
+        return
+    if player is None:
+        await interaction.response.send_message(
+            "Choose a target player when setting an investment.",
+            ephemeral=True,
+        )
+        return
+    if direction is None or percentage is None:
+        await interaction.response.send_message(
+            "Choose a direction and percentage when setting an investment.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        total = await asyncio.to_thread(
+            cog.betting_service.configure_investment,
+            guild_id,
+            investor_id=investor_id,
+            target_id=player.id,
+            direction=direction.value,
+            percentage=percentage,
+        )
+    except ValueError as exc:
+        await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Set a **{direction.value}** investment in <@{player.id}> at **{percentage}%**. "
+        f"Configured total: **{total}% / 50%**.",
+        ephemeral=True,
+    )
+
+
 def bounded_economy_multiplier(value: object) -> float:
     """Coerce a policy multiplier to a finite, non-negative operational range."""
     try:

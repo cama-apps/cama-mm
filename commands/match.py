@@ -879,6 +879,7 @@ class MatchCommands(commands.Cog):
 
             # Create auto-liquidity blind bets for pool mode
             blind_bets_result = None
+            investment_bets_result = None
             spectator_bets_result = None
             if mode == "pool":
                 betting_service = getattr(self.bot, "betting_service", None)
@@ -893,8 +894,9 @@ class MatchCommands(commands.Cog):
                         )
                         state_pmid = pending_state.pending_match_id if pending_state else None
                         logger.debug(f"Blind bets: state={pending_state is not None}, state_pmid={state_pmid}")
-                        blind_bets_result = await asyncio.to_thread(
-                            functools.partial(betting_service.create_auto_blind_bets,
+                        automatic_bets_result = await asyncio.to_thread(
+                            functools.partial(
+                                betting_service.create_match_automatic_bets,
                                 guild_id=guild_id,
                                 radiant_ids=pending_state.radiant_team_ids,
                                 dire_ids=pending_state.dire_team_ids,
@@ -903,16 +905,9 @@ class MatchCommands(commands.Cog):
                                 pending_match_id=pending_state.pending_match_id,
                             )
                         )
-                        spectator_bets_result = await asyncio.to_thread(
-                            functools.partial(
-                                betting_service.create_auto_spectator_bets,
-                                guild_id=guild_id,
-                                radiant_ids=pending_state.radiant_team_ids,
-                                dire_ids=pending_state.dire_team_ids,
-                                shuffle_timestamp=pending_state.shuffle_timestamp,
-                                pending_match_id=pending_state.pending_match_id,
-                            )
-                        )
+                        blind_bets_result = automatic_bets_result["blind_bets"]
+                        investment_bets_result = automatic_bets_result["investment_bets"]
+                        spectator_bets_result = automatic_bets_result["spectator_bets"]
                         if blind_bets_result["created"] > 0:
                             logger.info(
                                 f"Created {blind_bets_result['created']} blind bets: "
@@ -938,6 +933,12 @@ class MatchCommands(commands.Cog):
                                 f"Created {spectator_bets_result['created']} spectator auto-wagers: "
                                 f"Radiant={spectator_bets_result['total_radiant']}, "
                                 f"Dire={spectator_bets_result['total_dire']}"
+                            )
+                        if investment_bets_result["created"] > 0:
+                            logger.info(
+                                f"Created {investment_bets_result['created']} configured investments: "
+                                f"Radiant={investment_bets_result['total_radiant']}, "
+                                f"Dire={investment_bets_result['total_dire']}"
                             )
                     except Exception as exc:
                         logger.warning(f"Failed to create automatic bets: {exc}", exc_info=True)

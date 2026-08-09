@@ -2107,9 +2107,9 @@ class DraftCommands(commands.Cog):
             is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
             if betting_service and pending_state:
                 try:
-                    blind_result = await asyncio.to_thread(
+                    automatic_bets_result = await asyncio.to_thread(
                         functools.partial(
-                            betting_service.create_auto_blind_bets,
+                            betting_service.create_match_automatic_bets,
                             guild_id=guild_id,
                             radiant_ids=state.radiant_player_ids,
                             dire_ids=state.dire_player_ids,
@@ -2118,18 +2118,13 @@ class DraftCommands(commands.Cog):
                             pending_match_id=pending_state.pending_match_id,
                         )
                     )
-                    spectator_result = await asyncio.to_thread(
-                        functools.partial(
-                            betting_service.create_auto_spectator_bets,
-                            guild_id=guild_id,
-                            radiant_ids=state.radiant_player_ids,
-                            dire_ids=state.dire_player_ids,
-                            shuffle_timestamp=pending_state.shuffle_timestamp,
-                            pending_match_id=pending_state.pending_match_id,
-                        )
-                    )
+                    blind_result = automatic_bets_result["blind_bets"]
+                    investment_result = automatic_bets_result["investment_bets"]
+                    spectator_result = automatic_bets_result["spectator_bets"]
                     if spectator_result:
                         blind_result["spectator_bets"] = spectator_result
+                    if investment_result:
+                        blind_result["investment_bets"] = investment_result
                     if blind_result and blind_result.get("created", 0) > 0:
                         # Store blind bets result in pending state for embed display
                         pending_state.blind_bets_result = blind_result
@@ -2161,6 +2156,10 @@ class DraftCommands(commands.Cog):
                             )
                         logger.info(
                             f"Created {spectator_result['created']} spectator auto-wagers for draft"
+                        )
+                    if investment_result and investment_result.get("created", 0) > 0:
+                        logger.info(
+                            f"Created {investment_result['created']} configured investments for draft"
                         )
                 except Exception as exc:
                     logger.warning(f"Failed to create automatic bets for draft: {exc}")

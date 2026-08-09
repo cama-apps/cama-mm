@@ -69,6 +69,9 @@ from commands.betting_helpers.economy_actions import (
     bankruptcy_action as _bankruptcy_action,
 )
 from commands.betting_helpers.economy_actions import (
+    invest_action as _invest_action,
+)
+from commands.betting_helpers.economy_actions import (
     loan_action as _loan_action,
 )
 from commands.betting_helpers.economy_actions import (
@@ -1654,6 +1657,62 @@ class BettingCommands(commands.Cog):
         amount: int,
     ):
         await _tip_action(self, interaction, player, amount)
+    @economy.command(
+        name="invest",
+        description="Configure free automatic long or short match investments",
+    )
+    @app_commands.describe(
+        action="Set, remove, or list investments",
+        player="Player whose team you want to back or fade",
+        direction="Long backs the player; short backs their opponent",
+        percentage="Whole percentage of your balance (1-10)",
+        position="Number shown by List (for removing a position)",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="Set", value="set"),
+            app_commands.Choice(name="Remove", value="remove"),
+            app_commands.Choice(name="List", value="list"),
+        ],
+        direction=[
+            app_commands.Choice(name="Long", value="long"),
+            app_commands.Choice(name="Short", value="short"),
+        ],
+    )
+    @app_commands.checks.cooldown(5, 10)
+    @require_guild
+    async def invest(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        player: discord.Member = None,
+        direction: app_commands.Choice[str] = None,
+        percentage: app_commands.Range[int, 1, 10] = None,
+        position: app_commands.Range[int, 1, 50] = None,
+    ):
+        await _invest_action(
+            self,
+            interaction,
+            action=action,
+            player=player,
+            direction=direction,
+            percentage=percentage,
+            position=position,
+        )
+
+    @invest.error
+    async def invest_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"Slow down! Try configuring investments again in {error.retry_after:.0f}s.",
+                ephemeral=True,
+            )
+            return
+        raise error
     @economy.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
         player="Player whose debt to pay",
