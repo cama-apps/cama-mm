@@ -912,7 +912,7 @@ class PetService:
 
     # --- background sweep ---
 
-    def sweep(self) -> dict:
+    def sweep(self, *, announcement_limit: int = 100) -> dict:
         """One global pass: evolution, starvation, hatch/death notices, refunds.
 
         Delivery bookkeeping is the caller's job so failed Discord sends retry
@@ -938,18 +938,20 @@ class PetService:
                     else None
                 ),
             )
-            for p in self.pet_repo.get_unannounced_deaths()
+            for p in self.pet_repo.get_unannounced_deaths(limit=announcement_limit)
         ]
         hatches = [
             HatchNotice(pet=self._resolve_hatch(pet, now))
-            for pet in self.pet_repo.find_unannounced_hatches(now)
+            for pet in self.pet_repo.find_unannounced_hatches(
+                now, limit=announcement_limit
+            )
         ]
         evolutions = (
-            self.evolution_service.get_unannounced()
+            self.evolution_service.get_unannounced(limit=announcement_limit)
             if self.evolution_service is not None
             else []
         )
-        refunds = self._sweep_refunds(now)
+        refunds = self._sweep_refunds(now, limit=announcement_limit)
         return {
             "deaths": deaths,
             "hatches": hatches,
@@ -968,7 +970,7 @@ class PetService:
             notice.guild_id, notice.week_key, self._now()
         )
 
-    def _sweep_refunds(self, now: int) -> list[RefundNotice]:
+    def _sweep_refunds(self, now: int, *, limit: int = 100) -> list[RefundNotice]:
         # Look back two weeks, oldest first: the two-slot care accumulator can
         # still substantiate both, so an outage spanning a week boundary does
         # not silently forfeit the older window.
@@ -1000,7 +1002,7 @@ class PetService:
                         "Pet refund failed for guild %s %s; continuing sweep",
                         guild_id, week_key,
                     )
-        return self.pet_repo.get_unannounced_refunds()
+        return self.pet_repo.get_unannounced_refunds(limit=limit)
 
     def _pay_guild_refunds(
         self, guild_id: int, week_key: str, now: int

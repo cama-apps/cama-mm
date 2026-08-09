@@ -7,7 +7,9 @@ re-applying with the correct winner.
 """
 
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest import mock
 
@@ -15,6 +17,7 @@ import pytest
 
 from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
+from repositories.interfaces import IBetRepository, IMatchRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
@@ -74,6 +77,123 @@ def _create_players(player_repo, start_id=1000, count=10):
 def test_recorded_win_reward_uses_historical_fallback_only_for_legacy_matches():
     assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": 10}) == 10
     assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": None}) == 4
+
+
+def test_match_repository_requires_exact_once_bonus_capabilities():
+    """Incomplete repositories must fail construction, not skip money guards."""
+    required = {
+        "update_participant_bonus_jc",
+        "claim_match_bonuses_paid",
+        "release_match_bonuses_claim",
+        "apply_win_bonus_reversal_atomic",
+        "get_win_bonus_credited_ids",
+        "claim_match_correction",
+        "release_match_correction_claim",
+        "complete_match_correction_claim",
+    }
+
+    assert required <= IMatchRepository.__abstractmethods__
+
+
+def test_bet_repository_requires_correction_capabilities():
+    """Correction retry safety must be part of the injected repository contract."""
+    required = {
+        "get_settled_bets_for_match",
+        "settle_bet_correction_atomic",
+    }
+
+    assert required <= IBetRepository.__abstractmethods__
+
+
+def test_match_correction_claim_has_one_concurrent_owner(correction_services):
+    """Only one process may own a match transition at a time."""
+    match_service = correction_services["match_service"]
+    match_repo = correction_services["match_repo"]
+    player_repo = correction_services["player_repo"]
+    player_ids = _create_players(player_repo, start_id=17000)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    match_service.add_record_submission(
+        TEST_GUILD_ID, 99999, "radiant", is_admin=True
+    )
+    match_id = match_service.record_match(
+        "radiant", guild_id=TEST_GUILD_ID
+    )["match_id"]
+    start = threading.Barrier(2)
+
+    def claim(owner: str):
+        start.wait()
+        try:
+            result = match_repo.claim_match_correction(
+                match_id,
+                TEST_GUILD_ID,
+                new_winning_team=2,
+                owner_token=owner,
+            )
+        except RuntimeError as exc:
+            return str(exc)
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(claim, ("owner-a", "owner-b")))
+
+    claims = [result for result in results if isinstance(result, dict)]
+    conflicts = [result for result in results if isinstance(result, str)]
+    assert len(claims) == 1
+    assert claims[0]["state"] == "pending"
+    assert len(conflicts) == 1
+    assert "already in progress" in conflicts[0]
+
+
+def test_concurrent_match_corrections_apply_transition_once(correction_services):
+    """Overlapping admin requests must produce one audit row and one counter swap."""
+    match_service = correction_services["match_service"]
+    match_repo = correction_services["match_repo"]
+    player_repo = correction_services["player_repo"]
+    player_ids = _create_players(player_repo, start_id=17100)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    match_service.add_record_submission(
+        TEST_GUILD_ID, 99999, "radiant", is_admin=True
+    )
+    match_id = match_service.record_match(
+        "radiant", guild_id=TEST_GUILD_ID
+    )["match_id"]
+
+    real_claim = match_repo.claim_match_correction
+    start = threading.Barrier(2)
+
+    def synchronized_claim(*args, **kwargs):
+        start.wait()
+        return real_claim(*args, **kwargs)
+
+    match_repo.claim_match_correction = synchronized_claim
+
+    def correct(admin_id: int):
+        try:
+            return match_service.correct_match_result(
+                match_id,
+                "dire",
+                TEST_GUILD_ID,
+                corrected_by=admin_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            return str(exc)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(correct, (88001, 88002)))
+    finally:
+        match_repo.claim_match_correction = real_claim
+
+    assert sum(isinstance(result, dict) for result in results) == 1
+    assert match_repo.get_match(match_id, TEST_GUILD_ID)["winning_team"] == 2
+    assert len(match_repo.get_match_corrections(match_id)) == 1
+    for pid in pending.radiant_team_ids:
+        player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+        assert (player.wins, player.losses) == (0, 1)
+    for pid in pending.dire_team_ids:
+        player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+        assert (player.wins, player.losses) == (1, 0)
 
 
 class TestMatchCorrection:
@@ -383,6 +503,135 @@ class TestMatchCorrection:
         bets_after = {b["discord_id"]: b["payout"] for b in bet_repo.get_settled_bets_for_match(match_id)}
         assert bets_after == bets_before, \
             "Bets-table payouts must be untouched when the balance credit fails"
+
+    def test_retry_finishes_bets_before_recovering_openskill(self, correction_services):
+        """A post-core bet failure must remain recoverable exactly once.
+
+        The winning-team flip and replay-pending marker commit before bet
+        correction.  Retrying the same requested result must therefore finish
+        the still-pending payout rewrite before replaying OpenSkill, while a
+        later duplicate retry must not move balances or replay again.
+        """
+        match_service = correction_services["match_service"]
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        match_repo = correction_services["match_repo"]
+        bet_repo = correction_services["bet_repo"]
+
+        player_ids = _create_players(player_repo, start_id=6100)
+        spectator_id = 6199
+        player_repo.add(
+            discord_id=spectator_id,
+            discord_username="Spectator",
+            guild_id=TEST_GUILD_ID,
+            dotabuff_url="https://dotabuff.com/players/6199",
+            initial_mmr=1500,
+        )
+        player_repo.add_balance(spectator_id, TEST_GUILD_ID, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_bettor = pending.radiant_team_ids[0]
+        pending.bet_lock_until = int(time.time()) + 600
+        betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
+        betting_service.place_bet(TEST_GUILD_ID, radiant_bettor, "radiant", 20, pending)
+
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        match_id = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)["match_id"]
+        spectator_before = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
+        radiant_before = player_repo.get_balance(radiant_bettor, TEST_GUILD_ID)
+        old_payout = next(
+            bet["payout"]
+            for bet in bet_repo.get_settled_bets_for_match(match_id)
+            if bet["discord_id"] == radiant_bettor
+        )
+
+        real_settle = bet_repo.settle_bet_correction_atomic
+        settle_calls = 0
+
+        def fail_first_settlement(*args, **kwargs):
+            nonlocal settle_calls
+            settle_calls += 1
+            if settle_calls == 1:
+                raise sqlite3.OperationalError("injected post-core bet failure")
+            return real_settle(*args, **kwargs)
+
+        real_replay = match_service.backfill_openskill_ratings
+        replay_calls = 0
+
+        def count_replay(*args, **kwargs):
+            nonlocal replay_calls
+            replay_calls += 1
+            if replay_calls == 1:
+                raise RuntimeError("injected replay failure after bet settlement")
+            return real_replay(*args, **kwargs)
+
+        with mock.patch.object(
+            bet_repo,
+            "settle_bet_correction_atomic",
+            side_effect=fail_first_settlement,
+        ), mock.patch.object(
+            match_service,
+            "backfill_openskill_ratings",
+            side_effect=count_replay,
+        ):
+            with pytest.raises(sqlite3.OperationalError, match="post-core bet failure"):
+                match_service.correct_match_result(
+                    match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+                )
+
+            assert match_repo.get_match(match_id, TEST_GUILD_ID)["winning_team"] == 2
+            assert match_repo.get_pending_openskill_replay(TEST_GUILD_ID) is not None
+            assert replay_calls == 0
+
+            with pytest.raises(RuntimeError, match="replay failure after bet settlement"):
+                match_service.correct_match_result(
+                    match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+                )
+            balances_after_bet_settlement = {
+                spectator_id: player_repo.get_balance(spectator_id, TEST_GUILD_ID),
+                radiant_bettor: player_repo.get_balance(radiant_bettor, TEST_GUILD_ID),
+            }
+            assert settle_calls == 2
+            assert replay_calls == 1
+            assert match_repo.get_pending_openskill_replay(TEST_GUILD_ID) is not None
+
+            recovered = match_service.correct_match_result(
+                match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+            )
+            balances_after_recovery = {
+                spectator_id: player_repo.get_balance(spectator_id, TEST_GUILD_ID),
+                radiant_bettor: player_repo.get_balance(radiant_bettor, TEST_GUILD_ID),
+            }
+
+            assert recovered["replay_recovered"] is True
+            assert settle_calls == 2
+            assert replay_calls == 2
+            assert match_repo.get_pending_openskill_replay(TEST_GUILD_ID) is None
+            assert balances_after_recovery == balances_after_bet_settlement
+            with pytest.raises(ValueError, match="already has dire as winner"):
+                match_service.correct_match_result(
+                    match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+                )
+
+        bets_after = {
+            bet["discord_id"]: bet["payout"]
+            for bet in bet_repo.get_settled_bets_for_match(match_id)
+        }
+        assert bets_after[spectator_id] is not None and bets_after[spectator_id] > 0
+        assert bets_after[radiant_bettor] is None
+        assert balances_after_recovery[spectator_id] == (
+            spectator_before + bets_after[spectator_id]
+        )
+        assert balances_after_recovery[radiant_bettor] == (
+            radiant_before - old_payout - JOPACOIN_WIN_REWARD
+        )
+        assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == (
+            balances_after_recovery[spectator_id]
+        )
+        assert player_repo.get_balance(radiant_bettor, TEST_GUILD_ID) == (
+            balances_after_recovery[radiant_bettor]
+        )
 
     def test_correction_refunds_old_vanity_tax_and_taxes_new_winner(
         self, correction_services

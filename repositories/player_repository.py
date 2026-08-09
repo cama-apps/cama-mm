@@ -4113,6 +4113,142 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             # If rowcount > 0, the update happened (cooldown passed)
             return cursor.rowcount > 0
 
+    def settle_double_or_nothing_atomic(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        won: bool,
+        now: int,
+        cooldown_seconds: int,
+        bypass_cooldown: bool = False,
+    ) -> dict[str, int | str | bool | None]:
+        """Claim, settle, and record one Double or Nothing spin atomically."""
+        if cost < 0:
+            raise ValueError("Double or Nothing cost cannot be negative")
+        if cooldown_seconds < 0:
+            raise ValueError("Double or Nothing cooldown cannot be negative")
+
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance,
+                       last_double_or_nothing
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, guild_id),
+            ).fetchone()
+            if row is None:
+                return {
+                    "success": False,
+                    "reason": "not_registered",
+                    "balance": 0,
+                    "cooldown_ends_at": None,
+                }
+
+            balance = int(row["balance"])
+            last_spin = row["last_double_or_nothing"]
+            if (
+                not bypass_cooldown
+                and last_spin is not None
+                and int(last_spin) >= now - cooldown_seconds
+            ):
+                return {
+                    "success": False,
+                    "reason": "on_cooldown",
+                    "balance": balance,
+                    "cooldown_ends_at": int(last_spin) + cooldown_seconds,
+                }
+            if balance < 0:
+                return {
+                    "success": False,
+                    "reason": "in_debt",
+                    "balance": balance,
+                    "cooldown_ends_at": None,
+                }
+            if balance < cost:
+                return {
+                    "success": False,
+                    "reason": "insufficient_balance",
+                    "balance": balance,
+                    "cooldown_ends_at": None,
+                }
+            if balance == cost:
+                return {
+                    "success": False,
+                    "reason": "nothing_to_double",
+                    "balance": balance,
+                    "cooldown_ends_at": None,
+                }
+
+            balance_at_risk = balance - cost
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (balance_at_risk, discord_id, guild_id),
+            )
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, guild_id),
+            )
+
+            balance_after = 2 * balance_at_risk if won else 0
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = ?, last_double_or_nothing = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (balance_after, now, discord_id, guild_id),
+            )
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, guild_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO double_or_nothing_spins
+                    (guild_id, discord_id, cost, balance_before, balance_after, won, spin_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    discord_id,
+                    cost,
+                    balance_at_risk,
+                    balance_after,
+                    1 if won else 0,
+                    now,
+                ),
+            )
+            return {
+                "success": True,
+                "reason": None,
+                "balance_before": balance,
+                "balance_at_risk": balance_at_risk,
+                "balance_after": balance_after,
+                "won": won,
+                "cooldown_ends_at": now + cooldown_seconds,
+            }
+
     def log_double_or_nothing(
         self,
         discord_id: int,

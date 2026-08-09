@@ -1353,13 +1353,16 @@ class PetRepository(BaseRepository):
             ).fetchall()
         return [_row_to_pet(row) for row in rows]
 
-    def find_unannounced_hatches(self, now: int) -> list[Pet]:
+    def find_unannounced_hatches(self, now: int, *, limit: int = 100) -> list[Pet]:
+        if limit <= 0:
+            return []
         with self.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_PET_COLUMNS} FROM pets "
                 "WHERE died_at IS NULL AND hatch_announced_at IS NULL "
-                "AND hatched_at <= ?",
-                (now,),
+                "AND hatched_at <= ? "
+                "ORDER BY hatched_at, pet_id LIMIT ?",
+                (now, limit),
             ).fetchall()
         return [_row_to_pet(row) for row in rows]
 
@@ -1374,11 +1377,15 @@ class PetRepository(BaseRepository):
                 (announced_at, pet_id, gid),
             )
 
-    def get_unannounced_deaths(self) -> list[Pet]:
+    def get_unannounced_deaths(self, *, limit: int = 100) -> list[Pet]:
+        if limit <= 0:
+            return []
         with self.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_PET_COLUMNS} FROM pets "
-                "WHERE died_at IS NOT NULL AND death_announced_at IS NULL",
+                "WHERE died_at IS NOT NULL AND death_announced_at IS NULL "
+                "ORDER BY died_at, pet_id LIMIT ?",
+                (limit,),
             ).fetchall()
         return [_row_to_pet(row) for row in rows]
 
@@ -1538,7 +1545,9 @@ class PetRepository(BaseRepository):
                 self._clear_economy_ledger_context(cursor)
             return True
 
-    def get_unannounced_refunds(self) -> list[RefundNotice]:
+    def get_unannounced_refunds(self, *, limit: int = 100) -> list[RefundNotice]:
+        if limit <= 0:
+            return []
         with self.connection() as conn:
             rows = conn.execute(
                 """
@@ -1546,7 +1555,9 @@ class PetRepository(BaseRepository):
                 FROM pet_refund_windows
                 WHERE announcement_payload IS NOT NULL AND announced_at IS NULL
                 ORDER BY paid_at, guild_id, week_key
-                """
+                LIMIT ?
+                """,
+                (limit,),
             ).fetchall()
         notices = []
         for row in rows:

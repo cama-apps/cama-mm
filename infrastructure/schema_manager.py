@@ -838,6 +838,14 @@ class SchemaManager:
             ),
             ("create_referrals", self._migration_create_referrals),
             ("create_autobet_investments", self._migration_create_autobet_investments),
+            (
+                "create_match_correction_claims",
+                self._migration_create_match_correction_claims,
+            ),
+            (
+                "create_manashop_purchase_lifecycle",
+                self._migration_create_manashop_purchase_lifecycle,
+            ),
         ]
 
     # --- Migrations ---
@@ -3319,6 +3327,26 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_match_corrections_match_id ON match_corrections(match_id)"
         )
 
+    def _migration_create_match_correction_claims(self, cursor) -> None:
+        """Serialize each in-flight correction and retain post-core recovery state."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_correction_claims (
+                match_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                old_winning_team INTEGER NOT NULL,
+                new_winning_team INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'core_applied')),
+                owner_token TEXT,
+                claimed_at INTEGER NOT NULL DEFAULT 0,
+                correction_id INTEGER,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id),
+                FOREIGN KEY (correction_id) REFERENCES match_corrections(correction_id)
+            )
+            """
+        )
+
     def _migration_create_player_steam_ids_table(self, cursor) -> None:
         """Create junction table for multiple Steam IDs per player."""
         # Create the junction table
@@ -4059,6 +4087,42 @@ class SchemaManager:
                 used_date  TEXT NOT NULL,
                 PRIMARY KEY (discord_id, guild_id, item_id, used_date)
             )
+            """
+        )
+
+    def _migration_create_manashop_purchase_lifecycle(self, cursor) -> None:
+        """Give each debit/tap a durable identity and recoverable status."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manashop_purchases (
+                purchase_id TEXT PRIMARY KEY,
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                item_id TEXT NOT NULL,
+                used_date TEXT NOT NULL,
+                cost INTEGER NOT NULL,
+                tap_mana INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'applying', 'completed', 'refunded')),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self._add_column_if_not_exists(
+            cursor, "manashop_daily_uses", "purchase_id", "TEXT"
+        )
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_manashop_daily_purchase
+            ON manashop_daily_uses(purchase_id)
+            WHERE purchase_id IS NOT NULL
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_manashop_purchase_lookup
+            ON manashop_purchases(discord_id, guild_id, item_id, used_date, status)
             """
         )
 

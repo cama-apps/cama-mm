@@ -316,6 +316,16 @@ class PredictionService:
         self._record_trade_activity(discord_id, result)
         return result
 
+    def preview_buy(
+        self, prediction_id: int, side: str, contracts: int
+    ) -> dict[str, Any]:
+        """Quote a buy from the same live ladder rules used by execution."""
+        return self.prediction_repo.quote_buy_contracts(
+            prediction_id=prediction_id,
+            side=side,
+            contracts=contracts,
+        )
+
     def sell_contracts(
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict[str, Any]:

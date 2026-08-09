@@ -43,11 +43,7 @@ class RecordingMixin:
         distributions: dict = {"winners": [], "losers": []}
         jc_changes: dict[int, dict[str, int]] = {}
         if self.betting_service:
-            get_stored_jc_changes = getattr(
-                self.match_repo, "get_match_jc_changes", None
-            )
-            if callable(get_stored_jc_changes):
-                jc_changes.update(get_stored_jc_changes(match_id, guild_id))
+            jc_changes.update(self.match_repo.get_match_jc_changes(match_id, guild_id))
         for discord_id, components in (initial_jc_changes or {}).items():
             jc_changes.setdefault(discord_id, {}).update(components)
         distributions["jc_changes"] = jc_changes
@@ -76,9 +72,7 @@ class RecordingMixin:
         # user retried — previously double-paying participation, win, and
         # streak bonuses. Complete fallible recovery reads before consuming
         # the claim; bet settlement stays outside it and is idempotent itself.
-        bonuses_claimed = True
-        if hasattr(self.match_repo, "claim_match_bonuses_paid"):
-            bonuses_claimed = self.match_repo.claim_match_bonuses_paid(match_id, guild_id)
+        bonuses_claimed = self.match_repo.claim_match_bonuses_paid(match_id, guild_id)
 
         def _accumulate(
             awards: dict[int, dict[str, int]], component: str = "payout"
@@ -128,7 +122,7 @@ class RecordingMixin:
                 )
             distributions["jc_changes"] = jc_changes
             distributions["streaks"] = {}
-            if bet_deltas and hasattr(self.match_repo, "update_match_jc_changes"):
+            if bet_deltas:
                 # Bet settlement is independently idempotent and commits before
                 # the remaining bonus work. Snapshot its full-lifecycle deltas
                 # now so a later bonus failure cannot consume the only source
@@ -170,7 +164,7 @@ class RecordingMixin:
                 components = jc_changes.setdefault(pid, {})
                 for component, amount in pending_components.items():
                     components[component] = components.get(component, 0) + amount
-            if jc_changes and hasattr(self.match_repo, "update_match_jc_changes"):
+            if jc_changes:
                 self.match_repo.update_match_jc_changes(match_id, guild_id, jc_changes)
         except Exception:
             if bonuses_claimed:
@@ -184,9 +178,7 @@ class RecordingMixin:
         win_bonus_delta = {
             pid: int(r.get("net", 0)) + int(r.get("garnished", 0)) for pid, r in win_awards.items()
         }
-        if (bonus_net or win_bonus_delta) and hasattr(
-            self.match_repo, "update_participant_bonus_jc"
-        ):
+        if bonus_net or win_bonus_delta:
             self.match_repo.update_participant_bonus_jc(
                 match_id, guild_id, bonus_net, win_bonus_by_player=win_bonus_delta
             )
@@ -218,8 +210,7 @@ class RecordingMixin:
                         related_id=match_id,
                         reason="Bonus payout failed mid-match; compensating so a retry pays exactly once",
                     )
-            if hasattr(self.match_repo, "release_match_bonuses_claim"):
-                self.match_repo.release_match_bonuses_claim(match_id, guild_id)
+            self.match_repo.release_match_bonuses_claim(match_id, guild_id)
         except Exception:
             logger.critical(
                 "Match %s (guild %s) bonus rollback failed; claim stays consumed "
@@ -496,31 +487,13 @@ class RecordingMixin:
 
             # ---- PURE COMPUTATION (reads only; safe to run before the atomic block) ----
             all_player_ids = radiant_team_ids + dire_team_ids
-            load_with_revision = getattr(
-                self.player_repo,
-                "get_match_rating_inputs_with_openskill_revision",
-                None,
+            (
+                rating_inputs,
+                expected_openskill_revision,
+            ) = self.player_repo.get_match_rating_inputs_with_openskill_revision(
+                all_player_ids,
+                guild_id,
             )
-            if callable(load_with_revision):
-                (
-                    rating_inputs,
-                    expected_openskill_revision,
-                ) = load_with_revision(all_player_ids, guild_id)
-            else:
-                get_openskill_revision = getattr(
-                    self.match_repo,
-                    "get_openskill_rating_revision",
-                    None,
-                )
-                expected_openskill_revision = (
-                    get_openskill_revision(guild_id)
-                    if callable(get_openskill_revision)
-                    else None
-                )
-                rating_inputs = self.player_repo.get_match_rating_inputs(
-                    all_player_ids,
-                    guild_id,
-                )
             radiant_glicko = [
                 (self._glicko_player_from_input(rating_inputs.get(pid)), pid)
                 for pid in radiant_team_ids

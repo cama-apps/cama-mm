@@ -188,6 +188,83 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     VALID_BOOK_SIDES = {"yes_ask", "yes_bid"}
     VALID_TRADE_SIDES = {"yes", "no"}
 
+    def _validate_buy_request(self, side: str, contracts: int) -> None:
+        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
+
+        if side not in self.VALID_TRADE_SIDES:
+            raise ValueError("side must be 'yes' or 'no'")
+        if contracts <= 0:
+            raise ValueError("contracts must be positive")
+        if contracts > PREDICTION_MAX_CONTRACTS_PER_TRADE:
+            raise ValueError(
+                f"contracts capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE} per trade."
+            )
+
+    @staticmethod
+    def _buy_book_order(side: str) -> tuple[str, str]:
+        if side == "yes":
+            return "yes_ask", "price ASC"
+        return "yes_bid", "price DESC"
+
+    @staticmethod
+    def _plan_buy_fills(
+        levels: list[dict], side: str, contracts: int
+    ) -> tuple[list[tuple[int, int, int]], int, int]:
+        remaining = contracts
+        fills: list[tuple[int, int, int]] = []
+        for level in levels:
+            if remaining <= 0:
+                break
+            take = min(remaining, int(level["remaining_size"]))
+            fills.append((int(level["level_id"]), int(level["price"]), take))
+            remaining -= take
+
+        if remaining > 0:
+            available = contracts - remaining
+            raise ValueError(
+                f"Insufficient depth: only {available} contracts available "
+                f"(requested {contracts}). Wait for next refresh."
+            )
+
+        if side == "yes":
+            weighted_pct = sum(price * take for _, price, take in fills)
+        else:
+            weighted_pct = sum((100 - price) * take for _, price, take in fills)
+        return fills, weighted_pct, _quote_total(weighted_pct, "buy")
+
+    def quote_buy_contracts(
+        self, prediction_id: int, side: str, contracts: int
+    ) -> dict:
+        """Quote a buy against the live ladder without mutating it."""
+        self._validate_buy_request(side, contracts)
+        book_side, order_clause = self._buy_book_order(side)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "open":
+                raise ValueError("Market is not open for trading.")
+            cursor.execute(
+                f"""
+                SELECT level_id, price, remaining_size FROM prediction_levels
+                WHERE prediction_id = ? AND side = ? AND remaining_size > 0
+                ORDER BY {order_clause}
+                """,
+                (prediction_id, book_side),
+            )
+            levels = [dict(row) for row in cursor.fetchall()]
+            fills, _, total_cost = self._plan_buy_fills(levels, side, contracts)
+            return {
+                "contracts": contracts,
+                "total_cost": total_cost,
+                "fills": [(price, take) for _, price, take in fills],
+            }
+
     def create_orderbook_prediction(
         self,
         guild_id: int,
@@ -407,25 +484,10 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict:
         """Atomically execute a BUY YES or BUY NO sweep across the book."""
-        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
-        if side not in self.VALID_TRADE_SIDES:
-            raise ValueError("side must be 'yes' or 'no'")
-        if contracts <= 0:
-            raise ValueError("contracts must be positive")
-        if contracts > PREDICTION_MAX_CONTRACTS_PER_TRADE:
-            raise ValueError(
-                f"contracts capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE} per trade."
-            )
+        self._validate_buy_request(side, contracts)
 
         now = int(time.time())
-        # BUY YES consumes the yes_ask side (cheapest first).
-        # BUY NO  consumes the yes_bid side (highest bid first => cheapest NO ask).
-        if side == "yes":
-            book_side = "yes_ask"
-            order_clause = "price ASC"
-        else:
-            book_side = "yes_bid"
-            order_clause = "price DESC"
+        book_side, order_clause = self._buy_book_order(side)
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -451,27 +513,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             levels = [dict(r) for r in cursor.fetchall()]
 
-            remaining = contracts
-            fills: list[tuple[int, int, int]] = []  # (level_id, price, take)
-            for level in levels:
-                if remaining <= 0:
-                    break
-                take = min(remaining, int(level["remaining_size"]))
-                fills.append((int(level["level_id"]), int(level["price"]), take))
-                remaining -= take
-
-            if remaining > 0:
-                available = contracts - remaining
-                raise ValueError(
-                    f"Insufficient depth: only {available} contracts available "
-                    f"(requested {contracts}). Wait for next refresh."
-                )
-
-            if side == "yes":
-                weighted_pct = sum(price * take for _, price, take in fills)
-            else:  # no — cost per contract = 100 - bid_price
-                weighted_pct = sum((100 - price) * take for _, price, take in fills)
-            total_cost = _quote_total(weighted_pct, "buy")
+            fills, weighted_pct, total_cost = self._plan_buy_fills(
+                levels, side, contracts
+            )
 
             cursor.execute(
                 """

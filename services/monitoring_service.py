@@ -220,8 +220,13 @@ class MonitoringService:
     def _probe_db(self) -> tuple[bool, float | None, str | None]:
         started = time.perf_counter()
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("SELECT 1").fetchone()
+            with sqlite3.connect(
+                self.db_path,
+                uri=self.db_path.startswith("file:"),
+            ) as conn:
+                # A new/empty SQLite file can satisfy SELECT 1 while the
+                # application's actual database is unavailable or misrouted.
+                conn.execute("SELECT 1 FROM players LIMIT 1").fetchone()
         except Exception as exc:
             return False, None, f"DB probe failed: {exc}"
         return True, (time.perf_counter() - started) * 1000, None

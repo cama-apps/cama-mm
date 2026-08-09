@@ -9,6 +9,7 @@ no state of its own and is composed into ``MatchService``.
 """
 
 from typing import Any
+from uuid import uuid4
 
 from rating_system import recorded_streak_rate, recorded_streak_threshold
 from services.match._common import logger
@@ -29,6 +30,70 @@ class VotingCorrectionMixin:
     Composed into :class:`~services.match_service.MatchService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
+
+    def _settle_match_bet_correction(
+        self,
+        *,
+        match_id: int,
+        guild_id: int | None,
+        match: dict,
+        old_winning_team: str,
+        new_winning_team: str,
+        skip_if_complete: bool = False,
+    ) -> dict:
+        """Settle, or recognize, the durable bet leg of a correction."""
+        if not self.betting_service:
+            return {}
+
+        bet_repo = self.betting_service.bet_repo
+        all_bets = bet_repo.get_settled_bets_for_match(match_id)
+        if not all_bets:
+            return {}
+
+        old_winning_bets = [
+            bet for bet in all_bets if bet["team_bet_on"] == old_winning_team
+        ]
+        new_winning_bets = [
+            bet for bet in all_bets if bet["team_bet_on"] == new_winning_team
+        ]
+
+        # settle_bet_correction_atomic commits balance changes and payout-row
+        # rewrites together.  Therefore this payout pattern is also a durable
+        # completion marker after a crash between settlement and OpenSkill
+        # replay: every corrected winner has a non-NULL payout (including 0),
+        # and every corrected loser has NULL.
+        if skip_if_complete and all(
+            (bet["payout"] is not None)
+            == (bet["team_bet_on"] == new_winning_team)
+            for bet in all_bets
+        ):
+            combined_bet_deltas: dict[int, int] = {}
+        else:
+            original_betting_mode = match.get("betting_mode") or "pool"
+            combined_bet_deltas = bet_repo.settle_bet_correction_atomic(
+                match_id,
+                old_winning_bets,
+                new_winning_bets,
+                guild_id,
+                pool_mode=(original_betting_mode == "pool"),
+                vanity_tax_rate=(
+                    self.betting_service.vanity_tax_service.TAX_RATE
+                    if self.betting_service.vanity_tax_service
+                    else 0.0
+                ),
+                vanity_taxable_ids=(
+                    self.betting_service.vanity_tax_service.taxable_ids(guild_id)
+                    if self.betting_service.vanity_tax_service
+                    else frozenset()
+                ),
+            )
+
+        return {
+            "bets_affected": len(all_bets),
+            "old_winners_reversed": len(old_winning_bets),
+            "new_winners_paid": len(new_winning_bets),
+            "balance_changes": combined_bet_deltas,
+        }
 
     # ==================== Voting Management (delegated to MatchVotingService) ====================
 
@@ -112,6 +177,50 @@ class VotingCorrectionMixin:
         guild_id: int | None = None,
         corrected_by: int | None = None,
     ) -> dict:
+        """Own one durable correction lifecycle and release it on every exit."""
+        if new_winning_team not in ("radiant", "dire"):
+            raise ValueError("new_winning_team must be 'radiant' or 'dire'")
+        new_winning_team_num = 1 if new_winning_team == "radiant" else 2
+        owner_token = uuid4().hex
+        claim = self.match_repo.claim_match_correction(
+            match_id,
+            guild_id,
+            new_winning_team=new_winning_team_num,
+            owner_token=owner_token,
+        )
+        try:
+            result = self._correct_match_result_owned(
+                match_id,
+                new_winning_team,
+                guild_id,
+                corrected_by,
+                claim_state=str(claim["state"]),
+                claim_token=owner_token,
+                claimed_correction_id=claim.get("correction_id"),
+            )
+            if claim["state"] != "already" and not (
+                self.match_repo.complete_match_correction_claim(
+                    match_id, owner_token
+                )
+            ):
+                raise RuntimeError(
+                    f"Match {match_id} correction completed without its owned claim"
+                )
+            return result
+        finally:
+            self.match_repo.release_match_correction_claim(match_id, owner_token)
+
+    def _correct_match_result_owned(
+        self,
+        match_id: int,
+        new_winning_team: str,
+        guild_id: int | None = None,
+        corrected_by: int | None = None,
+        *,
+        claim_state: str,
+        claim_token: str,
+        claimed_correction_id: int | None,
+    ) -> dict:
         """
         Correct an incorrectly recorded match result.
 
@@ -155,13 +264,19 @@ class VotingCorrectionMixin:
         new_winning_team_num = 1 if new_winning_team == "radiant" else 2
 
         if old_winning_team_num == new_winning_team_num:
-            get_pending = getattr(
-                self.match_repo,
-                "get_pending_openskill_replay",
-                None,
-            )
-            pending = get_pending(guild_id) if callable(get_pending) else None
-            if pending:
+            pending = self.match_repo.get_pending_openskill_replay(guild_id)
+            if claim_state == "core_applied" or (
+                pending and pending.get("reason") == f"match_correction:{match_id}"
+            ):
+                old_winning_team = "dire" if new_winning_team == "radiant" else "radiant"
+                bet_correction_summary = self._settle_match_bet_correction(
+                    match_id=match_id,
+                    guild_id=guild_id,
+                    match=match,
+                    old_winning_team=old_winning_team,
+                    new_winning_team=new_winning_team,
+                    skip_if_complete=True,
+                )
                 replay = self.backfill_openskill_ratings(
                     guild_id=guild_id,
                     reset_first=True,
@@ -175,11 +290,11 @@ class VotingCorrectionMixin:
                     "match_id": match_id,
                     "old_winning_team": new_winning_team,
                     "new_winning_team": new_winning_team,
-                    "correction_id": None,
+                    "correction_id": claimed_correction_id,
                     "players_affected": 0,
                     "ratings_updated": 0,
                     "openskill_matches_replayed": replay["matches_processed"],
-                    "bet_correction": {},
+                    "bet_correction": bet_correction_summary,
                     "win_bonus_correction": {},
                     "new_winner_ids": [],
                     "new_loser_ids": [],
@@ -250,31 +365,18 @@ class VotingCorrectionMixin:
         streak_multipliers: dict[int, float] = {}
         new_streaks: dict[int, tuple[int, float]] = {}
         participant_ids = radiant_ids + dire_ids
-        get_outcomes_bulk = getattr(self.match_repo, "get_player_outcomes_before_match_bulk", None)
-        if callable(get_outcomes_bulk):
-            outcomes_by_id = get_outcomes_bulk(participant_ids, guild_id, match_id, limit=20)
-            for pid in participant_ids:
-                slen, mult = self.rating_system.calculate_streak_multiplier(
-                    outcomes_by_id.get(pid, []),
-                    won=pid in new_winner_ids,
-                    streak_multiplier_per_game=_recorded_streak_rate(pid),
-                    streak_threshold=_recorded_streak_threshold(pid),
-                )
-                streak_multipliers[pid] = mult
-                new_streaks[pid] = (slen, mult)
-        elif hasattr(self.match_repo, "get_player_outcomes_before_match"):
-            for pid in participant_ids:
-                outcomes = self.match_repo.get_player_outcomes_before_match(
-                    pid, guild_id, match_id, limit=20
-                )
-                slen, mult = self.rating_system.calculate_streak_multiplier(
-                    outcomes,
-                    won=pid in new_winner_ids,
-                    streak_multiplier_per_game=_recorded_streak_rate(pid),
-                    streak_threshold=_recorded_streak_threshold(pid),
-                )
-                streak_multipliers[pid] = mult
-                new_streaks[pid] = (slen, mult)
+        outcomes_by_id = self.match_repo.get_player_outcomes_before_match_bulk(
+            participant_ids, guild_id, match_id, limit=20
+        )
+        for pid in participant_ids:
+            slen, mult = self.rating_system.calculate_streak_multiplier(
+                outcomes_by_id.get(pid, []),
+                won=pid in new_winner_ids,
+                streak_multiplier_per_game=_recorded_streak_rate(pid),
+                streak_threshold=_recorded_streak_threshold(pid),
+            )
+            streak_multipliers[pid] = mult
+            new_streaks[pid] = (slen, mult)
 
         def _build_player(pid: int):
             entry = rating_by_id.get(pid)
@@ -384,33 +486,7 @@ class VotingCorrectionMixin:
                 update["new_streak_multiplier"] = new_streaks[pid][1]
             rating_history_updates.append(update)
 
-        # 7. Pre-compute bet correction deltas outside the atomic block. Bet
-        # payout reversal/re-apply writes to the bets table via bet_repo and
-        # returns per-player balance deltas; we apply those after the core
-        # match invariant commits.
-        bet_correction_summary = {}
-        combined_bet_deltas: dict[int, int] = {}
-        old_winning_bets: list = []
-        new_winning_bets: list = []
-        if self.betting_service and hasattr(self.betting_service, "bet_repo"):
-            bet_repo = self.betting_service.bet_repo
-            all_bets = bet_repo.get_settled_bets_for_match(match_id)
-
-            if all_bets:
-                old_winning_bets = [
-                    b
-                    for b in all_bets
-                    if (old_winning_team == "radiant" and b["team_bet_on"] == "radiant")
-                    or (old_winning_team == "dire" and b["team_bet_on"] == "dire")
-                ]
-                new_winning_bets = [
-                    b
-                    for b in all_bets
-                    if (new_winning_team == "radiant" and b["team_bet_on"] == "radiant")
-                    or (new_winning_team == "dire" and b["team_bet_on"] == "dire")
-                ]
-
-        # 8. JC win-bonus correction: the old "winners" keep their win bonus
+        # 7. JC win-bonus correction: the old "winners" keep their win bonus
         # and the corrected winners never got theirs unless it moves here.
         # This runs BEFORE the atomic winning_team flip so a failure anywhere
         # in it aborts the correction with no visible flip, and the identical
@@ -426,22 +502,19 @@ class VotingCorrectionMixin:
         # Rows predating that snapshot use the historical +4 JC default rather
         # than whatever the live configuration happens to be today.
         win_bonus_correction: dict = {}
-        if self.betting_service and hasattr(self.match_repo, "apply_win_bonus_reversal_atomic"):
+        if self.betting_service:
             recorded_win_reward = _recorded_win_reward_jc(match)
             participants_by_id = {p["discord_id"]: p for p in participants}
 
             win_bonus_awarded: dict[int, int] = {}
-            can_snapshot = hasattr(self.match_repo, "update_participant_bonus_jc")
             # The win_bonus_jc snapshot below is written in its own transaction,
             # so a crash between the credit and the snapshot left a paid player
             # looking unpaid and a retry paid them twice. The economy ledger row
             # is written by the balance trigger inside the credit's own
             # transaction, so it cannot disagree with the money.
-            already_credited: set[int] = set()
-            if hasattr(self.match_repo, "get_win_bonus_credited_ids"):
-                already_credited = self.match_repo.get_win_bonus_credited_ids(
-                    match_id, guild_id,
-                )
+            already_credited = self.match_repo.get_win_bonus_credited_ids(
+                match_id, guild_id,
+            )
             for pid in new_winner_ids:
                 stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
                 if stored is not None and int(stored) > 0:
@@ -465,10 +538,9 @@ class VotingCorrectionMixin:
                 result = awards.get(pid, {})
                 delta = int(result.get("net", 0)) + int(result.get("garnished", 0))
                 win_bonus_awarded[pid] = delta
-                if can_snapshot:
-                    self.match_repo.update_participant_bonus_jc(
-                        match_id, guild_id, {}, win_bonus_by_player={pid: delta}
-                    )
+                self.match_repo.update_participant_bonus_jc(
+                    match_id, guild_id, {}, win_bonus_by_player={pid: delta}
+                )
 
             win_bonus_debits: dict[int, int] = {}
             for pid in old_winner_ids:
@@ -482,7 +554,7 @@ class VotingCorrectionMixin:
                 "awarded": win_bonus_awarded,
             }
 
-        # 9. Atomic core: swap wins/losses, apply new ratings, rewrite history,
+        # 8. Atomic core: swap wins/losses, apply new ratings, rewrite history,
         # flip matches.winning_team, re-apply pairings, and log the correction
         # — all in one BEGIN IMMEDIATE. Bet settlement stays outside.
         correction_id = self.match_repo.correct_match_result_atomic(
@@ -498,9 +570,10 @@ class VotingCorrectionMixin:
             openskill_updates=new_os_updates,
             rating_history_updates=rating_history_updates,
             corrected_by=corrected_by,
+            claim_token=claim_token,
         )
 
-        # 10. Bet payout correction: reverse old winners, pay new winners, and
+        # 9. Bet payout correction: reverse old winners, pay new winners, and
         # apply the combined balance deltas — all folded into ONE atomic
         # transaction inside bet_repo so the bets-table payout rewrite and the
         # player-balance credits commit-or-rollback together. If this raises,
@@ -508,33 +581,13 @@ class VotingCorrectionMixin:
         # rerun the correction flow. Uses the original betting_mode persisted on
         # the match row so a match recorded in house mode is corrected with
         # house-mode math (older pre-migration matches default to 'pool').
-        if self.betting_service and (old_winning_bets or new_winning_bets):
-            bet_repo = self.betting_service.bet_repo
-            all_bets_len = len(old_winning_bets) + len(new_winning_bets)
-            original_betting_mode = match.get("betting_mode") or "pool"
-            combined_bet_deltas = bet_repo.settle_bet_correction_atomic(
-                match_id,
-                old_winning_bets,
-                new_winning_bets,
-                guild_id,
-                pool_mode=(original_betting_mode == "pool"),
-                vanity_tax_rate=(
-                    self.betting_service.vanity_tax_service.TAX_RATE
-                    if self.betting_service.vanity_tax_service
-                    else 0.0
-                ),
-                vanity_taxable_ids=(
-                    self.betting_service.vanity_tax_service.taxable_ids(guild_id)
-                    if self.betting_service.vanity_tax_service
-                    else frozenset()
-                ),
-            )
-            bet_correction_summary = {
-                "bets_affected": all_bets_len,
-                "old_winners_reversed": len(old_winning_bets),
-                "new_winners_paid": len(new_winning_bets),
-                "balance_changes": combined_bet_deltas,
-            }
+        bet_correction_summary = self._settle_match_bet_correction(
+            match_id=match_id,
+            guild_id=guild_id,
+            match=match,
+            old_winning_team=old_winning_team,
+            new_winning_team=new_winning_team,
+        )
 
         # The core transaction durably marked this guild replay-pending. Run
         # the replay only after the other correction effects are complete so a

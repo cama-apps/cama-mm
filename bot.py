@@ -693,7 +693,7 @@ def _init_services():
         dig_llm_enabled=DIG_LLM_ENABLED,
     )
     container.initialize()
-    monitoring_service = MonitoringService(DB_PATH, usage_monitor=usage_monitor)
+    monitoring_service = MonitoringService(container.db_path, usage_monitor=usage_monitor)
     container.expose_to_bot(bot)
     bot.monitoring_service = monitoring_service
     _container = container

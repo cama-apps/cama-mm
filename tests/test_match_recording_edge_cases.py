@@ -123,6 +123,34 @@ class TestRecordMatchServiceGuards:
         # Every input player is accounted for exactly once.
         assert rostered | excluded == set(player_ids)
 
+    def test_recording_requires_atomic_rating_snapshot_capability(
+        self, match_service, repo_db_path
+    ):
+        """Missing the revision-coupled rating read must fail closed.
+
+        Falling back to separate rating and revision reads disables the
+        optimistic-concurrency contract and can commit ratings calculated from
+        a stale OpenSkill snapshot.
+        """
+        player_repo = PlayerRepository(repo_db_path)
+        player_ids = list(range(42100, 42110))
+        _seed(player_repo, player_ids)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+        class MissingAtomicSnapshotRepository:
+            def __getattr__(self, name):
+                if name == "get_match_rating_inputs_with_openskill_revision":
+                    raise AttributeError(name)
+                return getattr(player_repo, name)
+
+        match_service.player_repo = MissingAtomicSnapshotRepository()
+
+        with pytest.raises(
+            AttributeError,
+            match="get_match_rating_inputs_with_openskill_revision",
+        ):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
 
 # =============================================================================
 # MatchRepository.record_match — storage primitive edge cases

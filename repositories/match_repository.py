@@ -4206,6 +4206,143 @@ class MatchRepository(BaseRepository, IMatchRepository):
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
+    def claim_match_correction(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        *,
+        new_winning_team: int,
+        owner_token: str,
+        stale_after_seconds: int = 300,
+    ) -> dict:
+        """Claim one result transition, or resume its durable recovery state."""
+        if new_winning_team not in (1, 2):
+            raise ValueError("new_winning_team must be 1 or 2")
+        if not owner_token:
+            raise ValueError("owner_token is required")
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            match = cursor.execute(
+                """
+                SELECT winning_team
+                FROM matches
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, normalized_guild),
+            ).fetchone()
+            if match is None:
+                raise ValueError(f"Match {match_id} not found")
+            current_winner = int(match["winning_team"])
+            claim = cursor.execute(
+                """
+                SELECT match_id, guild_id, old_winning_team, new_winning_team,
+                       state, owner_token, claimed_at, correction_id
+                FROM match_correction_claims
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            ).fetchone()
+            if claim is None:
+                if current_winner == new_winning_team:
+                    return {
+                        "match_id": match_id,
+                        "old_winning_team": current_winner,
+                        "new_winning_team": new_winning_team,
+                        "state": "already",
+                        "correction_id": None,
+                    }
+                cursor.execute(
+                    """
+                    INSERT INTO match_correction_claims
+                        (match_id, guild_id, old_winning_team, new_winning_team,
+                         state, owner_token, claimed_at)
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (
+                        match_id,
+                        normalized_guild,
+                        current_winner,
+                        new_winning_team,
+                        owner_token,
+                        now,
+                    ),
+                )
+                return {
+                    "match_id": match_id,
+                    "old_winning_team": current_winner,
+                    "new_winning_team": new_winning_team,
+                    "state": "pending",
+                    "correction_id": None,
+                }
+
+            claim_data = dict(claim)
+            if (
+                int(claim_data["guild_id"]) != normalized_guild
+                or int(claim_data["new_winning_team"]) != new_winning_team
+                or current_winner
+                not in (
+                    int(claim_data["old_winning_team"]),
+                    int(claim_data["new_winning_team"]),
+                )
+            ):
+                raise RuntimeError(
+                    f"Match {match_id} has an incompatible correction in progress"
+                )
+            active_owner = claim_data.get("owner_token")
+            claimed_at = int(claim_data.get("claimed_at") or 0)
+            if (
+                active_owner
+                and active_owner != owner_token
+                and claimed_at > now - max(1, stale_after_seconds)
+            ):
+                raise RuntimeError(
+                    f"Match {match_id} correction is already in progress"
+                )
+            cursor.execute(
+                """
+                UPDATE match_correction_claims
+                SET owner_token = ?, claimed_at = ?
+                WHERE match_id = ?
+                """,
+                (owner_token, now, match_id),
+            )
+            claim_data["owner_token"] = owner_token
+            claim_data["claimed_at"] = now
+            return claim_data
+
+    def release_match_correction_claim(
+        self, match_id: int, owner_token: str
+    ) -> bool:
+        """Release ownership while retaining pending/core recovery state."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE match_correction_claims
+                SET owner_token = NULL, claimed_at = 0
+                WHERE match_id = ? AND owner_token = ?
+                """,
+                (match_id, owner_token),
+            )
+            return cursor.rowcount == 1
+
+    def complete_match_correction_claim(
+        self, match_id: int, owner_token: str
+    ) -> bool:
+        """Remove the recovery claim after every correction leg succeeds."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM match_correction_claims
+                WHERE match_id = ? AND owner_token = ? AND state = 'core_applied'
+                """,
+                (match_id, owner_token),
+            )
+            return cursor.rowcount == 1
+
     def correct_match_result_atomic(
         self,
         *,
@@ -4221,6 +4358,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         openskill_updates: list[tuple[int, float, float]],
         rating_history_updates: list[dict],
         corrected_by: int | None,
+        claim_token: str,
     ) -> int | None:
         """Apply a match result correction atomically.
 
@@ -4245,6 +4383,37 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+
+            claim = cursor.execute(
+                """
+                SELECT old_winning_team, new_winning_team, state, owner_token
+                FROM match_correction_claims
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, normalized_guild),
+            ).fetchone()
+            if (
+                claim is None
+                or claim["owner_token"] != claim_token
+                or claim["state"] != "pending"
+                or int(claim["old_winning_team"]) != old_winning_team
+                or int(claim["new_winning_team"]) != new_winning_team
+            ):
+                raise RuntimeError(
+                    f"Match {match_id} correction claim is missing or no longer owned"
+                )
+            cursor.execute(
+                """
+                UPDATE matches
+                SET winning_team = ?
+                WHERE match_id = ? AND guild_id = ? AND winning_team = ?
+                """,
+                (new_winning_team, match_id, normalized_guild, old_winning_team),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"Match {match_id} winner changed before correction commit"
+                )
 
             # 1. Swap win/loss counters (old winners become losers, vice versa).
             if old_winner_ids:
@@ -4373,11 +4542,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     ],
                 )
 
-            # 5. Flip matches.winning_team and match_participants.won.
-            cursor.execute(
-                "UPDATE matches SET winning_team = ? WHERE match_id = ?",
-                (new_winning_team, match_id),
-            )
+            # 5. Flip match_participants.won. The guarded winner CAS ran first.
             cursor.execute(
                 """
                 UPDATE match_participants
@@ -4463,6 +4628,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 self._increment_openskill_rating_revision(
                     cursor,
                     normalized_guild,
+                )
+
+            cursor.execute(
+                """
+                UPDATE match_correction_claims
+                SET state = 'core_applied', correction_id = ?
+                WHERE match_id = ? AND owner_token = ? AND state = 'pending'
+                """,
+                (correction_id, match_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"Match {match_id} correction claim changed during commit"
                 )
 
             return correction_id

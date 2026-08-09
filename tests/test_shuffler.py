@@ -553,6 +553,48 @@ class TestShuffler:
         player_names = {p.name for p in players}
         assert all_player_names == player_names
 
+    def test_large_pool_bounds_full_role_matchup_evaluations(self, monkeypatch):
+        roles = [
+            ["1"],
+            ["2"],
+            ["3"],
+            ["4"],
+            ["5"],
+            ["1", "2"],
+            ["3", "4"],
+            ["4", "5"],
+        ]
+        players = [
+            Player(
+                name=f"Player{i}",
+                discord_id=1000 + i,
+                mmr=1500 + i * 40,
+                glicko_rating=1500.0 + i * 20,
+                glicko_rd=50.0 + i,
+                preferred_roles=roles[i % len(roles)],
+            )
+            for i in range(20)
+        ]
+        shuffler = BalancedShuffler()
+        original_evaluate = shuffler._evaluate_pool_matchup
+        evaluations = 0
+
+        def counted_evaluate(*args, **kwargs):
+            nonlocal evaluations
+            evaluations += 1
+            return original_evaluate(*args, **kwargs)
+
+        monkeypatch.setattr(shuffler, "_evaluate_pool_matchup", counted_evaluate)
+
+        team1, team2, excluded = shuffler.shuffle_from_pool(
+            players,
+            rng=random.Random(42),
+        )
+
+        assert len(team1.players) == len(team2.players) == 5
+        assert len(excluded) == 10
+        assert evaluations <= 4000
+
     def test_pool_signature_only_built_for_numeric_improvements(self, monkeypatch):
         players = [
             Player(

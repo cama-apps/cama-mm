@@ -481,14 +481,26 @@ class MafiaRepository(BaseRepository):
             return True
 
     def advance_to_next_cycle(
-        self, game_id: int, *, ended_at: int | None = None
-    ) -> bool:
-        """Atomically advance DAY -> next NIGHT (undecided game continues).
+        self,
+        game_id: int,
+        *,
+        ended_at: int | None = None,
+        guild_id: int | None = None,
+        day_number: int | None = None,
+        lynched_id: int | None = None,
+        lynched_was_mafia: bool = False,
+        alive_count: int = 0,
+    ) -> bool | dict[str, Any]:
+        """Atomically resolve and advance DAY -> next NIGHT.
 
         Increments day_number, resets phase_started_at, records day_ended_at.
-        Returns False if the game wasn't in DAY (already advanced/resolved).
+        When day-resolution inputs are supplied, the lynch, Bookie HIT, and
+        bounty payout share the phase-claim transaction and the return value is
+        ``{"applied": bool, "bounty": ...}``. The bool return is retained for
+        legacy callers that only request a phase advance.
         """
         ended = ended_at if ended_at is not None else int(time.time())
+        resolve_effects = day_number is not None
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -500,7 +512,38 @@ class MafiaRepository(BaseRepository):
                 """,
                 (MafiaPhase.NIGHT.value, ended, ended, game_id, MafiaPhase.DAY.value),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                if resolve_effects:
+                    return {
+                        "applied": False,
+                        "reason": "day_already_resolved",
+                        "bounty": {"paid": {}, "reward": 0},
+                    }
+                return False
+
+            if not resolve_effects:
+                return True
+
+            if lynched_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE mafia_players
+                    SET is_alive = 0, eliminated_phase = ?, eliminated_at = ?
+                    WHERE game_id = ? AND discord_id = ? AND is_alive = 1
+                    """,
+                    (MafiaPhase.DAY.value, ended, game_id, lynched_id),
+                )
+            self._mark_bookie_wager_hit(cursor, game_id, day_number, lynched_id)
+            bounty = self._resolve_day_bounties_in_transaction(
+                cursor,
+                game_id=game_id,
+                guild_id=guild_id,
+                day_number=day_number,
+                lynched_id=lynched_id,
+                lynched_was_mafia=lynched_was_mafia,
+                alive_count=alive_count,
+            )
+            return {"applied": True, "bounty": bounty}
 
     def revive_player(self, game_id: int, discord_id: int) -> None:
         """Bring a dead player back (Resurrection event)."""
@@ -590,12 +633,16 @@ class MafiaRepository(BaseRepository):
         vanity_tax_rate: float = 0.0,
         vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         nonprofit_overflow: int = 0,
+        day_number: int | None = None,
+        lynched_was_mafia: bool = False,
+        alive_count: int = 0,
         ended_at: int | None = None,
     ) -> dict[str, Any]:
-        """Atomically apply lynch, payouts, bankruptcy sinks, and DAY -> RESOLVED."""
+        """Atomically apply all durable effects of DAY -> RESOLVED."""
         ended = ended_at if ended_at is not None else int(time.time())
         penalties: dict[int, int] = {}
         vanity_taxes: dict[int, int] = {}
+        bounty: dict[str, Any] = {"paid": {}, "reward": 0}
         gid: int | None = None
 
         with self.atomic_transaction() as conn:
@@ -633,6 +680,18 @@ class MafiaRepository(BaseRepository):
                     WHERE game_id = ? AND discord_id = ? AND is_alive = 1
                     """,
                     (MafiaPhase.DAY.value, ended, game_id, lynched_id),
+                )
+
+            if day_number is not None:
+                self._mark_bookie_wager_hit(cursor, game_id, day_number, lynched_id)
+                bounty = self._resolve_day_bounties_in_transaction(
+                    cursor,
+                    game_id=game_id,
+                    guild_id=gid,
+                    day_number=day_number,
+                    lynched_id=lynched_id,
+                    lynched_was_mafia=lynched_was_mafia,
+                    alive_count=alive_count,
                 )
 
             if payout_deltas:
@@ -762,6 +821,7 @@ class MafiaRepository(BaseRepository):
                 "bankruptcy_penalties": penalties,
                 "vanity_taxes": vanity_taxes,
                 "guild_id": gid,
+                "bounty": bounty,
             }
 
     # ── Players ─────────────────────────────────────────────────────────────
@@ -1044,6 +1104,105 @@ class MafiaRepository(BaseRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    @staticmethod
+    def _mark_bookie_wager_hit(
+        cursor, game_id: int, day_number: int, lynched_id: int | None
+    ) -> None:
+        if lynched_id is None:
+            return
+        cursor.execute(
+            """
+            UPDATE mafia_actions
+            SET result = 'HIT'
+            WHERE game_id = ? AND day_number = ? AND action_type = ?
+              AND phase = ? AND target_id = ? AND COALESCE(result, '') != 'HIT'
+            """,
+            (
+                game_id,
+                day_number,
+                MafiaActionType.WAGER.value,
+                MafiaPhase.NIGHT.value,
+                lynched_id,
+            ),
+        )
+
+    def _resolve_day_bounties_in_transaction(
+        self,
+        cursor,
+        *,
+        game_id: int,
+        guild_id: int | None,
+        day_number: int,
+        lynched_id: int | None,
+        lynched_was_mafia: bool,
+        alive_count: int,
+    ) -> dict[str, Any]:
+        gid = self.normalize_guild_id(guild_id)
+        paid: dict[int, int] = {}
+        if lynched_id is None or not lynched_was_mafia:
+            return {"paid": paid, "reward": 0}
+
+        cursor.execute(
+            """
+            SELECT contributor_id, amount FROM mafia_bounties
+            WHERE game_id = ? AND day_number = ? AND target_id = ?
+            """,
+            (game_id, day_number, lynched_id),
+        )
+        bounty_rows = cursor.fetchall()
+        winners = [row["contributor_id"] for row in bounty_rows]
+        if not winners:
+            return {"paid": paid, "reward": 0}
+
+        parked_stake_sum = sum(row["amount"] for row in bounty_rows)
+        cursor.execute(
+            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+            (gid,),
+        )
+        row = cursor.fetchone()
+        available = row["total_collected"] if row else 0
+        reward_total = max(0, min(alive_count, parked_stake_sum, available))
+        if reward_total <= 0:
+            return {"paid": paid, "reward": 0}
+
+        cursor.execute(
+            """
+            UPDATE nonprofit_fund
+            SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+            WHERE guild_id = ?
+            """,
+            (reward_total, gid),
+        )
+        base = reward_total // len(winners)
+        dust = reward_total - base * len(winners)
+        self._set_economy_ledger_context(
+            cursor,
+            source="mafia_bounty_payout",
+            related_type="mafia_game",
+            related_id=game_id,
+            reason="mafia town bounty payout",
+            metadata={"day_number": day_number, "target_id": lynched_id},
+        )
+        try:
+            for index, contributor_id in enumerate(winners):
+                amount = base + (dust if index == 0 else 0)
+                if amount <= 0:
+                    continue
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, contributor_id, gid),
+                )
+                if cursor.rowcount == 1:
+                    paid[contributor_id] = amount
+        finally:
+            self._clear_economy_ledger_context(cursor)
+        return {"paid": paid, "reward": reward_total}
+
     def resolve_day_bounties(
         self,
         *,
@@ -1061,79 +1220,16 @@ class MafiaRepository(BaseRepository):
         other stakes stay forfeited. Atomic.
         Returns {"paid": {contributor_id: amount}, "reward": int}.
         """
-        gid = self.normalize_guild_id(guild_id)
-        paid: dict[int, int] = {}
-        reward_total = 0
-        if lynched_id is None or not lynched_was_mafia:
-            return {"paid": paid, "reward": 0}
-
         with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT contributor_id, amount FROM mafia_bounties
-                WHERE game_id = ? AND day_number = ? AND target_id = ?
-                """,
-                (game_id, day_number, lynched_id),
+            return self._resolve_day_bounties_in_transaction(
+                conn.cursor(),
+                game_id=game_id,
+                guild_id=guild_id,
+                day_number=day_number,
+                lynched_id=lynched_id,
+                lynched_was_mafia=lynched_was_mafia,
+                alive_count=alive_count,
             )
-            bounty_rows = cursor.fetchall()
-            winners = [r["contributor_id"] for r in bounty_rows]
-            if not winners:
-                return {"paid": paid, "reward": 0}
-
-            # The reward can only be funded by the coins players actually staked
-            # on THIS target — never by unrelated nonprofit-fund revenue (tax
-            # fines, capped-payout overflow, loans, disbursements). Cap by the
-            # parked stake sum, then by alive_count, then by what the fund holds.
-            parked_stake_sum = sum(r["amount"] for r in bounty_rows)
-            cursor.execute(
-                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                (gid,),
-            )
-            row = cursor.fetchone()
-            available = row["total_collected"] if row else 0
-            reward_total = max(0, min(alive_count, parked_stake_sum, available))
-            if reward_total <= 0:
-                return {"paid": paid, "reward": 0}
-
-            # Draw the reward out of the nonprofit fund and split it.
-            cursor.execute(
-                """
-                UPDATE nonprofit_fund
-                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id = ?
-                """,
-                (reward_total, gid),
-            )
-            base = reward_total // len(winners)
-            dust = reward_total - base * len(winners)
-            self._set_economy_ledger_context(
-                cursor,
-                source="mafia_bounty_payout",
-                related_type="mafia_game",
-                related_id=game_id,
-                reason="mafia town bounty payout",
-                metadata={"day_number": day_number, "target_id": lynched_id},
-            )
-            try:
-                for i, cid in enumerate(winners):
-                    amount = base + (dust if i == 0 else 0)
-                    if amount <= 0:
-                        continue
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (amount, cid, gid),
-                    )
-                    if cursor.rowcount == 1:
-                        paid[cid] = amount
-            finally:
-                self._clear_economy_ledger_context(cursor)
-            return {"paid": paid, "reward": reward_total}
 
     # ── Eligibility & opt-out ───────────────────────────────────────────────
 

@@ -99,7 +99,11 @@ class ServiceContainer:
     def _init_database(self) -> None:
         from database import Database
 
-        self._components["database_runtime"] = Database(db_path=self.db_path)
+        runtime = Database(db_path=self.db_path)
+        self._components["database_runtime"] = runtime
+        # Repositories must use the runtime's normalized path. In particular,
+        # ``:memory:`` becomes one shared URI held alive by Database.
+        self.db_path = runtime.db_path
 
     def _init_repositories(self) -> None:
         from repositories.bankruptcy_repository import BankruptcyRepository

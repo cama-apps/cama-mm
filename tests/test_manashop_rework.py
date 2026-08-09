@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -97,6 +100,179 @@ def test_mark_item_used_atomic_blocks_double_use_same_day(mana_repo):
     assert mana_repo.mark_item_used_atomic(USER, TEST_GUILD_ID, "blood_pact", today) is True
     # Different day is allowed.
     assert mana_repo.mark_item_used_atomic(USER, TEST_GUILD_ID, "regrowth", "2026-05-10") is True
+
+
+def test_manashop_purchase_shortfall_does_not_claim_or_tap(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 40)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+
+    result = mana_repo.try_purchase_item_atomic(
+        USER,
+        TEST_GUILD_ID,
+        "wildfire",
+        today,
+        cost=150,
+        tap_mana=True,
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "insufficient_balance"
+    assert result["balance"] == 40
+    assert mana_repo.was_item_used_today(USER, TEST_GUILD_ID, "wildfire", today) is False
+    assert mana_repo.is_mana_consumed(USER, TEST_GUILD_ID) is False
+
+
+def test_manashop_purchase_rolls_back_claim_and_tap_on_debit_error(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 200)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+    with mana_repo.connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_manashop_debit
+            BEFORE UPDATE OF jopacoin_balance ON players
+            BEGIN
+                SELECT RAISE(ABORT, 'forced debit failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced debit failure"):
+        mana_repo.try_purchase_item_atomic(
+            USER,
+            TEST_GUILD_ID,
+            "wildfire",
+            today,
+            cost=150,
+            tap_mana=True,
+        )
+
+    assert player_repository.get_balance(USER, TEST_GUILD_ID) == 200
+    assert mana_repo.was_item_used_today(USER, TEST_GUILD_ID, "wildfire", today) is False
+    assert mana_repo.is_mana_consumed(USER, TEST_GUILD_ID) is False
+
+
+def test_concurrent_manashop_purchases_cannot_overdraw_or_leak_claims(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 100)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+    start = threading.Barrier(2)
+
+    def purchase(item_id: str):
+        start.wait()
+        return mana_repo.try_purchase_item_atomic(
+            USER,
+            TEST_GUILD_ID,
+            item_id,
+            today,
+            cost=75,
+            tap_mana=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(purchase, ["item_a", "item_b"]))
+
+    assert [result["success"] for result in results].count(True) == 1
+    assert sorted(result["reason"] for result in results if not result["success"]) == [
+        "insufficient_balance"
+    ]
+    assert player_repository.get_balance(USER, TEST_GUILD_ID) == 25
+    claimed = [
+        item_id
+        for item_id in ("item_a", "item_b")
+        if mana_repo.was_item_used_today(USER, TEST_GUILD_ID, item_id, today)
+    ]
+    assert len(claimed) == 1
+
+
+def test_manashop_refund_is_atomic_idempotent_and_restores_tap(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 200)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+    purchased = mana_repo.try_purchase_item_atomic(
+        USER,
+        TEST_GUILD_ID,
+        "wildfire",
+        today,
+        cost=150,
+        tap_mana=True,
+    )
+    assert purchased["success"] is True
+    purchase_id = purchased["purchase_id"]
+    assert mana_repo.get_item_purchase(purchase_id)["status"] == "pending"
+
+    first = mana_repo.refund_item_purchase_atomic(purchase_id)
+    repeated = mana_repo.refund_item_purchase_atomic(purchase_id)
+
+    assert first is True
+    assert repeated is False
+    assert mana_repo.get_item_purchase(purchase_id)["status"] == "refunded"
+    assert player_repository.get_balance(USER, TEST_GUILD_ID) == 200
+    assert mana_repo.was_item_used_today(USER, TEST_GUILD_ID, "wildfire", today) is False
+    assert mana_repo.is_mana_consumed(USER, TEST_GUILD_ID) is False
+
+
+def test_manashop_stale_refund_cannot_reverse_repurchase(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 400)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+
+    first = mana_repo.try_purchase_item_atomic(
+        USER, TEST_GUILD_ID, "wildfire", today, cost=150, tap_mana=True
+    )
+    assert mana_repo.refund_item_purchase_atomic(first["purchase_id"]) is True
+    second = mana_repo.try_purchase_item_atomic(
+        USER, TEST_GUILD_ID, "wildfire", today, cost=150, tap_mana=True
+    )
+
+    assert second["purchase_id"] != first["purchase_id"]
+    assert mana_repo.refund_item_purchase_atomic(first["purchase_id"]) is False
+    assert player_repository.get_balance(USER, TEST_GUILD_ID) == 250
+    assert mana_repo.was_item_used_today(USER, TEST_GUILD_ID, "wildfire", today) is True
+    assert mana_repo.is_mana_consumed(USER, TEST_GUILD_ID) is True
+
+
+def test_manashop_retry_recovers_purchase_abandoned_before_effects(
+    mana_repo, player_repository
+):
+    today = "2026-05-09"
+    player_repository.add(USER, "Buyer", TEST_GUILD_ID)
+    player_repository.update_balance(USER, TEST_GUILD_ID, 400)
+    mana_repo.claim_mana_atomic(USER, TEST_GUILD_ID, "Mountain", today)
+    abandoned = mana_repo.try_purchase_item_atomic(
+        USER, TEST_GUILD_ID, "wildfire", today, cost=150, tap_mana=True
+    )
+    with mana_repo.connection() as conn:
+        conn.execute(
+            "UPDATE manashop_purchases SET updated_at = 0 WHERE purchase_id = ?",
+            (abandoned["purchase_id"],),
+        )
+
+    retried = mana_repo.try_purchase_item_atomic(
+        USER, TEST_GUILD_ID, "wildfire", today, cost=150, tap_mana=True
+    )
+
+    assert retried["success"] is True
+    assert retried["purchase_id"] != abandoned["purchase_id"]
+    assert mana_repo.get_item_purchase(abandoned["purchase_id"])["status"] == "refunded"
+    assert player_repository.get_balance(USER, TEST_GUILD_ID) == 250
+    assert mana_repo.is_mana_consumed(USER, TEST_GUILD_ID) is True
 
 
 # ──────────────────────────────────────────────────────────────────

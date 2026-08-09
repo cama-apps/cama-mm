@@ -361,26 +361,6 @@ class MafiaService:
             lynched_id is not None and by_id[lynched_id].role == MafiaRole.MAFIA
         )
 
-        def _commit_post_claim() -> dict:
-            # Both durable side effects fire ONLY after the day resolution is
-            # atomically claimed below: the Bookie HIT mark and the Town Bounty
-            # fund-draw. Doing either earlier let a lost race with an admin
-            # stop/abort leave a spurious HIT on record (which a rival finalize
-            # would pay a skim for) or debit the nonprofit fund (and re-pay,
-            # since bounties aren't marked) for a day that then reports
-            # unresolved. The current day's hit still feeds THIS day's skim via
-            # _bookie_hit_today (in memory) before finalize, so same-day cash-out
-            # is unaffected.
-            self._mark_bookie_wager(game, dn, lynched_id)
-            return self.repo.resolve_day_bounties(
-                game_id=game.game_id,
-                guild_id=guild_id,
-                day_number=dn,
-                lynched_id=lynched_id,
-                lynched_was_mafia=lynched_was_mafia,
-                alive_count=len(post_alive),
-            )
-
         # Win evaluation.
         jester_win = (
             lynched_id is not None and by_id[lynched_id].role == MafiaRole.JESTER
@@ -406,18 +386,17 @@ class MafiaService:
             winner = None  # undecided → the game continues to the next cycle
 
         if winner is None:
-            # Apply the lynch death and roll into the next night. No payout.
-            if lynched_id is not None:
-                self.repo.set_player_alive(
-                    game.game_id, lynched_id, alive=False,
-                    eliminated_phase=MafiaPhase.DAY,
-                )
             advanced = self.repo.advance_to_next_cycle(
-                game.game_id, ended_at=int(time.time())
+                game.game_id,
+                ended_at=int(time.time()),
+                guild_id=guild_id,
+                day_number=dn,
+                lynched_id=lynched_id,
+                lynched_was_mafia=lynched_was_mafia,
+                alive_count=len(post_alive),
             )
-            if not advanced:
+            if not isinstance(advanced, dict) or not advanced.get("applied"):
                 return {"resolved": False, "reason": "day_already_resolved"}
-            bounty = _commit_post_claim()
             return {
                 "resolved": True,
                 "continued": True,
@@ -425,7 +404,7 @@ class MafiaService:
                 "day_number": dn,
                 "lynched_id": lynched_id,
                 "alive_count": len(post_alive),
-                "bounty": bounty,
+                "bounty": advanced["bounty"],
                 "vote_breakdown": self._vote_breakdown(valid_votes),
                 "vote_detail": self._vote_detail(valid_votes),
                 "twist": game.twist_event.value if game.twist_event else None,
@@ -464,14 +443,15 @@ class MafiaService:
                 else frozenset()
             ),
             nonprofit_overflow=nonprofit_overflow,
+            day_number=dn,
+            lynched_was_mafia=lynched_was_mafia,
+            alive_count=len(post_alive),
         )
         if not finalize.get("applied"):
             return {
                 "resolved": False,
                 "reason": finalize.get("reason", "day_already_resolved"),
             }
-        bounty = _commit_post_claim()
-
         return {
             "resolved": True,
             "continued": False,
@@ -492,7 +472,7 @@ class MafiaService:
             "bookie_id": bookie_id,
             "bookie_payout": deltas.get(bookie_id, 0) if bookie_id is not None else 0,
             "nonprofit_overflow": nonprofit_overflow,
-            "bounty": bounty,
+            "bounty": finalize["bounty"],
             "cap_forced": cap_reached and not jester_win and alive_mafia > 0,
             "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),
             "vanity_taxes": finalize.get("vanity_taxes", {}),
@@ -640,28 +620,6 @@ class MafiaService:
     def _cycle_cap_reached(self, dn: int) -> bool:
         """Absolute backstop — force a standing tally past MAX_CYCLES cycles."""
         return dn >= MAX_CYCLES
-
-    def _mark_bookie_wager(
-        self, game: MafiaGame, dn: int, lynched_id: int | None
-    ) -> None:
-        """Durably flag a correct Bookie wager for this day (result='HIT')."""
-        if lynched_id is None:
-            return
-        wagers = self.repo.get_actions(
-            game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
-        )
-        for w in wagers:
-            if w["target_id"] == lynched_id and w.get("result") != "HIT":
-                self.repo.record_action(
-                    game_id=game.game_id,
-                    guild_id=game.guild_id,
-                    actor_id=w["actor_id"],
-                    target_id=lynched_id,
-                    action_type=MafiaActionType.WAGER,
-                    phase=MafiaPhase.NIGHT,
-                    result="HIT",
-                    day_number=dn,
-                )
 
     # ────────────────────────────────────────────────────────────────────
     # Action submission

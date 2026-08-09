@@ -784,6 +784,49 @@ def test_buy_yes_walks_deeper(prediction_service, prediction_repo, player_reposi
     assert result["total_cost"] == _quote_total(take_l1 * 52 + take_l2 * 53, "buy")
 
 
+def test_buy_preview_walks_live_levels_without_mutating_book(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="preview market?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_repo.replace_levels(
+        pid,
+        [
+            ("yes_ask", 40, 2),
+            ("yes_ask", 70, 3),
+            ("yes_bid", 35, 5),
+        ],
+    )
+    book_before = prediction_repo.get_book(pid)
+
+    preview = prediction_service.preview_buy(
+        prediction_id=pid,
+        side="yes",
+        contracts=5,
+    )
+
+    assert preview == {
+        "contracts": 5,
+        "fills": [(40, 2), (70, 3)],
+        "total_cost": _quote_total(2 * 40 + 3 * 70, "buy"),
+    }
+    assert prediction_repo.get_book(pid) == book_before
+
+    executed = prediction_service.buy_contracts(
+        prediction_id=pid,
+        discord_id=1,
+        side="yes",
+        contracts=5,
+    )
+    assert executed["fills"] == preview["fills"]
+    assert executed["total_cost"] == preview["total_cost"]
+
+
 def test_buy_rejections(prediction_service, player_repository):
     """All buy rejection paths against one market: insufficient depth,
     insufficient balance, non-positive contracts, per-trade cap, and debt.
