@@ -421,6 +421,7 @@ class TestCommandLayerConstraints:
         }
         allowed_pure_calls = {
             "self.dig_service._force_event_for.add",
+            "self.lobby_service.set_readycheck_state",
             "self.disburse_service.METHOD_LABELS.get",
             "disburse_service.METHOD_LABELS.get",
         }

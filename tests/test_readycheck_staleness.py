@@ -249,6 +249,79 @@ async def test_trigger_er_auto_counted_ready(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_new_readycheck_accepts_reaction_before_checkmark_and_ping(monkeypatch):
+    """The new message must become current before its first Discord await."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
+    reaction_results = []
+    rebuilt_reaction_fields = []
+
+    async def react_while_checkmark_is_added(message, _emoji):
+        reaction_results.append(
+            env.lobby_service.add_readycheck_reaction(
+                2,
+                "<@2>",
+                guild_id=env.guild_id,
+                expected_message_id=message.id,
+            )
+        )
+        rebuilt = env.cog.rebuild_readycheck_embed(
+            guild_id=env.guild_id,
+            expected_message_id=message.id,
+        )
+        rebuilt_reaction_fields.extend(
+            field
+            for field in rebuilt.fields
+            if "Reacted to Ready Check" in field.name
+        )
+
+    monkeypatch.setattr(FakeMessage, "add_reaction", react_while_checkmark_is_added)
+
+    status, _ = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok"
+    assert reaction_results == [True]
+    assert len(rebuilt_reaction_fields) == 1
+    assert rebuilt_reaction_fields[0].name == "✅ Reacted to Ready Check (2)"
+    assert set(rebuilt_reaction_fields[0].value.splitlines()) == {"<@1>", "<@2>"}
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {
+        1: "<@1>",
+        2: "<@2>",
+    }
+
+
+@pytest.mark.asyncio
+async def test_new_readycheck_keeps_auto_confirms_when_ping_delivery_fails(monkeypatch):
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE})
+    send_message = env.thread.send
+
+    async def fail_ping(content=None, *, embed=None, allowed_mentions=None):
+        if content is not None:
+            raise RuntimeError("ping failed")
+        return await send_message(
+            content=content,
+            embed=embed,
+            allowed_mentions=allowed_mentions,
+        )
+
+    monkeypatch.setattr(env.thread, "send", fail_ping)
+
+    with pytest.raises(RuntimeError, match="ping failed"):
+        await env.cog._execute_readycheck(
+            env.guild,
+            env.guild_id,
+            invoker_id=1,
+        )
+
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {
+        1: "<@1>"
+    }
+
+
+@pytest.mark.asyncio
 async def test_players_joined_under_ten_minutes_are_auto_counted_ready(monkeypatch):
     fixed_now = 2_000_000.0
     env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})

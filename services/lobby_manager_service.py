@@ -924,6 +924,7 @@ class LobbyManagerService:
         guild_id: int | None = None,
         created_at: float | None = None,
         lobby_kind: LobbyKind | str | None = None,
+        initial_reacted: dict[int, str] | None = None,
     ) -> None:
         key = self._lobby_key(guild_id, lobby_kind)
         with self._state_lock:
@@ -931,7 +932,11 @@ class LobbyManagerService:
             self.readycheck_channel_ids[key] = channel_id
             self.readycheck_lobby_ids[key] = lobby_ids
             self.readycheck_player_data[key] = player_data
-            self.readycheck_reacted[key] = {}
+            self.readycheck_reacted[key] = {
+                discord_id: tag
+                for discord_id, tag in (initial_reacted or {}).items()
+                if discord_id in lobby_ids
+            }
             self.readycheck_declined[key] = set()
             self.readycheck_created_ats[key] = (
                 created_at if created_at is not None else time.time()
