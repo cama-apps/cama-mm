@@ -273,11 +273,12 @@ def draw_rating_distribution(
     # Calculate statistics
     mean = np.mean(ratings_arr)
     std = np.std(ratings_arr)
-    skewness = stats.skew(ratings_arr)
-    kurtosis = stats.kurtosis(ratings_arr)  # Excess kurtosis (0 = normal)
+    has_spread = std > np.finfo(float).eps * max(1.0, abs(float(mean)))
+    skewness = stats.skew(ratings_arr) if has_spread else None
+    kurtosis = stats.kurtosis(ratings_arr) if has_spread else None
 
     # Shapiro-Wilk test for normality (only reliable for n < 5000)
-    if len(ratings_arr) >= 3:
+    if has_spread and len(ratings_arr) >= 3:
         if len(ratings_arr) <= 5000:
             _, shapiro_p = stats.shapiro(ratings_arr)
         else:
@@ -310,11 +311,19 @@ def draw_rating_distribution(
 
     # Fit and plot normal distribution curve
     x_range = np.linspace(min_rating, max_rating, 200)
-    normal_pdf = stats.norm.pdf(x_range, mean, std)
-    ax.plot(x_range, normal_pdf, color="#57F287", linewidth=2.5, label="Normal fit", linestyle="-")
+    if has_spread:
+        normal_pdf = stats.norm.pdf(x_range, mean, std)
+        ax.plot(
+            x_range,
+            normal_pdf,
+            color="#57F287",
+            linewidth=2.5,
+            label="Normal fit",
+            linestyle="-",
+        )
 
     # Also show a kernel density estimate for comparison
-    if len(ratings_arr) >= 5:
+    if has_spread and len(ratings_arr) >= 5:
         kde = stats.gaussian_kde(ratings_arr)
         kde_pdf = kde(x_range)
         ax.plot(x_range, kde_pdf, color="#FEE75C", linewidth=2, label="KDE", linestyle="--", alpha=0.8)
@@ -346,7 +355,13 @@ def draw_rating_distribution(
         else:
             normality_text = f"Non-normal (p={shapiro_p:.3f})"
 
-    stats_text = f"μ={mean:.0f}, σ={std:.0f}\nSkew={skewness:.2f}, Kurt={kurtosis:.2f}"
+    if has_spread:
+        stats_text = (
+            f"μ={mean:.0f}, σ={std:.0f}\n"
+            f"Skew={skewness:.2f}, Kurt={kurtosis:.2f}"
+        )
+    else:
+        stats_text = f"μ={mean:.0f}, σ=0\nSkew=N/A, Kurt=N/A"
     if normality_text:
         stats_text += f"\n{normality_text}"
 

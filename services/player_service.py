@@ -395,6 +395,28 @@ class PlayerService:
         """
         return self.player_repo.get_last_double_or_nothing(discord_id, guild_id)
 
+    def settle_double_or_nothing(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        won: bool,
+        now: int,
+        cooldown_seconds: int,
+        bypass_cooldown: bool = False,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically settle and persist one Double or Nothing attempt."""
+        return self.player_repo.settle_double_or_nothing_atomic(
+            discord_id,
+            guild_id,
+            cost=cost,
+            won=won,
+            now=now,
+            cooldown_seconds=cooldown_seconds,
+            bypass_cooldown=bypass_cooldown,
+        )
+
     def log_double_or_nothing(
         self,
         discord_id: int,

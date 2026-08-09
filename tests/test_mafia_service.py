@@ -985,8 +985,8 @@ def _nonprofit_fund(mafia_repo) -> int:
 def test_bounty_not_paid_when_finalize_loses_race(
     mafia_service, mafia_repo, player_repo, monkeypatch
 ):
-    """The Town Bounty draws from the nonprofit fund, so it must fire only after
-    the day resolution is atomically claimed. If finalize loses the race (the
+    """The Town Bounty draws from the nonprofit fund, so it must share the
+    transaction that claims the day resolution. If finalize loses the race (the
     game was resolved out-of-band, e.g. an admin stop racing the 5-min phase
     loop), the fund must not be debited and no contributor paid — otherwise the
     fund is double-spent for a day that reports unresolved."""
@@ -1052,6 +1052,121 @@ def test_bounty_not_paid_when_advance_loses_race(
     assert _nonprofit_fund(mafia_repo) == fund_before
     for pid in (2, 3):
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == bal_before[pid]
+
+
+def test_continue_day_commits_bookie_hit_and_bounty_with_phase_claim(
+    mafia_service, mafia_repo, player_repo, monkeypatch
+):
+    """A crash after the DAY -> NIGHT commit must not lose its durable effects."""
+    roster = [
+        (601, MafiaRole.MAFIA, True),
+        (606, MafiaRole.MAFIA, False),
+        (602, MafiaRole.TOWNIE, False),
+        (603, MafiaRole.DETECTIVE, False),
+        (604, MafiaRole.DOCTOR, False),
+        (605, MafiaRole.BOOKIE, False),
+    ]
+    gid = _new_game(mafia_repo, roster)
+    for pid in (602, 603):
+        player_repo.update_balance(pid, TEST_GUILD_ID, 10)
+
+    assert mafia_service.submit_night_action(
+        TEST_GUILD_ID, 605, 601, MafiaActionType.WAGER
+    )["ok"]
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 602, 601)["ok"]
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 603, 601)["ok"]
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+
+    real_advance = mafia_repo.advance_to_next_cycle
+
+    def crash_after_commit(*args, **kwargs):
+        result = real_advance(*args, **kwargs)
+        assert result
+        raise RuntimeError("crash after continuing-day commit")
+
+    monkeypatch.setattr(mafia_repo, "advance_to_next_cycle", crash_after_commit)
+    with pytest.raises(RuntimeError, match="crash after continuing-day commit"):
+        mafia_service.resolve_day(TEST_GUILD_ID)
+
+    wagers = mafia_repo.get_actions(
+        gid, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=1
+    )
+    assert any(w["actor_id"] == 605 and w.get("result") == "HIT" for w in wagers)
+    assert {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (602, 603)} == {
+        602: 10,
+        603: 10,
+    }
+    assert _nonprofit_fund(mafia_repo) == 0
+
+    monkeypatch.setattr(mafia_repo, "advance_to_next_cycle", real_advance)
+    assert mafia_service.resolve_day(TEST_GUILD_ID) == {
+        "resolved": False,
+        "reason": "no_active_day",
+    }
+    assert {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (602, 603)} == {
+        602: 10,
+        603: 10,
+    }
+
+
+def test_final_day_commits_bookie_hit_and_bounty_with_phase_claim(
+    mafia_service, mafia_repo, player_repo, monkeypatch
+):
+    """A crash after the DAY -> RESOLVED commit must not lose its durable effects."""
+    gid = _new_game(
+        mafia_repo,
+        [
+            (601, MafiaRole.MAFIA, True),
+            (602, MafiaRole.TOWNIE, False),
+            (603, MafiaRole.TOWNIE, False),
+            (604, MafiaRole.DOCTOR, False),
+            (605, MafiaRole.BOOKIE, False),
+        ],
+    )
+    for pid in (602, 603):
+        player_repo.update_balance(pid, TEST_GUILD_ID, 10)
+
+    assert mafia_service.submit_night_action(
+        TEST_GUILD_ID, 605, 601, MafiaActionType.WAGER
+    )["ok"]
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 602, 601)["ok"]
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 603, 601)["ok"]
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+
+    real_finalize = mafia_repo.finalize_day_resolution
+
+    def crash_after_commit(**kwargs):
+        result = real_finalize(**kwargs)
+        assert result["applied"]
+        raise RuntimeError("crash after final-day commit")
+
+    monkeypatch.setattr(mafia_repo, "finalize_day_resolution", crash_after_commit)
+    with pytest.raises(RuntimeError, match="crash after final-day commit"):
+        mafia_service.resolve_day(TEST_GUILD_ID)
+
+    wagers = mafia_repo.get_actions(
+        gid, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=1
+    )
+    assert any(w["actor_id"] == 605 and w.get("result") == "HIT" for w in wagers)
+    assert {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (602, 603)} == {
+        602: 10,
+        603: 10,
+    }
+    assert _nonprofit_fund(mafia_repo) == 0
+
+    monkeypatch.setattr(mafia_repo, "finalize_day_resolution", real_finalize)
+    assert mafia_service.resolve_day(TEST_GUILD_ID) == {
+        "resolved": False,
+        "reason": "no_active_day",
+    }
+    assert {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (602, 603)} == {
+        602: 10,
+        603: 10,
+    }
 
 
 def test_pot_for_roster_helper():
@@ -1389,8 +1504,8 @@ def test_bookie_hit_not_recorded_when_resolution_loses_race(
     mafia_service, mafia_repo, player_repo, monkeypatch
 ):
     """The Bookie HIT is durable state that feeds the end-of-week skim, so like
-    the Town Bounty it must be committed only AFTER the day resolution is
-    claimed. If resolve_day loses the race (an admin stop/abort resolved the day
+    the Town Bounty it must share the transaction that claims the day resolution.
+    If resolve_day loses the race (an admin stop/abort resolved the day
     out-of-band), no spurious HIT may be left on record — otherwise a rival
     finalize pays the Bookie a skim for a lynch that was never enacted."""
     _bookie_scenario(mafia_repo, player_repo, wager_target=601)
@@ -1410,21 +1525,10 @@ def test_bookie_hit_not_recorded_when_resolution_loses_race(
         "finalize_day_resolution",
         lambda **kw: {"applied": False, "reason": "already_resolved"},
     )
-    # Spy on the durable-HIT writer: the deterministic, load-insensitive core
-    # guarantee is that _commit_post_claim (its only caller during resolution) is
-    # never reached when the claim is lost — independent of re-reading DB state.
-    marked: list = []
-    real_mark = mafia_service._mark_bookie_wager
-    monkeypatch.setattr(
-        mafia_service,
-        "_mark_bookie_wager",
-        lambda *a, **k: marked.append(a) or real_mark(*a, **k),
-    )
     rd = mafia_service.resolve_day(TEST_GUILD_ID)
     assert rd["resolved"] is False
-    assert marked == []  # the HIT writer was never invoked
 
-    # And the observable outcome: no spurious HIT persisted, Bookie unpaid.
+    # The lost claim leaves no spurious HIT persisted and the Bookie unpaid.
     wagers = mafia_repo.get_actions(
         game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
     )

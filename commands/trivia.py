@@ -23,7 +23,7 @@ from domain.pet_evolution import PetActivity
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import apply_daily_reward_event, scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.pet_activity import record_pet_activity
@@ -58,14 +58,6 @@ def _streak_bonus_for_streak(streak: int) -> int:
 def _jc_for_streak(streak: int) -> int:
     """Total JC earned for a correct answer at this streak."""
     return TRIVIA_REWARD_PER_QUESTION + _streak_bonus_for_streak(streak)
-
-
-def _apply_daily_reward_event(bot, guild_id: int | None, amount: int) -> int:
-    """Apply the active daily event after central minigame scaling."""
-    event_service = getattr(bot, "economy_event_service", None)
-    if event_service is None or amount <= 0:
-        return amount
-    return event_service.adjust_reward(guild_id, amount)
 
 
 OPTION_LABELS = ["A", "B", "C", "D"]
@@ -308,11 +300,19 @@ class TriviaView(discord.ui.View):
 
             jc += streak_bonus_jc
             jc = scale_minigame_jc_delta(jc)
-            jc = _apply_daily_reward_event(
-                self.cog.bot,
-                self.session.guild_id,
-                jc,
-            )
+            try:
+                jc = await asyncio.to_thread(
+                    apply_daily_reward_event,
+                    jc,
+                    guild_id=self.session.guild_id,
+                    economy_event_service=getattr(
+                        self.cog.bot, "economy_event_service", None
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to apply daily reward event; using scaled trivia reward"
+                )
 
             if effects is not None:
                 # White: tithe to the nonprofit fund from the player's NET payout

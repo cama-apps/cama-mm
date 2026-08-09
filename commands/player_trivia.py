@@ -23,7 +23,7 @@ from config import (
 from domain.pet_evolution import PetActivity
 from services.permissions import has_admin_permission
 from services.player_trivia_service import PlayerTriviaQuestion
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import apply_daily_reward_event, scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.pet_activity import record_pet_activity
@@ -31,14 +31,6 @@ from utils.pet_activity import record_pet_activity
 logger = logging.getLogger("cama_bot.commands.player_trivia")
 
 OPTION_LABELS = ("A", "B", "C", "D")
-
-
-def _apply_daily_reward_event(bot, guild_id: int | None, amount: int) -> int:
-    """Apply the active daily event after central minigame scaling."""
-    event_service = getattr(bot, "economy_event_service", None)
-    if event_service is None or amount <= 0:
-        return amount
-    return event_service.adjust_reward(guild_id, amount)
 
 
 @dataclass
@@ -192,11 +184,19 @@ class PlayerTriviaView(discord.ui.View):
 
         question = self.session.questions[self.question_index]
         reward = max(0, scale_minigame_jc_delta(PLAYER_TRIVIA_REWARD_PER_CORRECT))
-        reward = _apply_daily_reward_event(
-            self.cog.bot,
-            self.session.guild_id,
-            reward,
-        )
+        try:
+            reward = await asyncio.to_thread(
+                apply_daily_reward_event,
+                reward,
+                guild_id=self.session.guild_id,
+                economy_event_service=getattr(
+                    self.cog.bot, "economy_event_service", None
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to apply daily reward event; using scaled player-trivia reward"
+            )
         try:
             result = await asyncio.to_thread(
                 self.cog.bot.player_trivia_service.settle_answer,

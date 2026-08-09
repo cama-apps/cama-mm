@@ -531,6 +531,26 @@ class TestDeathAndRevival:
         pet_repo.mark_hatch_announced(pet.pet_id, TEST_GUILD_ID, NOW + HATCH + 1)
         assert pet_repo.find_unannounced_hatches(NOW + HATCH) == []
 
+    def test_unannounced_pet_backlogs_are_oldest_first_and_bounded(
+        self, pet_repo, player_repository, rich_player
+    ):
+        for discord_id in (101, 102):
+            player_repository.add(discord_id, f"Owner {discord_id}", TEST_GUILD_ID)
+            player_repository.update_balance(discord_id, TEST_GUILD_ID, 100)
+        pets = [
+            adopt(pet_repo, discord_id=100, now=NOW + 20, hatch_seconds=1),
+            adopt(pet_repo, discord_id=101, now=NOW, hatch_seconds=1),
+            adopt(pet_repo, discord_id=102, now=NOW + 10, hatch_seconds=1),
+        ]
+
+        hatches = pet_repo.find_unannounced_hatches(NOW + 30, limit=2)
+        assert [pet.pet_id for pet in hatches] == [pets[1].pet_id, pets[2].pet_id]
+
+        for pet, died_at in zip(pets, (NOW + 60, NOW + 40, NOW + 50), strict=True):
+            assert claim_death(pet_repo, pet, died_at=died_at)
+        deaths = pet_repo.get_unannounced_deaths(limit=2)
+        assert [pet.pet_id for pet in deaths] == [pets[1].pet_id, pets[2].pet_id]
+
 
 class TestSaltLickAndRename:
     def test_salt_lick_sets_pampered_and_counts_care(
@@ -594,6 +614,28 @@ class TestRefunds:
 
         pet_repo.mark_refund_announced(TEST_GUILD_ID, WEEK, NOW + 1)
         assert pet_repo.get_unannounced_refunds() == []
+
+    def test_refund_announcement_backlog_is_oldest_first_and_bounded(
+        self, pet_repo
+    ):
+        payload = '{"payouts": [], "scaled_down": false}'
+        with pet_repo.connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO pet_refund_windows
+                    (guild_id, week_key, paid_at, total_paid, announcement_payload)
+                VALUES (?, ?, ?, 0, ?)
+                """,
+                [
+                    (TEST_GUILD_ID, "2026-W32", NOW + 20, payload),
+                    (TEST_GUILD_ID, "2026-W30", NOW, payload),
+                    (TEST_GUILD_ID, "2026-W31", NOW + 10, payload),
+                ],
+            )
+
+        notices = pet_repo.get_unannounced_refunds(limit=2)
+
+        assert [notice.week_key for notice in notices] == ["2026-W30", "2026-W31"]
 
     def test_pay_refunds_claims_window_once(
         self, pet_repo, player_repository, rich_player

@@ -9,7 +9,6 @@ import functools
 import logging
 import random
 import time
-import uuid
 from typing import TYPE_CHECKING
 
 import discord
@@ -1201,63 +1200,72 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Atomically claim the cooldown before any money moves (admins bypass).
-        # The read-based check above is only a fast path for the friendly
-        # remaining-time message; concurrent presses could both pass it, so
-        # this check-and-set is the authoritative gate against double payouts.
-        if not is_admin:
-            claimed = await asyncio.to_thread(
-                self.player_service.player_repo.try_claim_double_or_nothing,
-                user_id, guild_id, now, DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+        # Choose the result before claiming anything, then atomically re-check
+        # eligibility, move the money, advance cooldown, and store the outcome.
+        won = random.random() < 0.5
+        settlement = await asyncio.to_thread(
+            functools.partial(
+                self.player_service.settle_double_or_nothing,
+                user_id,
+                guild_id,
+                cost=cost,
+                won=won,
+                now=now,
+                cooldown_seconds=DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+                bypass_cooldown=is_admin,
             )
-            if not claimed:
-                try:
-                    await interaction.response.send_message(
-                        "You already tempted fate recently. "
-                        "Wait for your Double or Nothing cooldown before trying again.",
-                        ephemeral=True,
-                    )
-                except discord.HTTPException:
-                    # The claim write can outlast the 3s ack window; the
-                    # claim was refused, so nothing needs rolling back.
-                    logger.warning(
-                        "Double-or-nothing cooldown notice could not be "
-                        "sent for %s",
-                        user_id,
-                    )
-                return
+        )
+        if not settlement["success"]:
+            current_balance = int(settlement.get("balance", balance))
+            reason = settlement["reason"]
+            if reason == "on_cooldown":
+                message = (
+                    "You already tempted fate recently. "
+                    "Wait for your Double or Nothing cooldown before trying again."
+                )
+            elif reason == "in_debt":
+                message = (
+                    f"You're in debt ({current_balance} {JOPACOIN_EMOTE}). "
+                    "You can't double debt. Pay it off first!"
+                )
+            elif reason == "nothing_to_double":
+                message = (
+                    f"You only have {current_balance} {JOPACOIN_EMOTE} — exactly the ante cost. "
+                    "Nothing left to double! Earn more first."
+                )
+            elif reason == "not_registered":
+                message = (
+                    "You need to `/player register` before you can gamble. "
+                    "Can't double nothing if you have nothing."
+                )
+            else:
+                message = (
+                    f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have "
+                    f"{current_balance}. Can't afford the ante."
+                )
+            try:
+                await interaction.response.send_message(message, ephemeral=True)
+            except discord.HTTPException:
+                logger.warning(
+                    "Double-or-nothing rejection notice could not be sent for %s",
+                    user_id,
+                )
+            return
 
-        # Defer - we'll send the result publicly. Not gated: the 30-day
-        # cooldown claim already committed, so the flip must still run on a
-        # lapsed token (safe_followup falls back to channel.send) instead of
-        # consuming the monthly attempt with no coin flip.
+        balance = int(settlement["balance_before"])
+        balance_after_cost = int(settlement["balance_at_risk"])
+        final_balance = int(settlement["balance_after"])
+        won = bool(settlement["won"])
+
+        # Settlement is already durable, so a lapsed token cannot consume the
+        # attempt without its balance result and history row.
         await safe_defer(interaction, ephemeral=False)
 
-        # Deduct cost first
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-        balance_after_cost = balance - cost
-
-        # 50/50 flip
-        won = random.random() < 0.5
-
         if won:
-            # WIN: Double the remaining balance
-            winnings = balance_after_cost
-            final_balance = await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, winnings
-            )
             result_title = "DOUBLE!"
             result_color = 0x00FF00  # Green
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
         else:
-            # LOSE: forfeit the staked remainder. Debit relatively (not
-            # set_balance(0)) so a credit that landed after the balance read
-            # (e.g. a tip mid-flip) isn't clobbered — mirrors the additive win
-            # path. adjust_balance returns the true post-debit balance, so the
-            # display stays correct even if a concurrent credit landed.
-            final_balance = await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, -balance_after_cost
-            )
             result_title = "NOTHING!"
             result_color = 0xFF0000  # Red
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_LOSE
@@ -1290,20 +1298,6 @@ class ShopCommands(commands.Cog):
                 result_message = random.choice(examples)
             else:
                 result_message = "The coin has decided your fate."
-
-        # Log the result
-        await asyncio.to_thread(
-            functools.partial(
-                self.player_service.log_double_or_nothing,
-                discord_id=user_id,
-                guild_id=guild_id,
-                cost=cost,
-                balance_before=balance_after_cost,
-                balance_after=final_balance,
-                won=won,
-                spin_time=now,
-            )
-        )
 
         # Build result embed
         embed = discord.Embed(
@@ -1876,58 +1870,88 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Item claim BEFORE charging so every manashop item is once-per-day and
-        # concurrent calls don't briefly deduct then refund.
+        # The daily claim, conditional debit, and optional mana tap are one
+        # transaction, so a concurrent spend cannot overdraw or leak a claim.
         from services.mana_service import get_today_pst as _today_pst
         today = _today_pst()
-        claimed = await asyncio.to_thread(
-            mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
-        )
-        if not claimed:
-            await _reject(
-                f"**{display_name}** is once-per-day. Already used today.",
+        purchase = await asyncio.to_thread(
+            functools.partial(
+                mana_repo.try_purchase_item_atomic,
+                user_id,
+                guild_id,
+                item_key,
+                today,
+                cost=cost,
+                tap_mana=tier == "ult",
             )
+        )
+        if not purchase["success"]:
+            reason = purchase["reason"]
+            current_balance = int(purchase.get("balance", balance))
+            if reason == "already_used":
+                message = f"**{display_name}** is once-per-day. Already used today."
+            elif reason == "purchase_in_progress":
+                message = (
+                    f"Your previous **{display_name}** purchase is still starting. "
+                    "Try again shortly."
+                )
+            elif reason == "mana_tapped":
+                message = "Your mana was already tapped this turn. Try again tomorrow."
+            elif reason == "not_registered":
+                message = "You need to `/player register` first."
+            else:
+                message = (
+                    f"You need {cost} {JOPACOIN_EMOTE} for {display_name}. "
+                    f"You have {current_balance}."
+                )
+            await _reject(message)
             return
 
-        if tier == "ult":
-            tapped_now = await asyncio.to_thread(
-                mana_repo.mark_mana_consumed_atomic, user_id, guild_id,
+        # Use the authoritative transaction balance for all result copy.
+        balance = int(purchase["balance"]) + cost
+        purchase_id = purchase.get("purchase_id")
+        if purchase_id is not None:
+            delivery_claimed = await asyncio.to_thread(
+                mana_repo.mark_item_purchase_applying_atomic,
+                str(purchase_id),
             )
-            if not tapped_now:
-                try:
-                    await asyncio.to_thread(
-                        mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
-                    )
-                except Exception:
-                    logger.exception("Failed to release daily-use slot for %s", item_key)
+            if not delivery_claimed:
+                await asyncio.to_thread(
+                    mana_repo.refund_item_purchase_atomic,
+                    str(purchase_id),
+                )
                 await _reject(
-                    "Your mana was already tapped this turn. Try again tomorrow.",
+                    f"Could not start **{display_name}** safely; purchase refunded."
                 )
                 return
 
-        # Defer (public) only once the purchase proceeds. Not gated: the
-        # daily claim (and for ults the tap) already committed, so the effect
-        # must still be delivered on a lapsed token (safe_followup and
-        # channel sends still work).
+        # Defer only after the full purchase settlement is durable.
         await safe_defer(interaction, ephemeral=False)
 
-        # Charge cost AFTER the claim won so failure paths don't show a
-        # charge-then-refund flicker.
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-
         async def _refund(reason: str) -> None:
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-            # Release the daily-use slot so the player can retry after the failure.
             try:
                 await asyncio.to_thread(
-                    mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
+                    mana_repo.refund_item_purchase_atomic,
+                    str(purchase_id),
                 )
             except Exception:
-                logger.exception("Failed to release daily-use slot for %s", item_key)
+                logger.exception("Failed to refund manashop purchase for %s", item_key)
             # Deliberately public: the first followup after the public defer
             # ignores ephemeral, and a visible refund notice is honest about
             # the publicly in-progress purchase failing.
             await safe_followup(interaction, content=reason)
+
+        async def _complete_purchase() -> None:
+            if purchase_id is None:
+                return
+            completed = await asyncio.to_thread(
+                mana_repo.complete_item_purchase_atomic,
+                str(purchase_id),
+            )
+            if not completed:
+                raise RuntimeError(
+                    f"Manashop purchase {purchase_id} lost its applying state"
+                )
 
         async def _apply_hostile_loss(
             victim_id: int,
@@ -2041,7 +2065,7 @@ class ShopCommands(commands.Cog):
                 await _refund("No eligible targets to scorch; refunded.")
                 return
             targets = random.sample(eligible, min(3, len(eligible)))
-            event_prefix = f"pyroclasm:{uuid.uuid4().hex}"
+            event_prefix = f"pyroclasm:{purchase_id}"
             total_destroyed = 0
             total_absorbed = 0
             victim_lines = []
@@ -2131,6 +2155,7 @@ class ShopCommands(commands.Cog):
                     f"🏝️🔍 **INSIGHT** — {target.mention} hasn't started digging.\n"
                     f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
                 ))
+                await _complete_purchase()
                 return
             tunnel = tunnel_info.get("tunnel") or tunnel_info
             relics = tunnel_info.get("relics") or []
@@ -2225,7 +2250,7 @@ class ShopCommands(commands.Cog):
             if not eligible:
                 await _refund("No living souls to drain; refunded.")
                 return
-            event_prefix = f"soul_harvest:{uuid.uuid4().hex}"
+            event_prefix = f"soul_harvest:{purchase_id}"
             total_drained = 0
             total_absorbed = 0
             scaled_drain = scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET)
@@ -2427,7 +2452,7 @@ class ShopCommands(commands.Cog):
                 if p.discord_id != user_id
                 and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
-            event_prefix = f"wildfire:{uuid.uuid4().hex}"
+            event_prefix = f"wildfire:{purchase_id}"
             total_drained = 0
             total_absorbed = 0
             requested_drains = []
@@ -2577,6 +2602,8 @@ class ShopCommands(commands.Cog):
                 f"+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + 800 + ult_refund})"
             ))
+
+        await _complete_purchase()
 
 
     def _compute_largest_recent_loss(

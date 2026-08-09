@@ -577,13 +577,11 @@ class TestChartsDoNotLeakFigures:
         return plt.get_fignums()
 
     def test_successful_and_failed_renders_register_no_figure(self):
-        """One success and repeated failures leave pyplot's registry unchanged.
+        """Varied and degenerate distributions leave pyplot's registry unchanged.
 
         Merged from two tests that each paid the matplotlib setup cost; the
         assertions are the union of both.
         """
-        from numpy.linalg import LinAlgError
-
         from utils.drawing.ratings import draw_rating_distribution
 
         before = len(self._fignums())
@@ -591,14 +589,9 @@ class TestChartsDoNotLeakFigures:
         assert out is not None and out.getvalue()
         assert len(self._fignums()) == before
 
-        failures = 0
         for _ in range(3):
-            # Identical ratings -> singular covariance in the KDE.
-            try:
-                draw_rating_distribution([1500] * 8)
-            except LinAlgError:
-                failures += 1
-        assert failures == 3, "expected the singular-covariance failure path"
+            out = draw_rating_distribution([1500] * 8)
+            assert out is not None and out.getvalue()
         assert len(self._fignums()) == before, (
-            "a failed chart render leaked a figure into pyplot's registry"
+            "chart rendering leaked a figure into pyplot's registry"
         )

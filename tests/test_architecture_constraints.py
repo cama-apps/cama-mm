@@ -238,52 +238,43 @@ class TestCommandLayerConstraints:
             except SyntaxError:
                 continue
 
-            runtime_repo_imports = []
-            for node in ast.walk(tree):
-                # Skip imports inside TYPE_CHECKING blocks
-                if isinstance(node, ast.If):
-                    test = node.test
-                    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
-                        continue
-                    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
-                        continue
+            def is_type_checking(test: ast.expr) -> bool:
+                return (
+                    isinstance(test, ast.Name) and test.id == "TYPE_CHECKING"
+                ) or (
+                    isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+                )
 
-            # Collect only top-level / runtime imports
-            for node in ast.iter_child_nodes(tree):
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    module = None
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            module = alias.name
-                            if module.startswith("repositories") and not any(
-                                p in module for p in allowed_patterns
-                            ):
-                                runtime_repo_imports.append(module)
-                    elif isinstance(node, ast.ImportFrom) and node.module:
-                        module = node.module
+            class RuntimeRepositoryImportVisitor(ast.NodeVisitor):
+                def __init__(self, allowed: list[str]) -> None:
+                    self.allowed = allowed
+                    self.imports: list[str] = []
+
+                def visit_If(self, node: ast.If) -> None:
+                    if is_type_checking(node.test):
+                        for child in node.orelse:
+                            self.visit(child)
+                        return
+                    self.generic_visit(node)
+
+                def visit_Import(self, node: ast.Import) -> None:
+                    for alias in node.names:
+                        module = alias.name
                         if module.startswith("repositories") and not any(
-                            p in module for p in allowed_patterns
+                            pattern in module for pattern in self.allowed
                         ):
-                            runtime_repo_imports.append(module)
-                elif isinstance(node, ast.If):
-                    # Check if this is a TYPE_CHECKING guard - skip it
-                    test = node.test
-                    is_type_checking = False
-                    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
-                        is_type_checking = True
-                    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
-                        is_type_checking = True
-                    if is_type_checking:
-                        continue
-                    # Non-TYPE_CHECKING if blocks: check their body for imports
-                    for child in ast.walk(node):
-                        if (
-                            isinstance(child, ast.ImportFrom)
-                            and child.module
-                            and child.module.startswith("repositories")
-                            and not any(p in child.module for p in allowed_patterns)
-                        ):
-                            runtime_repo_imports.append(child.module)
+                            self.imports.append(module)
+
+                def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                    module = node.module
+                    if module and module.startswith("repositories") and not any(
+                        pattern in module for pattern in self.allowed
+                    ):
+                        self.imports.append(module)
+
+            visitor = RuntimeRepositoryImportVisitor(allowed_patterns)
+            visitor.visit(tree)
+            runtime_repo_imports = visitor.imports
 
             assert not runtime_repo_imports, (
                 f"{file_path.name} imports repositories at runtime: {runtime_repo_imports}. "

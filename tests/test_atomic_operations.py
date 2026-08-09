@@ -479,6 +479,13 @@ class TestMatchCorrectAtomic:
             for i in team1 + team2
         ]
 
+        claim_token = "atomic-correction-1"
+        match_repo.claim_match_correction(
+            match_id,
+            TEST_GUILD_ID,
+            new_winning_team=2,
+            owner_token=claim_token,
+        )
         correction_id = match_repo.correct_match_result_atomic(
             match_id=match_id,
             guild_id=TEST_GUILD_ID,
@@ -492,6 +499,7 @@ class TestMatchCorrectAtomic:
             openskill_updates=new_os,
             rating_history_updates=rating_history_updates,
             corrected_by=99,
+            claim_token=claim_token,
         )
         assert correction_id is not None and correction_id > 0
 
@@ -534,6 +542,13 @@ class TestMatchCorrectAtomic:
             effective_deal_ids=[],
         )
 
+        claim_token = "atomic-correction-2"
+        match_repo.claim_match_correction(
+            match_id,
+            TEST_GUILD_ID,
+            new_winning_team=2,
+            owner_token=claim_token,
+        )
         correction_id = match_repo.correct_match_result_atomic(
             match_id=match_id,
             guild_id=TEST_GUILD_ID,
@@ -547,6 +562,7 @@ class TestMatchCorrectAtomic:
             openskill_updates=[],
             rating_history_updates=[],
             corrected_by=None,
+            claim_token=claim_token,
         )
         assert correction_id is None
 

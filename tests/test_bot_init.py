@@ -214,6 +214,7 @@ def test_init_services_failure_is_retryable_and_success_is_idempotent(
     class FakeContainer:
         def __init__(self, attempt):
             self.attempt = attempt
+            self.db_path = f"normalized:{attempt}"
             self.expose_calls = 0
 
         def initialize(self):
@@ -240,7 +241,7 @@ def test_init_services_failure_is_retryable_and_success_is_idempotent(
         return container
 
     def monitoring_factory(db_path, *, usage_monitor):
-        assert db_path == bot_module.DB_PATH
+        assert db_path == containers[factory_attempts].db_path
         assert usage_monitor is bot_module.usage_monitor
         events.append(("monitoring", factory_attempts))
         if factory_attempts == 1 and failure_stage == "monitoring":
@@ -302,6 +303,7 @@ def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
     class CapturingContainer:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.db_path = "normalized:database"
             self.initialized = False
             self.exposed = False
             instances.append(self)
@@ -315,7 +317,7 @@ def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
             self.exposed = True
 
     def monitoring_factory(db_path, *, usage_monitor):
-        assert db_path == bot_module.DB_PATH
+        assert db_path == instances[0].db_path
         assert usage_monitor is bot_module.usage_monitor
         return monitor
 
@@ -351,6 +353,30 @@ def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
     assert container.exposed
     assert fake_bot.monitoring_service is monitor
     assert bot_module._container is container
+
+
+def test_init_services_monitoring_uses_container_normalized_database(monkeypatch):
+    """Health checks must probe the same normalized database as repositories."""
+    import bot as bot_module
+
+    class FakeBot:
+        latency = 0.0
+        guilds = []
+
+    fake_bot = FakeBot()
+    monkeypatch.setattr(bot_module, "_container", None)
+    monkeypatch.setattr(bot_module, "bot", fake_bot)
+    monkeypatch.setattr(bot_module, "DB_PATH", ":memory:")
+
+    bot_module._init_services()
+
+    container = bot_module._container
+    assert container is not None
+    try:
+        assert fake_bot.monitoring_service.db_path == container.db_path
+        assert fake_bot.monitoring_service.snapshot(fake_bot).db_ok is True
+    finally:
+        container._components["database_runtime"].close()
 
 
 if __name__ == "__main__":

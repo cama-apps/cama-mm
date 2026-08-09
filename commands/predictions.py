@@ -25,6 +25,7 @@ from commands.checks import require_gamba_channel, require_guild
 from config import (
     PREDICTION_CONTRACT_VALUE,
     PREDICTION_INITIAL_FAIR_DEFAULT,
+    PREDICTION_MAX_CONTRACTS_PER_TRADE,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
     PREDICTION_RECENT_TRADES_SHOWN,
@@ -380,10 +381,8 @@ class BuyContractsModal(discord.ui.Modal):
         max_available: int,
         unit_price: int,
         balance: int,
+        sample_cost: int | None,
     ):
-        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
-        from repositories.prediction_repository import _quote_total
-
         side_label = side.upper()
         # Title carries the price quote in % so the user sees the implied
         # probability up front. Discord caps modal titles at 45 chars.
@@ -394,11 +393,10 @@ class BuyContractsModal(discord.ui.Modal):
         # Hard cap per trade (positive integers up to PREDICTION_MAX_CONTRACTS_PER_TRADE).
         effective_max = min(max_available, PREDICTION_MAX_CONTRACTS_PER_TRADE)
         self.contracts.label = f"How many? ({balance} jopa available)"
-        sample_cost = _quote_total(5 * unit_price, "buy")
         self.contracts.placeholder = (
             f"e.g. 5  →  costs {sample_cost} jopa, wins "
             f"{5 * PREDICTION_CONTRACT_VALUE} if {side_label}"
-            if effective_max >= 5
+            if effective_max >= 5 and sample_cost is not None
             else f"max {effective_max} at top of book"
         )
         # keep question for context if we ever need it in followups
@@ -629,6 +627,24 @@ class PersistentMarketView(discord.ui.View):
             )
             return
 
+        sample_cost = None
+        effective_max = min(max_avail, PREDICTION_MAX_CONTRACTS_PER_TRADE)
+        if effective_max >= 5:
+            try:
+                sample_quote = await asyncio.to_thread(
+                    self.cog.prediction_service.preview_buy,
+                    prediction_id,
+                    side,
+                    5,
+                )
+                sample_cost = int(sample_quote["total_cost"])
+                unit_price = int(sample_quote["fills"][0][0])
+            except (KeyError, TypeError, ValueError):
+                await interaction.response.send_message(
+                    "The order book changed. Please try again.", ephemeral=True
+                )
+                return
+
         modal = BuyContractsModal(
             cog=self.cog,
             prediction_id=prediction_id,
@@ -637,6 +653,7 @@ class PersistentMarketView(discord.ui.View):
             max_available=max_avail,
             unit_price=unit_price,
             balance=balance,
+            sample_cost=sample_cost,
         )
         await interaction.response.send_modal(modal)
 

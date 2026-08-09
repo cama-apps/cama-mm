@@ -90,6 +90,18 @@ def test_monitoring_snapshot_degrades_on_db_failure(tmp_path):
     assert snapshot.reasons
 
 
+def test_monitoring_snapshot_rejects_empty_sqlite_file(tmp_path):
+    db_path = tmp_path / "empty.db"
+    db_path.touch()
+    service = MonitoringService(str(db_path), git_sha="abc123")
+
+    snapshot = service.snapshot()
+
+    assert snapshot.status == "degraded"
+    assert snapshot.db_ok is False
+    assert any("DB probe failed" in reason for reason in snapshot.reasons)
+
+
 def test_format_health_snapshot_includes_requested_fields(repo_db_path):
     monitor = UsageMonitor()
     monitor.record_command("admin health")

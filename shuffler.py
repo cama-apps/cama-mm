@@ -74,6 +74,21 @@ class _PoolMatchup:
     log_entry: tuple  # 12-tuple consumed by BalancedShuffler._log_top_matchups
 
 
+@dataclass(slots=True)
+class _PoolSelection:
+    """Combination-wide score inputs retained for full split evaluation."""
+
+    selected_indices: tuple[int, ...]
+    selected_players: list[Player]
+    excluded_players: list[Player]
+    excluded_names: list[str]
+    recent_penalty: float
+    exclusion_penalty: float
+    combo_penalty: float
+    rd_priority: float
+    preselection_score: float
+
+
 @dataclass(frozen=True, slots=True)
 class _RoleAssignmentMetrics:
     """Precomputed score inputs for one team's role assignment."""
@@ -1385,41 +1400,42 @@ class BalancedShuffler:
             f"Evaluating {total_player_combinations} player combinations from pool of {len(players)}"
         )
 
-        # For very large pools, sampling keeps runtime reasonable.
-        # Keep the threshold conservative to maintain quality for small/medium pools.
+        # For very large pools, sampling keeps roster selection reasonable.
         max_player_combinations = 2500
         if total_player_combinations > max_player_combinations:
-            selected_indices_iter = self._sample_player_combinations(
+            selected_indices_source = self._sample_player_combinations(
                 pool_rng, len(players), 10, max_player_combinations
             )
             logger.info(
                 f"Sampling {max_player_combinations} of {total_player_combinations} player combinations"
             )
         else:
-            selected_indices_iter = itertools.combinations(range(len(players)), 10)
+            selected_indices_source = itertools.combinations(range(len(players)), 10)
 
-        # Generate all (or sampled) ways to choose 10 players from the pool
-        for selected_indices in selected_indices_iter:
+        def build_selection(selected_indices: tuple[int, ...]) -> _PoolSelection:
             selected_players = [players[i] for i in selected_indices]
+            selected_index_set = set(selected_indices)
             excluded_players = [
-                players[i] for i in range(len(players)) if i not in selected_indices
+                player
+                for index, player in enumerate(players)
+                if index not in selected_index_set
             ]
-            excluded_names = [p.name for p in excluded_players]
-
-            # The recent-player penalty is fixed for all splits of these ten.
-            selected_names = frozenset(p.name for p in selected_players)
+            excluded_names = [player.name for player in excluded_players]
+            selected_names = frozenset(player.name for player in selected_players)
             recent_penalty = (
-                len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+                len(selected_names & recent_match_names)
+                * self.recent_match_penalty_weight
             )
-
             exclusion_penalty = (
                 sum(exclusion_counts.get(name, 0) for name in excluded_names)
                 * self.exclusion_penalty_weight
             )
-
-            # Calculate split penalty for package deals (one selected, one excluded)
-            selected_discord_ids = {p.discord_id for p in selected_players if p.discord_id}
-            excluded_discord_ids = {p.discord_id for p in excluded_players if p.discord_id}
+            selected_discord_ids = {
+                player.discord_id for player in selected_players if player.discord_id
+            }
+            excluded_discord_ids = {
+                player.discord_id for player in excluded_players if player.discord_id
+            }
             deal_split_penalty = self._calculate_package_deal_split_penalty(
                 selected_discord_ids,
                 excluded_discord_ids,
@@ -1430,26 +1446,81 @@ class BalancedShuffler:
                 selected_discord_ids,
                 low_priority_ids,
             )
-
-            # Rating spread penalty: incentivize selecting players of closer skill
-            selected_values = [self._player_value(p, scoring_context) for p in selected_players]
-            rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
-            lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
-            lobby_wait_bonus = self._calculate_lobby_wait_bonus(
-                selected_players,
-                lobby_wait_minutes,
-            )
-
-            # Penalties that are constant across every team split of this combination.
+            selected_values = [
+                self._player_value(player, scoring_context)
+                for player in selected_players
+            ]
             combo_penalty = (
                 exclusion_penalty
                 + deal_split_penalty
                 + low_priority_penalty
-                + rating_spread_penalty
-                - lobby_rating_bonus
-                - lobby_wait_bonus
+                + self._calculate_rating_spread_penalty(selected_values)
+                - self._calculate_lobby_rating_bonus(selected_values)
+                - self._calculate_lobby_wait_bonus(
+                    selected_players,
+                    lobby_wait_minutes,
+                )
             )
             rd_priority = self._calculate_rd_priority(selected_players)
+
+            # Rating-only split balance is cheap and ranks rosters before the
+            # expensive role-assignment stage. All real score terms are still
+            # evaluated for the retained candidates below.
+            if all(math.isfinite(value) for value in selected_values):
+                total_value = sum(selected_values)
+                split_value_diff = min(
+                    abs(
+                        total_value
+                        - 2 * sum(selected_values[index] for index in team1_indices)
+                    )
+                    for team1_indices, _ in _UNIQUE_TEAM_SPLITS
+                )
+            else:
+                split_value_diff = 0.0
+            return _PoolSelection(
+                selected_indices=selected_indices,
+                selected_players=selected_players,
+                excluded_players=excluded_players,
+                excluded_names=excluded_names,
+                recent_penalty=recent_penalty,
+                exclusion_penalty=exclusion_penalty,
+                combo_penalty=combo_penalty,
+                rd_priority=rd_priority,
+                preselection_score=(
+                    combo_penalty + recent_penalty - rd_priority + split_value_diff
+                ),
+            )
+
+        selections = (
+            build_selection(tuple(selected_indices))
+            for selected_indices in selected_indices_source
+        )
+        if len(players) >= 15:
+            full_evaluation_rosters = 24
+            selections = iter(
+                heapq.nsmallest(
+                    full_evaluation_rosters,
+                    selections,
+                    key=lambda selection: (
+                        selection.preselection_score,
+                        selection.selected_indices,
+                    ),
+                )
+            )
+            logger.info(
+                "Fully evaluating the best %d sampled rosters after cheap preselection",
+                full_evaluation_rosters,
+            )
+
+        # Generate all (or sampled) ways to choose 10 players from the pool
+        for selection in selections:
+            selected_players = selection.selected_players
+            excluded_players = selection.excluded_players
+            excluded_names = selection.excluded_names
+            recent_penalty = selection.recent_penalty
+            exclusion_penalty = selection.exclusion_penalty
+            combo_penalty = selection.combo_penalty
+            rd_priority = selection.rd_priority
 
             # For this combination of 10, try all ways to split into teams
             for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:

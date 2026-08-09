@@ -215,6 +215,21 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def settle_double_or_nothing_atomic(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        won: bool,
+        now: int,
+        cooldown_seconds: int,
+        bypass_cooldown: bool = False,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically validate, settle, and record one Double or Nothing spin."""
+        ...
+
+    @abstractmethod
     def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
@@ -555,6 +570,25 @@ class IBetRepository(ABC):
         ...
 
     @abstractmethod
+    def get_settled_bets_for_match(self, match_id: int) -> list[dict]:
+        """Return settled bets and payouts used to correct a match result."""
+        ...
+
+    @abstractmethod
+    def settle_bet_correction_atomic(
+        self,
+        match_id: int,
+        old_winners: list[dict],
+        new_winners: list[dict],
+        guild_id: int | None,
+        pool_mode: bool = True,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
+    ) -> dict[int, int]:
+        """Atomically reverse stale payouts and settle corrected winners."""
+        ...
+
+    @abstractmethod
     def get_match_blood_pact_skims(
         self, match_id: int, guild_id: int | None
     ) -> dict[int, int]: ...
@@ -697,7 +731,35 @@ class IMatchRepository(ABC):
         openskill_updates: list[tuple[int, float, float]],
         rating_history_updates: list[dict],
         corrected_by: int | None,
+        claim_token: str,
     ) -> int | None: ...
+
+    @abstractmethod
+    def claim_match_correction(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        *,
+        new_winning_team: int,
+        owner_token: str,
+        stale_after_seconds: int = 300,
+    ) -> dict:
+        """Claim or resume one durable match-result transition."""
+        ...
+
+    @abstractmethod
+    def release_match_correction_claim(
+        self, match_id: int, owner_token: str
+    ) -> bool:
+        """Release current ownership while retaining recovery state."""
+        ...
+
+    @abstractmethod
+    def complete_match_correction_claim(
+        self, match_id: int, owner_token: str
+    ) -> bool:
+        """Clear a fully-settled correction claim."""
+        ...
 
     @abstractmethod
     def apply_enrichment_atomic(
@@ -765,6 +827,44 @@ class IMatchRepository(ABC):
     def get_match_jc_changes(
         self, match_id: int, guild_id: int | None
     ) -> dict[int, dict[str, int]]: ...
+
+    @abstractmethod
+    def update_participant_bonus_jc(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        bonus_by_player: dict[int, int],
+        win_bonus_by_player: dict[int, int] | None = None,
+    ) -> None:
+        """Persist actual participant and win-bonus balance deltas."""
+        ...
+
+    @abstractmethod
+    def claim_match_bonuses_paid(self, match_id: int, guild_id: int | None) -> bool:
+        """Claim the one-time right to pay a match's post-core bonuses."""
+        ...
+
+    @abstractmethod
+    def release_match_bonuses_claim(self, match_id: int, guild_id: int | None) -> bool:
+        """Release a bonus claim after compensating every partial credit."""
+        ...
+
+    @abstractmethod
+    def apply_win_bonus_reversal_atomic(
+        self,
+        match_id: int,
+        guild_id: int | None,
+        debits_by_player: dict[int, int],
+    ) -> None:
+        """Atomically reverse recorded win bonuses and mark them reversed."""
+        ...
+
+    @abstractmethod
+    def get_win_bonus_credited_ids(
+        self, match_id: int, guild_id: int | None
+    ) -> set[int]:
+        """Return players with an atomic ledger record of this win bonus."""
+        ...
 
     @abstractmethod
     def get_match_participants_bulk(
@@ -1149,6 +1249,13 @@ class IPredictionRepository(ABC):
         needed. Rejects atomically (no partial fills) if total available depth
         is insufficient or user balance < total cost.
         """
+        ...
+
+    @abstractmethod
+    def quote_buy_contracts(
+        self, prediction_id: int, side: str, contracts: int
+    ) -> dict:
+        """Quote a live-ladder buy without mutating levels or balances."""
         ...
 
     @abstractmethod
@@ -2104,6 +2211,40 @@ class IManaRepository(ABC):
     ) -> bool:
         """Atomically record that ``item_id`` was used for ``used_date``.
         Returns True on first use, False if already recorded for that date."""
+        ...
+
+    @abstractmethod
+    def try_purchase_item_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        item_id: str,
+        used_date: str,
+        *,
+        cost: int,
+        tap_mana: bool,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically claim, conditionally debit, and optionally tap an item."""
+        ...
+
+    @abstractmethod
+    def refund_item_purchase_atomic(self, purchase_id: str) -> bool:
+        """Exactly once reverse the stored debit/tap for one purchase ID."""
+        ...
+
+    @abstractmethod
+    def get_item_purchase(self, purchase_id: str) -> dict | None:
+        """Return one purchase and its durable lifecycle state."""
+        ...
+
+    @abstractmethod
+    def mark_item_purchase_applying_atomic(self, purchase_id: str) -> bool:
+        """Claim effect delivery for one pending purchase."""
+        ...
+
+    @abstractmethod
+    def complete_item_purchase_atomic(self, purchase_id: str) -> bool:
+        """Persist that this purchase's effect finished."""
         ...
 
 

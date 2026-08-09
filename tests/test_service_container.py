@@ -22,6 +22,20 @@ class TestServiceContainerInitialization:
 
         assert first is second
 
+    def test_in_memory_container_uses_one_normalized_database(self):
+        container = ServiceContainer(":memory:")
+
+        container.initialize()
+
+        runtime = container._components["database_runtime"]
+        player_repo = container._components["player_repo"]
+        match_repo = container._components["match_repo"]
+        assert container.db_path == runtime.db_path
+        assert player_repo.db_path == runtime.db_path
+        assert match_repo.db_path == runtime.db_path
+        assert player_repo.get_all(0) == []
+        runtime.close()
+
     def test_duel_repository_and_service_are_initialized_once(self, repo_db_path):
         """Duel components share one stable repository instance."""
         container = ServiceContainer(repo_db_path)

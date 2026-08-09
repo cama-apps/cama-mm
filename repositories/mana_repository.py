@@ -2,6 +2,9 @@
 Repository for daily MTG mana land assignments.
 """
 
+import time
+from uuid import uuid4
+
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IManaRepository
 
@@ -9,6 +12,7 @@ _BANKRUPT_BUFF_COLUMNS = {
     "insurance": "bankrupt_insurance_used",
     "reroll": "bankrupt_reroll_used",
 }
+_PENDING_PURCHASE_STALE_SECONDS = 60
 
 
 def _buff_column(buff: str) -> str:
@@ -308,6 +312,315 @@ class ManaRepository(BaseRepository, IManaRepository):
                 (discord_id, gid, item_id, used_date),
             )
             return cursor.rowcount > 0
+
+    def try_purchase_item_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        item_id: str,
+        used_date: str,
+        *,
+        cost: int,
+        tap_mana: bool,
+    ) -> dict[str, int | str | bool | None]:
+        """Claim, conditionally charge, and optionally tap a mana item atomically."""
+        if cost < 0:
+            raise ValueError("Manashop cost cannot be negative")
+
+        gid = self.normalize_guild_id(guild_id)
+        purchase_id = uuid4().hex
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            player_row = cursor.execute(
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            ).fetchone()
+            if player_row is None:
+                return {
+                    "success": False,
+                    "reason": "not_registered",
+                    "balance": 0,
+                }
+            balance = int(player_row["balance"])
+
+            already_used = cursor.execute(
+                """
+                SELECT uses.purchase_id, purchases.status, purchases.cost,
+                       purchases.tap_mana, purchases.updated_at
+                FROM manashop_daily_uses AS uses
+                LEFT JOIN manashop_purchases AS purchases
+                  ON purchases.purchase_id = uses.purchase_id
+                WHERE uses.discord_id = ? AND uses.guild_id = ?
+                  AND uses.item_id = ? AND uses.used_date = ?
+                """,
+                (discord_id, gid, item_id, used_date),
+            ).fetchone()
+            if already_used is not None:
+                stale_pending = (
+                    already_used["purchase_id"] is not None
+                    and already_used["status"] == "pending"
+                    and int(already_used["updated_at"] or 0)
+                    <= now - _PENDING_PURCHASE_STALE_SECONDS
+                )
+                if not stale_pending:
+                    return {
+                        "success": False,
+                        "reason": (
+                            "purchase_in_progress"
+                            if already_used["status"] == "pending"
+                            else "already_used"
+                        ),
+                        "balance": balance,
+                    }
+
+                stale_purchase_id = str(already_used["purchase_id"])
+                stale_cost = int(already_used["cost"])
+                cursor.execute(
+                    """
+                    UPDATE manashop_purchases
+                    SET status = 'refunded', updated_at = ?
+                    WHERE purchase_id = ? AND status = 'pending'
+                    """,
+                    (now, stale_purchase_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Pending manashop purchase changed during recovery")
+                cursor.execute(
+                    "DELETE FROM manashop_daily_uses WHERE purchase_id = ?",
+                    (stale_purchase_id,),
+                )
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (stale_cost, discord_id, gid),
+                )
+                balance += stale_cost
+                if bool(already_used["tap_mana"]):
+                    cursor.execute(
+                        """
+                        UPDATE player_mana
+                        SET consumed_today = 0, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM manashop_purchases
+                              WHERE discord_id = ? AND guild_id = ?
+                                AND used_date = ? AND tap_mana = 1
+                                AND status IN ('applying', 'completed')
+                          )
+                        """,
+                        (discord_id, gid, discord_id, gid, used_date),
+                    )
+
+            if tap_mana:
+                mana_row = cursor.execute(
+                    """
+                    SELECT consumed_today
+                    FROM player_mana
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (discord_id, gid),
+                ).fetchone()
+                if mana_row is None or bool(mana_row["consumed_today"]):
+                    return {
+                        "success": False,
+                        "reason": "mana_tapped",
+                        "balance": balance,
+                    }
+
+            if balance < cost:
+                return {
+                    "success": False,
+                    "reason": "insufficient_balance",
+                    "balance": balance,
+                }
+
+            cursor.execute(
+                """
+                INSERT INTO manashop_purchases
+                    (purchase_id, discord_id, guild_id, item_id, used_date,
+                     cost, tap_mana, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    purchase_id,
+                    discord_id,
+                    gid,
+                    item_id,
+                    used_date,
+                    cost,
+                    int(tap_mana),
+                    now,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO manashop_daily_uses
+                    (discord_id, guild_id, item_id, used_date, purchase_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (discord_id, gid, item_id, used_date, purchase_id),
+            )
+            if tap_mana:
+                cursor.execute(
+                    """
+                    UPDATE player_mana
+                    SET consumed_today = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ? AND consumed_today = 0
+                    """,
+                    (discord_id, gid),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Mana tap changed during atomic purchase")
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND COALESCE(jopacoin_balance, 0) >= ?
+                """,
+                (cost, discord_id, gid, cost),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Player balance changed during atomic purchase")
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, gid),
+            )
+            return {
+                "success": True,
+                "reason": None,
+                "balance": balance - cost,
+                "purchase_id": purchase_id,
+                "status": "pending",
+            }
+
+    def get_item_purchase(self, purchase_id: str) -> dict | None:
+        """Return one immutable purchase identity and its lifecycle status."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT purchase_id, discord_id, guild_id, item_id, used_date,
+                       cost, tap_mana, status, created_at, updated_at
+                FROM manashop_purchases
+                WHERE purchase_id = ?
+                """,
+                (purchase_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def mark_item_purchase_applying_atomic(self, purchase_id: str) -> bool:
+        """Move a durable purchase into effect delivery exactly once."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE manashop_purchases
+                SET status = 'applying', updated_at = ?
+                WHERE purchase_id = ? AND status = 'pending'
+                """,
+                (int(time.time()), purchase_id),
+            )
+            return cursor.rowcount == 1
+
+    def complete_item_purchase_atomic(self, purchase_id: str) -> bool:
+        """Mark effect delivery complete without reopening a daily slot."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE manashop_purchases
+                SET status = 'completed', updated_at = ?
+                WHERE purchase_id = ? AND status = 'applying'
+                """,
+                (int(time.time()), purchase_id),
+            )
+            return cursor.rowcount == 1
+
+    def refund_item_purchase_atomic(self, purchase_id: str) -> bool:
+        """Reverse the exact stored debit/tap once, keyed by purchase identity."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            purchase = cursor.execute(
+                """
+                SELECT discord_id, guild_id, used_date, cost, tap_mana, status
+                FROM manashop_purchases
+                WHERE purchase_id = ?
+                """,
+                (purchase_id,),
+            ).fetchone()
+            if purchase is None or purchase["status"] not in ("pending", "applying"):
+                return False
+            discord_id = int(purchase["discord_id"])
+            gid = int(purchase["guild_id"])
+            cost = int(purchase["cost"])
+            cursor.execute(
+                """
+                UPDATE manashop_purchases
+                SET status = 'refunded', updated_at = ?
+                WHERE purchase_id = ? AND status IN ('pending', 'applying')
+                """,
+                (int(time.time()), purchase_id),
+            )
+            if cursor.rowcount != 1:
+                return False
+
+            cursor.execute(
+                "DELETE FROM manashop_daily_uses WHERE purchase_id = ?",
+                (purchase_id,),
+            )
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (cost, discord_id, gid),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Purchased player no longer exists")
+            if bool(purchase["tap_mana"]):
+                cursor.execute(
+                    """
+                    UPDATE player_mana
+                    SET consumed_today = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM manashop_purchases
+                          WHERE discord_id = ? AND guild_id = ?
+                            AND used_date = ? AND tap_mana = 1
+                            AND status IN ('pending', 'applying', 'completed')
+                      )
+                    """,
+                    (
+                        discord_id,
+                        gid,
+                        discord_id,
+                        gid,
+                        purchase["used_date"],
+                    ),
+                )
+            return True
 
     def unmark_item_used(
         self, discord_id: int, guild_id: int | None, item_id: str, used_date: str

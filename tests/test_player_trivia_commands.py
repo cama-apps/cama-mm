@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -403,8 +404,10 @@ async def test_daily_event_runs_after_single_player_trivia_central_scale(monkeyp
     class EventService:
         def __init__(self):
             self.calls = []
+            self.thread_ids = []
 
         def adjust_reward(self, guild_id, amount):
+            self.thread_ids.append(threading.get_ident())
             self.calls.append((guild_id, amount))
             return amount // 2
 
@@ -435,15 +438,49 @@ async def test_daily_event_runs_after_single_player_trivia_central_scale(monkeyp
 
     scale_spy.assert_called_once_with(10)
     assert event_service.calls == [(TEST_GUILD_ID, 10)]
+    assert event_service.thread_ids[0] != threading.get_ident()
     assert service.settlements[0][3] == 5
     assert session.total_jc == 5
 
 
-def test_missing_bot_or_player_trivia_event_service_is_neutral():
+@pytest.mark.asyncio
+async def test_daily_event_failure_does_not_strand_player_trivia_session():
     import commands.player_trivia as module
 
-    assert module._apply_daily_reward_event(None, TEST_GUILD_ID, 8) == 8
-    assert module._apply_daily_reward_event(SimpleNamespace(), TEST_GUILD_ID, 8) == 8
+    service = FakePlayerTriviaService(questions=[_question(1)])
+    service.next_result = {
+        "is_correct": True,
+        "reward": 1,
+        "score": 1,
+        "jc_earned": 1,
+        "completed": True,
+    }
+    cog = _cog(service)
+    cog.bot.economy_event_service = SimpleNamespace(
+        adjust_reward=MagicMock(side_effect=RuntimeError("event database unavailable"))
+    )
+    session = module.PlayerTriviaSession(
+        session_id=42,
+        user_id=101,
+        guild_id=TEST_GUILD_ID,
+        user=_user(),
+        questions=service.questions,
+    )
+    cog._sessions[(101, TEST_GUILD_ID)] = session
+    interaction = _interaction()
+
+    await module.PlayerTriviaView(session, cog)._handle_answer(interaction, 1)
+
+    assert service.settlements[0][3] == 1
+    assert session.active is False
+    assert cog._sessions == {}
+    interaction.response.edit_message.assert_awaited()
+
+
+def test_missing_bot_or_player_trivia_event_service_is_neutral():
+    from utils.economy_scaling import apply_daily_reward_event
+
+    assert apply_daily_reward_event(8, guild_id=TEST_GUILD_ID) == 8
 
 
 @pytest.mark.asyncio

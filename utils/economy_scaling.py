@@ -18,6 +18,18 @@ def scale_minigame_jc_delta(amount: int | float) -> int:
     return magnitude if value > 0 else -magnitude
 
 
+def apply_daily_reward_event(
+    amount: int,
+    *,
+    guild_id: int | None,
+    economy_event_service=None,
+) -> int:
+    """Apply today's reward policy to an already-scaled positive reward."""
+    if amount <= 0 or economy_event_service is None:
+        return int(amount)
+    return int(economy_event_service.adjust_reward(guild_id, amount))
+
+
 def adjust_generated_jc_reward(
     amount: int | float,
     *,
@@ -35,9 +47,11 @@ def adjust_generated_jc_reward(
     their own daily loss multiplier.
     """
     adjusted = scale_minigame_jc_delta(amount)
-    if adjusted <= 0 or economy_event_service is None:
-        return adjusted
-    return int(economy_event_service.adjust_reward(guild_id, adjusted))
+    return apply_daily_reward_event(
+        adjusted,
+        guild_id=guild_id,
+        economy_event_service=economy_event_service,
+    )
 
 
 def scale_deflationary_minigame_jc_delta(amount: int | float) -> int:

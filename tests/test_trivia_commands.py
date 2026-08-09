@@ -1,6 +1,7 @@
 """Tests for trivia cooldown and economy integration."""
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -199,8 +200,10 @@ class TestTriviaPayout:
         class EventService:
             def __init__(self):
                 self.calls = []
+                self.thread_ids = []
 
             def adjust_reward(self, guild_id, amount):
+                self.thread_ids.append(threading.get_ident())
                 self.calls.append((guild_id, amount))
                 return amount // 2
 
@@ -237,21 +240,52 @@ class TestTriviaPayout:
 
         scale_spy.assert_called_once_with(10)
         assert event_service.calls == [(TEST_GUILD_ID, 10)]
+        assert event_service.thread_ids[0] != threading.get_ident()
         assert session.total_jc == 5
         assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 5
 
-    def test_missing_bot_or_event_service_is_neutral(self):
+    @pytest.mark.asyncio
+    async def test_daily_event_failure_does_not_strand_correct_answer(
+        self, player_service, registered_player, monkeypatch
+    ):
         import commands.trivia as trivia_mod
 
-        assert trivia_mod._apply_daily_reward_event(None, TEST_GUILD_ID, 8) == 8
-        assert (
-            trivia_mod._apply_daily_reward_event(
-                SimpleNamespace(),
-                TEST_GUILD_ID,
-                8,
-            )
-            == 8
+        event_service = SimpleNamespace(
+            adjust_reward=MagicMock(side_effect=RuntimeError("event database unavailable"))
         )
+        bot = SimpleNamespace(
+            player_service=player_service,
+            mana_effects_service=None,
+            bankruptcy_service=None,
+            economy_event_service=event_service,
+        )
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player,
+            guild_id=TEST_GUILD_ID,
+            user=_trivia_user(registered_player),
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+        view = trivia_mod.TriviaView(session, _trivia_question(), 1, cog)
+        interaction = MagicMock()
+        interaction.user.id = registered_player
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        monkeypatch.setattr(trivia_mod, "generate_question", lambda _streak, _recent: None)
+
+        initial = player_service.get_balance(registered_player, TEST_GUILD_ID)
+        await view._handle_answer(interaction, 1)
+
+        assert session.streak == 1
+        assert session.total_jc == 1
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 1
+        interaction.response.edit_message.assert_awaited()
+        assert (registered_player, TEST_GUILD_ID) not in cog._sessions
+
+    def test_missing_bot_or_event_service_is_neutral(self):
+        from utils.economy_scaling import apply_daily_reward_event
+
+        assert apply_daily_reward_event(8, guild_id=TEST_GUILD_ID) == 8
 
 
 class TestTriviaCooldown:

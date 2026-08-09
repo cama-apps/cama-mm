@@ -2,6 +2,9 @@
 Tests for shop commands.
 """
 
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -9,6 +12,7 @@ import discord
 import pytest
 
 from commands.shop import (
+    JOPACOIN_EMOTE,
     PINGEDASH_COOLDOWN_SECONDS,
     PINGEDASH_COST,
     PINGEDASH_TENOR_URL,
@@ -36,6 +40,31 @@ def _make_interaction(user_id: int = 1001, guild_id: int | None = None):
     interaction.guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
     interaction.channel = None
     return interaction
+
+
+def _allow_manashop_purchase(bot, balance_before: int) -> None:
+    def purchase(_user_id, _guild_id, _item_id, _today, *, cost, tap_mana):
+        return {
+            "success": True,
+            "reason": None,
+            "balance": balance_before - cost,
+            "purchase_id": "purchase-1",
+        }
+
+    bot.mana_repo.try_purchase_item_atomic.side_effect = purchase
+
+
+def test_repository_contracts_require_atomic_shop_settlement():
+    from repositories.interfaces import IManaRepository, IPlayerRepository
+
+    assert "settle_double_or_nothing_atomic" in IPlayerRepository.__abstractmethods__
+    assert {
+        "try_purchase_item_atomic",
+        "refund_item_purchase_atomic",
+        "get_item_purchase",
+        "mark_item_purchase_applying_atomic",
+        "complete_item_purchase_atomic",
+    } <= IManaRepository.__abstractmethods__
 
 
 def test_pingedash_description_uses_configured_cost():
@@ -500,6 +529,117 @@ def test_pingedash_insufficient_balance_does_not_claim_cooldown(player_repositor
     assert rejected["cooldown_ends_at"] is None
     assert purchased["success"] is True
     assert purchased["balance"] == 0
+
+
+def test_double_or_nothing_settlement_rolls_back_and_retries_once(player_repository):
+    """The cooldown, money movement, and stored flip are one transaction."""
+    user_id = 1001
+    guild_id = 9000
+    now = 1_700_000_000
+    player_repository.add(user_id, "Buyer", guild_id)
+    player_repository.update_balance(user_id, guild_id, 200)
+
+    with player_repository.connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_double_or_nothing_log
+            BEFORE INSERT ON double_or_nothing_spins
+            BEGIN
+                SELECT RAISE(ABORT, 'forced log failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced log failure"):
+        player_repository.settle_double_or_nothing_atomic(
+            user_id,
+            guild_id,
+            cost=50,
+            won=False,
+            now=now,
+            cooldown_seconds=86_400,
+        )
+
+    assert player_repository.get_balance(user_id, guild_id) == 200
+    assert player_repository.get_last_double_or_nothing(user_id, guild_id) is None
+    assert player_repository.get_double_or_nothing_history(user_id, guild_id) == []
+
+    with player_repository.connection() as conn:
+        conn.execute("DROP TRIGGER fail_double_or_nothing_log")
+
+    settled = player_repository.settle_double_or_nothing_atomic(
+        user_id,
+        guild_id,
+        cost=50,
+        won=False,
+        now=now,
+        cooldown_seconds=86_400,
+    )
+    repeated = player_repository.settle_double_or_nothing_atomic(
+        user_id,
+        guild_id,
+        cost=50,
+        won=True,
+        now=now + 1,
+        cooldown_seconds=86_400,
+    )
+
+    assert settled == {
+        "success": True,
+        "reason": None,
+        "balance_before": 200,
+        "balance_at_risk": 150,
+        "balance_after": 0,
+        "won": False,
+        "cooldown_ends_at": now + 86_400,
+    }
+    assert repeated["success"] is False
+    assert repeated["reason"] == "on_cooldown"
+    assert player_repository.get_balance(user_id, guild_id) == 0
+    assert player_repository.get_double_or_nothing_history(user_id, guild_id) == [
+        {
+            "cost": 50,
+            "balance_before": 150,
+            "balance_after": 0,
+            "won": False,
+            "spin_time": now,
+        }
+    ]
+
+
+def test_concurrent_double_or_nothing_settlements_store_one_outcome(player_repository):
+    user_id = 1001
+    guild_id = 9000
+    now = 1_700_000_000
+    player_repository.add(user_id, "Buyer", guild_id)
+    player_repository.update_balance(user_id, guild_id, 200)
+    start = threading.Barrier(2)
+
+    def settle(won: bool):
+        start.wait()
+        return player_repository.settle_double_or_nothing_atomic(
+            user_id,
+            guild_id,
+            cost=50,
+            won=won,
+            now=now,
+            cooldown_seconds=86_400,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(settle, [True, False]))
+
+    successful = [result for result in results if result["success"]]
+    assert len(successful) == 1
+    assert [result["reason"] for result in results if not result["success"]] == [
+        "on_cooldown"
+    ]
+    expected_balance = 300 if successful[0]["won"] else 0
+    assert player_repository.get_balance(user_id, guild_id) == expected_balance
+    history = player_repository.get_double_or_nothing_history(user_id, guild_id)
+    assert len(history) == 1
+    assert history[0]["won"] is successful[0]["won"]
+    assert history[0]["balance_after"] == expected_balance
 
 
 @pytest.mark.asyncio
@@ -1805,7 +1945,7 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Green")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 1000)
 
     player_service = MagicMock()
     player_service.get_player.return_value = SimpleNamespace(discord_id=user_id)
@@ -1916,6 +2056,48 @@ async def test_manashop_failure_notices_precede_the_public_defer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_manashop_atomic_shortfall_rejects_before_effects(monkeypatch):
+    """A balance lost after the friendly pre-check must not consume the item."""
+    user_id = 1001
+    guild_id = 9000
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.try_purchase_item_atomic.return_value = {
+        "success": False,
+        "reason": "insufficient_balance",
+        "balance": 10,
+    }
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=user_id)
+    player_service.get_balance.return_value = 500
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=user_id, guild_id=guild_id)
+    safe_defer = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_defer", safe_defer)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="pyroclasm"), target=None,
+    )
+
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        user_id,
+        guild_id,
+        "pyroclasm",
+        ANY,
+        cost=25,
+        tap_mana=False,
+    )
+    safe_defer.assert_not_awaited()
+    player_service.adjust_balance.assert_not_called()
+    player_service.get_leaderboard.assert_not_called()
+    interaction.response.send_message.assert_awaited_once_with(
+        f"You need 25 {JOPACOIN_EMOTE} for Pyroclasm. You have 10.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("item", "color", "loss_method"),
     [
@@ -1933,7 +2115,7 @@ async def test_manashop_generated_recovery_scales_before_daily_event(
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color=color)
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 1_000)
     economy_event_service = MagicMock()
     economy_event_service.adjust_reward.return_value = 41
     bot.economy_event_service = economy_event_service
@@ -1978,7 +2160,7 @@ async def test_manashop_reprieve_grants_pool_and_reconciles_rolling_losses(
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="White")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 100)
     bot.buff_service = MagicMock()
     bot.buff_service.grant_reprieve.return_value = 77
     bot.protection_service = MagicMock()
@@ -1995,17 +2177,13 @@ async def test_manashop_reprieve_grants_pool_and_reconciles_rolling_losses(
         shop, interaction, SimpleNamespace(value="reprieve"), target=None,
     )
 
-    assert player_service.adjust_balance.call_args_list[0].args == (
-        user_id,
-        guild_id,
-        -15,
-    )
+    player_service.adjust_balance.assert_not_called()
     bot.buff_service.grant_reprieve.assert_called_once_with(user_id, guild_id)
     bot.protection_service.reconcile_purchased_pool.assert_called_once_with(
         user_id, guild_id, 77, 24 * 3600,
     )
-    bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
-        user_id, guild_id, "reprieve", ANY,
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        user_id, guild_id, "reprieve", ANY, cost=15, tap_mana=False,
     )
     message = interaction.followup.send.call_args.kwargs["content"]
     assert "REPRIEVE" in message
@@ -2045,7 +2223,7 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
     bot.protection_service = MagicMock()
     bot.protection_service.apply_hostile_loss.side_effect = outcomes
 
@@ -2078,9 +2256,11 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
 
     balance_calls = [call.args for call in player_service.adjust_balance.call_args_list]
     assert balance_calls == [
-        (buyer_id, guild_id, -25),
         (buyer_id, guild_id, 13),
     ]
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        buyer_id, guild_id, "pyroclasm", ANY, cost=25, tap_mana=False,
+    )
     message = interaction.followup.send.call_args.kwargs["content"]
     assert "**27" in message
     assert "You claim **13" in message
@@ -2115,7 +2295,7 @@ async def test_manashop_pyroclasm_batches_real_protection_gateway(monkeypatch):
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
     bot.protection_service = protection_service
 
     player_service = MagicMock()
@@ -2153,7 +2333,7 @@ async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
     bot.protection_service = MagicMock()
     bot.protection_service.apply_hostile_loss.side_effect = [
         SimpleNamespace(applied_loss=1, absorbed_amount=2),
@@ -2171,9 +2351,10 @@ async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch
         shop, interaction, SimpleNamespace(value="soul_harvest"), target=None,
     )
 
-    assert [call.args for call in player_service.adjust_balance.call_args_list] == [
-        (buyer_id, guild_id, -25),
-    ]
+    player_service.adjust_balance.assert_not_called()
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        buyer_id, guild_id, "soul_harvest", ANY, cost=25, tap_mana=False,
+    )
     calls = bot.protection_service.apply_hostile_loss.call_args_list
     assert [call.args[:3] for call in calls] == [
         (targets[0].discord_id, guild_id, 3),
@@ -2207,7 +2388,7 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
 
     player_service = MagicMock()
     player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
@@ -2227,7 +2408,6 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     )
 
     calls = [c.args for c in player_service.adjust_balance.call_args_list]
-    assert calls[0] == (buyer_id, guild_id, -25)
     assert calls[-1] == (buyer_id, guild_id, 6)
     assert not any(c[0] == low_player.discord_id for c in calls)
     assert not any(c[0] == zero_player.discord_id for c in calls)
@@ -2241,8 +2421,8 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     message = interaction.followup.send.call_args.kwargs["content"]
     assert "drains the living" in message.lower()
     assert "balance: 481" in message
-    bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
-        buyer_id, guild_id, "soul_harvest", ANY,
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        buyer_id, guild_id, "soul_harvest", ANY, cost=25, tap_mana=False,
     )
 
 
@@ -2255,7 +2435,7 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
 
     player_service = MagicMock()
     player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
@@ -2273,14 +2453,11 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
         shop, interaction, SimpleNamespace(value="soul_harvest"), target=None,
     )
 
-    assert [c.args for c in player_service.adjust_balance.call_args_list] == [
-        (buyer_id, guild_id, -25),
-        (buyer_id, guild_id, 25),
-    ]
+    player_service.adjust_balance.assert_not_called()
     message = interaction.followup.send.call_args.kwargs["content"]
     assert "No living souls" in message
-    bot.mana_repo.unmark_item_used.assert_called_once_with(
-        buyer_id, guild_id, "soul_harvest", ANY,
+    bot.mana_repo.refund_item_purchase_atomic.assert_called_once_with(
+        "purchase-1",
     )
 
 
@@ -2300,8 +2477,7 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
-    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
     bot.dig_service = None
     bot.protection_service = MagicMock()
     bot.protection_service.apply_hostile_loss.return_value = SimpleNamespace(
@@ -2327,9 +2503,11 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     assert call.kwargs["destination"] == "burn"
     # 45% of the 4 JC that landed floors to 1; the absorbed 5 pays nothing.
     assert [entry.args for entry in player_service.adjust_balance.call_args_list] == [
-        (buyer_id, guild_id, -150),
         (buyer_id, guild_id, 1),
     ]
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        buyer_id, guild_id, "wildfire", ANY, cost=150, tap_mana=True,
+    )
     message = interaction.followup.send.call_args.kwargs["content"]
     assert "Drained **4" in message
     assert "claim **1" in message
@@ -2346,8 +2524,7 @@ async def test_manashop_sanctuary_costs_90_without_match_bonus(monkeypatch):
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="White")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_item_used_atomic.return_value = True
-    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    _allow_manashop_purchase(bot, 500)
     bot.dig_service = None
     bot.buff_service = MagicMock()
 
@@ -2369,10 +2546,9 @@ async def test_manashop_sanctuary_costs_90_without_match_bonus(monkeypatch):
         shop, interaction, SimpleNamespace(value="sanctuary"), target=target,
     )
 
-    assert player_service.adjust_balance.call_args_list[0].args == (
-        buyer_id,
-        guild_id,
-        -90,
+    player_service.adjust_balance.assert_not_called()
+    bot.mana_repo.try_purchase_item_atomic.assert_called_once_with(
+        buyer_id, guild_id, "sanctuary", ANY, cost=90, tap_mana=True,
     )
     bot.buff_service.grant_sanctuary.assert_called_once_with(
         buyer_id, guild_id, ally_id,
@@ -2387,7 +2563,7 @@ async def test_dark_bargain_due_amount_matches_loan_principal():
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
     bot.mana_service.is_mana_consumed.return_value = False
-    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    _allow_manashop_purchase(bot, 1000)
     bot.buff_service = MagicMock()
 
     player_service = MagicMock()
@@ -2408,12 +2584,11 @@ async def test_dark_bargain_due_amount_matches_loan_principal():
 
 
 @pytest.mark.asyncio
-async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
-    """The cooldown must be claimed atomically before any money moves.
+async def test_double_or_nothing_atomic_settlement_blocks_concurrent_second_spin():
+    """The cooldown, money movement, and flip log settle in one repository call.
 
     Two rapid presses both pass the stale read-based check; only the first may
-    flip. Pre-fix, both flips ran and each credited against the same stale
-    balance (or both zeroed), minting or over-debiting coins.
+    settle. The losing claim must not move money or store a second outcome.
     """
     from unittest.mock import patch
 
@@ -2424,9 +2599,23 @@ async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
     player_service.get_player.return_value = object()
     player_service.get_last_double_or_nothing.return_value = None  # stale read: no cooldown
     player_service.get_balance.return_value = 200
-    # adjust_balance returns the post-adjust balance; the win credit lands at 300.
-    player_service.adjust_balance.return_value = 2 * (200 - COST)
-    player_service.player_repo.try_claim_double_or_nothing.side_effect = [True, False]
+    player_service.settle_double_or_nothing.side_effect = [
+        {
+            "success": True,
+            "reason": None,
+            "balance_before": 200,
+            "balance_at_risk": 200 - COST,
+            "balance_after": 2 * (200 - COST),
+            "won": True,
+            "cooldown_ends_at": 1_700_000_000 + 86_400,
+        },
+        {
+            "success": False,
+            "reason": "on_cooldown",
+            "balance": 2 * (200 - COST),
+            "cooldown_ends_at": 1_700_000_000 + 86_400,
+        },
+    ]
 
     commands = ShopCommands(bot, player_service)
 
@@ -2436,15 +2625,12 @@ async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
     with patch("commands.shop.random.random", return_value=0.25):
         await commands._handle_double_or_nothing(first)
 
-    adjust_calls = player_service.adjust_balance.call_args_list
-    assert [c.args for c in adjust_calls] == [
-        (1001, 9001, -COST),          # ante deducted
-        (1001, 9001, 200 - COST),     # win credits the exact at-risk amount
-    ]
-    log_kwargs = player_service.log_double_or_nothing.call_args.kwargs
-    assert log_kwargs["balance_before"] == 200 - COST
-    assert log_kwargs["balance_after"] == 2 * (200 - COST)
-    assert log_kwargs["won"] is True
+    first_call = player_service.settle_double_or_nothing.call_args_list[0]
+    assert first_call.args == (1001, 9001)
+    assert first_call.kwargs["cost"] == COST
+    assert first_call.kwargs["won"] is True
+    assert first_call.kwargs["cooldown_seconds"] > 0
+    assert first_call.kwargs["bypass_cooldown"] is False
 
     # Second press: atomic claim rejects; no money may move again.
     second = _make_interaction(guild_id=9001)
@@ -2453,8 +2639,9 @@ async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
 
     second.response.send_message.assert_awaited_once()
     assert second.response.send_message.call_args.kwargs.get("ephemeral") is True
-    assert len(player_service.adjust_balance.call_args_list) == 2  # unchanged
-    player_service.log_double_or_nothing.assert_called_once()  # unchanged
+    assert player_service.settle_double_or_nothing.call_count == 2
+    player_service.adjust_balance.assert_not_called()
+    player_service.log_double_or_nothing.assert_not_called()
     player_service.set_balance.assert_not_called()
 
 
