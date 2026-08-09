@@ -13,10 +13,13 @@ import json
 import math
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 
 import domain.models.boss_mechanics as boss_mechanics
+from domain.models.pet import PetMood, PetStage
+from domain.pet_constants import BRAWL_TRAINING_XP_CAP
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
@@ -24,6 +27,7 @@ from services.dig_constants import (
     PINNACLE_DEPTH,
 )
 from services.dig_service import DigService
+from services.result import Result
 from tests.conftest import TEST_GUILD_ID
 
 DISCORD_ID = 10001
@@ -108,6 +112,114 @@ def _fix_combat_stats(
             "boss_dmg": boss_dmg,
         },
     )
+
+
+def _give_fully_trained_pet(dig_service):
+    status = SimpleNamespace(
+        pet=SimpleNamespace(
+            name="Dane",
+            species="common_cama",
+            training_xp=BRAWL_TRAINING_XP_CAP,
+        ),
+        stage=PetStage.ADULT,
+        mood=PetMood.HAPPY,
+    )
+    dig_service.pet_service = SimpleNamespace(
+        get_status=lambda _discord_id, _guild_id: Result.ok(status)
+    )
+
+
+def test_pinnacle_scout_models_and_reports_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service)
+    dig_repo.add_inventory_item(DISCORD_ID, TEST_GUILD_ID, "lantern")
+    captured_bonus_pcts = []
+
+    def capture_bonus(**kwargs):
+        captured_bonus_pcts.append(kwargs.get("player_damage_bonus_pct"))
+        return 0.5
+
+    monkeypatch.setattr(
+        "services.dig_service._approx_duel_win_prob",
+        capture_bonus,
+    )
+
+    result = dig_service.scout_boss(DISCORD_ID, TEST_GUILD_ID)
+
+    assert captured_bonus_pcts == [12] * 6
+    assert result["pet_assist"]["bonus_pct"] == 12
+
+
+def test_pinnacle_fight_applies_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service)
+    _fix_combat_stats(
+        dig_service,
+        monkeypatch,
+        player_hp=5,
+        boss_hp=2,
+        boss_dmg=1,
+        player_hit=1.0,
+        player_dmg=1,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+
+    result = dig_service.start_boss_duel(
+        DISCORD_ID, TEST_GUILD_ID, "cautious", wager=0,
+    )
+
+    assert result["won"] is True
+    assert result["round_log"][0]["pet_assist"]["bonus_pct"] == 12
+    assert result["round_log"][0]["pet_assist_damage"] == 1
+
+
+def test_paused_pinnacle_duel_persists_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service)
+    monkeypatch.setattr(
+        boss_mechanics,
+        "get_mechanic",
+        lambda mechanic_id: boss_mechanics.MECHANIC_REGISTRY[mechanic_id],
+    )
+    monkeypatch.setattr(random.Random, "choice", lambda _rng, pool: pool[0])
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+
+    result = dig_service.start_boss_duel(
+        DISCORD_ID, TEST_GUILD_ID, "cautious", wager=0,
+    )
+    state = dig_repo.get_active_duel(DISCORD_ID, TEST_GUILD_ID)
+    status_effects = json.loads(state["status_effects"])
+
+    assert result["pending_prompt"]
+    assert result["pet_assist"]["bonus_pct"] == 12
+    assert status_effects["pet_boss_assist"] == result["pet_assist"]
+
+    snapshotted_assist = result["pet_assist"]
+    dig_service.pet_service = None
+    monkeypatch.setattr(
+        dig_service,
+        "_apply_option_outcome_to_state",
+        lambda **kwargs: (
+            "Dane creates the opening.",
+            kwargs["player_hp"],
+            0,
+            kwargs["status_effects"],
+        ),
+    )
+
+    resumed = dig_service.resume_boss_duel(
+        DISCORD_ID,
+        TEST_GUILD_ID,
+        result["pending_prompt"]["safe_option_idx"],
+    )
+
+    assert resumed["round_log"][-1]["pet_assist"] == snapshotted_assist
 
 
 def test_scout_pinnacle_uses_the_locked_phase_boss(

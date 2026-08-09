@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from domain.models.pet import PetMood, PetStage
+from domain.pet_constants import BRAWL_TRAINING_XP_CAP
 from repositories.dig_repository import DigRepository
+from services.dig import _common as dig_common
 from services.dig._common import DIG_BOSS_STAT_POINT_BONUS
 from services.dig_constants import (
     ARMOR_TIERS,
@@ -34,6 +37,7 @@ from services.dig_data.balance import (
     scale_positive_dig_jc,
 )
 from services.dig_service import DigService, _approx_duel_win_prob
+from services.result import Result
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -89,6 +93,237 @@ def _at_boss(dig_service, dig_repo, player_repository, monkeypatch, *, depth=24,
         boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
     )
     monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+
+
+@pytest.mark.parametrize(
+    ("damage", "bonus_pct", "roll", "expected"),
+    (
+        (1, 10, 0.09, 1),
+        (1, 10, 0.10, 0),
+        (3, 12, 0.35, 1),
+        (3, 12, 0.36, 0),
+        (12, 12, 0.43, 2),
+        (12, 12, 0.44, 1),
+    ),
+)
+def test_fractional_damage_bonus_uses_stochastic_rounding(
+    damage, bonus_pct, roll, expected,
+):
+    rng = SimpleNamespace(random=lambda: roll)
+
+    assert hasattr(dig_common, "_roll_fractional_damage_bonus")
+    assert (
+        dig_common._roll_fractional_damage_bonus(damage, bonus_pct, rng=rng)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("mood", "expected_pct"),
+    (
+        (PetMood.HAPPY, 12),
+        (PetMood.CONTENT, 10),
+        (PetMood.HUNGRY, 8),
+        (PetMood.STARVING, 5),
+    ),
+)
+def test_fully_trained_adult_pet_assist_scales_with_mood(
+    dig_service, mood, expected_pct,
+):
+    status = SimpleNamespace(
+        pet=SimpleNamespace(
+            name="Dane",
+            species="common_cama",
+            training_xp=BRAWL_TRAINING_XP_CAP,
+        ),
+        stage=PetStage.ADULT,
+        mood=mood,
+    )
+    dig_service.pet_service = SimpleNamespace(
+        get_status=lambda _discord_id, _guild_id: Result.ok(status)
+    )
+
+    assert hasattr(dig_service, "_get_pet_boss_assist")
+    assert dig_service._get_pet_boss_assist(10001, TEST_GUILD_ID) == {
+        "pet_name": "Dane",
+        "species_id": "common_cama",
+        "species_name": "Common Cama",
+        "bonus_pct": expected_pct,
+    }
+
+
+@pytest.mark.parametrize(
+    ("stage", "training_xp"),
+    (
+        (PetStage.BABY, BRAWL_TRAINING_XP_CAP),
+        (PetStage.ADULT, BRAWL_TRAINING_XP_CAP - 1),
+    ),
+)
+def test_pet_boss_assist_requires_adult_and_training_cap(
+    dig_service, stage, training_xp,
+):
+    status = SimpleNamespace(
+        pet=SimpleNamespace(
+            name="Dane",
+            species="common_cama",
+            training_xp=training_xp,
+        ),
+        stage=stage,
+        mood=PetMood.HAPPY,
+    )
+    dig_service.pet_service = SimpleNamespace(
+        get_status=lambda _discord_id, _guild_id: Result.ok(status)
+    )
+
+    assert hasattr(dig_service, "_get_pet_boss_assist")
+    assert dig_service._get_pet_boss_assist(10001, TEST_GUILD_ID) is None
+
+
+def _give_fully_trained_pet(dig_service, *, mood=PetMood.HAPPY):
+    status = SimpleNamespace(
+        pet=SimpleNamespace(
+            name="Dane",
+            species="common_cama",
+            training_xp=BRAWL_TRAINING_XP_CAP,
+        ),
+        stage=PetStage.ADULT,
+        mood=mood,
+    )
+    dig_service.pet_service = SimpleNamespace(
+        get_status=lambda _discord_id, _guild_id: Result.ok(status)
+    )
+
+
+def test_win_probability_models_fractional_player_damage_bonus():
+    common = {
+        "player_hp": 1,
+        "boss_hp": 2,
+        "player_hit": 1.0,
+        "player_dmg": 1,
+        "boss_hit": 1.0,
+        "boss_dmg": 1,
+        "trials": 5,
+    }
+
+    baseline = _approx_duel_win_prob(**common)
+    assisted = _approx_duel_win_prob(
+        **common,
+        player_damage_bonus_pct=100,
+    )
+
+    assert baseline == pytest.approx(0.05)
+    assert assisted == pytest.approx(0.95)
+
+
+def test_shared_round_applies_and_records_pet_assist(dig_service, monkeypatch):
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    assist = {
+        "pet_name": "Dane",
+        "species_id": "common_cama",
+        "species_name": "Common Cama",
+        "bonus_pct": 100,
+    }
+
+    entry, _player_hp, boss_hp, terminal = dig_service._run_one_round(
+        round_num=1,
+        player_hp=5,
+        boss_hp=6,
+        player_hit=1.0,
+        player_dmg=3,
+        boss_hit=0.0,
+        boss_dmg=1,
+        status_effects={"pet_boss_assist": assist},
+    )
+
+    assert terminal is True
+    assert boss_hp == 0
+    assert entry["pet_assist"] == assist
+    assert entry["pet_assist_damage"] == 3
+
+
+def test_legacy_boss_fight_applies_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service)
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+
+    result = dig_service.fight_boss(
+        10001, TEST_GUILD_ID, "cautious", wager=0,
+    )
+
+    assert result["won"] is True
+    assert sum(
+        entry.get("pet_assist_damage", 0) for entry in result["round_log"]
+    ) > 0
+    assert result["round_log"][0]["pet_assist"]["bonus_pct"] == 12
+
+
+def test_paused_boss_duel_persists_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service, mood=PetMood.CONTENT)
+    monkeypatch.setattr(
+        random.Random,
+        "choice",
+        lambda _rng, _pool: "grothak_earthquake",
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+
+    result = dig_service.start_boss_duel(
+        10001, TEST_GUILD_ID, "cautious", wager=0,
+    )
+    state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+    status_effects = json.loads(state["status_effects"])
+
+    assert result["pending_prompt"]
+    assert result["pet_assist"]["bonus_pct"] == 10
+    assert status_effects["pet_boss_assist"] == result["pet_assist"]
+
+    snapshotted_assist = result["pet_assist"]
+    dig_service.pet_service = None
+    monkeypatch.setattr(
+        dig_service,
+        "_apply_option_outcome_to_state",
+        lambda **kwargs: (
+            "Dane creates the opening.",
+            kwargs["player_hp"],
+            0,
+            kwargs["status_effects"],
+        ),
+    )
+
+    resumed = dig_service.resume_boss_duel(
+        10001,
+        TEST_GUILD_ID,
+        result["pending_prompt"]["safe_option_idx"],
+    )
+
+    assert resumed["round_log"][-1]["pet_assist"] == snapshotted_assist
+
+
+def test_regular_scout_models_and_reports_pet_assist(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+    _give_fully_trained_pet(dig_service, mood=PetMood.HUNGRY)
+    dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+    captured_bonus_pcts = []
+
+    def capture_bonus(**kwargs):
+        captured_bonus_pcts.append(kwargs.get("player_damage_bonus_pct"))
+        return 0.5
+
+    monkeypatch.setattr(
+        "services.dig_service._approx_duel_win_prob",
+        capture_bonus,
+    )
+
+    result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+    assert captured_bonus_pcts == [8] * 6
+    assert result["pet_assist"]["bonus_pct"] == 8
 
 
 class TestDuelDeterministicOutcomes:

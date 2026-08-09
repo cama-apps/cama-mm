@@ -207,6 +207,10 @@ class PinnacleMixin:
         )
         loadout = self._get_loadout(discord_id, guild_id)
         phase_key = f"{PINNACLE_DEPTH}:{phase_idx}"
+        pet_assist = self._get_pet_boss_assist(discord_id, guild_id)
+        pet_bonus_pct = (
+            int(pet_assist["bonus_pct"]) if pet_assist is not None else 0
+        )
 
         odds = {}
         for index, risk_tier in enumerate(
@@ -304,6 +308,7 @@ class PinnacleMixin:
                 boss_dmg=boss_dmg,
                 crit_chance=crit_chance,
                 crit_bonus=crit_bonus,
+                player_damage_bonus_pct=pet_bonus_pct,
             )
             free_win_pct = dig_service._approx_duel_win_prob(
                 player_hp=player_hp,
@@ -314,6 +319,7 @@ class PinnacleMixin:
                 boss_dmg=boss_dmg,
                 crit_chance=crit_chance,
                 crit_bonus=crit_bonus,
+                player_damage_bonus_pct=pet_bonus_pct,
             )
             base_multiplier = (
                 payouts[index] if index < len(payouts) else 2.0
@@ -360,6 +366,7 @@ class PinnacleMixin:
             enhanced=enhanced,
             mechanic_pool=mechanic_pool_preview,
             stinger=None,
+            pet_assist=pet_assist,
         )
 
     def _pinnacle_foreshadow_line(self, tunnel: dict) -> str | None:
@@ -655,6 +662,9 @@ class PinnacleMixin:
         )
         if shifting_idol_bonus:
             relic_status["shifting_idol_bonus"] = shifting_idol_bonus
+        pet_assist = self._get_pet_boss_assist(discord_id, guild_id)
+        if pet_assist is not None:
+            relic_status["pet_boss_assist"] = pet_assist
 
         win_chance = dig_service._approx_duel_win_prob(
             player_hp=player_hp,
@@ -665,6 +675,9 @@ class PinnacleMixin:
             boss_dmg=boss_dmg,
             crit_chance=crit_chance,
             crit_bonus=crit_bonus,
+            player_damage_bonus_pct=(
+                int(pet_assist["bonus_pct"]) if pet_assist is not None else 0
+            ),
         )
 
         # Roll a mid-fight mechanic from this phase's pool. Pinnacle phase
@@ -754,6 +767,7 @@ class PinnacleMixin:
                     round_num=round_num,
                     round_log=round_log,
                     win_chance=round(win_chance, 2),
+                    pet_assist=pet_assist,
                     is_pinnacle=True,
                     phase=phase_idx,
                     phase_total=3,
@@ -868,7 +882,7 @@ class PinnacleMixin:
                     status_effects=status_effects,
                 )
             )
-        round_log.append({
+        mechanic_entry = {
             "round": round_num,
             "mechanic_id": state_row["mechanic_id"],
             "option_idx": option_idx,
@@ -877,7 +891,11 @@ class PinnacleMixin:
             "warding_salts_blocked": warding_blocked,
             "player_hp": max(0, player_hp),
             "boss_hp": max(0, boss_hp),
-        })
+        }
+        pet_assist = status_effects.get("pet_boss_assist")
+        if pet_assist is not None:
+            mechanic_entry["pet_assist"] = dict(pet_assist)
+        round_log.append(mechanic_entry)
 
         won: bool | None = None
         if boss_hp <= 0:
