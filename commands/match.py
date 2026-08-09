@@ -1737,7 +1737,7 @@ class MatchCommands(commands.Cog):
                 return f"−{abs(amount)}"
             return "0"
 
-        lines: list[str] = []
+        entries: list[tuple[int, int, str]] = []
         for discord_id in ordered_ids:
             components = changes.get(discord_id)
             if components is None:
@@ -1766,13 +1766,39 @@ class MatchCommands(commands.Cog):
                 for component in ("payout", "bet", "streak", "referral")
             )
             detail = f" ({', '.join(parts)})" if parts else ""
-            lines.append(
-                f"<@{discord_id}>: **{signed(total)}** {JOPACOIN_EMOTE}{detail}"
+            entries.append(
+                (
+                    discord_id,
+                    total,
+                    f"<@{discord_id}>: **{signed(total)}** {JOPACOIN_EMOTE}{detail}",
+                )
             )
 
-        if not lines:
+        if not entries:
             return ""
-        return "\n\n🪙 **JC Changes:**\n" + "\n".join(lines)
+
+        participant_ids = winning_set | losing_set | excluded_set
+        sorted_entries = sorted(entries, key=lambda entry: entry[1], reverse=True)
+        sections: list[str] = []
+        player_lines = [
+            line for discord_id, _total, line in sorted_entries
+            if discord_id in participant_ids
+        ]
+        bettor_lines = [
+            line for discord_id, _total, line in sorted_entries
+            if discord_id not in participant_ids and "bet" in changes[discord_id]
+        ]
+        other_reward_lines = [
+            line for discord_id, _total, line in sorted_entries
+            if discord_id not in participant_ids and "bet" not in changes[discord_id]
+        ]
+        if player_lines:
+            sections.append("**Match Players:**\n" + "\n".join(player_lines))
+        if bettor_lines:
+            sections.append("**Bettors:**\n" + "\n".join(bettor_lines))
+        if other_reward_lines:
+            sections.append("**Other Rewards:**\n" + "\n".join(other_reward_lines))
+        return "\n\n🪙 **JC Changes:**\n" + "\n".join(sections)
 
     def _format_bet_distribution(
         self, winners: list[dict], losers: list[dict],

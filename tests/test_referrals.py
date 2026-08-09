@@ -639,7 +639,9 @@ class TestReferralRewardFormatting:
             },
         ) == (
             "\n\n🪙 **JC Changes:**\n"
+            "**Match Players:**\n"
             f"<@20>: **+110** {JOPACOIN_EMOTE} (win +10, referral +100)\n"
+            "**Other Rewards:**\n"
             f"<@10>: **+100** {JOPACOIN_EMOTE} (referral +100)"
         )
 
