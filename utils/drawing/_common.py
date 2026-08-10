@@ -19,6 +19,7 @@ DISCORD_RED = "#ED4245"
 DISCORD_YELLOW = "#FEE75C"
 DISCORD_WHITE = "#FFFFFF"
 DISCORD_GREY = "#B9BBBE"
+DISCORD_GRID = "#454950"
 
 # Role colors for radar graph
 ROLE_COLORS = {
@@ -165,7 +166,86 @@ def draw_zero_line(draw: ImageDraw.ImageDraw, proj: ChartProjection) -> int:
     return zero_y
 
 
-_Y_LABEL_MAGNITUDES = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000]
+_Y_LABEL_MAGNITUDES = [
+    1,
+    2,
+    5,
+    10,
+    20,
+    50,
+    100,
+    200,
+    500,
+    1000,
+    2000,
+    5000,
+    10000,
+    20000,
+    50000,
+    100000,
+]
+
+
+def _format_compact_axis_value(value: float) -> str:
+    """Format a signed axis value without spending width on insignificant zeroes."""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000:
+        compact = f"{magnitude / 1_000_000:g}m"
+    elif magnitude >= 1_000:
+        compact = f"{magnitude / 1_000:g}k"
+    else:
+        compact = f"{magnitude:g}"
+    return f"{'+' if value > 0 else '-'}{compact}"
+
+
+def _select_y_axis_ticks(
+    proj: ChartProjection,
+    actual_min: float,
+    actual_max: float,
+    *,
+    max_labels: int = 8,
+    min_gap: int = 20,
+) -> list[tuple[float, int]]:
+    """Choose legible signed-log ticks using projected pixel spacing.
+
+    Signed-log axes put the 1/2/5 ticks within each decade surprisingly close
+    together. Select from those familiar values with a maximin pass so the labels
+    stay distributed across the full plot instead of forming a wall around zero.
+    Zero is drawn separately by :func:`draw_zero_line`.
+    """
+    candidates: list[tuple[float, int]] = []
+    for magnitude in _Y_LABEL_MAGNITUDES:
+        for value in (-float(magnitude), float(magnitude)):
+            if value < actual_min * 1.2 or value > actual_max * 1.2:
+                continue
+            log_value = signed_log(value)
+            if log_value < proj.min_log_y or log_value > proj.max_log_y:
+                continue
+            y_pos = proj.chart_y + int(
+                (proj.max_log_y - log_value) / proj.log_y_range * proj.chart_height
+            )
+            candidates.append((value, y_pos))
+
+    zero_y = proj.chart_y + int(proj.max_log_y / proj.log_y_range * proj.chart_height)
+    selected_y = [zero_y]
+    selected: list[tuple[float, int]] = []
+
+    while candidates and len(selected) < max(max_labels - 1, 0):
+        value, y_pos = max(
+            candidates,
+            key=lambda candidate: (
+                min(abs(candidate[1] - used_y) for used_y in selected_y),
+                abs(candidate[0]),
+            ),
+        )
+        distance = min(abs(y_pos - used_y) for used_y in selected_y)
+        candidates.remove((value, y_pos))
+        if distance < min_gap:
+            continue
+        selected.append((value, y_pos))
+        selected_y.append(y_pos)
+
+    return sorted(selected, key=lambda tick: tick[1])
 
 
 def draw_y_axis_labels(
@@ -174,25 +254,15 @@ def draw_y_axis_labels(
     actual_min: float,
     actual_max: float,
 ) -> None:
-    """Draw Y-axis labels at nice round values within the visible log range."""
-    label_values: list[float] = [0]
-    for magnitude in _Y_LABEL_MAGNITUDES:
-        if magnitude <= abs(actual_max) * 1.2:
-            label_values.append(magnitude)
-        if -magnitude >= actual_min * 1.2:
-            label_values.append(-magnitude)
-
-    value_font = _get_font(13)
-    for val in sorted(set(label_values)):
-        log_val = signed_log(val)
-        if log_val < proj.min_log_y or log_val > proj.max_log_y:
-            continue
-        if val == 0:
-            continue  # Drawn by draw_zero_line
-        y_pos = proj.chart_y + int(
-            (proj.max_log_y - log_val) / proj.log_y_range * proj.chart_height
+    """Draw a sparse set of collision-free labels and horizontal guides."""
+    value_font = _get_font(12)
+    for value, y_pos in _select_y_axis_ticks(proj, actual_min, actual_max):
+        draw.line(
+            [(proj.chart_x, y_pos), (proj.chart_x + proj.chart_width, y_pos)],
+            fill=DISCORD_GRID,
+            width=1,
         )
-        label = f"{int(val):+d}"
+        label = _format_compact_axis_value(value)
         text_w = _get_text_size(value_font, label)[0]
         draw.text(
             (proj.chart_x - text_w - 8, y_pos - 6),
@@ -202,20 +272,41 @@ def draw_y_axis_labels(
         )
 
 
+def _select_x_axis_ticks(x_indices: list[int], max_labels: int = 5) -> list[int]:
+    """Return at most ``max_labels`` evenly spaced values, including both ends."""
+    if not x_indices or max_labels <= 0:
+        return []
+    count = min(len(x_indices), max_labels)
+    if count == 1:
+        return [x_indices[0]]
+    positions = [round(i * (len(x_indices) - 1) / (count - 1)) for i in range(count)]
+    return [x_indices[position] for position in positions]
+
+
 def draw_x_axis_labels(
     draw: ImageDraw.ImageDraw,
     proj: ChartProjection,
     x_indices: list[int],
 ) -> None:
-    """Draw X-axis labels at ~5 evenly-spaced points."""
-    value_font = _get_font(13)
-    x_step = max(len(x_indices) // 5, 1)
-    for i in range(0, len(x_indices), x_step):
-        x_pos, _ = proj.to_pixel(x_indices[i], 0)
-        label = str(x_indices[i])
+    """Draw a quiet baseline with no more than five evenly spaced labels."""
+    value_font = _get_font(12)
+    baseline_y = proj.chart_y + proj.chart_height
+    draw.line(
+        [(proj.chart_x, baseline_y), (proj.chart_x + proj.chart_width, baseline_y)],
+        fill=DISCORD_GRID,
+        width=1,
+    )
+    for value in _select_x_axis_ticks(x_indices):
+        x_pos, _ = proj.to_pixel(value, 0)
+        draw.line(
+            [(x_pos, baseline_y), (x_pos, baseline_y + 3)],
+            fill=DISCORD_GREY,
+            width=1,
+        )
+        label = str(value)
         text_w = _get_text_size(value_font, label)[0]
         draw.text(
-            (x_pos - text_w // 2, proj.chart_y + proj.chart_height + 5),
+            (x_pos - text_w // 2, baseline_y + 6),
             label,
             fill=DISCORD_GREY,
             font=value_font,

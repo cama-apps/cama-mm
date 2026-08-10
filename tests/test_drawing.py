@@ -12,12 +12,15 @@ from utils.drawing import (
     DISCORD_RED,
     draw_advantage_graph,
     draw_attribute_distribution,
+    draw_balance_chart,
     draw_gamba_chart,
     draw_lane_distribution,
     draw_matches_table,
     draw_rating_history_chart,
     draw_role_graph,
 )
+from utils.drawing._common import _select_x_axis_ticks, _select_y_axis_ticks, make_projection
+from utils.drawing.gamba import _marker_radius, _select_marker_indices
 
 
 class TestDrawMatchesTable:
@@ -542,6 +545,110 @@ class TestDrawAdvantageGraph:
 class TestDrawGambaChart:
     """Tests for draw_gamba_chart function."""
 
+    def test_dense_series_culls_overlapping_markers_but_keeps_key_events(self):
+        """Dense histories retain important shapes without rendering a marker blob."""
+        points = [(index * 2, 100) for index in range(386)]
+        infos = []
+        for index in range(386):
+            source = "bet"
+            if index % 47 == 0:
+                source = "double_or_nothing"
+            elif index % 19 == 0:
+                source = "wheel"
+            infos.append(
+                {
+                    "source": source,
+                    "leverage": 3 if source == "bet" and index % 13 == 0 else 1,
+                    "profit": index % 31,
+                }
+            )
+        radii = [_marker_radius(info) for info in infos]
+        required = {0, 100, 200, 385}
+
+        selected = _select_marker_indices(
+            points,
+            infos,
+            radii,
+            required_indices=required,
+        )
+
+        assert required <= set(selected)
+        assert len(selected) < 100
+        assert any(infos[index]["source"] == "double_or_nothing" for index in selected)
+        assert any(infos[index]["source"] == "wheel" for index in selected)
+        assert any(infos[index]["leverage"] > 1 for index in selected)
+        for position, index in enumerate(selected):
+            for other in selected[position + 1 :]:
+                distance_squared = (
+                    (points[index][0] - points[other][0]) ** 2
+                    + (points[index][1] - points[other][1]) ** 2
+                )
+                assert distance_squared >= (radii[index] + radii[other] + 3) ** 2
+
+    def test_sparse_series_keeps_every_marker(self):
+        points = [(index * 20, 100) for index in range(8)]
+        infos = [{"source": "bet", "leverage": 1, "profit": 10} for _ in points]
+        radii = [_marker_radius(info) for info in infos]
+
+        assert _select_marker_indices(points, infos, radii) == list(range(len(points)))
+
+    def test_axis_ticks_are_bounded_and_collision_free(self):
+        """Timeline labels include both ends and signed-log labels keep breathing room."""
+        assert _select_x_axis_ticks(list(range(1, 387))) == [1, 97, 193, 290, 386]
+
+        projection = make_projection(
+            y_values=[-4430, 3616],
+            total_x=386,
+            chart_x=60,
+            chart_y=88,
+            chart_width=614,
+            chart_height=222,
+        )
+        y_ticks = _select_y_axis_ticks(projection, -4430, 3616)
+        zero_y = projection.to_pixel(1, 0)[1]
+        y_positions = sorted([zero_y, *(y_pos for _, y_pos in y_ticks)])
+
+        assert len(y_positions) <= 8
+        assert all(second - first >= 20 for first, second in zip(y_positions, y_positions[1:]))
+
+    def test_dense_mixed_history_returns_fixed_size_png(self):
+        """A screenshot-scale mixed history exercises the adaptive render path."""
+        pnl_series = []
+        cumulative = 0
+        for event_number in range(1, 387):
+            profit = 80 if event_number % 3 else -150
+            cumulative += profit
+            source = "bet"
+            if event_number % 47 == 0:
+                source = "double_or_nothing"
+            elif event_number % 19 == 0:
+                source = "wheel"
+            pnl_series.append(
+                (
+                    event_number,
+                    cumulative,
+                    {
+                        "source": source,
+                        "outcome": "won" if profit > 0 else "lost",
+                        "leverage": 3 if source == "bet" and event_number % 13 == 0 else 1,
+                        "profit": profit,
+                    },
+                )
+            )
+
+        result = draw_gamba_chart(
+            "DenseUser",
+            65,
+            "Degenerate",
+            "🎰",
+            pnl_series,
+            {"total_bets": 288, "win_rate": 0.53, "net_pnl": -5489, "roi": -0.188},
+        )
+        image = Image.open(result)
+
+        assert image.format == "PNG"
+        assert image.size == (700, 400)
+
     def test_wheel_source_info_missing_keys_does_not_raise(self):
         """A wheel-source info dict lacking effective_bet/outcome/leverage must not crash.
 
@@ -557,6 +664,21 @@ class TestDrawGambaChart:
         assert isinstance(result, BytesIO)
         img = Image.open(result)
         assert img.format == "PNG"
+
+    def test_shared_axis_changes_keep_balance_chart_rendering(self):
+        result = draw_balance_chart(
+            "TestUser",
+            [
+                (1, 100, {"source": "bets"}),
+                (2, -50, {"source": "wheel"}),
+                (3, 500, {"source": "bonus"}),
+            ],
+            {"bets": 100, "wheel": -50, "bonus": 450},
+        )
+
+        image = Image.open(result)
+        assert image.format == "PNG"
+        assert image.size == (700, 400)
 
 
 class TestChartsDoNotLeakFigures:
