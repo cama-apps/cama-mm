@@ -805,10 +805,16 @@ class SchemaManager:
                 "add_first_game_pool_claim_settled",
                 self._migration_add_first_game_pool_claim_settled,
             ),
-            # Admin-granted exceptions to nickname-based vanity taxation.
+            # Legacy inverse override. Retain its migration/table so existing
+            # rows are never reinterpreted as forced taxes.
             (
                 "create_vanity_tax_exemptions",
                 self._migration_create_vanity_tax_exemptions,
+            ),
+            # Admin-enforced vanity tax for nickname-based false exemptions.
+            (
+                "create_vanity_tax_enforcements",
+                self._migration_create_vanity_tax_enforcements,
             ),
             # One-off, guild-scoped surveys with durable DM delivery and
             # respondent drafts. Identity-bearing tables remain private to
@@ -1376,13 +1382,27 @@ class SchemaManager:
         )
 
     def _migration_create_vanity_tax_exemptions(self, cursor) -> None:
-        """Store persistent admin-granted vanity-tax exemptions."""
+        """Retain storage created by the legacy inverse override."""
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS vanity_tax_exemptions (
                 guild_id INTEGER NOT NULL DEFAULT 0,
                 discord_id INTEGER NOT NULL,
                 exempted_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, discord_id)
+            )
+            """
+        )
+
+    def _migration_create_vanity_tax_enforcements(self, cursor) -> None:
+        """Store persistent admin-enforced vanity taxation."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vanity_tax_enforcements (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                enforced_by INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, discord_id)
             )
