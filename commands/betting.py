@@ -128,6 +128,7 @@ from services.loan_service import LoanService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
+from services.prediction_service import PredictionService
 from services.tip_service import TipService
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
@@ -298,6 +299,7 @@ class BettingCommands(commands.Cog):
         disburse_service: DisburseService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         tip_service: TipService | None = None,
+        prediction_service: PredictionService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -309,6 +311,7 @@ class BettingCommands(commands.Cog):
         self.loan_service = loan_service
         self.disburse_service = disburse_service
         self.tip_service = tip_service
+        self.prediction_service = prediction_service
 
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
@@ -1840,6 +1843,9 @@ async def setup(bot: commands.Bot):
     disburse_service = getattr(bot, "disburse_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     tip_service = getattr(bot, "tip_service", None)
+    prediction_service = getattr(bot, "prediction_service", None)
+    if prediction_service is None:
+        raise RuntimeError("Prediction service not registered on bot.")
     # optional services: bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service
 
     cog = BettingCommands(
@@ -1853,6 +1859,7 @@ async def setup(bot: commands.Bot):
         disburse_service,
         flavor_text_service,
         tip_service,
+        prediction_service,
     )
     await bot.add_cog(cog)
 
