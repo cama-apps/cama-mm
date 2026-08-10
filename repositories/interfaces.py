@@ -1283,6 +1283,11 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def get_guild_net_worth_leaderboard(self, guild_id: int | None) -> list[dict]:
+        """Return players ranked by cash plus current active-position value."""
+        ...
+
+    @abstractmethod
     def get_recent_trades(self, prediction_id: int, limit: int = 5) -> list[dict]:
         """Return the most recent ``limit`` trades for the embed's mini tape."""
         ...

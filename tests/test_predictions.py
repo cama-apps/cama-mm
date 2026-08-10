@@ -1660,6 +1660,91 @@ def test_get_user_open_positions_marks_missing_book_side_as_none(
     assert positions[0]["no_mark"] == expected_no_mark
 
 
+def test_guild_net_worth_leaderboard_uses_current_prices_for_active_positions(
+    prediction_service,
+    prediction_repo,
+    player_repository,
+):
+    _add_player(player_repository, 1, balance=100)
+    _add_player(player_repository, 2, balance=200)
+    _add_player(player_repository, 3, balance=500)
+    open_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="open market",
+        initial_fair=60,
+    )
+    locked_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="locked market",
+        initial_fair=25,
+    )
+    resolved_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="resolved market",
+        initial_fair=99,
+    )
+    other_guild_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID_SECONDARY,
+        creator_id=1,
+        question="other guild",
+        initial_fair=99,
+    )
+
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            "UPDATE predictions SET current_price = 70 WHERE prediction_id = ?",
+            (open_id,),
+        )
+        conn.execute(
+            "UPDATE predictions SET status = 'locked' WHERE prediction_id = ?",
+            (locked_id,),
+        )
+        conn.execute(
+            "UPDATE predictions SET status = 'resolved' WHERE prediction_id = ?",
+            (resolved_id,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO prediction_positions (
+                prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                no_contracts, no_cost_basis_total
+            )
+            VALUES (?, ?, ?, 0, ?, 0)
+            """,
+            [
+                (open_id, 1, 3, 2),
+                (open_id, 2, 0, 5),
+                (locked_id, 1, 1, 4),
+                (resolved_id, 1, 100, 0),
+                (other_guild_id, 1, 100, 0),
+            ],
+        )
+
+    assert prediction_service.get_guild_net_worth_leaderboard(TEST_GUILD_ID) == [
+        {
+            "discord_id": 3,
+            "name": "user3",
+            "jopacoin_balance": 500,
+            "net_worth": 500,
+        },
+        {
+            "discord_id": 2,
+            "name": "user2",
+            "jopacoin_balance": 200,
+            "net_worth": 215,
+        },
+        {
+            "discord_id": 1,
+            "name": "user1",
+            "jopacoin_balance": 100,
+            "net_worth": 159,
+        },
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Position mark helper
 # --------------------------------------------------------------------------- #

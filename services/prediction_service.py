@@ -370,6 +370,10 @@ class PredictionService:
     ) -> list[dict]:
         return self.prediction_repo.get_user_open_positions(discord_id, guild_id)
 
+    def get_guild_net_worth_leaderboard(self, guild_id: int | None) -> list[dict]:
+        """Return a snapshot-consistent cash-plus-position leaderboard."""
+        return self.prediction_repo.get_guild_net_worth_leaderboard(guild_id)
+
     def get_user_orderbook_stats(
         self, discord_id: int, guild_id: int | None = None
     ) -> dict:
