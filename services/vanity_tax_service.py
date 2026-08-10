@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class VanityTaxService:
-    """Apply a 10% profit tax to guild members without a server nickname."""
+    """Apply profit tax by nickname status and persistent admin enforcement."""
 
     TAX_RATE = VANITY_TAX_RATE
 
@@ -23,12 +23,12 @@ class VanityTaxService:
         # event handlers on the event loop (on_member_update etc.), so it must
         # never be held across repository I/O. ``_io_lock`` serializes the
         # repository read/write + cache swap so a stale refresh cannot clobber
-        # a newer manual-exemption write.
+        # a newer manual-taxation write.
         self._lock = RLock()
         self._io_lock = Lock()
         self._known_members_by_guild: dict[int, frozenset[int]] = {}
         self._nickname_taxable_by_guild: dict[int, frozenset[int]] = {}
-        self._manual_exemptions_by_guild: dict[int, frozenset[int]] = {}
+        self._manual_taxable_by_guild: dict[int, frozenset[int]] = {}
         # Ids touched by update_member/remove_member since the current
         # refresh's snapshot was taken (``begin_refresh``). ``refresh_guild``
         # runs off-loop from a snapshot taken on the event loop; a member
@@ -65,7 +65,7 @@ class VanityTaxService:
         guild_id: int,
         known_members: set[int],
         nickname_taxable: set[int],
-        manual_exemptions: frozenset[int],
+        manual_taxable: frozenset[int],
         generation: int | None = None,
     ) -> None:
         with self._lock:
@@ -103,7 +103,7 @@ class VanityTaxService:
             self._nickname_taxable_by_guild[guild_id] = frozenset(
                 nickname_taxable
             )
-            self._manual_exemptions_by_guild[guild_id] = manual_exemptions
+            self._manual_taxable_by_guild[guild_id] = manual_taxable
 
     def refresh_guild(
         self,
@@ -122,19 +122,19 @@ class VanityTaxService:
             # Blocking SQLite read happens outside the cache lock so event-loop
             # callers never wait on DB I/O.
             with self._io_lock:
-                manual_exemptions = (
-                    self._repository.get_vanity_tax_exemptions(guild_id)
+                manual_taxable = (
+                    self._repository.get_vanity_tax_enforcements(guild_id)
                 )
                 self._store_refresh(
                     guild_id,
                     known_members,
                     nickname_taxable,
-                    manual_exemptions,
+                    manual_taxable,
                     generation=generation,
                 )
         else:
             with self._lock:
-                manual_exemptions = self._manual_exemptions_by_guild.get(
+                manual_taxable = self._manual_taxable_by_guild.get(
                     guild_id,
                     frozenset(),
                 )
@@ -142,7 +142,7 @@ class VanityTaxService:
                     guild_id,
                     known_members,
                     nickname_taxable,
-                    manual_exemptions,
+                    manual_taxable,
                     generation=generation,
                 )
 
@@ -182,37 +182,37 @@ class VanityTaxService:
                 discord_id
             )
 
-    def set_manual_exemption(
+    def set_manual_taxation(
         self,
         guild_id: int,
         discord_id: int,
         *,
-        exempt: bool,
+        enforced: bool,
         actor_id: int,
     ) -> None:
-        """Grant or revoke a persistent exemption from the nickname rule."""
+        """Force taxation or restore the automatic nickname rule."""
         if self._repository is not None:
             # The blocking SQLite write happens outside the cache lock so
             # event-loop callers never wait on DB I/O.
             with self._io_lock:
-                exemptions = self._repository.set_vanity_tax_exemption(
+                enforced_ids = self._repository.set_vanity_tax_enforcement(
                     guild_id,
                     discord_id,
-                    exempt=exempt,
+                    enforced=enforced,
                     actor_id=actor_id,
                 )
                 with self._lock:
-                    self._manual_exemptions_by_guild[guild_id] = exemptions
+                    self._manual_taxable_by_guild[guild_id] = enforced_ids
         else:
             with self._lock:
                 updated = set(
-                    self._manual_exemptions_by_guild.get(guild_id, ())
+                    self._manual_taxable_by_guild.get(guild_id, ())
                 )
-                if exempt:
+                if enforced:
                     updated.add(discord_id)
                 else:
                     updated.discard(discord_id)
-                self._manual_exemptions_by_guild[guild_id] = frozenset(updated)
+                self._manual_taxable_by_guild[guild_id] = frozenset(updated)
 
     def eligibility_status(
         self,
@@ -223,8 +223,8 @@ class VanityTaxService:
         if guild_id is None:
             return "unknown"
         with self._lock:
-            if discord_id in self._manual_exemptions_by_guild.get(guild_id, ()):
-                return "manual_exemption"
+            if discord_id in self._manual_taxable_by_guild.get(guild_id, ()):
+                return "manual_taxation"
             known_members = self._known_members_by_guild.get(guild_id)
             if known_members is None or discord_id not in known_members:
                 return "unknown"
@@ -232,25 +232,25 @@ class VanityTaxService:
                 return "taxable"
             return "nickname_exemption"
 
-    def is_manually_exempt(self, guild_id: int | None, discord_id: int) -> bool:
-        """Return whether an admin override exempts this member."""
+    def is_manually_taxed(self, guild_id: int | None, discord_id: int) -> bool:
+        """Return whether an admin override taxes this member."""
         if guild_id is None:
             return False
         with self._lock:
-            return discord_id in self._manual_exemptions_by_guild.get(
+            return discord_id in self._manual_taxable_by_guild.get(
                 guild_id,
                 (),
             )
 
     def taxable_ids(self, guild_id: int | None) -> frozenset[int]:
-        """Return the latest known taxable members, failing open if unknown."""
+        """Return nickname-taxable and manually enforced member ids."""
         if guild_id is None:
             return frozenset()
         with self._lock:
             return self._nickname_taxable_by_guild.get(
                 guild_id,
                 frozenset(),
-            ) - self._manual_exemptions_by_guild.get(guild_id, frozenset())
+            ) | self._manual_taxable_by_guild.get(guild_id, frozenset())
 
     def calculate_tax(
         self,

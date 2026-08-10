@@ -10,43 +10,43 @@ from repositories.base_repository import BaseRepository, safe_json_loads
 class TaxRepository(BaseRepository):
     """Read helpers for guild and player monetary exposure."""
 
-    def get_vanity_tax_exemptions(
+    def get_vanity_tax_enforcements(
         self,
         guild_id: int | None,
     ) -> frozenset[int]:
-        """Return persistent vanity-tax exemptions for one guild."""
+        """Return persistent vanity-tax enforcements for one guild."""
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT discord_id
-                FROM vanity_tax_exemptions
+                FROM vanity_tax_enforcements
                 WHERE guild_id = ?
                 """,
                 (gid,),
             ).fetchall()
         return frozenset(int(row["discord_id"]) for row in rows)
 
-    def set_vanity_tax_exemption(
+    def set_vanity_tax_enforcement(
         self,
         guild_id: int | None,
         discord_id: int,
         *,
-        exempt: bool,
+        enforced: bool,
         actor_id: int,
     ) -> frozenset[int]:
-        """Grant or revoke an exemption and return the authoritative set."""
+        """Force or clear taxation and return the authoritative set."""
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
-            if exempt:
+            if enforced:
                 conn.execute(
                     """
-                    INSERT INTO vanity_tax_exemptions (
-                        guild_id, discord_id, exempted_by, created_at
+                    INSERT INTO vanity_tax_enforcements (
+                        guild_id, discord_id, enforced_by, created_at
                     )
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(guild_id, discord_id) DO UPDATE SET
-                        exempted_by = excluded.exempted_by,
+                        enforced_by = excluded.enforced_by,
                         created_at = excluded.created_at
                     """,
                     (gid, discord_id, actor_id, int(time.time())),
@@ -54,7 +54,7 @@ class TaxRepository(BaseRepository):
             else:
                 conn.execute(
                     """
-                    DELETE FROM vanity_tax_exemptions
+                    DELETE FROM vanity_tax_enforcements
                     WHERE guild_id = ? AND discord_id = ?
                     """,
                     (gid, discord_id),
@@ -62,7 +62,7 @@ class TaxRepository(BaseRepository):
             rows = conn.execute(
                 """
                 SELECT discord_id
-                FROM vanity_tax_exemptions
+                FROM vanity_tax_enforcements
                 WHERE guild_id = ?
                 """,
                 (gid,),
