@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime
 
 from config import CALIBRATION_RD_THRESHOLD, JOPACOIN_WIN_REWARD
+from domain.low_priority_constants import LOW_PRIORITY_RATING_GAIN_MULTIPLIER
 from domain.models.pending_match_state import PendingMatchState
 from openskill_rating_system import CamaOpenSkillSystem
 from services.match._common import coalesce_os_baseline, logger
@@ -506,6 +507,15 @@ class RecordingMixin:
             recent_outcomes_by_player = self.match_repo.get_player_recent_outcomes_bulk(
                 all_player_ids, normalized_gid, limit=20
             )
+            low_priority_ids = (
+                self.low_priority_repo.get_active_ids(all_player_ids, guild_id)
+                if self.low_priority_repo
+                else set()
+            )
+            gain_multipliers = dict.fromkeys(
+                low_priority_ids,
+                LOW_PRIORITY_RATING_GAIN_MULTIPLIER,
+            )
             streak_multipliers: dict[int, float] = {}
             streak_data: dict[int, tuple[int, float]] = {}
             for pid in all_player_ids:
@@ -529,6 +539,7 @@ class RecordingMixin:
                     "won": winning_team == "radiant",
                     "streak_length": streak_data.get(pid, (1, 1.0))[0],
                     "streak_multiplier": streak_data.get(pid, (1, 1.0))[1],
+                    "low_priority_gain_multiplier": gain_multipliers.get(pid, 1.0),
                 }
             for player, pid in dire_glicko:
                 pre_match[pid] = {
@@ -539,6 +550,7 @@ class RecordingMixin:
                     "won": winning_team == "dire",
                     "streak_length": streak_data.get(pid, (1, 1.0))[0],
                     "streak_multiplier": streak_data.get(pid, (1, 1.0))[1],
+                    "low_priority_gain_multiplier": gain_multipliers.get(pid, 1.0),
                 }
 
             radiant_rating, radiant_rd, _ = self.rating_system.aggregate_team_stats(
@@ -557,11 +569,19 @@ class RecordingMixin:
 
             if winning_team == "radiant":
                 team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                    radiant_glicko, dire_glicko, 1, streak_multipliers=streak_multipliers
+                    radiant_glicko,
+                    dire_glicko,
+                    1,
+                    streak_multipliers=streak_multipliers,
+                    gain_multipliers=gain_multipliers,
                 )
             else:
                 team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                    dire_glicko, radiant_glicko, 1, streak_multipliers=streak_multipliers
+                    dire_glicko,
+                    radiant_glicko,
+                    1,
+                    streak_multipliers=streak_multipliers,
+                    gain_multipliers=gain_multipliers,
                 )
 
             expected_ids = set(all_player_ids)
@@ -593,6 +613,7 @@ class RecordingMixin:
                 dire_os_data,
                 winning_team=1 if winning_team == "radiant" else 2,
                 streak_multipliers=streak_multipliers,
+                gain_multipliers=gain_multipliers,
             )
             os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
 
@@ -632,6 +653,9 @@ class RecordingMixin:
                         "os_sigma_after": pre.get("os_sigma_after"),
                         "streak_length": pre.get("streak_length"),
                         "streak_multiplier": pre.get("streak_multiplier"),
+                        "low_priority_gain_multiplier": pre.get(
+                            "low_priority_gain_multiplier", 1.0
+                        ),
                         "streak_multiplier_per_game": (
                             self.rating_system.streak_multiplier_per_game
                         ),
@@ -714,6 +738,9 @@ class RecordingMixin:
                 full_exclusion_increment_ids=full_exclusion_increment_ids,
                 half_exclusion_increment_ids=half_exclusion_increment_ids,
                 expected_openskill_revision=expected_openskill_revision,
+                expected_low_priority_ids=(
+                    low_priority_ids if self.low_priority_repo is not None else None
+                ),
                 win_reward_jc=JOPACOIN_WIN_REWARD,
                 referral_rewards_out=referral_rewards,
             )

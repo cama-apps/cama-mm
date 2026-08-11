@@ -306,7 +306,7 @@ List all available commands with descriptions.
 
 - `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
 - `/admin moderation suspend|lift|status|list|history` — Temporarily block selected lobby kinds by duration, future completed matches, or both, with private reasons and durable history
-- `/admin lowprio add|remove|status|list` — Apply the soft shuffle-selection penalty for 1–20 required wins and inspect its progress
+- `/admin lowprio add|remove|status|list` — Apply low-priority shuffle modifiers and 1.1× positive rating gains for 1–20 required wins, and inspect progress
 - `/player lobby status` — Privately view your active lobby suspension and low-priority progress
 - `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
 - `/trivia-reset-cooldown` — Reset a user's trivia cooldown

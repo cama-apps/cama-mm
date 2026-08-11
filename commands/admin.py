@@ -178,11 +178,15 @@ class AdminCommands(commands.Cog):
         )
         try:
             message = (
-                f"You were placed in low priority for **{state.wins_required} wins**."
+                f"You were placed in low priority for **{state.wins_required} wins**.\n"
+                "The matchmaker is asking for a small course correction."
             )
             if reason:
                 message += f"\nReason: {reason}"
-            message += "\nUse `/player lobby status` to view your progress."
+            message += (
+                f"\nWin {state.wins_required} recorded games to return to regular matchmaking."
+                "\nUse `/player lobby status` to view your progress."
+            )
             await user.send(message)
         except Exception as exc:
             logger.debug("Failed to DM low-priority player %s: %s", user.id, exc)
@@ -264,7 +268,7 @@ class AdminCommands(commands.Cog):
         await interaction.response.send_message(message, ephemeral=True)
         if removed:
             try:
-                dm_message = "Your low-priority matchmaking state was cleared."
+                dm_message = "Your low-priority matchmaking state was cleared. You're all set."
                 if reason:
                     dm_message += f"\nReason: {reason}"
                 await user.send(dm_message)

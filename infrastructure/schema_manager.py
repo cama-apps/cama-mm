@@ -798,6 +798,16 @@ class SchemaManager:
                 self._migration_expand_low_priority_state,
             ),
             (
+                "add_low_priority_gain_multiplier_to_rating_history",
+                self._migration_add_low_priority_gain_multiplier_to_rating_history,
+            ),
+            # OpenSkill v5: replay the persisted per-player positive-gain
+            # overlay used while low priority was active.
+            (
+                "openskill_v5_gain_multiplier_replay",
+                self._migration_openskill_v5_gain_multiplier_replay,
+            ),
+            (
                 "create_first_game_betting_pools",
                 self._migration_create_first_game_betting_pools,
             ),
@@ -1088,6 +1098,15 @@ class SchemaManager:
             "REAL NOT NULL DEFAULT 0.75",
         )
 
+    def _migration_add_low_priority_gain_multiplier_to_rating_history(self, cursor) -> None:
+        """Preserve the low-priority rating rule used for each participant."""
+        self._add_column_if_not_exists(
+            cursor,
+            "rating_history",
+            "low_priority_gain_multiplier",
+            "REAL NOT NULL DEFAULT 1.0",
+        )
+
     def _migration_add_streak_threshold_to_rating_history(self, cursor) -> None:
         """Preserve the streak threshold used when each match was recorded."""
         added = self._add_column_if_not_exists(
@@ -1117,6 +1136,10 @@ class SchemaManager:
 
     def _migration_openskill_v4_streak_replay(self, cursor) -> None:
         """Rebuild OpenSkill state with the persisted per-match streak curve."""
+        self._migration_openskill_v3_durable_native_replay(cursor)
+
+    def _migration_openskill_v5_gain_multiplier_replay(self, cursor) -> None:
+        """Rebuild OpenSkill state with persisted positive-gain overlays."""
         self._migration_openskill_v3_durable_native_replay(cursor)
 
     def _migration_create_lobby_target_subscriptions(self, cursor) -> None:
@@ -1549,6 +1572,7 @@ class SchemaManager:
         # databases behave alike.
         self._migration_add_streak_multiplier_per_game_to_rating_history(cursor)
         self._migration_add_streak_threshold_to_rating_history(cursor)
+        self._migration_add_low_priority_gain_multiplier_to_rating_history(cursor)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS openskill_rating_events (
@@ -1632,7 +1656,16 @@ class SchemaManager:
             participant_rows = cursor.execute(
                 """
                 SELECT mp.match_id, mp.discord_id, mp.team_number,
-                       mp.side, mp.fantasy_points
+                       mp.side, mp.fantasy_points,
+                       COALESCE((
+                           SELECT rh.low_priority_gain_multiplier
+                           FROM rating_history rh
+                           WHERE rh.guild_id = mp.guild_id
+                             AND rh.match_id = mp.match_id
+                             AND rh.discord_id = mp.discord_id
+                           ORDER BY rh.id
+                           LIMIT 1
+                       ), 1.0) AS low_priority_gain_multiplier
                 FROM match_participants mp
                 JOIN matches m
                   ON m.match_id = mp.match_id AND m.guild_id = mp.guild_id

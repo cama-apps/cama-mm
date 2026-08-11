@@ -351,6 +351,7 @@ class RegistrationCommands(commands.Cog):
             completed = low_priority.wins_required - low_priority.wins_remaining
             sections.append(
                 "**Low priority**\n"
+                "A small matchmaking detour is in progress.\n"
                 f"Progress: {completed}/{low_priority.wins_required} wins "
                 f"({low_priority.wins_remaining} remaining)\n"
                 f"Reason: {low_priority.reason or 'Not provided'}"
@@ -359,7 +360,7 @@ class RegistrationCommands(commands.Cog):
         message = (
             "\n\n".join(sections)
             if sections
-            else "✅ You have no active lobby suspension or low-priority state."
+            else "✅ All clear — you have no active lobby suspension or low-priority state."
         )
         await safe_followup(interaction, content=message, ephemeral=True)
 

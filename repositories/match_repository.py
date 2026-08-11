@@ -298,6 +298,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
+        expected_low_priority_ids: set[int] | None = None,
         win_reward_jc: int | None = None,
         referral_rewards_out: list[dict] | None = None,
     ) -> int:
@@ -372,6 +373,33 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 if current_revision != expected_openskill_revision:
                     raise RuntimeError(
                         "OpenSkill ratings changed while this match was being "
+                        "calculated; retry recording the match"
+                    )
+
+            # Low-priority membership also affects the precomputed Glicko and
+            # OpenSkill gains. Reject an admin/state change that committed
+            # after that snapshot so a retry can recompute both rating systems.
+            if expected_low_priority_ids is not None:
+                participant_ids = sorted(set(team1_ids + team2_ids))
+                current_low_priority_ids: set[int] = set()
+                if participant_ids:
+                    placeholders = ",".join("?" * len(participant_ids))
+                    rows = cursor.execute(
+                        f"""
+                        SELECT discord_id
+                        FROM low_priority_state
+                        WHERE guild_id = ? AND active = 1 AND wins_remaining > 0
+                          AND discord_id IN ({placeholders})
+                        """,
+                        (normalized_guild, *participant_ids),
+                    ).fetchall()
+                    current_low_priority_ids = {
+                        int(row["discord_id"])
+                        for row in rows
+                    }
+                if current_low_priority_ids != set(expected_low_priority_ids):
+                    raise RuntimeError(
+                        "Low-priority state changed while this match was being "
                         "calculated; retry recording the match"
                     )
 
@@ -857,9 +885,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         os_algorithm_fingerprint,
                         streak_length, streak_multiplier,
                         streak_multiplier_per_game, streak_threshold,
-                        base_rating_delta_multiplier
+                        base_rating_delta_multiplier,
+                        low_priority_gain_multiplier
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -891,6 +920,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             row.get("streak_multiplier_per_game", STREAK_MULTIPLIER_PER_GAME),
                             row.get("streak_threshold", STREAK_THRESHOLD),
                             row.get("base_rating_delta_multiplier", 0.75),
+                            row.get("low_priority_gain_multiplier", 1.0),
                         )
                         for row in rating_history_rows
                     ],
@@ -3009,7 +3039,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
             participant_rows = cursor.execute(
                 """
                 SELECT mp.match_id, mp.discord_id, mp.team_number,
-                       mp.side, mp.fantasy_points
+                       mp.side, mp.fantasy_points,
+                       COALESCE((
+                           SELECT rh.low_priority_gain_multiplier
+                           FROM rating_history rh
+                           WHERE rh.guild_id = mp.guild_id
+                             AND rh.match_id = mp.match_id
+                             AND rh.discord_id = mp.discord_id
+                           ORDER BY rh.id
+                           LIMIT 1
+                       ), 1.0) AS low_priority_gain_multiplier
                 FROM match_participants mp
                 JOIN matches m
                   ON m.match_id = mp.match_id AND m.guild_id = mp.guild_id
@@ -4197,7 +4236,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     fantasy_weight,
                     streak_multiplier_per_game,
                     streak_threshold,
-                    base_rating_delta_multiplier
+                    base_rating_delta_multiplier,
+                    low_priority_gain_multiplier
                 FROM rating_history
                 WHERE match_id = ?
                 """,

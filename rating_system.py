@@ -315,6 +315,7 @@ class CamaRatingSystem:
         result: float,
         streak_multiplier: float = 1.0,
         base_rating_delta_multiplier: float | None = None,
+        gain_multiplier: float = 1.0,
     ) -> tuple[float, float, float]:
         """
         Compute updated rating, RD, and volatility for a single player.
@@ -332,6 +333,7 @@ class CamaRatingSystem:
             result: 1.0 for win, 0.0 for loss
             streak_multiplier: Multiplier for rating delta (default 1.0)
             base_rating_delta_multiplier: Recording-time base delta scale, or the current default
+            gain_multiplier: Additional multiplier for positive rating deltas (default 1.0)
 
         Returns:
             Tuple of (new_rating, new_rd, new_vol)
@@ -356,6 +358,8 @@ class CamaRatingSystem:
 
         # Apply streak multiplier before capping
         delta = delta * streak_multiplier
+        if delta > 0:
+            delta *= gain_multiplier
 
         delta = max(-MAX_RATING_SWING_PER_GAME, min(MAX_RATING_SWING_PER_GAME, delta))
 
@@ -375,6 +379,7 @@ class CamaRatingSystem:
         winning_team: int,
         streak_multipliers: dict[int, float] | None = None,
         base_rating_delta_multiplier: float | None = None,
+        gain_multipliers: dict[int, float] | None = None,
     ) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
         """
         Update ratings after a match using team-based expected outcome with individual RD.
@@ -404,6 +409,7 @@ class CamaRatingSystem:
             winning_team: 1 or 2 (which team won)
             streak_multipliers: Optional dict mapping discord_id to streak multiplier
             base_rating_delta_multiplier: Recording-time base delta scale, or the current default
+            gain_multipliers: Optional dict mapping discord_id to positive-delta multiplier
 
         Returns:
             Tuple of (team1_updated_ratings, team2_updated_ratings)
@@ -420,6 +426,7 @@ class CamaRatingSystem:
             raise ValueError(f"winning_team must be 1 or 2, got {winning_team}")
 
         streak_multipliers = streak_multipliers or {}
+        gain_multipliers = gain_multipliers or {}
 
         # Get team aggregates (mean rating, RMS RD)
         team1_rating, team1_rd, _ = self.aggregate_team_stats([p for p, _ in team1_players])
@@ -434,6 +441,7 @@ class CamaRatingSystem:
                 *self._update_player_rating(
                     player, team1_rating, team2_rating, team2_rd, team1_result,
                     streak_multiplier=streak_multipliers.get(discord_id, 1.0),
+                    gain_multiplier=gain_multipliers.get(discord_id, 1.0),
                     base_rating_delta_multiplier=base_rating_delta_multiplier,
                 ),
                 discord_id
@@ -445,6 +453,7 @@ class CamaRatingSystem:
                 *self._update_player_rating(
                     player, team2_rating, team1_rating, team1_rd, team2_result,
                     streak_multiplier=streak_multipliers.get(discord_id, 1.0),
+                    gain_multiplier=gain_multipliers.get(discord_id, 1.0),
                     base_rating_delta_multiplier=base_rating_delta_multiplier,
                 ),
                 discord_id

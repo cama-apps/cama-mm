@@ -713,6 +713,7 @@ class IMatchRepository(ABC):
         full_exclusion_increment_ids: list[int] | None = None,
         half_exclusion_increment_ids: list[int] | None = None,
         expected_openskill_revision: int | None = None,
+        expected_low_priority_ids: set[int] | None = None,
         win_reward_jc: int | None = None,
         referral_rewards_out: list[dict] | None = None,
     ) -> int: ...

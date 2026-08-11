@@ -363,6 +363,12 @@ class VotingCorrectionMixin:
         # window is recoverable from rating_history (rows strictly before
         # this match), so the multiplier is recomputed, not restored.
         streak_multipliers: dict[int, float] = {}
+        gain_multipliers = {
+            pid: float(
+                rating_by_id.get(pid, {}).get("low_priority_gain_multiplier") or 1.0
+            )
+            for pid in radiant_ids + dire_ids
+        }
         new_streaks: dict[int, tuple[int, float]] = {}
         participant_ids = radiant_ids + dire_ids
         outcomes_by_id = self.match_repo.get_player_outcomes_before_match_bulk(
@@ -397,6 +403,7 @@ class VotingCorrectionMixin:
                 dire_glicko,
                 1,
                 streak_multipliers=streak_multipliers,
+                gain_multipliers=gain_multipliers,
                 base_rating_delta_multiplier=recorded_base_multiplier,
             )
         else:
@@ -405,6 +412,7 @@ class VotingCorrectionMixin:
                 radiant_glicko,
                 1,
                 streak_multipliers=streak_multipliers,
+                gain_multipliers=gain_multipliers,
                 base_rating_delta_multiplier=recorded_base_multiplier,
             )
 
@@ -449,6 +457,7 @@ class VotingCorrectionMixin:
                     ],
                     winning_team=new_winning_team_num,
                     streak_multipliers=streak_multipliers,
+                    gain_multipliers=gain_multipliers,
                 )
                 os_results = {pid: (mu, sigma) for pid, (mu, sigma, _factor) in weighted.items()}
                 os_factors = {pid: factor for pid, (_mu, _sigma, factor) in weighted.items()}
@@ -458,6 +467,7 @@ class VotingCorrectionMixin:
                     [(pid, *os_rating_by_id.get(pid, (None, None))) for pid in dire_ids],
                     winning_team=new_winning_team_num,
                     streak_multipliers=streak_multipliers,
+                    gain_multipliers=gain_multipliers,
                 )
                 os_factors = dict.fromkeys(os_results)
             new_os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]

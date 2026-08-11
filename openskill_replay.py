@@ -22,7 +22,7 @@ from rating_system import (
     recorded_streak_threshold,
 )
 
-OPENSKILL_ALGORITHM_VERSION = 4
+OPENSKILL_ALGORITHM_VERSION = 5
 _RECENT_OUTCOME_LIMIT = 20
 
 
@@ -313,6 +313,17 @@ def replay_openskill(
                 streak_threshold=match_streak_threshold,
             )
             streak_multipliers[player_id] = multiplier
+        gain_multipliers = {
+            player_id: float(
+                _value(
+                    participants_by_id.get(player_id, {}),
+                    "low_priority_gain_multiplier",
+                    1.0,
+                )
+                or 1.0
+            )
+            for player_id in all_ids
+        }
 
         complete_fantasy = len(participants_by_id) >= 10 and all(
             player_id in participants_by_id
@@ -368,6 +379,7 @@ def replay_openskill(
                 team2_data,
                 int(winning_team),
                 streak_multipliers=streak_multipliers,
+                gain_multipliers=gain_multipliers,
             )
             results = {
                 player_id: (mu, sigma)
@@ -383,6 +395,7 @@ def replay_openskill(
                 [(player_id, *before[player_id]) for player_id in team2_ids],
                 int(winning_team),
                 streak_multipliers=streak_multipliers,
+                gain_multipliers=gain_multipliers,
             )
             factors = dict.fromkeys(all_ids)
             replay.matches_equal_weight += 1

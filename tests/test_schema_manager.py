@@ -232,6 +232,32 @@ def test_base_delta_multiplier_migration_backfills_legacy_history(tmp_path):
     assert stored_multiplier == pytest.approx(0.75)
 
 
+def test_low_priority_gain_migration_keeps_legacy_history_unboosted(tmp_path):
+    db_path = str(tmp_path / "legacy-low-priority-gain.db")
+    manager = SchemaManager(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE rating_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rating REAL
+            )
+            """
+        )
+        conn.execute("INSERT INTO rating_history (rating) VALUES (1510.0)")
+
+        manager._migration_add_low_priority_gain_multiplier_to_rating_history(
+            conn.cursor()
+        )
+        stored_multiplier = conn.execute(
+            "SELECT low_priority_gain_multiplier FROM rating_history"
+        ).fetchone()[0]
+
+    assert stored_multiplier == pytest.approx(1.0)
+
+
 def test_wrapped_enrichment_facts_migration_backfills_safely_and_idempotently(
     repo_db_path,
 ):

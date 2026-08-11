@@ -15,7 +15,11 @@ Multiplier formula: 1.0 + 0.30 * max(0, streak_length - 2)
 
 import pytest
 
-from config import STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD
+from config import (
+    MAX_RATING_SWING_PER_GAME,
+    STREAK_MULTIPLIER_PER_GAME,
+    STREAK_THRESHOLD,
+)
 from rating_system import (
     CamaRatingSystem,
     recorded_streak_rate,
@@ -432,6 +436,56 @@ class TestStreakIntegration:
 
         # Streak delta should be ~1.60x the base delta (both negative)
         assert streak_delta == pytest.approx(base_delta * 1.60, rel=0.01)
+
+    def test_gain_multiplier_stacks_with_streak_without_amplifying_loss(
+        self, rating_system
+    ):
+        """A gain-only multiplier compounds positive streak gains only."""
+        from glicko2 import Player
+
+        winner = Player(rating=1500, rd=100, vol=0.06)
+        loser = Player(rating=1500, rd=100, vol=0.06)
+        base_winners, base_losers = rating_system.update_ratings_after_match(
+            [(winner, 1)],
+            [(loser, 2)],
+            winning_team=1,
+            streak_multipliers={1: 1.25, 2: 1.25},
+        )
+
+        winner = Player(rating=1500, rd=100, vol=0.06)
+        loser = Player(rating=1500, rd=100, vol=0.06)
+        boosted_winners, boosted_losers = rating_system.update_ratings_after_match(
+            [(winner, 1)],
+            [(loser, 2)],
+            winning_team=1,
+            streak_multipliers={1: 1.25, 2: 1.25},
+            gain_multipliers={1: 1.10, 2: 1.10},
+        )
+
+        base_win_delta = base_winners[0][0] - 1500
+        boosted_win_delta = boosted_winners[0][0] - 1500
+        assert boosted_win_delta == pytest.approx(base_win_delta * 1.10)
+        assert boosted_losers[0][0] == pytest.approx(base_losers[0][0])
+        assert boosted_winners[0][1:] == pytest.approx(base_winners[0][1:])
+        assert boosted_losers[0][1:] == pytest.approx(base_losers[0][1:])
+
+    def test_gain_multiplier_is_applied_before_the_rating_cap(self, rating_system):
+        from glicko2 import Player
+
+        player = Player(rating=1000, rd=350, vol=0.06)
+        updated_rating, _rd, _vol = rating_system._update_player_rating(
+            player,
+            team_rating=1000,
+            opponent_rating=3000,
+            opponent_rd=30,
+            result=1.0,
+            streak_multiplier=3.0,
+            gain_multiplier=1.10,
+        )
+
+        assert updated_rating - player.rating == pytest.approx(
+            MAX_RATING_SWING_PER_GAME
+        )
 
 
 class TestRatingHistoryStreakColumns:

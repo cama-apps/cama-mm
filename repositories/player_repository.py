@@ -199,14 +199,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 )
 
             roles_json = json.dumps(preferred_roles) if preferred_roles else None
+            from openskill_rating_system import CamaOpenSkillSystem
+            from openskill_replay import OPENSKILL_ALGORITHM_VERSION
+
+            algorithm_fingerprint = CamaOpenSkillSystem.algorithm_fingerprint()
 
             cursor.execute(
                 """
                 INSERT INTO players
                 (discord_id, guild_id, discord_username, dotabuff_url, steam_id, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
-                 os_mu, os_sigma, exclusion_count, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                 os_mu, os_sigma, os_rating_version, os_algorithm_fingerprint,
+                 exclusion_count, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
@@ -223,6 +228,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     glicko_volatility,
                     os_mu,
                     os_sigma,
+                    OPENSKILL_ALGORITHM_VERSION,
+                    algorithm_fingerprint,
                     NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
