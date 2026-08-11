@@ -915,6 +915,73 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_guild_net_worth_leaderboard(self, guild_id: int | None) -> list[dict]:
+        """Return a snapshot-consistent cash-plus-position leaderboard."""
+        from config import PREDICTION_CONTRACT_VALUE, PREDICTION_INITIAL_FAIR_DEFAULT
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH position_values AS (
+                    SELECT
+                        pp.discord_id,
+                        SUM(
+                            CAST(
+                                pp.yes_contracts * ?
+                                * COALESCE(p.current_price, p.initial_fair, ?) / 100
+                                AS INTEGER
+                            )
+                            + CAST(
+                                pp.no_contracts * ?
+                                * (100 - COALESCE(p.current_price, p.initial_fair, ?)) / 100
+                                AS INTEGER
+                            )
+                        ) AS position_value
+                    FROM predictions p
+                    JOIN prediction_positions pp
+                      ON pp.prediction_id = p.prediction_id
+                    WHERE p.guild_id = ?
+                      AND p.status IN ('open', 'locked')
+                      AND (pp.yes_contracts > 0 OR pp.no_contracts > 0)
+                    GROUP BY pp.discord_id
+                )
+                SELECT
+                    players.discord_id,
+                    players.discord_username AS name,
+                    COALESCE(players.jopacoin_balance, 0) AS jopacoin_balance,
+                    COALESCE(players.jopacoin_balance, 0)
+                        + COALESCE(position_values.position_value, 0) AS net_worth
+                FROM players
+                LEFT JOIN position_values
+                  ON position_values.discord_id = players.discord_id
+                WHERE players.guild_id = ?
+                ORDER BY
+                    net_worth DESC,
+                    COALESCE(players.jopacoin_balance, 0) DESC,
+                    COALESCE(players.wins, 0) DESC,
+                    COALESCE(players.glicko_rating, 0) DESC,
+                    players.discord_id ASC
+                """,
+                (
+                    PREDICTION_CONTRACT_VALUE,
+                    PREDICTION_INITIAL_FAIR_DEFAULT,
+                    PREDICTION_CONTRACT_VALUE,
+                    PREDICTION_INITIAL_FAIR_DEFAULT,
+                    normalized_guild,
+                    normalized_guild,
+                ),
+            ).fetchall()
+        return [
+            {
+                "discord_id": int(row["discord_id"]),
+                "name": row["name"],
+                "jopacoin_balance": int(row["jopacoin_balance"] or 0),
+                "net_worth": int(row["net_worth"] or 0),
+            }
+            for row in rows
+        ]
+
     def get_transferable_open_position_sides(
         self, discord_id: int, guild_id: int | None = None
     ) -> list[dict]:

@@ -629,8 +629,8 @@ class WheelOutcomeProcessor:
             )
 
     async def _blue_shell(self) -> None:
-        leaderboard = await self._leaderboard(limit=1)
-        if leaderboard and leaderboard[0].discord_id == self.context.user_id:
+        richest = await self._blue_shell_leader()
+        if richest and richest.discord_id == self.context.user_id:
             self.state.shell_self_hit = True
             percentage = max(1, int(self.state.new_balance * random.uniform(0.02, 0.07)))
             flat = random.randint(4, 20)
@@ -659,11 +659,10 @@ class WheelOutcomeProcessor:
             self.state.new_balance = settled.victim_balance_after
             return
 
-        if not leaderboard or leaderboard[0].jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
+        if not richest:
             self.state.shell_missed = True
             return
 
-        richest = leaderboard[0]
         percentage = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.1016)))
         flat = random.randint(4, 29)
         requested = scale_minigame_jc_delta(max(percentage, flat))
@@ -674,6 +673,7 @@ class WheelOutcomeProcessor:
                 "BLUE_SHELL",
                 destination="player",
                 recipient_id=self.context.user_id,
+                min_balance=None,
             )
         except Exception as exc:
             logger.warning(
@@ -694,6 +694,23 @@ class WheelOutcomeProcessor:
             self.state.shell_victim = self.context.interaction.guild.get_member(
                 richest.discord_id
             )
+
+    async def _blue_shell_leader(self):
+        """Return the visible player with the greatest liquid-plus-position wealth."""
+        if self.command.prediction_service is None:
+            players = await self._leaderboard(limit=1)
+        else:
+            rows = await asyncio.to_thread(
+                self.command.prediction_service.get_guild_net_worth_leaderboard,
+                self.context.guild_id,
+            )
+            players = [SimpleNamespace(**row) for row in rows]
+            players = filter_visible_leaderboard(
+                players,
+                self.context.interaction.guild,
+                limit=1,
+            )
+        return players[0] if players else None
 
     async def _lightning_bolt(self) -> None:
         tax_rate = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
@@ -1445,6 +1462,8 @@ class WheelOutcomeProcessor:
         victim,
         amount: int,
         outcome: str,
+        *,
+        min_balance: int | None = HOSTILE_LOSS_MIN_BALANCE,
         **kwargs,
     ):
         return await self.command._apply_hostile_gamba_loss(
@@ -1454,7 +1473,7 @@ class WheelOutcomeProcessor:
             actor_id=self.context.user_id,
             event_key=f"{self.context.hostile_event_prefix}:{victim.discord_id}",
             outcome=outcome,
-            min_balance=HOSTILE_LOSS_MIN_BALANCE,
+            min_balance=min_balance,
             victim_balance=victim.jopacoin_balance,
             **kwargs,
         )

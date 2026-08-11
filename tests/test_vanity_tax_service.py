@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from time import sleep
 from types import SimpleNamespace
 
 import pytest
 
+from infrastructure.schema_manager import SchemaManager
 from repositories.tax_repository import TaxRepository
 from services.vanity_tax_service import VanityTaxService
 
@@ -64,9 +65,9 @@ def test_member_updates_toggle_taxability_and_removal_fails_open():
     assert service.calculate_tax(1, GUILD_ID, 500) == 0
 
 
-def test_failed_exemption_refresh_keeps_guild_eligibility_unknown():
+def test_failed_enforcement_refresh_keeps_guild_eligibility_unknown():
     class FailingRepository:
-        def get_vanity_tax_exemptions(self, guild_id):
+        def get_vanity_tax_enforcements(self, guild_id):
             raise RuntimeError("database unavailable")
 
     service = VanityTaxService(FailingRepository())
@@ -78,69 +79,113 @@ def test_failed_exemption_refresh_keeps_guild_eligibility_unknown():
     assert service.eligibility_status(GUILD_ID, 1) == "unknown"
 
 
-def test_manual_exemption_persists_and_overrides_missing_nickname(repo_db_path):
+def test_manual_taxation_persists_and_overrides_server_nickname(repo_db_path):
     repository = TaxRepository(repo_db_path)
     service = VanityTaxService(repository)
-    service.refresh_guild(GUILD_ID, [_member(1, None)])
+    service.refresh_guild(GUILD_ID, [_member(1, "Skater")])
 
-    assert service.calculate_tax(1, GUILD_ID, 500) == 50
-
-    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
-    assert service.is_manually_exempt(GUILD_ID, 1) is True
     assert service.calculate_tax(1, GUILD_ID, 500) == 0
 
+    service.set_manual_taxation(GUILD_ID, 1, enforced=True, actor_id=99)
+    assert service.is_manually_taxed(GUILD_ID, 1) is True
+    assert service.calculate_tax(1, GUILD_ID, 500) == 50
+
     reloaded = VanityTaxService(repository)
-    reloaded.refresh_guild(GUILD_ID, [_member(1, None)])
-    assert reloaded.is_manually_exempt(GUILD_ID, 1) is True
-    assert reloaded.calculate_tax(1, GUILD_ID, 500) == 0
-    reloaded.refresh_guild(GUILD_ID + 1, [_member(1, None)])
-    assert reloaded.calculate_tax(1, GUILD_ID + 1, 500) == 50
-
-    reloaded.set_manual_exemption(GUILD_ID, 1, exempt=False, actor_id=100)
-    assert reloaded.is_manually_exempt(GUILD_ID, 1) is False
+    reloaded.refresh_guild(GUILD_ID, [_member(1, "Skater")])
+    assert reloaded.is_manually_taxed(GUILD_ID, 1) is True
     assert reloaded.calculate_tax(1, GUILD_ID, 500) == 50
+    reloaded.refresh_guild(GUILD_ID + 1, [_member(1, "Skater")])
+    assert reloaded.calculate_tax(1, GUILD_ID + 1, 500) == 0
 
-    after_revoke = VanityTaxService(repository)
-    after_revoke.refresh_guild(GUILD_ID, [_member(1, None)])
-    assert after_revoke.is_manually_exempt(GUILD_ID, 1) is False
-    assert after_revoke.calculate_tax(1, GUILD_ID, 500) == 50
+    reloaded.set_manual_taxation(GUILD_ID, 1, enforced=False, actor_id=100)
+    assert reloaded.is_manually_taxed(GUILD_ID, 1) is False
+    assert reloaded.calculate_tax(1, GUILD_ID, 500) == 0
+
+    after_clear = VanityTaxService(repository)
+    after_clear.refresh_guild(GUILD_ID, [_member(1, "Skater")])
+    assert after_clear.is_manually_taxed(GUILD_ID, 1) is False
+    assert after_clear.calculate_tax(1, GUILD_ID, 500) == 0
 
 
-def test_committed_manual_exemption_updates_cache_without_repository_reload():
+def test_enforcement_migration_does_not_reinterpret_legacy_exemptions(
+    repo_db_path,
+):
+    repository = TaxRepository(repo_db_path)
+    with repository.connection() as conn:
+        conn.execute("DROP TABLE vanity_tax_enforcements")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("create_vanity_tax_enforcements",),
+        )
+        conn.execute(
+            """
+            INSERT INTO vanity_tax_exemptions (
+                guild_id, discord_id, exempted_by, created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (GUILD_ID, 1, 99, 1),
+        )
+
+    SchemaManager(repo_db_path).initialize()
+
+    with repository.connection() as conn:
+        legacy_row = conn.execute(
+            """
+            SELECT exempted_by
+            FROM vanity_tax_exemptions
+            WHERE guild_id = ? AND discord_id = ?
+            """,
+            (GUILD_ID, 1),
+        ).fetchone()
+        enforcement_row = conn.execute(
+            """
+            SELECT enforced_by
+            FROM vanity_tax_enforcements
+            WHERE guild_id = ? AND discord_id = ?
+            """,
+            (GUILD_ID, 1),
+        ).fetchone()
+
+    assert legacy_row["exempted_by"] == 99
+    assert enforcement_row is None
+
+
+def test_committed_manual_taxation_updates_cache_without_repository_reload():
     class Repository:
         def __init__(self):
-            self.exemptions = set()
+            self.enforcements = set()
             self.read_count = 0
 
-        def get_vanity_tax_exemptions(self, guild_id):
+        def get_vanity_tax_enforcements(self, guild_id):
             self.read_count += 1
             if self.read_count > 1:
                 raise RuntimeError("reload failed")
-            return frozenset(self.exemptions)
+            return frozenset(self.enforcements)
 
-        def set_vanity_tax_exemption(
+        def set_vanity_tax_enforcement(
             self,
             guild_id,
             discord_id,
             *,
-            exempt,
+            enforced,
             actor_id,
         ):
-            if exempt:
-                self.exemptions.add(discord_id)
+            if enforced:
+                self.enforcements.add(discord_id)
             else:
-                self.exemptions.discard(discord_id)
-            return frozenset(self.exemptions)
+                self.enforcements.discard(discord_id)
+            return frozenset(self.enforcements)
 
     repository = Repository()
     service = VanityTaxService(repository)
-    service.refresh_guild(GUILD_ID, [_member(1, None)])
+    service.refresh_guild(GUILD_ID, [_member(1, "Skater")])
 
-    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+    service.set_manual_taxation(GUILD_ID, 1, enforced=True, actor_id=99)
 
-    assert repository.exemptions == {1}
-    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
-    assert service.calculate_tax(1, GUILD_ID, 500) == 0
+    assert repository.enforcements == {1}
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_taxation"
+    assert service.calculate_tax(1, GUILD_ID, 500) == 50
 
 
 def test_eligibility_status_distinguishes_every_cached_state():
@@ -154,8 +199,8 @@ def test_eligibility_status_distinguishes_every_cached_state():
     assert service.eligibility_status(GUILD_ID, 2) == "nickname_exemption"
     assert service.eligibility_status(GUILD_ID, 3) == "unknown"
 
-    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
-    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
+    service.set_manual_taxation(GUILD_ID, 2, enforced=True, actor_id=99)
+    assert service.eligibility_status(GUILD_ID, 2) == "manual_taxation"
 
     service.update_member(GUILD_ID, 3, None)
     assert service.eligibility_status(GUILD_ID, 3) == "taxable"
@@ -163,7 +208,7 @@ def test_eligibility_status_distinguishes_every_cached_state():
     assert service.eligibility_status(GUILD_ID, 3) == "unknown"
 
 
-def test_concurrent_manual_exemptions_do_not_lose_cached_members():
+def test_concurrent_manual_taxations_do_not_lose_cached_members():
     class SlowCache(dict):
         def get(self, key, default=None):
             value = super().get(key, default)
@@ -171,27 +216,114 @@ def test_concurrent_manual_exemptions_do_not_lose_cached_members():
             return value
 
     service = VanityTaxService()
-    service.refresh_guild(GUILD_ID, [_member(1, None), _member(2, None)])
-    service._manual_exemptions_by_guild = SlowCache(
+    service.refresh_guild(
+        GUILD_ID,
+        [_member(1, "Skater"), _member(2, "Spooky Bush")],
+    )
+    service._manual_taxable_by_guild = SlowCache(
         {GUILD_ID: frozenset()}
     )
     start = Barrier(2)
 
-    def exempt(discord_id: int) -> None:
+    def enforce(discord_id: int) -> None:
         start.wait()
-        service.set_manual_exemption(
+        service.set_manual_taxation(
             GUILD_ID,
             discord_id,
-            exempt=True,
+            enforced=True,
             actor_id=99,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(exempt, discord_id) for discord_id in (1, 2)]
+        futures = [executor.submit(enforce, discord_id) for discord_id in (1, 2)]
         for future in futures:
             future.result()
 
-    assert service.taxable_ids(GUILD_ID) == frozenset()
+    assert service.taxable_ids(GUILD_ID) == frozenset({1, 2})
+
+
+def test_concurrent_persisted_taxations_do_not_lose_members(repo_db_path):
+    repository = TaxRepository(repo_db_path)
+    service = VanityTaxService(repository)
+    service.refresh_guild(
+        GUILD_ID,
+        [_member(1, "Skater"), _member(2, "Spooky Bush")],
+    )
+    start = Barrier(2)
+
+    def enforce(discord_id: int) -> None:
+        start.wait()
+        service.set_manual_taxation(
+            GUILD_ID,
+            discord_id,
+            enforced=True,
+            actor_id=99,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(enforce, discord_id) for discord_id in (1, 2)]
+        for future in futures:
+            future.result()
+
+    assert service.taxable_ids(GUILD_ID) == frozenset({1, 2})
+    reloaded = VanityTaxService(repository)
+    reloaded.refresh_guild(
+        GUILD_ID,
+        [_member(1, "Skater"), _member(2, "Spooky Bush")],
+    )
+    assert reloaded.taxable_ids(GUILD_ID) == frozenset({1, 2})
+
+
+def test_enforcement_started_during_refresh_wins_cache_publication():
+    class InterleavingRepository:
+        def __init__(self):
+            self.enforcements: set[int] = set()
+            self.refresh_read_started = Event()
+            self.release_refresh_read = Event()
+
+        def get_vanity_tax_enforcements(self, guild_id):
+            self.refresh_read_started.set()
+            assert self.release_refresh_read.wait(timeout=1)
+            return frozenset(self.enforcements)
+
+        def set_vanity_tax_enforcement(
+            self, guild_id, discord_id, *, enforced, actor_id
+        ):
+            if enforced:
+                self.enforcements.add(discord_id)
+            else:
+                self.enforcements.discard(discord_id)
+            return frozenset(self.enforcements)
+
+    repository = InterleavingRepository()
+    service = VanityTaxService(repository)
+    write_started = Event()
+
+    def enforce() -> None:
+        write_started.set()
+        service.set_manual_taxation(
+            GUILD_ID,
+            1,
+            enforced=True,
+            actor_id=99,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refresh = executor.submit(
+            service.refresh_guild,
+            GUILD_ID,
+            [_member(1, "Skater")],
+        )
+        assert repository.refresh_read_started.wait(timeout=1)
+        write = executor.submit(enforce)
+        assert write_started.wait(timeout=1)
+        repository.release_refresh_read.set()
+        refresh.result()
+        write.result()
+
+    assert repository.enforcements == {1}
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_taxation"
+    assert service.calculate_tax(1, GUILD_ID, 500) == 50
 
 
 def _cache_lock_free_from_other_thread(service) -> bool:
@@ -212,7 +344,7 @@ def _cache_lock_free_from_other_thread(service) -> bool:
 def test_repository_io_runs_outside_shared_cache_lock():
     """DB reads/writes must not hold the cache lock the event loop acquires.
 
-    ``refresh_guild`` (called from on_ready) and ``set_manual_exemption``
+    ``refresh_guild`` (called from on_ready) and ``set_manual_taxation``
     (called from /tax vanity) perform SQLite I/O; holding ``_lock`` across it
     would block the sync member-event handlers running on the event loop.
     """
@@ -222,24 +354,26 @@ def test_repository_io_runs_outside_shared_cache_lock():
         def __init__(self):
             self.service = None
 
-        def get_vanity_tax_exemptions(self, guild_id):
+        def get_vanity_tax_enforcements(self, guild_id):
             observations.append(_cache_lock_free_from_other_thread(self.service))
             return frozenset()
 
-        def set_vanity_tax_exemption(self, guild_id, discord_id, *, exempt, actor_id):
+        def set_vanity_tax_enforcement(
+            self, guild_id, discord_id, *, enforced, actor_id
+        ):
             observations.append(_cache_lock_free_from_other_thread(self.service))
-            return frozenset({discord_id} if exempt else set())
+            return frozenset({discord_id} if enforced else set())
 
     repository = ProbingRepository()
     service = VanityTaxService(repository)
     repository.service = service
 
-    service.refresh_guild(GUILD_ID, [_member(1, None)])
-    service.set_manual_exemption(GUILD_ID, 1, exempt=True, actor_id=99)
+    service.refresh_guild(GUILD_ID, [_member(1, "Skater")])
+    service.set_manual_taxation(GUILD_ID, 1, enforced=True, actor_id=99)
 
     assert observations == [True, True]
     # The cache still ends up consistent after both operations.
-    assert service.eligibility_status(GUILD_ID, 1) == "manual_exemption"
+    assert service.eligibility_status(GUILD_ID, 1) == "manual_taxation"
 
 
 def test_refresh_does_not_clobber_member_events_landing_mid_refresh():
@@ -257,7 +391,7 @@ def test_refresh_does_not_clobber_member_events_landing_mid_refresh():
             self.service = None
             self.calls = 0
 
-        def get_vanity_tax_exemptions(self, guild_id):
+        def get_vanity_tax_enforcements(self, guild_id):
             self.calls += 1
             if self.calls == 1:
                 # Simulate event-loop handlers firing mid-refresh.

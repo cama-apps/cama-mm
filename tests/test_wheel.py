@@ -1208,9 +1208,6 @@ async def test_wheel_blue_shell_steals_from_richest():
     assert mock_randint.call_args_list[-1].args == (4, 29)
     mock_uniform.assert_called_once_with(0.02, 0.1016)
 
-    # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
-    player_service.get_leaderboard.assert_any_call(123, limit=1)
-
     # Neutral scaling preserves max(pct=50, flat=29) at 50 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
@@ -3036,6 +3033,7 @@ def _make_hostile_processor(wedge_key: str, *, user_id: int = 1001, new_balance:
     """Build a processor for direct hostile-outcome handler tests."""
     command = MagicMock()
     command.player_service = MagicMock()
+    command.prediction_service = None
     interaction = MagicMock()
     interaction.guild = None
     context = WheelOutcomeContext(
@@ -3052,6 +3050,214 @@ def _make_hostile_processor(wedge_key: str, *, user_id: int = 1001, new_balance:
     )
     state = WheelOutcomeState((wedge_key, wedge_key, "#000"), new_balance)
     return WheelOutcomeProcessor(context, state), state, command
+
+
+@pytest.mark.asyncio
+async def test_blue_shell_hits_true_net_worth_leader_without_liquidating_positions(
+    repo_db_path,
+):
+    from repositories.player_repository import PlayerRepository
+    from repositories.prediction_repository import PredictionRepository
+    from services.player_service import PlayerService
+    from services.prediction_service import PredictionService
+
+    guild_id = 123
+    spinner_id = 2001
+    cash_leader_id = 2002
+    position_leader_id = 2003
+    player_repo = PlayerRepository(repo_db_path)
+    for discord_id, name, balance in (
+        (spinner_id, "Spinner", 100),
+        (cash_leader_id, "CashLeader", 500),
+        (position_leader_id, "PositionLeader", 20),
+    ):
+        player_repo.add(
+            discord_id=discord_id,
+            discord_username=name,
+            guild_id=guild_id,
+        )
+        player_repo.update_balance(discord_id, guild_id, balance)
+
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_id = prediction_repo.create_orderbook_prediction(
+        guild_id=guild_id,
+        creator_id=spinner_id,
+        question="Will the position leader stay rich?",
+        initial_fair=90,
+    )
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions (
+                prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                no_contracts, no_cost_basis_total
+            )
+            VALUES (?, ?, 100, 450, 0, 0)
+            """,
+            (prediction_id, position_leader_id),
+        )
+
+    player_service = PlayerService(player_repo)
+    bot = MagicMock()
+    bot.protection_service = None
+    command = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+    command.prediction_service = PredictionService(prediction_repo, player_repo)
+    interaction = MagicMock()
+    interaction.guild = None
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=interaction,
+        user_id=spinner_id,
+        guild_id=guild_id,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix="wheel_spin:net-worth-test",
+    )
+    state = WheelOutcomeState(("BLUE SHELL", "BLUE_SHELL", "#000"), 100)
+    processor = WheelOutcomeProcessor(context, state)
+
+    with (
+        patch(
+            "commands.betting_helpers.wheel_outcomes.random.uniform",
+            return_value=0.1016,
+        ),
+        patch(
+            "commands.betting_helpers.wheel_outcomes.random.randint",
+            return_value=29,
+        ),
+    ):
+        await processor.process()
+
+    assert player_repo.get_balance(cash_leader_id, guild_id) == 500
+    assert player_repo.get_balance(position_leader_id, guild_id) == -9
+    assert player_repo.get_balance(spinner_id, guild_id) == 129
+    assert state.shell_amount == 29
+    assert state.shell_victim_new_balance == -9
+    assert prediction_repo.get_position(prediction_id, position_leader_id) == {
+        "prediction_id": prediction_id,
+        "discord_id": position_leader_id,
+        "yes_contracts": 100,
+        "yes_cost_basis_total": 450,
+        "no_contracts": 0,
+        "no_cost_basis_total": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_blue_shell_uses_one_snapshot_when_trade_moves_cash_into_positions(
+    repo_db_path,
+):
+    from repositories.player_repository import PlayerRepository
+    from repositories.prediction_repository import PredictionRepository
+    from services.player_service import PlayerService
+    from services.prediction_service import PredictionService
+
+    guild_id = 123
+    spinner_id = 2101
+    trader_id = 2102
+    true_leader_id = 2103
+    player_repo = PlayerRepository(repo_db_path)
+    for discord_id, name, balance in (
+        (spinner_id, "Spinner", 100),
+        (trader_id, "Trader", 1_000),
+        (true_leader_id, "TrueLeader", 1_500),
+    ):
+        player_repo.add(
+            discord_id=discord_id,
+            discord_username=name,
+            guild_id=guild_id,
+        )
+        player_repo.update_balance(discord_id, guild_id, balance)
+
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_id = prediction_repo.create_orderbook_prediction(
+        guild_id=guild_id,
+        creator_id=spinner_id,
+        question="Will the trade preserve net worth?",
+        initial_fair=90,
+    )
+
+    class TradingBetweenReadsPredictionService(PredictionService):
+        traded = False
+
+        def _move_cash_into_position(self) -> None:
+            if self.traded:
+                return
+            with self.prediction_repo.atomic_transaction() as conn:
+                conn.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = 100
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (trader_id, guild_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO prediction_positions (
+                        prediction_id, discord_id,
+                        yes_contracts, yes_cost_basis_total,
+                        no_contracts, no_cost_basis_total
+                    )
+                    VALUES (?, ?, 100, 900, 0, 0)
+                    """,
+                    (prediction_id, trader_id),
+                )
+            self.traded = True
+
+        def get_guild_position_values(self, target_guild_id):
+            self._move_cash_into_position()
+            return super().get_guild_position_values(target_guild_id)
+
+        def get_guild_net_worth_leaderboard(self, target_guild_id):
+            self._move_cash_into_position()
+            return super().get_guild_net_worth_leaderboard(target_guild_id)
+
+    player_service = PlayerService(player_repo)
+    bot = MagicMock()
+    bot.protection_service = None
+    command = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+    command.prediction_service = TradingBetweenReadsPredictionService(
+        prediction_repo,
+        player_repo,
+    )
+    interaction = MagicMock()
+    interaction.guild = None
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=interaction,
+        user_id=spinner_id,
+        guild_id=guild_id,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix="wheel_spin:snapshot-test",
+    )
+    state = WheelOutcomeState(("BLUE SHELL", "BLUE_SHELL", "#000"), 100)
+    processor = WheelOutcomeProcessor(context, state)
+
+    with (
+        patch(
+            "commands.betting_helpers.wheel_outcomes.random.uniform",
+            return_value=0.02,
+        ),
+        patch(
+            "commands.betting_helpers.wheel_outcomes.random.randint",
+            return_value=29,
+        ),
+    ):
+        await processor.process()
+
+    assert player_repo.get_balance(trader_id, guild_id) == 100
+    assert player_repo.get_balance(true_leader_id, guild_id) == 1_470
+    assert player_repo.get_balance(spinner_id, guild_id) == 130
+    assert state.shell_amount == 30
+    assert state.shell_victim_new_balance == 1_470
 
 
 @pytest.mark.asyncio
