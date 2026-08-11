@@ -1071,7 +1071,41 @@ async def test_tax_vanity_reports_unknown_status_for_uncached_user():
 
 
 @pytest.mark.asyncio
-async def test_tax_vanity_allowlisted_admin_can_set_and_clear_manual_exemption(
+async def test_tax_vanity_allowlisted_admin_can_force_and_clear_manual_taxation(
+    monkeypatch,
+):
+    from services.vanity_tax_service import VanityTaxService
+
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [42])
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick="Skater")])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    target = SimpleNamespace(id=7, display_name="Skater")
+
+    enforce = _FakeInteraction(guild_id=123, user_id=42)
+    await cog.vanity.callback(cog, enforce, user=target, taxable=True)
+
+    assert vanity.calculate_tax(7, 123, 500) == 50
+    assert enforce.response.deferred_ephemeral is True
+    assert "manually subject" in enforce.followup.messages[-1]["content"]
+
+    status = _FakeInteraction(guild_id=123, user_id=7)
+    await cog.vanity.callback(cog, status, user=target)
+    assert "admin override" in status.response.messages[-1]["content"]
+
+    clear = _FakeInteraction(guild_id=123, user_id=42)
+    await cog.vanity.callback(cog, clear, user=target, taxable=False)
+
+    assert vanity.calculate_tax(7, 123, 500) == 0
+    assert clear.response.deferred_ephemeral is True
+    assert "automatic nickname rule" in clear.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_clear_keeps_nicknameless_member_automatically_taxable(
     monkeypatch,
 ):
     from services.vanity_tax_service import VanityTaxService
@@ -1079,29 +1113,22 @@ async def test_tax_vanity_allowlisted_admin_can_set_and_clear_manual_exemption(
     monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [42])
     vanity = VanityTaxService()
     vanity.refresh_guild(123, [SimpleNamespace(id=7, nick=None)])
+    vanity.set_manual_taxation(123, 7, enforced=True, actor_id=42)
     cog = tax_commands.TaxCommands(
         bot=SimpleNamespace(vanity_tax_service=vanity),
         tax_service=SimpleNamespace(),
     )
-    target = SimpleNamespace(id=7, display_name="ANI")
+    target = SimpleNamespace(id=7, display_name="NoNick")
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
 
-    grant = _FakeInteraction(guild_id=123, user_id=42)
-    await cog.vanity.callback(cog, grant, user=target, exempt=True)
+    await cog.vanity.callback(cog, interaction, user=target, taxable=False)
 
-    assert vanity.calculate_tax(7, 123, 500) == 0
-    assert grant.response.deferred_ephemeral is True
-    assert "manually exempt" in grant.followup.messages[-1]["content"]
-
-    status = _FakeInteraction(guild_id=123, user_id=7)
-    await cog.vanity.callback(cog, status, user=target)
-    assert "admin override" in status.response.messages[-1]["content"]
-
-    revoke = _FakeInteraction(guild_id=123, user_id=42)
-    await cog.vanity.callback(cog, revoke, user=target, exempt=False)
-
+    assert vanity.is_manually_taxed(123, 7) is False
+    assert vanity.eligibility_status(123, 7) == "taxable"
     assert vanity.calculate_tax(7, 123, 500) == 50
-    assert revoke.response.deferred_ephemeral is True
-    assert "automatic nickname rule" in revoke.followup.messages[-1]["content"]
+    assert "taxable because they have no server nickname" in (
+        interaction.followup.messages[-1]["content"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1110,7 +1137,7 @@ async def test_tax_vanity_rejects_non_allowlisted_override(monkeypatch):
 
     monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
     vanity = VanityTaxService()
-    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick=None)])
+    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick="ANI")])
     cog = tax_commands.TaxCommands(
         bot=SimpleNamespace(vanity_tax_service=vanity),
         tax_service=SimpleNamespace(),
@@ -1122,9 +1149,9 @@ async def test_tax_vanity_rejects_non_allowlisted_override(monkeypatch):
     )
     target = SimpleNamespace(id=7, display_name="ANI")
 
-    await cog.vanity.callback(cog, interaction, user=target, exempt=True)
+    await cog.vanity.callback(cog, interaction, user=target, taxable=True)
 
-    assert vanity.calculate_tax(7, 123, 500) == 50
+    assert vanity.calculate_tax(7, 123, 500) == 0
     assert "ADMIN_USER_IDS" in interaction.response.messages[-1]["content"]
 
 

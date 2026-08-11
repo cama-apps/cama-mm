@@ -1389,7 +1389,7 @@ def _refresh_vanity_tax_memberships(
 ) -> None:
     """Rebuild nickname eligibility from a snapshot of the member cache.
 
-    Runs blocking SQLite reads (manual-exemption reload), so it is called via
+    Runs blocking SQLite reads (manual-enforcement reload), so it is called via
     ``asyncio.to_thread`` with the member snapshot built on the event loop.
     """
     service = getattr(bot, "vanity_tax_service", None)
