@@ -24,7 +24,7 @@ from domain.low_priority_constants import (
     LOW_PRIORITY_GOODNESS_PENALTY,
 )
 from domain.models.player import Player
-from domain.models.team import Team
+from domain.models.team import Team, calculate_off_role_value
 from domain.rating_constants import OPENSKILL_DISPLAY_SCALE
 from domain.services.team_balancing_service import (
     role_matchup_delta_from_values,
@@ -152,6 +152,7 @@ class BalancedShuffler:
         rating_spread_divisor: float | None = None,
         region_split: bool = False,
         region_split_penalty: float | None = None,
+        off_role_flat_value_penalty: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -159,19 +160,20 @@ class BalancedShuffler:
         Args:
             use_glicko: Whether to use Glicko-2 ratings (default True)
             consider_roles: Whether to consider role distribution
-            off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
+            off_role_multiplier: Multiplier for a player's value when playing off-role
             off_role_flat_penalty: Flat penalty per off-role player added to team value difference (see SHUFFLER_SETTINGS)
             role_matchup_delta_weight: Weight applied to lane and role parity deltas when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
             use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
             use_jopacoin: Whether to use jopacoin balance instead of ratings (default False)
             recent_match_penalty_weight: Penalty per recent match participant selected (see SHUFFLER_SETTINGS)
-            soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 500.0)
-            package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 100.0)
-            package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 100.0)
+            soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 160.0)
+            package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 90.0)
+            package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 90.0)
             rating_spread_divisor: Divisor for (max_rating - min_rating) pool spread penalty (default 10.0)
             region_split: Whether to prefer US West vs US East teams.
             region_split_penalty: Penalty per region mismatch in region split mode.
+            off_role_flat_value_penalty: Flat value subtracted after the off-role multiplier.
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -182,6 +184,11 @@ class BalancedShuffler:
             off_role_multiplier
             if off_role_multiplier is not None
             else settings["off_role_multiplier"]
+        )
+        self.off_role_flat_value_penalty = (
+            off_role_flat_value_penalty
+            if off_role_flat_value_penalty is not None
+            else settings["off_role_flat_value_penalty"]
         )
         self.off_role_flat_penalty = (
             off_role_flat_penalty
@@ -608,7 +615,11 @@ class BalancedShuffler:
             if is_on_role:
                 effective_value = base_value
             else:
-                effective_value = base_value * self.off_role_multiplier
+                effective_value = calculate_off_role_value(
+                    base_value,
+                    self.off_role_multiplier,
+                    self.off_role_flat_value_penalty,
+                )
                 off_role_count += 1
 
             team_value += effective_value

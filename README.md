@@ -360,7 +360,9 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 - `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
 **Rating:**
-- `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_PENALTY` - Team balancing penalties
+- `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
+  value adjustments (defaults: 0.95 and 100)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 500)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
 **Trivia:**
