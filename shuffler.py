@@ -19,6 +19,7 @@ from config import (
     SOFT_AVOID_PENALTY,
 )
 from domain.low_priority_constants import (
+    LOW_PRIORITY_AVOID_TARGET_EFFECTIVENESS,
     LOW_PRIORITY_EFFECTIVENESS,
     LOW_PRIORITY_GOODNESS_PENALTY,
 )
@@ -293,7 +294,9 @@ class BalancedShuffler:
         """
         Calculate penalty for soft avoids where avoider/avoided are on the same team.
 
-        Avoids are ADDITIVE: if A avoids B AND B avoids A, the penalty is doubled.
+        Avoids are ADDITIVE: if A avoids B AND B avoids A, both directed
+        penalties apply. A low-priority avoider contributes half strength;
+        an avoid targeting a low-priority player contributes double strength.
 
         Args:
             team1_ids: Set of discord IDs on team 1
@@ -321,6 +324,8 @@ class BalancedShuffler:
                     if low_priority_ids and avoider in low_priority_ids
                     else 1.0
                 )
+                if low_priority_ids and avoided in low_priority_ids:
+                    effectiveness *= LOW_PRIORITY_AVOID_TARGET_EFFECTIVENESS
                 penalty += self.soft_avoid_penalty * effectiveness
 
         return penalty

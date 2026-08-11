@@ -18,6 +18,7 @@ import pytest
 from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
 from repositories.interfaces import IBetRepository, IMatchRepository
+from repositories.low_priority_repository import LowPriorityRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
@@ -77,6 +78,76 @@ def _create_players(player_repo, start_id=1000, count=10):
 def test_recorded_win_reward_uses_historical_fallback_only_for_legacy_matches():
     assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": 10}) == 10
     assert voting_correction_mixin._recorded_win_reward_jc({"win_reward_jc": None}) == 4
+
+
+def test_correction_uses_recorded_low_priority_gain_after_state_clears(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    low_priority_repo = LowPriorityRepository(repo_db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+        low_priority_repo=low_priority_repo,
+    )
+    player_ids = list(range(18000, 18010))
+    for player_id in player_ids:
+        player_repo.add(
+            discord_id=player_id,
+            discord_username=f"Player{player_id}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=3000,
+            glicko_rating=1500.0,
+            glicko_rd=80.0,
+            glicko_volatility=0.06,
+            os_mu=35.0,
+            os_sigma=8.0,
+        )
+
+    target_id = player_ids[0]
+    low_priority_repo.set_low_priority(
+        target_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason=None,
+        wins_required=2,
+    )
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    target_side = "radiant" if target_id in pending.radiant_team_ids else "dire"
+    wrong_side = "dire" if target_side == "radiant" else "radiant"
+    target_team = (
+        pending.radiant_team_ids if target_side == "radiant" else pending.dire_team_ids
+    )
+    peer_id = next(player_id for player_id in target_team if player_id != target_id)
+    match_id = match_service.record_match(wrong_side, guild_id=TEST_GUILD_ID)["match_id"]
+    low_priority_repo.clear_low_priority(
+        target_id,
+        TEST_GUILD_ID,
+        removed_by=901,
+        reason="test correction after release",
+    )
+
+    match_service.correct_match_result(
+        match_id,
+        target_side,
+        TEST_GUILD_ID,
+        corrected_by=901,
+    )
+
+    history = {
+        row["discord_id"]: row
+        for row in match_repo.get_full_rating_history_for_match(match_id)
+    }
+    target = history[target_id]
+    peer = history[peer_id]
+    assert target["rating"] - target["rating_before"] == pytest.approx(
+        (peer["rating"] - peer["rating_before"]) * 1.10
+    )
+    assert target["os_mu_after"] - target["os_mu_before"] == pytest.approx(
+        (peer["os_mu_after"] - peer["os_mu_before"]) * 1.10
+    )
+    assert low_priority_repo.get_state(target_id, TEST_GUILD_ID).active is False
 
 
 def test_match_repository_requires_exact_once_bonus_capabilities():

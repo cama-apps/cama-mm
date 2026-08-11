@@ -1619,7 +1619,7 @@ class MatchCommands(commands.Cog):
             if event_type == "lowprio_complete":
                 message = (
                     f"You completed your low-priority win requirement in match #{match_id}. "
-                    "Your soft matchmaking penalty has been removed."
+                    "Nicely done — you're back to regular matchmaking."
                 )
             else:
                 message = (

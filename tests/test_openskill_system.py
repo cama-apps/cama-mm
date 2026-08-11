@@ -301,6 +301,34 @@ class TestStreakOverlay:
         assert streaked[1][1] == native[1][1]
         assert streaked[3][1] == native[3][1]
 
+    def test_gain_multiplier_stacks_with_streak_without_amplifying_loss(self):
+        system = CamaOpenSkillSystem()
+        starting_mu = 35.0
+        team1 = [(1, starting_mu, 8.0)]
+        team2 = [(2, starting_mu, 8.0)]
+        streak_multipliers = {1: 1.25, 2: 1.25}
+
+        streaked = system.update_ratings_equal_weight(
+            team1,
+            team2,
+            1,
+            streak_multipliers=streak_multipliers,
+        )
+        boosted = system.update_ratings_equal_weight(
+            team1,
+            team2,
+            1,
+            streak_multipliers=streak_multipliers,
+            gain_multipliers={1: 1.10, 2: 1.10},
+        )
+
+        streaked_win_delta = streaked[1][0] - starting_mu
+        boosted_win_delta = boosted[1][0] - starting_mu
+        assert boosted_win_delta == pytest.approx(streaked_win_delta * 1.10)
+        assert boosted[2][0] == pytest.approx(streaked[2][0])
+        assert boosted[1][1] == streaked[1][1]
+        assert boosted[2][1] == streaked[2][1]
+
 
 class TestEqualWeightUpdate:
     """Test equal weight updates (for non-enriched matches)."""
@@ -455,6 +483,20 @@ def test_algorithm_fingerprint_includes_streak_configuration(monkeypatch):
         CamaOpenSkillSystem,
         "STREAK_MULTIPLIER_PER_GAME",
         CamaOpenSkillSystem.STREAK_MULTIPLIER_PER_GAME + 0.01,
+    )
+
+    assert CamaOpenSkillSystem.algorithm_fingerprint() != original
+
+
+def test_algorithm_fingerprint_includes_positive_gain_configuration(monkeypatch):
+    spec = CamaOpenSkillSystem.algorithm_spec()
+    assert spec["positive_gain_policy"] == "posthoc_positive_mu_delta"
+
+    original = CamaOpenSkillSystem.algorithm_fingerprint()
+    monkeypatch.setattr(
+        CamaOpenSkillSystem,
+        "LOW_PRIORITY_GAIN_MULTIPLIER",
+        CamaOpenSkillSystem.LOW_PRIORITY_GAIN_MULTIPLIER + 0.01,
     )
 
     assert CamaOpenSkillSystem.algorithm_fingerprint() != original

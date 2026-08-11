@@ -35,6 +35,7 @@ from config import (
 from config import (
     STREAK_THRESHOLD as CONFIG_STREAK_THRESHOLD,
 )
+from domain.low_priority_constants import LOW_PRIORITY_RATING_GAIN_MULTIPLIER
 from domain.rating_constants import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
 
 if TYPE_CHECKING:
@@ -51,8 +52,9 @@ class CamaOpenSkillSystem:
     around 1.0 and passed directly to ``PlackettLuce.rate``. OpenSkill applies
     those weights to both mu and sigma: high-performing winners receive more
     credit, while high-performing losers receive less blame. A caller-provided
-    streak multiplier may then scale only the native mu delta; native sigma,
-    fantasy factors, and uncapped rating behavior remain unchanged.
+    streak and positive-gain multipliers may then scale the native mu delta;
+    gain-only multipliers do not amplify losses. Native sigma and fantasy
+    factors remain unchanged.
     """
 
     DEFAULT_MU = 25.0
@@ -82,6 +84,7 @@ class CamaOpenSkillSystem:
     # delta without changing OpenSkill's sigma posterior.
     STREAK_THRESHOLD = CONFIG_STREAK_THRESHOLD
     STREAK_MULTIPLIER_PER_GAME = CONFIG_STREAK_MULTIPLIER_PER_GAME
+    LOW_PRIORITY_GAIN_MULTIPLIER = LOW_PRIORITY_RATING_GAIN_MULTIPLIER
 
     SIGMA_DECAY_GRACE_PERIOD_DAYS = OPENSKILL_SIGMA_DECAY_GRACE_PERIOD_DAYS
     SIGMA_DECAY_PER_WEEK = OPENSKILL_SIGMA_DECAY_PER_WEEK
@@ -111,6 +114,8 @@ class CamaOpenSkillSystem:
             "streak_policy": "posthoc_mu_delta",
             "streak_threshold": cls.STREAK_THRESHOLD,
             "streak_multiplier_per_game": cls.STREAK_MULTIPLIER_PER_GAME,
+            "positive_gain_policy": "posthoc_positive_mu_delta",
+            "low_priority_gain_multiplier": cls.LOW_PRIORITY_GAIN_MULTIPLIER,
             "sigma_decay_grace_days": cls.SIGMA_DECAY_GRACE_PERIOD_DAYS,
             "sigma_decay_per_week": cls.SIGMA_DECAY_PER_WEEK,
             "win_probability_temperature": cls.WIN_PROBABILITY_TEMPERATURE,
@@ -180,6 +185,13 @@ class CamaOpenSkillSystem:
             return native_mu
         return old_mu + (native_mu - old_mu) * multiplier
 
+    @staticmethod
+    def _apply_gain_multiplier(old_mu: float, new_mu: float, multiplier: float) -> float:
+        """Scale only a positive mu delta."""
+        if multiplier == 1.0 or new_mu <= old_mu:
+            return new_mu
+        return old_mu + (new_mu - old_mu) * multiplier
+
     def mmr_to_os_mu(self, mmr: int) -> float:
         """
         Convert OpenDota MMR to OpenSkill mu.
@@ -225,6 +237,7 @@ class CamaOpenSkillSystem:
         team2_data: list[tuple[int, float | None, float | None, float | None]],
         winning_team: int,
         streak_multipliers: dict[int, float] | None = None,
+        gain_multipliers: dict[int, float] | None = None,
     ) -> dict[int, tuple[float, float, float | None]]:
         """
         Update ratings through OpenSkill's native weighted posterior.
@@ -238,6 +251,7 @@ class CamaOpenSkillSystem:
             team2_data: List of (discord_id, mu, sigma, fantasy_points) for Dire
             winning_team: 1 for Radiant, 2 for Dire
             streak_multipliers: Optional per-player multiplier for the native mu delta
+            gain_multipliers: Optional per-player multiplier for positive mu deltas
 
         Returns:
             Dict mapping discord_id -> (new_mu, new_sigma, contribution_weight)
@@ -248,6 +262,7 @@ class CamaOpenSkillSystem:
             raise ValueError("both teams must contain at least one player")
 
         streak_multipliers = streak_multipliers or {}
+        gain_multipliers = gain_multipliers or {}
 
         # Create ratings for each player.
         team1_ratings = []
@@ -314,6 +329,9 @@ class CamaOpenSkillSystem:
                 rating.mu,
                 streak_multipliers.get(discord_id, 1.0),
             )
+            new_mu = self._apply_gain_multiplier(
+                old_mu, new_mu, gain_multipliers.get(discord_id, 1.0)
+            )
             results[discord_id] = (new_mu, rating.sigma, factor)
         for discord_id, old_mu, rating, factor in zip(
             team2_ids,
@@ -326,6 +344,9 @@ class CamaOpenSkillSystem:
                 rating.mu,
                 streak_multipliers.get(discord_id, 1.0),
             )
+            new_mu = self._apply_gain_multiplier(
+                old_mu, new_mu, gain_multipliers.get(discord_id, 1.0)
+            )
             results[discord_id] = (new_mu, rating.sigma, factor)
 
         return results
@@ -336,6 +357,7 @@ class CamaOpenSkillSystem:
         team2_data: list[tuple[int, float | None, float | None]],
         winning_team: int,
         streak_multipliers: dict[int, float] | None = None,
+        gain_multipliers: dict[int, float] | None = None,
     ) -> dict[int, tuple[float, float]]:
         """
         Update ratings using Plackett-Luce with equal weights (1.0) for all players.
@@ -347,6 +369,7 @@ class CamaOpenSkillSystem:
             team2_data: List of (discord_id, mu, sigma) for Dire
             winning_team: 1 for Radiant, 2 for Dire
             streak_multipliers: Optional per-player multiplier for the native mu delta
+            gain_multipliers: Optional per-player multiplier for positive mu deltas
 
         Returns:
             Dict mapping discord_id -> (new_mu, new_sigma)
@@ -361,6 +384,7 @@ class CamaOpenSkillSystem:
             team2_with_weights,
             winning_team,
             streak_multipliers=streak_multipliers,
+            gain_multipliers=gain_multipliers,
         )
 
         # Return only (mu, sigma), dropping the fantasy_weight field

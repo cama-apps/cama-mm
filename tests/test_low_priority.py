@@ -2,9 +2,13 @@
 
 import sqlite3
 
+import pytest
+
 from repositories.match_repository import MatchRepository
 from repositories.moderation_repository import ModerationRepository
 from repositories.player_repository import PlayerRepository
+from repositories.soft_avoid_repository import SoftAvoidRepository
+from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
@@ -14,16 +18,64 @@ def _low_priority_repo(db_path: str):
     return LowPriorityRepository(db_path)
 
 
-def _register(player_repo: PlayerRepository, discord_id: int, guild_id: int) -> None:
+def _register(
+    player_repo: PlayerRepository,
+    discord_id: int,
+    guild_id: int,
+    *,
+    glicko_rd: float = 200.0,
+) -> None:
     player_repo.add(
         discord_id=discord_id,
         discord_username=f"Player{discord_id}",
         guild_id=guild_id,
         initial_mmr=3000,
         glicko_rating=1500.0,
-        glicko_rd=200.0,
+        glicko_rd=glicko_rd,
         glicko_volatility=0.06,
+        os_mu=35.0,
+        os_sigma=8.0,
     )
+
+
+def _record_low_priority_final_win(db_path: str):
+    player_repo = PlayerRepository(db_path)
+    match_repo = MatchRepository(db_path)
+    low_priority_repo = _low_priority_repo(db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        low_priority_repo=low_priority_repo,
+    )
+    player_ids = list(range(501, 511))
+    for player_id in player_ids:
+        _register(player_repo, player_id, TEST_GUILD_ID, glicko_rd=80.0)
+
+    target_id = player_ids[0]
+    low_priority_repo.set_low_priority(
+        target_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason=None,
+        wins_required=1,
+    )
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    target_side = "radiant" if target_id in pending.radiant_team_ids else "dire"
+    teammate_ids = (
+        pending.radiant_team_ids if target_side == "radiant" else pending.dire_team_ids
+    )
+    peer_id = next(player_id for player_id in teammate_ids if player_id != target_id)
+    result = match_service.record_match(target_side, guild_id=TEST_GUILD_ID)
+    return {
+        "match_service": match_service,
+        "match_repo": match_repo,
+        "player_repo": player_repo,
+        "low_priority_repo": low_priority_repo,
+        "target_id": target_id,
+        "peer_id": peer_id,
+        "match_id": result["match_id"],
+    }
 
 
 def _record_core_win(
@@ -301,3 +353,170 @@ def test_automatic_completion_is_audited_once_with_match_id(repo_db_path):
         == match_id
     )
     assert len(moderation_repo.get_history(TEST_GUILD_ID, winner_id)) == 1
+
+
+def test_final_low_priority_win_boosts_both_rating_gains_before_release(repo_db_path):
+    recorded = _record_low_priority_final_win(repo_db_path)
+    player_repo = recorded["player_repo"]
+    match_repo = recorded["match_repo"]
+    target_id = recorded["target_id"]
+    peer_id = recorded["peer_id"]
+
+    target_rating = player_repo.get_glicko_rating(target_id, TEST_GUILD_ID)[0]
+    peer_rating = player_repo.get_glicko_rating(peer_id, TEST_GUILD_ID)[0]
+    assert target_rating - 1500.0 == pytest.approx((peer_rating - 1500.0) * 1.10)
+
+    target_mu = player_repo.get_openskill_rating(target_id, TEST_GUILD_ID)[0]
+    peer_mu = player_repo.get_openskill_rating(peer_id, TEST_GUILD_ID)[0]
+    assert target_mu - 35.0 == pytest.approx((peer_mu - 35.0) * 1.10)
+
+    state = recorded["low_priority_repo"].get_state(target_id, TEST_GUILD_ID)
+    assert state.active is False
+    history = {
+        row["discord_id"]: row
+        for row in match_repo.get_full_rating_history_for_match(recorded["match_id"])
+    }
+    assert history[target_id]["low_priority_gain_multiplier"] == pytest.approx(1.10)
+    assert history[peer_id]["low_priority_gain_multiplier"] == pytest.approx(1.0)
+
+
+def test_recording_rejects_low_priority_state_changed_after_rating_snapshot(
+    repo_db_path,
+    monkeypatch,
+):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    low_priority_repo = _low_priority_repo(repo_db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        low_priority_repo=low_priority_repo,
+    )
+    player_ids = list(range(601, 611))
+    for player_id in player_ids:
+        _register(player_repo, player_id, TEST_GUILD_ID, glicko_rd=80.0)
+
+    target_id = player_ids[0]
+    low_priority_repo.set_low_priority(
+        target_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason="clear during recording",
+        wins_required=1,
+    )
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    target_side = "radiant" if target_id in pending.radiant_team_ids else "dire"
+
+    get_active_ids = low_priority_repo.get_active_ids
+
+    def get_then_clear(discord_ids, guild_id):
+        active_ids = get_active_ids(discord_ids, guild_id)
+        low_priority_repo.clear_low_priority(
+            target_id,
+            guild_id,
+            removed_by=902,
+            reason="concurrent admin clear",
+        )
+        return active_ids
+
+    monkeypatch.setattr(low_priority_repo, "get_active_ids", get_then_clear)
+
+    with pytest.raises(RuntimeError, match="Low-priority state changed"):
+        match_service.record_match(target_side, guild_id=TEST_GUILD_ID)
+
+    with sqlite3.connect(repo_db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 0
+    assert match_service.get_last_shuffle(TEST_GUILD_ID) is not None
+
+    result = match_service.record_match(target_side, guild_id=TEST_GUILD_ID)
+    history = {
+        row["discord_id"]: row
+        for row in match_repo.get_full_rating_history_for_match(result["match_id"])
+    }
+    assert history[target_id]["low_priority_gain_multiplier"] == pytest.approx(1.0)
+
+
+def test_openskill_replay_retains_recorded_low_priority_gain(repo_db_path):
+    recorded = _record_low_priority_final_win(repo_db_path)
+    match_service = recorded["match_service"]
+    player_repo = recorded["player_repo"]
+    target_id = recorded["target_id"]
+    peer_id = recorded["peer_id"]
+
+    replay = match_service.backfill_openskill_ratings(
+        guild_id=TEST_GUILD_ID,
+        reset_first=True,
+    )
+
+    assert replay["errors"] == []
+    target_mu = player_repo.get_openskill_rating(target_id, TEST_GUILD_ID)[0]
+    peer_mu = player_repo.get_openskill_rating(peer_id, TEST_GUILD_ID)[0]
+    history = {
+        row["discord_id"]: row
+        for row in recorded["match_repo"].get_full_rating_history_for_match(
+            recorded["match_id"]
+        )
+    }
+    target_delta = target_mu - history[target_id]["os_mu_before"]
+    peer_delta = peer_mu - history[peer_id]["os_mu_before"]
+    assert target_delta == pytest.approx(peer_delta * 1.10)
+
+
+def test_shuffle_display_uses_directional_low_priority_avoid_strength(
+    repo_db_path, monkeypatch
+):
+    from config import SOFT_AVOID_PENALTY
+    from domain.low_priority_constants import LOW_PRIORITY_GOODNESS_PENALTY
+    from domain.models.team import Team
+    from shuffler import BalancedShuffler
+
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    low_priority_repo = _low_priority_repo(repo_db_path)
+    soft_avoid_repo = SoftAvoidRepository(repo_db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        low_priority_repo=low_priority_repo,
+        soft_avoid_repo=soft_avoid_repo,
+    )
+    player_ids = list(range(601, 611))
+    for player_id in player_ids:
+        _register(player_repo, player_id, TEST_GUILD_ID)
+
+    avoider_id, target_id = player_ids[:2]
+    soft_avoid_repo.create_or_reactivate_avoid(
+        TEST_GUILD_ID,
+        avoider_id,
+        target_id,
+    )
+
+    def fixed_teams(_shuffler, players, **_kwargs):
+        roles = ["1", "2", "3", "4", "5"]
+        return Team(players[:5], roles), Team(players[5:], roles)
+
+    monkeypatch.setattr(BalancedShuffler, "shuffle", fixed_teams)
+
+    baseline = match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    low_priority_repo.set_low_priority(
+        target_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason=None,
+    )
+    target_only = match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    low_priority_repo.set_low_priority(
+        avoider_id,
+        TEST_GUILD_ID,
+        set_by=901,
+        reason=None,
+    )
+    both = match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    assert target_only["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        LOW_PRIORITY_GOODNESS_PENALTY + SOFT_AVOID_PENALTY
+    )
+    assert both["goodness_score"] - target_only["goodness_score"] == pytest.approx(
+        LOW_PRIORITY_GOODNESS_PENALTY - SOFT_AVOID_PENALTY
+    )

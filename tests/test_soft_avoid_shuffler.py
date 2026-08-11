@@ -67,7 +67,7 @@ class TestSoftAvoidPenaltyCalculation:
         penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 500.0
 
-    def test_only_low_priority_owner_gets_half_strength(self):
+    def test_low_priority_avoid_modifiers_apply_by_direction(self):
         shuffler = BalancedShuffler(soft_avoid_penalty=500.0)
         team1_ids = {1000, 1001, 1002, 1003, 1004}
         team2_ids = {1005, 1006, 1007, 1008, 1009}
@@ -85,9 +85,16 @@ class TestSoftAvoidPenaltyCalculation:
             avoids,
             low_priority_ids={1001},
         )
+        both_penalty = shuffler.calculate_soft_avoid_penalty(
+            team1_ids,
+            team2_ids,
+            avoids,
+            low_priority_ids={1000, 1001},
+        )
 
         assert owner_penalty == 250.0
-        assert target_penalty == 500.0
+        assert target_penalty == 1000.0
+        assert both_penalty == 500.0
 
     def test_avoid_opposite_teams_no_penalty(self):
         """Test that opposite-team avoid has no penalty."""
@@ -218,3 +225,33 @@ class TestShuffleWithAvoids:
         # matchups separate them: the outcome is deterministic even though the
         # shuffler tie-breaks randomly among equal-score matchups.
         assert not same_team, "With 10000 penalty and equal ratings, avoided pair should be on opposite teams"
+
+    def test_low_priority_direction_changes_the_selected_split(self):
+        players = create_test_players(10)
+        for player in players:
+            player.glicko_rating = 1500.0
+        players[0].glicko_rating = 1600.0
+        players[1].glicko_rating = 1400.0
+
+        shuffler = BalancedShuffler(
+            consider_roles=False,
+            rd_priority_weight=0.0,
+            soft_avoid_penalty=150.0,
+        )
+        avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1001)]
+
+        target_team1, target_team2 = shuffler.shuffle(
+            players,
+            avoids=avoids,
+            low_priority_ids={1001},
+        )
+        both_team1, both_team2 = shuffler.shuffle(
+            players,
+            avoids=avoids,
+            low_priority_ids={1000, 1001},
+        )
+
+        target_team1_ids = {player.discord_id for player in target_team1.players}
+        both_team1_ids = {player.discord_id for player in both_team1.players}
+        assert (1000 in target_team1_ids) != (1001 in target_team1_ids)
+        assert (1000 in both_team1_ids) == (1001 in both_team1_ids)

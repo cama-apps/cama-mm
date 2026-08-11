@@ -30,6 +30,7 @@ class _RecordingOpenSkillSystem(CamaOpenSkillSystem):
         team2_data,
         winning_team,
         streak_multipliers=None,
+        gain_multipliers=None,
     ):
         self.streak_calls.append(dict(streak_multipliers or {}))
         return super().update_ratings_after_match(
