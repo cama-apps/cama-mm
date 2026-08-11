@@ -45,7 +45,18 @@ class TestPackageDealPenalty:
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
         penalty = shuffler.calculate_package_deal_penalty(team1_ids, team2_ids, deals)
-        assert penalty == shuffler.package_deal_penalty
+        assert penalty == 90.0
+
+    def test_package_deal_split_adds_90_goodness(self, shuffler):
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(
+            {100, 101, 102, 103, 104},
+            {105},
+            deals,
+        )
+
+        assert penalty == 90.0
 
     def test_only_low_priority_buyer_gets_half_strength(self):
         shuffler = BalancedShuffler(

@@ -15,6 +15,107 @@ from shuffler import BalancedShuffler, _PoolMatchup
 from utils.region import region_split_mismatches, resolve_region
 
 
+def _team_with_one_off_role_player(player: Player) -> Team:
+    filler_players = [
+        Player(
+            name=f"Filler{role}",
+            mmr=0,
+            preferred_roles=[role],
+            jopacoin_balance=0,
+        )
+        for role in ("1", "3", "4", "5")
+    ]
+    return Team(
+        [player, *filler_players],
+        role_assignments=["2", "1", "3", "4", "5"],
+    )
+
+
+def test_default_off_role_value_subtracts_five_percent_and_100():
+    player = Player(name="Core", mmr=3000, preferred_roles=["1"])
+    team = _team_with_one_off_role_player(player)
+
+    assert team.get_team_value(use_glicko=False) == 2750.0
+
+
+def test_default_off_role_role_value_subtracts_five_percent_and_100():
+    player = Player(name="Core", mmr=3000, preferred_roles=["1"])
+    team = _team_with_one_off_role_player(player)
+
+    _, role_value = team.get_player_by_role("2", use_glicko=False)
+
+    assert role_value == 2750.0
+
+
+def test_default_off_role_value_applies_to_jopacoin():
+    player = Player(
+        name="Rich",
+        mmr=3000,
+        preferred_roles=["1"],
+        jopacoin_balance=1000,
+    )
+    team = _team_with_one_off_role_player(player)
+
+    assert team.get_team_value(use_jopacoin=True) == 850.0
+
+
+def test_default_off_role_value_clamps_at_zero():
+    player = Player(
+        name="Broke",
+        mmr=3000,
+        preferred_roles=["1"],
+        jopacoin_balance=50,
+    )
+    team = _team_with_one_off_role_player(player)
+
+    assert team.get_team_value(use_jopacoin=True) == 0.0
+
+
+def test_optimized_role_metrics_apply_default_off_role_value_adjustment():
+    player = Player(name="Core", mmr=3000, preferred_roles=["1"])
+    shuffler = BalancedShuffler(use_glicko=False)
+
+    metrics = shuffler._role_assignment_metrics([player], ("2",), [3000.0])
+
+    assert metrics.team_value == 2750.0
+    assert metrics.role_values == (0.0, 2750.0, 0.0, 0.0, 0.0)
+
+
+def test_default_off_role_goodness_adds_500_per_player():
+    team1_players = [
+        Player(name=f"OnRole{i}", mmr=1000, preferred_roles=[str(i + 1)])
+        for i in range(5)
+    ]
+    team2_players = [
+        Player(name=f"Team2-{i}", mmr=1000, preferred_roles=[role])
+        for i, role in enumerate(("2", "1", "3", "4", "5"))
+    ]
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        off_role_multiplier=1.0,
+        off_role_flat_value_penalty=0.0,
+        role_matchup_delta_weight=0.0,
+    )
+    team1_metrics = shuffler._role_assignment_metrics(
+        team1_players,
+        ("1", "2", "3", "4", "5"),
+        [1000.0] * 5,
+    )
+    team2_metrics = shuffler._role_assignment_metrics(
+        team2_players,
+        ("1", "2", "3", "4", "5"),
+        [1000.0] * 5,
+    )
+
+    _, _, score = shuffler._score_unconstrained_role_assignments(
+        (team1_metrics,),
+        (team2_metrics,),
+        rd_priority=0.0,
+    )
+
+    assert score == 1000.0
+
+
 def test_low_priority_penalty_is_500_per_selected_player():
     shuffler = BalancedShuffler()
 
@@ -190,7 +291,11 @@ class TestTeam:
         ]
         on_role = Team(players, role_assignments=["1", "2", "3", "4", "5"])
         # All on-role, so full value: 2000 + 1800 + 1600 + 1400 + 1200 = 8000
-        assert on_role.get_team_value(use_glicko=False, off_role_multiplier=0.9) == 8000
+        assert on_role.get_team_value(
+            use_glicko=False,
+            off_role_multiplier=0.9,
+            off_role_flat_value_penalty=0.0,
+        ) == 8000
         assert on_role.get_off_role_count() == 0
 
         # P1 playing role 2 (off-role), P2 playing role 1 (off-role)
@@ -199,7 +304,9 @@ class TestTeam:
         # P3, P4, P5 on-role: 1600 + 1400 + 1200 = 4200
         # Total: 3420 + 4200 = 7620
         assert off_role.get_team_value(
-            use_glicko=False, off_role_multiplier=0.9
+            use_glicko=False,
+            off_role_multiplier=0.9,
+            off_role_flat_value_penalty=0.0,
         ) == pytest.approx(7620)
         assert off_role.get_off_role_count() == 2
 
@@ -232,13 +339,23 @@ class TestTeam:
         ]
         team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
 
-        player, value = team.get_player_by_role("1", use_glicko=False, off_role_multiplier=0.5)
+        player, value = team.get_player_by_role(
+            "1",
+            use_glicko=False,
+            off_role_multiplier=0.5,
+            off_role_flat_value_penalty=0.0,
+        )
         assert player.name == "Carry"
         assert value == 2000
 
         # Move mid to off-role to trigger multiplier
         team.role_assignments = ["3", "1", "2", "4", "5"]
-        player, value = team.get_player_by_role("1", use_glicko=False, off_role_multiplier=0.5)
+        player, value = team.get_player_by_role(
+            "1",
+            use_glicko=False,
+            off_role_multiplier=0.5,
+            off_role_flat_value_penalty=0.0,
+        )
         assert player.name == "Mid"
         assert value == pytest.approx(1800 * 0.5)
 
@@ -1975,7 +2092,9 @@ class TestJopacoinBalancing:
         off_role_team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
         # P1 off-role: 100*0.9=90, P2 off-role: 200*0.9=180, rest on-role: 50+75+25=150
         assert off_role_team.get_team_value(
-            use_jopacoin=True, off_role_multiplier=0.9
+            use_jopacoin=True,
+            off_role_multiplier=0.9,
+            off_role_flat_value_penalty=0.0,
         ) == pytest.approx(420.0)
 
     def test_shuffler_jopacoin_balancing(self):

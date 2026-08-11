@@ -292,11 +292,20 @@ class ShufflePendingMixin:
             excluded_players = []
 
         off_role_mult = shuffler.off_role_multiplier
+        off_role_flat_value_penalty = shuffler.off_role_flat_value_penalty
         team1_value = team1.get_team_value(
-            self.use_glicko, off_role_mult, use_openskill=use_openskill, use_jopacoin=use_jopacoin
+            self.use_glicko,
+            off_role_mult,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+            off_role_flat_value_penalty=off_role_flat_value_penalty,
         )
         team2_value = team2.get_team_value(
-            self.use_glicko, off_role_mult, use_openskill=use_openskill, use_jopacoin=use_jopacoin
+            self.use_glicko,
+            off_role_mult,
+            use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
+            off_role_flat_value_penalty=off_role_flat_value_penalty,
         )
         value_diff = abs(team1_value - team2_value)
 

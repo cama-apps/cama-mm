@@ -53,9 +53,10 @@ class TeamBalancingService:
     def __init__(
         self,
         use_glicko: bool = True,
-        off_role_multiplier: float = 0.9,
-        off_role_flat_penalty: float = 50.0,
+        off_role_multiplier: float = 0.95,
+        off_role_flat_penalty: float = 500.0,
         role_matchup_delta_weight: float = 1.0,
+        off_role_flat_value_penalty: float = 100.0,
     ):
         """
         Initialize team balancing service.
@@ -65,11 +66,13 @@ class TeamBalancingService:
             off_role_multiplier: Multiplier for rating when playing off-role
             off_role_flat_penalty: Flat penalty per off-role player
             role_matchup_delta_weight: Weight applied to lane and role parity deltas in scores
+            off_role_flat_value_penalty: Flat value subtracted after the multiplier
         """
         self.use_glicko = use_glicko
         self.off_role_multiplier = off_role_multiplier
         self.off_role_flat_penalty = off_role_flat_penalty
         self.role_matchup_delta_weight = role_matchup_delta_weight
+        self.off_role_flat_value_penalty = off_role_flat_value_penalty
 
     def calculate_team_value(
         self,
@@ -94,6 +97,7 @@ class TeamBalancingService:
             self.off_role_multiplier,
             use_openskill=use_openskill,
             use_jopacoin=use_jopacoin,
+            off_role_flat_value_penalty=self.off_role_flat_value_penalty,
         )
 
 
@@ -163,6 +167,7 @@ class TeamBalancingService:
                 self.off_role_multiplier,
                 use_openskill=use_openskill,
                 use_jopacoin=use_jopacoin,
+                off_role_flat_value_penalty=self.off_role_flat_value_penalty,
             )
             return value
 
