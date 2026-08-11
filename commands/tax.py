@@ -17,7 +17,7 @@ from config import (
     VANITY_TAX_RATE,
 )
 from services import trivia_data
-from services.permissions import has_allowlisted_admin, has_tax_man_permission
+from services.permissions import has_admin_permission, has_tax_man_permission
 from services.tax_service import TaxService
 from utils.economy_event_display import build_public_economy_event_embed
 from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
@@ -412,10 +412,9 @@ class TaxCommands(commands.Cog):
             )
             return
         if taxable is not None:
-            if not has_allowlisted_admin(interaction):
+            if not has_admin_permission(interaction):
                 await interaction.response.send_message(
-                    "Only admins configured in `ADMIN_USER_IDS` can change "
-                    "vanity-tax enforcement.",
+                    "Only admins can change vanity-tax enforcement.",
                     ephemeral=True,
                 )
                 return

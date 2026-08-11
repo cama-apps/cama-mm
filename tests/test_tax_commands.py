@@ -1132,7 +1132,7 @@ async def test_tax_vanity_clear_keeps_nicknameless_member_automatically_taxable(
 
 
 @pytest.mark.asyncio
-async def test_tax_vanity_rejects_non_allowlisted_override(monkeypatch):
+async def test_tax_vanity_server_admin_can_override(monkeypatch):
     from services.vanity_tax_service import VanityTaxService
 
     monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
@@ -1151,8 +1151,29 @@ async def test_tax_vanity_rejects_non_allowlisted_override(monkeypatch):
 
     await cog.vanity.callback(cog, interaction, user=target, taxable=True)
 
+    assert vanity.calculate_tax(7, 123, 500) == 50
+    assert interaction.response.deferred_ephemeral is True
+    assert "manually subject" in interaction.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_rejects_non_admin_override(monkeypatch):
+    from services.vanity_tax_service import VanityTaxService
+
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=7, nick="ANI")])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+    target = SimpleNamespace(id=7, display_name="ANI")
+
+    await cog.vanity.callback(cog, interaction, user=target, taxable=True)
+
     assert vanity.calculate_tax(7, 123, 500) == 0
-    assert "ADMIN_USER_IDS" in interaction.response.messages[-1]["content"]
+    assert "Only admins" in interaction.response.messages[-1]["content"]
 
 
 @pytest.mark.asyncio
