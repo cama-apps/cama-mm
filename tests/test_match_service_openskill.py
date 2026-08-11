@@ -155,7 +155,7 @@ def test_record_match_passes_shared_streaks_to_openskill_phase_one(repo_db_path)
 
     multipliers = phase_one.call_args.kwargs["streak_multipliers"]
     assert set(multipliers) == set(player_ids)
-    assert all(multiplier == pytest.approx(1.25) for multiplier in multipliers.values())
+    assert all(multiplier == pytest.approx(1.30) for multiplier in multipliers.values())
 
 
 def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
