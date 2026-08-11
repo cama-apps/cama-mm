@@ -92,6 +92,7 @@ class MatchService(
             off_role_multiplier=self.shuffler.off_role_multiplier,
             off_role_flat_penalty=self.shuffler.off_role_flat_penalty,
             role_matchup_delta_weight=self.shuffler.role_matchup_delta_weight,
+            off_role_flat_value_penalty=self.shuffler.off_role_flat_value_penalty,
         )
         # State management delegated to MatchStateService
         self.state_service = state_service or MatchStateService(match_repo)

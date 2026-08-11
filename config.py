@@ -157,7 +157,10 @@ OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.02)  # 2% 
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
-    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 420.0),
+    "off_role_flat_value_penalty": _parse_float(
+        "OFF_ROLE_FLAT_VALUE_PENALTY", 100.0
+    ),
+    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 500.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.17),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 70.0),
     "region_split_penalty": _parse_float("REGION_SPLIT_PENALTY", 500.0),
@@ -267,7 +270,7 @@ SHOP_SOFT_AVOID_COST = _parse_int(
     "SHOP_SOFT_AVOID_COST", 750
 )  # Fallback cost to soft avoid a player
 SOFT_AVOID_PENALTY = _parse_float(
-    "SOFT_AVOID_PENALTY", 180.0
+    "SOFT_AVOID_PENALTY", 160.0
 )  # Penalty added to shuffler when pair on same team
 
 # Package Deal configuration
@@ -281,10 +284,10 @@ PACKAGE_DEAL_GAMES_DURATION = _parse_int(
     "PACKAGE_DEAL_GAMES_DURATION", 10
 )  # Number of games deal lasts
 PACKAGE_DEAL_PENALTY = _parse_float(
-    "PACKAGE_DEAL_PENALTY", 100.0
+    "PACKAGE_DEAL_PENALTY", 90.0
 )  # Penalty when pair on DIFFERENT teams
 PACKAGE_DEAL_SPLIT_PENALTY = _parse_float(
-    "PACKAGE_DEAL_SPLIT_PENALTY", 100.0
+    "PACKAGE_DEAL_SPLIT_PENALTY", 90.0
 )  # Penalty when one selected, one excluded
 RATING_SPREAD_DIVISOR = _parse_float(
     "RATING_SPREAD_DIVISOR", 10.0
