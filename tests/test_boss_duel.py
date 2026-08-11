@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -343,6 +344,24 @@ class TestDuelDeterministicOutcomes:
         assert "boss_hit" in result["round_log"][0]  # boss did swing round 1
         assert "boss_hit" not in result["round_log"][-1]  # killing blow, boss never swings back
 
+    def test_interactive_round_one_loss_resolves_before_prompt(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A lethal opening counterattack resolves instead of pausing early."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setitem(BOSS_DUEL_STATS["reckless"], "player_hp", 1)
+        rolls = iter([0.99, 0.0])  # player misses, boss hits
+        monkeypatch.setattr(random, "random", lambda: next(rolls, 0.99))
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "reckless", wager=0,
+        )
+
+        assert result["won"] is False
+        assert result.get("pending_prompt") is None
+        assert len(result["round_log"]) == 1
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
+
     @pytest.mark.parametrize("entrypoint", ("legacy", "interactive"))
     def test_wagered_fights_keep_a_ten_percent_hit_floor(
         self, entrypoint, dig_service, dig_repo, player_repository, monkeypatch,
@@ -385,6 +404,61 @@ class TestMechanicSelectionPerAttempt:
         "grothak_crumble_wall",
         "grothak_bedrock_bellow",
     )
+
+    @pytest.mark.parametrize("authored_round", [1, 5])
+    def test_mechanic_interrupts_before_second_round_loss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+        authored_round,
+    ):
+        """A viable fight must offer its choice before a fast loss resolves."""
+        _register(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            depth=74,
+            prestige_level=2,
+            boss_progress=json.dumps({
+                "25": "defeated",
+                "50": "defeated",
+                "75": {"boss_id": "magmus_rex", "status": "active"},
+            }),
+        )
+        monkeypatch.setattr(
+            random.Random,
+            "choice",
+            lambda _rng, _pool: "magmus_eruption",
+        )
+        from domain.models.boss_mechanics import MECHANIC_REGISTRY
+
+        monkeypatch.setitem(
+            MECHANIC_REGISTRY,
+            "magmus_eruption",
+            replace(
+                MECHANIC_REGISTRY["magmus_eruption"],
+                trigger_round=authored_round,
+            ),
+        )
+        # Reckless misses while Magmus lands every counter. The player survives
+        # round 1 but would die in round 2. Authored mechanic timing must not
+        # bypass that opening exchange or allow the second-round loss to resolve.
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "reckless", wager=0,
+        )
+
+        assert result["pending_prompt"]["prompt_title"] == (
+            "Magmus Rex plunges his fist into the lava"
+        )
+        assert result["round_num"] == 2
+        assert len(result["round_log"]) == 1
+        active = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert active is not None
+        assert active["mechanic_id"] == "magmus_eruption"
+        assert active["round_num"] == 2
 
     def test_pause_resume_uses_persisted_selected_mechanic(
         self, dig_service, dig_repo, player_repository, monkeypatch,
