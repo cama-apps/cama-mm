@@ -1751,10 +1751,10 @@ class BossCombatMixin:
     # =====================================================================
     # ``start_boss_duel`` is the entry point for the new mid-fight-prompt
     # flow. It does everything ``fight_boss`` does up to the auto-round loop,
-    # but if the boss's rolled mechanic (drawn from ``BossDef.mechanic_pool``)
-    # is scheduled to trigger this fight, it pauses at the trigger round,
-    # persists duel state to ``dig_active_duels``, and returns a
-    # ``pending_prompt`` for the UI to render.
+    # but if the opening exchange is non-terminal, it pauses before round 2,
+    # persists the rolled mechanic and duel state to ``dig_active_duels``, and
+    # returns a ``pending_prompt`` for the UI to render. Pinnacle fights retain
+    # their separately authored mechanic timing.
     #
     # ``resume_boss_duel`` is called when the player clicks one of the three
     # reactive option buttons. It loads the paused state, rolls the option's
@@ -1770,7 +1770,7 @@ class BossCombatMixin:
     def start_boss_duel(
         self, discord_id: int, guild_id, risk_tier: str, wager: int = 0,
     ) -> dict:
-        """Start a boss duel. Pauses at the rolled mechanic's trigger round."""
+        """Start a boss duel and pause after one non-terminal opening exchange."""
         from domain.models.boss_mechanics import (
             get_mechanic as _get_mechanic,
         )
@@ -2111,11 +2111,15 @@ class BossCombatMixin:
             status_effects["shifting_idol_bonus"] = shifting_idol_bonus
         if pet_assist is not None:
             status_effects["pet_boss_assist"] = pet_assist
+        # Preserve one opening exchange, then surface the rolled mechanic.
+        # Late authored rounds could otherwise let a fast fight resolve before
+        # the player received any reactive choice.
+        mechanic_trigger_round = 2 if mechanic is not None else None
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
-            # If a mechanic is scheduled for THIS round, pause and persist.
+            # After a non-terminal opening exchange, pause before round 2.
             if (mechanic is not None
-                    and round_num == mechanic.trigger_round
+                    and round_num == mechanic_trigger_round
                     and player_hp > 0 and boss_hp > 0):
                 state = {
                     "boss_id": boss.boss_id,
