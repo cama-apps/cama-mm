@@ -26,6 +26,29 @@ def test_jc_changes_format_groups_players_and_bettors_sorted_by_net_change():
         "winning_player_ids": [1, 2],
         "losing_player_ids": [3],
         "excluded_player_ids": [4],
+        "bet_distributions": {
+            "winners": [
+                {
+                    "discord_id": 1,
+                    "amount": 5,
+                    "effective_bet": 5,
+                    "team": "radiant",
+                    "multiplier": 2.5,
+                },
+                {
+                    "discord_id": 6,
+                    "amount": 6,
+                    "effective_bet": 6,
+                    "team": "radiant",
+                    "multiplier": 2.5,
+                },
+            ],
+            "losers": [
+                {"discord_id": 2, "amount": 5, "effective_bet": 10},
+                {"discord_id": 3, "amount": 3, "effective_bet": 3},
+                {"discord_id": 5, "amount": 7, "effective_bet": 7},
+            ],
+        },
         "jc_changes": {
             5: {"bet": -7},
             6: {"bet": 9},
@@ -38,12 +61,48 @@ def test_jc_changes_format_groups_players_and_bettors_sorted_by_net_change():
 
     assert MatchCommands._format_jc_changes(None, record_result) == (
         "\n\n🪙 **JC Changes:**\n"
+        "**Final odds:** 🟢 Radiant 2.50x\n"
         "**Match Players:**\n"
-        f"<@1>: **+15** {JOPACOIN_EMOTE} (win +10, bet +5)\n"
+        f"<@1>: **+15** {JOPACOIN_EMOTE} (win +10, bet +5 · stake 5)\n"
         f"<@4>: **+5** {JOPACOIN_EMOTE} (excluded +5)\n"
-        f"<@3>: **+2** {JOPACOIN_EMOTE} (play +5, bet −3)\n"
-        f"<@2>: **+1** {JOPACOIN_EMOTE} (win +10, bet −10, streak +1)\n"
+        f"<@3>: **+2** {JOPACOIN_EMOTE} (play +5, bet −3 · stake 3)\n"
+        f"<@2>: **+1** {JOPACOIN_EMOTE} (win +10, bet −10 · stake 10, streak +1)\n"
         "**Bettors:**\n"
-        f"<@6>: **+9** {JOPACOIN_EMOTE} (bet +9)\n"
-        f"<@5>: **−7** {JOPACOIN_EMOTE} (bet −7)"
+        f"<@6>: **+9** {JOPACOIN_EMOTE} (bet +9 · stake 6)\n"
+        f"<@5>: **−7** {JOPACOIN_EMOTE} (bet −7 · stake 7)"
+    )
+
+
+def test_jc_changes_aggregates_multiple_effective_stakes_per_bettor():
+    record_result = {
+        "winning_player_ids": [],
+        "losing_player_ids": [],
+        "excluded_player_ids": [],
+        "bet_distributions": {
+            "winners": [
+                {
+                    "discord_id": 7,
+                    "amount": 5,
+                    "effective_bet": 10,
+                    "team": "dire",
+                    "multiplier": 1.75,
+                },
+                {
+                    "discord_id": 7,
+                    "amount": 10,
+                    "effective_bet": 30,
+                    "team": "dire",
+                    "multiplier": 1.75,
+                },
+            ],
+            "losers": [],
+        },
+        "jc_changes": {7: {"bet": 30}},
+    }
+
+    assert MatchCommands._format_jc_changes(None, record_result) == (
+        "\n\n🪙 **JC Changes:**\n"
+        "**Final odds:** 🔴 Dire 1.75x\n"
+        "**Bettors:**\n"
+        f"<@7>: **+30** {JOPACOIN_EMOTE} (bet +30 · stake 40)"
     )

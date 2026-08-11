@@ -1721,6 +1721,36 @@ class MatchCommands(commands.Cog):
         if not changes:
             return ""
 
+        bet_distributions = record_result.get("bet_distributions", {})
+        settled_bets = [
+            *bet_distributions.get("winners", []),
+            *bet_distributions.get("losers", []),
+        ]
+        stakes_by_user: dict[int, int] = {}
+        for bet in settled_bets:
+            discord_id = int(bet["discord_id"])
+            stake = int(bet.get("effective_bet", bet.get("amount", 0)))
+            stakes_by_user[discord_id] = stakes_by_user.get(discord_id, 0) + stake
+
+        final_odds_line = ""
+        winning_bet = next(
+            (
+                bet
+                for bet in bet_distributions.get("winners", [])
+                if bet.get("multiplier") is not None
+            ),
+            None,
+        )
+        if winning_bet is not None:
+            team_label = {
+                "radiant": "🟢 Radiant",
+                "dire": "🔴 Dire",
+            }.get(str(winning_bet.get("team", "")).lower(), "Winning side")
+            final_odds_line = (
+                f"**Final odds:** {team_label} "
+                f"{float(winning_bet['multiplier']):.2f}x\n"
+            )
+
         winning_ids = list(record_result.get("winning_player_ids", []))
         losing_ids = list(record_result.get("losing_player_ids", []))
         excluded_ids = list(record_result.get("excluded_player_ids", []))
@@ -1756,7 +1786,11 @@ class MatchCommands(commands.Cog):
                     payout_label = "payout"
                 parts.append(f"{payout_label} {signed(int(components['payout']))}")
             if "bet" in components:
-                parts.append(f"bet {signed(int(components['bet']))}")
+                bet_part = f"bet {signed(int(components['bet']))}"
+                stake = stakes_by_user.get(discord_id)
+                if stake:
+                    bet_part += f" · stake {stake}"
+                parts.append(bet_part)
             if "streak" in components:
                 parts.append(f"streak {signed(int(components['streak']))}")
             if "referral" in components:
@@ -1799,7 +1833,11 @@ class MatchCommands(commands.Cog):
             sections.append("**Bettors:**\n" + "\n".join(bettor_lines))
         if other_reward_lines:
             sections.append("**Other Rewards:**\n" + "\n".join(other_reward_lines))
-        return "\n\n🪙 **JC Changes:**\n" + "\n".join(sections)
+        return (
+            "\n\n🪙 **JC Changes:**\n"
+            + final_odds_line
+            + "\n".join(sections)
+        )
 
     def _format_bet_distribution(
         self, winners: list[dict], losers: list[dict],
