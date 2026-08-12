@@ -3,7 +3,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
+from discord import app_commands
 
 from commands.admin import AdminCommands
 
@@ -44,6 +46,18 @@ def test_low_priority_commands_require_manage_guild_by_default():
         assert command.default_permissions.manage_guild is True
 
 
+def test_admin_payload_requires_manage_guild_and_includes_lowprio_group():
+    client = discord.Client(intents=discord.Intents.none())
+    tree = app_commands.CommandTree(client)
+
+    payload = AdminCommands.admin.to_dict(tree)
+
+    assert str(payload["default_member_permissions"]) == str(
+        discord.Permissions(manage_guild=True).value
+    )
+    assert any(option["name"] == "lowprio" for option in payload["options"])
+
+
 def test_lowprio_add_exposes_bounded_configurable_win_count():
     parameters = {parameter.name: parameter for parameter in AdminCommands.lowprio_add.parameters}
 
@@ -53,7 +67,9 @@ def test_lowprio_add_exposes_bounded_configurable_win_count():
 
 
 @pytest.mark.asyncio
-async def test_lowprio_add_sets_configurable_wins_and_pending_match_watermark(monkeypatch):
+async def test_lowprio_add_sets_configurable_wins_and_pending_match_watermark_without_dm(
+    monkeypatch,
+):
     moderation_service = MagicMock()
     moderation_service.get_pending_match_watermark.return_value = 314
     commands, player_service, repo = _commands(
@@ -96,11 +112,53 @@ async def test_lowprio_add_sets_configurable_wins_and_pending_match_watermark(mo
         reason="internal",
         source="admin",
     )
-    target.send.assert_awaited_once()
-    assert "7 wins" in target.send.await_args.args[0]
-    assert "internal" in target.send.await_args.args[0]
+    target.send.assert_not_awaited()
     interaction.response.send_message.assert_awaited_once()
     assert "7 wins required" in interaction.response.send_message.call_args.args[0]
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_lowprio_remove_clears_state_and_records_audit_without_dm(monkeypatch):
+    moderation_service = MagicMock()
+    commands, _player_service, repo = _commands(
+        moderation_service=moderation_service,
+    )
+    interaction = _interaction()
+    target = SimpleNamespace(id=42, mention="<@42>", send=AsyncMock())
+    repo.clear_low_priority.return_value = True
+    repo.get_state.return_value = SimpleNamespace(
+        wins_required=7,
+        start_pending_match_id=314,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _interaction: True)
+
+    await commands.lowprio_remove.callback(
+        commands,
+        interaction,
+        target,
+        reason="internal",
+    )
+
+    repo.clear_low_priority.assert_called_once_with(
+        42,
+        77,
+        removed_by=900,
+        reason="internal",
+    )
+    moderation_service.record_low_priority_event.assert_called_once_with(
+        42,
+        77,
+        event_type="lowprio_clear",
+        wins_required=7,
+        wins_remaining=0,
+        actor_id=900,
+        reason="internal",
+        pending_match_watermark=314,
+        source="admin",
+    )
+    target.send.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
     assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
 
 

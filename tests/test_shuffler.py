@@ -116,13 +116,13 @@ def test_default_off_role_goodness_adds_500_per_player():
     assert score == 1000.0
 
 
-def test_low_priority_penalty_is_500_per_selected_player():
+def test_low_priority_penalty_is_600_per_selected_player():
     shuffler = BalancedShuffler()
 
     assert shuffler.calculate_low_priority_penalty(
         {100, 101, 102},
         {100, 101, 999},
-    ) == 1000.0
+    ) == 1200.0
 
 
 def test_pool_shuffle_prefers_excluding_low_priority_player():

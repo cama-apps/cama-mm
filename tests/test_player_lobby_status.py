@@ -21,7 +21,7 @@ def test_player_lobby_status_has_no_target_player_option():
 
 
 @pytest.mark.asyncio
-async def test_player_lobby_status_queries_caller_and_keeps_reasons_private(monkeypatch):
+async def test_player_lobby_status_exposes_only_the_callers_suspension(monkeypatch):
     moderation_service = MagicMock()
     moderation_service.get_active_suspension.return_value = SimpleNamespace(
         scope="open",
@@ -51,7 +51,7 @@ async def test_player_lobby_status_queries_caller_and_keeps_reasons_private(monk
     await commands.lobby_status.callback(commands, interaction)
 
     moderation_service.get_active_suspension.assert_called_once_with(42, 77)
-    low_priority_repo.get_state.assert_called_once_with(42, 77)
+    low_priority_repo.get_state.assert_not_called()
     safe_defer.assert_awaited_once_with(interaction, ephemeral=True)
     safe_followup.assert_awaited_once()
     assert safe_followup.await_args.kwargs["ephemeral"] is True
@@ -60,9 +60,10 @@ async def test_player_lobby_status_queries_caller_and_keeps_reasons_private(monk
     assert "All You Can Feed" in message
     assert "<t:9000:F>" in message
     assert "and 2 completed matches remaining" in message
-    assert "repeat abandonment" in message
-    assert "Progress: 4/7 wins (3 remaining)" in message
-    assert "missed ready checks" in message
+    assert "Reason: repeat abandonment" in message
+    assert "low priority" not in message.lower()
+    assert "progress" not in message.lower()
+    assert "missed ready checks" not in message
 
 
 @pytest.mark.asyncio
@@ -87,8 +88,8 @@ async def test_player_lobby_status_reports_clear_state_ephemerally(monkeypatch):
     await commands.lobby_status.callback(commands, interaction)
 
     moderation_service.get_active_suspension.assert_called_once_with(88, 99)
-    low_priority_repo.get_state.assert_called_once_with(88, 99)
-    assert "no active lobby suspension or low-priority state" in (
-        safe_followup.await_args.kwargs["content"]
+    low_priority_repo.get_state.assert_not_called()
+    assert safe_followup.await_args.kwargs["content"] == (
+        "✅ All clear — you have no active lobby suspension."
     )
     assert safe_followup.await_args.kwargs["ephemeral"] is True

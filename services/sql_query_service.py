@@ -115,6 +115,12 @@ BLOCKED_COLUMNS: set[str] = {
     "id",  # Generic auto-increment IDs (use specific IDs like match_id instead)
 }
 
+# Columns whose presence anywhere in query structure would reveal secret state,
+# even when they are used only to filter, group, join, or order public results.
+FORBIDDEN_QUERY_IDENTIFIERS: set[str] = {
+    "low_priority_gain_multiplier",
+}
+
 # SQL keywords that indicate write operations
 DANGEROUS_KEYWORDS: set[str] = {
     "INSERT",
@@ -429,6 +435,10 @@ class SQLQueryService:
             blocked_lower = {b.lower() for b in BLOCKED_TABLES}
 
         allowed_tables = [t for t in all_tables if t.lower() not in blocked_lower]
+        hidden_columns = {
+            column.lower()
+            for column in BLOCKED_COLUMNS | FORBIDDEN_QUERY_IDENTIFIERS
+        }
 
         for table_name in sorted(allowed_tables):
             try:
@@ -442,7 +452,7 @@ class SQLQueryService:
                 for col in schema_info:
                     col_name = col["name"]
                     # Skip blocked columns
-                    if col_name.lower() in {b.lower() for b in BLOCKED_COLUMNS}:
+                    if col_name.lower() in hidden_columns:
                         continue
 
                     col_type = col["type"] or "ANY"
@@ -516,7 +526,8 @@ class SQLQueryService:
         1. Query starts with SELECT
         2. No dangerous keywords (INSERT, UPDATE, etc.)
         3. No blocked tables are referenced
-        4. No blocked columns in SELECT clause
+        4. No forbidden identifiers anywhere in query structure
+        5. No blocked columns in SELECT clause
 
         Args:
             sql: SQL query to validate
@@ -560,6 +571,14 @@ class SQLQueryService:
         statements = [s.strip() for s in masked.split(";") if s.strip()]
         if len(statements) > 1:
             return False, "Multiple statements not allowed"
+
+        # Some historical fields reveal secret state even when they are not
+        # projected. String values have already been masked, while quoted SQL
+        # identifiers remain visible, so this catches every structural use
+        # without rejecting harmless matching text in a literal.
+        for identifier in FORBIDDEN_QUERY_IDENTIFIERS:
+            if re.search(rf"\b{re.escape(identifier)}\b", masked, re.IGNORECASE):
+                return False, f"Forbidden column: {identifier}"
 
         # 4. Reject a `*` result column — the wildcard bypasses the column
         # blocklist and would expose PII columns like discord_id and steam_id.
@@ -608,9 +627,11 @@ class SQLQueryService:
 
         Two quote kinds are handled differently, matching SQLite semantics:
 
-        * Single-quoted ``'...'`` is *string data* — its contents are masked to a
-          neutral placeholder so a value like ``'a;b'`` or ``'DROP'`` can neither
-          trigger a false rejection nor hide a second statement.
+        * Single-quoted ``'...'`` is normally *string data*, so its contents are
+          masked to a neutral placeholder. SQLite also accepts single quotes as
+          identifiers in identifier-only contexts: table positions,
+          ``USING(...)`` columns, and either side of ``.`` qualification. Those
+          tokens are normalised like other quoted identifiers.
         * Double-quoted ``"..."``, bracketed ``[...]`` and backtick ``` `...` ```
           are *identifiers* (column/table names). SQLite resolves ``"discord_id"``
           to the real column, so these must stay visible to the column/table
@@ -630,20 +651,25 @@ class SQLQueryService:
         while i < n:
             ch = sql[i]
             if ch == "'":
-                out.append("'")
                 i += 1
+                contents: list[str] = []
                 while i < n:
                     if sql[i] == "'":
                         # Doubled quote = an escaped quote inside the literal.
                         if i + 1 < n and sql[i + 1] == "'":
-                            out.append("xx")
+                            contents.append("'")
                             i += 2
                             continue
-                        out.append("'")
                         i += 1
                         break
-                    out.append("x")
+                    contents.append(sql[i])
                     i += 1
+                if SQLQueryService._single_quote_is_identifier(
+                    "".join(out), sql, i
+                ):
+                    out.extend((" ", "".join(contents), " "))
+                else:
+                    out.extend(("'", "x" * len(contents), "'"))
             elif ch in ident_close:
                 close = ident_close[ch]
                 out.append(" ")
@@ -667,43 +693,115 @@ class SQLQueryService:
         return "".join(out)
 
     @staticmethod
+    def _single_quote_is_identifier(
+        masked_prefix: str, sql: str, end: int
+    ) -> bool:
+        """Whether SQLite reads a single-quoted token as an identifier.
+
+        This deliberately models only identifier-only grammar positions. A
+        standalone token in a projection, predicate, or function argument is
+        still string data and remains masked.
+        """
+        before = masked_prefix.rstrip()
+        after = sql[end:].lstrip()
+
+        # SQLite permits quoting both parts of a qualified name, including a
+        # schema/table pair and an alias/column pair.
+        if before.endswith(".") or after.startswith("."):
+            return True
+
+        # JOIN table names are not the first word of the FROM item returned by
+        # _from_clause_tables, so recognise that table slot directly.
+        if re.search(r"\bjoin\s*(?:\(\s*)*$", before, re.IGNORECASE):
+            return True
+
+        # SQLite's alternate IN grammar accepts a table name or table-valued
+        # function without parentheses around a value list/subquery.
+        if re.search(r"\bin\s*$", before, re.IGNORECASE):
+            return True
+
+        # USING contains an identifier list rather than expressions. Find the
+        # active opening parenthesis so every list item is covered without
+        # confusing quoted function arguments with identifiers.
+        if SQLQueryService._inside_using_list(before):
+            return True
+
+        # Reuse the FROM-clause scanner to recognise FROM and comma-join table
+        # slots while respecting nesting and clause terminators.
+        sentinel = "single_quoted_identifier"
+        candidate = f"{masked_prefix}{sentinel}{sql[end:]}".lower()
+        return sentinel in SQLQueryService._from_clause_tables(
+            candidate
+        )
+
+    @staticmethod
+    def _inside_using_list(masked_prefix: str) -> bool:
+        """Whether the current token is inside an open ``USING(...)`` list."""
+        depth = 0
+        for index in range(len(masked_prefix) - 1, -1, -1):
+            char = masked_prefix[index]
+            if char == ")":
+                depth += 1
+            elif char == "(":
+                if depth:
+                    depth -= 1
+                    continue
+                return bool(
+                    re.search(
+                        r"\busing\s*$", masked_prefix[:index], re.IGNORECASE
+                    )
+                )
+        return False
+
+    @staticmethod
     def _projection_lists(masked_lower: str) -> list[str]:
         """Return the output-column text of every SELECT, scoped to that SELECT's
         own nesting level.
 
-        For each ``SELECT`` the projection runs to the ``FROM`` that closes it at
-        the same parenthesis depth (or to end / an enclosing ``)`` for a
-        FROM-less SELECT). Text inside nested subqueries is skipped, so a blocked
-        column is detected when it is actually projected — at top level, in a
-        UNION branch, or as a projected subquery's own output — but not when it
-        appears only inside a subquery's WHERE/JOIN.
+        Ordinary expression parentheses remain visible, while nested subquery
+        bodies are skipped and scanned by their own SELECT pass. This catches
+        columns inside functions, CAST, JSON, and grouping without treating a
+        nested WHERE/JOIN column as output of the outer SELECT.
         """
         n = len(masked_lower)
         projections: list[str] = []
         for m in re.finditer(r"\bselect\b", masked_lower):
-            depth = 0
+            expression_depth = 0
+            subquery_depth = 0
             buf: list[str] = []
             j = m.end()
             while j < n:
                 c = masked_lower[j]
                 if c == "(":
-                    depth += 1
+                    if subquery_depth:
+                        subquery_depth += 1
+                    elif re.match(r"\s*(?:select|with)\b", masked_lower[j + 1 :]):
+                        subquery_depth = 1
+                    else:
+                        expression_depth += 1
+                        buf.append(c)
                     j += 1
                     continue
                 if c == ")":
-                    if depth == 0:
-                        break  # closing paren of an enclosing subquery
-                    depth -= 1
-                    j += 1
-                    continue
+                    if subquery_depth:
+                        subquery_depth -= 1
+                        j += 1
+                        continue
+                    if expression_depth:
+                        expression_depth -= 1
+                        buf.append(c)
+                        j += 1
+                        continue
+                    break  # closing paren of an enclosing subquery
                 if (
-                    depth == 0
+                    not subquery_depth
+                    and expression_depth == 0
                     and masked_lower.startswith("from", j)
                     and (j == 0 or not (masked_lower[j - 1].isalnum() or masked_lower[j - 1] == "_"))
                     and (j + 4 >= n or not (masked_lower[j + 4].isalnum() or masked_lower[j + 4] == "_"))
                 ):
                     break  # FROM closing this SELECT's column list
-                if depth == 0:
+                if not subquery_depth:
                     buf.append(c)
                 j += 1
             projections.append("".join(buf))
@@ -765,29 +863,75 @@ class SQLQueryService:
                 index += 1
             tables.append(masked_lower[item_start:index])
 
-        names = []
+        names: list[str] = []
         for item in tables:
-            stripped = item.strip()
-            if stripped.startswith("("):
-                # A subquery or parenthesised join: it has no table name of its
-                # own, and the tables inside it are picked up by this scan's
-                # own pass over their nested FROM.
-                continue
-            name = _WORD_RE.search(stripped)
-            if name:
-                names.append(name.group(0))
+            names.extend(SQLQueryService._source_item_tables(item))
         return names
+
+    @staticmethod
+    def _source_item_tables(item: str) -> list[str]:
+        """Table names in one FROM item, including parenthesized comma joins.
+
+        A complete outer parenthesis is a source group and can be unwrapped.
+        Commas are split only at that group's top level, so commas inside a
+        table-valued function's argument list remain function arguments.
+        """
+        stripped = item.strip()
+        while stripped.startswith("("):
+            depth = 0
+            close = None
+            for index, char in enumerate(stripped):
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        close = index
+                        break
+            if close is None:
+                break
+            if stripped[close + 1 :].lstrip().startswith(","):
+                break
+            stripped = stripped[1:close].strip()
+            if re.match(r"(?:select|with)\b", stripped):
+                return []
+
+        parts: list[str] = []
+        depth = 0
+        start = 0
+        for index, char in enumerate(stripped):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 0:
+                parts.append(stripped[start:index])
+                start = index + 1
+        if parts:
+            parts.append(stripped[start:])
+            return [
+                table
+                for part in parts
+                for table in SQLQueryService._source_item_tables(part)
+            ]
+
+        name = _WORD_RE.search(stripped)
+        if not name or name.group(0) in {"select", "with"}:
+            return []
+        return [name.group(0)]
 
     def _extract_tables(self, sql: str) -> list[str]:
         """
         Extract table names from SQL query.
 
-        Covers FROM clauses (including comma joins) and explicit JOINs. Table
-        aliases in column references (e.g., p.column) are not treated as tables.
+        Covers FROM clauses (including parenthesized/comma joins), explicit
+        JOINs, and SQLite's ``expr IN table-name`` grammar. Table aliases in
+        column references (e.g., p.column) are not treated as tables.
         """
         lowered = sql.lower()
         tables = self._from_clause_tables(lowered)
-        tables.extend(re.findall(r"\bjoin\s+(\w+)", lowered))
+        tables.extend(re.findall(r"\bjoin\s*(?:\(\s*)*(\w+)", lowered))
+        tables.extend(re.findall(r"\bin\s+(\w+)", lowered))
         return list({table.upper() for table in tables})
 
     def _check_blocked_columns(self, masked_sql: str) -> list[str]:

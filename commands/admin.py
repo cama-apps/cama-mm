@@ -47,7 +47,11 @@ def _enum_value(value) -> str:
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
-    admin = app_commands.Group(name="admin", description="Admin maintenance commands")
+    admin = app_commands.Group(
+        name="admin",
+        description="Admin maintenance commands",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
     adjust = app_commands.Group(
         name="adjust",
         description="Adjust player rating fields",
@@ -89,7 +93,7 @@ class AdminCommands(commands.Cog):
     @lowprio.command(name="add", description="Set restricted matchmaking state")
     @app_commands.describe(
         user="Player to update",
-        reason="Reason shown privately to the player and admins",
+        reason="Reason visible to admins and recorded in moderation audit history",
         wins="Required wins to clear low priority (1-20)",
     )
     @app_commands.default_permissions(manage_guild=True)
@@ -176,20 +180,6 @@ class AdminCommands(commands.Cog):
             f"{state.wins_remaining} wins required.",
             ephemeral=True,
         )
-        try:
-            message = (
-                f"You were placed in low priority for **{state.wins_required} wins**.\n"
-                "The matchmaker is asking for a small course correction."
-            )
-            if reason:
-                message += f"\nReason: {reason}"
-            message += (
-                f"\nWin {state.wins_required} recorded games to return to regular matchmaking."
-                "\nUse `/player lobby status` to view your progress."
-            )
-            await user.send(message)
-        except Exception as exc:
-            logger.debug("Failed to DM low-priority player %s: %s", user.id, exc)
         logger.info(
             "Admin %s set low-priority state for %s in guild %s",
             interaction.user.id,
@@ -200,7 +190,7 @@ class AdminCommands(commands.Cog):
     @lowprio.command(name="remove", description="Clear restricted matchmaking state")
     @app_commands.describe(
         user="Player to update",
-        reason="Reason shown privately to the player and admins",
+        reason="Reason visible to admins and recorded in moderation audit history",
     )
     @app_commands.default_permissions(manage_guild=True)
     @require_guild
@@ -266,15 +256,6 @@ class AdminCommands(commands.Cog):
             else f"{user.mention} does not have active restricted matchmaking state."
         )
         await interaction.response.send_message(message, ephemeral=True)
-        if removed:
-            try:
-                dm_message = "Your low-priority matchmaking state was cleared. You're all set."
-                if reason:
-                    dm_message += f"\nReason: {reason}"
-                await user.send(dm_message)
-            except Exception as exc:
-                logger.debug("Failed to DM cleared low-priority player %s: %s", user.id, exc)
-
     @lowprio.command(name="status", description="Show restricted matchmaking state")
     @app_commands.describe(user="Player to inspect")
     @app_commands.default_permissions(manage_guild=True)

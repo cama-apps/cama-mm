@@ -317,7 +317,7 @@ class RegistrationCommands(commands.Cog):
 
     @player_lobby.command(
         name="status",
-        description="Privately view your lobby suspension and low-priority progress",
+        description="Privately view your active lobby suspension",
     )
     @require_guild
     async def lobby_status(self, interaction: discord.Interaction):
@@ -326,41 +326,16 @@ class RegistrationCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         moderation_service = getattr(self.bot, "moderation_service", None)
-        low_priority_repo = getattr(self.bot, "low_priority_repo", None)
-        suspension, low_priority = await asyncio.gather(
-            asyncio.to_thread(
-                moderation_service.get_active_suspension,
-                interaction.user.id,
-                guild_id,
-            )
-            if moderation_service is not None
-            else asyncio.sleep(0, result=None),
-            asyncio.to_thread(
-                low_priority_repo.get_state,
-                interaction.user.id,
-                guild_id,
-            )
-            if low_priority_repo is not None
-            else asyncio.sleep(0, result=None),
-        )
-
-        sections: list[str] = []
-        if suspension is not None:
-            sections.append(_player_suspension_summary(suspension))
-        if low_priority is not None and low_priority.active:
-            completed = low_priority.wins_required - low_priority.wins_remaining
-            sections.append(
-                "**Low priority**\n"
-                "A small matchmaking detour is in progress.\n"
-                f"Progress: {completed}/{low_priority.wins_required} wins "
-                f"({low_priority.wins_remaining} remaining)\n"
-                f"Reason: {low_priority.reason or 'Not provided'}"
-            )
+        suspension = await asyncio.to_thread(
+            moderation_service.get_active_suspension,
+            interaction.user.id,
+            guild_id,
+        ) if moderation_service is not None else None
 
         message = (
-            "\n\n".join(sections)
-            if sections
-            else "✅ All clear — you have no active lobby suspension or low-priority state."
+            _player_suspension_summary(suspension)
+            if suspension is not None
+            else "✅ All clear — you have no active lobby suspension."
         )
         await safe_followup(interaction, content=message, ephemeral=True)
 
