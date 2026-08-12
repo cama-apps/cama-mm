@@ -619,7 +619,9 @@ def _build_schema_context_via_public_metadata_methods(ai_query_repo):
     allowed_tables = [
         table for table in all_tables if table.lower() not in blocked_lower
     ]
-    blocked_columns = {column.lower() for column in BLOCKED_COLUMNS}
+    blocked_columns = {column.lower() for column in BLOCKED_COLUMNS} | {
+        "low_priority_gain_multiplier"
+    }
 
     for table_name in sorted(allowed_tables):
         schema_info = ai_query_repo.get_table_schema(table_name)
@@ -793,6 +795,283 @@ class TestSQLQueryService:
         is_valid, error = service._validate_sql(query)
         assert is_valid, f"Should allow blocked column used only in a subquery WHERE: {error}"
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT low_priority_gain_multiplier FROM rating_history",
+            (
+                "SELECT p.discord_username FROM players p "
+                "JOIN rating_history rh ON p.discord_id = rh.discord_id "
+                "WHERE rh.low_priority_gain_multiplier > 1"
+            ),
+            (
+                "SELECT p.discord_username FROM players p "
+                "JOIN rating_history rh ON rh.low_priority_gain_multiplier > 1"
+            ),
+            (
+                "SELECT COUNT(*) FROM rating_history "
+                "GROUP BY low_priority_gain_multiplier"
+            ),
+            (
+                "SELECT COUNT(*) FROM rating_history "
+                "HAVING MAX(low_priority_gain_multiplier) > 1"
+            ),
+            (
+                "SELECT rating_after FROM rating_history "
+                "ORDER BY low_priority_gain_multiplier"
+            ),
+            "SELECT max(low_priority_gain_multiplier) FROM rating_history",
+            (
+                "SELECT json_object('multiplier', low_priority_gain_multiplier) "
+                "FROM rating_history"
+            ),
+            'SELECT "low_priority_gain_multiplier" FROM rating_history',
+        ],
+        ids=[
+            "select",
+            "where",
+            "join-on",
+            "group-by",
+            "having",
+            "order-by",
+            "function",
+            "json-object",
+            "quoted",
+        ],
+    )
+    def test_validate_sql_rejects_low_priority_multiplier_anywhere_structural(
+        self, query
+    ):
+        """Historical low-priority membership must not be visible or inferable."""
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert not is_valid, f"Low-priority history must be secret: {query}"
+        assert "forbidden" in error.lower() or "blocked" in error.lower()
+
+    def test_validate_sql_ignores_forbidden_identifier_text_in_string_literal(self):
+        service = _validator_service()
+
+        query = (
+            "SELECT discord_username FROM players "
+            "WHERE discord_username = 'low_priority_gain_multiplier'"
+        )
+        is_valid, error = service._validate_sql(query)
+
+        assert is_valid, f"String data must not trigger the identifier guard: {error}"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT reason FROM 'low_priority_state'",
+            (
+                "SELECT lp.reason FROM players p "
+                "JOIN 'low_priority_state' lp ON 1 = 1"
+            ),
+            "SELECT reason FROM players, 'low_priority_state'",
+            "SELECT p.'discord_id' FROM players p",
+            (
+                "SELECT rh.'low_priority_gain_multiplier' "
+                "FROM rating_history rh"
+            ),
+            (
+                "SELECT rh.rating_after FROM rating_history rh "
+                "WHERE rh.'low_priority_gain_multiplier' > 1"
+            ),
+            (
+                "SELECT rh.rating_after FROM players p "
+                "JOIN rating_history rh "
+                "USING ('low_priority_gain_multiplier')"
+            ),
+            (
+                "SELECT a.rating_after FROM rating_history a "
+                "JOIN rating_history b "
+                "USING (match_id, 'low_priority_gain_multiplier')"
+            ),
+            "SELECT discord_username FROM main.'players'",
+            "SELECT discord_username FROM 'main'.players",
+            "SELECT discord_username FROM 'main'.'players'",
+        ],
+        ids=[
+            "from-table",
+            "join-table",
+            "comma-join-table",
+            "qualified-blocked-column",
+            "qualified-forbidden-column-select",
+            "qualified-forbidden-column-where",
+            "using-column",
+            "using-second-column",
+            "quoted-table-after-schema",
+            "quoted-schema",
+            "quoted-schema-and-table",
+        ],
+    )
+    def test_validate_sql_rejects_single_quoted_identifier_bypass(self, query):
+        """SQLite accepts single quotes as identifiers in identifier-only contexts."""
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert not is_valid, f"Single-quoted identifier bypassed validation: {query}"
+        assert error
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT 'low_priority_gain_multiplier' AS label FROM rating_history",
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username = 'low_priority_gain_multiplier'"
+            ),
+            "SELECT upper('low_priority_state') AS label FROM players",
+            "SELECT printf('%s', 'main') AS label FROM players",
+        ],
+        ids=["projection", "where", "function", "function-with-two-literals"],
+    )
+    def test_validate_sql_allows_standalone_single_quoted_literals(self, query):
+        """Standalone quoted values remain data even when they name protected SQL."""
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert is_valid, f"Standalone string literal should stay allowed: {error}"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT reason FROM ('low_priority_state')",
+            "SELECT lp.reason FROM players JOIN ('low_priority_state') lp ON 1",
+            "SELECT reason FROM players, ('low_priority_state')",
+            "SELECT reason FROM (players JOIN ('low_priority_state') ON 1)",
+            "SELECT reason FROM (players, low_priority_state)",
+            "SELECT reason FROM ((players, low_priority_state))",
+            "SELECT reason FROM (players, ('low_priority_state'))",
+            "SELECT reason FROM ((players), (low_priority_state))",
+            "SELECT name FROM (pragma_table_info('players'))",
+            "SELECT name FROM ('pragma_table_info'('players'))",
+        ],
+        ids=[
+            "from",
+            "join",
+            "comma-join",
+            "parenthesized-join",
+            "parenthesized-comma-join",
+            "nested-parenthesized-comma-join",
+            "parenthesized-comma-join-quoted",
+            "separately-parenthesized-comma-join",
+            "pragma-function",
+            "single-quoted-pragma-function",
+        ],
+    )
+    def test_validate_sql_rejects_parenthesized_source_bypass(self, query):
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert not is_valid, f"Parenthesized source bypassed validation: {query}"
+        assert "not allowed" in error.lower()
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username IN low_priority_state"
+            ),
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username IN 'low_priority_state'"
+            ),
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username IN pragma_table_info('players')"
+            ),
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username IN 'pragma_table_info'('players')"
+            ),
+        ],
+        ids=["table", "quoted-table", "table-function", "quoted-table-function"],
+    )
+    def test_validate_sql_rejects_in_source_bypass(self, query):
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert not is_valid, f"IN source bypassed validation: {query}"
+        assert "not allowed" in error.lower()
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT (discord_id) FROM players",
+            "SELECT max(discord_id) FROM players",
+            "SELECT CAST(discord_id AS TEXT) FROM players",
+            "SELECT json_object('player_id', discord_id) FROM players",
+            "SELECT coalesce((discord_id), 0) FROM players",
+        ],
+        ids=["grouped", "function", "cast", "json-object", "nested-parentheses"],
+    )
+    def test_validate_sql_rejects_blocked_columns_inside_projection_expressions(
+        self, query
+    ):
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert not is_valid, f"Projection expression hid a blocked column: {query}"
+        assert "blocked column" in error.lower()
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            (
+                "SELECT p.discord_username FROM "
+                "(SELECT discord_username FROM players) p"
+            ),
+            (
+                "SELECT p.discord_username FROM "
+                "(players p JOIN matches m ON p.wins = m.match_id)"
+            ),
+            (
+                "SELECT (SELECT COUNT(*) FROM bets "
+                "WHERE discord_id = p.discord_id) FROM players p"
+            ),
+            (
+                "SELECT discord_username FROM players "
+                "WHERE discord_username IN ('low_priority_state')"
+            ),
+            "SELECT value FROM (json_each('[1,2]', '$'))",
+        ],
+        ids=[
+            "subquery-source",
+            "parenthesized-join",
+            "subquery-where",
+            "in-literal-list",
+            "table-function-argument-comma",
+        ],
+    )
+    def test_validate_sql_allows_legitimate_parenthesized_sql(self, query):
+        service = _validator_service()
+
+        is_valid, error = service._validate_sql(query)
+
+        assert is_valid, f"Legitimate parenthesized SQL should stay allowed: {error}"
+
+    def test_validate_sql_allows_projection_blocked_columns_in_join_predicates(self):
+        """Ordinary output-only blocks remain valid for relationships and filters."""
+        service = _validator_service()
+
+        query = (
+            "SELECT p.discord_username FROM players p "
+            "JOIN rating_history rh ON p.discord_id = rh.discord_id "
+            "WHERE rh.discord_id > 0"
+        )
+        is_valid, error = service._validate_sql(query)
+
+        assert is_valid, f"Projection-only blocked columns must stay usable in predicates: {error}"
+
     def test_validate_sql_allows_semicolon_inside_string_literal(self):
         """A semicolon inside a string literal is data, not a statement separator.
 
@@ -936,6 +1215,15 @@ class TestSQLQueryService:
         assert first == expected
         assert second == first
         assert connection.call_count == 1
+
+    def test_schema_context_hides_low_priority_history_multiplier(self, repo_db_path):
+        repo = AIQueryRepository(repo_db_path)
+        service = SQLQueryService(ai_service=MagicMock(), ai_query_repo=repo)
+
+        context = service._build_schema_context()
+
+        assert "### rating_history" in context
+        assert "low_priority_gain_multiplier" not in context
 
     def test_schema_context_bulk_metadata_blocks_unscoped_tables_fail_closed(self):
         repo = MagicMock()
