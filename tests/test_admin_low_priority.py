@@ -36,25 +36,23 @@ def _commands(*, player_exists: bool = True, moderation_service=None):
     )
 
 
-def test_low_priority_commands_require_manage_guild_by_default():
+def test_low_priority_commands_have_no_static_permission_gate():
     for command in (
         AdminCommands.lowprio_add,
         AdminCommands.lowprio_remove,
         AdminCommands.lowprio_status,
         AdminCommands.lowprio_list,
     ):
-        assert command.default_permissions.manage_guild is True
+        assert command.default_permissions is None
 
 
-def test_admin_payload_requires_manage_guild_and_includes_lowprio_group():
+def test_admin_payload_keeps_lowprio_group_discoverable():
     client = discord.Client(intents=discord.Intents.none())
     tree = app_commands.CommandTree(client)
 
     payload = AdminCommands.admin.to_dict(tree)
 
-    assert str(payload["default_member_permissions"]) == str(
-        discord.Permissions(manage_guild=True).value
-    )
+    assert payload["default_member_permissions"] is None
     assert any(option["name"] == "lowprio" for option in payload["options"])
 
 
