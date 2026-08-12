@@ -47,11 +47,7 @@ def _enum_value(value) -> str:
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
-    admin = app_commands.Group(
-        name="admin",
-        description="Admin maintenance commands",
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
+    admin = app_commands.Group(name="admin", description="Admin maintenance commands")
     adjust = app_commands.Group(
         name="adjust",
         description="Adjust player rating fields",
@@ -96,7 +92,6 @@ class AdminCommands(commands.Cog):
         reason="Reason visible to admins and recorded in moderation audit history",
         wins="Required wins to clear low priority (1-20)",
     )
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_add(
         self,
@@ -192,7 +187,6 @@ class AdminCommands(commands.Cog):
         user="Player to update",
         reason="Reason visible to admins and recorded in moderation audit history",
     )
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_remove(
         self,
@@ -258,7 +252,6 @@ class AdminCommands(commands.Cog):
         await interaction.response.send_message(message, ephemeral=True)
     @lowprio.command(name="status", description="Show restricted matchmaking state")
     @app_commands.describe(user="Player to inspect")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_status(
         self, interaction: discord.Interaction, user: discord.Member
@@ -289,7 +282,6 @@ class AdminCommands(commands.Cog):
         await interaction.response.send_message(message, ephemeral=True)
 
     @lowprio.command(name="list", description="List restricted matchmaking state")
-    @app_commands.default_permissions(manage_guild=True)
     @require_guild
     async def lowprio_list(self, interaction: discord.Interaction):
         if not has_admin_permission(interaction):
