@@ -40,6 +40,7 @@ use cama_domain::dig_cave_in::{
 };
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
+use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
@@ -4468,6 +4469,8 @@ where
             .as_ref()
             .expect("Dig always has a staged tunnel")
             .clone();
+        let mutations = mutations_from_json(tunnel.mutations.as_deref());
+        let mutation_fx = mutation_effects(&mutations);
         let mana_effects = if first_dig {
             ManaEffects::default()
         } else {
@@ -4491,12 +4494,22 @@ where
             ((relic_paid_cost as f64 * mana_paid_multiplier.max(0.0)) as i64).max(1);
         let (curse_fx, _curse_remaining) =
             active_curse_effects(tunnel.temp_curses.as_deref()).unwrap_or_default();
-        let base_cooldown_seconds = if injury_slows_cooldown(tunnel.injury_state.as_deref()) {
+        let restless_bonus = mutation_fx
+            .get("cooldown_bonus_seconds")
+            .and_then(|effect| effect.number())
+            .unwrap_or(0.0)
+            .max(0.0) as i64;
+        let before_stamina = if injury_slows_cooldown(tunnel.injury_state.as_deref()) {
             6 * 3_600
         } else {
-            3_600
+            3_600_i64.saturating_add(restless_bonus)
         };
-        let cooldown_seconds = (base_cooldown_seconds as f64
+        let stat_fx = miner_stat_effects(
+            MinerStats::new(0, 0, tunnel.stat_stamina.max(0))
+                .expect("normalized persisted stamina is non-negative"),
+        );
+        let after_stamina = (before_stamina as f64 * stat_fx.cooldown_multiplier) as i64;
+        let cooldown_seconds = (after_stamina.max(1) as f64
             * (1.0 + curse_fx.cooldown_penalty.clamp(0.0, 0.25)))
             as i64;
         let cooldown_seconds = cooldown_seconds
@@ -4741,7 +4754,6 @@ where
         let prestige_perks =
             serde_json::from_str::<Vec<String>>(&tunnel.prestige_perks).unwrap_or_default();
         let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
-        let mutation_fx = mutation_effects(&mutations_from_json(tunnel.mutations.as_deref()));
         let (buff_fx, buff_remaining) =
             active_buff_effects(tunnel.temp_buffs.as_deref()).unwrap_or_default();
         // Corruption is the first request-local random policy in Python. It
@@ -8723,6 +8735,58 @@ mod tests {
             .expect("Forest cooldown Dig");
         assert!(admitted.success);
         assert_eq!(admitted.cooldown_remaining, 0);
+    }
+
+    fn assert_stamina_cooldown_boundary(mutations: &str, expected_seconds: i64) {
+        let database = NamedTempFile::new().expect("stamina cooldown database");
+        let actor = 60_087;
+        let guild = 60_088;
+        let last_dig_at = 1_900_083_000;
+        seed_live_runtime_tunnel(
+            &database,
+            actor,
+            guild,
+            last_dig_at,
+            10,
+            1,
+            Some(last_dig_at),
+        );
+        Connection::open(database.path())
+            .expect("stamina cooldown connection")
+            .execute(
+                "UPDATE tunnels SET stat_stamina=13,mutations=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![mutations, actor, guild],
+            )
+            .expect("seed stamina and mutations");
+        let service = DigRuntimeService::sqlite(database.path());
+        let request_at = |now| DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        };
+        let blocked = service
+            .dig(request_at(last_dig_at + expected_seconds - 1))
+            .expect("stamina cooldown rejection");
+        assert!(!blocked.success);
+        assert_eq!(blocked.cooldown_remaining, 1);
+        let admitted = service
+            .dig(request_at(last_dig_at + expected_seconds))
+            .expect("stamina cooldown boundary Dig");
+        assert!(admitted.success);
+        assert_eq!(admitted.cooldown_remaining, 0);
+    }
+
+    #[test]
+    fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_plain() {
+        assert_stamina_cooldown_boundary("[]", 1_800);
+    }
+
+    #[test]
+    fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_restless() {
+        assert_stamina_cooldown_boundary(r#"[{"id":"restless"}]"#, 3_600);
     }
 
     #[test]
