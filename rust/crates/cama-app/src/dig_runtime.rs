@@ -475,6 +475,10 @@ pub struct DigRuntimeCommit {
     /// SQLite transaction as the tunnel, wallet, inventory, and audit rows so
     /// a stale pet cannot consume a paid dig or advance the tunnel.
     pub pet_work_claim: Option<PetDigWorkClaim>,
+    /// Spend the request-local Overgrowth charge in this same settlement.
+    /// The live reward/cave policy is calculated from a preview, so commit
+    /// must reject the stage if that charge disappeared before the CAS.
+    pub consume_overgrowth: bool,
     pub depth_before: i64,
     pub depth_after: i64,
     pub jc_delta: i64,
@@ -529,6 +533,8 @@ pub enum DigRuntimeStoreError {
     PetWorkConflict,
     #[error("Dig pet operation failed: {0}")]
     Pet(String),
+    #[error("the previewed Overgrowth charge changed before Dig settlement")]
+    OvergrowthConflict,
 }
 
 /// The only persistence seam used by the Dig application workflow.
@@ -1638,6 +1644,19 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             || fingerprint(&live_gear) != request.expected.gear_fingerprint
         {
             return Err(DigRuntimeStoreError::Conflict);
+        }
+
+        if request.consume_overgrowth {
+            let consumed = ManashopRepository::consume_overgrowth_charge_in_transaction(
+                &transaction,
+                discord_id,
+                Some(guild_id),
+                request.now,
+            )
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+            if !consumed {
+                return Err(DigRuntimeStoreError::OvergrowthConflict);
+            }
         }
 
         if let Some(claim) = request.pet_work_claim {
@@ -4576,6 +4595,7 @@ where
                 delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim,
+                consume_overgrowth: false,
                 depth_before: 0,
                 depth_after: first.advance,
                 jc_delta: first.jc_earned,
@@ -5295,6 +5315,7 @@ where
             economy_reward_multiplier_basis_points: economy_multiplier_basis_points,
             economy_before_positive_scale: loot_outcome.cave_in,
             streak_bonus: streak_reward,
+            overgrowth_bonus: i64::from(overgrowth_active).saturating_mul(10),
             helltide_tax,
             ..DigOutcomeInput::default()
         };
@@ -5624,6 +5645,7 @@ where
             delivery_draft: None,
             consumed_item_ids: consumed_item_ids.clone(),
             pet_work_claim,
+            consume_overgrowth: overgrowth_active,
             depth_before,
             depth_after: outcome.depth_after,
             jc_delta: outcome.jc_earned.saturating_sub(if paid_charge_active {
@@ -5726,6 +5748,7 @@ where
             delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
+            consume_overgrowth: false,
             depth_before: tunnel.depth,
             depth_after: tunnel.depth,
             jc_delta: 0,
@@ -5847,6 +5870,7 @@ where
             delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
+            consume_overgrowth: false,
             depth_before: depth,
             depth_after: depth,
             jc_delta: -result.cost,
@@ -6309,6 +6333,7 @@ mod tests {
     use cama_db::economy_event_repository::{
         EconomyEventRepository, EventDirection, EventDraft, EventEffects,
     };
+    use cama_db::manashop_rework_repository::{BuffData, GrantBuffRequest, ManashopRepository};
     use cama_db::schema_manager::initialize_or_migrate;
     use cama_domain::pet::DIG_WORK_UNITS_PER_BLOCK;
     use rusqlite::{Connection, params};
@@ -6745,6 +6770,7 @@ mod tests {
             delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
+            consume_overgrowth: false,
             depth_before: before.tunnel.as_ref().map_or(0, |tunnel| tunnel.depth),
             depth_after: before
                 .tunnel
@@ -6804,6 +6830,7 @@ mod tests {
             delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
+            consume_overgrowth: false,
             depth_before: 0,
             depth_after: 1,
             jc_delta: 1,
@@ -7011,6 +7038,7 @@ mod tests {
                 delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim: None,
+                consume_overgrowth: false,
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 0,
@@ -7742,6 +7770,7 @@ mod tests {
                     new_units: 0,
                     new_at: 1,
                 }),
+                consume_overgrowth: false,
                 depth_before: 10,
                 depth_after: 20,
                 jc_delta: 0,
@@ -8378,6 +8407,30 @@ mod tests {
             .expect("seed tunnel");
     }
 
+    fn grant_overgrowth(
+        database: &NamedTempFile,
+        discord_id: i64,
+        guild_id: i64,
+        now: i64,
+        charges: i64,
+    ) {
+        let data = BuffData {
+            charges_remaining: Some(charges),
+            ..BuffData::default()
+        };
+        ManashopRepository::new(database.path())
+            .grant_buff(GrantBuffRequest {
+                discord_id,
+                guild_id: Some(guild_id),
+                buff_type: "overgrowth",
+                target_id: None,
+                granted_at: now,
+                expires_at: now.saturating_add(3_600),
+                data: Some(&data),
+            })
+            .expect("grant Overgrowth");
+    }
+
     fn find_non_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
         (start..start.saturating_add(10_000))
             .find(|candidate| {
@@ -8431,6 +8484,193 @@ mod tests {
                 unit >= minimum && unit < maximum
             })
             .expect("deterministic cave probability seed")
+    }
+
+    #[test]
+    fn sqlite_overgrowth_adds_ten_and_consumes_one_charge_exactly_once() {
+        let control = NamedTempFile::new().expect("control Overgrowth database");
+        let boosted = NamedTempFile::new().expect("boosted Overgrowth database");
+        let actor = 60_091;
+        let guild = 60_092;
+        let now = 1_900_090_000;
+        for database in [&control, &boosted] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 7_200));
+        }
+        grant_overgrowth(&boosted, actor, guild, now, 2);
+        let dig_now = find_non_cave_dig_time(actor, guild, now);
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control Dig");
+        let service = DigRuntimeService::sqlite(boosted.path());
+        let boosted_outcome = service.dig(request).expect("Overgrowth Dig");
+        assert!(!control_outcome.cave_in && !boosted_outcome.cave_in);
+        assert_eq!(boosted_outcome.jc_earned, control_outcome.jc_earned + 10);
+        let active = ManashopRepository::new(boosted.path())
+            .active_for(actor, Some(guild), "overgrowth", dig_now)
+            .expect("read remaining Overgrowth");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].data.charges_remaining, Some(1));
+
+        let retry = service.dig(request).expect("duplicate request response");
+        assert!(!retry.success, "cooldown must reject duplicate Dig");
+        let active = ManashopRepository::new(boosted.path())
+            .active_for(actor, Some(guild), "overgrowth", dig_now)
+            .expect("read charge after duplicate");
+        assert_eq!(active[0].data.charges_remaining, Some(1));
+    }
+
+    #[test]
+    fn sqlite_cave_in_consumes_overgrowth_without_adding_ten() {
+        let control = NamedTempFile::new().expect("control cave database");
+        let boosted = NamedTempFile::new().expect("Overgrowth cave database");
+        let actor = 60_093;
+        let guild = 60_094;
+        let now = 1_900_091_000;
+        for database in [&control, &boosted] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 7_200));
+        }
+        grant_overgrowth(&boosted, actor, guild, now, 1);
+        let dig_now = find_dig_time_with_unit_between(actor, guild, now, 0.0, 0.01);
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control cave Dig");
+        let boosted_outcome = DigRuntimeService::sqlite(boosted.path())
+            .dig(request)
+            .expect("Overgrowth cave Dig");
+        assert!(control_outcome.cave_in && boosted_outcome.cave_in);
+        assert_eq!(boosted_outcome.jc_earned, control_outcome.jc_earned);
+        let connection = Connection::open(boosted.path()).expect("reload Overgrowth cave");
+        let (triggered, data) = connection
+            .query_row(
+                "SELECT triggered,data FROM manashop_buffs
+                 WHERE discord_id=?1 AND guild_id=?2 AND buff_type='overgrowth'",
+                params![actor, guild],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("persisted Overgrowth charge");
+        assert_eq!(triggered, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&data)
+                .expect("Overgrowth JSON")
+                .get("charges_remaining")
+                .and_then(Value::as_i64),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn sqlite_overgrowth_spend_rolls_back_when_later_commit_leg_fails() {
+        let database = NamedTempFile::new().expect("Overgrowth rollback database");
+        let actor = 60_095;
+        let guild = 60_096;
+        let now = 1_900_092_000;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 10, 1, Some(now - 7_200));
+        grant_overgrowth(&database, actor, guild, now, 1);
+        let store = SqliteDigRuntimeStore::new(database.path());
+        let snapshot = store.snapshot(actor, guild).expect("Overgrowth snapshot");
+        let mut next = snapshot.clone();
+        let tunnel = next.tunnel.as_mut().expect("Overgrowth tunnel");
+        tunnel.depth = 11;
+        tunnel.total_digs = 2;
+        tunnel.last_dig_at = Some(now);
+        assert!(matches!(
+            store.commit(DigRuntimeCommit {
+                expected: DigRuntimeVersion::from(&snapshot),
+                next,
+                delivery_draft: None,
+                consumed_item_ids: Vec::new(),
+                pet_work_claim: Some(cama_domain::pet::PetDigWorkClaim {
+                    pet_id: i64::MAX,
+                    expected_units: 0,
+                    expected_at: now,
+                    new_units: 0,
+                    new_at: now,
+                }),
+                consume_overgrowth: true,
+                depth_before: 10,
+                depth_after: 11,
+                jc_delta: 10,
+                balance_cost: 0,
+                action_type: "dig".to_owned(),
+                detail: "{}".to_owned(),
+                now,
+            }),
+            Err(DigRuntimeStoreError::PetWorkConflict)
+        ));
+        let active = ManashopRepository::new(database.path())
+            .active_for(actor, Some(guild), "overgrowth", now)
+            .expect("read rolled-back charge");
+        assert_eq!(active[0].data.charges_remaining, Some(1));
+        let reloaded = store
+            .snapshot(actor, guild)
+            .expect("reload rolled-back tunnel");
+        assert_eq!(reloaded, snapshot);
+    }
+
+    #[test]
+    fn sqlite_vanished_overgrowth_charge_rejects_whole_dig_stage() {
+        let database = NamedTempFile::new().expect("Overgrowth conflict database");
+        let actor = 60_097;
+        let guild = 60_098;
+        let now = 1_900_093_000;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 10, 1, Some(now - 7_200));
+        grant_overgrowth(&database, actor, guild, now, 1);
+        let store = SqliteDigRuntimeStore::new(database.path());
+        let snapshot = store.snapshot(actor, guild).expect("Overgrowth snapshot");
+        assert!(
+            ManashopRepository::new(database.path())
+                .consume_data_charge_atomic(actor, Some(guild), "overgrowth", now)
+                .expect("consume charge before commit")
+        );
+        let mut next = snapshot.clone();
+        let tunnel = next.tunnel.as_mut().expect("Overgrowth tunnel");
+        tunnel.depth = 11;
+        tunnel.total_digs = 2;
+        tunnel.last_dig_at = Some(now);
+        assert!(matches!(
+            store.commit(DigRuntimeCommit {
+                expected: DigRuntimeVersion::from(&snapshot),
+                next,
+                delivery_draft: None,
+                consumed_item_ids: Vec::new(),
+                pet_work_claim: None,
+                consume_overgrowth: true,
+                depth_before: 10,
+                depth_after: 11,
+                jc_delta: 10,
+                balance_cost: 0,
+                action_type: "dig".to_owned(),
+                detail: "{}".to_owned(),
+                now,
+            }),
+            Err(DigRuntimeStoreError::OvergrowthConflict)
+        ));
+        assert_eq!(
+            store.snapshot(actor, guild).expect("reload conflict"),
+            snapshot
+        );
+        assert_eq!(
+            Connection::open(database.path())
+                .expect("reload action audit")
+                .query_row("SELECT COUNT(*) FROM dig_actions", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("action count"),
+            0
+        );
     }
 
     #[test]
@@ -8595,6 +8835,7 @@ mod tests {
                 delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim: None,
+                consume_overgrowth: false,
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 0,
