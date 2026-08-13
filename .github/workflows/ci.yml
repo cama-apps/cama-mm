@@ -32,3 +32,199 @@ jobs:
 
       - name: Run tests
         run: uv run --locked pytest
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Verify generated Dig catalogs
+        run: |
+          uv run --locked python rust/scripts/generate_dig_event_catalog.py --check
+          uv run --locked python rust/scripts/generate_dig_event_catalog.py --quests --check
+          uv run --locked python rust/scripts/generate_dig_artifact_catalog.py --check
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
+
+      - name: Verify Rust schema authority against Python history
+        run: >-
+          cargo test --locked --manifest-path rust/Cargo.toml
+          -p cama-db --lib schema_manager::tests --
+          --ignored --test-threads=1
+
+      - name: Check implemented parity contracts
+        run: cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
+
+      - name: Build Python runtime image
+        run: docker build --build-arg GIT_SHA="$GITHUB_SHA" --tag cama-python:ci .
+
+      - name: Smoke Python runtime image
+        run: docker run --rm --entrypoint uv cama-python:ci run --no-sync python -c "import bot"
+
+      - name: Build Rust runtime image
+        run: docker build --file Dockerfile.rust --build-arg GIT_SHA="$GITHUB_SHA" --tag cama-rust:ci .
+
+      - name: Verify Rust image bundles the locked Dotabase catalog without Python
+        run: |
+          expected=$(uv run --locked python -c 'import hashlib,pathlib; import dotabase; path=pathlib.Path(dotabase.__file__).with_name("dotabase.db"); print(hashlib.sha256(path.read_bytes()).hexdigest())')
+          actual=$(docker run --rm --entrypoint sha256sum cama-rust:ci /app/assets/dotabase.db | cut -d' ' -f1)
+          test "$actual" = "$expected"
+          docker run --rm --entrypoint sh cama-rust:ci -c 'test -x /usr/local/bin/cama-rust && test -r /app/assets/dotabase.db && ! command -v python3 >/dev/null 2>&1'
+          docker run --rm cama-rust:ci catalog-check
+
+      - name: Prove Python and Rust runtime images cannot overlap
+        run: |
+          lock_dir="$RUNNER_TEMP/cama-runtime-lock-smoke"
+          mkdir -p "$lock_dir"
+          chmod a+rwx "$lock_dir"
+          docker run --rm --name cama-python-lock-holder \
+            --volume "$lock_dir:/app/data" \
+            --entrypoint flock \
+            cama-python:ci \
+            --nonblock --no-fork /app/data/.cama-runtime.lock \
+            sh -c 'touch /app/data/python-lock-ready; sleep 30' &
+          holder_pid=$!
+          trap 'docker stop cama-python-lock-holder cama-rust-lock-holder >/dev/null 2>&1 || true; wait "$holder_pid" 2>/dev/null || true; test -z "${rust_holder_pid:-}" || wait "$rust_holder_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            test -f "$lock_dir/python-lock-ready" && break
+            sleep 0.1
+          done
+          test -f "$lock_dir/python-lock-ready"
+
+          set +e
+          rust_output=$(docker run --rm \
+            --env DISCORD_BOT_TOKEN=offline-lock-smoke \
+            --env DB_PATH=/app/data/cama_shuffle.db \
+            --volume "$lock_dir:/app/data" \
+            cama-rust:ci serve 2>&1)
+          rust_status=$?
+          set -e
+          test "$rust_status" -ne 0
+          case "$rust_output" in
+            *"another Cama runtime already owns"*) ;;
+            *) printf '%s\n' "$rust_output"; exit 1 ;;
+          esac
+          test ! -e "$lock_dir/cama_shuffle.db"
+
+          docker stop cama-python-lock-holder >/dev/null
+          wait "$holder_pid" 2>/dev/null || true
+          docker run --rm --name cama-rust-lock-holder \
+            --env DISCORD_BOT_TOKEN=offline-lock-smoke \
+            --env DB_PATH=/app/data/cama_shuffle.db \
+            --volume "$lock_dir:/app/data" \
+            cama-rust:ci serve >"$lock_dir/rust-holder.log" 2>&1 &
+          rust_holder_pid=$!
+          for _ in $(seq 1 200); do
+            test -f "$lock_dir/.cama-runtime.lock" \
+              && test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder 2>/dev/null)" = true \
+              && break
+            sleep 0.1
+          done
+          test -f "$lock_dir/.cama-runtime.lock"
+          test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder)" = true
+          sleep 0.1
+
+          set +e
+          docker run --rm \
+            --volume "$lock_dir:/app/data" \
+            --entrypoint flock \
+            cama-python:ci \
+            --nonblock /app/data/.cama-runtime.lock true
+          python_status=$?
+          set -e
+          test "$python_status" -ne 0
+          test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder)" = true
+
+          docker stop cama-rust-lock-holder >/dev/null
+          wait "$rust_holder_pid" 2>/dev/null || true
+          docker run --rm \
+            --volume "$lock_dir:/app/data" \
+            --entrypoint flock \
+            cama-python:ci \
+            --nonblock /app/data/.cama-runtime.lock true
+
+      - name: Verify Compose keeps Python as the sole default writer
+        run: |
+          test "$(docker compose config --services)" = "bot"
+          test "$(docker compose --profile rust-preflight config --services)" = $'bot\nrust-preflight'
+
+      - name: Verify fail-closed same-service runtime selector
+        run: ./scripts/test-runtime-selector
+
+      - name: Create and exercise Python-migrated Rust smoke database
+        run: |
+          mkdir -p "$RUNNER_TEMP/cama-rust-smoke"
+          uv run --locked python -c 'import sys; from database import Database; database = Database(sys.argv[1]); database.close()' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
+          cargo run --locked --manifest-path rust/Cargo.toml -p cama-db --example guild_config_snapshot_smoke -- "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db" --disposable-copy
+          # SQLite needs a writable directory for WAL lock sidecars even though
+          # cama-rust opens the main database with SQLITE_OPEN_READ_ONLY.
+          chmod a+rwx "$RUNNER_TEMP/cama-rust-smoke"
+          chmod a+rw "$RUNNER_TEMP/cama-rust-smoke"/*
+          chmod a-w "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
+
+      - name: Smoke Rust runtime image and fail-closed health probe
+        run: |
+          docker run --rm \
+            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
+            cama-rust:ci \
+            db-check --db-path /app/data/cama_shuffle.db
+
+          docker inspect --format '{{json .Config.Healthcheck.Test}}' cama-rust:ci \
+            | grep -F '"health-check"'
+
+          uv run --locked python -c 'import json,sqlite3,sys,time; db=sys.argv[1]; count=sqlite3.connect(db).execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]; now=int(time.time()*1000); json.dump({"format_version":4,"pid":1,"database_path":"/app/data/cama_shuffle.db","status":"ready","database_ready":True,"gateway_ready":True,"commands_registered":True,"command_tree_synchronized":True,"connected_shards":[],"applied_migrations":count,"required_migrations":count,"recovery_failure_count":0,"worker_registration_complete":True,"expected_workers":[],"started_workers":[],"failed_workers":[],"lifecycle_gap_detected":False,"ready_at_unix_ms":now,"updated_at_unix_ms":now,"last_error":None},open(db+".rust-health.json","w"))' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
+          docker run --rm \
+            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
+            cama-rust:ci \
+            health-check --db-path /app/data/cama_shuffle.db --max-age-seconds 90
+
+          uv run --locked python -c 'import json,sys; path=sys.argv[1]; value=json.load(open(path)); value["status"]="stopped"; json.dump(value,open(path,"w"))' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db.rust-health.json"
+          set +e
+          docker run --rm \
+            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
+            cama-rust:ci \
+            health-check --db-path /app/data/cama_shuffle.db --max-age-seconds 90
+          stopped_status=$?
+          set -e
+          test "$stopped_status" -ne 0
+
+  # Enabling this repository variable turns both the parity ledger and the
+  # required operational-readiness manifest into a hard deployment gate,
+  # without changing normal development or Python deployment.
+  cutover-completeness:
+    if: ${{ vars.RUST_CUTOVER_CANDIDATE == 'true' }}
+    needs: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Require complete behavior and operational parity
+        run: cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete

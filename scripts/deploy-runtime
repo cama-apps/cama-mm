@@ -1,0 +1,193 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runtime_compose="$repository_root/scripts/runtime-compose"
+readiness_manifest="$repository_root/rust/parity/cutover_readiness.tsv"
+database_dir="$repository_root/data"
+database_path="$database_dir/cama_shuffle.db"
+deploy_lock="$database_dir/.cama-deploy.lock"
+
+if [ "${BOT_RUNTIME+x}" = x ]; then
+  selected_runtime=$BOT_RUNTIME
+else
+  selected_runtime=python
+fi
+case "$selected_runtime" in
+  python|rust) ;;
+  "") echo "BOT_RUNTIME is set but empty; expected python or rust" >&2; exit 64 ;;
+  *) echo "invalid BOT_RUNTIME=$selected_runtime; expected python or rust" >&2; exit 64 ;;
+esac
+
+if [ "$selected_runtime" = rust ]; then
+  if [ "${RUST_CUTOVER_CANDIDATE-}" != true ]; then
+    echo "Rust deployment refused: RUST_CUTOVER_CANDIDATE=true is required so CI runs the complete parity gate" >&2
+    exit 65
+  fi
+  if ! awk -F '\t' 'NR > 1 && $2 != "complete" { failed=1 } END { exit failed }' \
+    "$readiness_manifest"
+  then
+    echo "Rust deployment refused: cutover_readiness.tsv still has open gates" >&2
+    exit 65
+  fi
+fi
+
+deploy_sha=${GIT_SHA-}
+if [ -z "$deploy_sha" ]; then
+  deploy_sha=$(git -C "$repository_root" rev-parse --verify HEAD)
+fi
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+health_timeout=${DEPLOY_HEALTH_TIMEOUT_SECONDS:-300}
+case "$health_timeout" in
+  *[!0-9]*|"") echo "DEPLOY_HEALTH_TIMEOUT_SECONDS must be a positive integer" >&2; exit 64 ;;
+esac
+if [ "$health_timeout" -eq 0 ]; then
+  echo "DEPLOY_HEALTH_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 64
+fi
+
+mkdir -p "$database_dir"
+if ! mkdir "$deploy_lock" 2>/dev/null; then
+  echo "another deployment owns $deploy_lock" >&2
+  exit 73
+fi
+trap 'rmdir "$deploy_lock" 2>/dev/null || true' EXIT
+
+container_env_value() {
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" \
+    | awk -v key="$2" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }'
+}
+
+wait_for_runtime() {
+  container_id=$1
+  expected_runtime=$2
+  expected_sha=$3
+  timeout_seconds=$4
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  stable_checks=0
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    running=$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)
+    if [ "$running" = true ]; then
+      actual_runtime=$(container_env_value "$container_id" BOT_RUNTIME)
+      actual_sha=$(container_env_value "$container_id" GIT_SHA)
+      actual_uid=$(docker exec "$container_id" id -u 2>/dev/null || true)
+      data_mount=$(docker inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' \
+        "$container_id" 2>/dev/null || true)
+      if [ "$actual_runtime" = "$expected_runtime" ] \
+        && [ "$actual_sha" = "$expected_sha" ] \
+        && [ "$actual_uid" = 1001 ] \
+        && [ -n "$data_mount" ]
+      then
+        if [ "$expected_runtime" = rust ]; then
+          health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$container_id" 2>/dev/null || true)
+          if [ "$health" = healthy ]; then
+            return 0
+          fi
+          if [ "$health" = unhealthy ]; then
+            return 1
+          fi
+        else
+          stable_checks=$((stable_checks + 1))
+          if [ "$stable_checks" -ge 6 ]; then
+            return 0
+          fi
+        fi
+      else
+        stable_checks=0
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+cd "$repository_root"
+current_container=$(BOT_RUNTIME=python "$runtime_compose" ps --quiet bot)
+previous_runtime=python
+previous_sha=unknown
+previous_image_id=
+rollback_tag=
+if [ -n "$current_container" ]; then
+  previous_image_id=$(docker inspect --format '{{.Image}}' "$current_container")
+  inspected_runtime=$(container_env_value "$current_container" BOT_RUNTIME)
+  inspected_sha=$(container_env_value "$current_container" GIT_SHA)
+  if [ -n "$inspected_runtime" ]; then
+    previous_runtime=$inspected_runtime
+  fi
+  if [ -n "$inspected_sha" ]; then
+    previous_sha=$inspected_sha
+  fi
+  case "$previous_runtime" in
+    python|rust) ;;
+    *) echo "current bot has invalid BOT_RUNTIME=$previous_runtime" >&2; exit 65 ;;
+  esac
+  rollback_tag="cama-mm-bot-rollback:$timestamp"
+  docker tag "$previous_image_id" "$rollback_tag"
+elif [ "$selected_runtime" = rust ]; then
+  echo "Rust first-deploy refused: no running Python bot artifact is available for rollback" >&2
+  exit 65
+fi
+
+backup_path=
+if [ -f "$database_path" ]; then
+  backup_image="cama-mm-python-backup:$timestamp"
+  docker build --file Dockerfile --build-arg "GIT_SHA=$deploy_sha" --tag "$backup_image" .
+  docker run --rm \
+    --volume "$database_dir:/app/data" \
+    --entrypoint python \
+    "$backup_image" \
+    /app/scripts/sqlite_backup.py \
+    /app/data/cama_shuffle.db \
+    "/app/data/backups/predeploy-$timestamp.db"
+  backup_path="$database_dir/backups/predeploy-$timestamp.db"
+  test -s "$backup_path"
+  test -s "$backup_path.json"
+fi
+
+GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+if [ "$selected_runtime" = rust ]; then
+  GIT_SHA="$deploy_sha" BOT_RUNTIME=rust "$runtime_compose" run --rm --no-deps bot \
+    db-check --db-path /app/data/cama_shuffle.db
+fi
+
+rollback_previous() {
+  if [ -z "$previous_image_id" ] || [ -z "$rollback_tag" ]; then
+    echo "automatic rollback unavailable: there was no previous bot artifact" >&2
+    return 1
+  fi
+  target_image=$(BOT_RUNTIME="$previous_runtime" "$runtime_compose" config --images)
+  docker tag "$rollback_tag" "$target_image"
+  GIT_SHA="$previous_sha" BOT_RUNTIME="$previous_runtime" "$runtime_compose" \
+    up --detach --no-build --force-recreate --no-deps bot
+  rollback_container=$(BOT_RUNTIME="$previous_runtime" "$runtime_compose" ps --quiet bot)
+  if ! wait_for_runtime "$rollback_container" "$previous_runtime" "$previous_sha" "$health_timeout"; then
+    echo "automatic rollback started, but the previous runtime did not become healthy" >&2
+    return 1
+  fi
+  echo "automatic rollback restored BOT_RUNTIME=$previous_runtime image=$rollback_tag" >&2
+  return 0
+}
+
+set +e
+GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" \
+  up --detach --no-build --force-recreate --no-deps bot
+up_status=$?
+set -e
+new_container=$(BOT_RUNTIME="$selected_runtime" "$runtime_compose" ps --quiet bot)
+if [ "$up_status" -ne 0 ] || [ -z "$new_container" ] \
+  || ! wait_for_runtime "$new_container" "$selected_runtime" "$deploy_sha" "$health_timeout"
+then
+  echo "BOT_RUNTIME=$selected_runtime failed post-deploy health; rolling back" >&2
+  rollback_previous
+  echo "failed deployment backup: ${backup_path:-not-created}" >&2
+  exit 1
+fi
+
+echo "deployed BOT_RUNTIME=$selected_runtime GIT_SHA=$deploy_sha"
+echo "verified backup: ${backup_path:-not-needed (database did not exist)}"
+if [ -n "$rollback_tag" ]; then
+  echo "retained rollback image: $rollback_tag"
+fi

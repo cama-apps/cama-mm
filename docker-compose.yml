@@ -6,14 +6,46 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
     restart: "always"
-    env_file: .env
+    # The file is present on deployed hosts. Keeping it optional also lets CI
+    # validate the fully rendered selector without manufacturing credentials.
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./data:/app/data
     environment:
-      - DB_PATH=/app/data/cama_shuffle.db
+      DB_PATH: /app/data/cama_shuffle.db
+      # Unset is deliberately Python. `scripts/runtime-compose` is the only
+      # supported selector and rejects empty/unknown values before Compose.
+      BOT_RUNTIME: ${BOT_RUNTIME:-python}
+    user: "1001:1001"
     cap_add:
       - SYS_PTRACE
     security_opt:
       - seccomp:unconfined
     stdin_open: true
     tty: true
+
+  # Opt-in, read-only validation against the same database contract. This
+  # service is not started by the production `docker compose up` command.
+  rust-preflight:
+    profiles: ["rust-preflight"]
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    restart: "no"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # SQLite WAL readers need to coordinate through -shm/-wal sidecars. The
+      # directory stays writable for those lock files; cama-rust itself opens
+      # the main database with SQLITE_OPEN_READ_ONLY and query_only enabled.
+      - ./data:/app/data
+    environment:
+      DB_PATH: /app/data/cama_shuffle.db
+      # Never expose the live gateway credential to an offline preflight.
+      DISCORD_BOT_TOKEN: ""
+    command: ["db-check"]

@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cama-app = { path = "../crates/cama-app" }
+cama-db = { path = "../crates/cama-db" }
+cama-domain = { path = "../crates/cama-domain" }
+cama-runtime = { path = "../crates/cama-runtime" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

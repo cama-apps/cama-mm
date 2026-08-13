@@ -1,0 +1,26 @@
+mod application_config {
+    pub use cama_runtime::application_config::*;
+}
+mod discord_transport {
+    pub use cama_runtime::discord_transport::*;
+}
+mod lobby_provider {
+    pub use cama_runtime::lobby_provider::*;
+}
+mod match_provider {
+    pub use cama_runtime::match_provider::*;
+}
+mod registration {
+    pub use cama_runtime::registration::*;
+}
+
+// Keep the source-inclusion checker as a second, compile-closed test target.
+// The unique module name prevents duplicate Rust IDs now that the admitted
+// library also runs the provider's substantive unit tests.
+#[allow(dead_code)]
+#[path = "../draft_provider.rs"]
+mod draft_provider_check_impl;
+
+fn main() {
+    let _ = std::any::type_name::<cama_runtime::DraftRegistrationProvider>();
+}

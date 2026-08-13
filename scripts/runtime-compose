@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repository_root"
+
+if [ "${BOT_RUNTIME+x}" = x ]; then
+  selected_runtime=$BOT_RUNTIME
+else
+  selected_runtime=python
+fi
+
+case "$selected_runtime" in
+  python)
+    export BOT_RUNTIME=python
+    exec docker compose --file docker-compose.yml "$@"
+    ;;
+  rust)
+    export BOT_RUNTIME=rust
+    exec docker compose \
+      --file docker-compose.yml \
+      --file docker-compose.rust.yml \
+      "$@"
+    ;;
+  "")
+    echo "BOT_RUNTIME is set but empty; expected python or rust" >&2
+    exit 64
+    ;;
+  *)
+    echo "invalid BOT_RUNTIME=$selected_runtime; expected python or rust" >&2
+    exit 64
+    ;;
+esac

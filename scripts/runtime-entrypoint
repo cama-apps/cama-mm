@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+expected_runtime=$1
+shift
+
+case "${BOT_RUNTIME-}" in
+  python|rust)
+    ;;
+  "")
+    echo "BOT_RUNTIME must be explicitly resolved to python or rust" >&2
+    exit 64
+    ;;
+  *)
+    echo "invalid BOT_RUNTIME=${BOT_RUNTIME}; expected python or rust" >&2
+    exit 64
+    ;;
+esac
+
+if [ "$BOT_RUNTIME" != "$expected_runtime" ]; then
+  echo "BOT_RUNTIME=$BOT_RUNTIME does not match the $expected_runtime runtime image" >&2
+  exit 64
+fi
+
+exec "$@"

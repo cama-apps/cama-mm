@@ -1,0 +1,21 @@
+[package]
+name = "cama-db"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cama-domain = { path = "../cama-domain" }
+chrono.workspace = true
+fastrand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json = "1.0.151"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

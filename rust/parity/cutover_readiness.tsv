@@ -1,0 +1,15 @@
+# Required operational cutover gates. Status is `open` or `complete`; the third field records the missing proof or completed evidence.
+backup_rollback_rehearsal	open	Rehearse verified online backup, failed-start rollback, and one-flag Python restoration on a production-shaped snapshot.
+container_health_smoke	open	Add startup health, Discord/DB write smoke, failure detection, and automatic rollback checks for the Rust runtime image.
+database_migration_and_interop	open	Implement Rust-owned clean/existing database migrations, then complete every repository adapter and A/B delta test on old and current schema snapshots with Python stopped.
+discord_gateway_and_commands	open	Make cama-rust serve the live gateway as sole runtime and prove command schemas, interaction timing, visibility, mentions, components, attachments, and errors with Python stopped.
+external_service_recordings	open	Replay recorded OpenDota, Dotabase, Steam asset, and LLM provider success/failure/fallback contracts without live CI network.
+image_and_attachment_equivalence	open	Implement production renderers and pass semantic, pixel/perceptual, font, animation, and attachment-retry comparisons.
+observability_and_post_deploy	open	Provide health metrics, structured logs, deploy metadata, alerting, and a post-deploy verification checklist.
+persistent_views_and_reconnect	open	Register persistent views and prove buttons, modals, pagination, restart recovery, stale callbacks, and reconnect behavior.
+production_snapshot_replay	open	Replay representative reads and writes on independent sanitized copies of a current production-shaped database and compare deltas.
+python_rollback_compatibility	open	Prove every transition schema and Rust write remains readable by the retained Python artifact after cutover.
+runtime_selector_and_same_deploy	open	Replace the Compose bot process with cama-rust behind the existing service, UID, volume, environment, GIT_SHA, and SSH deploy path; no Python process may be required after cutover.
+scheduled_workers_and_shutdown	open	Wire all periodic workers with startup recovery, cancellation, retry, idempotency, and graceful shutdown parity.
+single_writer_and_process_lock	complete	Both images acquire /app/data/.cama-runtime.lock before DB or gateway startup; bidirectional fs2/flock tests and CI/local container overlap smoke reject the second runtime and prove no DB is created.
+sqlite_repository_coverage	open	Replace remaining in-memory application stores with existing-schema SQLite adapters and transactional interoperability tests.

@@ -151,6 +151,11 @@ dmypy.json
 *~.nib
 .bot.lock
 
+# Rust build artifacts
+rust/target/
+rust/**/target/
+rust/.scratch-*/
+
 # OS files
 .DS_Store
 .DS_Store?
@@ -183,7 +188,12 @@ desktop.ini
 # Scripts and temporary tools
 *.ps1
 fix_wins_losses.py
-scripts/
+scripts/*
+!scripts/deploy-runtime
+!scripts/runtime-compose
+!scripts/runtime-entrypoint
+!scripts/sqlite_backup.py
+!scripts/test-runtime-selector
 docs/stats.md
 docs/
 !docs/server-setup.md

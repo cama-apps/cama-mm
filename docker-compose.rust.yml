@@ -1,0 +1,13 @@
+services:
+  # This file only replaces the implementation behind the existing service.
+  # Identity, UID, env file, database volume, restart policy, and deploy SHA
+  # continue to come from docker-compose.yml.
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    environment:
+      BOT_RUNTIME: ${BOT_RUNTIME:?BOT_RUNTIME must be rust for the Rust override}
+    command: ["serve"]

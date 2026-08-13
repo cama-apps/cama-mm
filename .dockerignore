@@ -12,6 +12,8 @@ tests/
 test_*.py
 .pytest_cache/
 .bot.lock
+rust/target/
+rust/**/target/
 
 # Documentation
 README.md
@@ -23,5 +25,6 @@ docs/
 
 # Docker files (avoid recursion)
 Dockerfile
+Dockerfile.rust
 docker-compose.yml
 .dockerignore

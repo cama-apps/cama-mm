@@ -1,0 +1,3486 @@
+//! Production `/draft` command and component provider.
+//!
+//! This module is the gateway-facing adapter for [`cama_app::draft`]: all
+//! lobby membership,
+//! reservations, reset generations, and operation locks are borrowed from the
+//! live [`MatchLobbyPort`], while the process-local [`DraftStateManager`] is
+//! supplied by the lobby provider.  The provider does not construct either a
+//! second lobby service or a second draft manager.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use cama_app::betting_service::{
+    AutomaticSpectatorConfig, WealthSnapshot, plan_automatic_spectator_bets,
+};
+use cama_app::draft::{
+    DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed, DraftEmbedField, DraftPhase,
+    DraftState, DraftStateManager, LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS,
+    PlayerPoolEntry,
+};
+use cama_app::embeds::LobbyKind as AppLobbyKind;
+use cama_db::autobet_investments::AutobetInvestmentRepository;
+use cama_db::betting_service_repository::{
+    AutomaticBasisPointBetRequest, BettingServiceRepository, BlindBetCandidate, BlindBetPolicy,
+    PlaceBetRequest,
+};
+use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
+use cama_db::dota_bet_seed_repository::{
+    BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
+};
+use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
+use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::player::Player;
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::task::JoinHandle;
+use tracing::{debug, warn};
+
+use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{DiscordMessage, DiscordMessageReceipt, DiscordTransport};
+use crate::lobby_provider::{MatchLobbyPort, MatchLobbySnapshot};
+use crate::match_provider::MatchRegistrationProvider;
+use crate::registration::{
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
+    InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
+    InteractionEmbedField, InteractionHandler, InteractionHandlerError, InteractionOption,
+    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
+};
+
+const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
+const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
+const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+const DRAFT_COMPONENT_PREFIX: &str = "draft";
+const COMPLETION_ERROR_WITHOUT_MATCH: &str = "⚠️ Draft complete but encountered an error during match setup. Use `/draft start` to try again.";
+
+/// Runtime-facing build failures are configuration or construction errors;
+/// ordinary command failures remain user-visible interaction responses.
+#[derive(Debug, Error)]
+pub enum DraftProviderBuildError {
+    #[error("invalid draft lobby ready threshold")]
+    ReadyThreshold,
+    #[error("invalid draft bet lock seconds")]
+    BetLockSeconds,
+    #[error("invalid draft database path: {0}")]
+    Database(String),
+}
+
+/// Narrow completion hook implemented by the live match provider at
+/// composition time. Draft owns durable pending-match creation; the match
+/// provider owns reminder task cancellation/replacement and Discord reminder
+/// delivery. The default adapter is intentionally inert for transitional
+/// construction and tests that do not install MatchProvider.
+#[async_trait]
+pub trait DraftReminderScheduler: Send + Sync {
+    async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String>;
+}
+
+struct NoopDraftReminderScheduler;
+
+#[async_trait]
+impl DraftReminderScheduler for NoopDraftReminderScheduler {
+    async fn schedule_betting_reminders(&self, _pending: PendingMatchRecord) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DraftReminderScheduler for MatchRegistrationProvider {
+    async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String> {
+        self.schedule_draft_betting_reminders(pending)
+    }
+}
+
+/// Typed Neon seam for the three Draft events owned by the Python command.
+/// The live composition layer can adapt the existing Neon service without
+/// making this provider depend on Neon implementation details.  Returning
+/// `None` is a normal no-event result; an error is logged and never turns a
+/// durable draft failure-prone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DraftNeonResult {
+    pub text_block: String,
+    pub attachment: Option<crate::registration::InteractionAttachment>,
+}
+
+#[async_trait]
+pub trait DraftNeonObserver: Send + Sync {
+    async fn on_draft_coinflip(
+        &self,
+        guild_id: i64,
+        winner_id: i64,
+        loser_id: i64,
+    ) -> Result<Option<DraftNeonResult>, String>;
+
+    async fn on_captain_symmetry(
+        &self,
+        guild_id: i64,
+        radiant_captain_id: i64,
+        dire_captain_id: i64,
+        rating_diff: i64,
+    ) -> Result<Option<DraftNeonResult>, String>;
+
+    async fn on_bomb_pot(
+        &self,
+        guild_id: i64,
+        pool_amount: i64,
+        contributor_count: i64,
+    ) -> Result<Option<DraftNeonResult>, String>;
+}
+
+struct NoopDraftNeonObserver;
+
+#[async_trait]
+impl DraftNeonObserver for NoopDraftNeonObserver {
+    async fn on_draft_coinflip(
+        &self,
+        _guild_id: i64,
+        _winner_id: i64,
+        _loser_id: i64,
+    ) -> Result<Option<DraftNeonResult>, String> {
+        Ok(None)
+    }
+
+    async fn on_captain_symmetry(
+        &self,
+        _guild_id: i64,
+        _radiant_captain_id: i64,
+        _dire_captain_id: i64,
+        _rating_diff: i64,
+    ) -> Result<Option<DraftNeonResult>, String> {
+        Ok(None)
+    }
+
+    async fn on_bomb_pot(
+        &self,
+        _guild_id: i64,
+        _pool_amount: i64,
+        _contributor_count: i64,
+    ) -> Result<Option<DraftNeonResult>, String> {
+        Ok(None)
+    }
+}
+
+#[derive(Clone)]
+pub struct DraftRegistrationProvider {
+    handler: Arc<DraftHandler>,
+}
+
+struct CompletionMessageContext<'a> {
+    guild_id: i64,
+    pending_match_id: i64,
+    state: &'a DraftState,
+    published: &'a [(u64, DiscordMessageReceipt)],
+    lobby_channel_id: Option<u64>,
+    origin_channel_id: Option<u64>,
+    draft_receipt: Option<&'a DiscordMessageReceipt>,
+}
+
+impl DraftRegistrationProvider {
+    /// Build a draft provider over the already-admitted SQLite database and
+    /// the same lobby/draft handles used by `/lobby` and `/shuffle`.
+    pub fn new(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        lobbies: MatchLobbyPort,
+        drafts: Arc<DraftStateManager>,
+        discord: Arc<dyn DiscordTransport>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        Self::new_with_reminder_scheduler(
+            database_path,
+            config,
+            lobbies,
+            drafts,
+            discord,
+            Arc::new(NoopDraftReminderScheduler),
+        )
+    }
+
+    /// Build with the live MatchProvider reminder owner. This additive
+    /// constructor keeps the old five-argument constructor source-compatible
+    /// while allowing composition to install the exact runtime scheduler.
+    pub fn new_with_reminder_scheduler(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        lobbies: MatchLobbyPort,
+        drafts: Arc<DraftStateManager>,
+        discord: Arc<dyn DiscordTransport>,
+        reminders: Arc<dyn DraftReminderScheduler>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        Self::new_with_reminder_scheduler_and_neon(
+            database_path,
+            config,
+            lobbies,
+            drafts,
+            discord,
+            reminders,
+            Arc::new(NoopDraftNeonObserver),
+        )
+    }
+
+    /// Build with both the live reminder owner and an injectable Neon event
+    /// observer.  Runtime composition can install the production Neon
+    /// adapter without changing Draft's command/state ownership.
+    pub fn new_with_reminder_scheduler_and_neon(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        lobbies: MatchLobbyPort,
+        drafts: Arc<DraftStateManager>,
+        discord: Arc<dyn DiscordTransport>,
+        reminders: Arc<dyn DraftReminderScheduler>,
+        neon: Arc<dyn DraftNeonObserver>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        if config.values.lobby_ready_threshold <= 0 {
+            return Err(DraftProviderBuildError::ReadyThreshold);
+        }
+        if config.values.bet_lock_seconds < 0 {
+            return Err(DraftProviderBuildError::BetLockSeconds);
+        }
+        let path = database_path.as_ref().to_path_buf();
+        if path.as_os_str().is_empty() {
+            return Err(DraftProviderBuildError::Database(
+                "database path is empty".to_owned(),
+            ));
+        }
+        let handler = Arc::new(DraftHandler {
+            config: DraftConfig::from_application(config),
+            players: PlayerRepository::new(&path),
+            pending: PendingMatchRepository::new(&path),
+            seeds: DotaBetSeedRepository::new(&path),
+            bets: BettingServiceRepository::new(&path),
+            investments: AutobetInvestmentRepository::new(&path),
+            lobbies,
+            drafts,
+            discord,
+            reminders,
+            neon,
+            service: Mutex::new(cama_app::draft::DraftService::new()),
+            draft_messages: Arc::new(Mutex::new(BTreeMap::new())),
+            timeout_tasks: Mutex::new(BTreeMap::new()),
+            completing: Mutex::new(BTreeSet::new()),
+        });
+        Ok(Self { handler })
+    }
+
+    /// Expose the shared manager for composition and readiness diagnostics.
+    #[must_use]
+    pub fn state_manager(&self) -> Arc<DraftStateManager> {
+        Arc::clone(&self.handler.drafts)
+    }
+}
+
+impl RegistrationProvider for DraftRegistrationProvider {
+    fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
+        registry.command(CommandSpec {
+            name: "draft".to_owned(),
+            description: "Start or inspect an Immortal Draft captain mode".to_owned(),
+            options: draft_options(),
+            handler: self.handler.clone(),
+        })?;
+        registry.component(ComponentRoute {
+            custom_id_prefix: DRAFT_COMPONENT_PREFIX.to_owned(),
+            handler: self.handler.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DraftConfig {
+    admin_user_ids: BTreeSet<i64>,
+    ready_threshold: usize,
+    bet_lock_seconds: i64,
+    bomb_pot_chance: f64,
+    bomb_pot_ante: i64,
+    bomb_pot_blind_percentage: f64,
+    auto_blind_enabled: bool,
+    auto_blind_threshold: i64,
+    auto_blind_percentage: f64,
+    auto_spectator_bet_enabled: bool,
+    auto_spectator_bet_count: usize,
+    auto_spectator_bet_percentage: f64,
+    auto_spectator_bet_top_count: usize,
+    auto_spectator_bet_top_percentage: f64,
+    max_debt: i64,
+    dota_bet_seed_amount: i64,
+    first_game_pool_daily_amount: i64,
+}
+
+impl DraftConfig {
+    fn from_application(config: &ApplicationConfig) -> Self {
+        Self {
+            admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
+            ready_threshold: usize::try_from(config.values.lobby_ready_threshold).unwrap_or(10),
+            bet_lock_seconds: config.values.bet_lock_seconds,
+            bomb_pot_chance: config.values.bomb_pot_chance,
+            bomb_pot_ante: config.values.bomb_pot_ante,
+            bomb_pot_blind_percentage: config.values.bomb_pot_blind_percentage,
+            auto_blind_enabled: config.values.auto_blind_enabled,
+            auto_blind_threshold: config.values.auto_blind_threshold,
+            auto_blind_percentage: config.values.auto_blind_percentage,
+            auto_spectator_bet_enabled: config.values.auto_spectator_bet_enabled,
+            auto_spectator_bet_count: usize::try_from(config.values.auto_spectator_bet_count)
+                .unwrap_or_default(),
+            auto_spectator_bet_percentage: config.values.auto_spectator_bet_percentage,
+            auto_spectator_bet_top_count: usize::try_from(
+                config.values.auto_spectator_bet_top_count,
+            )
+            .unwrap_or_default(),
+            auto_spectator_bet_top_percentage: config.values.auto_spectator_bet_top_percentage,
+            max_debt: config.values.max_debt,
+            dota_bet_seed_amount: config.values.dota_bet_seed_amount,
+            first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
+        }
+    }
+}
+
+struct DraftHandler {
+    config: DraftConfig,
+    players: PlayerRepository,
+    pending: PendingMatchRepository,
+    seeds: DotaBetSeedRepository,
+    bets: BettingServiceRepository,
+    investments: AutobetInvestmentRepository,
+    lobbies: MatchLobbyPort,
+    drafts: Arc<DraftStateManager>,
+    discord: Arc<dyn DiscordTransport>,
+    reminders: Arc<dyn DraftReminderScheduler>,
+    neon: Arc<dyn DraftNeonObserver>,
+    service: Mutex<cama_app::draft::DraftService>,
+    draft_messages: Arc<Mutex<BTreeMap<(i64, u64), DiscordMessageReceipt>>>,
+    timeout_tasks: Mutex<BTreeMap<i64, JoinHandle<()>>>,
+    completing: Mutex<BTreeSet<(i64, u64)>>,
+}
+
+#[async_trait]
+impl InteractionHandler for DraftHandler {
+    async fn handle(
+        &self,
+        request: InteractionRequest,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        match request {
+            InteractionRequest::Command {
+                name,
+                user_id,
+                user_display_name,
+                guild_id,
+                channel_id,
+                member_permissions,
+                options,
+                ..
+            } => {
+                let user_id = signed_id(user_id, "user")?;
+                let guild_id = guild_id.map(|id| signed_id(id, "guild")).transpose()?;
+                let channel_id = channel_id.map(|id| signed_id(id, "channel")).transpose()?;
+                if name != "draft" {
+                    return Err(format!("draft handler received command {name:?}").into());
+                }
+                self.handle_command(
+                    user_id,
+                    user_display_name,
+                    guild_id,
+                    channel_id,
+                    member_permissions,
+                    options,
+                    responder,
+                )
+                .await
+                .map_err(Into::into)
+            }
+            InteractionRequest::Component {
+                custom_id,
+                user_id,
+                user_display_name,
+                guild_id,
+                channel_id,
+                member_permissions,
+                ..
+            } => {
+                let user_id = signed_id(user_id, "user")?;
+                let guild_id = guild_id.map(|id| signed_id(id, "guild")).transpose()?;
+                let channel_id = channel_id.map(|id| signed_id(id, "channel")).transpose()?;
+                self.handle_component(
+                    user_id,
+                    user_display_name,
+                    guild_id,
+                    channel_id,
+                    member_permissions,
+                    &custom_id,
+                    responder,
+                )
+                .await
+                .map_err(Into::into)
+            }
+            _ => Err("draft extension only handles commands and components".into()),
+        }
+    }
+}
+
+impl DraftHandler {
+    async fn send_neon_followup(
+        &self,
+        responder: &Arc<dyn InteractionResponder>,
+        result: DraftNeonResult,
+    ) {
+        if result.text_block.is_empty() && result.attachment.is_none() {
+            return;
+        }
+        let mut response = InteractionResponse::message(result.text_block);
+        if let Some(attachment) = result.attachment {
+            response = response.attachment(attachment);
+        }
+        if let Err(error) = responder.followup(response).await {
+            warn!(%error, "draft Neon Discord follow-up failed");
+        }
+    }
+
+    async fn emit_captain_symmetry(
+        &self,
+        guild_id: i64,
+        handle: &Arc<Mutex<DraftState>>,
+        responder: &Arc<dyn InteractionResponder>,
+    ) {
+        let state = lock_state(handle).clone();
+        let (Some(radiant_captain_id), Some(dire_captain_id)) =
+            (state.radiant_captain_id, state.dire_captain_id)
+        else {
+            return;
+        };
+        let rating_diff = (state.captain1_rating - state.captain2_rating)
+            .abs()
+            .floor() as i64;
+        if rating_diff > 50 {
+            return;
+        }
+        match self
+            .neon
+            .on_captain_symmetry(guild_id, radiant_captain_id, dire_captain_id, rating_diff)
+            .await
+        {
+            Ok(Some(result)) => self.send_neon_followup(responder, result).await,
+            Ok(None) => {}
+            Err(error) => warn!(%error, guild_id, "draft captain-symmetry Neon hook failed"),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_command(
+        &self,
+        user_id: i64,
+        user_display_name: String,
+        guild_id: Option<i64>,
+        channel_id: Option<i64>,
+        permissions: Option<u64>,
+        options: Vec<InteractionOption>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let (subcommand, sub_options) = leaf_command(&options)?;
+        let Some(guild_id) = guild_id else {
+            return respond_ephemeral(&responder, "This command must be used in a server.").await;
+        };
+        match subcommand {
+            "start" => {
+                let explicit_kind = optional_lobby_kind(sub_options)?;
+                let captain1 = optional_user(sub_options, "captain1")?;
+                let captain2 = optional_user(sub_options, "captain2")?;
+                self.start(
+                    StartContext {
+                        user_id,
+                        user_display_name,
+                        guild_id,
+                        channel_id: channel_id.unwrap_or_default(),
+                        explicit_kind,
+                        captain1,
+                        captain2,
+                    },
+                    responder,
+                )
+                .await
+            }
+            "restart" => {
+                self.restart(
+                    guild_id,
+                    user_id,
+                    user_display_name,
+                    is_admin(&self.config, user_id, permissions),
+                    responder,
+                )
+                .await
+            }
+            "sampleinprogress" => {
+                self.sample_in_progress(guild_id, user_id, permissions, responder)
+                    .await
+            }
+            "samplecomplete" => {
+                self.sample_complete(guild_id, user_id, permissions, responder)
+                    .await
+            }
+            other => Err(format!("unknown /draft subcommand {other:?}")),
+        }
+    }
+
+    async fn start(
+        &self,
+        context: StartContext,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let memberships = self
+            .lobbies
+            .lobby_kinds_for_player(context.guild_id, context.user_id);
+        let kind = match resolve_lobby_kind(&memberships, context.explicit_kind) {
+            Ok(kind) => kind,
+            Err(message) => return respond_ephemeral(&responder, message).await,
+        };
+        let lock = self.lobbies.operation_lock(context.guild_id, kind);
+        let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, lock.lock()).await else {
+            return followup_ephemeral(
+                &responder,
+                &format!(
+                    "A {} shuffle or draft is already being processed. Please wait.",
+                    kind.label()
+                ),
+            )
+            .await;
+        };
+
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if self.drafts.has_active_draft(Some(context.guild_id)) {
+            return followup_ephemeral(
+                &responder,
+                "❌ A draft is already in progress. Use `/draft restart` to restart it first.",
+            )
+            .await;
+        }
+        let Some(snapshot) = self.lobbies.snapshot(context.guild_id, kind) else {
+            return followup_ephemeral(
+                &responder,
+                &format!(
+                    "❌ No active {} lobby. Use `/lobby` to create one first.",
+                    kind.label()
+                ),
+            )
+            .await;
+        };
+        if !snapshot.player_ids.contains(&context.user_id) {
+            return followup_ephemeral(
+                &responder,
+                &format!("❌ Join {} before using `/draft start`.", kind.label()),
+            )
+            .await;
+        }
+        if snapshot.player_ids.len() < self.config.ready_threshold {
+            return followup_ephemeral(
+                &responder,
+                &format!(
+                    "❌ {} needs at least {} players. Currently have {}.",
+                    kind.label(),
+                    self.config.ready_threshold,
+                    snapshot.player_ids.len()
+                ),
+            )
+            .await;
+        }
+        if let Some(captain) = context.captain1
+            && !snapshot.player_ids.contains(&captain)
+        {
+            return followup_ephemeral(
+                &responder,
+                &format!("❌ Captain {captain} is not in the lobby."),
+            )
+            .await;
+        }
+        if let Some(captain) = context.captain2
+            && !snapshot.player_ids.contains(&captain)
+        {
+            return followup_ephemeral(
+                &responder,
+                &format!("❌ Captain {captain} is not in the lobby."),
+            )
+            .await;
+        }
+        if context.captain1.is_some() && context.captain1 == context.captain2 {
+            return followup_ephemeral(
+                &responder,
+                "❌ Cannot specify the same player as both captains.",
+            )
+            .await;
+        }
+
+        let progress = responder
+            .followup_with_receipt(InteractionResponse::message(format!(
+                "⚙️ {}: building the Immortal Draft player pool…",
+                kind.label()
+            )))
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .execute_start(&context, kind, snapshot, responder.clone(), progress)
+            .await;
+        if let Err(error) = result {
+            warn!(%error, guild_id = context.guild_id, "draft start failed");
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn execute_start(
+        &self,
+        context: &StartContext,
+        kind: AppLobbyKind,
+        snapshot: MatchLobbySnapshot,
+        responder: Arc<dyn InteractionResponder>,
+        progress: Option<crate::registration::InteractionMessageReceipt>,
+    ) -> Result<(), String> {
+        let guild_id = context.guild_id;
+        let regular_ids = snapshot.player_ids.clone();
+        let players = self
+            .load_players(&regular_ids, guild_id)
+            .await
+            .map_err(|error| format!("could not load draft players: {error}"))?;
+        let ratings = players
+            .iter()
+            .filter_map(|player| {
+                player
+                    .discord_id
+                    .map(|id| (id, player.glicko_rating.unwrap_or(1500.0)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let exclusions = self
+            .players
+            .get_exclusion_counts(&regular_ids, Some(guild_id))
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|(id, count)| (*id, *count))
+            .collect::<BTreeMap<_, _>>();
+        let captain_candidates = regular_ids.clone();
+        let captain_pair = self
+            .service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .select_captains(
+                &captain_candidates,
+                &ratings,
+                context.captain1,
+                context.captain2,
+            )
+            .map_err(|error| error.message)?;
+        let pool = self
+            .service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .select_player_pool(
+                &regular_ids,
+                &[],
+                &exclusions,
+                &ratings,
+                &[captain_pair.captain1_id, captain_pair.captain2_id],
+                cama_app::draft::DRAFT_POOL_SIZE,
+            )
+            .map_err(|error| error.message)?;
+        let selected = pool.selected_ids.iter().copied().collect::<BTreeSet<_>>();
+        if !self.lobbies.reserve_players(guild_id, kind, &selected) {
+            delete_followup(&responder, progress).await;
+            return followup_ephemeral(
+                &responder,
+                "❌ The lobby changed while the draft was starting. Please try again.",
+            )
+            .await;
+        }
+
+        let state = match self
+            .drafts
+            .create_draft(Some(guild_id), to_draft_kind(kind))
+        {
+            Ok(state) => state,
+            Err(error) => {
+                self.lobbies.release_players(guild_id, kind, &selected);
+                delete_followup(&responder, progress).await;
+                return followup_ephemeral(&responder, &format!("❌ {error}")).await;
+            }
+        };
+        let session_id = lock_state(&state).session_id;
+        let setup_result = self
+            .finish_start(
+                context,
+                kind,
+                snapshot,
+                players,
+                pool,
+                captain_pair,
+                state.clone(),
+                responder.clone(),
+                progress,
+            )
+            .await;
+        if let Err(error) = setup_result {
+            lock_recover(&self.draft_messages).remove(&(guild_id, session_id));
+            self.drafts.clear_state(Some(guild_id), Some(&state));
+            let state_snapshot = lock_state(&state).clone();
+            self.lobbies.release_players(guild_id, kind, &selected);
+            if let Some(message_id) = state_snapshot.captain_ping_message_id
+                && let Some(channel_id) = state_snapshot.draft_channel_id
+            {
+                let _ = self
+                    .discord
+                    .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
+                    .await;
+            }
+            delete_followup(&responder, progress).await;
+            return Err(error);
+        }
+        self.schedule_timeout(guild_id, session_id, PRE_DRAFT_TIMEOUT_SECONDS);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_start(
+        &self,
+        context: &StartContext,
+        kind: AppLobbyKind,
+        snapshot: MatchLobbySnapshot,
+        players: Vec<Player>,
+        pool: cama_app::draft::PoolSelectionResult,
+        captain_pair: cama_app::draft::CaptainPair,
+        state: Arc<Mutex<DraftState>>,
+        responder: Arc<dyn InteractionResponder>,
+        progress: Option<crate::registration::InteractionMessageReceipt>,
+    ) -> Result<(), String> {
+        let channel_id = snapshot
+            .lobby_channel_id
+            .or(snapshot.origin_channel_id)
+            .map(|id| i64::try_from(id).map_err(|_| "draft channel exceeds SQLite range"))
+            .transpose()?
+            .unwrap_or(context.channel_id);
+        let coinflip_winner = self
+            .service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .coinflip(captain_pair.captain1_id, captain_pair.captain2_id);
+        let (session_id, opening) = {
+            let mut current = lock_state(&state);
+            current.player_pool_ids = pool.selected_ids.clone();
+            current.excluded_player_ids = pool.excluded_ids.clone();
+            current.full_exclusion_increment_ids = pool
+                .excluded_ids
+                .iter()
+                .copied()
+                .filter(|id| snapshot.player_ids.contains(id))
+                .collect();
+            current.half_exclusion_increment_ids = Vec::new();
+            current.captain1_id = Some(captain_pair.captain1_id);
+            current.captain2_id = Some(captain_pair.captain2_id);
+            current.captain1_rating = captain_pair.captain1_rating;
+            current.captain2_rating = captain_pair.captain2_rating;
+            current.draft_channel_id = Some(channel_id);
+            current.player_pool_data = players
+                .iter()
+                .filter_map(|player| {
+                    let id = player.discord_id?;
+                    pool.selected_ids.contains(&id).then(|| {
+                        (
+                            id,
+                            PlayerPoolEntry {
+                                name: player.name.clone(),
+                                rating: player.glicko_rating.unwrap_or(1500.0),
+                                roles: player.preferred_roles.clone().unwrap_or_default(),
+                            },
+                        )
+                    })
+                })
+                .collect();
+            current.coinflip_winner_id = Some(coinflip_winner);
+            current.phase = DraftPhase::WinnerChoice;
+            (
+                current.session_id,
+                opening_embed(&current, &context.user_display_name),
+            )
+        };
+
+        delete_followup(&responder, progress).await;
+        let ping = self
+            .discord
+            .send_message(
+                to_u64(channel_id)?,
+                DiscordMessage::mentioning(
+                    InteractionResponse::message(format!(
+                        "<@{}> <@{}> {} draft starting!",
+                        captain_pair.captain1_id,
+                        captain_pair.captain2_id,
+                        kind.label()
+                    )),
+                    BTreeSet::from([
+                        to_u64(captain_pair.captain1_id)?,
+                        to_u64(captain_pair.captain2_id)?,
+                    ]),
+                ),
+            )
+            .await;
+        if let Ok(receipt) = ping {
+            lock_state(&state).captain_ping_message_id = Some(to_i64(receipt.message_id)?);
+        }
+        let opening_view = pre_choice_view(session_id, coinflip_winner, false, true);
+        let opening_receipt = self
+            .discord
+            .send_message(
+                to_u64(channel_id)?,
+                DiscordMessage::default_mentions(
+                    InteractionResponse::message("")
+                        .embed(opening)
+                        .action_rows(opening_view),
+                ),
+            )
+            .await
+            .map_err(|error| format!("draft opening message failed: {error}"))?;
+        {
+            let mut current = lock_state(&state);
+            current.draft_message_id = Some(to_i64(opening_receipt.message_id)?);
+            lock_recover(&self.draft_messages)
+                .insert((current.guild_id, session_id), opening_receipt);
+        }
+
+        let loser_id = if coinflip_winner == captain_pair.captain1_id {
+            captain_pair.captain2_id
+        } else {
+            captain_pair.captain1_id
+        };
+        match self
+            .neon
+            .on_draft_coinflip(context.guild_id, coinflip_winner, loser_id)
+            .await
+        {
+            Ok(Some(result)) => {
+                self.send_neon_followup(&responder, result).await;
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => {
+                warn!(%error, guild_id = context.guild_id, "draft coinflip Neon hook failed");
+                Ok(())
+            }
+        }
+    }
+
+    async fn restart(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        user_name: String,
+        admin: bool,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let Some(handle) = self.drafts.get_state(Some(guild_id)) else {
+            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+        };
+        let snapshot = lock_state(&handle).clone();
+        let kind = to_runtime_kind(snapshot.lobby_kind);
+        let kind_lock = self.lobbies.operation_lock(guild_id, kind);
+        let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, kind_lock.lock()).await
+        else {
+            return respond_ephemeral(
+                &responder,
+                "A draft is already being processed. Please wait.",
+            )
+            .await;
+        };
+        let Some(current) = self.drafts.get_state(Some(guild_id)) else {
+            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+        };
+        if !Arc::ptr_eq(&current, &handle) {
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
+        }
+        let is_captain = [snapshot.captain1_id, snapshot.captain2_id]
+            .into_iter()
+            .flatten()
+            .any(|captain| captain == user_id);
+        if !admin && !is_captain {
+            return respond_ephemeral(
+                &responder,
+                "❌ Only captains or server admins can restart the draft.",
+            )
+            .await;
+        }
+        if snapshot.phase == DraftPhase::Complete {
+            return respond_ephemeral(
+                &responder,
+                "⏳ Draft results are still being finalized. Please wait.",
+            )
+            .await;
+        }
+        self.drafts.clear_state(Some(guild_id), Some(&handle));
+        lock_recover(&self.draft_messages).remove(&(guild_id, snapshot.session_id));
+        self.lobbies.release_players(
+            guild_id,
+            kind,
+            &snapshot.player_pool_ids.iter().copied().collect(),
+        );
+        self.cancel_timeout(guild_id);
+        if let (Some(channel_id), Some(message_id)) =
+            (snapshot.draft_channel_id, snapshot.captain_ping_message_id)
+        {
+            let _ = self
+                .discord
+                .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
+                .await;
+        }
+        responder
+            .respond(InteractionResponse::message(format!(
+                "🔄 **Draft Restarted** by {user_name}\n\nThe lobby has been preserved. Use `/draft start` to start a new draft."
+            )))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_component(
+        &self,
+        user_id: i64,
+        user_name: String,
+        guild_id: Option<i64>,
+        _channel_id: Option<i64>,
+        permissions: Option<u64>,
+        custom_id: &str,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let Some(guild_id) = guild_id else {
+            return respond_ephemeral(&responder, "This command must be used in a server.").await;
+        };
+        let component = parse_component(custom_id)?;
+        let Some(handle) = self.drafts.get_state(Some(guild_id)) else {
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
+        };
+        let session = lock_state(&handle).session_id;
+        if component
+            .session_id
+            .is_some_and(|expected| expected != session)
+        {
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
+        }
+        let participant = {
+            let state = lock_state(&handle);
+            state.player_pool_ids.is_empty()
+                || state.player_pool_ids.contains(&user_id)
+                || state.captain1_id == Some(user_id)
+                || state.captain2_id == Some(user_id)
+        };
+        if !participant {
+            return respond_ephemeral(&responder, "❌ You are not part of this draft.").await;
+        }
+        match component.action {
+            DraftComponent::ChoiceSide => {
+                self.choice_side(guild_id, user_id, handle, &responder)
+                    .await
+            }
+            DraftComponent::ChoiceHero => {
+                self.choice_hero(guild_id, user_id, handle, &responder)
+                    .await
+            }
+            DraftComponent::Side(side) => {
+                self.choose_side(guild_id, user_id, handle, side, &responder)
+                    .await
+            }
+            DraftComponent::Hero(order) => {
+                self.choose_hero(guild_id, user_id, handle, order, &responder)
+                    .await
+            }
+            DraftComponent::Pick(player_id) => {
+                self.pick_player(guild_id, user_id, handle, player_id, user_name, &responder)
+                    .await
+            }
+            DraftComponent::Preference(side) => {
+                self.side_preference(guild_id, user_id, handle, side, &responder)
+                    .await
+            }
+            DraftComponent::Unknown => {
+                let _ = permissions;
+                respond_ephemeral(&responder, "❌ This draft control is no longer valid.").await
+            }
+        }
+    }
+
+    async fn choice_side(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let initial = lock_state(&handle).clone();
+        let phase = initial.phase;
+        let valid =
+            phase == DraftPhase::WinnerChoice && initial.coinflip_winner_id == Some(user_id);
+        if phase != DraftPhase::WinnerChoice {
+            return respond_ephemeral(responder, wrong_choice_message(phase)).await;
+        }
+        if !valid {
+            let response = "Only the coinflip winner can make this choice.";
+            return respond_ephemeral(responder, response).await;
+        }
+        let (session, embed, ping) = {
+            let mut state = lock_state(&handle);
+            let ping = state
+                .captain_ping_message_id
+                .zip(state.draft_channel_id)
+                .map(|(message_id, channel_id)| (channel_id, message_id));
+            state.captain_ping_message_id = None;
+            state.winner_choice_type = Some("side".to_owned());
+            state.phase = DraftPhase::WinnerSideChoice;
+            (
+                state.session_id,
+                choice_embed(&state, "Choose Your Side", "Pick Radiant or Dire."),
+                ping,
+            )
+        };
+        if let Some((channel_id, message_id)) = ping {
+            let _ = self
+                .discord
+                .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
+                .await;
+        }
+        self.cancel_timeout(guild_id);
+        self.schedule_timeout(guild_id, session, PRE_DRAFT_TIMEOUT_SECONDS);
+        responder
+            .update(embed.action_rows(pre_choice_view(session, user_id, true, false)))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn choice_hero(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let initial = lock_state(&handle).clone();
+        let phase = initial.phase;
+        let valid =
+            phase == DraftPhase::WinnerChoice && initial.coinflip_winner_id == Some(user_id);
+        if phase != DraftPhase::WinnerChoice {
+            return respond_ephemeral(responder, wrong_choice_message(phase)).await;
+        }
+        if !valid {
+            let response = "Only the coinflip winner can make this choice.";
+            return respond_ephemeral(responder, response).await;
+        }
+        let (session, loser, embed, ping) = {
+            let mut state = lock_state(&handle);
+            let ping = state
+                .captain_ping_message_id
+                .zip(state.draft_channel_id)
+                .map(|(message_id, channel_id)| (channel_id, message_id));
+            state.captain_ping_message_id = None;
+            state.winner_choice_type = Some("hero_pick".to_owned());
+            state.phase = DraftPhase::WinnerHeroChoice;
+            let loser = other_captain(&state, user_id).unwrap_or_default();
+            (
+                state.session_id,
+                loser,
+                choice_embed(
+                    &state,
+                    "Choose Hero Pick Order",
+                    "Pick First or Second hero pick (in-game).",
+                ),
+                ping,
+            )
+        };
+        if let Some((channel_id, message_id)) = ping {
+            let _ = self
+                .discord
+                .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
+                .await;
+        }
+        self.cancel_timeout(guild_id);
+        self.schedule_timeout(guild_id, session, PRE_DRAFT_TIMEOUT_SECONDS);
+        responder
+            .update(embed.action_rows(pre_choice_view(session, loser, false, false)))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn choose_side(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        side: Side,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let result: Result<(InteractionResponse, Option<u64>), &'static str> = {
+            let mut state = lock_state(&handle);
+            let is_winner = state.phase == DraftPhase::WinnerSideChoice;
+            let expected_user = if is_winner {
+                state.coinflip_winner_id
+            } else if state.winner_choice_type.as_deref() == Some("hero_pick") {
+                other_captain(&state, state.coinflip_winner_id.unwrap_or_default())
+            } else {
+                None
+            };
+            if expected_user != Some(user_id)
+                || (!is_winner && state.phase != DraftPhase::LoserChoice)
+            {
+                Err(
+                    if (is_winner && state.phase == DraftPhase::WinnerSideChoice)
+                        || (!is_winner && state.phase == DraftPhase::LoserChoice)
+                    {
+                        "Only the designated captain can make this choice."
+                    } else {
+                        wrong_choice_message(state.phase)
+                    },
+                )
+            } else if is_winner {
+                let loser = other_captain(&state, user_id).unwrap_or_default();
+                state.winner_choice_value = Some(side.as_str().to_owned());
+                assign_captains(&mut state, user_id, loser, side);
+                state.phase = DraftPhase::LoserChoice;
+                let session = state.session_id;
+                let embed = choice_embed(
+                    &state,
+                    "Choose Hero Pick Order",
+                    "The other captain picks First or Second hero pick (in-game).",
+                );
+                Ok((
+                    embed.action_rows(pre_choice_view(session, loser, false, false)),
+                    None,
+                ))
+            } else {
+                let winner = state.coinflip_winner_id.unwrap_or_default();
+                state.loser_choice_value = Some(side.as_str().to_owned());
+                assign_captains(&mut state, user_id, winner, side);
+                let session = state.session_id;
+                complete_pre_draft(&mut state);
+                let embed = live_embed(&state);
+                let view = drafting_view(&state);
+                Ok((
+                    InteractionResponse::message("")
+                        .embed(embed)
+                        .action_rows(view),
+                    Some(session),
+                ))
+            }
+        };
+        let (response, drafting_session) = match result {
+            Ok(result) => result,
+            Err(message) => return respond_ephemeral(responder, message).await,
+        };
+        if let Some(session) = drafting_session {
+            self.cancel_timeout(guild_id);
+            self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        responder
+            .update(response)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn choose_hero(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        order: HeroOrder,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let result: Result<(InteractionResponse, Option<u64>), &'static str> = {
+            let mut state = lock_state(&handle);
+            let winner_choice = state.phase == DraftPhase::WinnerHeroChoice;
+            let loser_hero_choice = state.phase == DraftPhase::LoserChoice
+                && state.winner_choice_type.as_deref() == Some("side");
+            let expected = if winner_choice {
+                state.coinflip_winner_id
+            } else if loser_hero_choice {
+                other_captain(&state, state.coinflip_winner_id.unwrap_or_default())
+            } else {
+                None
+            };
+            if expected != Some(user_id) {
+                Err(
+                    if (winner_choice && state.phase == DraftPhase::WinnerHeroChoice)
+                        || (loser_hero_choice && state.phase == DraftPhase::LoserChoice)
+                    {
+                        "Only the designated captain can make this choice."
+                    } else {
+                        wrong_choice_message(state.phase)
+                    },
+                )
+            } else if winner_choice {
+                state.winner_choice_value = Some(order.as_str().to_owned());
+                state.phase = DraftPhase::LoserChoice;
+                let loser = other_captain(&state, user_id).unwrap_or_default();
+                let session = state.session_id;
+                let embed = choice_embed(&state, "Choose Your Side", "Pick Radiant or Dire.");
+                Ok((
+                    embed.action_rows(pre_choice_view(session, loser, true, false)),
+                    None,
+                ))
+            } else {
+                state.loser_choice_value = Some(order.as_str().to_owned());
+                let session = state.session_id;
+                complete_pre_draft(&mut state);
+                let embed = live_embed(&state);
+                let view = drafting_view(&state);
+                Ok((
+                    InteractionResponse::message("")
+                        .embed(embed)
+                        .action_rows(view),
+                    Some(session),
+                ))
+            }
+        };
+        let (response, drafting_session) = match result {
+            Ok(result) => result,
+            Err(message) => return respond_ephemeral(responder, message).await,
+        };
+        if let Some(session) = drafting_session {
+            self.cancel_timeout(guild_id);
+            self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        responder
+            .update(response)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn pick_player(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        player_id: i64,
+        _user_name: String,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let outcome = {
+            let mut state = lock_state(&handle);
+            if state.phase != DraftPhase::Drafting {
+                Err("❌ Draft is not in picking phase.")
+            } else if state.current_captain_id() != Some(user_id) {
+                Err("❌ It's not your turn!")
+            } else if !state.pick_player(player_id, Some(user_id)) {
+                Err("❌ Cannot pick that player. They may already be picked.")
+            } else {
+                Ok((
+                    state.phase == DraftPhase::Complete,
+                    state.session_id,
+                    state.clone(),
+                ))
+            }
+        };
+        let Ok((complete, session, state_snapshot)) = outcome else {
+            return respond_ephemeral(responder, outcome.unwrap_err()).await;
+        };
+        if complete {
+            responder
+                .defer(false)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.complete(guild_id, handle, state_snapshot, responder.clone(), true)
+                .await
+        } else {
+            self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
+            responder
+                .update(
+                    InteractionResponse::message("")
+                        .embed(live_embed(&state_snapshot))
+                        .action_rows(drafting_view(&state_snapshot)),
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    async fn side_preference(
+        &self,
+        _guild_id: i64,
+        user_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        side: Option<Side>,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let outcome = {
+            let mut state = lock_state(&handle);
+            if state.phase != DraftPhase::Drafting {
+                Err("❌ Draft is not in picking phase.".to_owned())
+            } else {
+                let value = side.map(Side::as_str);
+                if !state.set_side_preference(user_id, value) {
+                    Err("❌ You have already been picked or are not in this draft.".to_owned())
+                } else {
+                    let message = match side {
+                        Some(side) => format!("✅ Preference set to **{}**", side.title()),
+                        None => "✅ Preference cleared".to_owned(),
+                    };
+                    Ok((message, state.clone()))
+                }
+            }
+        };
+        let Ok((message, snapshot)) = outcome else {
+            return respond_ephemeral(responder, outcome.unwrap_err()).await;
+        };
+        let response = InteractionResponse::message(message).ephemeral();
+        responder
+            .respond(response)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let (Some(channel_id), Some(message_id)) =
+            (snapshot.draft_channel_id, snapshot.draft_message_id)
+        {
+            let _ = self
+                .discord
+                .edit_message(
+                    to_u64(channel_id)?,
+                    to_u64(message_id)?,
+                    DiscordMessage::silent(
+                        InteractionResponse::message("")
+                            .embed(live_embed(&snapshot))
+                            .action_rows(drafting_view(&snapshot)),
+                    )
+                    .preserving_content(),
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        guild_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        state: DraftState,
+        responder: Arc<dyn InteractionResponder>,
+        deferred: bool,
+    ) -> Result<(), String> {
+        let key = (guild_id, state.session_id);
+        let inserted = {
+            let mut completing = lock_recover(&self.completing);
+            completing.insert(key)
+        };
+        if !inserted {
+            return respond_ephemeral(
+                &responder,
+                "⏳ Draft results are still being finalized. Please wait.",
+            )
+            .await;
+        }
+        let result = self
+            .complete_owned(guild_id, handle, state, responder.clone(), deferred)
+            .await;
+        lock_recover(&self.completing).remove(&key);
+        result
+    }
+
+    async fn complete_owned(
+        &self,
+        guild_id: i64,
+        handle: Arc<Mutex<DraftState>>,
+        state: DraftState,
+        responder: Arc<dyn InteractionResponder>,
+        deferred: bool,
+    ) -> Result<(), String> {
+        let kind = to_runtime_kind(state.lobby_kind);
+        let operation_lock = self.lobbies.operation_lock(guild_id, kind);
+        let Ok(_operation_guard) =
+            tokio::time::timeout(OPERATION_LOCK_TIMEOUT, operation_lock.lock()).await
+        else {
+            return completion_response(
+                &responder,
+                None,
+                "A draft or shuffle is already being finalized.".to_owned(),
+                deferred,
+            )
+            .await;
+        };
+        let snapshot = self.lobbies.snapshot(guild_id, kind);
+        let thread_id = snapshot.as_ref().and_then(|snapshot| snapshot.thread_id);
+        let origin_channel_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.origin_channel_id)
+            .or_else(|| state.draft_channel_id.and_then(|id| u64::try_from(id).ok()));
+        let now = unix_now();
+        let is_bomb_pot = fastrand::f64() < self.config.bomb_pot_chance;
+        let pending_state =
+            db_pending_state(&state, now, self.config.bet_lock_seconds, is_bomb_pot)?;
+        let pending = match self
+            .pending
+            .create_pending_match(guild_id, &pending_state)
+            .map_err(|error| error.to_string())
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.finish_draft_without_match(&handle, &state);
+                return completion_response(&responder, None, error, deferred).await;
+            }
+        };
+        if let Err(error) =
+            self.pending
+                .mutate_pending_match(guild_id, pending.pending_match_id, |state| {
+                    state.origin_channel_id =
+                        origin_channel_id.and_then(|id| i64::try_from(id).ok());
+                    state.thread_shuffle_thread_id =
+                        thread_id.and_then(|id| i64::try_from(id).ok());
+                })
+        {
+            warn!(%error, pending_match_id = pending.pending_match_id, "draft thread metadata persistence failed");
+        }
+        if let Err(error) = self
+            .reserve_seed_and_bets(&pending, kind, &state, now, is_bomb_pot)
+            .await
+        {
+            warn!(
+                %error,
+                pending_match_id = pending.pending_match_id,
+                "draft seed/bet setup failed"
+            );
+            self.finish_draft_without_match(&handle, &state);
+            return completion_response(
+                &responder,
+                Some(pending.pending_match_id),
+                error,
+                deferred,
+            )
+            .await;
+        }
+        let pending = self
+            .pending
+            .pending_match(guild_id, pending.pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "pending draft match disappeared after seed reservation".to_owned())?;
+
+        if is_bomb_pot && let Some(blind) = pending.state.blind_bets_result.as_ref() {
+            let pool_amount = blind
+                .get("total_radiant")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                .saturating_add(
+                    blind
+                        .get("total_dire")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default(),
+                );
+            let contributor_count = blind
+                .get("created")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            if contributor_count > 0 {
+                match self
+                    .neon
+                    .on_bomb_pot(guild_id, pool_amount, contributor_count)
+                    .await
+                {
+                    Ok(Some(result)) => self.send_neon_followup(&responder, result).await,
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(%error, guild_id, "draft bomb-pot Neon hook failed");
+                    }
+                }
+            }
+        }
+
+        // A durable match consumes only the ten drafted players; the excluded
+        // bench remains in the sibling lobby until this point as in Python.
+        let matched = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if let Err(error) = self
+            .lobbies
+            .evict_from_other_lobby(guild_id, kind, &matched)
+            .await
+        {
+            warn!(%error, "draft sibling lobby eviction failed");
+        }
+        if let Err(error) = self.lobbies.reset_after_shuffle(guild_id, kind).await {
+            warn!(%error, "draft lobby reset failed after pending match creation");
+        }
+        self.cancel_timeout(guild_id);
+        let draft_receipt =
+            lock_recover(&self.draft_messages).remove(&(guild_id, state.session_id));
+        self.drafts.clear_state(Some(guild_id), Some(&handle));
+        self.lobbies.release_players(
+            guild_id,
+            kind,
+            &state.player_pool_ids.iter().copied().collect(),
+        );
+
+        let embed = completion_embed(&state, &pending);
+        let completion_message = InteractionResponse::message("").embed(embed.clone());
+        let edit_result = if deferred {
+            responder.edit_original(completion_message).await
+        } else {
+            responder.update(completion_message).await
+        };
+        if let Err(error) = edit_result {
+            warn!(%error, pending_match_id = pending.pending_match_id, "draft completion source edit failed");
+            drop(_operation_guard);
+            let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
+            return completion_response(
+                &responder,
+                Some(pending.pending_match_id),
+                error.to_string(),
+                deferred,
+            )
+            .await;
+        }
+        let destinations = [
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.lobby_channel_id),
+            origin_channel_id,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|channel_id| {
+            Some(*channel_id) != state.draft_channel_id.and_then(|id| u64::try_from(id).ok())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+        let mut published = Vec::new();
+        if let [first, second] = destinations.as_slice() {
+            // Python publishes distinct lobby/origin copies with one gather,
+            // so a slow or failed channel cannot serialize the other copy.
+            let (first_result, second_result) = tokio::join!(
+                self.send_completion_copy(*first, embed.clone()),
+                self.send_completion_copy(*second, embed.clone()),
+            );
+            if let Ok(receipt) = first_result {
+                published.push((*first, receipt));
+            }
+            if let Ok(receipt) = second_result {
+                published.push((*second, receipt));
+            }
+        } else if let Some(channel_id) = destinations.first().copied()
+            && let Ok(receipt) = self.send_completion_copy(channel_id, embed.clone()).await
+        {
+            published.push((channel_id, receipt));
+        }
+        self.store_completion_message_info(CompletionMessageContext {
+            guild_id,
+            pending_match_id: pending.pending_match_id,
+            state: &state,
+            published: &published,
+            lobby_channel_id: snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.lobby_channel_id),
+            origin_channel_id,
+            draft_receipt: draft_receipt.as_ref(),
+        })?;
+        if let Some(thread_id) = thread_id {
+            self.publish_thread(thread_id, &state, &embed, pending.pending_match_id)
+                .await;
+        }
+        if let Err(error) = self.schedule_betting_reminders(pending.clone()).await {
+            warn!(%error, pending_match_id = pending.pending_match_id, "draft betting reminder scheduling failed");
+        }
+        // The refresh helper acquires both lobby operation locks itself. Do
+        // not hold the source-scope guard while calling it or a successful
+        // completion deadlocks on the same open-lobby mutex.
+        drop(_operation_guard);
+        let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
+        Ok(())
+    }
+
+    async fn send_completion_copy(
+        &self,
+        channel_id: u64,
+        embed: InteractionEmbed,
+    ) -> Result<DiscordMessageReceipt, String> {
+        self.discord
+            .send_message(
+                channel_id,
+                DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed)),
+            )
+            .await
+    }
+
+    async fn reserve_seed_and_bets(
+        &self,
+        pending: &PendingMatchRecord,
+        kind: AppLobbyKind,
+        state: &DraftState,
+        now: i64,
+        is_bomb_pot: bool,
+    ) -> Result<(), String> {
+        let first_game_reserved = if self.config.first_game_pool_daily_amount > 0 {
+            let date = cama_domain::game_date::get_game_date();
+            self.seeds
+                .fund_first_game_pools(
+                    Some(pending.guild_id),
+                    &date,
+                    self.config.first_game_pool_daily_amount,
+                )
+                .map_err(|error| error.to_string())?;
+            self.seeds
+                .claim_first_game_pool(
+                    Some(pending.guild_id),
+                    match kind {
+                        AppLobbyKind::Open => FirstGameLobby::Open,
+                        AppLobbyKind::LowSkill => FirstGameLobby::LowSkill,
+                    },
+                    &date,
+                    pending.pending_match_id,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            0
+        };
+        self.seeds
+            .reserve_seed_atomic(
+                Some(pending.guild_id),
+                pending.pending_match_id,
+                self.config.dota_bet_seed_amount,
+                first_game_reserved,
+                SeedBettingMode::Pool,
+            )
+            .map_err(|error| error.to_string())?;
+        let candidates = state
+            .radiant_player_ids
+            .iter()
+            .copied()
+            .map(|discord_id| BlindBetCandidate {
+                discord_id,
+                team: BettingTeam::Radiant,
+                ante_override: None,
+            })
+            .chain(
+                state
+                    .dire_player_ids
+                    .iter()
+                    .copied()
+                    .map(|discord_id| BlindBetCandidate {
+                        discord_id,
+                        team: BettingTeam::Dire,
+                        ante_override: None,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let investment_starting_balances = self
+            .investment_starting_balances(pending.guild_id, state)
+            .unwrap_or_default();
+
+        // Python deliberately treats automatic liquidity as a best-effort
+        // post-persistence hook.  A single wallet/DB candidate must not turn
+        // a durable draft into a failed completion, so each service seam is
+        // isolated and the pending state is updated only after the hooks have
+        // returned their summaries.
+        let mut blind_result = json!({
+            "created": 0,
+            "total_radiant": 0,
+            "total_dire": 0,
+            "percentage": if is_bomb_pot {
+                self.config.bomb_pot_blind_percentage
+            } else {
+                self.config.auto_blind_percentage
+            },
+            "is_bomb_pot": is_bomb_pot,
+            "bets": [],
+            "skipped": [],
+        });
+        if self.config.auto_blind_enabled {
+            match self.bets.create_auto_blind_bets_atomic(
+                Some(pending.guild_id),
+                Some(pending.pending_match_id),
+                now,
+                &candidates,
+                BlindBetPolicy {
+                    is_bomb_pot,
+                    normal_threshold: self.config.auto_blind_threshold,
+                    normal_percentage: percentage_points(self.config.auto_blind_percentage),
+                    bomb_percentage: percentage_points(self.config.bomb_pot_blind_percentage),
+                    bomb_ante: self.config.bomb_pot_ante,
+                    max_debt: self.config.max_debt,
+                },
+            ) {
+                Ok(outcome) => {
+                    blind_result = blind_outcome_json(&outcome);
+                    blind_result["percentage"] = json!(if is_bomb_pot {
+                        self.config.bomb_pot_blind_percentage
+                    } else {
+                        self.config.auto_blind_percentage
+                    });
+                }
+                Err(error) => {
+                    warn!(%error, pending_match_id = pending.pending_match_id, "draft blind-bet hook failed");
+                }
+            }
+        }
+
+        let investment_result = match self.create_investment_bets(
+            pending,
+            state,
+            now,
+            &investment_starting_balances,
+        ) {
+            Ok(result) => Some(result),
+            Err(error) => {
+                warn!(%error, pending_match_id = pending.pending_match_id, "draft configured-investment hook failed");
+                None
+            }
+        };
+
+        let spectator_result = self
+            .create_spectator_bets(pending, state, now)
+            .map_err(|error| {
+                warn!(%error, pending_match_id = pending.pending_match_id, "draft spectator auto-wager hook failed");
+                error
+            })
+            .ok();
+
+        if let Some(result) = investment_result {
+            blind_result["investment_bets"] = result;
+        }
+        if let Some(result) = spectator_result {
+            blind_result["spectator_bets"] = result;
+        }
+        let has_automatic_bets = blind_result
+            .get("created")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+            > 0
+            || blind_result
+                .get("investment_bets")
+                .and_then(|result| result.get("created"))
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                > 0
+            || blind_result
+                .get("spectator_bets")
+                .and_then(|result| result.get("created"))
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                > 0;
+        if has_automatic_bets
+            && let Err(error) = self.pending.mutate_pending_match(
+                pending.guild_id,
+                pending.pending_match_id,
+                |state| state.blind_bets_result = Some(blind_result),
+            )
+        {
+            warn!(%error, pending_match_id = pending.pending_match_id, "draft automatic-bet result persistence failed");
+        }
+        Ok(())
+    }
+
+    fn create_investment_bets(
+        &self,
+        pending: &PendingMatchRecord,
+        state: &DraftState,
+        now: i64,
+        starting_balances: &BTreeMap<i64, i64>,
+    ) -> Result<Value, String> {
+        let target_ids = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        let positions = self
+            .investments
+            .for_targets(Some(pending.guild_id), &target_ids)
+            .map_err(|error| error.to_string())?;
+        if positions.is_empty() {
+            return Ok(json!({
+                "created": 0,
+                "total_radiant": 0,
+                "total_dire": 0,
+                "bets": [],
+                "skipped": [],
+            }));
+        }
+        let investor_ids = positions
+            .iter()
+            .map(|position| position.investor_id)
+            .collect::<Vec<_>>();
+        // Python prepares the shuffle-start gate before blind bets, then
+        // sizes each investment from the post-blind wallet snapshot.
+        let current_balances = self
+            .players
+            .get_balances_bulk(&investor_ids, Some(pending.guild_id))
+            .map_err(|error| error.to_string())?;
+        let team_by_player = state
+            .radiant_player_ids
+            .iter()
+            .map(|id| (*id, BettingTeam::Radiant))
+            .chain(
+                state
+                    .dire_player_ids
+                    .iter()
+                    .map(|id| (*id, BettingTeam::Dire)),
+            )
+            .collect::<BTreeMap<_, _>>();
+        let timestamp = pending.state.shuffle_timestamp.unwrap_or(now);
+        let mut totals = self
+            .bets
+            .get_pending_totals(
+                Some(pending.guild_id),
+                timestamp,
+                Some(pending.pending_match_id),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut investment_total_radiant = 0_i64;
+        let mut investment_total_dire = 0_i64;
+        let mut created = Vec::new();
+        let mut skipped = Vec::new();
+        for position in positions {
+            let Some(target_team) = team_by_player.get(&position.target_id).copied() else {
+                continue;
+            };
+            let starting_balance = starting_balances
+                .get(&position.investor_id)
+                .copied()
+                .unwrap_or_default();
+            if starting_balance < 50 {
+                skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": format!("shuffle-start balance {starting_balance} < 50"),
+                }));
+                continue;
+            }
+            let balance = current_balances
+                .get(&position.investor_id)
+                .copied()
+                .unwrap_or_default();
+            if balance <= 0 {
+                skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": format!("balance {balance} is not positive"),
+                }));
+                continue;
+            }
+            if position.direction == "short" && position.investor_id == position.target_id {
+                skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": "cannot short yourself",
+                }));
+                continue;
+            }
+            let team = if position.direction == "long" {
+                target_team
+            } else {
+                match target_team {
+                    BettingTeam::Radiant => BettingTeam::Dire,
+                    BettingTeam::Dire => BettingTeam::Radiant,
+                }
+            };
+            if team_by_player
+                .get(&position.investor_id)
+                .is_some_and(|investor_team| *investor_team != team)
+            {
+                skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": "investment would bet against the investor's team",
+                }));
+                continue;
+            }
+            let amount = balance
+                .checked_mul(position.percentage)
+                .ok_or_else(|| "investment amount overflow".to_owned())?
+                / 100;
+            if amount < 1 {
+                skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": format!("investment amount {amount} < 1"),
+                }));
+                continue;
+            }
+            let total_pool = totals.total();
+            let team_total = match team {
+                BettingTeam::Radiant => totals.radiant,
+                BettingTeam::Dire => totals.dire,
+            };
+            let request = PlaceBetRequest {
+                guild_id: Some(pending.guild_id),
+                pending_match_id: pending.pending_match_id,
+                discord_id: position.investor_id,
+                team,
+                amount,
+                bet_time: timestamp,
+                leverage: 1,
+                max_debt: self.config.max_debt,
+                is_blind: true,
+                odds_at_placement: (total_pool > 0 && team_total > 0)
+                    .then_some(total_pool as f64 / team_total as f64),
+            };
+            match self.bets.place_investment_bet_atomic(
+                request,
+                position.target_id,
+                &position.direction,
+            ) {
+                Ok(record) => {
+                    match team {
+                        BettingTeam::Radiant => {
+                            totals.radiant = totals.radiant.saturating_add(amount);
+                            investment_total_radiant =
+                                investment_total_radiant.saturating_add(amount);
+                        }
+                        BettingTeam::Dire => {
+                            totals.dire = totals.dire.saturating_add(amount);
+                            investment_total_dire = investment_total_dire.saturating_add(amount);
+                        }
+                    }
+                    created.push(json!({
+                        "investor_id": record.discord_id,
+                        "target_id": position.target_id,
+                        "direction": position.direction,
+                        "percentage": position.percentage,
+                        "team": betting_team_name(team),
+                        "amount": amount,
+                    }));
+                }
+                Err(error) => skipped.push(json!({
+                    "investor_id": position.investor_id,
+                    "target_id": position.target_id,
+                    "reason": error.to_string(),
+                })),
+            }
+        }
+        Ok(json!({
+            "created": created.len(),
+            "total_radiant": investment_total_radiant,
+            "total_dire": investment_total_dire,
+            "bets": created,
+            "skipped": skipped,
+        }))
+    }
+
+    fn investment_starting_balances(
+        &self,
+        guild_id: i64,
+        state: &DraftState,
+    ) -> Result<BTreeMap<i64, i64>, String> {
+        let target_ids = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        let positions = self
+            .investments
+            .for_targets(Some(guild_id), &target_ids)
+            .map_err(|error| error.to_string())?;
+        let investor_ids = positions
+            .iter()
+            .map(|position| position.investor_id)
+            .collect::<Vec<_>>();
+        self.players
+            .get_balances_bulk(&investor_ids, Some(guild_id))
+            .map_err(|error| error.to_string())
+            .map(|balances| balances.into_iter().collect())
+    }
+
+    fn create_spectator_bets(
+        &self,
+        pending: &PendingMatchRecord,
+        state: &DraftState,
+        now: i64,
+    ) -> Result<Value, String> {
+        let candidates = self
+            .players
+            .get_all(Some(pending.guild_id))
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|player| {
+                player.discord_id.map(|discord_id| WealthSnapshot {
+                    discord_id,
+                    balance: player.jopacoin_balance,
+                })
+            })
+            .collect::<Vec<_>>();
+        let participants = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let plan = plan_automatic_spectator_bets(
+            &candidates,
+            &participants,
+            AutomaticSpectatorConfig {
+                enabled: self.config.auto_spectator_bet_enabled,
+                total_count: self.config.auto_spectator_bet_count,
+                top_count: self.config.auto_spectator_bet_top_count,
+                base_basis_points: percentage_basis_points(
+                    self.config.auto_spectator_bet_percentage,
+                ),
+                top_basis_points: percentage_basis_points(
+                    self.config.auto_spectator_bet_top_percentage,
+                ),
+            },
+        );
+        let requests = plan
+            .bets
+            .iter()
+            .map(|bet| AutomaticBasisPointBetRequest {
+                discord_id: bet.discord_id,
+                team: bet.team,
+                basis_points: bet.basis_points,
+            })
+            .collect::<Vec<_>>();
+        let outcome = self
+            .bets
+            .place_automatic_basis_point_bets_atomic(
+                Some(pending.guild_id),
+                Some(pending.pending_match_id),
+                now,
+                &requests,
+                self.config.max_debt,
+            )
+            .map_err(|error| error.to_string())?;
+        let plan_by_id = plan
+            .bets
+            .iter()
+            .map(|bet| (bet.discord_id, *bet))
+            .collect::<BTreeMap<_, _>>();
+        let total_radiant = outcome
+            .created
+            .iter()
+            .filter(|bet| bet.team == BettingTeam::Radiant)
+            .map(|bet| bet.amount)
+            .sum::<i64>();
+        let total_dire = outcome
+            .created
+            .iter()
+            .filter(|bet| bet.team == BettingTeam::Dire)
+            .map(|bet| bet.amount)
+            .sum::<i64>();
+        let bets = outcome
+            .created
+            .iter()
+            .map(|bet| {
+                let plan = plan_by_id.get(&bet.discord_id);
+                json!({
+                    "discord_id": bet.discord_id,
+                    "team": betting_team_name(bet.team),
+                    "amount": bet.amount,
+                    "networth": plan.map_or(0, |plan| plan.networth),
+                    "percentage": plan.map_or(0.0, |plan| {
+                        plan.basis_points as f64 / 10_000.0
+                    }),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "created": outcome.created.len(),
+            "total_radiant": total_radiant,
+            "total_dire": total_dire,
+            "percentage": self.config.auto_spectator_bet_percentage,
+            "top_percentage": self.config.auto_spectator_bet_top_percentage,
+            "total_count": plan.total_count,
+            "top_count": plan.top_count,
+            "bets": bets,
+            "skipped": outcome.skipped,
+        }))
+    }
+
+    fn finish_draft_without_match(&self, handle: &Arc<Mutex<DraftState>>, state: &DraftState) {
+        self.cancel_timeout(state.guild_id);
+        lock_recover(&self.draft_messages).remove(&(state.guild_id, state.session_id));
+        self.drafts.clear_state(Some(state.guild_id), Some(handle));
+        self.lobbies.release_players(
+            state.guild_id,
+            to_runtime_kind(state.lobby_kind),
+            &state.player_pool_ids.iter().copied().collect(),
+        );
+    }
+
+    fn store_completion_message_info(
+        &self,
+        context: CompletionMessageContext<'_>,
+    ) -> Result<(), String> {
+        let CompletionMessageContext {
+            guild_id,
+            pending_match_id,
+            state,
+            published,
+            lobby_channel_id,
+            origin_channel_id,
+            draft_receipt,
+        } = context;
+        self.pending
+            .mutate_pending_match(guild_id, pending_match_id, |pending| {
+                pending.shuffle_channel_id = state.draft_channel_id;
+                pending.shuffle_message_id = state.draft_message_id;
+                pending.origin_channel_id = origin_channel_id.and_then(|id| i64::try_from(id).ok());
+                let primary = lobby_channel_id
+                    .and_then(|channel_id| {
+                        published
+                            .iter()
+                            .find(|(published_channel, _)| *published_channel == channel_id)
+                            .map(|(published_channel, receipt)| (*published_channel, receipt))
+                    })
+                    .or_else(|| draft_receipt.map(|receipt| (receipt.channel_id, receipt)))
+                    .or_else(|| {
+                        published
+                            .first()
+                            .map(|(channel_id, receipt)| (*channel_id, receipt))
+                    });
+                if let Some((channel_id, receipt)) = primary {
+                    pending.shuffle_channel_id = i64::try_from(channel_id).ok();
+                    pending.shuffle_message_id = i64::try_from(receipt.message_id).ok();
+                    pending.shuffle_message_jump_url = Some(receipt.jump_url.clone());
+                }
+                let primary_channel = pending
+                    .shuffle_channel_id
+                    .and_then(|id| u64::try_from(id).ok());
+                let command_receipt = origin_channel_id.and_then(|origin_channel| {
+                    published
+                        .iter()
+                        .find(|(channel_id, _)| *channel_id == origin_channel)
+                        .map(|(channel_id, receipt)| (*channel_id, receipt))
+                        .or_else(|| {
+                            draft_receipt
+                                .filter(|receipt| receipt.channel_id == origin_channel)
+                                .map(|receipt| (receipt.channel_id, receipt))
+                        })
+                });
+                if origin_channel_id != primary_channel
+                    && let Some((channel_id, receipt)) = command_receipt
+                {
+                    pending.cmd_shuffle_channel_id = i64::try_from(channel_id).ok();
+                    pending.cmd_shuffle_message_id = i64::try_from(receipt.message_id).ok();
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn publish_thread(
+        &self,
+        thread_id: u64,
+        state: &DraftState,
+        embed: &InteractionEmbed,
+        pending_match_id: i64,
+    ) {
+        let kind = to_runtime_kind(state.lobby_kind);
+        let name = format!("🔒 {} Draft Complete - Awaiting Results", kind.label());
+        // Renaming is independent of the ordered embed -> player-ping path;
+        // Python starts both before waiting, then locks only after publication.
+        let rename = self.discord.edit_thread(thread_id, &name, false, false);
+        let post = async {
+            let receipt = self
+                .discord
+                .send_message(
+                    thread_id,
+                    DiscordMessage::default_mentions(
+                        InteractionResponse::message("").embed(embed.clone()),
+                    ),
+                )
+                .await?;
+            let mentions = state
+                .radiant_player_ids
+                .iter()
+                .chain(&state.dire_player_ids)
+                .copied()
+                .filter(|id| *id > 0)
+                .filter_map(|id| u64::try_from(id).ok())
+                .collect::<Vec<_>>();
+            let content = mentions
+                .iter()
+                .map(|id| format!("<@{id}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !content.is_empty() {
+                self.discord
+                    .send_message(
+                        thread_id,
+                        DiscordMessage::mentioning(
+                            InteractionResponse::message(format!(
+                                "{content}\nPlayers, please take your starting positions!"
+                            )),
+                            mentions.into_iter().collect(),
+                        ),
+                    )
+                    .await?;
+            }
+            self.pending
+                .mutate_pending_match(state.guild_id, pending_match_id, |pending| {
+                    pending.thread_shuffle_thread_id =
+                        Some(i64::try_from(thread_id).unwrap_or_default());
+                    pending.thread_shuffle_message_id =
+                        Some(i64::try_from(receipt.message_id).unwrap_or_default());
+                })
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        };
+        let (rename_result, post_result) = tokio::join!(rename, post);
+        if let Err(error) = rename_result {
+            debug!(%error, thread_id, "draft thread rename failed");
+        }
+        if let Err(error) = post_result {
+            debug!(%error, thread_id, "draft thread publication failed");
+        }
+        if let Err(error) = self
+            .discord
+            .edit_thread(thread_id, &name, false, true)
+            .await
+        {
+            debug!(%error, thread_id, "draft thread lock failed");
+        }
+        // The production Python path leaves the thread locked but not
+        // archived until `/record` or `/record abort` finalizes it.
+    }
+
+    fn schedule_timeout(&self, guild_id: i64, session_id: u64, seconds: u64) {
+        self.cancel_timeout(guild_id);
+        let drafts = Arc::clone(&self.drafts);
+        let draft_messages = Arc::clone(&self.draft_messages);
+        let discord = Arc::clone(&self.discord);
+        let lobbies = self.lobbies.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+            let Some(state) = drafts.get_state(Some(guild_id)) else {
+                return;
+            };
+            let snapshot = lock_state(&state).clone();
+            if snapshot.session_id != session_id {
+                return;
+            }
+            let kind = to_runtime_kind(snapshot.lobby_kind);
+            let operation_lock = lobbies.operation_lock(guild_id, kind);
+            let _operation_guard = operation_lock.lock().await;
+            let Some(current) = drafts.get_state(Some(guild_id)) else {
+                return;
+            };
+            if !Arc::ptr_eq(&current, &state) || lock_state(&current).session_id != session_id {
+                return;
+            }
+            lock_recover(&draft_messages).remove(&(guild_id, session_id));
+            drafts.clear_state(Some(guild_id), Some(&state));
+            let ids = snapshot
+                .player_pool_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            lobbies.release_players(guild_id, kind, &ids);
+            if let (Some(channel_id), Some(message_id)) =
+                (snapshot.draft_channel_id, snapshot.captain_ping_message_id)
+            {
+                let _ = discord
+                    .delete_message(
+                        to_u64(channel_id).unwrap_or_default(),
+                        to_u64(message_id).unwrap_or_default(),
+                    )
+                    .await;
+            }
+            if let (Some(channel_id), Some(message_id)) =
+                (snapshot.draft_channel_id, snapshot.draft_message_id)
+            {
+                let _ = discord
+                    .edit_message(
+                        to_u64(channel_id).unwrap_or_default(),
+                        to_u64(message_id).unwrap_or_default(),
+                        DiscordMessage::silent(
+                            InteractionResponse::message("").embed(timeout_embed()),
+                        ),
+                    )
+                    .await;
+            }
+        });
+        lock_recover(&self.timeout_tasks).insert(guild_id, handle);
+    }
+
+    fn cancel_timeout(&self, guild_id: i64) {
+        if let Some(handle) = lock_recover(&self.timeout_tasks).remove(&guild_id) {
+            handle.abort();
+        }
+    }
+
+    async fn sample_in_progress(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        permissions: Option<u64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        if !is_admin(&self.config, user_id, permissions) {
+            return respond_ephemeral(&responder, "❌ Admin only command.").await;
+        }
+        let state = sample_state(guild_id, false);
+        let players = sample_players();
+        self.ensure_sample_players(guild_id, &players)?;
+        responder
+            .respond(
+                InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
+                    .embed(sample_live_embed(&state))
+                    .action_rows(drafting_sample_view(&state)),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn sample_complete(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        permissions: Option<u64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        if !is_admin(&self.config, user_id, permissions) {
+            return respond_ephemeral(&responder, "❌ Admin only command.").await;
+        }
+        let state = sample_state(guild_id, true);
+        self.ensure_sample_players(guild_id, &sample_players())?;
+        let pending = db_pending_state(&state, unix_now(), self.config.bet_lock_seconds, false)?;
+        let mut pending = PendingMatchRecord {
+            pending_match_id: 0,
+            guild_id,
+            state: pending,
+            created_at: None,
+            updated_at: None,
+        };
+        pending.state.blind_bets_result = Some(json!({
+            "created": 3,
+            "total_radiant": 15,
+            "total_dire": 12,
+            "percentage": 0.1,
+            "is_bomb_pot": false,
+        }));
+        responder
+            .respond(
+                InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
+                    .embed(completion_embed(&state, &pending)),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    fn ensure_sample_players(
+        &self,
+        guild_id: i64,
+        players: &[(i64, &str, f64, &[&str])],
+    ) -> Result<(), String> {
+        for (id, name, rating, roles) in players {
+            if self
+                .players
+                .get_by_id(*id, Some(guild_id))
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                continue;
+            }
+            let mut player = NewPlayer::new(*id, *name, Some(guild_id));
+            player.glicko_rating = Some(*rating);
+            player.glicko_rd = Some(100.0);
+            player.glicko_volatility = Some(0.06);
+            player.preferred_roles = Some(roles.iter().map(|role| (*role).to_owned()).collect());
+            match self.players.add(&player) {
+                Ok(()) | Err(CoreRepositoryError::DuplicatePlayer { .. }) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_players(
+        &self,
+        ids: &[i64],
+        guild_id: i64,
+    ) -> Result<Vec<Player>, CoreRepositoryError> {
+        let players = self.players.clone();
+        let ids = ids.to_vec();
+        tokio::task::spawn_blocking(move || players.get_by_ids(&ids, Some(guild_id)))
+            .await
+            .map_err(|error| {
+                CoreRepositoryError::InvalidInput(format!("player load task failed: {error}"))
+            })?
+    }
+
+    async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String> {
+        self.reminders.schedule_betting_reminders(pending).await
+    }
+}
+
+#[derive(Clone)]
+struct StartContext {
+    user_id: i64,
+    user_display_name: String,
+    guild_id: i64,
+    channel_id: i64,
+    explicit_kind: Option<AppLobbyKind>,
+    captain1: Option<i64>,
+    captain2: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Side {
+    Radiant,
+    Dire,
+}
+
+impl Side {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Radiant => "radiant",
+            Self::Dire => "dire",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Radiant => "Radiant",
+            Self::Dire => "Dire",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeroOrder {
+    First,
+    Second,
+}
+
+impl HeroOrder {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Second => "second",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DraftComponent {
+    ChoiceSide,
+    ChoiceHero,
+    Side(Side),
+    Hero(HeroOrder),
+    Pick(i64),
+    Preference(Option<Side>),
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedComponent {
+    session_id: Option<u64>,
+    action: DraftComponent,
+}
+
+fn draft_options() -> Vec<CommandOptionSpec> {
+    vec![
+        subcommand(
+            "start",
+            "Start an Immortal Draft with captain-based player selection",
+            vec![
+                CommandOptionSpec::new(
+                    "captain1",
+                    "(Optional) Specify first captain",
+                    CommandOptionKind::User,
+                ),
+                CommandOptionSpec::new(
+                    "captain2",
+                    "(Optional) Specify second captain",
+                    CommandOptionKind::User,
+                ),
+                choices(
+                    CommandOptionSpec::new(
+                        "lobby",
+                        "Lobby to draft from (defaults to the lobby you're in)",
+                        CommandOptionKind::String,
+                    ),
+                    &[
+                        ("🍽️ All You Can Feed", "open"),
+                        ("🧀 Whine & Cheese", "lowskill"),
+                    ],
+                ),
+            ],
+        ),
+        subcommand(
+            "restart",
+            "Restart the current Immortal Draft (preserves lobby)",
+            Vec::new(),
+        ),
+        subcommand(
+            "sampleinprogress",
+            "[Admin] Show sample draft UI mid-draft for testing",
+            Vec::new(),
+        ),
+        subcommand(
+            "samplecomplete",
+            "[Admin] Show sample draft complete UI for testing",
+            Vec::new(),
+        ),
+    ]
+}
+
+fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
+    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
+}
+
+fn choices(mut option: CommandOptionSpec, values: &[(&str, &str)]) -> CommandOptionSpec {
+    option.choices = values
+        .iter()
+        .map(|(name, value)| CommandOptionChoice::String {
+            name: (*name).to_owned(),
+            value: (*value).to_owned(),
+        })
+        .collect();
+    option
+}
+
+fn leaf_command(options: &[InteractionOption]) -> Result<(&str, &[InteractionOption]), String> {
+    let option = options
+        .iter()
+        .find(|option| matches!(option.value, InteractionValue::Subcommand(_)))
+        .ok_or_else(|| "/draft requires a subcommand".to_owned())?;
+    let InteractionValue::Subcommand(children) = &option.value else {
+        unreachable!()
+    };
+    Ok((&option.name, children.as_slice()))
+}
+
+fn optional_lobby_kind(options: &[InteractionOption]) -> Result<Option<AppLobbyKind>, String> {
+    let Some(value) = options.iter().find(|option| option.name == "lobby") else {
+        return Ok(None);
+    };
+    let InteractionValue::String(value) = &value.value else {
+        return Err("draft lobby option must be a string".to_owned());
+    };
+    match value.as_str() {
+        "open" => Ok(Some(AppLobbyKind::Open)),
+        "lowskill" => Ok(Some(AppLobbyKind::LowSkill)),
+        _ => Err("draft lobby option must be open or lowskill".to_owned()),
+    }
+}
+
+fn optional_user(options: &[InteractionOption], name: &str) -> Result<Option<i64>, String> {
+    let Some(option) = options.iter().find(|option| option.name == name) else {
+        return Ok(None);
+    };
+    let InteractionValue::User { id, .. } = &option.value else {
+        return Err(format!("draft {name} option must be a user"));
+    };
+    signed_id(*id, name).map(Some)
+}
+
+fn resolve_lobby_kind(
+    memberships: &[AppLobbyKind],
+    explicit: Option<AppLobbyKind>,
+) -> Result<AppLobbyKind, String> {
+    if let Some(kind) = explicit {
+        return Ok(kind);
+    }
+    match memberships {
+        [] => Err("❌ Join a lobby before using `/draft start`.".to_owned()),
+        [kind] => Ok(*kind),
+        _ => Err(cama_app::draft::AMBIGUOUS_LOBBY_MESSAGE.to_owned()),
+    }
+}
+
+fn parse_component(custom_id: &str) -> Result<ParsedComponent, String> {
+    if let Some(action) = custom_id.strip_prefix("draft_") {
+        let action = match action {
+            "choice_side" => DraftComponent::ChoiceSide,
+            "choice_hero_pick" => DraftComponent::ChoiceHero,
+            value if value.starts_with("pick_") => value[5..]
+                .parse::<i64>()
+                .map_or(DraftComponent::Unknown, DraftComponent::Pick),
+            "pref_radiant" => DraftComponent::Preference(Some(Side::Radiant)),
+            "pref_dire" => DraftComponent::Preference(Some(Side::Dire)),
+            "pref_clear" => DraftComponent::Preference(None),
+            _ => DraftComponent::Unknown,
+        };
+        return Ok(ParsedComponent {
+            session_id: None,
+            action,
+        });
+    }
+    let mut parts = custom_id.split(':');
+    if parts.next() != Some("draft") {
+        return Err("invalid draft component prefix".to_owned());
+    }
+    let first = parts
+        .next()
+        .ok_or_else(|| "draft component is incomplete".to_owned())?;
+    let (session_id, action_name) = if let Ok(session) = first.parse::<u64>() {
+        (
+            Some(session),
+            parts
+                .next()
+                .ok_or_else(|| "draft component is incomplete".to_owned())?,
+        )
+    } else {
+        (None, first)
+    };
+    let action = match action_name {
+        "choice_side" => DraftComponent::ChoiceSide,
+        "choice_hero" => DraftComponent::ChoiceHero,
+        "side" => match parts.next() {
+            Some("radiant") => DraftComponent::Side(Side::Radiant),
+            Some("dire") => DraftComponent::Side(Side::Dire),
+            _ => DraftComponent::Unknown,
+        },
+        "hero" => match parts.next() {
+            Some("first") => DraftComponent::Hero(HeroOrder::First),
+            Some("second") => DraftComponent::Hero(HeroOrder::Second),
+            _ => DraftComponent::Unknown,
+        },
+        "pick" => parts
+            .next()
+            .and_then(|id| id.parse::<i64>().ok())
+            .map_or(DraftComponent::Unknown, DraftComponent::Pick),
+        "pref" => match parts.next() {
+            Some("radiant") => DraftComponent::Preference(Some(Side::Radiant)),
+            Some("dire") => DraftComponent::Preference(Some(Side::Dire)),
+            Some("clear") => DraftComponent::Preference(None),
+            _ => DraftComponent::Unknown,
+        },
+        _ => DraftComponent::Unknown,
+    };
+    Ok(ParsedComponent { session_id, action })
+}
+
+fn pre_choice_view(
+    session: u64,
+    chooser_id: i64,
+    side_choice: bool,
+    winner_choice: bool,
+) -> Vec<InteractionActionRow> {
+    if winner_choice {
+        return vec![InteractionActionRow::buttons(vec![
+            InteractionButton::new(format!("draft:{session}:choice_side"), "Choose Side")
+                .emoji("🗺️"),
+            InteractionButton::new(
+                format!("draft:{session}:choice_hero"),
+                "Choose Hero Pick Order",
+            )
+            .emoji("⚔️"),
+        ])];
+    }
+    if side_choice {
+        vec![InteractionActionRow::buttons(vec![
+            InteractionButton::new(format!("draft:{session}:side:radiant"), "Radiant")
+                .style(InteractionButtonStyle::Success)
+                .emoji("🟢"),
+            InteractionButton::new(format!("draft:{session}:side:dire"), "Dire")
+                .style(InteractionButtonStyle::Danger)
+                .emoji("🔴"),
+        ])]
+    } else {
+        let _ = chooser_id;
+        vec![InteractionActionRow::buttons(vec![
+            InteractionButton::new(format!("draft:{session}:hero:first"), "First Pick").emoji("1️⃣"),
+            InteractionButton::new(format!("draft:{session}:hero:second"), "Second Pick")
+                .style(InteractionButtonStyle::Secondary)
+                .emoji("2️⃣"),
+        ])]
+    }
+}
+
+fn drafting_view(state: &DraftState) -> Vec<InteractionActionRow> {
+    drafting_view_with_session(state, Some(state.session_id))
+}
+
+fn drafting_sample_view(state: &DraftState) -> Vec<InteractionActionRow> {
+    drafting_view_with_session(state, None)
+}
+
+fn drafting_view_with_session(
+    state: &DraftState,
+    session: Option<u64>,
+) -> Vec<InteractionActionRow> {
+    let mut available = state
+        .available_player_ids()
+        .into_iter()
+        .filter_map(|id| state.player_pool_data.get(&id).map(|data| (id, data)))
+        .collect::<Vec<_>>();
+    available.sort_by(|(_, left), (_, right)| {
+        right
+            .rating
+            .partial_cmp(&left.rating)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut rows = Vec::new();
+    for chunk in available.into_iter().take(8).collect::<Vec<_>>().chunks(4) {
+        rows.push(InteractionActionRow::buttons(
+            chunk
+                .iter()
+                .map(|(id, player)| {
+                    let label = format!(
+                        "{} ({:.0}) {}",
+                        player.name,
+                        player.rating,
+                        format_roles(&player.roles)
+                    );
+                    let custom_id = session.map_or_else(
+                        || format!("draft_pick_{id}"),
+                        |session| format!("draft:{session}:pick:{id}"),
+                    );
+                    InteractionButton::new(custom_id, label.chars().take(80).collect::<String>())
+                })
+                .collect(),
+        ));
+    }
+    rows.push(InteractionActionRow::buttons(vec![
+        InteractionButton::new(
+            session.map_or_else(
+                || "draft_pref_radiant".to_owned(),
+                |session| format!("draft:{session}:pref:radiant"),
+            ),
+            "Prefer Radiant",
+        )
+        .style(InteractionButtonStyle::Success)
+        .emoji("🟢"),
+        InteractionButton::new(
+            session.map_or_else(
+                || "draft_pref_dire".to_owned(),
+                |session| format!("draft:{session}:pref:dire"),
+            ),
+            "Prefer Dire",
+        )
+        .style(InteractionButtonStyle::Danger)
+        .emoji("🔴"),
+        InteractionButton::new(
+            session.map_or_else(
+                || "draft_pref_clear".to_owned(),
+                |session| format!("draft:{session}:pref:clear"),
+            ),
+            "Clear Preference",
+        )
+        .style(InteractionButtonStyle::Secondary)
+        .emoji("❌"),
+    ]));
+    rows
+}
+
+fn opening_embed(state: &DraftState, starter: &str) -> InteractionEmbed {
+    let captain1 = state
+        .captain1_id
+        .and_then(|id| state.player_pool_data.get(&id))
+        .map_or("Unknown", |player| player.name.as_str());
+    let captain2 = state
+        .captain2_id
+        .and_then(|id| state.player_pool_data.get(&id))
+        .map_or("Unknown", |player| player.name.as_str());
+    let winner = if state.coinflip_winner_id == state.captain1_id {
+        captain1
+    } else {
+        captain2
+    };
+    interaction_embed(DraftEmbed {
+        title: format!(
+            "🎲 IMMORTAL DRAFT — {}",
+            to_runtime_kind(state.lobby_kind).label()
+        ),
+        description: String::new(),
+        footer: Some(format!("Started by {starter}")),
+        fields: vec![
+            DraftEmbedField {
+                name: "👑 Captains".to_owned(),
+                value: format!(
+                    "**{captain1}** ({:.0})\n**{captain2}** ({:.0})",
+                    state.captain1_rating, state.captain2_rating
+                ),
+                inline: false,
+            },
+            DraftEmbedField {
+                name: "🎰 Coinflip Result".to_owned(),
+                value: format!("**{winner}** won the coinflip!"),
+                inline: false,
+            },
+            DraftEmbedField {
+                name: "Next Step".to_owned(),
+                value: format!("**{winner}**, choose whether to pick Side or Hero Pick Order."),
+                inline: false,
+            },
+            DraftEmbedField {
+                name: "📋 Player Pool".to_owned(),
+                value: build_pool_field(state),
+                inline: false,
+            },
+        ],
+    })
+}
+
+fn choice_embed(state: &DraftState, title: &str, description: &str) -> InteractionResponse {
+    InteractionResponse::message("").embed(interaction_embed(DraftEmbed {
+        title: format!(
+            "🎲 IMMORTAL DRAFT — {}",
+            to_runtime_kind(state.lobby_kind).label()
+        ),
+        description: description.to_owned(),
+        fields: vec![
+            DraftEmbedField {
+                name: title.to_owned(),
+                value: description.to_owned(),
+                inline: false,
+            },
+            DraftEmbedField {
+                name: "📋 Player Pool".to_owned(),
+                value: build_pool_field(state),
+                inline: false,
+            },
+        ],
+        ..DraftEmbed::default()
+    }))
+}
+
+fn live_embed(state: &DraftState) -> InteractionEmbed {
+    let current = state
+        .current_captain_id()
+        .and_then(|id| state.player_pool_data.get(&id))
+        .map_or("N/A", |player| player.name.as_str());
+    let team = state.current_captain_team().unwrap_or("N/A");
+    let first_is_radiant = state.current_round_first_captain_id == state.radiant_captain_id;
+    let (first, second) = if first_is_radiant {
+        ("🟢 Radiant", "🔴 Dire")
+    } else {
+        ("🔴 Dire", "🟢 Radiant")
+    };
+    interaction_embed(DraftEmbed {
+        title: format!(
+            "⚔️ IMMORTAL DRAFT — {} - Player Selection",
+            to_runtime_kind(state.lobby_kind).label()
+        ),
+        description: format!(
+            "**Round {}/4:** {first} → {second}\n**Team Totals:** 🟢 {:.0} • 🔴 {:.0}\n\n**{current}** ({}) to pick! (Pick {}/2)",
+            (state.current_pick_index / 2 + 1).min(4),
+            state.radiant_rating_total(),
+            state.dire_rating_total(),
+            title_case(team),
+            state.current_pick_index % 2 + 1,
+        ),
+        footer: Some(format!(
+            "Pick #{}/{} | Click a player name to pick",
+            (state.current_pick_index + 1).min(DRAFT_TOTAL_PICKS),
+            DRAFT_TOTAL_PICKS
+        )),
+        fields: vec![
+            DraftEmbedField {
+                name: format!("🟢 Radiant ({}/5)", state.radiant_player_ids.len()),
+                value: team_field(state, &state.radiant_player_ids),
+                inline: true,
+            },
+            DraftEmbedField {
+                name: format!("🔴 Dire ({}/5)", state.dire_player_ids.len()),
+                value: team_field(state, &state.dire_player_ids),
+                inline: true,
+            },
+            DraftEmbedField {
+                name: format!("📋 Available ({})", state.available_player_ids().len()),
+                value: available_field(state),
+                inline: false,
+            },
+            DraftEmbedField {
+                name: "ℹ️ In-Game Hero Draft".to_owned(),
+                value: format!(
+                    "**{}** picks first",
+                    if state.radiant_hero_pick_order == Some(1) {
+                        "Radiant"
+                    } else {
+                        "Dire"
+                    }
+                ),
+                inline: false,
+            },
+        ],
+    })
+}
+
+fn sample_live_embed(state: &DraftState) -> InteractionEmbed {
+    live_embed(state)
+}
+
+fn completion_embed(state: &DraftState, pending: &PendingMatchRecord) -> InteractionEmbed {
+    let first_team = if state.radiant_hero_pick_order == Some(1) {
+        "Radiant"
+    } else {
+        "Dire"
+    };
+    let mut fields = vec![
+        DraftEmbedField {
+            name: format!("🟢 Radiant ({:.0})", pending.state.radiant_value),
+            value: team_field(state, &state.radiant_player_ids),
+            inline: true,
+        },
+        DraftEmbedField {
+            name: format!("🔴 Dire ({:.0})", pending.state.dire_value),
+            value: team_field(state, &state.dire_player_ids),
+            inline: true,
+        },
+        DraftEmbedField {
+            name: "📊 Balance".to_owned(),
+            value: format!("**Value diff:** {:.0}", pending.state.value_diff),
+            inline: false,
+        },
+    ];
+    if let Some(blind) = pending.state.blind_bets_result.as_ref()
+        && blind
+            .get("created")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+            > 0
+    {
+        fields.push(DraftEmbedField {
+            name: if pending.state.is_bomb_pot {
+                "💣 Bomb Pot Stakes".to_owned()
+            } else {
+                "🎲 Blind Bets".to_owned()
+            },
+            value: blind_bet_display(blind, pending.state.is_bomb_pot),
+            inline: false,
+        });
+    }
+    if let Some(spectator) = pending
+        .state
+        .blind_bets_result
+        .as_ref()
+        .and_then(|result| result.get("spectator_bets"))
+        && spectator
+            .get("created")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+            > 0
+    {
+        fields.push(DraftEmbedField {
+            name: "💸 Spectator Auto-Wagers".to_owned(),
+            value: spectator_bet_display(spectator),
+            inline: false,
+        });
+    }
+    interaction_embed(DraftEmbed {
+        title: format!(
+            "{} IMMORTAL DRAFT — {} — Match #{} - Complete!",
+            if pending.state.is_bomb_pot {
+                "💣 BOMB POT 💣"
+            } else {
+                "⚔️"
+            },
+            to_runtime_kind(state.lobby_kind).label(),
+            pending.pending_match_id
+        ),
+        description: format!("**{first_team}** picks first in hero draft"),
+        footer: Some("Use /record to record the match result when finished.".to_owned()),
+        fields,
+    })
+}
+
+fn blind_bet_display(blind: &Value, is_bomb_pot: bool) -> String {
+    let created = blind
+        .get("created")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let radiant = blind
+        .get("total_radiant")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let dire = blind
+        .get("total_dire")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    if is_bomb_pot {
+        let percentage = blind
+            .get("percentage")
+            .and_then(Value::as_f64)
+            .unwrap_or_default()
+            * 100.0;
+        format!(
+            "💣 **BOMB POT:** All 10 players ante'd in! ({percentage}% + 10 {JOPACOIN_EMOTE} ante)\n🟢 Radiant: {radiant} {JOPACOIN_EMOTE} | 🔴 Dire: {dire} {JOPACOIN_EMOTE}\n_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
+        )
+    } else {
+        format!(
+            "**Auto-liquidity:** {created} players contributed blind bets\n🟢 Radiant: {radiant} {JOPACOIN_EMOTE} | 🔴 Dire: {dire} {JOPACOIN_EMOTE}"
+        )
+    }
+}
+
+fn spectator_bet_display(spectator: &Value) -> String {
+    let created = spectator
+        .get("created")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let radiant = spectator
+        .get("total_radiant")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let dire = spectator
+        .get("total_dire")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    format!(
+        "**Auto-wagers:** {created} spectators contributed\n🟢 Radiant: {radiant} {JOPACOIN_EMOTE} | 🔴 Dire: {dire} {JOPACOIN_EMOTE}"
+    )
+}
+
+fn interaction_embed(embed: DraftEmbed) -> InteractionEmbed {
+    InteractionEmbed {
+        title: Some(embed.title),
+        description: (!embed.description.is_empty()).then_some(embed.description),
+        footer: embed.footer,
+        fields: embed
+            .fields
+            .into_iter()
+            .map(|field| InteractionEmbedField {
+                name: field.name,
+                value: field.value,
+                inline: field.inline,
+            })
+            .collect(),
+        ..InteractionEmbed::default()
+    }
+}
+
+fn timeout_embed() -> InteractionEmbed {
+    interaction_embed(DraftEmbed {
+        title: "⏰ Draft Timed Out".to_owned(),
+        description: "The draft was automatically cancelled due to inactivity.\n\nThe lobby has been preserved. Use `/draft start` to begin a new draft.".to_owned(),
+        ..DraftEmbed::default()
+    })
+}
+
+fn build_pool_field(state: &DraftState) -> String {
+    let mut players = state
+        .player_pool_ids
+        .iter()
+        .copied()
+        .filter(|id| Some(*id) != state.captain1_id && Some(*id) != state.captain2_id)
+        .filter_map(|id| state.player_pool_data.get(&id))
+        .collect::<Vec<_>>();
+    players.sort_by(|left, right| {
+        right
+            .rating
+            .partial_cmp(&left.rating)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if players.is_empty() {
+        return "No players in pool".to_owned();
+    }
+    players
+        .into_iter()
+        .map(|player| {
+            format!(
+                "{} ({:.0}) {}",
+                player.name,
+                player.rating,
+                format_roles(&player.roles)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn team_field(state: &DraftState, ids: &[i64]) -> String {
+    if ids.is_empty() {
+        return "Empty".to_owned();
+    }
+    ids.iter()
+        .map(|id| {
+            let captain =
+                Some(*id) == state.radiant_captain_id || Some(*id) == state.dire_captain_id;
+            let player = state.player_pool_data.get(id);
+            let name = player.map_or_else(|| format!("Player {id}"), |player| player.name.clone());
+            let rating = player.map_or(1500.0, |player| player.rating);
+            format!(
+                "{} {} ({rating:.0})",
+                if captain { "👑" } else { "⠀⠀" },
+                name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn available_field(state: &DraftState) -> String {
+    state
+        .available_player_ids()
+        .into_iter()
+        .filter_map(|id| state.player_pool_data.get(&id).map(|player| (id, player)))
+        .map(|(id, player)| {
+            let preference = match state.side_preferences.get(&id) {
+                Some(side) if side == "radiant" => " 🟢",
+                Some(side) if side == "dire" => " 🔴",
+                _ => "",
+            };
+            format!(
+                "{} ({:.0}) {}{preference}",
+                player.name,
+                player.rating,
+                format_roles(&player.roles)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_roles(roles: &[String]) -> String {
+    if roles.is_empty() {
+        return String::new();
+    }
+    let mut roles = roles.iter().cloned().enumerate().collect::<Vec<_>>();
+    roles.sort_by_key(|(index, role)| (role.parse::<i64>().unwrap_or(99), *index));
+    format!(
+        "[{}]",
+        roles
+            .into_iter()
+            .map(|(_, role)| role)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn sample_state(guild_id: i64, complete: bool) -> DraftState {
+    let mut state = DraftState::with_session(guild_id, DraftLobbyKind::Open, 0);
+    state.captain1_id = Some(-101);
+    state.captain2_id = Some(-102);
+    state.captain1_rating = 1650.0;
+    state.captain2_rating = 1580.0;
+    state.radiant_captain_id = Some(-101);
+    state.dire_captain_id = Some(-102);
+    state.coinflip_winner_id = Some(-101);
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.player_pool_ids = vec![-101, -102, -103, -104, -105, -106, -107, -108, -109, -110];
+    state.excluded_player_ids = vec![-111, -112];
+    for (id, name, rating, roles) in sample_players() {
+        state.player_pool_data.insert(
+            id,
+            PlayerPoolEntry {
+                name: name.to_owned(),
+                rating,
+                roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+            },
+        );
+    }
+    state.radiant_player_ids = if complete {
+        vec![-101, -103, -105, -107, -109]
+    } else {
+        vec![-101]
+    };
+    state.dire_player_ids = if complete {
+        vec![-102, -104, -106, -108, -110]
+    } else {
+        vec![-102, -103]
+    };
+    state.side_preferences.insert(-105, "radiant".to_owned());
+    state.side_preferences.insert(-107, "dire".to_owned());
+    state.current_pick_index = if complete { DRAFT_TOTAL_PICKS } else { 1 };
+    state.phase = if complete {
+        DraftPhase::Complete
+    } else {
+        DraftPhase::Drafting
+    };
+    state.current_round_first_captain_id = Some(-102);
+    state
+}
+
+fn sample_players() -> Vec<(i64, &'static str, f64, &'static [&'static str])> {
+    vec![
+        (-101, "SampleCapt1", 1650.0, &["1", "2"]),
+        (-102, "SampleCapt2", 1580.0, &["1", "3"]),
+        (-103, "SamplePlayer3", 1720.0, &["2"]),
+        (-104, "SamplePlayer4", 1540.0, &["3", "4"]),
+        (-105, "SamplePlayer5", 1610.0, &["4", "5"]),
+        (-106, "SamplePlayer6", 1490.0, &["5"]),
+        (-107, "SamplePlayer7", 1555.0, &["1", "2", "3"]),
+        (-108, "SamplePlayer8", 1480.0, &["4", "5"]),
+        (-109, "SamplePlayer9", 1630.0, &["2", "3"]),
+        (-110, "SamplePlayer10", 1520.0, &["3", "4", "5"]),
+        (-111, "ExcludedPlayer1", 1450.0, &["5"]),
+        (-112, "ExcludedPlayer2", 1410.0, &["4", "5"]),
+    ]
+}
+
+fn db_pending_state(
+    state: &DraftState,
+    now: i64,
+    bet_lock_seconds: i64,
+    is_bomb_pot: bool,
+) -> Result<PendingMatchState, String> {
+    let radiant_value = state.radiant_rating_total();
+    let dire_value = state.dire_rating_total();
+    let lock_until = now
+        .checked_add(bet_lock_seconds)
+        .ok_or_else(|| "betting lock timestamp overflow".to_owned())?;
+    Ok(PendingMatchState {
+        radiant_team_ids: state.radiant_player_ids.clone(),
+        dire_team_ids: state.dire_player_ids.clone(),
+        excluded_player_ids: state.excluded_player_ids.clone(),
+        excluded_conditional_player_ids: state.half_exclusion_increment_ids.clone(),
+        radiant_value,
+        dire_value,
+        value_diff: (radiant_value - dire_value).abs(),
+        first_pick_team: Some(
+            if state.radiant_hero_pick_order == Some(1) {
+                "Radiant"
+            } else {
+                "Dire"
+            }
+            .to_owned(),
+        ),
+        shuffle_timestamp: Some(now),
+        bet_lock_until: Some(lock_until),
+        betting_mode: "pool".to_owned(),
+        is_bomb_pot,
+        is_draft: true,
+        lobby_kind: Some(state.lobby_kind.value().to_owned()),
+        exclusion_updates_deferred: true,
+        full_exclusion_increment_ids: state.full_exclusion_increment_ids.clone(),
+        half_exclusion_increment_ids: state.half_exclusion_increment_ids.clone(),
+        shuffle_message_id: state.draft_message_id,
+        shuffle_channel_id: state.draft_channel_id,
+        origin_channel_id: state.draft_channel_id,
+        ..PendingMatchState::default()
+    })
+}
+
+fn assign_captains(state: &mut DraftState, chooser: i64, other: i64, side: Side) {
+    match side {
+        Side::Radiant => {
+            state.radiant_captain_id = Some(chooser);
+            state.dire_captain_id = Some(other);
+        }
+        Side::Dire => {
+            state.dire_captain_id = Some(chooser);
+            state.radiant_captain_id = Some(other);
+        }
+    }
+}
+
+fn complete_pre_draft(state: &mut DraftState) {
+    let hero_choice = if state.winner_choice_type.as_deref() == Some("side") {
+        state.loser_choice_value.as_deref()
+    } else {
+        state.winner_choice_value.as_deref()
+    };
+    let chooser = if state.winner_choice_type.as_deref() == Some("hero_pick") {
+        state.coinflip_winner_id
+    } else {
+        state
+            .captain1_id
+            .filter(|id| Some(*id) != state.coinflip_winner_id)
+            .or(state.captain2_id)
+    };
+    let chooser_is_radiant = chooser == state.radiant_captain_id;
+    let first = hero_choice == Some("first");
+    state.radiant_hero_pick_order = Some(if chooser_is_radiant == first { 1 } else { 2 });
+    state.dire_hero_pick_order = Some(if chooser_is_radiant == first { 2 } else { 1 });
+    state.start_player_draft();
+}
+
+fn wrong_choice_message(phase: DraftPhase) -> &'static str {
+    if phase == DraftPhase::Complete {
+        "⏳ Draft results are still being finalized. Please wait."
+    } else {
+        "❌ That choice has already been made."
+    }
+}
+
+fn other_captain(state: &DraftState, captain: i64) -> Option<i64> {
+    if state.captain1_id == Some(captain) {
+        state.captain2_id
+    } else if state.captain2_id == Some(captain) {
+        state.captain1_id
+    } else {
+        None
+    }
+}
+
+fn to_draft_kind(kind: AppLobbyKind) -> DraftLobbyKind {
+    match kind {
+        AppLobbyKind::Open => DraftLobbyKind::Open,
+        AppLobbyKind::LowSkill => DraftLobbyKind::LowSkill,
+    }
+}
+
+fn to_runtime_kind(kind: DraftLobbyKind) -> AppLobbyKind {
+    match kind {
+        DraftLobbyKind::Open => AppLobbyKind::Open,
+        DraftLobbyKind::LowSkill => AppLobbyKind::LowSkill,
+    }
+}
+
+fn is_admin(config: &DraftConfig, user_id: i64, permissions: Option<u64>) -> bool {
+    config.admin_user_ids.contains(&user_id)
+        || permissions.is_some_and(|permissions| {
+            permissions & (ADMINISTRATOR_PERMISSION | MANAGE_GUILD_PERMISSION) != 0
+        })
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
+}
+
+fn percentage_points(value: f64) -> i64 {
+    if value <= 0.0 {
+        0
+    } else if value < 1.0 {
+        (value * 100.0).round() as i64
+    } else {
+        value.round() as i64
+    }
+}
+
+fn percentage_basis_points(value: f64) -> i64 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else {
+        (value * 10_000.0).round() as i64
+    }
+}
+
+fn betting_team_name(team: BettingTeam) -> &'static str {
+    match team {
+        BettingTeam::Radiant => "radiant",
+        BettingTeam::Dire => "dire",
+    }
+}
+
+fn blind_outcome_json(outcome: &cama_db::betting_service_repository::BlindBetOutcome) -> Value {
+    let bets = outcome
+        .created
+        .iter()
+        .map(|bet| {
+            json!({
+                "discord_id": bet.discord_id,
+                "team": betting_team_name(bet.team),
+                "amount": bet.amount,
+            })
+        })
+        .collect::<Vec<_>>();
+    let skipped = outcome
+        .skipped
+        .iter()
+        .map(|skip| {
+            json!({
+                "discord_id": skip.discord_id,
+                "reason": skip.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "created": outcome.created.len(),
+        "total_radiant": outcome.total_radiant,
+        "total_dire": outcome.total_dire,
+        "is_bomb_pot": outcome.is_bomb_pot,
+        "bets": bets,
+        "skipped": skipped,
+        "percentage": if outcome.is_bomb_pot { 0.15 } else { 0.1 },
+    })
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+fn signed_id(id: u64, kind: &str) -> Result<i64, String> {
+    i64::try_from(id).map_err(|_| format!("Discord {kind} ID exceeds SQLite range"))
+}
+
+fn to_i64(id: u64) -> Result<i64, String> {
+    signed_id(id, "Discord")
+}
+
+fn to_u64(id: i64) -> Result<u64, String> {
+    u64::try_from(id).map_err(|_| format!("SQLite ID {id} is negative"))
+}
+
+fn lock_state<'a>(state: &'a Arc<Mutex<DraftState>>) -> MutexGuard<'a, DraftState> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+async fn respond_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: impl Into<String>,
+) -> Result<(), String> {
+    responder
+        .respond(
+            InteractionResponse::message(content)
+                .ephemeral()
+                .without_mentions(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn followup_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: impl Into<String>,
+) -> Result<(), String> {
+    responder
+        .followup(
+            InteractionResponse::message(content)
+                .ephemeral()
+                .without_mentions(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn delete_followup(
+    responder: &Arc<dyn InteractionResponder>,
+    receipt: Option<crate::registration::InteractionMessageReceipt>,
+) {
+    if let Some(receipt) = receipt {
+        let _ = responder.delete_message(receipt).await;
+    }
+}
+
+async fn completion_response(
+    responder: &Arc<dyn InteractionResponder>,
+    pending_match_id: Option<i64>,
+    _error: String,
+    deferred: bool,
+) -> Result<(), String> {
+    let content = pending_match_id.map_or_else(
+        || COMPLETION_ERROR_WITHOUT_MATCH.to_owned(),
+        |id| format!(
+            "⚠️ Draft complete — Match #{id} was created, but an error occurred while announcing it. Betting and recording still work: play the match and use `/record`, or use `/record abort` to cancel it."
+        ),
+    );
+    let response = InteractionResponse::message(content)
+        .ephemeral()
+        .without_mentions();
+    if deferred {
+        responder.followup(response).await
+    } else {
+        responder.respond(response).await
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+#[path = "draft_provider/tests.rs"]
+mod tests;

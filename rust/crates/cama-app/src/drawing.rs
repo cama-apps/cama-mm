@@ -1,0 +1,1840 @@
+//! Deterministic, Discord-neutral production chart rendering.
+//!
+//! This module owns the migrated chart geometry and decisions with a small RGBA
+//! rasterizer and real PNG encoder, so the Rust runtime emits seekable image
+//! bytes without Python, native graphics dependencies, or process-global
+//! plotting state.
+
+use std::collections::BTreeMap;
+use std::io::Cursor;
+
+pub const DISCORD_BG: Rgba = Rgba::rgb(0x36, 0x39, 0x3f);
+pub const DISCORD_DARKER: Rgba = Rgba::rgb(0x2f, 0x31, 0x36);
+pub const DISCORD_ACCENT: Rgba = Rgba::rgb(0x58, 0x65, 0xf2);
+pub const DISCORD_GREEN: Rgba = Rgba::rgb(0x57, 0xf2, 0x87);
+pub const DISCORD_RED: Rgba = Rgba::rgb(0xed, 0x42, 0x45);
+pub const DISCORD_YELLOW: Rgba = Rgba::rgb(0xfe, 0xe7, 0x5c);
+pub const DISCORD_WHITE: Rgba = Rgba::rgb(0xff, 0xff, 0xff);
+pub const DISCORD_GREY: Rgba = Rgba::rgb(0xb9, 0xbb, 0xbe);
+pub const DISCORD_GRID: Rgba = Rgba::rgb(0x45, 0x49, 0x50);
+
+const ROLE_ORDER: [&str; 9] = [
+    "Carry",
+    "Nuker",
+    "Initiator",
+    "Disabler",
+    "Durable",
+    "Escape",
+    "Support",
+    "Pusher",
+    "Jungler",
+];
+
+const Y_LABEL_MAGNITUDES: [i32; 16] = [
+    1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rgba(pub [u8; 4]);
+
+impl Rgba {
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self([red, green, blue, 0xff])
+    }
+
+    const fn with_alpha(self, alpha: u8) -> Self {
+        Self([self.0[0], self.0[1], self.0[2], alpha])
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Raster {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+impl Raster {
+    fn new(width: usize, height: usize, color: Rgba) -> Self {
+        let mut pixels = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&color.0);
+        }
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    fn set_pixel(&mut self, x: i32, y: i32, color: Rgba) {
+        let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+            return;
+        };
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = (y * self.width + x) * 4;
+        if color.0[3] == 0xff {
+            self.pixels[offset..offset + 4].copy_from_slice(&color.0);
+            return;
+        }
+        let alpha = u16::from(color.0[3]);
+        let inverse = 255_u16 - alpha;
+        for channel in 0..3 {
+            let blended = (u16::from(color.0[channel]) * alpha
+                + u16::from(self.pixels[offset + channel]) * inverse
+                + 127)
+                / 255;
+            self.pixels[offset + channel] = u8::try_from(blended).unwrap_or(255);
+        }
+        self.pixels[offset + 3] = 0xff;
+    }
+
+    fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: Rgba) {
+        for y in top.min(bottom)..top.max(bottom) {
+            for x in left.min(right)..left.max(right) {
+                self.set_pixel(x, y, color);
+            }
+        }
+    }
+
+    fn line(&mut self, start: (i32, i32), end: (i32, i32), color: Rgba, width: i32) {
+        let (mut x0, mut y0) = start;
+        let (x1, y1) = end;
+        let dx = (x1 - x0).abs();
+        let step_x = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let step_y = if y0 < y1 { 1 } else { -1 };
+        let mut error = dx + dy;
+        let radius = width.saturating_sub(1) / 2;
+        loop {
+            for offset_y in -radius..=radius {
+                for offset_x in -radius..=radius {
+                    self.set_pixel(x0 + offset_x, y0 + offset_y, color);
+                }
+            }
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let twice_error = error * 2;
+            if twice_error >= dy {
+                error += dy;
+                x0 += step_x;
+            }
+            if twice_error <= dx {
+                error += dx;
+                y0 += step_y;
+            }
+        }
+    }
+
+    fn circle(&mut self, center: (i32, i32), radius: i32, color: Rgba) {
+        let squared = radius * radius;
+        for y in -radius..=radius {
+            for x in -radius..=radius {
+                if x * x + y * y <= squared {
+                    self.set_pixel(center.0 + x, center.1 + y, color);
+                }
+            }
+        }
+    }
+
+    fn polygon(&mut self, points: &[(i32, i32)], color: Rgba) {
+        if points.len() < 3 {
+            return;
+        }
+        let min_y = points.iter().map(|point| point.1).min().unwrap_or(0);
+        let max_y = points.iter().map(|point| point.1).max().unwrap_or(0);
+        for y in min_y..=max_y {
+            let mut intersections = Vec::new();
+            for index in 0..points.len() {
+                let first = points[index];
+                let second = points[(index + 1) % points.len()];
+                if (first.1 <= y && second.1 > y) || (second.1 <= y && first.1 > y) {
+                    let numerator = i64::from(y - first.1) * i64::from(second.0 - first.0);
+                    let denominator = i64::from(second.1 - first.1);
+                    let x = i64::from(first.0) + numerator / denominator;
+                    intersections.push(i32::try_from(x).unwrap_or(first.0));
+                }
+            }
+            intersections.sort_unstable();
+            for pair in intersections.chunks_exact(2) {
+                for x in pair[0]..=pair[1] {
+                    self.set_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn polygon_outline(&mut self, points: &[(i32, i32)], color: Rgba) {
+        for index in 0..points.len() {
+            self.line(points[index], points[(index + 1) % points.len()], color, 1);
+        }
+    }
+
+    fn draw_glyph(&mut self, x: i32, y: i32, character: char, color: Rgba, scale: i32) {
+        for (row, bits) in glyph(character).into_iter().enumerate() {
+            for column in 0..5_u8 {
+                if bits & (1 << (4 - column)) == 0 {
+                    continue;
+                }
+                let pixel_x = x + i32::from(column) * scale;
+                let pixel_y = y + i32::try_from(row).unwrap_or(0) * scale;
+                self.fill_rect(pixel_x, pixel_y, pixel_x + scale, pixel_y + scale, color);
+            }
+        }
+    }
+
+    fn text(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
+        let mut cursor = x;
+        for character in text.chars() {
+            self.draw_glyph(cursor, y, character, color, scale);
+            cursor += 6 * scale;
+        }
+    }
+
+    fn pie(&mut self, center: (i32, i32), radius: i32, slices: &[(f64, Rgba)]) {
+        let total = slices.iter().map(|(value, _)| value.max(0.0)).sum::<f64>();
+        if total <= 0.0 {
+            return;
+        }
+        let squared = radius * radius;
+        for y in -radius..=radius {
+            for x in -radius..=radius {
+                if x * x + y * y > squared {
+                    continue;
+                }
+                let angle = (f64::from(y).atan2(f64::from(x)).to_degrees() + 450.0) % 360.0;
+                let mut threshold = 0.0;
+                let mut color = slices
+                    .iter()
+                    .rev()
+                    .find(|slice| slice.0 > 0.0)
+                    .map_or(DISCORD_GREY, |slice| slice.1);
+                for (value, candidate) in slices {
+                    if *value <= 0.0 {
+                        continue;
+                    }
+                    threshold += value.max(0.0) / total * 360.0;
+                    if angle <= threshold {
+                        color = *candidate;
+                        break;
+                    }
+                }
+                self.set_pixel(center.0 + x, center.1 + y, color);
+            }
+        }
+    }
+}
+
+fn glyph(character: char) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [14, 17, 16, 23, 17, 17, 15],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'I' => [31, 4, 4, 4, 4, 4, 31],
+        'J' => [7, 2, 2, 2, 18, 18, 12],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 21, 19, 17, 17, 17],
+        'O' => [14, 17, 17, 17, 17, 17, 14],
+        'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
+        'T' => [31, 4, 4, 4, 4, 4, 4],
+        'U' => [17, 17, 17, 17, 17, 17, 14],
+        'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
+        'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
+        '0' => [14, 17, 19, 21, 25, 17, 14],
+        '1' => [4, 12, 4, 4, 4, 4, 14],
+        '2' => [14, 17, 1, 2, 4, 8, 31],
+        '3' => [30, 1, 1, 14, 1, 1, 30],
+        '4' => [2, 6, 10, 18, 31, 2, 2],
+        '5' => [31, 16, 16, 30, 1, 1, 30],
+        '6' => [14, 16, 16, 30, 17, 17, 14],
+        '7' => [31, 1, 2, 4, 8, 8, 8],
+        '8' => [14, 17, 17, 14, 17, 17, 14],
+        '9' => [14, 17, 17, 15, 1, 1, 14],
+        '-' => [0, 0, 0, 31, 0, 0, 0],
+        '+' => [0, 4, 4, 31, 4, 4, 0],
+        '=' => [0, 31, 0, 31, 0, 0, 0],
+        '.' => [0, 0, 0, 0, 0, 12, 12],
+        ':' => [0, 12, 12, 0, 12, 12, 0],
+        '%' => [25, 25, 2, 4, 8, 19, 19],
+        '/' => [1, 2, 2, 4, 8, 8, 16],
+        '(' => [2, 4, 8, 8, 8, 4, 2],
+        ')' => [8, 4, 2, 2, 2, 4, 8],
+        '#' => [10, 31, 10, 10, 31, 10, 0],
+        '\'' => [4, 4, 2, 0, 0, 0, 0],
+        ' ' => [0; 7],
+        _ => [14, 17, 1, 2, 4, 0, 4],
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MatchRow {
+    pub hero_id: Option<i64>,
+    pub hero_name: Option<String>,
+    pub kills: i64,
+    pub deaths: i64,
+    pub assists: i64,
+    pub won: Option<bool>,
+    pub duration_seconds: Option<u64>,
+}
+
+/// Render the compact match table used by profile commands.
+#[must_use]
+pub fn draw_matches_table(
+    matches: &[MatchRow],
+    hero_names: &BTreeMap<i64, String>,
+) -> Cursor<Vec<u8>> {
+    if matches.is_empty() {
+        let mut raster = Raster::new(400, 100, DISCORD_BG);
+        raster.text(20, 40, "No matches found", DISCORD_GREY, 2);
+        return render(raster);
+    }
+
+    let width = 370;
+    let height = 52 + matches.len() * 36;
+    let mut raster = Raster::new(width, height, DISCORD_BG);
+    raster.text(15, 14, "HERO", DISCORD_WHITE, 1);
+    raster.text(137, 14, "K", DISCORD_WHITE, 1);
+    raster.text(172, 14, "D", DISCORD_WHITE, 1);
+    raster.text(207, 14, "A", DISCORD_WHITE, 1);
+    raster.text(238, 14, "RESULT", DISCORD_WHITE, 1);
+    raster.text(298, 14, "DURATION", DISCORD_WHITE, 1);
+    raster.fill_rect(10, 40, 360, 42, DISCORD_ACCENT);
+
+    for (index, row) in matches.iter().enumerate() {
+        let y = 43 + i32::try_from(index).unwrap_or(0) * 36;
+        if index % 2 == 1 {
+            raster.fill_rect(10, y, 360, y + 36, DISCORD_DARKER);
+        }
+        let resolved = row
+            .hero_id
+            .and_then(|hero_id| hero_names.get(&hero_id))
+            .cloned()
+            .or_else(|| row.hero_name.clone())
+            .unwrap_or_else(|| "Unknown".to_owned());
+        let hero = truncate(&resolved, 14, 12);
+        raster.text(15, y + 13, &hero, DISCORD_WHITE, 1);
+        raster.text(135, y + 13, &row.kills.to_string(), DISCORD_WHITE, 1);
+        raster.text(170, y + 13, &row.deaths.to_string(), DISCORD_WHITE, 1);
+        raster.text(205, y + 13, &row.assists.to_string(), DISCORD_WHITE, 1);
+        let (result, color) = match row.won {
+            Some(true) => ("WIN", DISCORD_GREEN),
+            Some(false) => ("LOSS", DISCORD_RED),
+            None => ("?", DISCORD_GREY),
+        };
+        raster.text(240, y + 13, result, color, 1);
+        let duration = row.duration_seconds.map_or_else(
+            || "-".to_owned(),
+            |seconds| format!("{}:{:02}", seconds / 60, seconds % 60),
+        );
+        raster.text(310, y + 13, &duration, DISCORD_GREY, 1);
+    }
+    render(raster)
+}
+
+fn truncate(value: &str, limit: usize, prefix: usize) -> String {
+    if value.chars().count() <= limit {
+        value.to_owned()
+    } else {
+        format!("{}..", value.chars().take(prefix).collect::<String>())
+    }
+}
+
+/// Render a fixed-order radar chart of Dota role percentages.
+#[must_use]
+pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(400, 400, DISCORD_BG);
+    raster.text(110, 10, title, DISCORD_WHITE, 2);
+    let mut roles = ROLE_ORDER
+        .iter()
+        .map(|role| (*role).to_owned())
+        .collect::<Vec<_>>();
+    for role in values.keys() {
+        if !roles.contains(role) {
+            roles.push(role.clone());
+        }
+    }
+    if roles.len() < 3 {
+        raster.text(100, 200, "Not enough data", DISCORD_GREY, 2);
+        return render(raster);
+    }
+    let maximum = roles
+        .iter()
+        .filter_map(|role| values.get(role))
+        .copied()
+        .fold(0.0_f64, f64::max);
+    let scale_max = if maximum <= 10.0 {
+        10.0
+    } else if maximum <= 25.0 {
+        ((maximum as i32 / 5) + 1) as f64 * 5.0
+    } else {
+        ((maximum as i32 / 10) + 1) as f64 * 10.0
+    };
+    let center = (200, 215);
+    for fraction in [0.25, 0.5, 0.75, 1.0] {
+        let ring = radial_points(roles.len(), center, 140.0 * fraction, |_| 1.0);
+        raster.polygon_outline(&ring, DISCORD_DARKER);
+    }
+    let outer = radial_points(roles.len(), center, 140.0, |_| 1.0);
+    for point in &outer {
+        raster.line(center, *point, DISCORD_DARKER, 1);
+    }
+    let data = radial_points(roles.len(), center, 140.0, |index| {
+        values.get(&roles[index]).copied().unwrap_or(0.0) / scale_max
+    });
+    raster.polygon(&data, DISCORD_ACCENT.with_alpha(100));
+    raster.polygon_outline(&data, DISCORD_ACCENT);
+    for point in data {
+        raster.circle(point, 4, DISCORD_ACCENT);
+    }
+    render(raster)
+}
+
+fn radial_points<F>(count: usize, center: (i32, i32), radius: f64, scale: F) -> Vec<(i32, i32)>
+where
+    F: Fn(usize) -> f64,
+{
+    (0..count)
+        .map(|index| {
+            let angle =
+                std::f64::consts::TAU * index as f64 / count as f64 - std::f64::consts::FRAC_PI_2;
+            let distance = radius * scale(index).clamp(0.0, 1.0);
+            (
+                center.0 + (distance * angle.cos()) as i32,
+                center.1 + (distance * angle.sin()) as i32,
+            )
+        })
+        .collect()
+}
+
+/// Render the insertion-ordered horizontal lane bar chart.
+#[must_use]
+pub fn draw_lane_distribution(lanes: &[(String, f64)]) -> Cursor<Vec<u8>> {
+    let height = lanes.len() * 40 + 60;
+    let mut raster = Raster::new(350, height, DISCORD_BG);
+    raster.text(15, 15, "Lane Distribution", DISCORD_WHITE, 2);
+    for (index, (lane, value)) in lanes.iter().enumerate() {
+        let y = 55 + i32::try_from(index).unwrap_or(0) * 40;
+        raster.text(15, y + 7, &truncate(lane, 11, 9), DISCORD_WHITE, 1);
+        raster.fill_rect(95, y + 5, 285, y + 25, DISCORD_DARKER);
+        let fill = (190.0 * value.clamp(0.0, 100.0) / 100.0) as i32;
+        let color = match lane.as_str() {
+            "Safe Lane" => Rgba::rgb(0x4c, 0xaf, 0x50),
+            "Mid" => Rgba::rgb(0x21, 0x96, 0xf3),
+            "Off Lane" => Rgba::rgb(0xff, 0x98, 0x00),
+            "Jungle" => Rgba::rgb(0x9c, 0x27, 0xb0),
+            "Roaming" => Rgba::rgb(0xe9, 0x1e, 0x63),
+            _ => DISCORD_ACCENT,
+        };
+        raster.fill_rect(95, y + 5, 95 + fill, y + 25, color);
+        raster.text(295, y + 11, &format!("{value:.0}%"), DISCORD_GREY, 1);
+    }
+    render(raster)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeroPerformanceEntry {
+    pub hero_name: String,
+    pub games: i64,
+    pub wins: i64,
+}
+
+/// Render the profile Heroes performance bars, matching Python's top-eight
+/// game-count ordering and win-rate color thresholds.
+#[must_use]
+pub fn draw_hero_performance_chart(
+    hero_stats: &[HeroPerformanceEntry],
+    username: &str,
+) -> Cursor<Vec<u8>> {
+    const WIDTH: usize = 450;
+    const BAR_HEIGHT: i32 = 32;
+    const PADDING: i32 = 15;
+    const HEADER_HEIGHT: i32 = 35;
+    const LABEL_WIDTH: i32 = 110;
+    const VALUE_WIDTH: i32 = 70;
+    const BAR_GAP: i32 = 6;
+    let stats = hero_stats.iter().take(8).collect::<Vec<_>>();
+    if stats.is_empty() {
+        let mut raster = Raster::new(WIDTH, 100, DISCORD_BG);
+        raster.text(20, 40, "No hero data available", DISCORD_GREY, 2);
+        return render(raster);
+    }
+    let height = usize::try_from(
+        HEADER_HEIGHT
+            + i32::try_from(stats.len()).unwrap_or(0) * (BAR_HEIGHT + BAR_GAP)
+            + PADDING * 2,
+    )
+    .unwrap_or(100);
+    let mut raster = Raster::new(WIDTH, height, DISCORD_BG);
+    raster.text(
+        PADDING,
+        PADDING,
+        &format!("Top Heroes: {username}"),
+        DISCORD_WHITE,
+        1,
+    );
+    let max_games = stats
+        .iter()
+        .map(|stat| stat.games)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let bar_x = PADDING + LABEL_WIDTH;
+    let bar_max_width =
+        i32::try_from(WIDTH).unwrap_or(450) - PADDING * 2 - LABEL_WIDTH - VALUE_WIDTH - 10;
+    for (index, stat) in stats.into_iter().enumerate() {
+        let y =
+            PADDING + HEADER_HEIGHT + i32::try_from(index).unwrap_or(0) * (BAR_HEIGHT + BAR_GAP);
+        let hero_name = truncate(&stat.hero_name, 13, 11);
+        raster.text(PADDING, y + 8, &hero_name, DISCORD_WHITE, 1);
+        raster.fill_rect(
+            bar_x,
+            y + 5,
+            bar_x + bar_max_width,
+            y + BAR_HEIGHT - 5,
+            DISCORD_DARKER,
+        );
+        let fill_width = (bar_max_width as i64)
+            .saturating_mul(stat.games.max(0))
+            .checked_div(max_games)
+            .unwrap_or(0)
+            .clamp(4, i64::from(bar_max_width));
+        let fill_width = i32::try_from(fill_width).unwrap_or(bar_max_width);
+        let win_rate = if stat.games > 0 {
+            stat.wins as f64 / stat.games as f64
+        } else {
+            0.0
+        };
+        let color = if win_rate >= 0.60 {
+            DISCORD_GREEN
+        } else if win_rate >= 0.50 {
+            Rgba::rgb(0x7c, 0xb3, 0x42)
+        } else if win_rate >= 0.40 {
+            DISCORD_YELLOW
+        } else {
+            DISCORD_RED
+        };
+        raster.fill_rect(bar_x, y + 5, bar_x + fill_width, y + BAR_HEIGHT - 5, color);
+        raster.text(
+            bar_x + bar_max_width + 8,
+            y + 8,
+            &format!("{:.0}% ({}g)", win_rate * 100.0, stat.games),
+            DISCORD_GREY,
+            1,
+        );
+    }
+    render(raster)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AttributeValues {
+    pub strength: f64,
+    pub agility: f64,
+    pub intelligence: f64,
+    pub universal: f64,
+}
+
+/// Render the four-way hero attribute pie and legend swatches.
+#[must_use]
+pub fn draw_attribute_distribution(values: AttributeValues) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(300, 300, DISCORD_BG);
+    raster.text(65, 10, "Hero Attributes", DISCORD_WHITE, 2);
+    let slices = [
+        (values.strength, Rgba::rgb(0xe5, 0x39, 0x35)),
+        (values.agility, Rgba::rgb(0x43, 0xa0, 0x47)),
+        (values.intelligence, Rgba::rgb(0x1e, 0x88, 0xe5)),
+        (values.universal, Rgba::rgb(0x8e, 0x24, 0xaa)),
+    ];
+    raster.pie((150, 170), 80, &slices);
+    for (index, (value, color)) in slices.iter().filter(|slice| slice.0 > 0.0).enumerate() {
+        let x = 20 + i32::try_from(index).unwrap_or(0) * 70;
+        raster.fill_rect(x, 250, x + 14, 264, *color);
+        raster.text(x + 18, 254, &format!("{value:.0}%"), DISCORD_WHITE, 1);
+    }
+    render(raster)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RatingHistoryEntry {
+    pub rating: Option<f64>,
+    pub openskill_mu: Option<f64>,
+    pub won: Option<bool>,
+}
+
+/// Render chronological Glicko/OpenSkill history on the same display scale.
+#[must_use]
+pub fn draw_rating_history_chart(
+    username: &str,
+    most_recent_first: &[RatingHistoryEntry],
+) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(700, 400, DISCORD_BG);
+    raster.text(
+        60,
+        12,
+        &format!("{username}'s Rating History"),
+        DISCORD_WHITE,
+        2,
+    );
+    if most_recent_first.len() < 2 {
+        let message = if most_recent_first.is_empty() {
+            "No rating history"
+        } else {
+            "Need 2+ matches for chart"
+        };
+        raster.text(220, 200, message, DISCORD_GREY, 2);
+        return render(raster);
+    }
+
+    let data = most_recent_first.iter().rev().copied().collect::<Vec<_>>();
+    let glicko = data.iter().map(|entry| entry.rating).collect::<Vec<_>>();
+    let openskill = data
+        .iter()
+        .map(|entry| entry.openskill_mu.map(mu_to_display))
+        .collect::<Vec<_>>();
+    let combined = glicko
+        .iter()
+        .chain(&openskill)
+        .filter_map(|value| *value)
+        .collect::<Vec<_>>();
+    let minimum = combined.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = combined.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let raw_range = (maximum - minimum).max(1.0);
+    let lower = minimum - raw_range * 0.1;
+    let upper = maximum + raw_range * 0.1;
+    let chart = ChartRect {
+        x: 60,
+        y: 70,
+        width: 580,
+        height: 250,
+    };
+    for step in 0..=4 {
+        let y = chart.y + step * chart.height / 4;
+        raster.line((chart.x, y), (chart.x + chart.width, y), DISCORD_GRID, 1);
+    }
+    draw_optional_series(&mut raster, &glicko, lower, upper, chart, DISCORD_ACCENT);
+    draw_optional_series(&mut raster, &openskill, lower, upper, chart, DISCORD_YELLOW);
+
+    for (index, entry) in data.iter().enumerate() {
+        let Some(value) = glicko[index].or(openskill[index]) else {
+            continue;
+        };
+        let point = chart.point(index, data.len(), value, lower, upper);
+        let color = match entry.won {
+            Some(true) => DISCORD_GREEN,
+            Some(false) => DISCORD_RED,
+            None => DISCORD_GREY,
+        };
+        raster.circle(point, if data.len() > 30 { 3 } else { 4 }, color);
+    }
+
+    let mut legend_x = 60;
+    if glicko.iter().any(Option::is_some) {
+        raster.line((legend_x, 348), (legend_x + 20, 348), DISCORD_ACCENT, 2);
+        raster.text(legend_x + 25, 345, "Glicko-2", DISCORD_GREY, 1);
+        legend_x += 100;
+    }
+    if openskill.iter().any(Option::is_some) {
+        raster.line((legend_x, 348), (legend_x + 20, 348), DISCORD_YELLOW, 2);
+        raster.text(legend_x + 25, 345, "OpenSkill", DISCORD_GREY, 1);
+        legend_x += 110;
+    }
+    raster.circle((legend_x + 4, 348), 4, DISCORD_GREEN);
+    raster.text(legend_x + 12, 345, "Win", DISCORD_GREY, 1);
+    raster.circle((legend_x + 64, 348), 4, DISCORD_RED);
+    raster.text(legend_x + 72, 345, "Loss", DISCORD_GREY, 1);
+    render(raster)
+}
+
+fn mu_to_display(mu: f64) -> f64 {
+    ((mu - 25.0) * 50.0).max(0.0).round()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChartRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl ChartRect {
+    fn point(
+        self,
+        index: usize,
+        count: usize,
+        value: f64,
+        minimum: f64,
+        maximum: f64,
+    ) -> (i32, i32) {
+        let x_fraction = index as f64 / count.saturating_sub(1).max(1) as f64;
+        let y_fraction = (maximum - value) / (maximum - minimum).max(f64::EPSILON);
+        (
+            self.x + (x_fraction * f64::from(self.width)) as i32,
+            self.y + (y_fraction * f64::from(self.height)) as i32,
+        )
+    }
+}
+
+fn draw_optional_series(
+    raster: &mut Raster,
+    values: &[Option<f64>],
+    minimum: f64,
+    maximum: f64,
+    chart: ChartRect,
+    color: Rgba,
+) {
+    for index in 0..values.len().saturating_sub(1) {
+        if let (Some(first), Some(second)) = (values[index], values[index + 1]) {
+            raster.line(
+                chart.point(index, values.len(), first, minimum, maximum),
+                chart.point(index + 1, values.len(), second, minimum, maximum),
+                color,
+                2,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdvantageData {
+    pub radiant_gold: Vec<f64>,
+    pub radiant_xp: Vec<f64>,
+}
+
+/// Render gold and XP advantage, or no attachment when both series are absent.
+#[must_use]
+pub fn draw_advantage_graph(
+    data: &AdvantageData,
+    match_id: Option<i64>,
+) -> Option<Cursor<Vec<u8>>> {
+    if data.radiant_gold.is_empty() && data.radiant_xp.is_empty() {
+        return None;
+    }
+    let mut raster = Raster::new(800, 350, DISCORD_BG);
+    raster.fill_rect(60, 55, 760, 300, DISCORD_DARKER);
+    let title = match_id.map_or_else(
+        || "Team Advantages Per Minute".to_owned(),
+        |id| format!("Team Advantages Per Minute - Match #{id}"),
+    );
+    raster.text(180, 15, &title, DISCORD_WHITE, 1);
+    let values = data
+        .radiant_gold
+        .iter()
+        .chain(&data.radiant_xp)
+        .copied()
+        .collect::<Vec<_>>();
+    let magnitude = values.iter().copied().map(f64::abs).fold(1.0_f64, f64::max);
+    raster.line((60, 177), (760, 177), DISCORD_GREY, 1);
+    draw_advantage_series(
+        &mut raster,
+        &data.radiant_gold,
+        magnitude,
+        DISCORD_YELLOW,
+        2,
+    );
+    draw_advantage_series(&mut raster, &data.radiant_xp, magnitude, DISCORD_ACCENT, 1);
+    Some(render(raster))
+}
+
+fn draw_advantage_series(
+    raster: &mut Raster,
+    values: &[f64],
+    magnitude: f64,
+    color: Rgba,
+    width: i32,
+) {
+    let points = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let x =
+                60 + (index as f64 / values.len().saturating_sub(1).max(1) as f64 * 700.0) as i32;
+            let y = 177 - (value / magnitude * 110.0) as i32;
+            (x, y)
+        })
+        .collect::<Vec<_>>();
+    for pair in points.windows(2) {
+        raster.line(pair[0], pair[1], color, width);
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GambaInfo {
+    pub source: String,
+    pub outcome: Option<String>,
+    pub leverage: i64,
+    pub profit: i64,
+}
+
+impl GambaInfo {
+    fn normalized_leverage(&self) -> i64 {
+        self.leverage.max(1)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GambaPoint {
+    pub event_number: i32,
+    pub cumulative: i64,
+    pub info: GambaInfo,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GambaStats {
+    pub total_bets: usize,
+    pub win_rate: f64,
+    pub net_pnl: i64,
+    pub roi: f64,
+}
+
+#[must_use]
+pub fn marker_radius(info: &GambaInfo) -> i32 {
+    if info.source == "double_or_nothing" {
+        6
+    } else if info.source == "wheel" || info.normalized_leverage() > 1 {
+        5
+    } else {
+        3
+    }
+}
+
+fn marker_priority(info: &GambaInfo) -> i32 {
+    if info.source == "double_or_nothing" {
+        4
+    } else if info.normalized_leverage() > 1 {
+        3
+    } else if info.source == "wheel" {
+        2
+    } else {
+        1
+    }
+}
+
+/// Select non-overlapping semantic event markers while retaining required points.
+pub fn select_marker_indices(
+    points: &[(i32, i32)],
+    infos: &[GambaInfo],
+    radii: &[i32],
+    required_indices: &[usize],
+) -> Result<Vec<usize>, &'static str> {
+    if points.len() != infos.len() || points.len() != radii.len() {
+        return Err("marker points, infos, and radii must have equal lengths");
+    }
+    let mut selected = required_indices
+        .iter()
+        .copied()
+        .filter(|index| *index < points.len())
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected.dedup();
+    let mut candidates = (0..points.len())
+        .filter(|index| !selected.contains(index))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|index| {
+        (
+            -marker_priority(&infos[*index]),
+            -infos[*index].profit.abs(),
+            *index,
+        )
+    });
+    for index in candidates {
+        let clear = selected.iter().all(|other| {
+            let dx = points[index].0 - points[*other].0;
+            let dy = points[index].1 - points[*other].1;
+            let required = radii[index] + radii[*other] + 3;
+            dx * dx + dy * dy >= required * required
+        });
+        if clear {
+            selected.push(index);
+        }
+    }
+    selected.sort_unstable();
+    Ok(selected)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChartProjection {
+    pub chart_x: i32,
+    pub chart_y: i32,
+    pub chart_width: i32,
+    pub chart_height: i32,
+    pub total_x: usize,
+    pub min_log_y: f64,
+    pub max_log_y: f64,
+}
+
+impl ChartProjection {
+    #[must_use]
+    pub fn log_y_range(self) -> f64 {
+        (self.max_log_y - self.min_log_y).max(1e-9)
+    }
+
+    #[must_use]
+    pub fn to_pixel(self, x_index: i32, y_value: f64) -> (i32, i32) {
+        let x = self.chart_x
+            + ((f64::from(x_index - 1) / self.total_x.saturating_sub(1).max(1) as f64)
+                * f64::from(self.chart_width)) as i32;
+        let y = self.chart_y
+            + (((self.max_log_y - signed_log(y_value)) / self.log_y_range())
+                * f64::from(self.chart_height)) as i32;
+        (x, y)
+    }
+}
+
+#[must_use]
+pub fn make_projection(
+    values: &[f64],
+    total_x: usize,
+    chart: (i32, i32, i32, i32),
+) -> ChartProjection {
+    let logs = values.iter().copied().map(signed_log).collect::<Vec<_>>();
+    let mut minimum = logs.iter().copied().fold(0.0_f64, f64::min);
+    let mut maximum = logs.iter().copied().fold(0.0_f64, f64::max);
+    let range = (maximum - minimum).abs().max(0.1);
+    minimum -= range * 0.1;
+    maximum += range * 0.1;
+    ChartProjection {
+        chart_x: chart.0,
+        chart_y: chart.1,
+        chart_width: chart.2,
+        chart_height: chart.3,
+        total_x,
+        min_log_y: minimum,
+        max_log_y: maximum,
+    }
+}
+
+fn signed_log(value: f64) -> f64 {
+    value.signum() * value.abs().ln_1p()
+}
+
+/// Mirror Python's round-to-even selection and always retain both timeline ends.
+#[must_use]
+pub fn select_x_axis_ticks(indices: &[i32], max_labels: usize) -> Vec<i32> {
+    if indices.is_empty() || max_labels == 0 {
+        return Vec::new();
+    }
+    let count = indices.len().min(max_labels);
+    if count == 1 {
+        return vec![indices[0]];
+    }
+    (0..count)
+        .map(|step| {
+            let position = round_ratio_ties_even(
+                step.saturating_mul(indices.len().saturating_sub(1)),
+                count - 1,
+            );
+            indices[position]
+        })
+        .collect()
+}
+
+fn round_ratio_ties_even(numerator: usize, denominator: usize) -> usize {
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    match remainder.saturating_mul(2).cmp(&denominator) {
+        std::cmp::Ordering::Less => quotient,
+        std::cmp::Ordering::Greater => quotient + 1,
+        std::cmp::Ordering::Equal if quotient.is_multiple_of(2) => quotient,
+        std::cmp::Ordering::Equal => quotient + 1,
+    }
+}
+
+/// Choose signed-log labels with the same maximin spacing policy as Python.
+#[must_use]
+pub fn select_y_axis_ticks(
+    projection: ChartProjection,
+    actual_min: f64,
+    actual_max: f64,
+) -> Vec<(f64, i32)> {
+    let mut candidates = Vec::new();
+    for magnitude in Y_LABEL_MAGNITUDES {
+        for value in [-f64::from(magnitude), f64::from(magnitude)] {
+            if value < actual_min * 1.2 || value > actual_max * 1.2 {
+                continue;
+            }
+            let log = signed_log(value);
+            if log < projection.min_log_y || log > projection.max_log_y {
+                continue;
+            }
+            candidates.push((value, projection.to_pixel(1, value).1));
+        }
+    }
+    let zero_y = projection.to_pixel(1, 0.0).1;
+    let mut occupied = vec![zero_y];
+    let mut selected = Vec::new();
+    while !candidates.is_empty() && selected.len() < 7 {
+        let key = |candidate: &(f64, i32)| {
+            (
+                occupied
+                    .iter()
+                    .map(|y| (candidate.1 - y).abs())
+                    .min()
+                    .unwrap_or(0),
+                candidate.0.abs(),
+            )
+        };
+        let mut best = 0;
+        for index in 1..candidates.len() {
+            let candidate_key = key(&candidates[index]);
+            let best_key = key(&candidates[best]);
+            if candidate_key.0 > best_key.0
+                || (candidate_key.0 == best_key.0 && candidate_key.1 > best_key.1)
+            {
+                best = index;
+            }
+        }
+        let candidate = candidates.remove(best);
+        let distance = occupied
+            .iter()
+            .map(|y| (candidate.1 - y).abs())
+            .min()
+            .unwrap_or(0);
+        if distance >= 20 {
+            occupied.push(candidate.1);
+            selected.push(candidate);
+        }
+    }
+    selected.sort_by_key(|tick| tick.1);
+    selected
+}
+
+/// Render the fixed-size adaptive gamba journey chart.
+#[must_use]
+pub fn draw_gamba_chart(
+    username: &str,
+    degen_score: i32,
+    degen_title: &str,
+    series: &[GambaPoint],
+    stats: GambaStats,
+) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(700, 400, DISCORD_BG);
+    raster.text(
+        60,
+        12,
+        &format!("{username}'s Gamba Journey"),
+        DISCORD_WHITE,
+        2,
+    );
+    raster.text(
+        60,
+        40,
+        &format!("Degen Score {degen_score} - {degen_title}"),
+        DISCORD_GREY,
+        1,
+    );
+    if series.is_empty() {
+        raster.text(240, 200, "No betting history", DISCORD_GREY, 2);
+        return render(raster);
+    }
+    let values = series
+        .iter()
+        .map(|point| point.cumulative as f64)
+        .collect::<Vec<_>>();
+    let projection = make_projection(&values, series.len(), (60, 88, 614, 222));
+    let zero_y = projection.to_pixel(1, 0.0).1;
+    raster.line((60, zero_y), (674, zero_y), DISCORD_GREY, 1);
+    let pixels = series
+        .iter()
+        .map(|point| projection.to_pixel(point.event_number, point.cumulative as f64))
+        .collect::<Vec<_>>();
+    for index in 0..pixels.len().saturating_sub(1) {
+        let change = series[index + 1].cumulative - series[index].cumulative;
+        let color = if change > 0 {
+            DISCORD_GREEN
+        } else if change < 0 {
+            DISCORD_RED
+        } else {
+            DISCORD_GREY
+        };
+        raster.line(pixels[index], pixels[index + 1], color, 2);
+    }
+    let radii = series
+        .iter()
+        .map(|point| marker_radius(&point.info))
+        .collect::<Vec<_>>();
+    let peak = values
+        .iter()
+        .enumerate()
+        .max_by(|first, second| first.1.total_cmp(second.1))
+        .map_or(0, |entry| entry.0);
+    let trough = values
+        .iter()
+        .enumerate()
+        .min_by(|first, second| first.1.total_cmp(second.1))
+        .map_or(0, |entry| entry.0);
+    let selected = select_marker_indices(
+        &pixels,
+        &series
+            .iter()
+            .map(|point| point.info.clone())
+            .collect::<Vec<_>>(),
+        &radii,
+        &[0, series.len() - 1, peak, trough],
+    )
+    .unwrap_or_default();
+    for index in selected {
+        let color = match series[index].info.outcome.as_deref() {
+            Some("won") => DISCORD_GREEN,
+            Some("neutral") => DISCORD_GREY,
+            _ => DISCORD_RED,
+        };
+        raster.circle(pixels[index], radii[index], color);
+    }
+    raster.fill_rect(60, 346, 674, 389, DISCORD_DARKER);
+    raster.text(
+        70,
+        357,
+        &format!("EVENTS {}", series.len()),
+        DISCORD_WHITE,
+        1,
+    );
+    raster.text(
+        180,
+        357,
+        &format!("BETS {}", stats.total_bets),
+        DISCORD_WHITE,
+        1,
+    );
+    raster.text(
+        280,
+        357,
+        &format!("WIN {:.0}%", stats.win_rate * 100.0),
+        DISCORD_GREEN,
+        1,
+    );
+    raster.text(
+        400,
+        357,
+        &format!("P&L {:+}", stats.net_pnl),
+        if stats.net_pnl >= 0 {
+            DISCORD_GREEN
+        } else {
+            DISCORD_RED
+        },
+        1,
+    );
+    raster.text(
+        520,
+        357,
+        &format!("ROI {:+.1}%", stats.roi * 100.0),
+        if stats.roi >= 0.0 {
+            DISCORD_GREEN
+        } else {
+            DISCORD_RED
+        },
+        1,
+    );
+    render(raster)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BalancePoint {
+    pub event_number: i32,
+    pub cumulative: i64,
+    pub source: String,
+}
+
+/// Render an all-source balance journey on the shared signed-log projection.
+#[must_use]
+pub fn draw_balance_chart(
+    username: &str,
+    series: &[BalancePoint],
+    source_totals: &BTreeMap<String, i64>,
+) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(700, 400, DISCORD_BG);
+    raster.text(
+        60,
+        12,
+        &format!("{username}'s Balance Journey"),
+        DISCORD_WHITE,
+        2,
+    );
+    if series.is_empty() {
+        raster.text(220, 200, "No balance history yet", DISCORD_GREY, 2);
+        return render(raster);
+    }
+    let values = series
+        .iter()
+        .map(|point| point.cumulative as f64)
+        .collect::<Vec<_>>();
+    let projection = make_projection(&values, series.len(), (60, 70, 580, 250));
+    let zero_y = projection.to_pixel(1, 0.0).1;
+    raster.line((60, zero_y), (640, zero_y), DISCORD_GREY, 1);
+    let points = series
+        .iter()
+        .map(|point| projection.to_pixel(point.event_number, point.cumulative as f64))
+        .collect::<Vec<_>>();
+    for index in 0..points.len().saturating_sub(1) {
+        let color = if series[index + 1].cumulative >= series[index].cumulative {
+            DISCORD_GREEN
+        } else {
+            DISCORD_RED
+        };
+        raster.line(points[index], points[index + 1], color, 2);
+    }
+    for (point, pixel) in series.iter().zip(points) {
+        raster.circle(pixel, 4, source_color(&point.source));
+    }
+    let net = source_totals.values().sum::<i64>();
+    raster.text(
+        60,
+        350,
+        &format!("Net {net:+} across {} events", series.len()),
+        if net >= 0 { DISCORD_GREEN } else { DISCORD_RED },
+        1,
+    );
+    render(raster)
+}
+
+/// Render the production prediction-market fair-history chart as a real PNG.
+///
+/// The geometry follows Python's 700×280 chart: zero/one-point histories keep
+/// the 0–100 scale, multi-point histories zoom to a ten-point padded range,
+/// and the market creation timestamp remains the left edge. `now` is supplied
+/// by the worker clock so scheduling and image output share one time snapshot.
+#[must_use]
+pub fn draw_prediction_market_chart(
+    market_id: i64,
+    title: Option<&str>,
+    snapshots: &[(i64, i64)],
+    created_at: i64,
+    now: i64,
+) -> Cursor<Vec<u8>> {
+    const WIDTH: i32 = 700;
+    const HEIGHT: i32 = 280;
+    const LEFT: i32 = 50;
+    const RIGHT: i32 = 670;
+    const TOP: i32 = 50;
+    const BOTTOM: i32 = 240;
+
+    let mut raster = Raster::new(WIDTH as usize, HEIGHT as usize, DISCORD_BG);
+    let raw_title = title.filter(|value| !value.trim().is_empty()).map_or_else(
+        || format!("Market #{market_id} - fair history"),
+        str::to_owned,
+    );
+    let title = if raw_title.chars().count() > 92 {
+        format!("{}...", raw_title.chars().take(89).collect::<String>())
+    } else {
+        raw_title
+    };
+    raster.text(LEFT, 14, &title, DISCORD_WHITE, 2);
+
+    let (low, high) = if snapshots.len() >= 2 {
+        let minimum = snapshots.iter().map(|(_, fair)| *fair).min().unwrap_or(0);
+        let maximum = snapshots.iter().map(|(_, fair)| *fair).max().unwrap_or(100);
+        let low = ((minimum - 10).div_euclid(10) * 10).max(0);
+        let high = (((maximum + 10 + 9).div_euclid(10)) * 10).min(100);
+        if high > low { (low, high) } else { (0, 100) }
+    } else {
+        (0, 100)
+    };
+    let vertical_span = (high - low).max(1);
+    let last_timestamp = snapshots
+        .last()
+        .map_or(now.max(created_at.saturating_add(1)), |(timestamp, _)| {
+            now.max(*timestamp)
+        });
+    let horizontal_span = last_timestamp.saturating_sub(created_at).max(1);
+    let project = |timestamp: i64, fair: i64| {
+        let x_numerator = timestamp
+            .saturating_sub(created_at)
+            .clamp(0, horizontal_span);
+        let x = LEFT
+            + i32::try_from(i64::from(RIGHT - LEFT).saturating_mul(x_numerator) / horizontal_span)
+                .unwrap_or_default();
+        let fair = fair.clamp(low, high);
+        let y = TOP
+            + i32::try_from(i64::from(BOTTOM - TOP).saturating_mul(high - fair) / vertical_span)
+                .unwrap_or_default();
+        (x, y)
+    };
+
+    for index in 0..=4 {
+        let fair = low + (vertical_span * index + 2) / 4;
+        let y = project(created_at, fair).1;
+        raster.line((LEFT, y), (RIGHT, y), DISCORD_GRID, 1);
+        raster.text(4, y - 4, &format!("{fair}%"), DISCORD_GREY, 1);
+    }
+
+    let points = snapshots
+        .iter()
+        .map(|(timestamp, fair)| project(*timestamp, *fair))
+        .collect::<Vec<_>>();
+    if points.len() == 1 {
+        raster.line((LEFT, points[0].1), (RIGHT, points[0].1), DISCORD_ACCENT, 2);
+        raster.circle(points[0], 4, DISCORD_ACCENT);
+    } else {
+        for pair in points.windows(2) {
+            raster.line(pair[0], pair[1], DISCORD_ACCENT, 2);
+        }
+        for point in &points {
+            raster.circle(*point, 3, DISCORD_ACCENT);
+        }
+    }
+    if let (Some(point), Some((_, fair))) = (points.last(), snapshots.last()) {
+        raster.text(
+            (point.0 + 6).min(RIGHT - 36),
+            point.1 - 7,
+            &format!("{fair}%"),
+            DISCORD_WHITE,
+            1,
+        );
+    }
+    render(raster)
+}
+
+fn source_color(source: &str) -> Rgba {
+    match source {
+        "bets" => Rgba::rgb(0x3b, 0x82, 0xf6),
+        "predictions" => Rgba::rgb(0xa8, 0x55, 0xf7),
+        "wheel" => Rgba::rgb(0xfa, 0xcc, 0x15),
+        "double_or_nothing" => Rgba::rgb(0xf9, 0x73, 0x16),
+        "tips" => Rgba::rgb(0xec, 0x48, 0x99),
+        "disburse" => Rgba::rgb(0x22, 0xc5, 0x5e),
+        "bonus" => Rgba::rgb(0x9c, 0xa3, 0xaf),
+        "dig" => Rgba::rgb(0xa1, 0x62, 0x07),
+        _ => Rgba::rgb(0x3b, 0x82, 0xf6),
+    }
+}
+
+/// Render the rating-distribution diagnostic used by `/calibration`.
+///
+/// The chart retains the Python surface: 100-point density bins, normal and
+/// KDE overlays when the sample has spread, mean/median markers, axes, legend,
+/// and descriptive statistics. Rendering is native and deterministic, so the
+/// production Rust process does not require matplotlib/scipy.
+#[must_use]
+pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
+    const LEFT: i32 = 65;
+    const RIGHT: i32 = 620;
+    const TOP: i32 = 50;
+    const BOTTOM: i32 = 335;
+    const PLOT_HEIGHT: f64 = 250.0;
+    const BIN_WIDTH: f64 = 100.0;
+    const SPINE: Rgba = Rgba::rgb(0x4f, 0x54, 0x5c);
+    const MEDIAN: Rgba = Rgba::rgb(0xf4, 0x7b, 0x67);
+
+    let mut raster = Raster::new(650, 400, DISCORD_BG);
+    raster.fill_rect(LEFT, TOP, RIGHT, BOTTOM, DISCORD_DARKER);
+    if ratings.is_empty() {
+        raster.text(240, 190, "No rating data", DISCORD_WHITE, 2);
+        return render(raster);
+    }
+    let mean = ratings.iter().sum::<f64>() / ratings.len() as f64;
+    let variance = ratings
+        .iter()
+        .map(|rating| (rating - mean).powi(2))
+        .sum::<f64>()
+        / ratings.len() as f64;
+    let deviation = variance.sqrt();
+    let has_spread = deviation > f64::EPSILON * mean.abs().max(1.0);
+    let mut sorted = ratings.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let median = if sorted.len().is_multiple_of(2) {
+        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let minimum = ratings.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = ratings.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let start = (minimum / BIN_WIDTH).floor().max(0.0) * BIN_WIDTH;
+    let end = (maximum / BIN_WIDTH).ceil() * BIN_WIDTH + BIN_WIDTH;
+    let bin_count = (((end - start) / BIN_WIDTH) as usize).max(1);
+    let mut bins = vec![0_usize; bin_count];
+    for rating in ratings {
+        let index = (((rating - start) / BIN_WIDTH) as usize).min(bin_count - 1);
+        bins[index] += 1;
+    }
+
+    let normal_density = |x: f64| {
+        if has_spread {
+            (-(x - mean).powi(2) / (2.0 * variance)).exp()
+                / (deviation * (2.0 * std::f64::consts::PI).sqrt())
+        } else {
+            0.0
+        }
+    };
+    let kde_bandwidth = if has_spread && ratings.len() >= 5 {
+        let sample_deviation = (ratings
+            .iter()
+            .map(|rating| (rating - mean).powi(2))
+            .sum::<f64>()
+            / (ratings.len() - 1) as f64)
+            .sqrt();
+        Some(sample_deviation * (ratings.len() as f64).powf(-0.2))
+            .filter(|bandwidth| *bandwidth > f64::EPSILON)
+    } else {
+        None
+    };
+    let kde_density = |x: f64| {
+        kde_bandwidth.map_or(0.0, |bandwidth| {
+            ratings
+                .iter()
+                .map(|rating| {
+                    let z = (x - rating) / bandwidth;
+                    (-0.5 * z * z).exp() / (bandwidth * (2.0 * std::f64::consts::PI).sqrt())
+                })
+                .sum::<f64>()
+                / ratings.len() as f64
+        })
+    };
+    let histogram_peak = bins
+        .iter()
+        .map(|count| *count as f64 / (ratings.len() as f64 * BIN_WIDTH))
+        .fold(0.0_f64, f64::max);
+    let curve_peak = (0..=RIGHT - LEFT)
+        .map(|offset| start + f64::from(offset) / f64::from(RIGHT - LEFT) * (end - start))
+        .map(|x| normal_density(x).max(kde_density(x)))
+        .fold(0.0_f64, f64::max);
+    let density_peak = histogram_peak.max(curve_peak).max(f64::EPSILON);
+
+    for index in 1..=4 {
+        let y = BOTTOM - index * 50;
+        raster.line((LEFT, y), (RIGHT, y), DISCORD_GRID, 1);
+    }
+    for (index, count) in bins.iter().enumerate() {
+        let left = LEFT + (index * (RIGHT - LEFT) as usize / bin_count) as i32;
+        let right = LEFT + ((index + 1) * (RIGHT - LEFT) as usize / bin_count) as i32;
+        let density = *count as f64 / (ratings.len() as f64 * BIN_WIDTH);
+        let top = BOTTOM - (density / density_peak * PLOT_HEIGHT) as i32;
+        raster.fill_rect(left, top, right - 1, BOTTOM, DISCORD_ACCENT.with_alpha(180));
+    }
+
+    if has_spread {
+        let mut previous = None;
+        for pixel_x in LEFT..=RIGHT {
+            let x = start + f64::from(pixel_x - LEFT) / f64::from(RIGHT - LEFT) * (end - start);
+            let point = (
+                pixel_x,
+                BOTTOM - (normal_density(x) / density_peak * PLOT_HEIGHT) as i32,
+            );
+            if let Some(before) = previous {
+                raster.line(before, point, DISCORD_GREEN, 2);
+            }
+            previous = Some(point);
+        }
+    }
+
+    if kde_bandwidth.is_some() {
+        let mut previous = None;
+        for pixel_x in LEFT..=RIGHT {
+            let x = start + f64::from(pixel_x - LEFT) / f64::from(RIGHT - LEFT) * (end - start);
+            let point = (
+                pixel_x,
+                BOTTOM - (kde_density(x) / density_peak * PLOT_HEIGHT) as i32,
+            );
+            if pixel_x % 8 < 5
+                && let Some(before) = previous
+            {
+                raster.line(before, point, DISCORD_YELLOW, 2);
+            }
+            previous = Some(point);
+        }
+    }
+
+    let rating_x =
+        |rating: f64| LEFT + ((rating - start) / (end - start) * f64::from(RIGHT - LEFT)) as i32;
+    let mean_x = rating_x(mean);
+    raster.line(
+        (mean_x, TOP),
+        (mean_x, BOTTOM),
+        DISCORD_RED.with_alpha(205),
+        1,
+    );
+    let median_x = rating_x(median);
+    let mut y = TOP;
+    while y < BOTTOM {
+        raster.line((median_x, y), (median_x, (y + 5).min(BOTTOM)), MEDIAN, 1);
+        y += 9;
+    }
+
+    raster.line((LEFT, TOP), (LEFT, BOTTOM), SPINE, 1);
+    raster.line((LEFT, BOTTOM), (RIGHT, BOTTOM), SPINE, 1);
+    let tick_count = bin_count.min(5);
+    for index in 0..=tick_count {
+        let x = LEFT + index as i32 * (RIGHT - LEFT) / tick_count as i32;
+        let value = start + index as f64 / tick_count as f64 * (end - start);
+        raster.line((x, BOTTOM), (x, BOTTOM + 4), SPINE, 1);
+        raster.text(x - 12, BOTTOM + 8, &format!("{value:.0}"), DISCORD_GREY, 1);
+    }
+    raster.text(300, 374, "RATING", DISCORD_GREY, 1);
+    raster.text(8, 188, "DENSITY", DISCORD_GREY, 1);
+
+    let (skewness, kurtosis) = if has_spread {
+        let skewness = ratings
+            .iter()
+            .map(|rating| ((rating - mean) / deviation).powi(3))
+            .sum::<f64>()
+            / ratings.len() as f64;
+        let kurtosis = ratings
+            .iter()
+            .map(|rating| ((rating - mean) / deviation).powi(4))
+            .sum::<f64>()
+            / ratings.len() as f64
+            - 3.0;
+        (format!("{skewness:.2}"), format!("{kurtosis:.2}"))
+    } else {
+        ("N/A".to_owned(), "N/A".to_owned())
+    };
+    let normality = distribution_normality_p_value(&sorted).map(|probability| {
+        format!(
+            "{} (P={probability:.3})",
+            if probability > 0.05 {
+                "NORMAL"
+            } else {
+                "NON-NORMAL"
+            }
+        )
+    });
+    raster.fill_rect(75, 61, 270, 103, DISCORD_DARKER.with_alpha(230));
+    raster.text(
+        81,
+        67,
+        &format!("MU {mean:.0}  SIGMA {deviation:.0}"),
+        DISCORD_GREY,
+        1,
+    );
+    raster.text(
+        81,
+        79,
+        &format!("SKEW {skewness}  KURT {kurtosis}"),
+        DISCORD_GREY,
+        1,
+    );
+    if let Some(normality) = normality {
+        raster.text(81, 91, &normality, DISCORD_GREY, 1);
+    }
+
+    let legend_x = 445;
+    raster.fill_rect(
+        legend_x - 8,
+        60,
+        RIGHT - 5,
+        125,
+        DISCORD_DARKER.with_alpha(230),
+    );
+    for (index, (label, color)) in [
+        (format!("DATA N={}", ratings.len()), DISCORD_ACCENT),
+        ("NORMAL FIT".to_owned(), DISCORD_GREEN),
+        ("KDE".to_owned(), DISCORD_YELLOW),
+        (format!("MEAN {mean:.0}"), DISCORD_RED),
+        (format!("MEDIAN {median:.0}"), MEDIAN),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let y = 66 + index as i32 * 11;
+        raster.line((legend_x, y + 3), (legend_x + 16, y + 3), color, 2);
+        raster.text(legend_x + 22, y, &label, DISCORD_WHITE, 1);
+    }
+    raster.text(
+        145,
+        15,
+        &format!("Rating Distribution (N={})", ratings.len()),
+        DISCORD_WHITE,
+        2,
+    );
+    render(raster)
+}
+
+/// Shapiro-Wilk/Royston normality probability used by scipy for samples up to
+/// 5,000. Larger samples use the same D'Agostino-Pearson chi-square test as
+/// scipy's `normaltest` branch.
+fn distribution_normality_p_value(sorted: &[f64]) -> Option<f64> {
+    let count = sorted.len();
+    if count < 3 || sorted[count - 1] <= sorted[0] {
+        return None;
+    }
+    if count > 5_000 {
+        let mean = sorted.iter().sum::<f64>() / count as f64;
+        let second = sorted
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / count as f64;
+        if second <= f64::EPSILON {
+            return None;
+        }
+        let skew = sorted
+            .iter()
+            .map(|value| (value - mean).powi(3))
+            .sum::<f64>()
+            / count as f64
+            / second.powf(1.5);
+        let kurtosis = sorted
+            .iter()
+            .map(|value| (value - mean).powi(4))
+            .sum::<f64>()
+            / count as f64
+            / second.powi(2)
+            - 3.0;
+        return Some(dagostino_pearson_p_value(count, skew, kurtosis + 3.0));
+    }
+
+    const C1: [f64; 6] = [0.0, 0.221_157, -0.147_981, -2.071_19, 4.434_685, -2.706_056];
+    const C2: [f64; 6] = [
+        0.0, 0.042_981, -0.293_762, -1.752_461, 5.682_633, -3.582_633,
+    ];
+    const C3: [f64; 4] = [0.544, -0.399_78, 0.025_054, -0.000_671_4];
+    const C4: [f64; 4] = [1.382_2, -0.778_57, 0.062_767, -0.002_032_2];
+    const C5: [f64; 3] = [-1.586_1, -0.310_82, -0.083_751];
+    const C6: [f64; 3] = [-0.480_3, -0.082_676, 0.003_030_2];
+
+    let half = count / 2;
+    let adjusted_count = count as f64 + 0.25;
+    let mut weights = (1..=half)
+        .map(|index| inverse_normal_cdf((index as f64 - 0.375) / adjusted_count))
+        .collect::<Vec<_>>();
+    let squared_sum = 2.0 * weights.iter().map(|weight| weight.powi(2)).sum::<f64>();
+    let root_sum = squared_sum.sqrt();
+    let reciprocal_root_count = 1.0 / (count as f64).sqrt();
+    let first = polynomial(&C1, reciprocal_root_count) - weights[0] / root_sum;
+    let start = if count > 5 {
+        let second = -weights[1] / root_sum + polynomial(&C2, reciprocal_root_count);
+        let factor = ((squared_sum - 2.0 * weights[0].powi(2) - 2.0 * weights[1].powi(2))
+            / (1.0 - 2.0 * first.powi(2) - 2.0 * second.powi(2)))
+        .sqrt();
+        weights[1] = second;
+        for weight in &mut weights[2..] {
+            *weight /= -factor;
+        }
+        2
+    } else {
+        let factor =
+            ((squared_sum - 2.0 * weights[0].powi(2)) / (1.0 - 2.0 * first.powi(2))).sqrt();
+        for weight in &mut weights[1..] {
+            *weight /= -factor;
+        }
+        1
+    };
+    weights[0] = first;
+    debug_assert!(start <= weights.len());
+
+    let mean = sorted.iter().sum::<f64>() / count as f64;
+    let denominator = sorted
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>();
+    if denominator <= f64::EPSILON {
+        return None;
+    }
+    let numerator = weights
+        .iter()
+        .enumerate()
+        .map(|(index, weight)| weight * (sorted[count - 1 - index] - sorted[index]))
+        .sum::<f64>()
+        .powi(2);
+    let statistic = (numerator / denominator).clamp(0.0, 1.0);
+    if count == 3 {
+        return Some(
+            (6.0 / std::f64::consts::PI * (statistic.sqrt().asin() - (0.75_f64).sqrt().asin()))
+                .clamp(0.0, 1.0),
+        );
+    }
+
+    let mut transformed = (1.0 - statistic).max(f64::MIN_POSITIVE).ln();
+    let (location, scale) = if count <= 11 {
+        let gamma = -2.273 + 0.459 * count as f64;
+        if transformed >= gamma {
+            return Some(0.0);
+        }
+        transformed = -(gamma - transformed).ln();
+        (
+            polynomial(&C3, count as f64),
+            polynomial(&C4, count as f64).exp(),
+        )
+    } else {
+        let log_count = (count as f64).ln();
+        (polynomial(&C5, log_count), polynomial(&C6, log_count).exp())
+    };
+    Some(normal_survival((transformed - location) / scale).clamp(0.0, 1.0))
+}
+
+fn dagostino_pearson_p_value(count: usize, skew: f64, pearson_kurtosis: f64) -> f64 {
+    let count = count as f64;
+    let mut adjusted_skew = skew * (((count + 1.0) * (count + 3.0)) / (6.0 * (count - 2.0))).sqrt();
+    let beta_two = 3.0 * (count.powi(2) + 27.0 * count - 70.0) * (count + 1.0) * (count + 3.0)
+        / ((count - 2.0) * (count + 5.0) * (count + 7.0) * (count + 9.0));
+    let w_squared = -1.0 + (2.0 * (beta_two - 1.0)).sqrt();
+    let delta = 1.0 / (0.5 * w_squared.ln()).sqrt();
+    let alpha = (2.0 / (w_squared - 1.0)).sqrt();
+    // Preserve scipy.stats.skewtest's exact zero-skew branch.
+    if adjusted_skew == 0.0 {
+        adjusted_skew = 1.0;
+    }
+    let skew_z =
+        delta * (adjusted_skew / alpha + ((adjusted_skew / alpha).powi(2) + 1.0).sqrt()).ln();
+
+    let expected = 3.0 * (count - 1.0) / (count + 1.0);
+    let variance = 24.0 * count * (count - 2.0) * (count - 3.0)
+        / ((count + 1.0).powi(2) * (count + 3.0) * (count + 5.0));
+    let standardized = (pearson_kurtosis - expected) / variance.sqrt();
+    let root_beta_one = 6.0 * (count.powi(2) - 5.0 * count + 2.0) / ((count + 7.0) * (count + 9.0))
+        * (6.0 * (count + 3.0) * (count + 5.0) / (count * (count - 2.0) * (count - 3.0))).sqrt();
+    let a = 6.0
+        + 8.0 / root_beta_one * (2.0 / root_beta_one + (1.0 + 4.0 / root_beta_one.powi(2)).sqrt());
+    let first = 1.0 - 2.0 / (9.0 * a);
+    let denominator = 1.0 + standardized * (2.0 / (a - 4.0)).sqrt();
+    let second = denominator.signum() * ((1.0 - 2.0 / a) / denominator.abs()).powf(1.0 / 3.0);
+    let kurtosis_z = (first - second) / (2.0 / (9.0 * a)).sqrt();
+    let statistic = skew_z.powi(2) + kurtosis_z.powi(2);
+    (-statistic / 2.0).exp().clamp(0.0, 1.0)
+}
+
+fn polynomial(coefficients: &[f64], value: f64) -> f64 {
+    coefficients
+        .iter()
+        .rev()
+        .fold(0.0, |result, coefficient| result * value + coefficient)
+}
+
+fn normal_survival(value: f64) -> f64 {
+    0.5 * (1.0 - approximate_erf(value / 2.0_f64.sqrt()))
+}
+
+fn approximate_erf(value: f64) -> f64 {
+    let sign = value.signum();
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let polynomial =
+        (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t;
+    sign * (1.0 - polynomial * (-x * x).exp())
+}
+
+fn inverse_normal_cdf(probability: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    const LOW: f64 = 0.024_25;
+    const HIGH: f64 = 1.0 - LOW;
+
+    if probability < LOW {
+        let q = (-2.0 * probability.ln()).sqrt();
+        return (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    if probability > HIGH {
+        let q = (-2.0 * (1.0 - probability).ln()).sqrt();
+        return -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    let q = probability - 0.5;
+    let r = q * q;
+    (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+        / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+}
+
+fn render(raster: Raster) -> Cursor<Vec<u8>> {
+    Cursor::new(encode_png(&raster))
+}
+
+fn encode_png(raster: &Raster) -> Vec<u8> {
+    let mut png = Vec::new();
+    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&(raster.width as u32).to_be_bytes());
+    header.extend_from_slice(&(raster.height as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    append_png_chunk(&mut png, b"IHDR", &header);
+
+    let row_bytes = raster.width * 4;
+    let mut filtered = Vec::with_capacity((row_bytes + 1) * raster.height);
+    for row in raster.pixels.chunks_exact(row_bytes) {
+        filtered.push(0);
+        filtered.extend_from_slice(row);
+    }
+    let mut zlib = Vec::with_capacity(filtered.len() + filtered.len() / 65_535 * 5 + 16);
+    zlib.extend_from_slice(&[0x78, 0x01]);
+    let blocks = filtered.chunks(65_535).collect::<Vec<_>>();
+    for (index, block) in blocks.iter().enumerate() {
+        zlib.push(u8::from(index + 1 == blocks.len()));
+        let length = u16::try_from(block.len()).expect("stored DEFLATE block length");
+        zlib.extend_from_slice(&length.to_le_bytes());
+        zlib.extend_from_slice(&(!length).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    zlib.extend_from_slice(&adler32(&filtered).to_be_bytes());
+    append_png_chunk(&mut png, b"IDAT", &zlib);
+    append_png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+fn append_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut checksum = Vec::with_capacity(4 + data.len());
+    checksum.extend_from_slice(kind);
+    checksum.extend_from_slice(data);
+    output.extend_from_slice(&crc32(&checksum).to_be_bytes());
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    const MODULUS: u32 = 65_521;
+    let mut a = 1_u32;
+    let mut b = 0_u32;
+    for byte in bytes {
+        a = (a + u32::from(*byte)) % MODULUS;
+        b = (b + a) % MODULUS;
+    }
+    (b << 16) | a
+}
+
+#[cfg(test)]
+mod tests;
