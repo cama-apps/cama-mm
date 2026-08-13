@@ -20,6 +20,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventActorSnapshot, DigEventQuestSnapshot, DigEventRuntimeRepository,
 };
@@ -72,9 +73,9 @@ use crate::dig_routes::{
     route_by_id, route_effect, route_status,
 };
 use crate::dig_service::{
-    DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, MinerAllocation,
-    TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig, cooldown_remaining, layer_at,
-    paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
+    DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, DigProfitPolicy,
+    MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig,
+    cooldown_remaining, layer_at, paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
@@ -122,6 +123,7 @@ pub struct DigRuntimeConfig {
     pub asset_root: PathBuf,
     pub require_authored_assets: bool,
     pub minigame_jc_delta_scale: f64,
+    pub bankruptcy_penalty_keep_basis_points: i64,
     pub economy_event: EconomyEventConfig,
     /// Pet dig work is settled lazily from the persisted hunger/work anchors.
     /// Keeping the decay policy on the runtime config makes the dig aggregate
@@ -135,6 +137,7 @@ impl Default for DigRuntimeConfig {
             asset_root: PathBuf::from(DEFAULT_DIG_ASSET_ROOT),
             require_authored_assets: false,
             minigame_jc_delta_scale: 1.0,
+            bankruptcy_penalty_keep_basis_points: DIG_REWARD_BASIS_POINTS,
             economy_event: EconomyEventConfig::default(),
             pet_decay_per_day: cama_domain::pet::DEFAULT_HUNGER_DECAY_PER_DAY,
         }
@@ -169,6 +172,16 @@ impl DigRuntimeConfig {
     #[must_use]
     pub fn with_pet_decay_per_day(mut self, decay_per_day: i64) -> Self {
         self.pet_decay_per_day = decay_per_day.max(0);
+        self
+    }
+
+    #[must_use]
+    pub fn with_bankruptcy_penalty_rate(mut self, kept_rate: f64) -> Self {
+        self.bankruptcy_penalty_keep_basis_points = if kept_rate.is_finite() {
+            (kept_rate.clamp(0.0, 1.0) * DIG_REWARD_BASIS_POINTS as f64).round() as i64
+        } else {
+            DIG_REWARD_BASIS_POINTS
+        };
         self
     }
 
@@ -656,6 +669,14 @@ pub trait DigRuntimeStore: Send + Sync {
         _today: &str,
     ) -> Result<ManaEffects, DigRuntimeStoreError> {
         Ok(ManaEffects::default())
+    }
+
+    fn bankruptcy_penalty_games(
+        &self,
+        _discord_id: i64,
+        _guild_id: i64,
+    ) -> Result<i64, DigRuntimeStoreError> {
+        Ok(0)
     }
 
     /// Credit a successfully computed Plains tithe before the actor's Dig
@@ -1255,6 +1276,16 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         };
         let color = color_for_land(&row.current_land);
         Ok(ManaEffects::for_color(color, Some(&row.current_land)))
+    }
+
+    fn bankruptcy_penalty_games(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+    ) -> Result<i64, DigRuntimeStoreError> {
+        BankruptcyRepository::new(&self.path)
+            .get_penalty_games(discord_id, Some(guild_id))
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))
     }
 
     fn credit_plains_tithe(
@@ -5470,6 +5501,12 @@ where
         let balance_before_outcome = staged.balance;
         let mut state = tunnel_state(&staged, paid_charge_active.then_some(paid_cost));
         state.depth = depth_before;
+        let bankruptcy_penalty_games = if loot_outcome.cave_in {
+            0
+        } else {
+            self.store
+                .bankruptcy_penalty_games(request.discord_id, request.guild_id)?
+        };
         let mut outcome_input = DigOutcomeInput {
             advance: loot_outcome.advance,
             gross_jc: if loot_outcome.cave_in {
@@ -5504,6 +5541,14 @@ where
             )),
             overgrowth_bonus: i64::from(overgrowth_active).saturating_mul(10),
             helltide_tax,
+            profit_policy: DigProfitPolicy {
+                bankruptcy_keep_basis_points: if bankruptcy_penalty_games > 0 {
+                    self.config.bankruptcy_penalty_keep_basis_points
+                } else {
+                    DIG_REWARD_BASIS_POINTS
+                },
+                vanity_tax_basis_points: 0,
+            },
             ..DigOutcomeInput::default()
         };
         if !loot_outcome.cave_in
@@ -5877,6 +5922,7 @@ where
             "mana_yield_tax": outcome.mana_yield_tax,
             "mana_paid_cave_refund": mana_paid_cave_refund,
             "helltide_tax": helltide_tax,
+            "bankruptcy_penalty": outcome.bankruptcy_penalty,
             "gross_jc": outcome.economy_gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
             "economy_reward_multiplier": economy_multiplier,
@@ -9198,6 +9244,83 @@ mod tests {
                 .get("mana_yield_tax")
                 .and_then(Value::as_i64),
             Some(expected_tax),
+        );
+    }
+
+    #[test]
+    fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
+        let control = NamedTempFile::new().expect("control bankruptcy database");
+        let penalized = NamedTempFile::new().expect("penalized bankruptcy database");
+        let actor = 60_099;
+        let guild = 60_100;
+        let now = 1_900_085_500;
+        for database in [&control, &penalized] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("bankruptcy boss-progress connection")
+                .execute(
+                    "UPDATE tunnels SET boss_progress=?1,temp_buffs=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        r#"{"digs_remaining":1,"effect":{"yield_multiplier":2.0}}"#,
+                        actor,
+                        guild,
+                    ],
+                )
+                .expect("seed bankruptcy defeated bosses");
+        }
+        Connection::open(penalized.path())
+            .expect("bankruptcy state connection")
+            .execute(
+                "INSERT INTO bankruptcy_state(
+                     discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+                 ) VALUES(?1,?2,2,1)",
+                params![actor, guild],
+            )
+            .expect("seed bankruptcy penalty");
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+        let today = game_date_for_timestamp(dig_now as f64).expect("bankruptcy Dig date");
+        for database in [&control, &penalized] {
+            seed_two_weather_rows(database, guild, &today, "Magma", "fossil_rush");
+        }
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control bankruptcy Dig");
+        let penalized_config = DigRuntimeConfig::default().with_bankruptcy_penalty_rate(0.75);
+        let penalized_outcome =
+            DigRuntimeService::sqlite_with_config(penalized.path(), penalized_config)
+                .dig(request)
+                .expect("penalized bankruptcy Dig");
+        let expected_penalty = control_outcome.jc_earned / 4;
+        assert!(expected_penalty > 0);
+        assert_eq!(
+            penalized_outcome.jc_earned,
+            control_outcome.jc_earned - expected_penalty,
+        );
+        let connection = Connection::open(penalized.path()).expect("inspect bankruptcy Dig");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT penalty_games_remaining FROM bankruptcy_state
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("bankruptcy games after Dig"),
+            2,
+            "ordinary Dig winnings do not consume a game-based penalty",
+        );
+        assert_eq!(
+            latest_dig_detail(&penalized, actor, guild)["bankruptcy_penalty"].as_i64(),
+            Some(expected_penalty),
         );
     }
 

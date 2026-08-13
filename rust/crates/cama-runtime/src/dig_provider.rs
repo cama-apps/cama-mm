@@ -349,6 +349,7 @@ impl DigRegistrationProvider {
                     .unwrap_or_default(),
                 },
             )
+            .with_bankruptcy_penalty_rate(config.values.bankruptcy_penalty_rate)
             .with_pet_decay_per_day(config.values.pet_hunger_decay_per_day);
         let mut neon = DigNeonService::new(
             SeededDigNeonRandom::new(fastrand::u64(..)),
