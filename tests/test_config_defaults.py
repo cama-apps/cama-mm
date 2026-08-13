@@ -46,6 +46,12 @@ def test_openskill_shuffle_chance_defaults_to_two_percent():
     assert config_module.OPENSKILL_SHUFFLE_CHANCE == 0.02
 
 
+def test_new_player_exclusion_boost_defaults_to_five():
+    config_module = _load_config_without_env("NEW_PLAYER_EXCLUSION_BOOST")
+
+    assert config_module.NEW_PLAYER_EXCLUSION_BOOST == 5
+
+
 def test_spectator_autobet_defaults_to_two_five_player_tiers():
     config_module = _load_config_without_env(
         "AUTO_SPECTATOR_BET_COUNT",

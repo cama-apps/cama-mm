@@ -235,7 +235,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
 
     def create_referral(self, referrer_id: int, referred_id: int, guild_id: int) -> None:
-        """Enroll an unregistered player under a registered guild referrer."""
+        """Enroll a player before their first recorded guild match."""
         guild_id = self.normalize_guild_id(guild_id)
         if referrer_id == referred_id:
             raise ValueError("Self-referrals are not allowed.")
@@ -251,11 +251,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     raise ValueError("Referrer must be registered in this guild.")
 
                 cursor.execute(
-                    "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                    """
+                    SELECT COALESCE(wins, 0) + COALESCE(losses, 0) AS games_played
+                    FROM players
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
                     (referred_id, guild_id),
                 )
-                if cursor.fetchone() is not None:
-                    raise ValueError("That player is already registered in this guild.")
+                referred = cursor.fetchone()
+                if referred is not None and referred["games_played"] > 0:
+                    raise ValueError("That player has already played a game in this guild.")
 
                 cursor.execute(
                     "INSERT INTO referrals (guild_id, referred_id, referrer_id) VALUES (?, ?, ?)",
