@@ -83,6 +83,8 @@ use crate::economy_event_sqlite::SqliteEconomyEventService;
 use crate::mana_effects_service::color_for_land;
 use crate::pet::{SeededPetRandom, SystemPetClock};
 use crate::pet_sqlite::SqlitePetCommandService;
+use crate::service_container::PersistentVanityTaxService;
+use crate::vanity_tax_service::VanityTaxService;
 
 /// Production image root used by the Rust deployment. The Docker image must
 /// copy the authored `assets/dig` tree here; procedural rendering is only the
@@ -499,6 +501,9 @@ pub struct DigRuntimeCommit {
     pub depth_before: i64,
     pub depth_after: i64,
     pub jc_delta: i64,
+    /// Tax withheld from the gross JC reward. `jc_delta` remains the net
+    /// audited reward so historical Dig reports retain their Python meaning.
+    pub vanity_tax: i64,
     /// Conditional wallet debit reserved before the staged Dig reward. This
     /// remains in the same transaction while producing its own ledger entry.
     pub balance_cost: i64,
@@ -969,12 +974,32 @@ fn set_runtime_ledger_context(
     reason: &str,
     metadata: &str,
 ) -> Result<(), rusqlite::Error> {
+    set_runtime_ledger_context_source(
+        transaction,
+        "dig",
+        actor_id,
+        related_type,
+        related_id,
+        reason,
+        metadata,
+    )
+}
+
+fn set_runtime_ledger_context_source(
+    transaction: &Transaction<'_>,
+    source: &str,
+    actor_id: i64,
+    related_type: &str,
+    related_id: &str,
+    reason: &str,
+    metadata: &str,
+) -> Result<(), rusqlite::Error> {
     transaction.execute("DELETE FROM economy_ledger_context", [])?;
     transaction.execute(
         "INSERT INTO economy_ledger_context
             (id,source,actor_id,related_type,related_id,reason,metadata)
-         VALUES (1,'dig',?1,?2,?3,?4,?5)",
-        params![actor_id, related_type, related_id, reason, metadata],
+         VALUES (1,?1,?2,?3,?4,?5,?6)",
+        params![source, actor_id, related_type, related_id, reason, metadata],
     )?;
     Ok(())
 }
@@ -1936,25 +1961,48 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 return Err(DigRuntimeStoreError::Conflict);
             }
         }
-        let reward_delta = request.next.balance.saturating_sub(balance_after_cost);
-        if reward_delta != 0 {
+        // `request.next.balance` is the net post-policy balance.  Record the
+        // gross reward first (net plus the explicit tax), then withhold the
+        // tax in its own ledger row.  Both updates remain inside this
+        // transaction so an audit/delivery failure cannot leave either side
+        // of the split persisted.
+        let net_reward_delta = request.next.balance.saturating_sub(balance_after_cost);
+        let vanity_tax = request.vanity_tax.max(0);
+        let gross_reward_delta = net_reward_delta.saturating_add(vanity_tax);
+        let gross_balance = balance_after_cost.saturating_add(gross_reward_delta);
+        if gross_reward_delta != 0 {
             set_runtime_ledger_context(
                 &transaction,
                 discord_id,
                 &request.action_type,
                 &request.action_type,
-                runtime_ledger_reason(&request.action_type, reward_delta),
+                runtime_ledger_reason(&request.action_type, gross_reward_delta),
                 &request.detail,
             )?;
             let changed = transaction.execute(
                 "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
                  WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
-                params![
-                    request.next.balance,
-                    discord_id,
-                    guild_id,
-                    balance_after_cost
-                ],
+                params![gross_balance, discord_id, guild_id, balance_after_cost,],
+            )?;
+            clear_runtime_ledger_context(&transaction)?;
+            if changed != 1 {
+                return Err(DigRuntimeStoreError::Conflict);
+            }
+        }
+        if vanity_tax != 0 {
+            set_runtime_ledger_context_source(
+                &transaction,
+                "vanity_tax",
+                discord_id,
+                &request.action_type,
+                &request.action_type,
+                "vanity tax on JC profit",
+                &request.detail,
+            )?;
+            let changed = transaction.execute(
+                "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
+                 WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
+                params![request.next.balance, discord_id, guild_id, gross_balance],
             )?;
             clear_runtime_ledger_context(&transaction)?;
             if changed != 1 {
@@ -2800,6 +2848,8 @@ pub struct DigRuntimeOutcome {
     pub depth_after: i64,
     pub advance: i64,
     pub jc_earned: i64,
+    /// Vanity tax withheld from the post-Mana/post-Helltide gross reward.
+    pub vanity_tax: i64,
     pub balance_after: i64,
     pub cave_in: bool,
     pub cave_in_detail: Option<String>,
@@ -3630,6 +3680,7 @@ impl DigRuntimeOutcome {
             depth_after: depth,
             advance: 0,
             jc_earned: 0,
+            vanity_tax: 0,
             balance_after: snapshot.balance,
             cave_in: false,
             cave_in_detail: None,
@@ -3656,11 +3707,42 @@ impl DigRuntimeOutcome {
     }
 }
 
+/// Application seam for the gateway-maintained vanity-tax policy.
+///
+/// The default runtime is deliberately a no-op so existing deployments and
+/// non-Discord callers retain the current economy until a provider injects the
+/// shared eligibility service with [`DigRuntimeService::with_vanity_tax`].
+pub trait DigRuntimeVanityTaxPort: Send + Sync + std::fmt::Debug {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64;
+}
+
+impl DigRuntimeVanityTaxPort for VanityTaxService {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        self.calculate_tax(discord_id, Some(guild_id), gross_profit)
+    }
+}
+
+impl DigRuntimeVanityTaxPort for PersistentVanityTaxService {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        self.calculate_tax(discord_id, guild_id, gross_profit)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoDigRuntimeVanityTax;
+
+impl DigRuntimeVanityTaxPort for NoDigRuntimeVanityTax {
+    fn calculate_tax(&self, _discord_id: i64, _guild_id: i64, _gross_profit: i64) -> i64 {
+        0
+    }
+}
+
 /// Full application orchestration for a Dig request.
 #[derive(Clone, Debug)]
 pub struct DigRuntimeService<S = SqliteDigRuntimeStore> {
     store: S,
     config: DigRuntimeConfig,
+    vanity_tax: Arc<dyn DigRuntimeVanityTaxPort>,
 }
 
 impl DigRuntimeService<SqliteDigRuntimeStore> {
@@ -4282,7 +4364,17 @@ where
 
     #[must_use]
     pub fn with_config(store: S, config: DigRuntimeConfig) -> Self {
-        Self { store, config }
+        Self {
+            store,
+            config,
+            vanity_tax: Arc::new(NoDigRuntimeVanityTax),
+        }
+    }
+
+    #[must_use]
+    pub fn with_vanity_tax(mut self, vanity_tax: Arc<dyn DigRuntimeVanityTaxPort>) -> Self {
+        self.vanity_tax = vanity_tax;
+        self
     }
 
     #[must_use]
@@ -4441,6 +4533,7 @@ where
                 depth_after: tunnel.depth,
                 advance: 0,
                 jc_earned: 0,
+                vanity_tax: 0,
                 balance_after: current.balance,
                 cave_in: false,
                 cave_in_detail: None,
@@ -4494,6 +4587,7 @@ where
                 depth_after: tunnel.depth,
                 advance: 0,
                 jc_earned: 0,
+                vanity_tax: 0,
                 balance_after: current.balance,
                 cave_in: false,
                 cave_in_detail: None,
@@ -4728,6 +4822,7 @@ where
                 depth_before: 0,
                 depth_after: first.advance,
                 jc_delta: first.jc_earned,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: serde_json::json!({
@@ -4736,6 +4831,7 @@ where
                     "minigame_scaled_jc": scaled_jc,
                     "economy_adjusted_jc": daily_adjusted_jc,
                     "economy_reward_multiplier": economy_multiplier,
+                    "vanity_tax": 0,
                     "pet_dig_bonus": pet_dig_bonus,
                     "boss_boundary": gated_total.boss_encounter,
                 })
@@ -4750,6 +4846,7 @@ where
                 depth_after: first.advance,
                 advance: first.advance,
                 jc_earned: first.jc_earned,
+                vanity_tax: 0,
                 balance_after,
                 cave_in: false,
                 cave_in_detail: None,
@@ -5664,6 +5761,26 @@ where
         let pet_work_claim = pet_work
             .as_ref()
             .and_then(|work| work.claim(pet_dig_bonus).ok());
+        // Vanity taxation is a single post-policy adjustment.  The basis is
+        // the reward after Mana and Helltide withholding but before profit
+        // policies, reconstructed as net + bankruptcy withholding; this is
+        // deliberately independent of bankruptcy and is skipped for cave-ins.
+        if !outcome.cave_in {
+            let vanity_tax_basis = outcome
+                .jc_earned
+                .saturating_add(outcome.bankruptcy_penalty)
+                .max(0);
+            let vanity_tax = self
+                .vanity_tax
+                .calculate_tax(request.discord_id, request.guild_id, vanity_tax_basis)
+                .max(0)
+                .min(vanity_tax_basis);
+            if vanity_tax > 0 {
+                state.balance = state.balance.saturating_sub(vanity_tax);
+                outcome.jc_earned = outcome.jc_earned.saturating_sub(vanity_tax);
+                outcome.vanity_tax = vanity_tax;
+            }
+        }
         let wallet_reward_delta = state
             .balance
             .saturating_sub(balance_before_outcome)
@@ -5917,6 +6034,7 @@ where
             "mana_paid_cave_refund": mana_paid_cave_refund,
             "helltide_tax": helltide_tax,
             "bankruptcy_penalty": outcome.bankruptcy_penalty,
+            "vanity_tax": outcome.vanity_tax,
             "gross_jc": outcome.economy_gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
             "economy_reward_multiplier": economy_multiplier,
@@ -5959,6 +6077,11 @@ where
                     .jc_earned
                     .saturating_sub(if paid_charge_active { paid_cost } else { 0 })
             },
+            vanity_tax: if outcome.cave_in {
+                0
+            } else {
+                outcome.vanity_tax
+            },
             balance_cost: if paid_charge_active { paid_cost } else { 0 },
             action_type: "dig".to_owned(),
             detail,
@@ -5974,6 +6097,11 @@ where
                 0
             } else {
                 outcome.jc_earned
+            },
+            vanity_tax: if outcome.cave_in {
+                0
+            } else {
+                outcome.vanity_tax
             },
             balance_after,
             cave_in: outcome.cave_in,
@@ -6062,6 +6190,7 @@ where
             depth_before: tunnel.depth,
             depth_after: tunnel.depth,
             jc_delta: 0,
+            vanity_tax: 0,
             balance_cost: 0,
             action_type: "route_choice".to_owned(),
             detail: serde_json::json!({"route_id": route_id}).to_string(),
@@ -6184,6 +6313,7 @@ where
             depth_before: depth,
             depth_after: depth,
             jc_delta: -result.cost,
+            vanity_tax: 0,
             balance_cost: 0,
             action_type: action_type.to_owned(),
             detail: serde_json::json!({"item": result.item, "item_id": result.item_id}).to_string(),
@@ -6661,7 +6791,9 @@ mod tests {
         DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
         proportional_mana_yield_tax, scale_dig_minigame_jc,
     };
+    use crate::vanity_tax_service::{VanityMember, VanityTaxService};
     use cama_domain::game_date::game_date_for_timestamp;
+    use std::sync::Arc;
 
     const PET_DAY: i64 = DIG_WORK_UNITS_PER_BLOCK;
 
@@ -7090,6 +7222,7 @@ mod tests {
                 .as_ref()
                 .map_or(1, |tunnel| tunnel.depth.saturating_add(1)),
             jc_delta: 0,
+            vanity_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "[]".to_owned(),
@@ -7147,6 +7280,7 @@ mod tests {
             depth_before: 0,
             depth_after: 1,
             jc_delta: 1,
+            vanity_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -7355,6 +7489,7 @@ mod tests {
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 0,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: "{}".to_owned(),
@@ -8087,6 +8222,7 @@ mod tests {
                 depth_before: 10,
                 depth_after: 20,
                 jc_delta: 0,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: "{}".to_owned(),
@@ -9299,6 +9435,229 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_normal_dig_applies_vanity_tax_to_gross_and_audits_net() {
+        let control = NamedTempFile::new().expect("control vanity-tax database");
+        let taxable = NamedTempFile::new().expect("taxable vanity-tax database");
+        let actor = 60_111;
+        let guild = 60_112;
+        let now = 1_900_110_000;
+        for database in [&control, &taxable] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("vanity-tax setup connection")
+                .execute("DELETE FROM economy_ledger_entries", [])
+                .expect("clear vanity-tax setup ledger");
+        }
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let today = game_date_for_timestamp(dig_now as f64).expect("vanity-tax date");
+        for database in [&control, &taxable] {
+            seed_two_weather_rows(database, guild, &today, "Magma", "fossil_rush");
+        }
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control normal Dig");
+        assert!(control_outcome.success);
+        assert!(!control_outcome.cave_in);
+        assert!(control_outcome.jc_earned > 0);
+
+        let vanity = Arc::new(VanityTaxService::with_rate_fraction(None, 0.5));
+        vanity
+            .refresh_guild(
+                guild,
+                &[VanityMember {
+                    discord_id: actor,
+                    nickname: None,
+                }],
+                None,
+            )
+            .expect("refresh taxable member");
+        assert_eq!(vanity.calculate_tax(actor, Some(guild), 6), 3);
+        let taxable_outcome = DigRuntimeService::sqlite(taxable.path())
+            .with_vanity_tax(vanity)
+            .dig(request)
+            .expect("taxable normal Dig");
+        let expected_tax = control_outcome.jc_earned / 2;
+        assert!(expected_tax > 0);
+        assert_eq!(taxable_outcome.vanity_tax, expected_tax);
+        assert_eq!(
+            taxable_outcome.jc_earned,
+            control_outcome.jc_earned - expected_tax
+        );
+        let detail = latest_dig_detail(&taxable, actor, guild);
+        assert_eq!(detail["vanity_tax"].as_i64(), Some(expected_tax));
+
+        let connection = Connection::open(taxable.path()).expect("inspect vanity-tax ledger");
+        let ledger = connection
+            .prepare(
+                "SELECT source,delta FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2 ORDER BY ledger_id",
+            )
+            .expect("prepare vanity-tax ledger")
+            .query_map(params![actor, guild], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("query vanity-tax ledger")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect vanity-tax ledger");
+        assert_eq!(
+            ledger,
+            vec![
+                ("dig".to_owned(), control_outcome.jc_earned),
+                ("vanity_tax".to_owned(), -expected_tax),
+            ]
+        );
+        let audit: (i64, i64) = connection
+            .query_row(
+                "SELECT jc_delta,COUNT(*) FROM dig_actions
+                 WHERE actor_id=?1 AND guild_id=?2 AND action_type='dig'",
+                params![actor, guild],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("vanity-tax audit");
+        assert_eq!(audit, (taxable_outcome.jc_earned, 1));
+    }
+
+    #[test]
+    fn sqlite_first_dig_is_exempt_from_vanity_tax() {
+        let database = NamedTempFile::new().expect("first-Dig vanity-tax database");
+        let actor = 60_113;
+        let guild = 60_114;
+        let now = 1_900_113_000;
+        initialize_or_migrate(database.path()).expect("first-Dig migration");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(actor, "first-vanity", Some(guild)))
+            .expect("first-Dig player");
+        Connection::open(database.path())
+            .expect("first-Dig connection")
+            .execute("DELETE FROM economy_ledger_entries", [])
+            .expect("clear first-Dig setup ledger");
+        let vanity = Arc::new(VanityTaxService::with_rate_fraction(None, 0.5));
+        vanity
+            .refresh_guild(
+                guild,
+                &[VanityMember {
+                    discord_id: actor,
+                    nickname: None,
+                }],
+                None,
+            )
+            .expect("refresh first-Dig member");
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .with_vanity_tax(vanity)
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("first Dig");
+        assert!(outcome.success);
+        assert!(outcome.first_dig);
+        assert_eq!(outcome.vanity_tax, 0);
+        let connection = Connection::open(database.path()).expect("inspect first-Dig ledger");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM economy_ledger_entries
+                     WHERE account_id=?1 AND guild_id=?2 AND source='vanity_tax'",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("first-Dig vanity ledger count"),
+            0
+        );
+    }
+
+    #[test]
+    fn vanity_tax_manual_override_taxability_is_deterministic() {
+        let vanity = VanityTaxService::with_rate_fraction(None, 0.1);
+        vanity
+            .refresh_guild(
+                60_116,
+                &[VanityMember {
+                    discord_id: 60_115,
+                    nickname: Some("decorated".to_owned()),
+                }],
+                None,
+            )
+            .expect("refresh manually exempt member");
+        assert_eq!(vanity.calculate_tax(60_115, Some(60_116), 250), 0);
+        vanity
+            .set_manual_taxation(60_116, 60_115, true, 60_117)
+            .expect("manual taxation");
+        assert_eq!(vanity.calculate_tax(60_115, Some(60_116), 250), 25);
+    }
+
+    #[test]
+    fn sqlite_vanity_tax_rolls_back_on_audit_failure_without_duplicate_ledger() {
+        let database = NamedTempFile::new().expect("vanity-tax rollback database");
+        let actor = 60_118;
+        let guild = 60_119;
+        let now = 1_900_118_000;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 10, 1, Some(now - 7_200));
+        let store = SqliteDigRuntimeStore::new(database.path());
+        let before = store.snapshot(actor, guild).expect("rollback snapshot");
+        let mut next = before.clone();
+        next.balance = before.balance.saturating_add(10);
+        let tunnel = next.tunnel.as_mut().expect("rollback tunnel");
+        tunnel.depth = tunnel.depth.saturating_add(1);
+        tunnel.total_digs = tunnel.total_digs.saturating_add(1);
+        tunnel.last_dig_at = Some(now);
+        Connection::open(database.path())
+            .expect("audit trigger connection")
+            .execute_batch(
+                "CREATE TRIGGER reject_vanity_tax_audit
+                 BEFORE INSERT ON dig_actions
+                 BEGIN SELECT RAISE(ABORT, 'vanity audit failure'); END;",
+            )
+            .expect("install audit failure trigger");
+        let error = store
+            .commit(DigRuntimeCommit {
+                expected: DigRuntimeVersion::from(&before),
+                next,
+                delivery_draft: None,
+                consumed_item_ids: Vec::new(),
+                pet_work_claim: None,
+                consume_overgrowth: false,
+                depth_before: 10,
+                depth_after: 11,
+                jc_delta: 10,
+                vanity_tax: 2,
+                balance_cost: 0,
+                action_type: "dig".to_owned(),
+                detail: "{}".to_owned(),
+                now,
+            })
+            .expect_err("audit failure must roll back vanity settlement");
+        assert!(matches!(error, DigRuntimeStoreError::Sqlite(_)));
+        assert_eq!(
+            store.snapshot(actor, guild).expect("rollback reload"),
+            before
+        );
+        let connection = Connection::open(database.path()).expect("rollback ledger connection");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM economy_ledger_entries
+                     WHERE account_id=?1 AND guild_id=?2
+                       AND source IN ('dig','vanity_tax')",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("rollback ledger count"),
+            0
+        );
+    }
+
+    #[test]
     fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
         let control = NamedTempFile::new().expect("control bankruptcy database");
         let penalized = NamedTempFile::new().expect("penalized bankruptcy database");
@@ -9807,6 +10166,7 @@ mod tests {
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 10,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: "{}".to_owned(),
@@ -9855,6 +10215,7 @@ mod tests {
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 10,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: "{}".to_owned(),
@@ -10042,6 +10403,7 @@ mod tests {
                 depth_before: 10,
                 depth_after: 11,
                 jc_delta: 0,
+                vanity_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: "{}".to_owned(),
