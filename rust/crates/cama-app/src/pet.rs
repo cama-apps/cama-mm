@@ -19,9 +19,9 @@ use cama_domain::pet::{
     DIG_WORK_RATE_HAPPY, DIG_WORK_RATE_HUNGRY, DIG_WORK_UNITS_PER_BLOCK, DeathNotice,
     EGG_HATCH_SECONDS, EvolutionNotice, FEED_CAP_PER_DAY, FOOD_ITEMS, FeedOutcome,
     GILDED_EGG_PREMIUM, GILDED_TIER_WEIGHTS, HatchNotice, MATCH_WIN_HUNGER, MAX_BUY_QTY,
-    MAX_HUNGER, PET_NAME_MAX_LEN, PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetError, PetMood,
-    PetStage, PetStatus, REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout, SALT_LICK,
-    SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
+    MAX_HUNGER, PET_NAME_MAX_LEN, PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetDigWork, PetError,
+    PetMood, PetStage, PetStatus, REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout,
+    SALT_LICK, SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
     TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, WARNING_HUNGER,
     adoption_fee, food_cost, get_species, sacrifice_tier_weights, species_ids_by_tier,
 };
@@ -531,6 +531,37 @@ where
             return Ok(None);
         };
         self.resolve_starvation(pet, now)
+    }
+
+    /// Return the passive work offer for one admitted Dig.
+    ///
+    /// Lifecycle resolution intentionally happens before the offer is built:
+    /// Python's `PetService.preview_dig_work` goes through `living_pet`, so a
+    /// ready egg hatches and a stale starving pet is revived or claimed dead
+    /// before Dig can inspect its work.  Healthy passive work remains a
+    /// preview-only calculation; the Dig commit owns the subsequent CAS
+    /// claim that advances `dig_work_units` and `dig_work_at`.
+    pub fn preview_dig_work(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        now: i64,
+    ) -> Result<Option<PetDigWork>, PetApplicationError> {
+        let Some(pet) = self.living_pet(discord_id, guild_id, now)? else {
+            return Ok(None);
+        };
+        if now < pet.hatched_at {
+            return Ok(None);
+        }
+        let (accrued_units, as_of) = self.dig_work_settlement(&pet, now)?;
+        Ok(Some(PetDigWork {
+            pet_id: pet.pet_id,
+            pet_name: pet.name,
+            expected_units: pet.dig_work_units,
+            expected_at: pet.dig_work_at,
+            accrued_units,
+            as_of,
+        }))
     }
 
     pub fn get_status(
@@ -3153,6 +3184,67 @@ mod tests {
         }
 
         #[test]
+        fn dig_work_preview_resolves_ready_egg_before_offering_work() {
+            let (mut service, clock) = fixture();
+            let egg = service
+                .adopt(OWNER, Some(GUILD), "Blep", "standard")
+                .unwrap()
+                .pet;
+            clock.set(egg.hatched_at);
+
+            let offer = service
+                .preview_dig_work(OWNER, Some(GUILD), clock.now())
+                .unwrap()
+                .expect("ready egg should offer passive work");
+            let hatched = stored(&mut service, egg.pet_id);
+
+            assert_ne!(hatched.species, UNHATCHED_SPECIES);
+            assert_eq!(offer.pet_id, egg.pet_id);
+            assert_eq!(offer.expected_units, hatched.dig_work_units);
+            assert_eq!(offer.expected_at, hatched.dig_work_at);
+        }
+
+        #[test]
+        fn dig_work_preview_rejects_pre_hatch_egg_without_resolving_species() {
+            let (mut service, clock) = fixture();
+            let egg = service
+                .adopt(OWNER, Some(GUILD), "Blep", "standard")
+                .unwrap()
+                .pet;
+            let now = egg.hatched_at - 1;
+            clock.set(now);
+
+            assert!(
+                service
+                    .preview_dig_work(OWNER, Some(GUILD), now)
+                    .unwrap()
+                    .is_none()
+            );
+            let still_egg = stored(&mut service, egg.pet_id);
+            assert_eq!(still_egg.species, UNHATCHED_SPECIES);
+        }
+
+        #[test]
+        fn dig_work_preview_claims_historical_starvation_before_rejecting_work() {
+            let (mut service, clock) = fixture();
+            let pet = adopt_common(&mut service, "Blep");
+            let starvation_at = pet.starvation_time(service.decay_per_day()).unwrap();
+            clock.set(starvation_at + DAY);
+
+            assert!(
+                service
+                    .preview_dig_work(OWNER, Some(GUILD), clock.now())
+                    .unwrap()
+                    .is_none()
+            );
+            let dead = stored(&mut service, pet.pet_id);
+            assert_eq!(dead.died_at, Some(starvation_at));
+            assert_eq!(dead.death_cause.as_deref(), Some("starvation"));
+            assert_eq!(dead.dig_work_units, 34 * DAY + 7 * DAY / 20);
+            assert_eq!(dead.dig_work_at, starvation_at);
+        }
+
+        #[test]
         fn aegis_revive_preserves_work_earned_before_starvation() {
             let (mut service, clock) = fixture();
             let pet = adopt_species(&mut service, "Shelly", "aegis_cama", "standard");
@@ -3165,6 +3257,59 @@ mod tests {
             assert_eq!(revived.dig_work_units, 34 * DAY + 7 * DAY / 20);
             assert_eq!(revived.dig_work_at, starved_at);
             assert_eq!(revived.aegis_used, 1);
+        }
+
+        #[test]
+        fn dig_work_preview_revives_aegis_before_offering_work() {
+            let (mut service, clock) = fixture();
+            let pet = adopt_species(&mut service, "Shelly", "aegis_cama", "standard");
+            let starvation_at = pet.starvation_time(service.decay_per_day()).unwrap();
+            clock.set(starvation_at + 3_600);
+
+            let offer = service
+                .preview_dig_work(OWNER, Some(GUILD), clock.now())
+                .unwrap()
+                .expect("Aegis should revive the pet before Dig work is offered");
+            let revived = stored(&mut service, pet.pet_id);
+
+            assert_eq!(revived.aegis_used, 1);
+            assert_eq!(revived.last_fed_at, starvation_at);
+            assert_eq!(revived.hunger_at_last_fed, AEGIS_REVIVE_HUNGER);
+            assert_eq!(revived.dig_work_units, 34 * DAY + 7 * DAY / 20);
+            assert_eq!(revived.dig_work_at, starvation_at);
+            assert_eq!(offer.expected_units, revived.dig_work_units);
+            assert_eq!(offer.expected_at, revived.dig_work_at);
+        }
+
+        #[test]
+        fn dig_work_preview_claims_second_starvation_after_aegis_is_spent() {
+            let (mut service, clock) = fixture();
+            let pet = adopt_species(&mut service, "Shelly", "aegis_cama", "standard");
+            let first_starvation = pet.starvation_time(service.decay_per_day()).unwrap();
+            clock.set(first_starvation + 3_600);
+
+            assert!(
+                service
+                    .preview_dig_work(OWNER, Some(GUILD), clock.now())
+                    .unwrap()
+                    .is_some()
+            );
+            let revived = stored(&mut service, pet.pet_id);
+            assert_eq!(revived.aegis_used, 1);
+
+            let second_starvation = first_starvation + DAY / 2;
+            clock.set(second_starvation + 3_600);
+            assert!(
+                service
+                    .preview_dig_work(OWNER, Some(GUILD), clock.now())
+                    .unwrap()
+                    .is_none()
+            );
+            let dead = stored(&mut service, pet.pet_id);
+            assert_eq!(dead.aegis_used, 1);
+            assert_eq!(dead.died_at, Some(second_starvation));
+            assert_eq!(dead.death_cause.as_deref(), Some("starvation"));
+            assert_eq!(dead.dig_work_at, second_starvation);
         }
     }
 
