@@ -12,6 +12,7 @@ pub mod ask_provider;
 pub mod betting_provider;
 pub mod blame_luke_provider;
 pub mod config;
+pub mod dig_provider;
 pub mod dig_weather_worker;
 pub mod discord_transport;
 pub mod dota_info_provider;
@@ -78,6 +79,10 @@ pub use betting_provider::{
 };
 pub use blame_luke_provider::BlameLukeRegistrationProvider;
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
+pub use dig_provider::{
+    DigChannelSnapshot, DigDiscordPort, DigProviderBuildError, DigPublicHistory,
+    DigPublicHistoryMessage, DigRegistrationProvider,
+};
 pub use dig_weather_worker::{
     DIG_WEATHER_WAKE_INTERVAL, DIG_WEATHER_WORKER_NAME, DigWeatherWorker, dig_weather_worker_spec,
 };
