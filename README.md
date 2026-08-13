@@ -235,7 +235,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 ### Registration & Profile — `/player`
 
 - `/player register` — Register yourself with your Steam32 ID; fetches MMR from OpenDota to seed your rating
-- `/refer` — Refer a new player before they register
+- `/refer` — Refer a player before their first game
 - `/player link` / `/player unlink` / `/player steamids` — Link, unlink, and list your Steam accounts
 - `/player roles` — Set preferred roles (1-5) for matchmaking
 - `/player region` — Set your preferred Dota server (US East / US West)
