@@ -52,9 +52,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::dig_loot::{
-    CanonicalEventResolution, DigLootModifiers, DigLootService, InventoryItem, LootActionResult,
-    LootEntropy, LootRepository, RepositoryError, SeededLootEntropy, TunnelLootState, consumable,
-    is_boss_prep_item, is_dig_consumable,
+    CanonicalEventResolution, CaveInChanceRequest, DigLootModifiers, DigLootService, InventoryItem,
+    LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
+    TunnelLootState, consumable, is_boss_prep_item, is_dig_consumable,
 };
 use crate::dig_relic_rework::{
     LanternStubRestoreInput, RelicEntropy, RelicSet, YieldContext, apply_lantern_stub_restore,
@@ -71,6 +71,7 @@ use crate::dig_service::{
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
+    roll_corruption,
 };
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
@@ -642,6 +643,27 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(1.0)
     }
 
+    /// Resolve the active mana hazard adjustment once for the live Dig.
+    /// Non-SQLite stores stay neutral until they explicitly own this input.
+    fn cave_in_mana_hazard_modifier(
+        &self,
+        _discord_id: i64,
+        _guild_id: i64,
+        _now: i64,
+    ) -> Result<f64, DigRuntimeStoreError> {
+        Ok(0.0)
+    }
+
+    /// Whether the player has an unspent Overgrowth charge at this instant.
+    fn overgrowth_active(
+        &self,
+        _discord_id: i64,
+        _guild_id: i64,
+        _now: i64,
+    ) -> Result<bool, DigRuntimeStoreError> {
+        Ok(false)
+    }
+
     fn auto_buy_items(
         &self,
         _request: AutoBuyRequest<'_>,
@@ -1194,9 +1216,13 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
     ) -> Result<f64, DigRuntimeStoreError> {
         let today = game_date_for_timestamp(now as f64)
             .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
-        let row = ManaRepository::new(&self.path)
-            .get_mana(discord_id, Some(guild_id))
-            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+        // Python treats a failed mana lookup as one neutral request-local
+        // snapshot; it must not turn an otherwise valid Dig into an error or
+        // retry the repository later in the same action.
+        let row = match ManaRepository::new(&self.path).get_mana(discord_id, Some(guild_id)) {
+            Ok(row) => row,
+            Err(_) => return Ok(0.0),
+        };
         let modifier = row
             .filter(|row| row.assigned_date == today && !row.consumed_today)
             .map(|row| match row.current_land.as_str() {
@@ -1205,6 +1231,47 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             })
             .unwrap_or(0.0);
         Ok((1.0_f64 + modifier).max(0.0))
+    }
+
+    fn cave_in_mana_hazard_modifier(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        now: i64,
+    ) -> Result<f64, DigRuntimeStoreError> {
+        let today = game_date_for_timestamp(now as f64)
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+        let row = ManaRepository::new(&self.path)
+            .get_mana(discord_id, Some(guild_id))
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+        Ok(row
+            .filter(|row| row.assigned_date == today && !row.consumed_today)
+            .map(|row| match row.current_land.as_str() {
+                "Forest" | "Mountain" => {
+                    if row.current_land == "Forest" {
+                        -0.01
+                    } else {
+                        0.01
+                    }
+                }
+                "Swamp" => 0.01,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0))
+    }
+
+    fn overgrowth_active(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        now: i64,
+    ) -> Result<bool, DigRuntimeStoreError> {
+        let active = ManashopRepository::new(&self.path)
+            .active_for(discord_id, Some(guild_id), "overgrowth", now)
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+        Ok(active
+            .iter()
+            .any(|buff| buff.data.charges_remaining.unwrap_or(0) > 0))
     }
 
     fn auto_buy_items(
@@ -3022,6 +3089,21 @@ fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffects, i64)> 
     ))
 }
 
+fn active_buff_cave_in_reduction(raw: Option<&str>) -> Option<(f64, i64)> {
+    let value = serde_json::from_str::<Value>(raw?).ok()?;
+    let remaining = value.get("digs_remaining")?.as_i64()?;
+    if remaining <= 0 {
+        return None;
+    }
+    let reduction = value
+        .get("effect")
+        .or_else(|| value.get("effects"))
+        .and_then(|effect| effect.get("cave_in_reduction"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    Some((reduction, remaining))
+}
+
 impl DigWeatherEffects {
     const fn neutral() -> Self {
         Self {
@@ -4258,8 +4340,9 @@ where
         } else {
             3_600
         };
-        let cooldown_seconds =
-            (base_cooldown_seconds as f64 * (1.0 + curse_fx.cooldown_penalty.max(0.0))) as i64;
+        let cooldown_seconds = (base_cooldown_seconds as f64
+            * (1.0 + curse_fx.cooldown_penalty.clamp(0.0, 0.25)))
+            as i64;
         let cooldown = cooldown_remaining(tunnel.last_dig_at, now, cooldown_seconds);
         // A paid flag only charges while it is actually bypassing an active
         // cooldown.  Python treats a paid click on an already-ready Dig as a
@@ -4494,6 +4577,122 @@ where
             weather_fx.cave_in_bonus
         };
         let active_pickaxe_tier = active_pickaxe_tier(&current.gear, &tunnel);
+        let prestige_perks =
+            serde_json::from_str::<Vec<String>>(&tunnel.prestige_perks).unwrap_or_default();
+        let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
+        let mutation_fx = mutation_effects(&mutations_from_json(tunnel.mutations.as_deref()));
+        // Corruption is the first request-local random policy in Python. It
+        // must consume the same entropy stream as the subsequent cave roll,
+        // rather than a second seed that would shift only some Dig paths.
+        let mut entropy = SeededLootEntropy::new(seed_for(request));
+        let corruption = roll_corruption(tunnel.prestige_level as i32, &mut entropy);
+        let corruption_bonus = corruption
+            .as_ref()
+            .and_then(|corruption| {
+                corruption
+                    .effects
+                    .iter()
+                    .find(|effect| effect.key == "cave_in_bonus")
+                    .and_then(|effect| effect.value.number())
+            })
+            .unwrap_or(0.0);
+        let mana_hazard_modifier =
+            self.store
+                .cave_in_mana_hazard_modifier(request.discord_id, request.guild_id, now)?;
+        let overgrowth_active =
+            self.store
+                .overgrowth_active(request.discord_id, request.guild_id, now)?;
+        let thick_skin = mutation_fx
+            .get("daily_cave_in_shield")
+            .and_then(|effect| effect.boolean())
+            .unwrap_or(false)
+            && tunnel.thick_skin_date.as_deref() != Some(today.as_str());
+        // The cave probability is evaluated after Python's complete
+        // luminosity pipeline. Project that value before entering the loot
+        // stage (which owns the first entropy draw) and apply the same value
+        // again below when the staged tunnel is settled.
+        let projected_luminosity = {
+            let layer = layer_at(depth_before);
+            let mut base_drain = layer.luminosity_drain;
+            if active_pickaxe_tier >= 6 {
+                base_drain = base_drain.saturating_sub(base_drain / 4);
+            }
+            base_drain = base_drain.saturating_add(deep_luminosity_drain_bonus(depth_before));
+            let drain = (base_drain as f64 * (1.0 + route_luminosity_delta).max(0.0)) as i64;
+            let mut luminosity = tunnel.luminosity.saturating_sub(drain).max(0);
+            let mut drained = tunnel.luminosity.saturating_sub(luminosity).max(0);
+            if current
+                .inventory
+                .iter()
+                .any(|item| item.queued && item.item_type == "torch")
+            {
+                luminosity = (luminosity + 50).min(LUMINOSITY_MAX);
+            }
+            if relics.contains("spore_cloak") && drained > 0 {
+                let restored = drained / 2;
+                luminosity = (luminosity + restored).min(LUMINOSITY_MAX);
+                drained = drained.saturating_sub(restored);
+            }
+            for multiplier in [
+                ascension_number("luminosity_drain_multiplier"),
+                weather_fx.luminosity_drain_multiplier,
+            ] {
+                if multiplier > 0.0 && drained > 0 {
+                    let extra = (drained as f64 * multiplier) as i64;
+                    luminosity = luminosity.saturating_sub(extra).max(0);
+                    drained = drained.saturating_add(extra);
+                }
+            }
+            if curse_fx.luminosity_drain > 0 {
+                luminosity = luminosity.saturating_sub(curse_fx.luminosity_drain).max(0);
+                drained = drained.saturating_add(curse_fx.luminosity_drain);
+            }
+            let lantern_stub = apply_lantern_stub_restore(
+                &relics,
+                LanternStubRestoreInput {
+                    luminosity_after: luminosity,
+                    last_dig_at: tunnel.last_dig_at,
+                    lantern_stub_date: tunnel.lantern_stub_date.as_deref(),
+                    today: &today,
+                },
+            );
+            luminosity = lantern_stub.luminosity_after;
+            if prestige_perk_contains(&tunnel.prestige_perks, "deep_sight") && drained > 0 {
+                let restored = (drained / 4).max(1);
+                luminosity = (luminosity + restored).min(LUMINOSITY_MAX);
+            }
+            luminosity
+        };
+        let cave_in_policy = CaveInChanceRequest {
+            base_layer: layer_at(depth_before).cave_in_chance,
+            route_bonus: route_number("cave_in_bonus"),
+            ascension_bonus: ascension_number("cave_in_bonus"),
+            curse_bonus: curse_fx.cave_in_bonus,
+            weather_bonus: cave_weather_bonus,
+            corruption_bonus,
+            luminosity: projected_luminosity,
+            dark_adaptation: prestige_perks.iter().any(|perk| perk == "dark_adaptation"),
+            dark_sight: mutation_fx
+                .get("ignore_luminosity_cave_in")
+                .and_then(|effect| effect.boolean())
+                .unwrap_or(false),
+            perk_reduction: perk_fx.get("cave_in_reduction").copied().unwrap_or(0.0),
+            active_pickaxe_reduction: gear_fx.cave_in_reduction,
+            active_buff_reduction: active_buff_cave_in_reduction(tunnel.temp_buffs.as_deref())
+                .map_or(0.0, |(reduction, _)| reduction),
+            smarts: tunnel.stat_smarts,
+            lantern: current
+                .inventory
+                .iter()
+                .any(|item| item.queued && item.item_type == "lantern"),
+            crystal_compass: relics.contains("crystal_compass"),
+            prestige_multiplier: crate::dig_service::prestige_cave_in_multiplier(
+                tunnel.prestige_level,
+            ),
+            overgrowth: overgrowth_active,
+            mana_hazard_modifier,
+            thick_skin,
+        };
         let loot_modifiers = DigLootModifiers {
             cave_in_chance_bonus: route_number("cave_in_bonus")
                 + cave_weather_bonus
@@ -4538,6 +4737,7 @@ where
                     .and_then(|route| route_effect(route, "cave_in_loss_cap"))
                     .map(|value| value as i64)
             }),
+            cave_in_policy: Some(cave_in_policy),
             defer_event_selection: true,
         };
         let sonar_skip_active_this_dig = tunnel.sonar_skip_pending;
@@ -4551,10 +4751,7 @@ where
             })
             .map(|item| item.id)
             .collect::<Vec<_>>();
-        let mut loot = DigLootService::new(
-            DigRuntimeLootRepository::new(current.clone()),
-            SeededLootEntropy::new(seed_for(request)),
-        );
+        let mut loot = DigLootService::new(DigRuntimeLootRepository::new(current.clone()), entropy);
         let mut loot_outcome =
             loot.dig_with_modifiers(request.discord_id, request.guild_id, now, loot_modifiers);
         if !loot_outcome.success {
@@ -4631,6 +4828,13 @@ where
                 let restored = (luminosity_drained / 4).max(1);
                 next_tunnel.luminosity = (next_tunnel.luminosity + restored).min(LUMINOSITY_MAX);
             }
+            // Hard Hat is deliberately last in Python's luminosity pipeline:
+            // the ten-point protection cost follows ordinary drain, Torch,
+            // Spore Cloak, ascension/weather/curse drains, Lantern Stub, and
+            // Deep Sight restoration.
+            if loot_outcome.hard_hat_absorbed {
+                next_tunnel.luminosity = next_tunnel.luminosity.saturating_sub(10).max(0);
+            }
         }
         let layer = layer_at(depth_before);
         let gross_jc = loot
@@ -4700,10 +4904,6 @@ where
         } else {
             None
         };
-        let mutation_fx = mutation_effects(&mutations_from_json(tunnel.mutations.as_deref()));
-        let prestige_perks =
-            serde_json::from_str::<Vec<String>>(&tunnel.prestige_perks).unwrap_or_default();
-        let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
         let mut cave_in_grappling_absorbed = false;
         let mut cave_reward_gross = 0_i64;
         let cave_loss = if loot_outcome.cave_in {
@@ -5131,6 +5331,21 @@ where
                     *value = Value::from(remaining - 1);
                 }
                 Some(curse.to_string())
+            };
+        }
+        if let Some((_, remaining)) = active_buff_cave_in_reduction(tunnel.temp_buffs.as_deref())
+            && let Some(next_tunnel) = staged.tunnel.as_mut()
+        {
+            next_tunnel.temp_buffs = if remaining <= 1 {
+                None
+            } else {
+                let mut buff =
+                    serde_json::from_str::<Value>(tunnel.temp_buffs.as_deref().unwrap_or("{}"))
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(value) = buff.get_mut("digs_remaining") {
+                    *value = Value::from(remaining - 1);
+                }
+                Some(buff.to_string())
             };
         }
         // Canonical event selection is deliberately late: Python rolls the
@@ -7997,6 +8212,29 @@ mod tests {
             .expect("deterministic cave seed")
     }
 
+    fn find_dig_time_with_unit_between(
+        discord_id: i64,
+        guild_id: i64,
+        start: i64,
+        minimum: f64,
+        maximum: f64,
+    ) -> i64 {
+        (start..start.saturating_add(10_000))
+            .find(|candidate| {
+                let unit =
+                    super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
+                        discord_id,
+                        guild_id,
+                        now: *candidate,
+                        paid: false,
+                        forced_event: false,
+                    }))
+                    .unit();
+                unit >= minimum && unit < maximum
+            })
+            .expect("deterministic cave probability seed")
+    }
+
     #[test]
     fn sqlite_luminosity_refill_updates_timestamp_and_applies_torch_after_drain() {
         let database = NamedTempFile::new().expect("luminosity database");
@@ -8136,7 +8374,9 @@ mod tests {
                 },
             )
             .expect("persisted queued charges");
-        assert_eq!(charges.0, 5);
+        // The queued Hard Hat grants three charges, then the imminent Dig
+        // consumes one unconditionally while bypassing the cave RNG.
+        assert_eq!(charges.0, 4);
         assert_eq!(charges.1, 9);
         assert!(charges.2 >= 4);
         assert!(charges.3 > dig_now);
@@ -8163,6 +8403,206 @@ mod tests {
                 .expect("applied inventory consumed"),
             0
         );
+    }
+
+    #[test]
+    fn sqlite_cave_probability_uses_luminosity_perk_buff_stats_and_mana_modifiers() {
+        let control_db = NamedTempFile::new().expect("control cave database");
+        let modified_db = NamedTempFile::new().expect("modified cave database");
+        let actor = 60_021;
+        let guild = 60_022;
+        let now = 1_900_015_000;
+        seed_live_runtime_tunnel(&control_db, actor, guild, now, 10, 1, Some(now - 7_200));
+        seed_live_runtime_tunnel(&modified_db, actor, guild, now, 10, 1, Some(now - 7_200));
+        let today = cama_domain::game_date::game_date_for_timestamp(now as f64)
+            .expect("cave probability date");
+        for database in [&control_db, &modified_db] {
+            let connection = Connection::open(database.path()).expect("seed cave weather");
+            for (layer, weather) in [("Dirt", "earthworm_migration"), ("Stone", "fossil_rush")] {
+                connection
+                    .execute(
+                        "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                         VALUES (?1,?2,?3,?4)",
+                        params![guild, today, layer, weather],
+                    )
+                    .expect("seed neutral cave weather");
+            }
+        }
+        let connection = Connection::open(modified_db.path()).expect("modified cave connection");
+        connection
+            .execute(
+                "UPDATE tunnels SET luminosity=25,prestige_perks=?1,stat_smarts=1,
+                 temp_buffs=?2 WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    r#"["dark_adaptation"]"#,
+                    r#"{"digs_remaining":1,"effect":{"cave_in_reduction":0.01}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed cave modifiers");
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'crystal_compass',?3,1,1)",
+                params![actor, guild, now - 100],
+            )
+            .expect("seed crystal compass");
+        connection
+            .execute(
+                "INSERT INTO player_mana(
+                     discord_id,guild_id,current_land,assigned_date,consumed_today
+                 ) VALUES(?1,?2,'Swamp',?3,0)",
+                params![actor, guild, today],
+            )
+            .expect("seed mana hazard");
+        drop(connection);
+
+        // The same request seed is safely outside the P0 control chance
+        // (~4.5%) but inside the dark, buff/stat/mana-adjusted chance.
+        let dig_now = find_dig_time_with_unit_between(actor, guild, now, 0.10, 0.18);
+        let control = DigRuntimeService::sqlite(control_db.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("control cave probability dig");
+        let modified = DigRuntimeService::sqlite(modified_db.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("modified cave probability dig");
+        assert!(
+            !control.cave_in,
+            "control should remain below the cave roll"
+        );
+        assert!(
+            modified.cave_in,
+            "live policy modifiers should raise dark cave risk"
+        );
+        assert_eq!(modified.depth_before, 10);
+        assert!(modified.depth_after < modified.depth_before);
+        assert_eq!(
+            Connection::open(modified_db.path())
+                .expect("reload modified cave database")
+                .query_row(
+                    "SELECT temp_buffs FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("expired cave buff"),
+            None,
+            "the active hazard buff is consumed by the same committed Dig",
+        );
+    }
+
+    #[test]
+    fn sqlite_queued_grapple_and_hard_hat_are_visible_to_cave_consequences() {
+        let hard_hat_db = NamedTempFile::new().expect("hard-hat cave database");
+        let grapple_db = NamedTempFile::new().expect("grapple cave database");
+        let hard_hat_actor = 60_023;
+        let grapple_actor = 60_024;
+        let guild = 60_025;
+        let now = 1_900_016_000;
+        seed_live_runtime_tunnel(
+            &hard_hat_db,
+            hard_hat_actor,
+            guild,
+            now,
+            10,
+            1,
+            Some(now - 7_200),
+        );
+        seed_live_runtime_tunnel(
+            &grapple_db,
+            grapple_actor,
+            guild,
+            now,
+            180,
+            1,
+            Some(now - 7_200),
+        );
+        let connection = Connection::open(hard_hat_db.path()).expect("hard-hat connection");
+        connection
+            .execute(
+                "UPDATE tunnels SET luminosity=40 WHERE discord_id=?1 AND guild_id=?2",
+                params![hard_hat_actor, guild],
+            )
+            .expect("seed hard-hat luminosity");
+        for item_type in ["hard_hat", "torch"] {
+            connection
+                .execute(
+                    "INSERT INTO dig_inventory(
+                         discord_id,guild_id,item_type,queued,created_at
+                     ) VALUES(?1,?2,?3,1,?4)",
+                    params![hard_hat_actor, guild, item_type, now],
+                )
+                .expect("queue hard-hat item");
+        }
+        drop(connection);
+        let connection = Connection::open(grapple_db.path()).expect("grapple connection");
+        connection
+            .execute(
+                "INSERT INTO dig_inventory(
+                     discord_id,guild_id,item_type,queued,created_at
+                 ) VALUES(?1,?2,'grappling_hook',1,?3)",
+                params![grapple_actor, guild, now],
+            )
+            .expect("queue grapple");
+        drop(connection);
+
+        let hard_hat_now = find_non_cave_dig_time(hard_hat_actor, guild, now);
+        let hard_hat = DigRuntimeService::sqlite(hard_hat_db.path())
+            .dig(DigRuntimeRequest {
+                discord_id: hard_hat_actor,
+                guild_id: guild,
+                now: hard_hat_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("hard-hat dig");
+        assert!(hard_hat.success);
+        assert!(!hard_hat.cave_in);
+        let hard_hat_snapshot = SqliteDigRuntimeStore::new(hard_hat_db.path())
+            .snapshot(hard_hat_actor, guild)
+            .expect("hard-hat snapshot");
+        let hard_hat_tunnel = hard_hat_snapshot.tunnel.expect("hard-hat tunnel");
+        assert_eq!(hard_hat_tunnel.hard_hat_charges, 2);
+        // Dirt has no ordinary luminosity drain: 40 + 50 Torch - 10 Hard Hat.
+        // This catches applying the protection cost before the Torch hook.
+        assert_eq!(hard_hat_tunnel.luminosity, 80);
+
+        let grapple_now = find_cave_dig_time(grapple_actor, guild, now);
+        let grapple = DigRuntimeService::sqlite(grapple_db.path())
+            .dig(DigRuntimeRequest {
+                discord_id: grapple_actor,
+                guild_id: guild,
+                now: grapple_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("grapple dig");
+        assert!(grapple.success && grapple.cave_in);
+        assert_eq!(grapple.depth_after, grapple.depth_before);
+        let detail =
+            serde_json::from_str::<Value>(&grapple.cave_in_detail.expect("cushioned cave detail"))
+                .expect("cushioned cave JSON");
+        assert_eq!(detail["type"], "cushioned");
+        assert_eq!(detail["block_loss"], 0);
+        let grapple_tunnel = SqliteDigRuntimeStore::new(grapple_db.path())
+            .snapshot(grapple_actor, guild)
+            .expect("grapple snapshot")
+            .tunnel
+            .expect("grapple tunnel");
+        assert_eq!(grapple_tunnel.grappling_hook_charges, 4);
     }
 
     #[test]
@@ -8341,9 +8781,11 @@ mod tests {
         let slower_connection = Connection::open(slower_db.path()).expect("slower connection");
         slower_connection
             .execute(
-                "UPDATE tunnels SET injury_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+                "UPDATE tunnels SET injury_state=?1,temp_curses=?2
+                 WHERE discord_id=?3 AND guild_id=?4",
                 params![
                     r#"{"type":"slower_cooldown","digs_remaining":1}"#,
+                    r#"{"digs_remaining":1,"effect":{"cooldown_penalty":1.0}}"#,
                     actor,
                     guild
                 ],
@@ -8360,12 +8802,12 @@ mod tests {
             })
             .expect("slower injury cooldown");
         assert!(!blocked.success);
-        assert!(blocked.cooldown_remaining >= 5 * 3_600);
+        assert_eq!(blocked.cooldown_remaining, 13 * 30 * 60);
         let slower_connection = Connection::open(slower_db.path()).expect("reopen slower");
         slower_connection
             .execute(
                 "UPDATE tunnels SET last_dig_at=?1 WHERE discord_id=?2 AND guild_id=?3",
-                params![now - 6 * 3_600, actor, guild],
+                params![now - (15 * 3_600 / 2), actor, guild],
             )
             .expect("clear slower cooldown");
         drop(slower_connection);

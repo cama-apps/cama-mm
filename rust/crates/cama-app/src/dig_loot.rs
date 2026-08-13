@@ -16,6 +16,7 @@ use cama_domain::embed_safety::EmbedModel;
 use serde::{Deserialize, Serialize};
 
 use crate::dig_service::{AutoBuyStatus, layer_at};
+use crate::dig_tunnels::EntropyPort;
 
 pub const MAX_INVENTORY_SLOTS: usize = 8;
 pub const HARD_HAT_USES: i64 = 3;
@@ -2219,6 +2220,12 @@ impl SeededLootEntropy {
     }
 }
 
+impl EntropyPort for SeededLootEntropy {
+    fn next_u64(&mut self) -> u64 {
+        SeededLootEntropy::next_u64(self)
+    }
+}
+
 impl LootEntropy for SeededLootEntropy {
     fn unit(&mut self) -> f64 {
         let numerator = self.next_u64() >> 11;
@@ -2629,6 +2636,10 @@ pub struct DigLootOutcome {
     pub error: Option<String>,
     pub advance: i64,
     pub cave_in: bool,
+    /// A queued/charged Hard Hat prevented the cave roll. The outer runtime
+    /// applies its ten-point luminosity drain after all ordinary drain,
+    /// Torch, relic, weather, curse, and Deep Sight hooks have settled.
+    pub hard_hat_absorbed: bool,
     pub dynamite_bonus: i64,
     pub has_lantern: bool,
     pub event: Option<String>,
@@ -2640,6 +2651,107 @@ pub struct DigLootOutcome {
     /// depth is known while preserving the single RNG draw used by Python.
     pub event_roll_bits: Option<u64>,
     pub items_used: Vec<&'static str>,
+}
+
+/// All request-local inputs used by Python's live cave-in gate.
+///
+/// Keeping the additive terms, reductions, multipliers, and final hazard
+/// adjustment together prevents the loot stage from silently applying an
+/// older subset of the `/dig` policy. The application fills this value from
+/// its one admitted runtime snapshot; this type itself is pure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaveInChanceRequest {
+    pub base_layer: f64,
+    pub route_bonus: f64,
+    pub ascension_bonus: f64,
+    pub curse_bonus: f64,
+    pub weather_bonus: f64,
+    pub corruption_bonus: f64,
+    pub luminosity: i64,
+    pub dark_adaptation: bool,
+    pub dark_sight: bool,
+    pub perk_reduction: f64,
+    pub active_pickaxe_reduction: f64,
+    pub active_buff_reduction: f64,
+    pub smarts: i64,
+    pub lantern: bool,
+    pub crystal_compass: bool,
+    pub prestige_multiplier: f64,
+    pub overgrowth: bool,
+    pub mana_hazard_modifier: f64,
+    pub thick_skin: bool,
+}
+
+impl Default for CaveInChanceRequest {
+    fn default() -> Self {
+        Self {
+            base_layer: 0.0,
+            route_bonus: 0.0,
+            ascension_bonus: 0.0,
+            curse_bonus: 0.0,
+            weather_bonus: 0.0,
+            corruption_bonus: 0.0,
+            luminosity: 100,
+            dark_adaptation: false,
+            dark_sight: false,
+            perk_reduction: 0.0,
+            active_pickaxe_reduction: 0.0,
+            active_buff_reduction: 0.0,
+            smarts: 0,
+            lantern: false,
+            crystal_compass: false,
+            prestige_multiplier: 1.0,
+            overgrowth: false,
+            mana_hazard_modifier: 0.0,
+            thick_skin: false,
+        }
+    }
+}
+
+impl CaveInChanceRequest {
+    /// Resolve the live chance in the same order as Python.
+    #[must_use]
+    pub fn resolve(self) -> f64 {
+        if self.thick_skin {
+            return 0.0;
+        }
+        let luminosity_bonus = if self.dark_sight || self.luminosity >= 76 {
+            0.0
+        } else if self.luminosity >= 26 {
+            if self.dark_adaptation { 0.0 } else { 0.08 }
+        } else if self.luminosity >= 1 {
+            0.20
+        } else {
+            0.35
+        };
+        let curse_bonus = self.curse_bonus.clamp(0.0, 0.10);
+        let mut chance = self.base_layer
+            + self.route_bonus
+            + self.ascension_bonus
+            + curse_bonus
+            + self.weather_bonus
+            + self.corruption_bonus
+            + luminosity_bonus
+            - self.perk_reduction
+            - self.active_pickaxe_reduction
+            - self.active_buff_reduction
+            - (self.smarts.max(0) as f64 * 0.02);
+        if self.lantern {
+            chance *= 0.50;
+        }
+        if self.crystal_compass {
+            chance *= 0.97;
+        }
+        chance *= self.prestige_multiplier.max(0.0);
+        if self.overgrowth {
+            chance *= 0.50;
+        }
+        // Mana applies after multiplicative hazard protections. Python
+        // clamps this modifier before the ordinary 1% floor.
+        (chance + self.mana_hazard_modifier)
+            .clamp(0.0, 1.0)
+            .max(0.01)
+    }
 }
 
 /// Environment modifiers supplied by the application orchestrator.
@@ -2671,6 +2783,9 @@ pub struct DigLootModifiers {
     pub artifact_multiplier: f64,
     pub cave_in_loss_bonus: i64,
     pub cave_in_loss_cap: Option<i64>,
+    /// Complete live cave-in policy. When present it supersedes the legacy
+    /// additive/multiplicative fields above.
+    pub cave_in_policy: Option<CaveInChanceRequest>,
     /// Let the application-level canonical event picker own catalog
     /// selection.  The loot service still consumes the event-gate draw and
     /// applies queued tunnel-item state, but it never performs the legacy
@@ -2696,6 +2811,7 @@ impl Default for DigLootModifiers {
             artifact_multiplier: 1.0,
             cave_in_loss_bonus: 0,
             cave_in_loss_cap: None,
+            cave_in_policy: None,
             defer_event_selection: false,
         }
     }
@@ -2889,17 +3005,28 @@ where
         }
 
         let layer = layer_at(tunnel.depth);
-        let mut cave_in_chance = (layer.cave_in_chance + modifiers.cave_in_chance_bonus)
-            * modifiers.cave_in_chance_multiplier.max(0.0);
-        if has_lantern {
-            cave_in_chance *= 0.5;
-        }
-        let cave_roll = self.entropy.unit();
-        let would_cave = cave_roll < cave_in_chance;
-        let cave_in = would_cave && tunnel.hard_hat_charges <= 0;
-        if would_cave && tunnel.hard_hat_charges > 0 {
+        let cave_in_chance = modifiers.cave_in_policy.map_or_else(
+            || {
+                let mut chance = (layer.cave_in_chance + modifiers.cave_in_chance_bonus)
+                    * modifiers.cave_in_chance_multiplier.max(0.0);
+                if has_lantern {
+                    chance *= 0.5;
+                }
+                chance
+            },
+            CaveInChanceRequest::resolve,
+        );
+        // Hard Hat is an atomic prevention, not a random roll that happens
+        // to be ignored. Skipping the draw preserves Python's RNG stream and
+        // drains the same ten luminosity points as the live bot.
+        let hard_hat_used = tunnel.hard_hat_charges > 0;
+        let cave_in = if hard_hat_used {
             tunnel.hard_hat_charges -= 1;
-        }
+            false
+        } else {
+            let cave_roll = self.entropy.unit();
+            cave_roll < cave_in_chance
+        };
 
         let minimum = modifiers
             .advance_min
@@ -2994,6 +3121,7 @@ where
             success: true,
             advance,
             cave_in,
+            hard_hat_absorbed: hard_hat_used,
             dynamite_bonus: flat_advance_bonus,
             has_lantern,
             event,
@@ -3386,6 +3514,60 @@ pub fn build_dig_embed(result: &DigPresentation) -> EmbedModel {
         );
     }
     embed
+}
+
+#[cfg(test)]
+mod cave_in_policy_tests {
+    use super::CaveInChanceRequest;
+
+    fn request(luminosity: i64) -> CaveInChanceRequest {
+        CaveInChanceRequest {
+            base_layer: 0.10,
+            luminosity,
+            ..CaveInChanceRequest::default()
+        }
+    }
+
+    #[test]
+    fn cave_in_policy_preserves_each_luminosity_band() {
+        assert!((request(100).resolve() - 0.10).abs() < f64::EPSILON);
+        assert!((request(76).resolve() - 0.10).abs() < f64::EPSILON);
+        assert!((request(75).resolve() - 0.18).abs() < f64::EPSILON);
+        assert!((request(26).resolve() - 0.18).abs() < f64::EPSILON);
+        assert!((request(25).resolve() - 0.30).abs() < f64::EPSILON);
+        assert!((request(0).resolve() - 0.45).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cave_in_policy_dark_adaptation_only_cancels_dim_penalty() {
+        let dim = CaveInChanceRequest {
+            dark_adaptation: true,
+            ..request(75)
+        };
+        let dark = CaveInChanceRequest {
+            dark_adaptation: true,
+            ..request(25)
+        };
+        assert!((dim.resolve() - 0.10).abs() < f64::EPSILON);
+        assert!((dark.resolve() - 0.30).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cave_in_policy_caps_curse_and_applies_mana_after_multipliers() {
+        let capped = CaveInChanceRequest {
+            curse_bonus: 0.50,
+            lantern: true,
+            mana_hazard_modifier: 0.01,
+            ..request(100)
+        };
+        // (0.10 + 0.10) * .5 + .01 = .11.
+        assert!((capped.resolve() - 0.11).abs() < f64::EPSILON);
+        let negative = CaveInChanceRequest {
+            curse_bonus: -0.50,
+            ..request(100)
+        };
+        assert!((negative.resolve() - 0.10).abs() < f64::EPSILON);
+    }
 }
 
 #[cfg(test)]
