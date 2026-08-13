@@ -1550,6 +1550,16 @@ struct PendingWheelInteraction {
     guild_id: i64,
     created_at: Instant,
     options: Vec<WheelOption>,
+    /// Keep the complete wheel presentation so a Red-mana reroll can replace
+    /// the uploaded GIF with the newly selected wedge.  The economic options
+    /// above intentionally remain the smaller policy surface.
+    wheel_wedges: Vec<cama_app::wheel::WheelWedge>,
+    golden: bool,
+    /// The exact bytes sent with the initial prompt.  Python edits the
+    /// message without an `attachments=` argument when settling, which keeps
+    /// that GIF visible; carrying the bytes through gives the typed responder
+    /// the same result without changing explicit-clear semantics elsewhere.
+    initial_attachment: Option<InteractionAttachment>,
     votes: BTreeMap<i64, usize>,
     spin_kind: WheelKind,
     balance_before: i64,
@@ -1853,13 +1863,11 @@ impl BettingInteractionHandler {
                     }
                     if let Some(original_responder) = original_responder {
                         let _ = original_responder
-                            .edit_original(
-                                InteractionResponse::message(format!(
-                                    "This Wheel interaction timed out. {}",
-                                    result.message
-                                ))
-                                .embed(result.completion_embed.clone()),
-                            )
+                            .edit_original(wheel_completion_response(
+                                format!("This Wheel interaction timed out. {}", result.message),
+                                Some(result.completion_embed.clone()),
+                                pending.initial_attachment.clone(),
+                            ))
                             .await;
                     }
                     settled += 1;
@@ -2295,10 +2303,11 @@ impl BettingInteractionHandler {
                 if response.is_ok() {
                     if let Some(original_responder) = original_responder {
                         let _ = original_responder
-                            .edit_original(
-                                InteractionResponse::message(timeout_message)
-                                    .embed(result.completion_embed.clone()),
-                            )
+                            .edit_original(wheel_completion_response(
+                                timeout_message,
+                                Some(result.completion_embed.clone()),
+                                pending.initial_attachment.clone(),
+                            ))
                             .await;
                     }
                     self.emit_pending_neon(channel_id, user_id, guild_id, &result)
@@ -2324,6 +2333,12 @@ impl BettingInteractionHandler {
         };
         let (key, pending, option, use_reroll) = pending;
         let original_responder = pending.original_responder.clone();
+        let final_attachment = if use_reroll {
+            wheel_attachment_for_option(&pending, &option)
+                .or_else(|| pending.initial_attachment.clone())
+        } else {
+            pending.initial_attachment.clone()
+        };
         let path = self.database_path.clone();
         let config = pending.config.clone();
         let event_id = pending.event_id.clone();
@@ -2377,10 +2392,11 @@ impl BettingInteractionHandler {
         if response.is_ok() {
             if let Some(original_responder) = original_responder {
                 let _ = original_responder
-                    .edit_original(
-                        InteractionResponse::message(result.message.clone())
-                            .embed(result.completion_embed.clone()),
-                    )
+                    .edit_original(wheel_completion_response(
+                        result.message.clone(),
+                        Some(result.completion_embed.clone()),
+                        final_attachment,
+                    ))
                     .await;
             }
             self.emit_pending_neon(channel_id, user_id, guild_id, &result)
@@ -3613,6 +3629,7 @@ impl BettingInteractionHandler {
         let completion_message = outcome.completion_message.clone();
         let completion_embed = outcome.completion_embed.clone();
         let completion_delay = outcome.completion_delay;
+        let initial_attachment = outcome.attachment.clone();
         let neon_wheel_result = outcome.neon_wheel_result;
         let neon_wheel_balance_before = outcome.neon_wheel_balance_before;
         let neon_wheel_balance = outcome.neon_wheel_balance;
@@ -3643,8 +3660,13 @@ impl BettingInteractionHandler {
                 .insert(key, pending);
             response = response.action_rows(rows);
         }
+        let response_has_attachment = !response.attachments.is_empty();
+        let mut attachment_delivered = false;
         let delivery = match responder.respond(response.clone()).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                attachment_delivered = response_has_attachment;
+                Ok(())
+            }
             Err(error) if !response.attachments.is_empty() => {
                 // Discord can reject a generated media upload (size, transient
                 // CDN failure, or an adapter without attachment support). Keep
@@ -3664,6 +3686,9 @@ impl BettingInteractionHandler {
             && let Some(pending) = interactions.get_mut(&pending_key)
         {
             pending.original_responder = Some(Arc::clone(responder));
+            if !attachment_delivered {
+                pending.initial_attachment = None;
+            }
         }
         if delivery.is_ok()
             && let Some(completion_message) = completion_message
@@ -3673,10 +3698,11 @@ impl BettingInteractionHandler {
             // already committed before this delivery boundary; an edit
             // failure therefore degrades to the initial attachment message.
             tokio::time::sleep(completion_delay).await;
-            let mut completion = InteractionResponse::message(completion_message);
-            if let Some(embed) = completion_embed {
-                completion = completion.embed(embed);
-            }
+            let completion = wheel_completion_response(
+                completion_message,
+                completion_embed,
+                attachment_delivered.then_some(initial_attachment).flatten(),
+            );
             let _ = responder.edit_original(completion).await;
         }
         if delivery.is_ok() {
@@ -7850,6 +7876,7 @@ fn spin_once(
         bonus_spin,
         last_regular_spin,
     ) {
+        let (key, mut pending) = (key, pending);
         let prompt = match pending.kind {
             WheelInteractionKind::TownTrial => {
                 "⚖️ **TOWN TRIAL** — the town has five minutes to decide your fate."
@@ -7868,13 +7895,15 @@ fn spin_once(
             || prompt.to_owned(),
             |preview| format!("{prompt}\n\n{preview}"),
         );
+        let attachment = render_wheel_attachment(&wedges, index, kind == WheelKind::Golden).ok();
+        pending.initial_attachment = attachment.clone();
         return Ok(SpinResult {
             message: prompt,
             completion_message: None,
             completion_embed: None,
             completion_delay: Duration::ZERO,
             pending: Some((key, pending)),
-            attachment: render_wheel_attachment(&wedges, index, kind == WheelKind::Golden).ok(),
+            attachment,
             neon_wheel_result: None,
             neon_wheel_balance_before: None,
             neon_wheel_balance: None,
@@ -8111,6 +8140,31 @@ fn spin_result_with_attachment(
         neon_lightning: None,
         golden_announcement: None,
     }
+}
+
+fn wheel_completion_response(
+    content: impl Into<String>,
+    embed: Option<InteractionEmbed>,
+    attachment: Option<InteractionAttachment>,
+) -> InteractionResponse {
+    let mut response = InteractionResponse::message(content);
+    if let Some(embed) = embed {
+        response = response.embed(embed);
+    }
+    if let Some(attachment) = attachment {
+        response = response.attachment(attachment);
+    }
+    response
+}
+
+fn wheel_attachment_for_option(
+    pending: &PendingWheelInteraction,
+    option: &WheelOption,
+) -> Option<InteractionAttachment> {
+    let index = pending.wheel_wedges.iter().position(|wedge| {
+        wedge.label == option.label && wedge.value == option.value && wedge.color == option.color
+    })?;
+    render_wheel_attachment(&pending.wheel_wedges, index, pending.golden).ok()
 }
 
 fn wheel_result_embed(
@@ -8575,6 +8629,9 @@ fn pending_wheel_interaction(
             guild_id,
             created_at: Instant::now(),
             options,
+            wheel_wedges: wedges.to_vec(),
+            golden: kind == WheelKind::Golden,
+            initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: kind,
             balance_before,
@@ -9529,6 +9586,9 @@ mod tests {
                         value: WheelValue::Numeric(0),
                         color: "#000000",
                     }],
+                    wheel_wedges: Vec::new(),
+                    golden: false,
+                    initial_attachment: None,
                     votes: BTreeMap::new(),
                     spin_kind: WheelKind::Regular,
                     balance_before: 0,
@@ -9625,6 +9685,9 @@ mod tests {
                         value: WheelValue::Numeric(0),
                         color: "#000000",
                     }],
+                    wheel_wedges: Vec::new(),
+                    golden: false,
+                    initial_attachment: None,
                     votes: BTreeMap::new(),
                     spin_kind: WheelKind::Regular,
                     balance_before: 0,
@@ -10616,6 +10679,9 @@ mod tests {
             guild_id: 42,
             created_at: Instant::now(),
             options: options.clone(),
+            wheel_wedges: Vec::new(),
+            golden: false,
+            initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Bankrupt,
             balance_before: -100,
@@ -10937,6 +11003,9 @@ mod tests {
                 value: WheelValue::Numeric(0),
                 color: "#000000",
             }],
+            wheel_wedges: Vec::new(),
+            golden: false,
+            initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Bankrupt,
             balance_before: -10,
@@ -10995,6 +11064,7 @@ mod tests {
             Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
         );
         let responder = RecordingResponder::default();
+        let initial_attachment = InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3, 4]);
         let pending = PendingWheelInteraction {
             kind: WheelInteractionKind::Discover,
             user_id: 7,
@@ -11005,6 +11075,9 @@ mod tests {
                 value: WheelValue::Numeric(0),
                 color: "#000000",
             }],
+            wheel_wedges: Vec::new(),
+            golden: false,
+            initial_attachment: Some(initial_attachment.clone()),
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Regular,
             balance_before: 0,
@@ -11055,6 +11128,106 @@ mod tests {
             Some("🚫 LOSE A TURN 🚫")
         );
         assert_eq!(edits[0].embeds.len(), 1);
+        assert_eq!(edits[0].attachments, vec![initial_attachment]);
+    }
+
+    #[tokio::test]
+    async fn wheel_component_reroll_replaces_public_gif_attachment() {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(7, "player", Some(42)))
+            .expect("player");
+        ManaRepository::new(database.path())
+            .set_mana(7, Some(42), "Mountain", "2025-01-01")
+            .expect("red mana");
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let mut effects = ManaEffects::default();
+        effects.color = Some("Red".to_owned());
+        let wedges = vec![
+            cama_app::wheel::WheelWedge {
+                label: "LOSE".to_owned(),
+                value: WheelValue::Numeric(0),
+                color: "#000000",
+            },
+            cama_app::wheel::WheelWedge {
+                label: "GOOD".to_owned(),
+                value: WheelValue::Numeric(5),
+                color: "#ffffff",
+            },
+        ];
+        let initial_attachment =
+            render_wheel_attachment(&wedges, 0, false).expect("initial wheel GIF");
+        let responder = RecordingResponder::default();
+        let pending = PendingWheelInteraction {
+            kind: WheelInteractionKind::Reroll,
+            user_id: 7,
+            guild_id: 42,
+            created_at: Instant::now(),
+            options: wedges.iter().map(wheel_option).collect(),
+            wheel_wedges: wedges.clone(),
+            golden: false,
+            initial_attachment: Some(initial_attachment.clone()),
+            votes: BTreeMap::new(),
+            spin_kind: WheelKind::Bankrupt,
+            balance_before: 0,
+            effects,
+            event_id: "reroll-media".to_owned(),
+            config: BettingRuntimeConfig::from_application_config(&config),
+            event_win_multiplier: 1.0,
+            event_loss_multiplier: 1.0,
+            bonus_spin: false,
+            last_regular_spin: None,
+            original_responder: Some(Arc::new(responder.clone())),
+        };
+        let provider = BettingRegistrationProvider::new(
+            database.path(),
+            &config,
+            Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+        );
+        provider
+            .handler
+            .wheel_interactions
+            .lock()
+            .expect("wheel state lock")
+            .insert("betting:reroll:reroll-media".to_owned(), pending);
+
+        provider
+            .handler
+            .handle(
+                InteractionRequest::Component {
+                    interaction_id: 47,
+                    custom_id: "betting:reroll:reroll-media:yes".to_owned(),
+                    user_id: 7,
+                    user_display_name: "player".to_owned(),
+                    guild_id: Some(42),
+                    channel_id: Some(99),
+                    member_permissions: None,
+                    values: Vec::new(),
+                },
+                Arc::new(responder.clone()),
+            )
+            .await
+            .expect("resolve reroll component");
+
+        let responses = responder.responses.lock().expect("responses lock");
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].ephemeral);
+        assert!(responses[0].attachments.is_empty());
+        drop(responses);
+        let edits = responder.edits.lock().expect("edits lock");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].attachments.len(), 1);
+        assert_eq!(edits[0].attachments[0].filename, "wheel.gif");
+        assert_ne!(edits[0].attachments[0].bytes, initial_attachment.bytes);
+        assert!(
+            ManaRepository::new(database.path())
+                .is_bankrupt_buff_used(7, Some(42), BankruptBuff::Reroll)
+                .expect("reroll claim")
+        );
     }
 
     #[test]

@@ -3724,6 +3724,7 @@ fn response_error(error: serenity::Error) -> InteractionResponseError {
 mod tests {
     use super::*;
     use crate::gateway::GatewayIntentProfile;
+    use crate::registration::InteractionButton;
 
     #[test]
     fn python_profile_maps_to_default_plus_exact_privileged_intents() {
@@ -3857,6 +3858,47 @@ mod tests {
 
         assert_eq!(serialized["footer"]["text"], "Community Mine");
         assert_eq!(serialized["footer"]["icon_url"], "attachment://pickaxe.png");
+    }
+
+    #[test]
+    fn attachment_upload_and_edit_replacement_preserve_typed_bytes() {
+        let mut attachment = InteractionAttachment::bytes("wheel.gif", vec![0, 1, 2, 255]);
+        attachment.description = Some("wheel animation".to_owned());
+        let upload = serenity_attachment(&attachment);
+        assert_eq!(upload.filename, "wheel.gif");
+        assert_eq!(upload.description.as_deref(), Some("wheel animation"));
+        assert_eq!(upload.data, vec![0, 1, 2, 255]);
+
+        let uploaded = serde_json::to_value(response_message(
+            InteractionResponse::message("spinning").attachment(attachment.clone()),
+        ))
+        .expect("serialize attachment upload");
+        assert_eq!(uploaded["attachments"][0]["filename"], "wheel.gif");
+
+        let serialized = serde_json::to_value(edit_response(
+            InteractionResponse::message("settled").attachment(attachment),
+        ))
+        .expect("serialize attachment replacement");
+        assert_eq!(serialized["attachments"][0]["id"], serde_json::json!(0));
+        assert_eq!(serialized["attachments"][0]["filename"], "wheel.gif");
+        assert_eq!(
+            serialized["attachments"][0]["description"],
+            "wheel animation"
+        );
+    }
+
+    #[test]
+    fn component_only_edit_omits_attachments_to_preserve_existing_upload() {
+        let preserving = DiscordMessage::silent(InteractionResponse::message("").action_row(
+            InteractionActionRow::buttons(vec![InteractionButton::new(
+                "wheel:keep",
+                "Keep result",
+            )]),
+        ))
+        .preserving_body();
+        let serialized = serde_json::to_value(edit_channel_response(preserving))
+            .expect("serialize component-only edit");
+        assert!(serialized.get("attachments").is_none());
     }
 
     #[test]
