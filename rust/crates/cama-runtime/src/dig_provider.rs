@@ -73,6 +73,7 @@ use crate::registration::{
 use crate::reminder_provider::ReminderHooks;
 
 const COMPONENT_PREFIX: &str = "dig:";
+const ROUTE_COMPONENT_PREFIX: &str = "dig_route_";
 const GUILD_ONLY_MESSAGE: &str = "This command can only be used in a server.";
 const REGISTER_FIRST_MESSAGE: &str = "You must be registered first. Use `/player register`.";
 const WRONG_CHANNEL_PENALTY: i64 = 1;
@@ -344,6 +345,10 @@ impl RegistrationProvider for DigRegistrationProvider {
         })?;
         registry.component(ComponentRoute {
             custom_id_prefix: COMPONENT_PREFIX.to_owned(),
+            handler: self.handler.clone(),
+        })?;
+        registry.component(ComponentRoute {
+            custom_id_prefix: ROUTE_COMPONENT_PREFIX.to_owned(),
             handler: self.handler.clone(),
         })?;
         registry.component(ComponentRoute {
@@ -1526,6 +1531,11 @@ impl DigInteractionHandler {
                     .map_err(|error| error.to_string())?;
             }
             return Ok(());
+        }
+        if let Some(raw) = custom_id.strip_prefix(ROUTE_COMPONENT_PREFIX) {
+            return self
+                .handle_route_component(raw, user_id, guild_id, responder)
+                .await;
         }
         let action = custom_id.strip_prefix(COMPONENT_PREFIX).unwrap_or_default();
         if let Some(raw) = action.strip_prefix("guide:") {
@@ -3539,12 +3549,12 @@ impl DigInteractionHandler {
                 boss_name: boss.boss_name,
                 dialogue: boss.dialogue,
                 is_pinnacle: boss.is_pinnacle,
-                phase: boss.phase,
+                phase: i64::from(boss.phase),
                 wager_allowed: boss.wager_allowed,
-                carried_wager: boss.carried_wager,
+                carried_wager: boss.carried_wager.unwrap_or_default(),
                 has_scout_lantern: boss.has_scout_lantern,
                 luminosity: boss.luminosity,
-                encounter_key: boss.encounter_key,
+                encounter_key: Some(boss.encounter_key),
             }),
         })
         .await
@@ -6459,7 +6469,7 @@ fn route_component_id(
     token: &str,
     route_id: &str,
 ) -> String {
-    format!("{COMPONENT_PREFIX}route:{view_nonce}:{owner_id}:{guild_id}:{token}:{route_id}")
+    format!("{ROUTE_COMPONENT_PREFIX}{view_nonce}:{owner_id}:{guild_id}:{token}:{route_id}")
 }
 
 fn parse_route_component(raw: &str) -> Option<(&str, i64, i64, String, String)> {
@@ -6638,13 +6648,13 @@ fn dig_delivery_responses(
             boss_name: boss.boss_name.clone(),
             dialogue: boss.dialogue.clone(),
             is_pinnacle: boss.is_pinnacle,
-            phase: boss.phase,
+            phase: u8::try_from(boss.phase).unwrap_or(1),
             wager_allowed: boss.wager_allowed,
-            carried_wager: boss.carried_wager,
+            carried_wager: (boss.carried_wager > 0).then_some(boss.carried_wager),
             carried_risk_tier: None,
             has_scout_lantern: boss.has_scout_lantern,
             luminosity: boss.luminosity,
-            encounter_key: boss.encounter_key.clone(),
+            encounter_key: boss.encounter_key.clone().unwrap_or_default(),
         };
         return (
             boss_encounter_response(&info, delivery.discord_id, delivery.guild_id, media),

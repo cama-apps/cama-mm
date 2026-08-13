@@ -381,6 +381,7 @@ impl From<&DigRuntimeSnapshot> for DigRuntimeVersion {
 pub struct DigRuntimeCommit {
     pub expected: DigRuntimeVersion,
     pub next: DigRuntimeSnapshot,
+    pub delivery_draft: Option<DigRuntimeDeliveryDraft>,
     pub consumed_item_ids: Vec<i64>,
     /// Optimistic pet work settlement.  The claim is applied in the same
     /// SQLite transaction as the tunnel, wallet, inventory, and audit rows so
@@ -454,6 +455,30 @@ pub trait DigRuntimeStore: Send + Sync {
         &self,
         request: DigRuntimeCommit,
     ) -> Result<DigRuntimeCommitReceipt, DigRuntimeStoreError>;
+
+    /// Commit a Dig and its immutable Discord projection. Production SQLite
+    /// overrides this to keep the action and outbox in one transaction;
+    /// lightweight stores retain the older commit-then-attach compatibility
+    /// path.
+    fn commit_with_delivery(
+        &self,
+        request: DigRuntimeCommit,
+        draft: DigRuntimeDeliveryDraft,
+    ) -> Result<DigRuntimeCommitReceipt, DigRuntimeStoreError> {
+        let receipt = self.commit(request)?;
+        let mut outcome = draft.outcome;
+        outcome.action_id = Some(receipt.action_id);
+        if let Some(delivery) = build_delivery_snapshot(
+            &outcome,
+            draft.discord_id,
+            draft.guild_id,
+            draft.context,
+            draft.committed_at,
+        ) {
+            self.attach_delivery(&delivery)?;
+        }
+        Ok(receipt)
+    }
 
     /// Return a settled, bounded pet-work offer for one dig.  Non-SQLite
     /// stores may omit pet integration by keeping the default `None`.
@@ -894,6 +919,15 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         }))
     }
 
+    fn commit_with_delivery(
+        &self,
+        mut request: DigRuntimeCommit,
+        draft: DigRuntimeDeliveryDraft,
+    ) -> Result<DigRuntimeCommitReceipt, DigRuntimeStoreError> {
+        request.delivery_draft = Some(draft);
+        self.commit(request)
+    }
+
     fn commit(
         &self,
         request: DigRuntimeCommit,
@@ -1285,6 +1319,31 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             ],
         )?;
         let action_id = transaction.last_insert_rowid();
+        if let Some(mut draft) = request.delivery_draft {
+            draft.outcome.action_id = Some(action_id);
+            if let Some(delivery) = build_delivery_snapshot(
+                &draft.outcome,
+                draft.discord_id,
+                draft.guild_id,
+                draft.context,
+                draft.committed_at,
+            ) {
+                let mut detail_value = serde_json::from_str::<Value>(&request.detail)
+                    .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+                let object = detail_value
+                    .as_object_mut()
+                    .ok_or(DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+                object.insert(
+                    "delivery".to_owned(),
+                    serde_json::to_value(delivery)
+                        .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?,
+                );
+                transaction.execute(
+                    "UPDATE dig_actions SET detail=?1 WHERE id=?2 AND actor_id=?3 AND guild_id=?4",
+                    params![detail_value.to_string(), action_id, discord_id, guild_id],
+                )?;
+            }
+        }
         transaction.commit()?;
         Ok(DigRuntimeCommitReceipt {
             balance_after: request.next.balance,
@@ -1983,6 +2042,18 @@ pub struct DigRuntimeDeliveryContext {
     pub channel_id: i64,
     pub display_name: String,
     pub avatar_url: Option<String>,
+}
+
+/// Immutable delivery inputs captured before the actor transaction. The
+/// SQLite adapter persists the resulting projection beside the action row;
+/// lightweight stores use the existing attach hook as a compatibility path.
+#[derive(Clone, Debug)]
+pub struct DigRuntimeDeliveryDraft {
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub outcome: DigRuntimeOutcome,
+    pub context: DigRuntimeDeliveryContext,
+    pub committed_at: i64,
 }
 
 impl DigRuntimeDeliveryContext {
@@ -3227,7 +3298,7 @@ where
         request: DigRuntimeRequest,
         context: DigRuntimeDeliveryContext,
     ) -> Result<DigRuntimeExecution, DigRuntimeStoreError> {
-        let outcome = self.dig(request)?;
+        let outcome = self.dig_inner(request, Some(context.clone()))?;
         let delivery = outcome
             .success
             .then(|| {
@@ -3240,10 +3311,34 @@ where
                 )
             })
             .flatten();
-        if let Some(delivery) = delivery.as_ref() {
-            self.store.attach_delivery(delivery)?;
-        }
         Ok(DigRuntimeExecution { outcome, delivery })
+    }
+
+    fn commit_dig(
+        &self,
+        request: DigRuntimeCommit,
+        outcome: DigRuntimeOutcome,
+        context: Option<&DigRuntimeDeliveryContext>,
+    ) -> Result<DigRuntimeCommitReceipt, DigRuntimeStoreError> {
+        let Some(context) = context else {
+            return self.store.commit(request);
+        };
+        let (discord_id, guild_id) = request
+            .next
+            .tunnel
+            .as_ref()
+            .map_or((0, 0), |tunnel| (tunnel.discord_id, tunnel.guild_id));
+        let committed_at = request.now;
+        self.store.commit_with_delivery(
+            request,
+            DigRuntimeDeliveryDraft {
+                discord_id,
+                guild_id,
+                outcome,
+                context: context.clone(),
+                committed_at,
+            },
+        )
     }
 
     pub fn pending_deliveries(
@@ -3270,6 +3365,14 @@ where
     pub fn dig(
         &self,
         request: DigRuntimeRequest,
+    ) -> Result<DigRuntimeOutcome, DigRuntimeStoreError> {
+        self.dig_inner(request, None)
+    }
+
+    fn dig_inner(
+        &self,
+        request: DigRuntimeRequest,
+        delivery_context: Option<DigRuntimeDeliveryContext>,
     ) -> Result<DigRuntimeOutcome, DigRuntimeStoreError> {
         let snapshot = self.store.snapshot(request.discord_id, request.guild_id)?;
         if !snapshot.registered {
@@ -3393,6 +3496,7 @@ where
             let commit = DigRuntimeCommit {
                 expected: DigRuntimeVersion::from(&snapshot),
                 next,
+                delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim,
                 depth_before: 0,
@@ -3407,15 +3511,15 @@ where
                 .to_string(),
                 now,
             };
-            let receipt = self.store.commit(commit)?;
-            return Ok(DigRuntimeOutcome {
+            let balance_after = commit.next.balance;
+            let mut first_outcome = DigRuntimeOutcome {
                 success: true,
                 error: None,
                 depth_before: 0,
                 depth_after: first.advance,
                 advance: first.advance,
                 jc_earned: first.jc_earned,
-                balance_after: receipt.balance_after,
+                balance_after,
                 cave_in: false,
                 cave_in_detail: None,
                 event_id: None,
@@ -3427,7 +3531,7 @@ where
                 paid_dig_available: false,
                 items_used: Vec::new(),
                 consumed_item_ids: Vec::new(),
-                action_id: Some(receipt.action_id),
+                action_id: None,
                 route_choice_required: false,
                 pickaxe_tier: current
                     .tunnel
@@ -3437,7 +3541,12 @@ where
                 pet_name,
                 forced_event_consumed: false,
                 relic_trim_notice: false,
-            });
+            };
+            let receipt =
+                self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
+            first_outcome.balance_after = receipt.balance_after;
+            first_outcome.action_id = Some(receipt.action_id);
+            return Ok(first_outcome);
         }
 
         let depth_before = tunnel.depth;
@@ -3640,6 +3749,7 @@ where
             ..DigOutcomeInput::default()
         };
         let mut outcome = apply_dig_outcome(&mut state, outcome_input, now);
+        let base_advance = outcome.advance;
         let mut pet_dig_bonus = 0;
         // A cave-in is a loss-only branch in Python: the pet's stored work is
         // not consumed. For a successful roll, try each additional block in
@@ -3657,11 +3767,19 @@ where
                     &mut candidate_state,
                     DigOutcomeInput {
                         advance: loot_outcome.advance.saturating_add(blocks),
+                        // The normal cap applies to the base roll before
+                        // Python adds pet work.  Mark this candidate as an
+                        // already-capped application so pet blocks are not
+                        // incorrectly clipped at the main-dig ceiling.
+                        authored_event: true,
                         ..outcome_input
                     },
                     now,
                 );
-                pet_dig_bonus = blocks;
+                // Python claims only the pet blocks that survived the same
+                // boss cap as the base advance.  The requested loop count is
+                // not necessarily the applied count at the boundary.
+                pet_dig_bonus = candidate.advance.saturating_sub(base_advance);
                 state = candidate_state;
                 outcome = candidate;
                 if outcome.boss_encounter.is_some() {
@@ -3720,9 +3838,16 @@ where
             "pet_dig_bonus": pet_dig_bonus,
         })
         .to_string();
+        let items_used = loot_outcome
+            .items_used
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect::<Vec<_>>();
+        let balance_after = staged.balance;
         let commit = DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next: staged,
+            delivery_draft: None,
             consumed_item_ids: consumed_item_ids.clone(),
             pet_work_claim,
             depth_before,
@@ -3735,15 +3860,14 @@ where
             detail,
             now,
         };
-        let receipt = self.store.commit(commit)?;
-        Ok(DigRuntimeOutcome {
+        let mut runtime_outcome = DigRuntimeOutcome {
             success: true,
             error: None,
             depth_before,
             depth_after: outcome.depth_after,
             advance: outcome.advance,
             jc_earned: outcome.jc_earned,
-            balance_after: receipt.balance_after,
+            balance_after,
             cave_in: outcome.cave_in,
             cave_in_detail: outcome.cave_in.then(|| {
                 format!(
@@ -3758,20 +3882,21 @@ where
             paid_dig_cost: paid_cost,
             cooldown_remaining: 0,
             paid_dig_available: false,
-            items_used: loot_outcome
-                .items_used
-                .iter()
-                .map(|item| (*item).to_owned())
-                .collect(),
+            items_used,
             consumed_item_ids,
-            action_id: Some(receipt.action_id),
+            action_id: None,
             route_choice_required: false,
             pickaxe_tier,
             pet_dig_bonus,
             pet_name,
             forced_event_consumed,
             relic_trim_notice: false,
-        })
+        };
+        let receipt =
+            self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
+        runtime_outcome.balance_after = receipt.balance_after;
+        runtime_outcome.action_id = Some(receipt.action_id);
+        Ok(runtime_outcome)
     }
 
     /// Atomically choose one of the persisted route offers.  This is the
@@ -3822,6 +3947,7 @@ where
         let receipt = self.store.commit(DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
             depth_before: tunnel.depth,
@@ -3942,6 +4068,7 @@ where
         let receipt = self.store.commit(DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
             depth_before: depth,
@@ -4101,11 +4228,10 @@ fn build_delivery_snapshot(
         context,
         outcome: outcome.clone(),
         render,
-        flavor: if outcome.first_dig {
-            DigRuntimeFlavorSnapshot::Skipped
-        } else {
-            DigRuntimeFlavorSnapshot::Pending
-        },
+        // Even the first-dig copy runs through the flavor service. With AI
+        // disabled that service records a durable terminal `Skipped` receipt;
+        // omitting the pending phase would lose the audited flavor boundary.
+        flavor: DigRuntimeFlavorSnapshot::Pending,
         main_delivered_at: None,
         event_delivered_at: None,
     })
@@ -4297,9 +4423,10 @@ mod tests {
     use crate::dig_loot::LootEntropy;
 
     use super::{
-        DigAdminMutationOutcome, DigRuntimeDeliveryContext, DigRuntimeDeliveryPart,
-        DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery, DigRuntimeRequest,
-        DigRuntimeService, DigRuntimeSnapshot, DigRuntimeStore, InMemoryDigRuntimeStore,
+        DigAdminMutationOutcome, DigRuntimeCommit, DigRuntimeDeliveryContext,
+        DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart, DigRuntimeMarkDelivered,
+        DigRuntimePendingDeliveryQuery, DigRuntimeRequest, DigRuntimeService, DigRuntimeSnapshot,
+        DigRuntimeStore, DigRuntimeStoreError, DigRuntimeVersion, InMemoryDigRuntimeStore,
         SqliteDigRuntimeStore,
     };
 
@@ -4408,6 +4535,75 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_delivery_outbox_invalid_detail_rolls_back_actor_and_action() {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("canonical migration");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(7, "delivery-rollback", Some(9)))
+            .expect("seed player");
+        let store = SqliteDigRuntimeStore::new(database.path());
+        let service = DigRuntimeService::new(store.clone());
+        let first = service
+            .dig(DigRuntimeRequest {
+                discord_id: 7,
+                guild_id: 9,
+                now: 1_700_000_000,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("seed first dig");
+        let before = store.snapshot(7, 9).expect("snapshot before rollback");
+        let mut next = before.clone();
+        let tunnel = next.tunnel.as_mut().expect("seed tunnel");
+        tunnel.depth = tunnel.depth.saturating_add(1);
+        tunnel.total_digs = tunnel.total_digs.saturating_add(1);
+        tunnel.last_dig_at = Some(1_700_000_001);
+        let request = DigRuntimeCommit {
+            expected: DigRuntimeVersion::from(&before),
+            next,
+            delivery_draft: None,
+            consumed_item_ids: Vec::new(),
+            pet_work_claim: None,
+            depth_before: before.tunnel.as_ref().map_or(0, |tunnel| tunnel.depth),
+            depth_after: before
+                .tunnel
+                .as_ref()
+                .map_or(1, |tunnel| tunnel.depth.saturating_add(1)),
+            jc_delta: 0,
+            balance_cost: 0,
+            action_type: "dig".to_owned(),
+            detail: "[]".to_owned(),
+            now: 1_700_000_001,
+        };
+        let error = store
+            .commit_with_delivery(
+                request,
+                DigRuntimeDeliveryDraft {
+                    discord_id: 7,
+                    guild_id: 9,
+                    outcome: first,
+                    context: DigRuntimeDeliveryContext::new(99, 11, "Delivery Rollback", None),
+                    committed_at: 1_700_000_001,
+                },
+            )
+            .expect_err("invalid detail must abort the transaction");
+        assert!(matches!(error, DigRuntimeStoreError::InvalidJson(_)));
+        assert_eq!(
+            store.snapshot(7, 9).expect("snapshot after rollback"),
+            before
+        );
+        let action_count: i64 = Connection::open(database.path())
+            .expect("reopen database")
+            .query_row(
+                "SELECT COUNT(*) FROM dig_actions WHERE actor_id=?1 AND guild_id=?2",
+                params![7_i64, 9_i64],
+                |row| row.get(0),
+            )
+            .expect("action count");
+        assert_eq!(action_count, 1);
+    }
+
+    #[test]
     fn stale_snapshot_is_rejected_by_cas() {
         let snapshot = DigRuntimeSnapshot::fresh(7, 9, 100, 1_700_000_000);
         let store = InMemoryDigRuntimeStore::new(snapshot.clone());
@@ -4424,6 +4620,7 @@ mod tests {
         let stale = super::DigRuntimeCommit {
             expected: super::DigRuntimeVersion::from(&snapshot),
             next: snapshot,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
             depth_before: 0,
@@ -4630,6 +4827,7 @@ mod tests {
             .commit(super::DigRuntimeCommit {
                 expected: super::DigRuntimeVersion::from(&snapshot),
                 next,
+                delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim: None,
                 depth_before: 10,
@@ -5354,6 +5552,7 @@ mod tests {
             .commit(super::DigRuntimeCommit {
                 expected: super::DigRuntimeVersion::from(&snapshot),
                 next,
+                delivery_draft: None,
                 consumed_item_ids: Vec::new(),
                 pet_work_claim: Some(cama_domain::pet::PetDigWorkClaim {
                     pet_id,

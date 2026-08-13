@@ -325,6 +325,7 @@ fn stale_pet_work_claim_rolls_back_tunnel_advance() {
         .commit(DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: Some(PetDigWorkClaim {
                 pet_id,
@@ -400,6 +401,7 @@ fn applied_outcome_stops_pet_work_at_boss_boundary() {
         .commit(DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: Some(work.claim(3).expect("boss-capped claim")),
             depth_before: 20,
@@ -430,6 +432,7 @@ fn applied_cave_in_does_not_consume_pet_work() {
         .commit(DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next,
+            delivery_draft: None,
             consumed_item_ids: Vec::new(),
             pet_work_claim: None,
             depth_before: 10,
