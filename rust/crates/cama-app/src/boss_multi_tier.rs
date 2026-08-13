@@ -713,6 +713,13 @@ pub fn mechanic_by_id(mechanic_id: &str) -> Option<MechanicDefinition> {
     })
 }
 
+/// Regular boss fights preserve one opening exchange and then surface the
+/// rolled mechanic before round two. Pinnacle phases retain their separate
+/// authored-timing engine and do not call this helper.
+const fn regular_mechanic_trigger_round(_mechanic: &MechanicDefinition) -> u8 {
+    2
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptOption {
     pub option_index: usize,
@@ -2951,8 +2958,9 @@ where
         let initial_win_chance = combat_win_probability(&combat);
         let gear_snapshot = self.gear_repair.snapshot(key);
         let mut round_log = Vec::new();
+        let mechanic_trigger_round = regular_mechanic_trigger_round(&mechanic);
         for round_num in 1..=BOSS_ROUND_CAP {
-            if round_num == mechanic.trigger_round && combat.player_hp > 0 && combat.boss_hp > 0 {
+            if round_num == mechanic_trigger_round && combat.player_hp > 0 && combat.boss_hp > 0 {
                 let paused = PausedBossDuel {
                     boss_id: boss.boss_id.to_owned(),
                     boundary,

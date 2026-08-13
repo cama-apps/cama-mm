@@ -30,6 +30,20 @@ fn test_service(unit: f64) -> TestService {
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct OneHpCombatPreparation;
+
+impl BossCombatPreparationPort for OneHpCombatPreparation {
+    fn prepare(
+        &self,
+        _request: BossCombatPreparationRequest<'_>,
+        mut base_combat: CombatState,
+    ) -> BossCombatPreparation {
+        base_combat.player_hp = 1;
+        BossCombatPreparation::neutral(base_combat)
+    }
+}
+
 fn entry(status: BossStatus, boss_id: &str) -> BossProgressValue {
     BossProgressValue::Entry(BossProgressEntry {
         status,
@@ -598,7 +612,53 @@ fn test_pending_prompt_shape() {
         assert_eq!(option.option_index, index);
         assert!(!option.label.is_empty());
     }
+    assert_eq!(paused.round_num, 2);
+    assert_eq!(paused.round_log.len(), 1);
     assert!(service.repository.active_duel(key()).is_some());
+}
+
+#[test]
+fn interactive_round_one_loss_resolves_before_prompt() {
+    let mut service = test_service(0.99).with_combat_preparation(OneHpCombatPreparation);
+    service.entropy = SequenceEntropy::new(vec![0.99, 0.0], Vec::new(), Vec::new());
+    seed_at_first_boss(&mut service);
+
+    let outcome = service
+        .start_boss_duel(key(), RiskTier::Cautious, 0)
+        .expect("opening loss resolves");
+    let StartBossDuelOutcome::Resolved(result) = outcome else {
+        panic!("a lethal opening exchange must resolve before prompting");
+    };
+    assert!(!result.won);
+    assert_eq!(result.round_log.len(), 1);
+    assert!(service.repository.active_duel(key()).is_none());
+}
+
+fn assert_regular_mechanic_round_is_normalized(authored_round: u8) {
+    let mut mechanic = mechanic_by_id("grothak_earthquake").expect("registered mechanic");
+    mechanic.trigger_round = authored_round;
+    assert_eq!(regular_mechanic_trigger_round(&mechanic), 2);
+
+    let mut service = test_service(0.5);
+    seed_at_first_boss(&mut service);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 0)
+        .expect("regular duel pauses")
+    else {
+        panic!("viable regular fight must pause");
+    };
+    assert_eq!(paused.round_num, 2);
+    assert_eq!(paused.round_log.len(), 1);
+}
+
+#[test]
+fn mechanic_authored_round_one_interrupts_before_second_round() {
+    assert_regular_mechanic_round_is_normalized(1);
+}
+
+#[test]
+fn mechanic_authored_round_five_interrupts_before_second_round() {
+    assert_regular_mechanic_round_is_normalized(5);
 }
 
 #[test]
@@ -636,7 +696,7 @@ fn test_resumed_duel_preserves_active_boss_max_hp() {
     let StartBossDuelOutcome::Paused(paused) = outcome else {
         panic!("expected a prompt");
     };
-    assert_eq!(paused.combat.boss_hp, 8);
+    assert_eq!(paused.combat.boss_hp, 9);
     assert_eq!(paused.boss_hp_max, 20);
     service.entropy = SequenceEntropy::constant(0.99);
     let result = service
@@ -650,7 +710,7 @@ fn test_resumed_duel_preserves_active_boss_max_hp() {
     let BossProgressValue::Entry(saved) = &fresh.boss_progress["25"] else {
         panic!("progress remains detailed");
     };
-    assert_eq!(saved.hp_remaining, Some(8));
+    assert_eq!(saved.hp_remaining, Some(9));
     assert_eq!(saved.hp_max, Some(20));
 }
 
