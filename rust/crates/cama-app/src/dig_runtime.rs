@@ -56,14 +56,17 @@ use crate::dig_loot::{
     LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
     TunnelLootState, consumable, is_boss_prep_item, is_dig_consumable,
 };
+use crate::dig_prestige4_content::{
+    ArtifactRollPlan, Prestige4Entropy, artifact_rate_modifier, roll_artifact_stage,
+};
 use crate::dig_relic_rework::{
     LanternStubRestoreInput, RelicEntropy, RelicSet, YieldContext, apply_lantern_stub_restore,
     is_first_dig_of_day, post_pinnacle_decay_factor, relic_aware_paid_cost,
     relic_jc_yield_multiplier, settle_slow_drip_claim, storm_negates_hazard,
 };
 use crate::dig_routes::{
-    RouteChoiceEvaluation, evaluate_route_choice, parse_route_state, route_by_id, route_effect,
-    route_status,
+    RouteChoiceEvaluation, evaluate_route_choice, parse_route_state, route_artifact_multiplier,
+    route_by_id, route_effect, route_status,
 };
 use crate::dig_service::{
     DigOutcomeInput, MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome,
@@ -3401,6 +3404,23 @@ impl RelicEntropy for LootRelicEntropy<'_> {
     }
 }
 
+/// Adapt the live Dig entropy stream to the pure prestige-four artifact policy.
+///
+/// The adapter is intentionally local to the runtime transaction: corruption,
+/// cave consequences, JC, artifact, and event selection all advance the same
+/// request-local stream, while the pure policy remains persistence-free.
+struct DigPrestige4Entropy<'a>(&'a mut SeededLootEntropy);
+
+impl Prestige4Entropy for DigPrestige4Entropy<'_> {
+    fn unit(&mut self) -> f64 {
+        self.0.unit()
+    }
+
+    fn choose_index(&mut self, upper_bound: usize) -> usize {
+        self.0.choose_index(upper_bound)
+    }
+}
+
 impl DigRuntimeOutcome {
     fn blocked(
         snapshot: &DigRuntimeSnapshot,
@@ -4722,11 +4742,10 @@ where
             jc_multiplier: (1.0 + weather_fx.jc_multiplier + ascension_number("jc_multiplier"))
                 .max(0.0),
             jc_bonus: weather_fx.jc_bonus + gear_fx.loot_bonus + curse_fx.jc_bonus,
-            artifact_multiplier: (1.0
-                + weather_fx.artifact_multiplier
-                + route_number("artifact_multiplier")
-                + ascension_number("artifact_multiplier"))
-            .max(0.0),
+            // Ordinary artifacts are settled below, after the cave branch
+            // has established the final depth. Keep the loot-stage carrier
+            // neutral so it cannot consume a pre-cave artifact roll.
+            artifact_multiplier: 1.0,
             cave_in_loss_bonus: if storm_hazard_negated {
                 0
             } else {
@@ -4864,46 +4883,6 @@ where
         let economy_multiplier_basis_points = (economy_multiplier.max(0.0) * 10_000.0 + 0.5) as i64;
         let streak_days = next_daily_streak(&tunnel, &today);
         let streak_reward = crate::dig_service::streak_bonus(streak_days);
-        let artifact_multiplier = loot_modifiers.artifact_multiplier * post_pinnacle_multiplier;
-        let artifact_id = if loot.entropy_mut().unit() < 0.005 * artifact_multiplier {
-            let owned = current
-                .artifacts
-                .iter()
-                .map(|artifact| artifact.artifact_id.as_str())
-                .collect::<BTreeSet<_>>();
-            let mut candidates = crate::dig_loot::artifact_catalog()
-                .into_iter()
-                .filter(|artifact| {
-                    artifact.is_relic
-                        && !artifact.trophy
-                        && artifact.min_prestige <= tunnel.prestige_level
-                        && !owned.contains(artifact.id)
-                })
-                .collect::<Vec<_>>();
-            let layer_name = layer.name;
-            candidates.sort_by_key(|artifact| (artifact.layer != layer_name, artifact.id));
-            let weight_total = candidates
-                .iter()
-                .map(|artifact| artifact.rarity.weight())
-                .sum::<u64>();
-            if weight_total == 0 {
-                None
-            } else {
-                let pick = (loot.entropy_mut().unit() * weight_total as f64) as u64;
-                let mut cursor = 0_u64;
-                let selected = candidates.into_iter().find(|artifact| {
-                    cursor = cursor.saturating_add(artifact.rarity.weight());
-                    pick < cursor
-                });
-                selected.and_then(|artifact| {
-                    loot.add_artifact(request.discord_id, request.guild_id, artifact.id)
-                        .ok()
-                        .map(|_| artifact.id.to_owned())
-                })
-            }
-        } else {
-            None
-        };
         let mut cave_in_grappling_absorbed = false;
         let mut cave_reward_gross = 0_i64;
         let cave_loss = if loot_outcome.cave_in {
@@ -5314,6 +5293,75 @@ where
             .as_ref()
             .and_then(|work| work.claim(pet_dig_bonus).ok());
         staged = apply_state(&staged, state, &today, paid_charge_active, paid_cost);
+        // Python rolls ordinary artifacts only after the cave branch has
+        // settled the final post-boss depth. Keep this roll on the same
+        // entropy stream as the cave/JC/event stages, but stage the new row on
+        // the final snapshot so the outer CAS persists it atomically.
+        let mut artifact_id = None;
+        let skip_artifact = outcome.cave_in
+            || corruption.as_ref().is_some_and(|corruption| {
+                corruption.effects.iter().any(|effect| {
+                    effect.key == "skip_artifact" && effect.value.boolean().unwrap_or(false)
+                })
+            });
+        if !skip_artifact {
+            let weather_factor = if weather_fx.artifact_multiplier > 0.0 {
+                weather_fx.artifact_multiplier
+            } else {
+                1.0
+            };
+            let ascension_factor = {
+                let factor = ascension_number("artifact_multiplier");
+                if factor > 0.0 { factor } else { 1.0 }
+            };
+            let treasure_bonus = mutation_fx
+                .get("artifact_chance_bonus")
+                .and_then(|effect| effect.number())
+                .unwrap_or(0.0);
+            let find_modifier = artifact_rate_modifier(
+                relics.contains("echo_stone"),
+                weather_factor,
+                route_artifact_multiplier(active_route),
+                ascension_factor,
+                treasure_bonus,
+                post_pinnacle_decay_factor(outcome.depth_after, &relics),
+            );
+            let owned = staged
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.artifact_id.clone())
+                .collect::<BTreeSet<_>>();
+            let mut entropy = DigPrestige4Entropy(loot.entropy_mut());
+            if let Some(stage) = roll_artifact_stage(
+                ArtifactRollPlan {
+                    depth: outcome.depth_after,
+                    rate_modifier: find_modifier,
+                    skip_artifact: false,
+                },
+                &owned,
+                &mut entropy,
+            ) {
+                artifact_id = Some(stage.definition.id.to_owned());
+                let local_id = staged
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.id)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                staged.artifacts.push(DigRuntimeArtifact {
+                    id: local_id,
+                    artifact_id: stage.definition.id.to_owned(),
+                    is_relic: stage.definition.is_relic,
+                    equipped: false,
+                });
+                if let Some(next_tunnel) = staged.tunnel.as_mut() {
+                    next_tunnel.current_run_artifacts = next_tunnel
+                        .current_run_artifacts
+                        .saturating_add(stage.current_run_artifacts_delta);
+                }
+            }
+        }
         if let Some(next_tunnel) = staged.tunnel.as_mut() {
             next_tunnel.streak_days = streak_days;
             next_tunnel.streak_last_date = Some(today.clone());
@@ -8233,6 +8281,197 @@ mod tests {
                 unit >= minimum && unit < maximum
             })
             .expect("deterministic cave probability seed")
+    }
+
+    #[test]
+    fn sqlite_cave_in_does_not_persist_an_artifact() {
+        let database = NamedTempFile::new().expect("cave artifact database");
+        let actor = 60_101;
+        let guild = 60_102;
+        let now = 1_900_100_000;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 10, 1, Some(now - 7_200));
+        let dig_now = find_cave_dig_time(actor, guild, now);
+        let service = DigRuntimeService::sqlite(database.path());
+        let outcome = service
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("cave-in Dig");
+        assert!(outcome.success && outcome.cave_in);
+        assert_eq!(outcome.artifact_id, None);
+        let snapshot = SqliteDigRuntimeStore::new(database.path())
+            .snapshot(actor, guild)
+            .expect("reload cave artifact database");
+        assert_eq!(snapshot.artifacts.len(), 0);
+        assert_eq!(
+            snapshot.tunnel.expect("cave tunnel").current_run_artifacts,
+            0
+        );
+    }
+
+    #[test]
+    fn sqlite_successful_artifact_persists_and_increments_current_run_artifacts_once() {
+        let database = NamedTempFile::new().expect("successful artifact database");
+        let actor = 61_001;
+        let guild = 61_002;
+        let seed_now = 1_900_100_000;
+        seed_live_runtime_tunnel(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            55,
+            1,
+            Some(seed_now - 7_200),
+        );
+        let today = cama_domain::game_date::game_date_for_timestamp(seed_now as f64)
+            .expect("artifact game date");
+        let connection = Connection::open(database.path()).expect("artifact connection");
+        connection
+            .execute(
+                "UPDATE tunnels SET route_state=?1,mutations=?2
+                 WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    r#"{"end_depth":75,"layer":"Crystal","offered":["glass_labyrinth","prismatic_fault","resonant_gallery"],"selected":"glass_labyrinth","start_depth":50}"#,
+                    r#"[{"id":"treasure_sense"}]"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed artifact route and mutation");
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'echo_stone',?3,1,1)",
+                params![actor, guild, seed_now - 100],
+            )
+            .expect("seed echo stone");
+        connection
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,'Crystal','fossil_rush'),(?1,?2,'Dirt','earthworm_migration')",
+                params![guild, today],
+            )
+            .expect("seed artifact weather");
+        drop(connection);
+
+        // The fixed request seed has a non-cave roll and a find roll inside
+        // the composed 0.5% * (route * weather * Echo Stone * Treasure Sense)
+        // rate. The artifact policy then consumes rarity and candidate entropy.
+        let dig_now = seed_now + 312;
+        let service = DigRuntimeService::sqlite(database.path());
+        let outcome = service
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("successful artifact Dig");
+        let artifact_id = outcome.artifact_id.expect("artifact drop");
+        let retry = service
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("artifact retry response");
+        assert!(
+            !retry.success,
+            "cooldown must prevent a duplicate artifact roll"
+        );
+        let snapshot = SqliteDigRuntimeStore::new(database.path())
+            .snapshot(actor, guild)
+            .expect("reload successful artifact database");
+        assert_eq!(
+            snapshot
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.artifact_id == artifact_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .tunnel
+                .expect("successful artifact tunnel")
+                .current_run_artifacts,
+            1
+        );
+    }
+
+    #[test]
+    fn sqlite_artifact_commit_conflict_persists_neither_artifact_nor_counter() {
+        let database = NamedTempFile::new().expect("artifact rollback database");
+        let actor = 61_101;
+        let guild = 61_102;
+        let now = 1_900_110_000;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 10, 1, Some(now - 7_200));
+        let store = SqliteDigRuntimeStore::new(database.path());
+        let snapshot = store
+            .snapshot(actor, guild)
+            .expect("artifact rollback snapshot");
+        let mut next = snapshot.clone();
+        next.artifacts.push(super::DigRuntimeArtifact {
+            id: 1,
+            artifact_id: "mole_claws".to_owned(),
+            is_relic: true,
+            equipped: false,
+        });
+        next.tunnel
+            .as_mut()
+            .expect("artifact rollback tunnel")
+            .current_run_artifacts = 1;
+        let connection = Connection::open(database.path()).expect("artifact conflict connection");
+        connection
+            .execute(
+                "UPDATE tunnels SET depth=depth+1 WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild],
+            )
+            .expect("force artifact conflict");
+        drop(connection);
+        assert!(matches!(
+            store.commit(super::DigRuntimeCommit {
+                expected: super::DigRuntimeVersion::from(&snapshot),
+                next,
+                delivery_draft: None,
+                consumed_item_ids: Vec::new(),
+                pet_work_claim: None,
+                depth_before: 10,
+                depth_after: 11,
+                jc_delta: 0,
+                balance_cost: 0,
+                action_type: "dig".to_owned(),
+                detail: "{}".to_owned(),
+                now,
+            }),
+            Err(super::DigRuntimeStoreError::Conflict)
+        ));
+        let connection = Connection::open(database.path()).expect("reload artifact rollback");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM dig_artifacts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("artifact count after rollback"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT current_run_artifacts FROM tunnels", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("artifact counter after rollback"),
+            0
+        );
     }
 
     #[test]
