@@ -576,9 +576,9 @@ class TestStartBossDuel:
     ):
         """With ``deterministic_rng`` (``Random().choice`` always returns
         ``seq[0]``) and pinned ``random.random=0.5``, the first boss in tier
-        25 (Grothak) is locked and its first pool mechanic (earthquake,
-        trigger_round=3) always fires. Player_hit=0.60 cautious + pinned 0.5
-        = hit; boss_hit=0.30 + pinned 0.5 = miss. Fight pauses at round 3."""
+        25 (Grothak) is locked and its first pool mechanic is selected.
+        Player_hit=0.60 cautious + pinned 0.5 = hit; boss_hit=0.30 + pinned
+        0.5 = miss. Fight pauses before round 2 after one opening exchange."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.5)
         start = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
@@ -587,6 +587,8 @@ class TestStartBossDuel:
         )
         pp = start["pending_prompt"]
         assert {"mechanic_id", "prompt_title", "options", "safe_option_idx"}.issubset(pp)
+        assert start["round_num"] == 2
+        assert len(start["round_log"]) == 1
         assert len(pp["options"]) == 3
         for i, opt in enumerate(pp["options"]):
             assert opt["option_idx"] == i
@@ -596,7 +598,7 @@ class TestStartBossDuel:
         assert row is not None
         assert row["boss_id"] in {b.boss_id for b in get_boss_pool_for_tier(25)}
         assert row["mechanic_id"] in MECHANIC_REGISTRY
-        assert row["round_num"] >= 1
+        assert row["round_num"] == 2
 
 
 class TestPersistedHPCarry:
@@ -611,7 +613,7 @@ class TestPersistedHPCarry:
         # Pre-seed the depth-25 entry as a wounded boss with hp_remaining=1.
         # Pre-fix, _get_boss_progress flattened this to {"25": "active"} and
         # _resolve_persisted_boss_hp returned fresh HP — fight took multiple
-        # rounds and triggered the round-3 mechanic pause.
+        # rounds and triggered a mechanic pause.
         progress = json.dumps({
             "25": {
                 "boss_id": "grothak",
@@ -653,13 +655,13 @@ class TestPersistedHPCarry:
         })
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
 
-        # Two hits wound the boss to 8 HP before Grothak's round-three prompt.
+        # One opening hit wounds the boss to 9 HP before the round-two prompt.
         monkeypatch.setattr(random, "random", lambda: 0.5)
         start = dig_service.start_boss_duel(
             10001, TEST_GUILD_ID, "cautious", wager=10,
         )
         assert start.get("pending_prompt")
-        assert start["boss_hp"] == 8
+        assert start["boss_hp"] == 9
         assert start["boss_hp_max"] == 20
 
         # Miss every remaining attack so the resumed fight loses at the round
@@ -676,7 +678,7 @@ class TestPersistedHPCarry:
 
         fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
         entry = json.loads(fresh["boss_progress"])["25"]
-        assert entry["hp_remaining"] == 8
+        assert entry["hp_remaining"] == 9
         assert entry["hp_max"] == 20
 
     def test_scout_uses_active_boss_hp_for_every_risk_tier(

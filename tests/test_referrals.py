@@ -105,8 +105,18 @@ def test_referrals_schema_is_guild_scoped(repo_db_path):
     }
 
 
-def test_create_referral_requires_registered_referrer_and_unregistered_target(player_repository):
+def test_create_referral_requires_registered_referrer(player_repository):
     player_repository.add(discord_id=10, discord_username="Recruiter", guild_id=1)
+
+    player_repository.create_referral(10, 20, 1)
+
+    with pytest.raises(ValueError, match="already has a referral"):
+        player_repository.create_referral(10, 20, 1)
+
+
+def test_create_referral_allows_registered_target_without_recorded_games(player_repository):
+    player_repository.add(discord_id=10, discord_username="Recruiter", guild_id=1)
+    player_repository.add(discord_id=20, discord_username="New player", guild_id=1)
 
     player_repository.create_referral(10, 20, 1)
 
@@ -119,11 +129,19 @@ def test_create_referral_rejects_unregistered_referrer(player_repository):
         player_repository.create_referral(10, 20, 1)
 
 
-def test_create_referral_rejects_registered_target(player_repository):
+@pytest.mark.parametrize(("wins", "losses"), [(1, 0), (0, 1)])
+def test_create_referral_rejects_target_with_recorded_game(
+    player_repository, repo_db_path, wins, losses
+):
     player_repository.add(discord_id=10, discord_username="Recruiter", guild_id=1)
     player_repository.add(discord_id=20, discord_username="New player", guild_id=1)
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.execute(
+            "UPDATE players SET wins = ?, losses = ? WHERE discord_id = ? AND guild_id = ?",
+            (wins, losses, 20, 1),
+        )
 
-    with pytest.raises(ValueError, match="already registered"):
+    with pytest.raises(ValueError, match="already played"):
         player_repository.create_referral(10, 20, 1)
 
 
@@ -177,8 +195,8 @@ def test_first_recorded_match_atomically_rewards_both_referral_accounts(
     player_repository, match_repository, repo_db_path
 ):
     _add_player(player_repository, 10)
-    player_repository.create_referral(10, 20, TEST_GUILD_ID)
     _add_player(player_repository, 20)
+    player_repository.create_referral(10, 20, TEST_GUILD_ID)
     _add_player(player_repository, 30)
     starting_balances = {
         player_id: player_repository.get_balance(player_id, TEST_GUILD_ID)
@@ -671,10 +689,22 @@ class TestReferCommand:
         return RegistrationCommands(bot=Mock(), player_service=player_service or Mock())
 
     @pytest.mark.asyncio
-    async def test_referral_uses_private_ack_before_public_onboarding(self):
+    async def test_referral_uses_private_ack_before_public_onboarding(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("commands.registration.LOBBY_CHANNEL_ID", 111)
+        monkeypatch.setattr(
+            "commands.registration.LOWSKILL_LOBBY_CHANNEL_ID", 222
+        )
         player_service = Mock()
         cog = self._make_cog(player_service)
         interaction = self._make_interaction()
+        lobby_channel = Mock(mention="<#111>")
+        jv_lobby_channel = Mock(mention="<#222>")
+        interaction.guild.get_channel.side_effect = {
+            111: lobby_channel,
+            222: jv_lobby_channel,
+        }.get
         player = self._make_member()
 
         await cog.refer.callback(cog, interaction, player)
@@ -691,16 +721,37 @@ class TestReferCommand:
         assert kwargs["ephemeral"] is False
         assert kwargs["content"] == (
             "**Referral: <@20>**\n"
-            "1. Run `/player register` with your Steam32 ID "
+            "1. If needed, run `/player register` with your Steam32 ID "
             "(the number in your Dotabuff URL).\n"
             "2. Run `/player roles` with your Dota positions (1-5).\n"
-            "3. Run `/join` for an active lobby, or `/lobby` to start one."
+            "3. React in <#111> or <#222> to join an active lobby, "
+            "or run `/lobby` to start one."
         )
         allowed_mentions = kwargs["allowed_mentions"]
         assert allowed_mentions.users == [player]
         assert allowed_mentions.roles is False
         assert allowed_mentions.everyone is False
         assert allowed_mentions.replied_user is False
+
+    @pytest.mark.asyncio
+    async def test_referral_onboarding_falls_back_when_lobby_channels_do_not_resolve(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("commands.registration.LOBBY_CHANNEL_ID", 111)
+        monkeypatch.setattr(
+            "commands.registration.LOWSKILL_LOBBY_CHANNEL_ID", 222
+        )
+        cog = self._make_cog(Mock())
+        interaction = self._make_interaction()
+        interaction.guild.get_channel.return_value = None
+
+        await cog.refer.callback(cog, interaction, self._make_member())
+
+        public_onboarding = interaction.followup.send.await_args_list[1].kwargs["content"]
+        assert public_onboarding.endswith(
+            "3. React in a lobby channel to join an active lobby, "
+            "or run `/lobby` to start one."
+        )
 
     @pytest.mark.asyncio
     async def test_bot_target_is_rejected_ephemerally(self):
@@ -746,10 +797,10 @@ class TestReferCommand:
         assert "Referrer must be registered" in kwargs["content"]
 
     @pytest.mark.asyncio
-    async def test_registered_target_error_is_ephemeral(self):
+    async def test_played_target_error_is_ephemeral(self):
         player_service = Mock()
         player_service.create_referral.side_effect = ValueError(
-            "That player is already registered in this guild."
+            "That player has already played a game in this guild."
         )
         cog = self._make_cog(player_service)
         interaction = self._make_interaction()
@@ -760,7 +811,7 @@ class TestReferCommand:
         player_service.create_referral.assert_called_once_with(10, 20, TEST_GUILD_ID)
         kwargs = interaction.followup.send.await_args.kwargs
         assert kwargs["ephemeral"] is True
-        assert "already registered" in kwargs["content"]
+        assert "already played" in kwargs["content"]
 
     @pytest.mark.asyncio
     async def test_duplicate_referral_error_does_not_expose_original_referrer(self):

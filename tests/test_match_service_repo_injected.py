@@ -1,11 +1,13 @@
 import pytest
 
+from config import SHUFFLER_SETTINGS
 from domain.models.team import Team
 from repositories.base_repository import BaseRepository
 from repositories.low_priority_repository import LowPriorityRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
+from shuffler import BalancedShuffler
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -107,7 +109,7 @@ def test_shuffle_accounts_for_all_sixteen_players(repo_db_path):
     assert len(excluded_ids) == 6
 
 
-def test_goodness_adds_500_per_active_low_priority_player(repo_db_path):
+def test_goodness_includes_low_priority_selection_penalty_and_team_bonus(repo_db_path):
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     low_priority_repo = LowPriorityRepository(repo_db_path)
@@ -129,9 +131,76 @@ def test_goodness_adds_500_per_active_low_priority_player(repo_db_path):
     )
     penalized = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
-    assert penalized["goodness_score"] - baseline["goodness_score"] == pytest.approx(
-        1000.0
+    low_priority_ids = set(player_ids[:2])
+    assert any(
+        low_priority_ids <= {player.discord_id for player in team.players}
+        for team in (penalized["radiant_team"], penalized["dire_team"])
     )
+    assert penalized["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        1100.0
+    )
+
+
+def test_shuffle_display_uses_configured_flat_off_role_value_penalty(
+    repo_db_path,
+    monkeypatch,
+):
+    monkeypatch.setitem(SHUFFLER_SETTINGS, "off_role_flat_value_penalty", 200.0)
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_specs = (
+        (5000, 3000, "1"),
+        (5001, 2800, "2"),
+        (5002, 2600, "3"),
+        (5003, 2400, "4"),
+        (5004, 2200, "5"),
+        (5005, 2000, "2"),
+        (5006, 2700, "2"),
+        (5007, 2500, "3"),
+        (5008, 2300, "4"),
+        (5009, 2100, "5"),
+    )
+    for player_id, mmr, preferred_role in player_specs:
+        player_repo.add(
+            discord_id=player_id,
+            discord_username=f"OffRole{player_id}",
+            guild_id=TEST_GUILD_ID,
+            preferred_roles=[preferred_role],
+            initial_mmr=mmr,
+            glicko_rating=None,
+            glicko_rd=None,
+            glicko_volatility=None,
+        )
+
+    def fixed_asymmetric_shuffle(self, players, **kwargs):
+        players_by_id = {player.discord_id: player for player in players}
+        return (
+            Team(
+                [players_by_id[player_id] for player_id in range(5000, 5005)],
+                role_assignments=["1", "2", "3", "4", "5"],
+            ),
+            Team(
+                [players_by_id[player_id] for player_id in range(5005, 5010)],
+                role_assignments=["1", "2", "3", "4", "5"],
+            ),
+        )
+
+    monkeypatch.setattr(BalancedShuffler, "shuffle", fixed_asymmetric_shuffle)
+
+    result = service.shuffle_players(
+        [player_id for player_id, _, _ in player_specs],
+        guild_id=TEST_GUILD_ID,
+    )
+
+    # Player 5005 is assigned role 1 off-role: 2000 * 0.95 - 200 = 1700.
+    assert sorted((result["radiant_value"], result["dire_value"])) == [11300.0, 13000.0]
+    assert result["goodness_score"] == pytest.approx(1682.0)
 
 
 def test_goodness_subtracts_selected_players_lobby_wait_minutes(repo_db_path):

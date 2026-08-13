@@ -7,6 +7,15 @@ import itertools
 from domain.models.player import Player
 
 
+def calculate_off_role_value(
+    base_value: float,
+    multiplier: float = 0.95,
+    flat_value_penalty: float = 100.0,
+) -> float:
+    """Return an off-role value after percentage and flat reductions."""
+    return max(0.0, base_value * multiplier - flat_value_penalty)
+
+
 def compute_optimal_role_assignments(
     player_roles_key: tuple[tuple[str, ...], ...],
 ) -> tuple[tuple[str, ...], ...]:
@@ -87,9 +96,10 @@ class Team:
     def get_team_value(
         self,
         use_glicko: bool = True,
-        off_role_multiplier: float = 0.9,
+        off_role_multiplier: float = 0.95,
         use_openskill: bool = False,
         use_jopacoin: bool = False,
+        off_role_flat_value_penalty: float = 100.0,
     ) -> float:
         """
         Calculate total team value with off-role penalties.
@@ -99,6 +109,7 @@ class Team:
             off_role_multiplier: Multiplier for rating when playing off-role
             use_openskill: Whether to use OpenSkill ratings (overrides use_glicko if True)
             use_jopacoin: Whether to use jopacoin balance (overrides other ratings if True)
+            off_role_flat_value_penalty: Flat value subtracted after the multiplier
 
         Returns:
             Sum of all player values adjusted for role assignments
@@ -117,7 +128,11 @@ class Team:
             if player.preferred_roles and assigned_role in player.preferred_roles:
                 total_value += base_value
             else:
-                total_value += base_value * off_role_multiplier
+                total_value += calculate_off_role_value(
+                    base_value,
+                    off_role_multiplier,
+                    off_role_flat_value_penalty,
+                )
 
         return total_value
 
@@ -166,9 +181,10 @@ class Team:
         self,
         role: str,
         use_glicko: bool = True,
-        off_role_multiplier: float = 0.9,
+        off_role_multiplier: float = 0.95,
         use_openskill: bool = False,
         use_jopacoin: bool = False,
+        off_role_flat_value_penalty: float = 100.0,
     ) -> tuple[Player, float]:
         """
         Get the player assigned to a specific role and their effective value.
@@ -179,6 +195,7 @@ class Team:
             off_role_multiplier: Multiplier for rating when playing off-role
             use_openskill: Whether to use OpenSkill ratings (overrides use_glicko if True)
             use_jopacoin: Whether to use jopacoin balance (overrides other ratings if True)
+            off_role_flat_value_penalty: Flat value subtracted after the multiplier
 
         Returns:
             Tuple of (player, effective_value)
@@ -196,14 +213,25 @@ class Team:
                 if player.preferred_roles and role in player.preferred_roles:
                     effective_value = base_value
                 else:
-                    effective_value = base_value * off_role_multiplier
+                    effective_value = calculate_off_role_value(
+                        base_value,
+                        off_role_multiplier,
+                        off_role_flat_value_penalty,
+                    )
                 return (player, effective_value)
 
         # Should never happen if team is valid, but return first player as fallback
         if self.players:
             player = self.players[0]
             base_value = player.get_value(use_glicko, use_openskill=use_openskill, use_jopacoin=use_jopacoin)
-            return (player, base_value * off_role_multiplier)
+            return (
+                player,
+                calculate_off_role_value(
+                    base_value,
+                    off_role_multiplier,
+                    off_role_flat_value_penalty,
+                ),
+            )
 
         raise ValueError(f"No player found for role {role}")
 

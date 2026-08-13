@@ -154,7 +154,7 @@ class PlayerService:
         }
 
     def create_referral(self, referrer_id: int, referred_id: int, guild_id: int) -> None:
-        """Enroll an unregistered player under a registered referrer."""
+        """Enroll a player before their first recorded guild match."""
         self.player_repo.create_referral(referrer_id, referred_id, guild_id)
 
     def set_roles(self, discord_id: int, guild_id: int, roles: list[str]):

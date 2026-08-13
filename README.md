@@ -249,7 +249,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 ### Registration & Profile — `/player`
 
 - `/player register` — Register yourself with your Steam32 ID; fetches MMR from OpenDota to seed your rating
-- `/refer` — Refer a new player before they register
+- `/refer` — Refer a player before their first game
 - `/player link` / `/player unlink` / `/player steamids` — Link, unlink, and list your Steam accounts
 - `/player roles` — Set preferred roles (1-5) for matchmaking
 - `/player region` — Set your preferred Dota server (US East / US West)
@@ -320,8 +320,8 @@ List all available commands with descriptions.
 
 - `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
 - `/admin moderation suspend|lift|status|list|history` — Temporarily block selected lobby kinds by duration, future completed matches, or both, with private reasons and durable history
-- `/admin lowprio add|remove|status|list` — Apply low-priority shuffle modifiers and 1.1× positive rating gains for 1–20 required wins, and inspect progress
-- `/player lobby status` — Privately view your active lobby suspension and low-priority progress
+- `/admin lowprio add|remove|status|list` — Admin-only private management and inspection of low-priority shuffle modifiers and 1.1× positive rating gains for 1–20 required wins
+- `/player lobby status` — Privately view your active lobby suspension
 - `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
 - `/trivia-reset-cooldown` — Reset a user's trivia cooldown
 - `/survey` — Manage and report on one-off anonymous DM surveys (`create`, `list`, `preview`, `delete`, `send`, `retry`, `results`, `close`, and `question add|edit|remove|move`)
@@ -374,7 +374,9 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 - `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
 **Rating:**
-- `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_PENALTY` - Team balancing penalties
+- `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
+  value adjustments (defaults: 0.95 and 100)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 500)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
 **Trivia:**

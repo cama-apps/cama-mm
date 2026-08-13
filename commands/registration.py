@@ -12,6 +12,8 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import (
+    LOBBY_CHANNEL_ID,
+    LOWSKILL_LOBBY_CHANNEL_ID,
     MMR_MODAL_RETRY_LIMIT,
     MMR_MODAL_TIMEOUT_MINUTES,
 )
@@ -60,11 +62,11 @@ class RegistrationCommands(commands.Cog):
                 exc,
             )
 
-    @app_commands.command(name="refer", description="Refer a new player")
+    @app_commands.command(name="refer", description="Refer a player before their first game")
     @app_commands.checks.cooldown(1, 5.0)
     @require_guild
     async def refer(self, interaction: discord.Interaction, player: discord.Member):
-        """Enroll a new player and share the registration steps."""
+        """Enroll a player before their first game and share the onboarding steps."""
         if not await safe_defer(interaction, ephemeral=True):
             return
 
@@ -99,14 +101,26 @@ class RegistrationCommands(commands.Cog):
             content="✅ Referral created.",
             ephemeral=True,
         )
+        lobby_mentions = []
+        for channel_id in dict.fromkeys((LOBBY_CHANNEL_ID, LOWSKILL_LOBBY_CHANNEL_ID)):
+            if channel_id is None:
+                continue
+            channel = interaction.guild.get_channel(channel_id)
+            if channel is not None:
+                lobby_mentions.append(channel.mention)
+        lobby_destination = (
+            " or ".join(lobby_mentions) if lobby_mentions else "a lobby channel"
+        )
+
         await safe_followup(
             interaction,
             content=(
                 f"**Referral: {player.mention}**\n"
-                "1. Run `/player register` with your Steam32 ID "
+                "1. If needed, run `/player register` with your Steam32 ID "
                 "(the number in your Dotabuff URL).\n"
                 "2. Run `/player roles` with your Dota positions (1-5).\n"
-                "3. Run `/join` for an active lobby, or `/lobby` to start one."
+                f"3. React in {lobby_destination} to join an active lobby, "
+                "or run `/lobby` to start one."
             ),
             allowed_mentions=discord.AllowedMentions(
                 users=[player],
@@ -317,7 +331,7 @@ class RegistrationCommands(commands.Cog):
 
     @player_lobby.command(
         name="status",
-        description="Privately view your lobby suspension and low-priority progress",
+        description="Privately view your active lobby suspension",
     )
     @require_guild
     async def lobby_status(self, interaction: discord.Interaction):
@@ -326,41 +340,16 @@ class RegistrationCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         moderation_service = getattr(self.bot, "moderation_service", None)
-        low_priority_repo = getattr(self.bot, "low_priority_repo", None)
-        suspension, low_priority = await asyncio.gather(
-            asyncio.to_thread(
-                moderation_service.get_active_suspension,
-                interaction.user.id,
-                guild_id,
-            )
-            if moderation_service is not None
-            else asyncio.sleep(0, result=None),
-            asyncio.to_thread(
-                low_priority_repo.get_state,
-                interaction.user.id,
-                guild_id,
-            )
-            if low_priority_repo is not None
-            else asyncio.sleep(0, result=None),
-        )
-
-        sections: list[str] = []
-        if suspension is not None:
-            sections.append(_player_suspension_summary(suspension))
-        if low_priority is not None and low_priority.active:
-            completed = low_priority.wins_required - low_priority.wins_remaining
-            sections.append(
-                "**Low priority**\n"
-                "A small matchmaking detour is in progress.\n"
-                f"Progress: {completed}/{low_priority.wins_required} wins "
-                f"({low_priority.wins_remaining} remaining)\n"
-                f"Reason: {low_priority.reason or 'Not provided'}"
-            )
+        suspension = await asyncio.to_thread(
+            moderation_service.get_active_suspension,
+            interaction.user.id,
+            guild_id,
+        ) if moderation_service is not None else None
 
         message = (
-            "\n\n".join(sections)
-            if sections
-            else "✅ All clear — you have no active lobby suspension or low-priority state."
+            _player_suspension_summary(suspension)
+            if suspension is not None
+            else "✅ All clear — you have no active lobby suspension."
         )
         await safe_followup(interaction, content=message, ephemeral=True)
 

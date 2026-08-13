@@ -467,7 +467,10 @@ def test_shuffle_display_uses_directional_low_priority_avoid_strength(
     repo_db_path, monkeypatch
 ):
     from config import SOFT_AVOID_PENALTY
-    from domain.low_priority_constants import LOW_PRIORITY_GOODNESS_PENALTY
+    from domain.low_priority_constants import (
+        LOW_PRIORITY_GOODNESS_PENALTY,
+        LOW_PRIORITY_TEAM_GROUPING_BONUS,
+    )
     from domain.models.team import Team
     from shuffler import BalancedShuffler
 
@@ -518,5 +521,7 @@ def test_shuffle_display_uses_directional_low_priority_avoid_strength(
         LOW_PRIORITY_GOODNESS_PENALTY + SOFT_AVOID_PENALTY
     )
     assert both["goodness_score"] - target_only["goodness_score"] == pytest.approx(
-        LOW_PRIORITY_GOODNESS_PENALTY - SOFT_AVOID_PENALTY
+        LOW_PRIORITY_GOODNESS_PENALTY
+        - SOFT_AVOID_PENALTY
+        - LOW_PRIORITY_TEAM_GROUPING_BONUS
     )

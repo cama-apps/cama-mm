@@ -2,9 +2,10 @@
 
 A ``BossMechanic`` represents a single "moment" inside a boss fight where the
 player is forced to make a reactive choice. Each boss has a ``mechanic_pool``
-of compatible mechanic ids on its ``BossDef``; exactly one is rolled per fight and
-triggers at its configured round number, pausing the auto-resolve loop until
-the player clicks an option.
+of compatible mechanic ids on its ``BossDef``; exactly one is rolled per fight.
+Regular fights surface it after one opening exchange, while pinnacle phases
+honor its authored ``trigger_round``. Either path pauses until the player clicks
+an option.
 
 Each mechanic has exactly 3 ``MechanicOption``s. Each option has a tuple of
 ``OutcomeRoll``s whose probabilities sum to 1.0 — when the player clicks the
@@ -51,7 +52,7 @@ class BossMechanic:
     """A full mid-fight prompt: title + description + 3 option buttons."""
     id: str                             # globally unique, e.g. "pudge_hook"
     archetype: str                      # e.g. "hook_pull" (shape family)
-    trigger_round: int                  # round at which this fires if rolled
+    trigger_round: int                  # authored timing; regular fights use round 2
     prompt_title: str                   # big-text title shown on the prompt
     prompt_description: str             # 1-2 line narrative below the title
     options: tuple[MechanicOption, ...] # exactly 3 options
@@ -129,7 +130,7 @@ EFFECT_APPLIERS: dict[str, EffectApplier] = {
 # Shape conventions (documented for content authors):
 #   - Exactly 3 options per mechanic
 #   - Option probabilities for a single option's outcome_rolls must sum to 1.0
-#   - trigger_round is typically between 2-6 (fights last <=20 rounds)
+#   - trigger_round is typically 2-6; regular fights normalize it to round 2
 #   - narrative strings should be one sentence, present tense, <=100 chars
 #   - safe_option_idx is the "don't do anything crazy" button — lowest variance.
 

@@ -67,6 +67,16 @@ class TestSoftAvoidPenaltyCalculation:
         penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 500.0
 
+    def test_default_avoid_same_team_adds_160_goodness(self):
+        shuffler = BalancedShuffler()
+        team1_ids = {1000, 1001, 1002, 1003, 1004}
+        team2_ids = {1005, 1006, 1007, 1008, 1009}
+        avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1001)]
+
+        penalty = shuffler.calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+
+        assert penalty == 160.0
+
     def test_low_priority_avoid_modifiers_apply_by_direction(self):
         shuffler = BalancedShuffler(soft_avoid_penalty=500.0)
         team1_ids = {1000, 1001, 1002, 1003, 1004}

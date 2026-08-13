@@ -1601,6 +1601,10 @@ class MatchCommands(commands.Cog):
             return
 
         for event in events:
+            event_type = str(getattr(event.event_type, "value", event.event_type))
+            if event_type == "lowprio_complete":
+                continue
+
             target = guild.get_member(event.discord_id) if guild is not None else None
             if target is None:
                 get_user = getattr(self.bot, "get_user", None)
@@ -1615,17 +1619,10 @@ class MatchCommands(commands.Cog):
             if target is None:
                 continue
 
-            event_type = str(getattr(event.event_type, "value", event.event_type))
-            if event_type == "lowprio_complete":
-                message = (
-                    f"You completed your low-priority win requirement in match #{match_id}. "
-                    "Nicely done — you're back to regular matchmaking."
-                )
-            else:
-                message = (
-                    f"Your matchmaking lobby suspension was completed by match #{match_id}. "
-                    "You may create and join eligible lobbies again."
-                )
+            message = (
+                f"Your matchmaking lobby suspension was completed by match #{match_id}. "
+                "You may create and join eligible lobbies again."
+            )
             try:
                 await target.send(message)
             except Exception as exc:
