@@ -9,7 +9,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{
-    Connection, OptionalExtension, TransactionBehavior, params, params_from_iter, types::Value,
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+    types::Value,
 };
 use thiserror::Error;
 
@@ -1017,6 +1018,49 @@ impl ManashopRepository {
     ) -> Result<bool, ManashopRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let consumed = Self::consume_data_charge_in_transaction(
+            &transaction,
+            discord_id,
+            guild_id,
+            buff_type,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(consumed)
+    }
+
+    /// Consume one Overgrowth charge inside a caller-owned Dig transaction.
+    ///
+    /// Dig settlement already holds a `BEGIN IMMEDIATE` transaction for the
+    /// tunnel, wallet, inventory, and audit rows. Opening a second connection
+    /// here would let a successful Dig commit while its charge spend fails (or
+    /// vice versa), so the live runtime calls this helper before committing
+    /// that transaction. The returned boolean preserves Python's
+    /// `consume_data_charge_atomic` result: `true` spends one charge and
+    /// `false` leaves no usable charge. The transaction remains owned by the
+    /// caller and is neither committed nor rolled back here.
+    pub fn consume_overgrowth_charge_in_transaction(
+        transaction: &Transaction<'_>,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        now: i64,
+    ) -> Result<bool, ManashopRepositoryError> {
+        Self::consume_data_charge_in_transaction(
+            transaction,
+            discord_id,
+            guild_id,
+            "overgrowth",
+            now,
+        )
+    }
+
+    fn consume_data_charge_in_transaction(
+        transaction: &Transaction<'_>,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        buff_type: &str,
+        now: i64,
+    ) -> Result<bool, ManashopRepositoryError> {
         let row = transaction
             .query_row(
                 "SELECT id, data FROM manashop_buffs
@@ -1033,7 +1077,6 @@ impl ManashopRepository {
             )
             .optional()?;
         let Some((buff_id, raw)) = row else {
-            transaction.commit()?;
             return Ok(false);
         };
         let mut data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
@@ -1043,7 +1086,6 @@ impl ManashopRepository {
                 "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?1",
                 params![buff_id],
             )?;
-            transaction.commit()?;
             return Ok(false);
         }
         data.charges_remaining = Some(charges - 1);
@@ -1051,7 +1093,6 @@ impl ManashopRepository {
             "UPDATE manashop_buffs SET data = ?1, triggered = ?2 WHERE id = ?3",
             params![buff_data_to_json(&data), i64::from(charges == 1), buff_id],
         )?;
-        transaction.commit()?;
         Ok(true)
     }
 

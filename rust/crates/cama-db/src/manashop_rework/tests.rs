@@ -2,8 +2,10 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::{path::Path, process::Command};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::NamedTempFile;
+
+use crate::schema_manager::initialize_or_migrate;
 
 use super::*;
 
@@ -702,6 +704,95 @@ fn test_overgrowth_migration_backfills_missing_charges() {
         .active_for(USER, Some(GUILD), "overgrowth", NOW)
         .unwrap();
     assert_eq!(active[0].data.charges_remaining, Some(10));
+}
+
+fn migrated_overgrowth_fixture() -> (NamedTempFile, ManashopRepository) {
+    let file = NamedTempFile::new().expect("temporary migrated SQLite file");
+    initialize_or_migrate(file.path()).expect("migrate canonical SQLite schema");
+    let connection = Connection::open(file.path()).expect("open migrated SQLite fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable historical foreign-key mismatch for fixture");
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+             VALUES (?1,?2,'overgrowth miner',100)",
+            params![USER, GUILD],
+        )
+        .expect("insert migrated player");
+    drop(connection);
+    let repository = ManashopRepository::new(file.path());
+    repository
+        .grant_buff(GrantBuffRequest {
+            discord_id: USER,
+            guild_id: Some(GUILD),
+            buff_type: "overgrowth",
+            target_id: None,
+            granted_at: NOW,
+            expires_at: NOW + 3_600,
+            data: Some(&BuffData {
+                charges_remaining: Some(2),
+                ..BuffData::default()
+            }),
+        })
+        .expect("grant migrated Overgrowth buff");
+    (file, repository)
+}
+
+#[test]
+fn test_overgrowth_charge_consumption_commits_with_caller_transaction() {
+    let (file, repository) = migrated_overgrowth_fixture();
+    let mut connection = Connection::open(file.path()).expect("open migrated fixture");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("begin caller transaction");
+    assert!(
+        ManashopRepository::consume_overgrowth_charge_in_transaction(
+            &transaction,
+            USER,
+            Some(GUILD),
+            NOW,
+        )
+        .expect("consume Overgrowth charge in caller transaction")
+    );
+    transaction
+        .execute(
+            "UPDATE players SET jopacoin_balance=jopacoin_balance+1
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+        )
+        .expect("write sibling Dig settlement in same transaction");
+    transaction.commit().expect("commit caller transaction");
+
+    let active = repository
+        .active_for(USER, Some(GUILD), "overgrowth", NOW)
+        .expect("read committed Overgrowth state");
+    assert_eq!(active[0].data.charges_remaining, Some(1));
+    assert_eq!(repository.balance(USER, Some(GUILD)).unwrap(), Some(101));
+}
+
+#[test]
+fn test_overgrowth_charge_consumption_rolls_back_with_caller_transaction() {
+    let (file, repository) = migrated_overgrowth_fixture();
+    let mut connection = Connection::open(file.path()).expect("open migrated fixture");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("begin caller transaction");
+    assert!(
+        ManashopRepository::consume_overgrowth_charge_in_transaction(
+            &transaction,
+            USER,
+            Some(GUILD),
+            NOW,
+        )
+        .expect("consume Overgrowth charge in caller transaction")
+    );
+    transaction.rollback().expect("rollback caller transaction");
+
+    let active = repository
+        .active_for(USER, Some(GUILD), "overgrowth", NOW)
+        .expect("read rolled-back Overgrowth state");
+    assert_eq!(active[0].data.charges_remaining, Some(2));
 }
 
 #[test]
