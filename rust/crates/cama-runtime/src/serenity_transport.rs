@@ -1968,7 +1968,11 @@ fn serenity_embed(embed: &InteractionEmbed) -> CreateEmbed {
         result = result.thumbnail(thumbnail_url);
     }
     if let Some(footer) = &embed.footer {
-        result = result.footer(CreateEmbedFooter::new(footer));
+        let mut rendered_footer = CreateEmbedFooter::new(footer);
+        if let Some(icon_url) = &embed.footer_icon_url {
+            rendered_footer = rendered_footer.icon_url(icon_url);
+        }
+        result = result.footer(rendered_footer);
     }
     for field in &embed.fields {
         result = result.field(&field.name, &field.value, field.inline);
@@ -3841,6 +3845,18 @@ mod tests {
             "https://cdn.example/spell.png"
         );
         assert!(serialized.get("image").is_none());
+    }
+
+    #[test]
+    fn interaction_embed_footer_icon_maps_to_discord_footer_icon() {
+        let embed = InteractionEmbed::titled("Dig result")
+            .footer("Community Mine")
+            .footer_icon("attachment://pickaxe.png");
+        let serialized =
+            serde_json::to_value(serenity_embed(&embed)).expect("serialize Discord embed");
+
+        assert_eq!(serialized["footer"]["text"], "Community Mine");
+        assert_eq!(serialized["footer"]["icon_url"], "attachment://pickaxe.png");
     }
 
     #[test]

@@ -2096,6 +2096,7 @@ fn embed_model(model: EmbedModel) -> InteractionEmbed {
         image_url: None,
         thumbnail_url: None,
         footer: model.footer,
+        footer_icon_url: None,
         fields: model
             .fields
             .into_iter()

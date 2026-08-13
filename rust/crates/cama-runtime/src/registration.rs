@@ -418,6 +418,7 @@ pub struct InteractionEmbed {
     pub image_url: Option<String>,
     pub thumbnail_url: Option<String>,
     pub footer: Option<String>,
+    pub footer_icon_url: Option<String>,
     pub fields: Vec<InteractionEmbedField>,
 }
 
@@ -464,6 +465,12 @@ impl InteractionEmbed {
     #[must_use]
     pub fn footer(mut self, footer: impl Into<String>) -> Self {
         self.footer = Some(footer.into());
+        self
+    }
+
+    #[must_use]
+    pub fn footer_icon(mut self, footer_icon_url: impl Into<String>) -> Self {
+        self.footer_icon_url = Some(footer_icon_url.into());
         self
     }
 
