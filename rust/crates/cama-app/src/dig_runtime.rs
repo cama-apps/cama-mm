@@ -3453,6 +3453,10 @@ fn weather_effects(weather_id: &str) -> DigWeatherEffects {
     }
 }
 
+fn event_chance_factor(ascension_delta: f64, weather_delta: f64, route_delta: f64) -> f64 {
+    (1.0 + ascension_delta) * (1.0 + weather_delta) * (1.0 + route_delta)
+}
+
 fn weather_code(weather_id: Option<&str>) -> Option<&str> {
     // Python forwards the persisted weather id verbatim (lowercased by its
     // repository). Authored ids such as `temporal_storm` and
@@ -4963,10 +4967,11 @@ where
             advance_max: active_route
                 .and_then(|route| route_effect(route, "advance_max_penalty"))
                 .map(|penalty| (layer_at(depth_before).advance_range.1 - penalty as i64).max(1)),
-            event_chance_multiplier: (1.0
-                + route_event_delta
-                + weather_fx.event_chance_multiplier
-                + ascension_number("event_chance_multiplier"))
+            event_chance_multiplier: event_chance_factor(
+                ascension_number("event_chance_multiplier"),
+                weather_fx.event_chance_multiplier,
+                route_event_delta,
+            )
             .max(0.0),
             luminosity_drain_multiplier: (1.0 + route_luminosity_delta).max(0.0),
             luminosity_drain_bonus: deep_luminosity_drain_bonus(depth_before),
@@ -9032,6 +9037,63 @@ mod tests {
             &relics,
             super::weather_code(Some("storm")),
         ));
+    }
+
+    #[test]
+    fn event_chance_composes_ascension_weather_and_route_multiplicatively() {
+        let factor = super::event_chance_factor(0.20, 0.50, 0.50);
+        assert!((factor - 2.70).abs() < 1e-12);
+        assert!(((0.31_f64 * factor).min(0.75) - 0.75).abs() < 1e-12);
+        assert_eq!(super::event_chance_factor(0.20, -1.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn sqlite_live_event_gate_multiplies_ascension_weather_and_route_factors() {
+        let database = NamedTempFile::new().expect("event multiplier database");
+        let actor = 60_111;
+        let guild = 60_112;
+        let now = 1_900_086_006;
+        seed_live_runtime_tunnel(&database, actor, guild, now, 240, 1, Some(now - 7_200));
+        Connection::open(database.path())
+            .expect("event multiplier connection")
+            .execute(
+                "UPDATE tunnels SET prestige_level=2,route_state=?1,boss_progress=?2
+                 WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    r#"{"end_depth":275,"layer":"Frozen Core","offered":["timefracture","frozen_stillness","icebound_cache"],"selected":"timefracture","start_depth":200}"#,
+                    r#"{"25":"defeated","50":{"status":"defeated"},"75":"defeated","100":{"status":"defeated"},"150":"defeated","200":"defeated"}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed event multiplier policy");
+        let today = cama_domain::game_date::game_date_for_timestamp(now as f64)
+            .expect("event multiplier date");
+        seed_two_weather_rows(&database, guild, &today, "Frozen Core", "temporal_storm");
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("multiplicative event Dig");
+        assert!(outcome.success && !outcome.cave_in);
+        assert!(outcome.event_id.is_some());
+        assert_eq!(
+            Connection::open(database.path())
+                .expect("inspect event multiplier Dig")
+                .query_row(
+                    "SELECT current_run_events FROM tunnels
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("event counter"),
+            1,
+        );
     }
 
     #[test]
