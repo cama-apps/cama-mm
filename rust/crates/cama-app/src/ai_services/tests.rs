@@ -653,6 +653,163 @@ fn assert_invalid(service: &SQLQueryService, sql: &str, message: &str) {
     );
 }
 
+macro_rules! sql_validation_tests {
+    (
+        $(
+            $name:ident, $sql:expr, $expected:expr, $message:expr
+        );+ $(;)?
+    ) => {
+        $(
+            #[test]
+            fn $name() {
+                let service = validator_service();
+                let result = service.validate_sql($sql);
+                if $expected {
+                    assert!(result.is_ok(), "expected valid SQL {:?}, got {:?}", $sql, result);
+                } else {
+                    let error = result.expect_err("expected SQL validation failure");
+                    assert!(
+                        error.0.to_ascii_lowercase().contains($message),
+                        "unexpected error for {:?}: {}",
+                        $sql,
+                        error
+                    );
+                }
+            }
+        )+
+    };
+}
+
+sql_validation_tests! {
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_select,
+    "SELECT low_priority_gain_multiplier FROM rating_history", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_where,
+    "SELECT p.discord_username FROM players p JOIN rating_history rh ON p.discord_id = rh.discord_id WHERE rh.low_priority_gain_multiplier > 1", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_join_on,
+    "SELECT p.discord_username FROM players p JOIN rating_history rh ON rh.low_priority_gain_multiplier > 1", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_group_by,
+    "SELECT COUNT(*) FROM rating_history GROUP BY low_priority_gain_multiplier", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_having,
+    "SELECT COUNT(*) FROM rating_history HAVING MAX(low_priority_gain_multiplier) > 1", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_order_by,
+    "SELECT rating_after FROM rating_history ORDER BY low_priority_gain_multiplier", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_function,
+    "SELECT max(low_priority_gain_multiplier) FROM rating_history", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_json_object,
+    "SELECT json_object('multiplier', low_priority_gain_multiplier) FROM rating_history", false, "forbidden";
+    test_validate_sql_rejects_low_priority_multiplier_anywhere_structural_quoted,
+    "SELECT \"low_priority_gain_multiplier\" FROM rating_history", false, "forbidden";
+
+    test_validate_sql_ignores_forbidden_identifier_text_in_string_literal,
+    "SELECT discord_username FROM players WHERE discord_username = 'low_priority_gain_multiplier'", true, "";
+
+    test_validate_sql_rejects_single_quoted_identifier_bypass_from_table,
+    "SELECT reason FROM 'low_priority_state'", false, "not allowed";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_join_table,
+    "SELECT lp.reason FROM players p JOIN 'low_priority_state' lp ON 1 = 1", false, "not allowed";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_comma_join_table,
+    "SELECT reason FROM players, 'low_priority_state'", false, "not allowed";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_qualified_blocked_column,
+    "SELECT p.'discord_id' FROM players p", false, "blocked column";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_qualified_forbidden_select,
+    "SELECT rh.'low_priority_gain_multiplier' FROM rating_history rh", false, "forbidden";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_qualified_forbidden_where,
+    "SELECT rh.rating_after FROM rating_history rh WHERE rh.'low_priority_gain_multiplier' > 1", false, "forbidden";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_using_column,
+    "SELECT rh.rating_after FROM rating_history rh JOIN rating_history b USING ('low_priority_gain_multiplier')", false, "forbidden";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_using_second_column,
+    "SELECT a.rating_after FROM rating_history a JOIN rating_history b USING (match_id, 'low_priority_gain_multiplier')", false, "forbidden";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_quoted_table_after_schema,
+    "SELECT discord_username FROM main.'players'", false, "schema-qualified";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_quoted_schema,
+    "SELECT discord_username FROM 'main'.players", false, "schema-qualified";
+    test_validate_sql_rejects_single_quoted_identifier_bypass_quoted_schema_and_table,
+    "SELECT discord_username FROM 'main'.'players'", false, "schema-qualified";
+
+    test_validate_sql_allows_standalone_single_quoted_literals_projection,
+    "SELECT 'low_priority_gain_multiplier' AS label FROM rating_history", true, "";
+    test_validate_sql_allows_standalone_single_quoted_literals_where,
+    "SELECT discord_username FROM players WHERE discord_username = 'low_priority_gain_multiplier'", true, "";
+    test_validate_sql_allows_standalone_single_quoted_literals_function,
+    "SELECT upper('low_priority_state') AS label FROM players", true, "";
+    test_validate_sql_allows_standalone_single_quoted_literals_function_with_two_literals,
+    "SELECT printf('%s', 'main') AS label FROM players", true, "";
+
+    test_validate_sql_rejects_parenthesized_source_bypass_from,
+    "SELECT reason FROM ('low_priority_state')", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_join,
+    "SELECT lp.reason FROM players JOIN ('low_priority_state') lp ON 1", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_comma_join,
+    "SELECT reason FROM players, ('low_priority_state')", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_parenthesized_join,
+    "SELECT reason FROM (players JOIN ('low_priority_state') ON 1)", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_parenthesized_comma_join,
+    "SELECT reason FROM (players, low_priority_state)", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_nested_parenthesized_comma_join,
+    "SELECT reason FROM ((players, low_priority_state))", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_parenthesized_comma_join_quoted,
+    "SELECT reason FROM (players, ('low_priority_state'))", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_separately_parenthesized_comma_join,
+    "SELECT reason FROM ((players), (low_priority_state))", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_pragma_function,
+    "SELECT name FROM (pragma_table_info('players'))", false, "not allowed";
+    test_validate_sql_rejects_parenthesized_source_bypass_single_quoted_pragma_function,
+    "SELECT name FROM ('pragma_table_info'('players'))", false, "not allowed";
+
+    test_validate_sql_rejects_in_source_bypass_table,
+    "SELECT discord_username FROM players WHERE discord_username IN low_priority_state", false, "not allowed";
+    test_validate_sql_rejects_in_source_bypass_quoted_table,
+    "SELECT discord_username FROM players WHERE discord_username IN 'low_priority_state'", false, "not allowed";
+    test_validate_sql_rejects_in_source_bypass_table_function,
+    "SELECT discord_username FROM players WHERE discord_username IN pragma_table_info('players')", false, "not allowed";
+    test_validate_sql_rejects_in_source_bypass_quoted_table_function,
+    "SELECT discord_username FROM players WHERE discord_username IN 'pragma_table_info'('players')", false, "not allowed";
+
+    test_validate_sql_rejects_blocked_columns_inside_projection_expressions_grouped,
+    "SELECT (discord_id) FROM players", false, "blocked column";
+    test_validate_sql_rejects_blocked_columns_inside_projection_expressions_function,
+    "SELECT max(discord_id) FROM players", false, "blocked column";
+    test_validate_sql_rejects_blocked_columns_inside_projection_expressions_cast,
+    "SELECT CAST(discord_id AS TEXT) FROM players", false, "blocked column";
+    test_validate_sql_rejects_blocked_columns_inside_projection_expressions_json_object,
+    "SELECT json_object('player_id', discord_id) FROM players", false, "blocked column";
+    test_validate_sql_rejects_blocked_columns_inside_projection_expressions_nested_parentheses,
+    "SELECT coalesce((discord_id), 0) FROM players", false, "blocked column";
+
+    test_validate_sql_allows_legitimate_parenthesized_sql_subquery_source,
+    "SELECT p.discord_username FROM (SELECT discord_username FROM players) p", true, "";
+    test_validate_sql_allows_legitimate_parenthesized_sql_parenthesized_join,
+    "SELECT p.discord_username FROM (players p JOIN matches m ON p.wins = m.match_id)", true, "";
+    test_validate_sql_allows_legitimate_parenthesized_sql_subquery_where,
+    "SELECT (SELECT COUNT(*) FROM bets WHERE discord_id = p.discord_id) FROM players p", true, "";
+    test_validate_sql_allows_legitimate_parenthesized_sql_in_literal_list,
+    "SELECT discord_username FROM players WHERE discord_username IN ('low_priority_state')", true, "";
+    test_validate_sql_allows_legitimate_parenthesized_sql_table_function_argument_comma,
+    "SELECT value FROM (json_each('[1,2]', '$'))", true, "";
+
+    test_validate_sql_allows_projection_blocked_columns_in_join_predicates,
+    "SELECT p.discord_username FROM players p JOIN rating_history rh ON p.discord_id = rh.discord_id WHERE rh.discord_id > 0", true, "";
+}
+
+#[test]
+fn test_schema_context_hides_low_priority_history_multiplier() {
+    let repository = Arc::new(InMemoryAIQueryRepository::new([TableSchema {
+        name: "rating_history".to_owned(),
+        columns: vec![
+            ColumnSchema::new("guild_id", "INTEGER", true, false),
+            ColumnSchema::new("rating_after", "REAL", true, false),
+            ColumnSchema::new("low_priority_gain_multiplier", "REAL", true, false),
+        ],
+        foreign_keys: Vec::new(),
+    }]));
+    let port: Arc<dyn AIQueryRepository> = repository;
+    let context = SQLQueryService::new(port)
+        .schema_context()
+        .expect("schema context");
+    assert!(context.contains("### rating_history"));
+    assert!(!context.contains("low_priority_gain_multiplier"));
+}
+
 #[test]
 fn test_validate_sql_rejects_non_select() {
     let service = validator_service();

@@ -1474,6 +1474,12 @@ pub const BLOCKED_COLUMNS: &[&str] = &[
     "id",
 ];
 
+/// Historical rating fields reveal private membership state even when they
+/// are only used in a predicate, grouping, join, or ordering expression.
+/// Unlike ordinary blocked output columns, these identifiers must be rejected
+/// anywhere in the query structure.
+pub const FORBIDDEN_QUERY_IDENTIFIERS: &[&str] = &["low_priority_gain_multiplier"];
+
 const DANGEROUS_KEYWORDS: &[&str] = &[
     "insert", "update", "delete", "drop", "alter", "create", "truncate", "replace", "grant",
     "revoke", "attach", "detach", "pragma", "vacuum", "reindex",
@@ -2086,24 +2092,127 @@ fn mask_string_literals(sql: &str) -> String {
             index += 1;
             continue;
         }
-        output.push('\'');
+
         index += 1;
+        let mut contents = String::new();
         while index < chars.len() {
             if chars[index] == '\'' {
                 if chars.get(index + 1) == Some(&'\'') {
-                    output.push_str("xx");
+                    contents.push('\'');
                     index += 2;
                     continue;
                 }
-                output.push('\'');
                 index += 1;
                 break;
             }
-            output.push('x');
+            contents.push(chars[index]);
             index += 1;
+        }
+
+        if single_quote_is_identifier(&output, &normalized, index) {
+            output.push(' ');
+            output.push_str(&contents);
+            output.push(' ');
+        } else {
+            output.push('\'');
+            output.extend(std::iter::repeat_n('x', contents.chars().count()));
+            output.push('\'');
         }
     }
     output
+}
+
+/// SQLite accepts single-quoted text as an identifier in identifier-only
+/// grammar slots. In expression/value slots it remains a string literal. The
+/// validator needs this distinction so `FROM 'blocked_table'` and
+/// `USING ('blocked_column')` cannot bypass structural checks while ordinary
+/// values such as `WHERE label = 'blocked_table'` remain valid.
+fn single_quote_is_identifier(masked_prefix: &str, sql: &str, end: usize) -> bool {
+    let before = masked_prefix.trim_end();
+    let after = sql.get(end..).unwrap_or_default().trim_start();
+
+    if before.ends_with('.') || after.starts_with('.') {
+        return true;
+    }
+
+    let tokens = lex_sql(before);
+    let mut depth = 0_usize;
+    let mut token_depths = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        token_depths.push(depth);
+        match token.symbol() {
+            Some('(') => depth += 1,
+            Some(')') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    // JOIN table names and IN table-name expressions may be parenthesized by
+    // SQLite's grammar. Walk backwards through the active source item and
+    // stop at a clause boundary; commas remain part of the same FROM list.
+    let current_depth = depth;
+    for index in (0..tokens.len()).rev() {
+        let token_depth = token_depths[index];
+        if token_depth > current_depth {
+            continue;
+        }
+        if token_depth < current_depth {
+            if tokens[index].symbol() == Some('(') {
+                if let Some(previous_word) = index
+                    .checked_sub(1)
+                    .and_then(|previous| tokens[previous].word())
+                {
+                    if previous_word == "using" {
+                        return true;
+                    }
+                    if previous_word != "from" && previous_word != "join" {
+                        // This is a function/value parenthesis, not a source
+                        // group. Do not let an outer FROM marker reclassify
+                        // its string arguments as identifiers.
+                        return false;
+                    }
+                }
+                let outer_depth = token_depth;
+                for outer_index in (0..index).rev() {
+                    if token_depths[outer_index] != outer_depth {
+                        continue;
+                    }
+                    if let Some(word) = tokens[outer_index].word() {
+                        if word == "join" || word == "from" {
+                            return true;
+                        }
+                        if FROM_TERMINATORS.contains(&word) || word == "select" {
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(word) = tokens[index].word() {
+            if word == "join" || word == "from" {
+                return true;
+            }
+            if word == "in" {
+                return true;
+            }
+            if FROM_TERMINATORS.contains(&word) || word == "select" {
+                break;
+            }
+        }
+    }
+
+    // USING(...) is an identifier list rather than an expression list.
+    if let Some(open_index) = tokens.iter().rposition(|token| token.symbol() == Some('('))
+        && token_depths[open_index] < current_depth
+        && tokens[..open_index]
+            .iter()
+            .rev()
+            .any(|token| token.word() == Some("using"))
+    {
+        return true;
+    }
+    false
 }
 
 fn is_word_character(character: char) -> bool {
@@ -2126,25 +2235,50 @@ fn projection_lists(masked_lower: &str) -> Vec<String> {
         if !word_at(&chars, select_index, "select") {
             continue;
         }
-        let mut depth = 0_usize;
+        let mut expression_depth = 0_usize;
+        let mut subquery_depth = 0_usize;
         let mut output = String::new();
         let mut index = select_index + "select".len();
         while index < chars.len() {
             match chars[index] {
                 '(' => {
-                    depth += 1;
+                    if subquery_depth > 0 {
+                        subquery_depth += 1;
+                    } else {
+                        let remainder = chars[index + 1..].iter().collect::<String>();
+                        let trimmed = remainder.trim_start();
+                        if word_at(&trimmed.chars().collect::<Vec<_>>(), 0, "select")
+                            || word_at(&trimmed.chars().collect::<Vec<_>>(), 0, "with")
+                        {
+                            subquery_depth = 1;
+                        } else {
+                            expression_depth += 1;
+                            output.push('(');
+                        }
+                    }
                     index += 1;
                 }
-                ')' if depth == 0 => break,
-                ')' => {
-                    depth -= 1;
+                ')' if subquery_depth > 0 => {
+                    subquery_depth -= 1;
+                    index += 1;
+                }
+                ')' if expression_depth > 0 => {
+                    expression_depth -= 1;
+                    output.push(')');
+                    index += 1;
+                }
+                ')' => break,
+                _ if subquery_depth > 0 => {
                     index += 1;
                 }
                 character => {
-                    if depth == 0 && word_at(&chars, index, "from") {
+                    if subquery_depth == 0
+                        && expression_depth == 0
+                        && word_at(&chars, index, "from")
+                    {
                         break;
                     }
-                    if depth == 0 {
+                    if subquery_depth == 0 {
                         output.push(character);
                     }
                     index += 1;
@@ -2198,47 +2332,144 @@ fn schema_qualified_reference(masked: &str) -> bool {
     })
 }
 
-fn extract_tables(masked: &str) -> BTreeSet<String> {
-    let tokens = lex_sql(masked);
-    let mut depths = Vec::with_capacity(tokens.len());
+fn source_item_tables(tokens: &[SqlToken]) -> Vec<String> {
+    let mut start = 0;
+    let mut end = tokens.len();
+
+    // Unwrap complete outer source groups. A parenthesized SELECT has no
+    // source table of its own; its nested FROM is visited by the outer scan.
+    loop {
+        if tokens.get(start).and_then(SqlToken::symbol) != Some('(') {
+            break;
+        }
+        let mut depth = 0_usize;
+        let mut close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.symbol() {
+                Some('(') => depth += 1,
+                Some(')') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        if close + 1 < end && tokens[close + 1].symbol() == Some(',') {
+            break;
+        }
+        let first_word = tokens[start + 1..close].iter().find_map(SqlToken::word);
+        if matches!(first_word, Some("select" | "with")) {
+            return Vec::new();
+        }
+        start += 1;
+        end = close;
+    }
+
+    // Commas at this source-group depth are cross joins. Split recursively so
+    // every parenthesized item is checked, while function-argument commas
+    // remain inside their nested parentheses.
     let mut depth = 0_usize;
-    for token in &tokens {
-        depths.push(depth);
-        match token.symbol() {
+    let mut item_start = start;
+    let mut items = Vec::new();
+    for index in start..end {
+        match tokens[index].symbol() {
             Some('(') => depth += 1,
             Some(')') => depth = depth.saturating_sub(1),
+            Some(',') if depth == 0 => {
+                items.extend(source_item_tables(&tokens[item_start..index]));
+                item_start = index + 1;
+            }
             _ => {}
         }
     }
+    if !items.is_empty() || item_start != start {
+        items.extend(source_item_tables(&tokens[item_start..end]));
+        return items;
+    }
+
+    tokens[start..end]
+        .iter()
+        .find_map(SqlToken::identifier)
+        .filter(|word| !matches!(*word, "select" | "with"))
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+}
+
+fn from_clause_tables(tokens: &[SqlToken]) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
+    for (from_index, token) in tokens.iter().enumerate() {
+        if token.word() != Some("from") {
+            continue;
+        }
+        let mut depth = 0_usize;
+        let mut item_start = from_index + 1;
+        let mut index = item_start;
+        while index < tokens.len() {
+            match tokens[index].symbol() {
+                Some('(') => depth += 1,
+                Some(')') if depth == 0 => break,
+                Some(')') => depth = depth.saturating_sub(1),
+                Some(',') if depth == 0 => {
+                    tables.extend(
+                        source_item_tables(&tokens[item_start..index])
+                            .into_iter()
+                            .map(|table| table.to_ascii_lowercase()),
+                    );
+                    item_start = index + 1;
+                }
+                _ if depth == 0 => {
+                    if let Some(word) = tokens[index].word()
+                        && FROM_TERMINATORS.contains(&word)
+                    {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        if item_start <= index {
+            tables.extend(
+                source_item_tables(&tokens[item_start..index])
+                    .into_iter()
+                    .map(|table| table.to_ascii_lowercase()),
+            );
+        }
+    }
+    tables
+}
+
+fn extract_tables(masked: &str) -> BTreeSet<String> {
+    let tokens = lex_sql(masked);
+    let mut tables = from_clause_tables(&tokens);
     for (index, token) in tokens.iter().enumerate() {
-        if matches!(token.word(), Some("from" | "join")) {
-            if let Some(table) = tokens.get(index + 1).and_then(SqlToken::identifier) {
+        if token.word() == Some("join") {
+            let mut next = index + 1;
+            while tokens.get(next).and_then(SqlToken::symbol) == Some('(') {
+                next += 1;
+            }
+            if let Some(table) = tokens.get(next).and_then(SqlToken::identifier)
+                && !matches!(table, "select" | "with")
+            {
                 tables.insert(table.to_owned());
             }
-            continue;
-        }
-        if token.symbol() != Some(',') {
-            continue;
-        }
-        let comma_depth = depths[index];
-        let mut inside_from = false;
-        for previous in (0..index).rev() {
-            if depths[previous] != comma_depth {
-                continue;
+        } else if token.word() == Some("in") {
+            let mut next = index + 1;
+            while tokens.get(next).and_then(SqlToken::symbol) == Some('(') {
+                next += 1;
             }
-            if let Some(word) = tokens[previous].word() {
-                if FROM_TERMINATORS.contains(&word) {
-                    break;
-                }
-                if word == "from" {
-                    inside_from = true;
-                    break;
-                }
+            if let Some(table) = tokens.get(next).and_then(SqlToken::identifier)
+                && !matches!(table, "select" | "with")
+            {
+                tables.insert(table.to_owned());
             }
-        }
-        if inside_from && let Some(table) = tokens.get(index + 1).and_then(SqlToken::identifier) {
-            tables.insert(table.to_owned());
         }
     }
     tables
@@ -2379,7 +2610,11 @@ impl SQLQueryService {
             })?;
             *blocked_cache = Some(blocked.clone());
         }
-        let blocked_columns = BLOCKED_COLUMNS.iter().copied().collect::<BTreeSet<_>>();
+        let hidden_columns = BLOCKED_COLUMNS
+            .iter()
+            .chain(FORBIDDEN_QUERY_IDENTIFIERS)
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut lines = vec!["## Available Tables\n".to_owned()];
         let mut tables = snapshot
             .tables
@@ -2392,7 +2627,7 @@ impl SQLQueryService {
                 .columns
                 .iter()
                 .filter(|column| {
-                    !blocked_columns.contains(column.name.to_ascii_lowercase().as_str())
+                    !hidden_columns.contains(column.name.to_ascii_lowercase().as_str())
                 })
                 .collect::<Vec<_>>();
             if columns.is_empty() {
@@ -2476,6 +2711,18 @@ impl SQLQueryService {
             return Err(SqlValidationError(
                 "Multiple statements not allowed".to_owned(),
             ));
+        }
+        let structural_words = lex_sql(&masked.to_ascii_lowercase())
+            .into_iter()
+            .filter_map(|token| token.word().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        if let Some(identifier) = FORBIDDEN_QUERY_IDENTIFIERS
+            .iter()
+            .find(|identifier| structural_words.contains(**identifier))
+        {
+            return Err(SqlValidationError(format!(
+                "Forbidden column: {identifier}"
+            )));
         }
         if wildcard_projection(&lower) {
             return Err(SqlValidationError(
