@@ -734,6 +734,17 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(false)
     }
 
+    /// Atomically move one still-pending delivery part to a fallback channel.
+    /// This must commit before Discord is called so READY recovery observes
+    /// the same channel even if the process dies after Discord accepts the
+    /// fallback send but before the delivered receipt CAS.
+    fn rebind_pending_delivery_channel(
+        &self,
+        _request: DigRuntimeRebindDeliveryChannel,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        Err(DigRuntimeStoreError::StateConflict)
+    }
+
     fn finalize_delivery(
         &self,
         _request: DigRuntimeFinalizeDelivery,
@@ -2139,6 +2150,55 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         Ok(true)
     }
 
+    fn rebind_pending_delivery_channel(
+        &self,
+        request: DigRuntimeRebindDeliveryChannel,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = transaction
+            .query_row(
+                "SELECT detail FROM dig_actions WHERE id=?1",
+                params![request.action_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut value = serde_json::from_str::<Value>(&detail)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+        let raw = value
+            .get("delivery")
+            .cloned()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        let part_pending = match request.part {
+            DigRuntimeDeliveryPart::Main => delivery.main_delivered_at.is_none(),
+            DigRuntimeDeliveryPart::Event => {
+                delivery.render.kind.requires_event_part() && delivery.event_delivered_at.is_none()
+            }
+        };
+        if delivery.source_key != request.source_key
+            || delivery.context.channel_id != request.expected_channel_id
+            || !part_pending
+        {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        delivery.context.channel_id = request.fallback_channel_id;
+        value["delivery"] = serde_json::to_value(&delivery)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        let changed = transaction.execute(
+            "UPDATE dig_actions SET detail=?1 WHERE id=?2",
+            params![value.to_string(), request.action_id],
+        )?;
+        if changed != 1 {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        transaction.commit()?;
+        Ok(delivery)
+    }
+
     fn finalize_delivery(
         &self,
         request: DigRuntimeFinalizeDelivery,
@@ -2912,6 +2972,15 @@ pub struct DigRuntimeMarkDelivered {
     pub source_key: String,
     pub delivered_at: i64,
     pub part: DigRuntimeDeliveryPart,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigRuntimeRebindDeliveryChannel {
+    pub action_id: i64,
+    pub source_key: String,
+    pub part: DigRuntimeDeliveryPart,
+    pub expected_channel_id: i64,
+    pub fallback_channel_id: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4175,6 +4244,13 @@ where
         request: DigRuntimeMarkDelivered,
     ) -> Result<bool, DigRuntimeStoreError> {
         self.store.mark_delivery_delivered(request)
+    }
+
+    pub fn rebind_pending_delivery_channel(
+        &self,
+        request: DigRuntimeRebindDeliveryChannel,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        self.store.rebind_pending_delivery_channel(request)
     }
 
     pub fn finalize_delivery(
@@ -6244,9 +6320,9 @@ mod tests {
     use super::{
         DigAdminMutationOutcome, DigRuntimeCommit, DigRuntimeConfig, DigRuntimeDeliveryContext,
         DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart, DigRuntimeMarkDelivered,
-        DigRuntimePendingDeliveryQuery, DigRuntimeRequest, DigRuntimeService, DigRuntimeSnapshot,
-        DigRuntimeStore, DigRuntimeStoreError, DigRuntimeVersion, InMemoryDigRuntimeStore,
-        SqliteDigRuntimeStore,
+        DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRequest,
+        DigRuntimeService, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
+        DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
     };
 
     const PET_DAY: i64 = DIG_WORK_UNITS_PER_BLOCK;
@@ -6563,6 +6639,80 @@ mod tests {
                 .expect("pending after main")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("canonical migration");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(7, "delivery-rebind", Some(9)))
+            .expect("seed player");
+        let service = DigRuntimeService::sqlite(database.path());
+        let delivery = service
+            .dig_with_delivery(
+                DigRuntimeRequest {
+                    discord_id: 7,
+                    guild_id: 9,
+                    now: 1_700_000_000,
+                    paid: false,
+                    forced_event: false,
+                },
+                DigRuntimeDeliveryContext::new(99, 101, "Delivery Rebind", None),
+            )
+            .expect("dig and outbox commit")
+            .delivery
+            .expect("delivery snapshot");
+        let rebound = service
+            .rebind_pending_delivery_channel(DigRuntimeRebindDeliveryChannel {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                part: DigRuntimeDeliveryPart::Main,
+                expected_channel_id: 101,
+                fallback_channel_id: 202,
+            })
+            .expect("pending delivery channel rebind");
+        assert_eq!(rebound.context.channel_id, 202);
+        let restarted = DigRuntimeService::sqlite(database.path());
+        let recovered = restarted
+            .pending_deliveries(DigRuntimePendingDeliveryQuery {
+                guild_id: Some(9),
+                discord_id: Some(7),
+                limit: 10,
+            })
+            .expect("restart pending delivery");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].context.channel_id, 202);
+        assert!(matches!(
+            restarted.rebind_pending_delivery_channel(DigRuntimeRebindDeliveryChannel {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                part: DigRuntimeDeliveryPart::Main,
+                expected_channel_id: 101,
+                fallback_channel_id: 303,
+            }),
+            Err(DigRuntimeStoreError::StateConflict)
+        ));
+        assert!(
+            restarted
+                .mark_delivery_delivered(DigRuntimeMarkDelivered {
+                    action_id: delivery.action_id,
+                    source_key: delivery.source_key.clone(),
+                    delivered_at: 1_700_000_001,
+                    part: DigRuntimeDeliveryPart::Main,
+                })
+                .expect("mark rebound delivery")
+        );
+        assert!(matches!(
+            restarted.rebind_pending_delivery_channel(DigRuntimeRebindDeliveryChannel {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key,
+                part: DigRuntimeDeliveryPart::Main,
+                expected_channel_id: 202,
+                fallback_channel_id: 303,
+            }),
+            Err(DigRuntimeStoreError::StateConflict)
+        ));
     }
 
     #[test]

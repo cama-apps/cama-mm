@@ -36,6 +36,7 @@ use tracing::{error, info, warn};
 use crate::admin_provider::{AdminCommandSyncResult, AdminDiscordControl, AdminDiscordHealth};
 use crate::dig_provider::{
     DigChannelSnapshot, DigDiscordPort, DigPublicHistory, DigPublicHistoryMessage,
+    DigPublicSendFailure, DigPublicSendFailureKind,
 };
 use crate::discord_transport::{
     DiscordDirectMessageError, DiscordDirectMessageErrorKind, DiscordEmoji,
@@ -384,11 +385,11 @@ impl DigDiscordPort for SerenityDiscordTransport {
         channel_id: i64,
         response: InteractionResponse,
         nonce: &str,
-    ) -> Result<InteractionMessageReceipt, String> {
-        let context = self.context()?;
+    ) -> Result<InteractionMessageReceipt, DigPublicSendFailure> {
+        let context = self.context().map_err(DigPublicSendFailure::ambiguous)?;
         let channel_id = u64::try_from(channel_id)
             .map(ChannelId::new)
-            .map_err(|_| "Dig channel id is negative".to_owned())?;
+            .map_err(|_| DigPublicSendFailure::rejected("Dig channel id is negative"))?;
         channel_id
             .send_message(
                 &context.http,
@@ -402,7 +403,7 @@ impl DigDiscordPort for SerenityDiscordTransport {
                 channel_id: message.channel_id.get(),
                 delivery: InteractionMessageDelivery::ChannelFallback,
             })
-            .map_err(|error| error.to_string())
+            .map_err(dig_public_send_failure)
     }
 
     async fn dig_public_history(
@@ -3947,6 +3948,29 @@ fn response_error(error: serenity::Error) -> InteractionResponseError {
     InteractionResponseError::with_status_code(error.to_string(), status_code)
 }
 
+fn dig_public_send_failure(error: serenity::Error) -> DigPublicSendFailure {
+    let status = match &error {
+        serenity::Error::Http(error) => error.status_code().map(|status| status.as_u16()),
+        _ => None,
+    };
+    let kind = dig_public_send_failure_kind(status);
+    DigPublicSendFailure {
+        kind,
+        message: error.to_string(),
+    }
+}
+
+const fn dig_public_send_failure_kind(status: Option<u16>) -> DigPublicSendFailureKind {
+    match status {
+        // A concrete client-error response proves Discord rejected the
+        // request. Request-timeout and rate-limit responses remain recovery
+        // only because their transport/retry timing is not a safe fallback
+        // boundary.
+        Some(400..=499) if !matches!(status, Some(408 | 429)) => DigPublicSendFailureKind::Rejected,
+        _ => DigPublicSendFailureKind::Ambiguous,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3967,6 +3991,34 @@ mod tests {
             GatewayIntents::privileged()
         );
         assert_eq!(actual.bits(), expected.bits());
+    }
+
+    #[test]
+    fn dig_public_send_fallback_requires_definitive_discord_rejection() {
+        assert_eq!(
+            dig_public_send_failure_kind(Some(403)),
+            DigPublicSendFailureKind::Rejected
+        );
+        assert_eq!(
+            dig_public_send_failure_kind(Some(404)),
+            DigPublicSendFailureKind::Rejected
+        );
+        assert_eq!(
+            dig_public_send_failure_kind(None),
+            DigPublicSendFailureKind::Ambiguous
+        );
+        assert_eq!(
+            dig_public_send_failure_kind(Some(408)),
+            DigPublicSendFailureKind::Ambiguous
+        );
+        assert_eq!(
+            dig_public_send_failure_kind(Some(429)),
+            DigPublicSendFailureKind::Ambiguous
+        );
+        assert_eq!(
+            dig_public_send_failure_kind(Some(500)),
+            DigPublicSendFailureKind::Ambiguous
+        );
     }
 
     #[test]

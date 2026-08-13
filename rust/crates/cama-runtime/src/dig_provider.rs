@@ -45,7 +45,8 @@ use cama_app::dig_runtime::{
     DigAdminMutationOutcome, DigRuntimeConfig, DigRuntimeDeliveryContext, DigRuntimeDeliveryPart,
     DigRuntimeDeliverySnapshot, DigRuntimeExecution, DigRuntimeFinalizeDelivery,
     DigRuntimeFlavorSnapshot, DigRuntimeFlexData, DigRuntimeMarkDelivered,
-    DigRuntimePendingDeliveryQuery, DigRuntimeRenderKind, DigWeatherEffects,
+    DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind,
+    DigWeatherEffects,
 };
 use cama_app::dig_service::{PICKAXE_TIERS, layer_at};
 use cama_app::dig_social_runtime::DigSocialRuntimeService;
@@ -106,6 +107,54 @@ const FLEX_COLOR: u32 = 0xFF_D7_00;
 const ERROR_COLOR: u32 = 0xED_42_45;
 type DigRateKey = (i64, i64, &'static str);
 type DigRateHits = VecDeque<Instant>;
+
+/// Failure classification for the configured-channel outbox.
+///
+/// A rejected send with a clean, empty history is safe to fall back to the
+/// interaction response.  Any history/CAS failure after an attempted send is
+/// ambiguous: Discord may already have accepted the message, so publishing a
+/// second response would violate the durable per-part nonce contract.
+#[derive(Debug)]
+enum DigDeliveryFailure {
+    SafeFallback {
+        part: DigRuntimeDeliveryPart,
+        error: String,
+    },
+    Ambiguous(String),
+}
+
+/// Whether a nonce-addressed Discord send was definitely rejected or may
+/// have been accepted before the transport failed. Only a definite rejection
+/// is safe to redirect to the interaction channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DigPublicSendFailureKind {
+    Rejected,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigPublicSendFailure {
+    pub kind: DigPublicSendFailureKind,
+    pub message: String,
+}
+
+impl DigPublicSendFailure {
+    #[must_use]
+    pub fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            kind: DigPublicSendFailureKind::Rejected,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn ambiguous(message: impl Into<String>) -> Self {
+        Self {
+            kind: DigPublicSendFailureKind::Ambiguous,
+            message: message.into(),
+        }
+    }
+}
 
 /// A narrow Discord seam for `/dig`'s channel and media policy.
 ///
@@ -175,7 +224,7 @@ pub trait DigDiscordPort: Send + Sync {
         channel_id: i64,
         response: InteractionResponse,
         nonce: &str,
-    ) -> Result<InteractionMessageReceipt, String>;
+    ) -> Result<InteractionMessageReceipt, DigPublicSendFailure>;
 
     /// Read at most `limit` recent messages at or after the supplied time.
     /// Implementations must retain the Discord nonce and author identity.
@@ -2841,38 +2890,50 @@ impl DigInteractionHandler {
             .await?
         };
         let target = self.public_channel(guild_id, channel_id).await?;
-        if let Some(target) = target.filter(|target| Some(*target) != channel_id) {
-            // The Python command attempts the configured public channel but
-            // falls back to the interaction follow-up if Discord rejects the
-            // send (missing permission, deleted channel, or a transient HTTP
-            // failure).  Keep that recovery path here rather than turning a
-            // successful dig into an interaction error.
-            if self
-                .state
-                .discord
-                .dig_send_public(target, response.clone())
-                .await
-                .is_ok()
-            {
-                if let Some(delivery) = delivery.as_ref() {
-                    self.mark_delivery_part(delivery, DigRuntimeDeliveryPart::Main, unix_now())
-                        .await?;
-                }
-                if let Some(event_response) = event_response {
-                    self.state
-                        .discord
-                        .dig_send_public(target, event_response)
-                        .await?;
-                    if let Some(delivery) = delivery.as_ref() {
-                        self.mark_delivery_part(
-                            delivery,
-                            DigRuntimeDeliveryPart::Event,
-                            unix_now(),
-                        )
-                        .await?;
+        if target.is_some_and(|target| Some(target) != channel_id) {
+            // Configured-channel delivery is durable and nonce-addressed just
+            // like READY recovery.  The delivery context was created with
+            // this target above, so its per-part nonce/history lookup is bound
+            // to the configured channel rather than the interaction channel.
+            if let Some(delivery) = delivery.as_ref() {
+                match self.deliver_to_channel_with_failure(delivery).await {
+                    Ok(()) => return Ok(()),
+                    Err(DigDeliveryFailure::SafeFallback { part, error }) => {
+                        // Preserve Python's channel fallback, but keep it in
+                        // the same durable nonce/history path.  Rebind the
+                        // immutable snapshot to the interaction channel so a
+                        // crash after this fallback send cannot cause READY
+                        // recovery to repost to the configured channel.
+                        let Some(interaction_channel) = channel_id else {
+                            return Err(error);
+                        };
+                        let fallback = self
+                            .rebind_delivery_channel(
+                                delivery,
+                                part,
+                                delivery.context.channel_id,
+                                interaction_channel,
+                            )
+                            .await
+                            .map_err(|rebind_error| {
+                                format!(
+                                    "{error}; fallback delivery channel could not be persisted: {rebind_error}"
+                                )
+                            })?;
+                        self.deliver_to_channel_with_failure(&fallback)
+                            .await
+                            .map_err(|failure| match failure {
+                                DigDeliveryFailure::SafeFallback { error, .. }
+                                | DigDeliveryFailure::Ambiguous(error) => error,
+                            })?;
+                        return Ok(());
+                    }
+                    Err(DigDeliveryFailure::Ambiguous(error)) => {
+                        // Never publish an interaction duplicate when the
+                        // configured send may already have been accepted.
+                        return Err(error);
                     }
                 }
-                return Ok(());
             }
         }
         responder
@@ -3535,6 +3596,30 @@ impl DigInteractionHandler {
         .await
     }
 
+    async fn rebind_delivery_channel(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+        part: DigRuntimeDeliveryPart,
+        expected_channel_id: i64,
+        fallback_channel_id: i64,
+    ) -> Result<DigRuntimeDeliverySnapshot, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        let request = DigRuntimeRebindDeliveryChannel {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            part,
+            expected_channel_id,
+            fallback_channel_id,
+        };
+        blocking(move || {
+            cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(&path, config)
+                .rebind_pending_delivery_channel(request)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     async fn finalize_delivery_snapshot(
         &self,
         request: DigRuntimeFinalizeDelivery,
@@ -3634,20 +3719,22 @@ impl DigInteractionHandler {
         Ok(found)
     }
 
-    async fn deliver_part_once(
+    async fn deliver_part_once_with_failure(
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
         part: DigRuntimeDeliveryPart,
         response: InteractionResponse,
-    ) -> Result<(), String> {
+    ) -> Result<(), DigDeliveryFailure> {
         // A process can die after Discord accepts the message but before the
         // SQLite CAS below. Always reconcile first; if history is unavailable,
         // fail closed rather than publish a possible duplicate.
-        if self
+        match self
             .reconcile_delivery_part(delivery, part, &response)
-            .await?
+            .await
         {
-            return Ok(());
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(DigDeliveryFailure::Ambiguous(error)),
         }
         let nonce = dig_delivery_nonce(delivery, part);
         match self
@@ -3656,43 +3743,68 @@ impl DigInteractionHandler {
             .dig_send_public_once(delivery.context.channel_id, response.clone(), &nonce)
             .await
         {
-            Ok(_receipt) => {
-                self.mark_delivery_part(delivery, part, unix_now()).await?;
-                Ok(())
-            }
+            Ok(_receipt) => self
+                .mark_delivery_part(delivery, part, unix_now())
+                .await
+                .map(|_| ())
+                .map_err(DigDeliveryFailure::Ambiguous),
             Err(send_error) => {
                 // HTTP cancellation and timeouts can be ambiguous. Re-read a
                 // bounded history before deciding the send failed.
-                if self
+                match self
                     .reconcile_delivery_part(delivery, part, &response)
-                    .await?
+                    .await
                 {
-                    Ok(())
-                } else {
-                    Err(send_error)
+                    Ok(true) => Ok(()),
+                    Ok(false) if send_error.kind == DigPublicSendFailureKind::Rejected => {
+                        Err(DigDeliveryFailure::SafeFallback {
+                            part,
+                            error: send_error.message,
+                        })
+                    }
+                    Ok(false) => Err(DigDeliveryFailure::Ambiguous(send_error.message)),
+                    Err(history_error) => Err(DigDeliveryFailure::Ambiguous(format!(
+                        "{}; delivery history reconciliation failed: {history_error}",
+                        send_error.message
+                    ))),
                 }
             }
         }
+    }
+
+    async fn deliver_to_channel_with_failure(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+    ) -> Result<(), DigDeliveryFailure> {
+        let delivery = self
+            .prepare_delivery(delivery)
+            .await
+            .map_err(DigDeliveryFailure::Ambiguous)?;
+        let (main, event) =
+            dig_delivery_responses(&delivery, &self.state.media, &self.state.view_nonce);
+        if delivery.main_delivered_at.is_none() {
+            self.deliver_part_once_with_failure(&delivery, DigRuntimeDeliveryPart::Main, main)
+                .await?;
+        }
+        if delivery.event_delivered_at.is_none()
+            && let Some(event) = event
+        {
+            self.deliver_part_once_with_failure(&delivery, DigRuntimeDeliveryPart::Event, event)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn deliver_to_channel(
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> Result<(), String> {
-        let delivery = self.prepare_delivery(delivery).await?;
-        let (main, event) =
-            dig_delivery_responses(&delivery, &self.state.media, &self.state.view_nonce);
-        if delivery.main_delivered_at.is_none() {
-            self.deliver_part_once(&delivery, DigRuntimeDeliveryPart::Main, main)
-                .await?;
-        }
-        if delivery.event_delivered_at.is_none()
-            && let Some(event) = event
-        {
-            self.deliver_part_once(&delivery, DigRuntimeDeliveryPart::Event, event)
-                .await?;
-        }
-        Ok(())
+        self.deliver_to_channel_with_failure(delivery)
+            .await
+            .map_err(|failure| match failure {
+                DigDeliveryFailure::SafeFallback { error, .. }
+                | DigDeliveryFailure::Ambiguous(error) => error,
+            })
     }
 
     async fn command_help(
@@ -7866,7 +7978,7 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -7882,9 +7994,11 @@ mod tests {
     use super::dig_options;
     use super::{
         DigAbandonViewAdmission, DigChannelSnapshot, DigDiscordPort, DigPrestigeViewAdmission,
-        DigPublicHistory, DigPublicHistoryMessage, DigRegistrationProvider, JOPACOIN_EMOTE,
+        DigPublicHistory, DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
+        JOPACOIN_EMOTE,
     };
     use crate::application_config::ApplicationConfig;
+    use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
     use crate::registration::{
         CommandOptionChoice, CommandOptionKind, CommandOptionSpec, InteractionHandler,
         InteractionMessageReceipt, InteractionModal, InteractionOption, InteractionRequest,
@@ -8396,6 +8510,12 @@ mod tests {
     struct TestDiscord {
         public: StdMutex<Vec<InteractionResponse>>,
         public_history: StdMutex<Vec<DigPublicHistoryMessage>>,
+        message_channels: StdMutex<BTreeMap<u64, i64>>,
+        available_channels: StdMutex<BTreeSet<i64>>,
+        accept_then_fail_nonce_send: StdMutex<bool>,
+        reject_next_configured_nonce_send: StdMutex<bool>,
+        fail_next_history: StdMutex<bool>,
+        reject_un_nonnced_public_send: StdMutex<bool>,
         gamba: bool,
         avatar_url: Option<String>,
     }
@@ -8405,19 +8525,66 @@ mod tests {
             Self {
                 public: StdMutex::new(Vec::new()),
                 public_history: StdMutex::new(Vec::new()),
+                message_channels: StdMutex::new(BTreeMap::new()),
+                available_channels: StdMutex::new(BTreeSet::new()),
+                accept_then_fail_nonce_send: StdMutex::new(false),
+                reject_next_configured_nonce_send: StdMutex::new(false),
+                fail_next_history: StdMutex::new(false),
+                reject_un_nonnced_public_send: StdMutex::new(false),
                 gamba: true,
                 avatar_url: None,
             }
         }
     }
 
+    impl TestDiscord {
+        fn with_channels(channels: impl IntoIterator<Item = i64>) -> Self {
+            let discord = Self::default();
+            discord
+                .available_channels
+                .lock()
+                .expect("available channels")
+                .extend(channels);
+            discord
+        }
+
+        fn arm_accept_then_fail_nonce_send(&self) {
+            *self
+                .accept_then_fail_nonce_send
+                .lock()
+                .expect("nonce send fault") = true;
+        }
+
+        fn reject_next_configured_nonce_send(&self) {
+            *self
+                .reject_next_configured_nonce_send
+                .lock()
+                .expect("configured nonce send fault") = true;
+        }
+
+        fn reject_un_nonnced_public_send(&self) {
+            *self
+                .reject_un_nonnced_public_send
+                .lock()
+                .expect("un-nonced send fault") = true;
+        }
+    }
+
     #[async_trait]
     impl DigDiscordPort for TestDiscord {
-        async fn dig_channel(
-            &self,
-            _channel_id: i64,
-        ) -> Result<Option<DigChannelSnapshot>, String> {
-            Ok(None)
+        async fn dig_channel(&self, channel_id: i64) -> Result<Option<DigChannelSnapshot>, String> {
+            Ok(self
+                .available_channels
+                .lock()
+                .expect("available channels")
+                .contains(&channel_id)
+                .then_some(DigChannelSnapshot {
+                    id: channel_id,
+                    guild_id: Some(GUILD as i64),
+                    parent_id: (channel_id == CHANNEL as i64).then_some(CHANNEL as i64 + 1),
+                    can_send: true,
+                    is_text: true,
+                }))
         }
 
         async fn dig_channel_is_gamba(
@@ -8441,6 +8608,13 @@ mod tests {
             _channel_id: i64,
             response: InteractionResponse,
         ) -> Result<(), String> {
+            if *self
+                .reject_un_nonnced_public_send
+                .lock()
+                .expect("un-nonced send fault")
+            {
+                return Err("test forbids un-nonced public sends".to_owned());
+            }
             self.public.lock().expect("public responses").push(response);
             Ok(())
         }
@@ -8450,27 +8624,58 @@ mod tests {
             channel_id: i64,
             response: InteractionResponse,
             nonce: &str,
-        ) -> Result<InteractionMessageReceipt, String> {
+        ) -> Result<InteractionMessageReceipt, DigPublicSendFailure> {
             const BOT_USER_ID: u64 = 8_008;
+            let reject_configured = channel_id == CHANNEL as i64 + 1
+                && std::mem::replace(
+                    &mut *self
+                        .reject_next_configured_nonce_send
+                        .lock()
+                        .expect("configured nonce send fault"),
+                    false,
+                );
+            if reject_configured {
+                return Err(DigPublicSendFailure::rejected(
+                    "test configured channel rejected the send",
+                ));
+            }
             if let Some(existing) = self
                 .public_history
                 .lock()
                 .expect("public history")
                 .iter()
-                .find(|message| message.nonce.as_deref() == Some(nonce))
+                .find(|message| {
+                    message.nonce.as_deref() == Some(nonce)
+                        && self
+                            .message_channels
+                            .lock()
+                            .expect("message channels")
+                            .get(&message.message_id)
+                            .copied()
+                            .is_none_or(|message_channel| message_channel == channel_id)
+                })
                 .cloned()
             {
                 return Ok(InteractionMessageReceipt {
                     message_id: existing.message_id,
                     channel_id: u64::try_from(channel_id)
-                        .map_err(|_| "negative test channel".to_owned())?,
+                        .map_err(|_| DigPublicSendFailure::rejected("negative test channel"))?,
                     delivery: crate::registration::InteractionMessageDelivery::ChannelFallback,
                 });
             }
+            let accept_then_fail = {
+                let mut armed = self
+                    .accept_then_fail_nonce_send
+                    .lock()
+                    .expect("nonce send fault");
+                let armed_now = *armed;
+                *armed = false;
+                armed_now
+            };
             self.public.lock().expect("public responses").push(response);
             let mut history = self.public_history.lock().expect("public history");
-            let message_id =
-                u64::try_from(history.len() + 1).map_err(|_| "test history overflow".to_owned())?;
+            let message_id = u64::try_from(history.len() + 1)
+                .map_err(|_| DigPublicSendFailure::ambiguous("test history overflow"))?;
             history.push(DigPublicHistoryMessage {
                 message_id,
                 author_id: BOT_USER_ID,
@@ -8480,20 +8685,39 @@ mod tests {
                 embed_titles: Vec::new(),
                 embed_descriptions: Vec::new(),
             });
+            self.message_channels
+                .lock()
+                .expect("message channels")
+                .insert(message_id, channel_id);
+            if accept_then_fail {
+                *self.fail_next_history.lock().expect("history fault") = true;
+                return Err(DigPublicSendFailure::ambiguous(
+                    "test connection lost after Discord accepted the message",
+                ));
+            }
             Ok(InteractionMessageReceipt {
                 message_id,
                 channel_id: u64::try_from(channel_id)
-                    .map_err(|_| "negative test channel".to_owned())?,
+                    .map_err(|_| DigPublicSendFailure::rejected("negative test channel"))?,
                 delivery: crate::registration::InteractionMessageDelivery::ChannelFallback,
             })
         }
 
         async fn dig_public_history(
             &self,
-            _channel_id: i64,
+            channel_id: i64,
             _after_unix_seconds: i64,
             limit: usize,
         ) -> Result<DigPublicHistory, String> {
+            let fail = {
+                let mut fail_next = self.fail_next_history.lock().expect("history fault");
+                let fail = *fail_next;
+                *fail_next = false;
+                fail
+            };
+            if fail {
+                return Err("test connection lost before receipt history".to_owned());
+            }
             Ok(DigPublicHistory {
                 bot_user_id: 8_008,
                 messages: self
@@ -8501,6 +8725,14 @@ mod tests {
                     .lock()
                     .expect("public history")
                     .iter()
+                    .filter(|message| {
+                        self.message_channels
+                            .lock()
+                            .expect("message channels")
+                            .get(&message.message_id)
+                            .copied()
+                            .is_none_or(|message_channel| message_channel == channel_id)
+                    })
                     .rev()
                     .take(limit)
                     .cloned()
@@ -8658,6 +8890,13 @@ mod tests {
     fn fixture_with_discord(
         discord: Arc<TestDiscord>,
     ) -> (NamedTempFile, DigRegistrationProvider, Arc<TestDiscord>) {
+        fixture_with_discord_and_config(discord, config())
+    }
+
+    fn fixture_with_discord_and_config(
+        discord: Arc<TestDiscord>,
+        config: ApplicationConfig,
+    ) -> (NamedTempFile, DigRegistrationProvider, Arc<TestDiscord>) {
         let database = NamedTempFile::new().expect("temporary database");
         initialize_or_migrate(database.path()).expect("canonical schema");
         PlayerRepository::new(database.path())
@@ -8684,7 +8923,7 @@ mod tests {
         ));
         let provider = DigRegistrationProvider::with_media(
             database.path(),
-            &config(),
+            &config,
             discord.clone(),
             None,
             media,
@@ -8912,6 +9151,153 @@ mod tests {
                 .expect("reload reconciled delivery")
                 .is_empty(),
             "the recovered receipt completes the durable delivery CAS"
+        );
+    }
+
+    struct EmptyGatewayMembers;
+
+    #[async_trait]
+    impl GuildMemberPageSource for EmptyGatewayMembers {
+        async fn fetch_page(
+            &self,
+            _guild_id: u64,
+            _after: Option<u64>,
+            _limit: u64,
+        ) -> Result<Vec<GatewayMember>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_public_send_crash_reconciles_without_duplicate() {
+        const CONFIGURED_CHANNEL: i64 = CHANNEL as i64 + 1;
+        let discord = Arc::new(TestDiscord::with_channels([
+            CHANNEL as i64,
+            CONFIGURED_CHANNEL,
+        ]));
+        discord.arm_accept_then_fail_nonce_send();
+        discord.reject_un_nonnced_public_send();
+        let configured = ApplicationConfig::from_lookup(|name| match name {
+            "DISCORD_BOT_TOKEN" => Some("dig-provider-test-token".to_owned()),
+            "NEON_DEGEN_ENABLED" => Some("false".to_owned()),
+            "DIG_CHANNEL_ID" => Some(CONFIGURED_CHANNEL.to_string()),
+            _ => None,
+        })
+        .expect("configured Dig provider test config");
+        let (database, provider, discord) =
+            fixture_with_discord_and_config(discord, configured.clone());
+        let responder = Arc::new(TestResponder::default());
+
+        // The configured-channel send accepts the nonce-addressed message,
+        // then the process loses its connection before the durable CAS.  The
+        // provider must not fall back to an un-nonced public send in this
+        // ambiguous state.
+        let initial = provider.handler.handle(go_request(), responder).await;
+        assert!(initial.is_err());
+        assert_eq!(
+            discord.public.lock().expect("public responses").len(),
+            1,
+            "Discord accepted exactly one configured-channel message"
+        );
+        assert_eq!(
+            discord.public_history.lock().expect("public history").len(),
+            1
+        );
+
+        let restarted = DigRegistrationProvider::with_media(
+            database.path(),
+            &configured,
+            discord.clone(),
+            None,
+            provider.handler.state.media.clone(),
+        );
+        let report = restarted
+            .gateway_observer()
+            .ready_recovery(ReadyRecoveryContext::new(
+                vec![GUILD],
+                Arc::new(EmptyGatewayMembers),
+            ))
+            .await;
+        assert!(report.failures.is_empty(), "recovery report: {report:?}");
+        assert_eq!(report.members_refreshed, 1);
+        assert_eq!(
+            discord.public.lock().expect("single public response").len(),
+            1,
+            "READY reconciliation must not issue a duplicate configured send"
+        );
+        assert!(
+            restarted
+                .handler
+                .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("pending recovery query")
+                .is_empty(),
+            "receipt recovery completes the durable delivery CAS"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_crash_reconciles_without_duplicate_after_rebind() {
+        const CONFIGURED_CHANNEL: i64 = CHANNEL as i64 + 1;
+        let discord = Arc::new(TestDiscord::with_channels([
+            CHANNEL as i64,
+            CONFIGURED_CHANNEL,
+        ]));
+        discord.reject_next_configured_nonce_send();
+        discord.arm_accept_then_fail_nonce_send();
+        discord.reject_un_nonnced_public_send();
+        let configured = ApplicationConfig::from_lookup(|name| match name {
+            "DISCORD_BOT_TOKEN" => Some("dig-provider-test-token".to_owned()),
+            "NEON_DEGEN_ENABLED" => Some("false".to_owned()),
+            "DIG_CHANNEL_ID" => Some(CONFIGURED_CHANNEL.to_string()),
+            _ => None,
+        })
+        .expect("configured Dig provider test config");
+        let (database, provider, discord) =
+            fixture_with_discord_and_config(discord, configured.clone());
+        let responder = Arc::new(TestResponder::default());
+
+        // Configured-channel rejection falls back to the interaction channel;
+        // the fallback is accepted, then the process loses the CAS window.
+        assert!(
+            provider
+                .handler
+                .handle(go_request(), responder)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            discord
+                .public
+                .lock()
+                .expect("fallback public response")
+                .len(),
+            1
+        );
+
+        let restarted = DigRegistrationProvider::with_media(
+            database.path(),
+            &configured,
+            discord.clone(),
+            None,
+            provider.handler.state.media.clone(),
+        );
+        let report = restarted
+            .gateway_observer()
+            .ready_recovery(ReadyRecoveryContext::new(
+                vec![GUILD],
+                Arc::new(EmptyGatewayMembers),
+            ))
+            .await;
+        assert!(report.failures.is_empty(), "recovery report: {report:?}");
+        assert_eq!(
+            discord.public.lock().expect("public responses").len(),
+            1,
+            "persisted fallback-channel rebind must prevent configured-channel repost"
         );
     }
 
@@ -12109,10 +12495,9 @@ mod tests {
         // The transport adapter's false result must debit exactly one JC
         // through the app service before it rejects the command.
         let gated_discord = Arc::new(TestDiscord {
-            public: StdMutex::new(Vec::new()),
-            public_history: StdMutex::new(Vec::new()),
             gamba: false,
             avatar_url: None,
+            ..TestDiscord::default()
         });
         let gated_provider =
             DigRegistrationProvider::new(database.path(), &config(), gated_discord, None);
