@@ -32,7 +32,6 @@ use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository};
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::ManashopRepository;
-use cama_db::pet_repository::PetRepository;
 use cama_domain::dig_cave_in::{
     CAVE_IN_BLOCK_LOSS_RANGES, CAVE_IN_CATASTROPHIC_GEAR_TICKS, CAVE_IN_CATASTROPHIC_MEDICAL_BILL,
     CAVE_IN_CATASTROPHIC_MILESTONE_STEP, CAVE_IN_CATASTROPHIC_STUN_DIGS_RANGE,
@@ -46,9 +45,7 @@ use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
-use cama_domain::pet::{
-    DIG_WORK_CAP_BLOCKS, DIG_WORK_UNITS_PER_BLOCK, PetDigWork, PetDigWorkClaim,
-};
+use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
 use chrono::NaiveDate;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -84,6 +81,8 @@ use crate::dig_tunnels::{
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
 use crate::mana_effects_service::color_for_land;
+use crate::pet::{SeededPetRandom, SystemPetClock};
+use crate::pet_sqlite::SqlitePetCommandService;
 
 /// Production image root used by the Rust deployment. The Docker image must
 /// copy the authored `assets/dig` tree here; procedural rendering is only the
@@ -1567,32 +1566,22 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         if decay_per_day <= 0 {
             return Ok(None);
         }
-        let Some(pet) = PetRepository::new(&self.path)
-            .get_active_pet(discord_id, Some(guild_id))
-            .map_err(|error| DigRuntimeStoreError::Pet(error.to_string()))?
-        else {
-            return Ok(None);
-        };
-        let settled_at = if let Some(died_at) = pet.died_at {
-            now.min(died_at)
-        } else {
-            pet.starvation_time(decay_per_day)
-                .map_err(|error| DigRuntimeStoreError::Pet(error.to_string()))?
-                .min(now)
-        }
-        .max(pet.dig_work_at);
-        let accrued = pet
-            .dig_work_units_between(pet.dig_work_at, settled_at, decay_per_day)
-            .map_err(|error| DigRuntimeStoreError::Pet(error.to_string()))?;
-        let cap = DIG_WORK_CAP_BLOCKS.saturating_mul(DIG_WORK_UNITS_PER_BLOCK);
-        Ok(Some(PetDigWork {
-            pet_id: pet.pet_id,
-            pet_name: pet.name,
-            expected_units: pet.dig_work_units,
-            expected_at: pet.dig_work_at,
-            accrued_units: pet.dig_work_units.saturating_add(accrued).min(cap),
-            as_of: settled_at,
-        }))
+        let entropy_seed = seed_for(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now,
+            paid: false,
+            forced_event: false,
+        });
+        SqlitePetCommandService::new(
+            &self.path,
+            SeededPetRandom::new(entropy_seed),
+            SystemPetClock,
+            decay_per_day,
+        )
+        .service_mut()
+        .preview_dig_work(discord_id, Some(guild_id), now)
+        .map_err(|error| DigRuntimeStoreError::Pet(error.to_string()))
     }
 
     fn commit_with_delivery(

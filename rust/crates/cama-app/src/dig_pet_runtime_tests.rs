@@ -166,6 +166,25 @@ impl Fixture {
     }
 
     fn seed_pet(&self, hatched_at: i64, work_units: i64, work_at: i64) -> i64 {
+        self.seed_pet_species(
+            "common_cama",
+            hatched_at,
+            hatched_at,
+            100,
+            work_units,
+            work_at,
+        )
+    }
+
+    fn seed_pet_species(
+        &self,
+        species: &str,
+        hatched_at: i64,
+        last_fed_at: i64,
+        hunger: i64,
+        work_units: i64,
+        work_at: i64,
+    ) -> i64 {
         let connection = self.connection();
         connection
             .execute(
@@ -173,8 +192,17 @@ impl Fixture {
                      discord_id,guild_id,name,species,adopted_at,hatched_at,
                      adopt_fee,last_fed_at,hunger_at_last_fed,
                      dig_work_units,dig_work_at
-                 ) VALUES (?1,?2,'Blep','common_cama',?3,?3,0,?3,100,?4,?5)",
-                params![USER_ID, GUILD_ID, hatched_at, work_units, work_at],
+                 ) VALUES (?1,?2,'Blep',?3,?4,?4,0,?5,?6,?7,?8)",
+                params![
+                    USER_ID,
+                    GUILD_ID,
+                    species,
+                    hatched_at,
+                    last_fed_at,
+                    hunger,
+                    work_units,
+                    work_at,
+                ],
             )
             .expect("seed pet");
         connection.last_insert_rowid()
@@ -260,6 +288,237 @@ fn first_dig_spends_at_most_twelve_pet_blocks() {
     assert_eq!(result.pet_dig_bonus, 12);
     assert_eq!(result.pet_name.as_deref(), Some("Blep"));
     assert_eq!(fixture.pet_work(pet_id), (10 * DAY + DAY / 5, now));
+}
+
+#[test]
+fn sqlite_preview_resolves_ready_egg_before_offering_work() {
+    let fixture = Fixture::new();
+    let pet_id = fixture.seed_pet_species("unhatched", T0 - 1, T0 - 1, 100, 0, T0 - 1);
+
+    let offer = fixture
+        .store
+        .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+        .expect("ready egg preview")
+        .expect("hatched pet work offer");
+    let species = fixture
+        .connection()
+        .query_row(
+            "SELECT species FROM pets WHERE pet_id=?1",
+            [pet_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("hatched species");
+
+    assert_ne!(species, "unhatched");
+    assert_eq!(offer.pet_id, pet_id);
+}
+
+#[test]
+fn sqlite_preview_rejects_pre_hatch_egg_without_resolving_species() {
+    let fixture = Fixture::new();
+    let pet_id = fixture.seed_pet_species("unhatched", T0 + 1, T0, 100, 7 * DAY, T0);
+
+    assert!(
+        fixture
+            .store
+            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+            .expect("pre-hatch preview")
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT species FROM pets WHERE pet_id=?1",
+                [pet_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("pre-hatch species"),
+        "unhatched",
+    );
+}
+
+#[test]
+fn sqlite_preview_claims_starvation_at_the_historical_moment() {
+    let fixture = Fixture::new();
+    let hunger_anchor = T0 - 6 * DAY;
+    let starvation_at = hunger_anchor + 5 * DAY;
+    let pet_id = fixture.seed_pet_species(
+        "common_cama",
+        hunger_anchor,
+        hunger_anchor,
+        100,
+        0,
+        hunger_anchor,
+    );
+
+    assert!(
+        fixture
+            .store
+            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+            .expect("starved pet preview")
+            .is_none()
+    );
+    let state = fixture
+        .connection()
+        .query_row(
+            "SELECT died_at,death_cause,dig_work_units,dig_work_at
+             FROM pets WHERE pet_id=?1",
+            [pet_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("starvation state");
+    assert_eq!(state.0, Some(starvation_at));
+    assert_eq!(state.1.as_deref(), Some("starvation"));
+    assert_eq!(state.2, 34 * DAY + 7 * DAY / 20);
+    assert_eq!(state.3, starvation_at);
+}
+
+#[test]
+fn sqlite_preview_revives_aegis_before_returning_work() {
+    let fixture = Fixture::new();
+    let hunger_anchor = T0 - 6 * DAY;
+    let starvation_at = hunger_anchor + 5 * DAY;
+    let pet_id = fixture.seed_pet_species(
+        "aegis_cama",
+        hunger_anchor,
+        hunger_anchor,
+        100,
+        0,
+        hunger_anchor,
+    );
+
+    let offer = fixture
+        .store
+        .preview_pet_dig_work(USER_ID, GUILD_ID, starvation_at + 3_600, 20)
+        .expect("Aegis preview")
+        .expect("revived Aegis work");
+    let state = fixture
+        .connection()
+        .query_row(
+            "SELECT aegis_used,last_fed_at,hunger_at_last_fed,dig_work_at
+             FROM pets WHERE pet_id=?1",
+            [pet_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("Aegis state");
+    assert_eq!(state, (1, starvation_at, 10, starvation_at));
+    assert_eq!(offer.expected_at, starvation_at);
+}
+
+#[test]
+fn sqlite_preview_consumes_aegis_once_then_claims_second_starvation() {
+    let fixture = Fixture::new();
+    let hunger_anchor = T0 - 6 * DAY;
+    let first_starvation = hunger_anchor + 5 * DAY;
+    let pet_id = fixture.seed_pet_species(
+        "aegis_cama",
+        hunger_anchor,
+        hunger_anchor,
+        100,
+        0,
+        hunger_anchor,
+    );
+
+    assert!(
+        fixture
+            .store
+            .preview_pet_dig_work(USER_ID, GUILD_ID, first_starvation + 3_600, 20)
+            .expect("first Aegis preview")
+            .is_some()
+    );
+    let second_starvation = first_starvation + DAY / 2;
+    assert!(
+        fixture
+            .store
+            .preview_pet_dig_work(USER_ID, GUILD_ID, second_starvation + 3_600, 20)
+            .expect("second Aegis preview")
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT aegis_used,died_at,death_cause,dig_work_at
+                 FROM pets WHERE pet_id=?1",
+                [pet_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("second starvation state"),
+        (
+            1,
+            Some(second_starvation),
+            Some("starvation".to_owned()),
+            second_starvation,
+        ),
+    );
+}
+
+#[test]
+fn live_normal_dig_claims_stale_pet_death_without_using_its_work() {
+    let fixture = Fixture::new();
+    let now = normal_dig_time(false, Some(1), false);
+    fixture.seed_tunnel(10, 0);
+    let hunger_anchor = now - 6 * DAY;
+    let starvation_at = hunger_anchor + 5 * DAY;
+    let pet_id = fixture.seed_pet_species(
+        "common_cama",
+        hunger_anchor,
+        hunger_anchor,
+        100,
+        0,
+        hunger_anchor,
+    );
+
+    let result = fixture
+        .service()
+        .dig(dig(now, false))
+        .expect("live Dig with stale pet");
+    assert!(result.success && !result.cave_in);
+    assert_eq!(result.pet_dig_bonus, 0);
+    assert_eq!(result.pet_name, None);
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT died_at,death_cause,dig_work_at FROM pets WHERE pet_id=?1",
+                [pet_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("live stale-pet state"),
+        (
+            Some(starvation_at),
+            Some("starvation".to_owned()),
+            starvation_at,
+        ),
+    );
 }
 
 #[test]
