@@ -1089,7 +1089,7 @@ fn player_balance(
         })
 }
 
-fn validate_hostile_request(
+pub(crate) fn validate_hostile_request(
     request: &HostileLossRequest,
 ) -> Result<(), ShopRuntimeRepositoryError> {
     if request.requested <= 0 {
@@ -1107,7 +1107,7 @@ fn validate_hostile_request(
     Ok(())
 }
 
-fn apply_hostile_loss_in(
+pub(crate) fn apply_hostile_loss_in(
     connection: &Connection,
     request: &HostileLossRequest,
 ) -> Result<HostileLossSettlement, ShopRuntimeRepositoryError> {

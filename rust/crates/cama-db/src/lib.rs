@@ -24,6 +24,7 @@ pub mod blame_luke;
 pub mod core_repositories;
 pub mod dig_abandon_runtime;
 pub mod dig_action_history;
+pub mod dig_blood_pact;
 #[path = "dig_bonus_events.rs"]
 pub mod dig_bonus_events_repository;
 pub mod dig_boss_runtime;

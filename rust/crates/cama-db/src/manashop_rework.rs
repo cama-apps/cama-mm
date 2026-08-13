@@ -893,13 +893,40 @@ impl ManashopRepository {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let row = transaction
+        let claim = Self::claim_blood_pact_skim_in(
+            &transaction,
+            target_id,
+            Self::normalize_guild_id(guild_id),
+            earning,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(claim)
+    }
+
+    /// Reserve one Blood Pact claim inside a caller-owned transaction.
+    ///
+    /// The ordinary public method above remains a standalone atomic claim.
+    /// Dig's post-commit settlement uses this lower-level seam so the claim,
+    /// hostile-loss audit, protection consumption, and balance transfer share
+    /// one `BEGIN IMMEDIATE` boundary.
+    pub(crate) fn claim_blood_pact_skim_in(
+        connection: &Connection,
+        target_id: i64,
+        guild_id: i64,
+        earning: i64,
+        now: i64,
+    ) -> Result<Option<BloodPactClaim>, rusqlite::Error> {
+        if earning <= 0 {
+            return Ok(None);
+        }
+        let row = connection
             .query_row(
                 "SELECT id, discord_id, data FROM manashop_buffs
                  WHERE target_id = ?1 AND guild_id = ?2 AND buff_type = 'blood_pact'
                    AND triggered = 0 AND expires_at > ?3
                  ORDER BY granted_at DESC, id DESC LIMIT 1",
-                params![target_id, Self::normalize_guild_id(guild_id), now],
+                params![target_id, guild_id, now],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -910,30 +937,26 @@ impl ManashopRepository {
             )
             .optional()?;
         let Some((buff_id, skimmer_id, raw_data)) = row else {
-            transaction.commit()?;
             return Ok(None);
         };
         let mut data = buff_data_from_json(raw_data.as_deref().unwrap_or("{}"));
         let cap = data.cap.unwrap_or(0);
         let current = data.skimmed_total.unwrap_or(0);
-        let remaining = cap - current;
+        let remaining = cap.saturating_sub(current);
         if remaining <= 0 {
-            transaction.commit()?;
             return Ok(None);
         }
         let rate = data.skim_rate.unwrap_or(0.0);
         let amount = remaining.min(((earning as f64 * rate) as i64).max(1));
         if amount <= 0 {
-            transaction.commit()?;
             return Ok(None);
         }
-        let new_total = current + amount;
+        let new_total = current.saturating_add(amount);
         data.skimmed_total = Some(new_total);
-        transaction.execute(
+        connection.execute(
             "UPDATE manashop_buffs SET data = ?1 WHERE id = ?2",
             params![buff_data_to_json(&data), buff_id],
         )?;
-        transaction.commit()?;
         Ok(Some(BloodPactClaim {
             buff_id,
             skimmer_id,
@@ -972,10 +995,80 @@ impl ManashopRepository {
         }
         self.mutate_buff_data_atomic(buff_id, |data| {
             let current = data.skimmed_total.unwrap_or(0);
-            let granted = amount.min(data.cap.unwrap_or(0) - current).max(0);
-            data.skimmed_total = Some(current + granted);
+            let granted = amount
+                .min(data.cap.unwrap_or(0).saturating_sub(current))
+                .max(0);
+            data.skimmed_total = Some(current.saturating_add(granted));
             granted
         })
+    }
+
+    /// Reserve scaled Blood Pact capacity inside a caller-owned transaction.
+    pub(crate) fn claim_blood_pact_extra_in(
+        connection: &Connection,
+        buff_id: i64,
+        amount: i64,
+    ) -> Result<i64, rusqlite::Error> {
+        if amount <= 0 {
+            return Ok(0);
+        }
+        let raw = connection
+            .query_row(
+                "SELECT data FROM manashop_buffs WHERE id = ?1",
+                params![buff_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(0);
+        };
+        let mut data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
+        let current = data.skimmed_total.unwrap_or(0);
+        let granted = amount
+            .min(data.cap.unwrap_or(0).saturating_sub(current))
+            .max(0);
+        data.skimmed_total = Some(current.saturating_add(granted));
+        connection.execute(
+            "UPDATE manashop_buffs SET data = ?1 WHERE id = ?2",
+            params![buff_data_to_json(&data), buff_id],
+        )?;
+        Ok(granted)
+    }
+
+    /// Reconcile a reservation with the amount actually applied by protection.
+    ///
+    /// The caller owns the transaction, so a failed hostile settlement rolls
+    /// back the reservation automatically. A successful but partially
+    /// absorbed settlement leaves only the applied amount counted against the
+    /// Blood Pact cap, matching Python's revert-after-protection behavior.
+    pub(crate) fn settle_blood_pact_skim_in(
+        connection: &Connection,
+        buff_id: i64,
+        reserved_amount: i64,
+        applied_amount: i64,
+    ) -> Result<(), rusqlite::Error> {
+        if reserved_amount <= 0 {
+            return Ok(());
+        }
+        let raw = connection
+            .query_row(
+                "SELECT data FROM manashop_buffs WHERE id = ?1",
+                params![buff_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(());
+        };
+        let mut data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
+        let current = data.skimmed_total.unwrap_or(0);
+        let released = current.saturating_sub(reserved_amount);
+        data.skimmed_total = Some(released.saturating_add(applied_amount.max(0)));
+        connection.execute(
+            "UPDATE manashop_buffs SET data = ?1 WHERE id = ?2",
+            params![buff_data_to_json(&data), buff_id],
+        )?;
+        Ok(())
     }
 
     fn mutate_buff_data_atomic<F>(
