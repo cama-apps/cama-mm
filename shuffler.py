@@ -22,6 +22,7 @@ from domain.low_priority_constants import (
     LOW_PRIORITY_AVOID_TARGET_EFFECTIVENESS,
     LOW_PRIORITY_EFFECTIVENESS,
     LOW_PRIORITY_GOODNESS_PENALTY,
+    LOW_PRIORITY_TEAM_GROUPING_BONUS,
 )
 from domain.models.player import Player
 from domain.models.team import Team, calculate_off_role_value
@@ -429,6 +430,43 @@ class BalancedShuffler:
         if not low_priority_ids:
             return 0.0
         return len(selected_ids & low_priority_ids) * LOW_PRIORITY_GOODNESS_PENALTY
+
+    @staticmethod
+    def calculate_low_priority_team_adjustment(
+        team1_ids: set[int],
+        team2_ids: set[int],
+        low_priority_ids: set[int] | None,
+    ) -> float:
+        if not low_priority_ids:
+            return 0.0
+        return BalancedShuffler._low_priority_team_adjustment_from_counts(
+            len(team1_ids & low_priority_ids),
+            len(team2_ids & low_priority_ids),
+        )
+
+    @staticmethod
+    def _low_priority_team_adjustment_from_counts(
+        team1_count: int,
+        team2_count: int,
+    ) -> float:
+        largest_group = max(team1_count, team2_count)
+        return -max(0, largest_group - 1) * LOW_PRIORITY_TEAM_GROUPING_BONUS
+
+    @staticmethod
+    def _low_priority_team_adjustment_lower_bound(
+        selected_ids: set[int],
+        low_priority_ids: set[int] | None,
+    ) -> float:
+        if not low_priority_ids:
+            return 0.0
+        largest_possible_group = min(
+            Team.TEAM_SIZE,
+            len(selected_ids & low_priority_ids),
+        )
+        return BalancedShuffler._low_priority_team_adjustment_from_counts(
+            largest_possible_group,
+            0,
+        )
 
     def _greedy_shuffle(
         self,
@@ -906,10 +944,22 @@ class BalancedShuffler:
             team2_players, max_assignments_per_team, _scoring_context
         )
 
+        team1_ids: set[int] = set()
+        team2_ids: set[int] = set()
+        if low_priority_ids or avoids or deals:
+            team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
+            team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
+        low_priority_team_adjustment = self.calculate_low_priority_team_adjustment(
+            team1_ids,
+            team2_ids,
+            low_priority_ids,
+        )
+
         if not avoids and not deals and (not self.region_split or self.region_split_penalty <= 0):
-            return self._score_unconstrained_role_assignments(
+            team1_roles, team2_roles, score = self._score_unconstrained_role_assignments(
                 team1_metrics, team2_metrics, rd_priority
             )
+            return team1_roles, team2_roles, score + low_priority_team_adjustment
 
         best_team1_roles: tuple[str, ...] | None = None
         best_team2_roles: tuple[str, ...] | None = None
@@ -917,8 +967,6 @@ class BalancedShuffler:
 
         # Constraints are uncommon, so pay their set/scan cost only on the
         # fallback path that can produce a non-zero penalty.
-        team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
-        team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
         avoid_penalty = self.calculate_soft_avoid_penalty(
             team1_ids,
             team2_ids,
@@ -990,6 +1038,7 @@ class BalancedShuffler:
                     + avoid_penalty
                     + deal_penalty
                     + region_penalty
+                    + low_priority_team_adjustment
                 )
 
                 if total_score < best_score:
@@ -1148,11 +1197,6 @@ class BalancedShuffler:
             if total_score < best_score:
                 best_score = total_score
                 best_matchups = [(team1, team2, value_diff, total_off_roles)]
-
-                # Early termination: if perfect match found (score = 0), stop searching
-                if total_score == 0:
-                    logger.info("Early termination: Perfect match found (score=0)")
-                    break
             elif total_score == best_score:
                 best_matchups.append((team1, team2, value_diff, total_off_roles))
 
@@ -1462,6 +1506,12 @@ class BalancedShuffler:
                 selected_discord_ids,
                 low_priority_ids,
             )
+            low_priority_team_lower_bound = (
+                self._low_priority_team_adjustment_lower_bound(
+                    selected_discord_ids,
+                    low_priority_ids,
+                )
+            )
             selected_values = [
                 self._player_value(player, scoring_context)
                 for player in selected_players
@@ -1503,7 +1553,11 @@ class BalancedShuffler:
                 combo_penalty=combo_penalty,
                 rd_priority=rd_priority,
                 preselection_score=(
-                    combo_penalty + recent_penalty - rd_priority + split_value_diff
+                    combo_penalty
+                    + recent_penalty
+                    - rd_priority
+                    + split_value_diff
+                    + low_priority_team_lower_bound
                 ),
             )
 
@@ -1722,6 +1776,11 @@ class BalancedShuffler:
             is BalancedShuffler._score_unconstrained_role_assignments
         )
         player_bit_masks = tuple(1 << index for index in range(14))
+        low_priority_player_mask = sum(
+            bit_mask
+            for player, bit_mask in zip(players, player_bit_masks)
+            if low_priority_ids and player.discord_id in low_priority_ids
+        )
         team_summary_by_mask: list[_TeamRoleMetricsSummary | None] = (
             [None] * (1 << 14) if use_split_role_bound else []
         )
@@ -1762,6 +1821,12 @@ class BalancedShuffler:
                 selected_discord_ids,
                 low_priority_ids,
             )
+            low_priority_team_lower_bound = (
+                self._low_priority_team_adjustment_lower_bound(
+                    selected_discord_ids,
+                    low_priority_ids,
+                )
+            )
 
             # Rating spread penalty: incentivize selecting players of closer skill
             selected_value_list = [player_values[i] for i in selected_indices]
@@ -1780,10 +1845,15 @@ class BalancedShuffler:
                 - lobby_wait_bonus
             )
             rd_priority = self._calculate_rd_priority(selected_players)
-            combo_lower_bound = combo_penalty - rd_priority
+            combo_lower_bound = (
+                combo_penalty
+                - rd_priority
+                + low_priority_team_lower_bound
+            )
 
             # All remaining score components are nonnegative after accounting
-            # for the combination-wide RD priority bonus.
+            # for the combination-wide RD priority bonus and the best possible
+            # low-priority grouping adjustment.
             if (
                 base_score_terms_nonnegative
                 and recent_score_term_nonnegative
@@ -1822,6 +1892,12 @@ class BalancedShuffler:
                         | player_bit_masks[selected_indices[team1_indices[4]]]
                     )
                     team2_mask = selected_mask ^ team1_mask
+                    low_priority_team_adjustment = (
+                        self._low_priority_team_adjustment_from_counts(
+                            (team1_mask & low_priority_player_mask).bit_count(),
+                            (team2_mask & low_priority_player_mask).bit_count(),
+                        )
+                    )
 
                     team1_summary = team_summary_by_mask[team1_mask]
                     if team1_summary is None:
@@ -1864,6 +1940,7 @@ class BalancedShuffler:
                         split_lower_bound = min_value_diff + min_off_role_penalty - rd_priority
                         split_lower_bound += recent_penalty
                         split_lower_bound += combo_penalty
+                        split_lower_bound += low_priority_team_adjustment
 
                         if math.isfinite(split_lower_bound) and split_lower_bound >= best_score:
                             pruned_team_splits += 1
@@ -1874,6 +1951,7 @@ class BalancedShuffler:
                         team2_summary.metrics,
                         rd_priority,
                     )
+                    base_score += low_priority_team_adjustment
                 else:
                     team1_players = [selected_players[i] for i in team1_indices]
                     team2_players = [selected_players[i] for i in team2_indices]

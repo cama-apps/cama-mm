@@ -125,6 +125,89 @@ def test_low_priority_penalty_is_600_per_selected_player():
     ) == 1200.0
 
 
+@pytest.mark.parametrize(
+    ("team1_ids", "team2_ids", "low_priority_ids", "expected"),
+    [
+        ({100}, {200}, {100, 200}, 0.0),
+        ({100, 101}, set(), {100, 101}, -100.0),
+        ({100, 101}, {200, 201}, {100, 101, 200, 201}, -100.0),
+        ({100, 101, 102}, {200, 201}, {100, 101, 102, 200, 201}, -200.0),
+        ({100, 101, 102, 103}, {200}, {100, 101, 102, 103, 200}, -300.0),
+        ({100, 101, 102, 103, 104}, set(), {100, 101, 102, 103, 104}, -400.0),
+    ],
+)
+def test_low_priority_team_adjustment_applies_once_for_largest_group(
+    team1_ids,
+    team2_ids,
+    low_priority_ids,
+    expected,
+):
+    assert BalancedShuffler.calculate_low_priority_team_adjustment(
+        team1_ids,
+        team2_ids,
+        low_priority_ids,
+    ) == expected
+
+
+def test_matchup_score_subtracts_low_priority_team_adjustment_once():
+    team1_players = [
+        Player(
+            name=f"Team1-{role}",
+            mmr=1000,
+            preferred_roles=[role],
+            discord_id=100 + index,
+        )
+        for index, role in enumerate(("1", "2", "3", "4", "5"))
+    ]
+    team2_players = [
+        Player(
+            name=f"Team2-{role}",
+            mmr=1000,
+            preferred_roles=[role],
+            discord_id=200 + index,
+        )
+        for index, role in enumerate(("1", "2", "3", "4", "5"))
+    ]
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        rd_priority_weight=0.0,
+    )
+
+    _, _, score = shuffler._score_role_assignments_for_matchup(
+        team1_players,
+        team2_players,
+        low_priority_ids={100, 101, 200, 201},
+    )
+
+    assert score == -100.0
+
+
+def test_fixed_ten_search_does_not_stop_before_low_priority_grouping_bonus():
+    players = [
+        Player(
+            name=f"Player{i}",
+            mmr=1500,
+            preferred_roles=["1", "2", "3", "4", "5"],
+            discord_id=100 + i,
+        )
+        for i in range(10)
+    ]
+    low_priority_ids = {100, 105}
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        rd_priority_weight=0.0,
+    )
+
+    team1, team2 = shuffler.shuffle(
+        players,
+        low_priority_ids=low_priority_ids,
+    )
+
+    team1_ids = {player.discord_id for player in team1.players}
+    team2_ids = {player.discord_id for player in team2.players}
+    assert low_priority_ids <= team1_ids or low_priority_ids <= team2_ids
+
+
 def test_pool_shuffle_prefers_excluding_low_priority_player():
     players = [
         Player(
@@ -150,6 +233,40 @@ def test_pool_shuffle_prefers_excluding_low_priority_player():
     )
 
     assert {player.discord_id for player in excluded} == {100}
+
+
+def test_branch_bound_groups_selected_low_priority_players():
+    players = [
+        Player(
+            name=f"Player{i:02}",
+            mmr=1500,
+            preferred_roles=["1", "2", "3", "4", "5"],
+            discord_id=100 + i,
+        )
+        for i in range(14)
+    ]
+    low_priority_ids = {100, 101}
+    exclusion_counts = {
+        player.name: 100 if player.discord_id in low_priority_ids else 0
+        for player in players
+    }
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        exclusion_penalty_weight=70.0,
+        recent_match_penalty_weight=0.0,
+        rd_priority_weight=0.0,
+    )
+
+    team1, team2, excluded = shuffler.shuffle_branch_bound(
+        players,
+        exclusion_counts,
+        low_priority_ids=low_priority_ids,
+    )
+
+    team1_ids = {player.discord_id for player in team1.players}
+    team2_ids = {player.discord_id for player in team2.players}
+    assert low_priority_ids.isdisjoint({player.discord_id for player in excluded})
+    assert low_priority_ids <= team1_ids or low_priority_ids <= team2_ids
 
 
 @pytest.mark.parametrize(("player_count", "long_waiter_id"), [(11, 109), (14, 100)])
@@ -1402,6 +1519,7 @@ def _assert_split_bound_matches_reference(
     recent_match_names: set[str] | None = None,
     avoids: list | None = None,
     deals: list | None = None,
+    low_priority_ids: set[int] | None = None,
 ) -> None:
     reference = BalancedShuffler(**settings)
     optimized = BalancedShuffler(**settings)
@@ -1413,6 +1531,7 @@ def _assert_split_bound_matches_reference(
         "recent_match_names": recent_match_names,
         "avoids": avoids,
         "deals": deals,
+        "low_priority_ids": low_priority_ids,
     }
     expected = reference.shuffle_branch_bound(players, **kwargs)
     actual = optimized.shuffle_branch_bound(players, **kwargs)
@@ -1605,6 +1724,39 @@ class TestShuffler14Players:
             settings,
             exclusion_counts=exclusion_counts,
             recent_match_names=recent_names,
+        )
+
+    @pytest.mark.parametrize("low_priority_count", [2, 5])
+    def test_split_bound_matches_reference_with_low_priority_grouping(
+        self,
+        monkeypatch,
+        low_priority_count,
+    ):
+        players = _seeded_14_player_pool(0x14A7 + low_priority_count)
+        low_priority_ids = {
+            player.discord_id for player in players[:low_priority_count]
+        }
+        exclusion_counts = {
+            player.name: 20 if player.discord_id in low_priority_ids else 0
+            for player in players
+        }
+        settings = {
+            "off_role_multiplier": 0.8,
+            "off_role_flat_penalty": 60.0,
+            "role_matchup_delta_weight": 0.35,
+            "exclusion_penalty_weight": 100.0,
+            "rd_priority_weight": 0.08,
+            "recent_match_penalty_weight": 75.0,
+            "rating_spread_divisor": 15.0,
+        }
+
+        _assert_split_bound_matches_reference(
+            monkeypatch,
+            players,
+            settings,
+            exclusion_counts=exclusion_counts,
+            recent_match_names={player.name for player in players[-4:]},
+            low_priority_ids=low_priority_ids,
         )
 
     def test_duplicate_display_names_do_not_change_branch_bound_result(

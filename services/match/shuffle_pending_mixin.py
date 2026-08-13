@@ -401,6 +401,13 @@ class ShufflePendingMixin:
             radiant_ids_set | dire_ids_set,
             low_priority_ids,
         )
+        low_priority_team_adjustment = (
+            shuffler.calculate_low_priority_team_adjustment(
+                radiant_ids_set,
+                dire_ids_set,
+                low_priority_ids,
+            )
+        )
 
         region_split_penalty = 0.0
         if shuffle_mode == "region":
@@ -437,6 +444,7 @@ class ShufflePendingMixin:
             + package_deal_penalty
             + deal_split_penalty
             + low_priority_penalty
+            + low_priority_team_adjustment
             + region_split_penalty
             + rating_spread_penalty
             - lobby_rating_bonus
