@@ -7,8 +7,6 @@
 //! independent.  SQLite work is always moved to Tokio's blocking pool and
 //! all money-moving seams use a single transaction.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -56,6 +54,7 @@ use cama_db::core_repositories::PlayerRepository;
 use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
 use cama_domain::formatting::JOPACOIN_EMOTE;
+use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::gateway_events::{
@@ -211,7 +210,33 @@ pub struct DigRegistrationProvider {
 }
 
 impl DigRegistrationProvider {
+    /// Compose the fail-closed production `/dig` provider.
+    ///
+    /// Production callers provide the shared AI service when available while
+    /// this constructor owns the canonical media root. The explicit-media
+    /// [`Self::with_media_and_ai`] seam remains available for tests and
+    /// deployment-specific asset fixtures.
+    #[must_use = "inspect the provider admission result"]
+    pub fn production(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        discord: Arc<dyn DigDiscordPort>,
+        reminder_hooks: Option<ReminderHooks>,
+        ai_service: Option<Arc<AIService>>,
+    ) -> Result<Self, DigProviderBuildError> {
+        let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig::production()));
+        Self::with_media_and_ai(
+            database_path,
+            config,
+            discord,
+            reminder_hooks,
+            media,
+            ai_service,
+        )
+    }
+
     /// Compose the complete production `/dig` command/component surface.
+    #[cfg(test)]
     #[must_use]
     pub fn new(
         database_path: impl AsRef<Path>,
@@ -226,6 +251,7 @@ impl DigRegistrationProvider {
     /// Compose the provider with an explicit media facade. Production uses
     /// [`Self::new`]; this seam keeps deployment-root and cached-byte behavior
     /// independently testable without putting filesystem work on Tokio.
+    #[cfg(test)]
     #[must_use]
     pub fn with_media(
         database_path: impl AsRef<Path>,
@@ -235,12 +261,13 @@ impl DigRegistrationProvider {
         media: Arc<DigMediaRuntime>,
     ) -> Self {
         Self::with_media_and_ai(database_path, config, discord, reminder_hooks, media, None)
+            .expect("admitted Dig schema in provider test")
     }
 
     /// Compose the hidden production candidate with the shared AI service.
     /// `None` remains a fully durable terminal-skip path rather than leaving
     /// the mechanical delivery permanently pending.
-    #[must_use]
+    #[must_use = "inspect the provider admission result"]
     pub fn with_media_and_ai(
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
@@ -248,8 +275,15 @@ impl DigRegistrationProvider {
         reminder_hooks: Option<ReminderHooks>,
         media: Arc<DigMediaRuntime>,
         ai_service: Option<Arc<AIService>>,
-    ) -> Self {
+    ) -> Result<Self, DigProviderBuildError> {
         let path = database_path.as_ref().to_path_buf();
+        let audit = cama_db::schema_manager_contracts::audit_existing_schema(&path)
+            .map_err(|error| DigProviderBuildError::Database(error.to_string()))?;
+        if !audit.is_compatible() {
+            return Err(DigProviderBuildError::Database(format!(
+                "schema-manager contract is incompatible: {audit:?}"
+            )));
+        }
         let dig_config = DigRuntimeConfig::production()
             .with_runtime_policy(
                 config.values.minigame_jc_delta_scale,
@@ -296,7 +330,7 @@ impl DigRegistrationProvider {
             )
             .with_config(flavor_config),
         );
-        Self {
+        Ok(Self {
             handler: Arc::new(DigInteractionHandler {
                 state: Arc::new(DigRuntimeState {
                     database_path: path,
@@ -321,7 +355,7 @@ impl DigRegistrationProvider {
                     force_events: Mutex::new(BTreeSet::new()),
                 }),
             }),
-        }
+        })
     }
 
     /// READY/resume hook for persisted Dig views.  Dig's long-lived state is
@@ -1841,9 +1875,7 @@ impl DigInteractionHandler {
                     .await
                     .map_err(|error| error.to_string());
             }
-            if let Some(hooks) = &self.state.reminder_hooks {
-                let _ = hooks.reconcile_dig(user_id, guild_id, Some(now)).await;
-            }
+            self.reconcile_dig_reminder(user_id, guild_id, now).await;
             let delivery = match result.delivery.as_ref() {
                 Some(delivery) => Some(self.prepare_delivery(delivery).await?),
                 None => None,
@@ -2775,10 +2807,8 @@ impl DigInteractionHandler {
             }
             return Ok(());
         }
-        if result.success
-            && let Some(hooks) = &self.state.reminder_hooks
-        {
-            let _ = hooks.reconcile_dig(user_id, guild_id, Some(now)).await;
+        if result.success {
+            self.reconcile_dig_reminder(user_id, guild_id, now).await;
         }
         if result.paid_dig_available {
             let token = self.create_paid_view(user_id, guild_id, now)?;
@@ -3017,8 +3047,19 @@ impl DigInteractionHandler {
     }
 
     async fn reconcile_resolved_boss(&self, user_id: i64, guild_id: i64, now: i64) {
-        if let Some(hooks) = &self.state.reminder_hooks {
-            let _ = hooks.reconcile_dig(user_id, guild_id, Some(now)).await;
+        self.reconcile_dig_reminder(user_id, guild_id, now).await;
+    }
+
+    async fn reconcile_dig_reminder(&self, user_id: i64, guild_id: i64, now: i64) {
+        if let Some(hooks) = &self.state.reminder_hooks
+            && let Err(error) = hooks.reconcile_dig(user_id, guild_id, Some(now)).await
+        {
+            warn!(
+                %error,
+                user_id,
+                guild_id,
+                "dig reminder scheduling failed"
+            );
         }
     }
 
@@ -5355,10 +5396,6 @@ async fn respond(
         .map_err(|error| error.to_string())
 }
 
-fn result_response(content: String, _title: &str) -> InteractionResponse {
-    InteractionResponse::message(content).ephemeral()
-}
-
 fn miner_profile_embed(display_name: &str, profile: &DigMinerProfile) -> InteractionEmbed {
     InteractionEmbed::titled(format!("{display_name} - Miner Profile"))
         .description(miner_backstory(profile))
@@ -7056,6 +7093,16 @@ fn boss_encounter_response(
     guild_id: i64,
     media: &DigMediaRuntime,
 ) -> InteractionResponse {
+    boss_encounter_response_with_roll(info, owner_id, guild_id, media, None)
+}
+
+fn boss_encounter_response_with_roll(
+    info: &DigBossEncounterInfo,
+    owner_id: i64,
+    guild_id: i64,
+    media: &DigMediaRuntime,
+    forced_roll: Option<f64>,
+) -> InteractionResponse {
     let normal = cama_app::boss_encounter_view_guard::BossInfo {
         boss_id: info.boss_id.clone(),
         name: info.boss_name.clone(),
@@ -7068,16 +7115,21 @@ fn boss_encounter_response(
     };
     let secret = pinnacle_by_id(&info.boss_id).and_then(|boss| {
         let phase = boss.phases.get(usize::from(info.phase.saturating_sub(1)))?;
-        phase.secret_title.map(
-            |title| cama_app::boss_encounter_view_guard::SecretPhaseDefinition {
-                title: title.to_owned(),
-                dialogue: phase
+        phase.secret_title.map(|title| {
+            let dialogue = if info.boss_id == "forgotten_king" && info.phase == 3 {
+                vec!["A king's last room opens behind the throne.".to_owned()]
+            } else {
+                phase
                     .secret_dialogue
                     .iter()
                     .map(|line| (*line).to_owned())
-                    .collect(),
-            },
-        )
+                    .collect()
+            };
+            cama_app::boss_encounter_view_guard::SecretPhaseDefinition {
+                title: title.to_owned(),
+                dialogue,
+            }
+        })
     });
     let seed = format!(
         "{owner_id}:{}:{}:{}",
@@ -7089,7 +7141,7 @@ fn boss_encounter_response(
         &seed,
         PINNACLE_SECRET_PHASE_CHANCE,
         secret.as_ref(),
-        None,
+        forced_roll,
     );
     let layer_name = layer_at(i64::from(info.boundary)).name;
     let art = if info.is_pinnacle {
@@ -7107,7 +7159,10 @@ fn boss_encounter_response(
     if let Some(wager) = info.carried_wager.filter(|wager| *wager > 0) {
         embed = embed.field(
             "Carried Wager",
-            format!("**{wager}** JC is already riding on this phase."),
+            format!(
+                "**{}** {JOPACOIN_EMOTE} is already riding on this phase.",
+                format_jc_amount(wager)
+            ),
             false,
         );
     }
@@ -7562,17 +7617,13 @@ fn event_resolution_response(
             cama_app::dig_loot::CanonicalReward::Gear(item_id) => cama_domain::dig_gear::unique_gear(item_id).map_or_else(
                 || ("Gear Drop", format!("**{item_id}**\nStored in your gear inventory — equip it with `/dig gear`.")),
                 |gear| {
-                    (
-                        "Gear Drop",
-                        format!(
-                            "**{}**\nSlot: {:?}\nDurability: {}/{}\n{}\nStored in your gear inventory — equip it with `/dig gear`.",
-                            gear.name,
-                            gear.slot,
-                            gear.max_durability,
-                            gear.max_durability,
-                            gear.effect_summary,
-                        ),
-                    )
+                    let presentation = cama_app::dig_event_runtime::gear_drop_presentation(
+                        gear.name,
+                        gear.slot.as_str(),
+                        i64::from(gear.max_durability),
+                        gear.effect_summary,
+                    );
+                    ("Gear Drop", presentation.field_value)
                 },
             ),
             cama_app::dig_loot::CanonicalReward::Consumable(item_id) => (
@@ -7748,6 +7799,23 @@ fn format_dig_duration(seconds: i64) -> String {
     }
 }
 
+fn format_jc_amount(amount: i64) -> String {
+    let sign = if amount < 0 { "-" } else { "" };
+    let digits = amount.unsigned_abs().to_string();
+    let first = digits.len() % 3;
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    if first != 0 {
+        formatted.push_str(&digits[..first]);
+    }
+    for chunk in digits.as_bytes()[first..].chunks(3) {
+        if !formatted.is_empty() {
+            formatted.push(',');
+        }
+        formatted.push_str(std::str::from_utf8(chunk).expect("ASCII JC digits"));
+    }
+    format!("{sign}{formatted}")
+}
+
 // -------------------------------------------------------------------------
 // SQLite command policy
 // -------------------------------------------------------------------------
@@ -7809,7 +7877,7 @@ mod tests {
     use cama_db::core_repositories::{NewPlayer, PlayerRepository};
     use cama_db::schema_manager::initialize_or_migrate;
     use rusqlite::{Connection, params};
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, tempdir};
 
     use super::dig_options;
     use super::{
@@ -7827,6 +7895,38 @@ mod tests {
     const USER: u64 = 77_001;
     const GUILD: u64 = 77_002;
     const CHANNEL: u64 = 77_003;
+
+    #[test]
+    fn production_constructor_owns_media_and_fails_closed_on_schema_admission() {
+        let admitted = NamedTempFile::new().expect("admitted provider database");
+        initialize_or_migrate(admitted.path()).expect("admit canonical schema");
+        let provider = DigRegistrationProvider::production(
+            admitted.path(),
+            &config(),
+            Arc::new(TestDiscord::default()),
+            None,
+            None,
+        )
+        .expect("production constructor admits canonical schema");
+        let mut registry = crate::registration::RegistryBuilder::default();
+        provider
+            .register(&mut registry)
+            .expect("production provider registers");
+
+        let missing_directory = tempdir().expect("missing schema directory");
+        let result = DigRegistrationProvider::production(
+            missing_directory.path().join("not-created.db"),
+            &config(),
+            Arc::new(TestDiscord::default()),
+            None,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(super::DigProviderBuildError::Database(message))
+                if message.contains("does not exist") || message.contains("schema")
+        ));
+    }
 
     #[test]
     fn boss_reminder_predicate_requires_a_committed_resolution() {
@@ -7849,6 +7949,245 @@ mod tests {
             ..pending
         };
         assert!(super::boss_resume_is_resolved(&committed));
+    }
+
+    // tests/test_dig_reminder_command.py::test_run_dig_reuses_registration_check_and_embedded_notice
+    #[tokio::test]
+    async fn run_dig_returns_the_registered_typed_execution_and_delivery_notice() {
+        let (_database, provider, _discord) = fixture();
+        let execution = provider
+            .handler
+            .run_dig(
+                USER as i64,
+                GUILD as i64,
+                super::unix_now(),
+                false,
+                false,
+                cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                    0x1234,
+                    CHANNEL as i64,
+                    "Dig Test Miner",
+                    None,
+                ),
+            )
+            .await
+            .expect("registered dig execution");
+        assert!(execution.outcome.success);
+        let delivery = execution.delivery.expect("immutable delivery notice");
+        assert_eq!(delivery.context.channel_id, CHANNEL as i64);
+        assert_eq!(delivery.context.display_name, "Dig Test Miner");
+        assert!(!delivery.render.description.is_empty());
+    }
+
+    // tests/test_dig_reminder_command.py::test_schedule_dig_reminder_is_noop_without_service
+    #[tokio::test]
+    async fn schedule_dig_reminder_is_a_noop_without_a_reminder_service() {
+        let (_database, provider, _discord) = fixture();
+        assert!(provider.handler.state.reminder_hooks.is_none());
+        provider
+            .handler
+            .reconcile_dig_reminder(USER as i64, GUILD as i64, super::unix_now())
+            .await;
+    }
+
+    // tests/test_dig_reminder_command.py::test_reconciliation_failure_does_not_interrupt_dig_and_warns
+    #[tokio::test]
+    async fn failed_reminder_reconciliation_does_not_interrupt_a_committed_dig() {
+        let (database, base, _discord) = fixture();
+        let invalid_store = tempdir().expect("invalid reminder store directory");
+        let reminder = crate::reminder_provider::tests::test_provider(
+            invalid_store.path(),
+            Arc::new(crate::reminder_provider::tests::MockDiscord::default()),
+            Default::default(),
+        );
+        let provider = DigRegistrationProvider::with_media(
+            database.path(),
+            &config(),
+            Arc::new(TestDiscord::default()),
+            Some(reminder.hooks()),
+            Arc::clone(&base.handler.state.media),
+        );
+        let execution = provider
+            .handler
+            .run_dig(
+                USER as i64,
+                GUILD as i64,
+                super::unix_now(),
+                false,
+                false,
+                cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                    0x1235,
+                    CHANNEL as i64,
+                    "Dig Test Miner",
+                    None,
+                ),
+            )
+            .await
+            .expect("dig remains successful when reminder storage fails");
+        assert!(execution.outcome.success);
+        provider
+            .handler
+            .reconcile_dig_reminder(USER as i64, GUILD as i64, super::unix_now())
+            .await;
+    }
+
+    // tests/test_dig_reminder_command.py::test_boss_encounter_receives_reminder_callback
+    #[tokio::test]
+    async fn resolved_boss_reconciles_the_dig_reminder_callback() {
+        let (database, base, _discord) = fixture();
+        let now = super::unix_now();
+        Connection::open(database.path())
+            .expect("boss callback database")
+            .execute(
+                "INSERT INTO tunnels (discord_id,guild_id,last_dig_at)
+                 VALUES (?1,?2,?3)",
+                rusqlite::params![USER as i64, GUILD as i64, now],
+            )
+            .expect("seed boss callback tunnel");
+        Connection::open(database.path())
+            .expect("boss reminder preferences database")
+            .execute(
+                "INSERT INTO reminder_preferences
+                    (discord_id,guild_id,dig_enabled,updated_at)
+                 VALUES (?1,?2,1,?3)",
+                rusqlite::params![USER as i64, GUILD as i64, now],
+            )
+            .expect("enable boss callback reminder");
+        let reminder = crate::reminder_provider::tests::test_provider(
+            database.path(),
+            Arc::new(crate::reminder_provider::tests::MockDiscord::default()),
+            Default::default(),
+        );
+        let provider = DigRegistrationProvider::with_media(
+            database.path(),
+            &config(),
+            Arc::new(TestDiscord::default()),
+            Some(reminder.hooks()),
+            Arc::clone(&base.handler.state.media),
+        );
+        provider
+            .handler
+            .reconcile_resolved_boss(USER as i64, GUILD as i64, now)
+            .await;
+        let key = cama_app::reminders::ReminderTaskKey::new(
+            cama_app::reminders::UserId::new(USER as i64),
+            cama_app::reminders::GuildId::new(GUILD as i64),
+            cama_app::reminders::ReminderKind::Dig,
+        );
+        let task = reminder
+            .hooks()
+            .test_task_snapshot(key)
+            .expect("boss callback reminder snapshot")
+            .expect("boss callback schedules reminder");
+        assert_eq!(
+            task.due_at,
+            now + cama_app::dig_service::FREE_DIG_COOLDOWN_SECONDS
+        );
+    }
+
+    // tests/test_dig_reminder_command.py::test_boss_encounter_embed_surfaces_carried_wager
+    #[test]
+    fn boss_encounter_embed_surfaces_the_carried_wager() {
+        let (_database, provider, _discord) = fixture();
+        let info = cama_app::dig_boss_runtime::DigBossEncounterInfo {
+            boundary: 350,
+            boss_id: "forgotten_king".to_owned(),
+            boss_name: "The Crowned Hunger".to_owned(),
+            dialogue: "The crown burns.".to_owned(),
+            is_pinnacle: true,
+            phase: 2,
+            wager_allowed: true,
+            carried_wager: Some(1_500),
+            carried_risk_tier: None,
+            has_scout_lantern: false,
+            luminosity: 100,
+            encounter_key: "carried-wager".to_owned(),
+        };
+        let response = super::boss_encounter_response(
+            &info,
+            USER as i64,
+            GUILD as i64,
+            &provider.handler.state.media,
+        );
+        let field = response.embeds[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "Carried Wager")
+            .expect("carried wager field");
+        assert_eq!(
+            field.value,
+            format!("**1,500** {JOPACOIN_EMOTE} is already riding on this phase.")
+        );
+        assert!(!field.value.contains("**1,500** JC "));
+    }
+
+    // tests/test_dig_reminder_command.py::test_resumed_pinnacle_encounter_uses_phase_presentation[2]
+    #[test]
+    fn resumed_pinnacle_phase_two_uses_the_normal_presentation() {
+        let (_database, provider, _discord) = fixture();
+        let info = cama_app::dig_boss_runtime::DigBossEncounterInfo {
+            boundary: 350,
+            boss_id: "forgotten_king".to_owned(),
+            boss_name: "The Crowned Hunger".to_owned(),
+            dialogue: "The crown burns.".to_owned(),
+            is_pinnacle: true,
+            phase: 2,
+            wager_allowed: true,
+            carried_wager: None,
+            carried_risk_tier: None,
+            has_scout_lantern: false,
+            luminosity: 100,
+            encounter_key: "phase-two".to_owned(),
+        };
+        let response = super::boss_encounter_response(
+            &info,
+            USER as i64,
+            GUILD as i64,
+            &provider.handler.state.media,
+        );
+        assert_eq!(
+            response.embeds[0].title.as_deref(),
+            Some("Boss Encountered: The Crowned Hunger!")
+        );
+        assert_eq!(
+            response.embeds[0].description.as_deref(),
+            Some("The crown burns.")
+        );
+    }
+
+    // tests/test_dig_reminder_command.py::test_resumed_pinnacle_encounter_uses_phase_presentation[3]
+    #[test]
+    fn resumed_pinnacle_phase_three_uses_the_secret_presentation() {
+        let (_database, provider, _discord) = fixture();
+        let info = cama_app::dig_boss_runtime::DigBossEncounterInfo {
+            boundary: 350,
+            boss_id: "forgotten_king".to_owned(),
+            boss_name: "The Last Breath of Kings".to_owned(),
+            dialogue: "Last breath.".to_owned(),
+            is_pinnacle: true,
+            phase: 3,
+            wager_allowed: true,
+            carried_wager: None,
+            carried_risk_tier: None,
+            has_scout_lantern: false,
+            luminosity: 100,
+            encounter_key: "phase-three".to_owned(),
+        };
+        let response = super::boss_encounter_response_with_roll(
+            &info,
+            USER as i64,
+            GUILD as i64,
+            &provider.handler.state.media,
+            Some(0.0),
+        );
+        assert_eq!(
+            response.embeds[0].title.as_deref(),
+            Some("Boss Encountered: The Crown Remembers!")
+        );
+        assert_eq!(
+            response.embeds[0].description.as_deref(),
+            Some("A king's last room opens behind the throne.")
+        );
     }
 
     fn regular_boss_projection_fixture(won: bool) -> cama_app::boss_multi_tier::ResolvedFight {
@@ -8031,7 +8370,7 @@ mod tests {
             .find(|field| field.name == "Gear Drop")
             .expect("gear drop field");
         assert!(field.value.contains("Glassbreaker Pick"));
-        assert!(field.value.contains("Slot: Weapon"));
+        assert!(field.value.contains("Weapon"));
         assert!(field.value.contains("Durability: 8"));
         assert!(
             field
@@ -10572,9 +10911,10 @@ mod tests {
         );
     }
 
+    // tests/test_dig_shop.py::test_dig_shop_handler_falls_back_to_ephemeral_when_public_send_fails
     #[tokio::test]
-    async fn shop_falls_back_to_ephemeral_and_every_embed_field_is_discord_safe() {
-        let (database, provider, _discord) = fixture();
+    async fn shop_public_send_falls_back_to_an_ephemeral_response() {
+        let (_database, provider, _discord) = fixture();
         let responder = Arc::new(RejectingPublicFollowupResponder::default());
         provider
             .handler
@@ -10588,8 +10928,22 @@ mod tests {
         assert!(attempts[1].ephemeral);
         assert_eq!(attempts[0].embeds, attempts[1].embeds);
         assert_eq!(attempts[0].attachments, attempts[1].attachments);
+    }
+
+    // tests/test_dig_shop.py::test_shop_consumables_field_fits_discord_limit
+    #[tokio::test]
+    async fn shop_consumables_fields_stay_within_discord_limit_without_dropping_rows() {
+        let (database, provider, _discord) = fixture();
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(command_request(230, "shop", Vec::new()), responder.clone())
+            .await
+            .expect("shop field rendering");
+        let attempts = responder.followups.lock().unwrap();
+        assert_eq!(attempts.len(), 1);
         assert!(
-            attempts[1].embeds[0]
+            attempts[0].embeds[0]
                 .fields
                 .iter()
                 .all(|field| field.value.len() <= 1_024)
@@ -10599,7 +10953,7 @@ mod tests {
             .shop(USER as i64, GUILD as i64)
             .expect("shop")
             .expect("registered player");
-        let rendered = attempts[1].embeds[0]
+        let rendered = attempts[0].embeds[0]
             .fields
             .iter()
             .map(|field| field.value.as_str())

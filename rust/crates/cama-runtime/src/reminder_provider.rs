@@ -511,6 +511,14 @@ pub struct ReminderHooks {
 }
 
 impl ReminderHooks {
+    #[cfg(test)]
+    pub(crate) fn test_task_snapshot(
+        &self,
+        key: ReminderTaskKey,
+    ) -> Result<Option<ScheduledReminder>, String> {
+        self.state.task_snapshot(key)
+    }
+
     /// Read the durable per-guild pet-DM preference without blocking Tokio.
     pub async fn pet_enabled(&self, user_id: i64, guild_id: i64) -> Result<bool, String> {
         self.state
@@ -709,4 +717,4 @@ fn reminder_response(preferences: ReminderPreferences) -> InteractionResponse {
 
 #[cfg(test)]
 #[path = "reminder_provider/tests.rs"]
-mod tests;
+pub(crate) mod tests;

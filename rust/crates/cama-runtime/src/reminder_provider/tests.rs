@@ -22,7 +22,7 @@ fn migrated_database() -> NamedTempFile {
     file
 }
 
-fn test_provider(
+pub(crate) fn test_provider(
     path: &Path,
     discord: Arc<dyn DiscordTransport>,
     cooldowns: ReminderCooldowns,
@@ -37,7 +37,7 @@ fn test_provider(
 }
 
 #[derive(Default)]
-struct MockDiscord {
+pub(crate) struct MockDiscord {
     dms: Mutex<Vec<(u64, DiscordMessage)>>,
     fail_users: Mutex<BTreeSet<u64>>,
 }
@@ -435,6 +435,7 @@ async fn ready_recovery_isolates_invalid_guild_and_failed_dm_is_consumed_once() 
     );
 }
 
+// tests/test_dig_reminder_command.py::test_schedule_dig_reminder_delegates_to_reconciliation
 #[tokio::test]
 async fn typed_hooks_reconcile_and_cancel_dig_and_deliver_betting_with_isolation() {
     let file = migrated_database();
@@ -494,6 +495,17 @@ async fn typed_hooks_reconcile_and_cancel_dig_and_deliver_betting_with_isolation
             .task_snapshot(key)
             .expect("task snapshot")
             .is_some()
+    );
+    assert_eq!(
+        provider
+            .hooks
+            .state
+            .task_snapshot(key)
+            .expect("task snapshot")
+            .expect("scheduled dig reminder")
+            .due_at,
+        now + cama_app::dig_service::FREE_DIG_COOLDOWN_SECONDS,
+        "the hook preserves the authoritative ready timestamp"
     );
     hooks.cancel_dig(USER, GUILD).expect("cancel dig");
     assert!(
@@ -567,5 +579,57 @@ async fn typed_hooks_reconcile_and_cancel_dig_and_deliver_betting_with_isolation
     assert_eq!(
         dms[0].1.response.content,
         "A new 🧀 Whine & Cheese match (Match #55) has been shuffled! Betting is open for ~10 more minutes. Use `/bet` now!"
+    );
+}
+
+// tests/test_dig_reminder_command.py::test_schedule_dig_reminder_reuses_ready_timestamp
+#[tokio::test]
+async fn dig_reconciliation_reuses_the_authoritative_ready_timestamp() {
+    let file = migrated_database();
+    let now = SystemReminderClock.now_seconds();
+    let connection = Connection::open(file.path()).expect("open timestamp database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match reminder SQLite compatibility mode");
+    connection
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,last_dig_at)
+             VALUES (?1,?2,?3)",
+            (USER, GUILD, now),
+        )
+        .expect("seed timestamp tunnel");
+    connection
+        .execute(
+            "INSERT INTO reminder_preferences
+                (discord_id,guild_id,dig_enabled,updated_at)
+             VALUES (?1,?2,1,?3)",
+            (USER, GUILD, now),
+        )
+        .expect("enable timestamp reminder");
+    drop(connection);
+
+    let provider = test_provider(
+        file.path(),
+        Arc::new(MockDiscord::default()),
+        ReminderCooldowns::default(),
+    );
+    provider
+        .hooks()
+        .reconcile_dig(USER, GUILD, Some(now))
+        .await
+        .expect("reconcile timestamp reminder");
+    let task = provider
+        .hooks
+        .state
+        .task_snapshot(ReminderTaskKey::new(
+            UserId::new(USER),
+            GuildId::new(GUILD),
+            ReminderKind::Dig,
+        ))
+        .expect("timestamp task snapshot")
+        .expect("authoritative ready task");
+    assert_eq!(
+        task.due_at,
+        now + cama_app::dig_service::FREE_DIG_COOLDOWN_SECONDS
     );
 }

@@ -571,6 +571,7 @@ fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     );
 }
 
+// tests/test_dig_pinnacle_combat.py::test_resumed_pinnacle_loss_ticks_snapshot_armor_after_swap
 #[test]
 fn resolution_wear_ticks_snapshot_loadout_and_loss_armor_after_swap() {
     let database = fixture();

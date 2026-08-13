@@ -1122,6 +1122,7 @@ fn regular_boss_fresh_attempt_applies_shared_shifting_idol_policy() {
     );
 }
 
+// tests/test_dig_boss_prep.py::test_arming_boss_prep_consumes_exact_queued_row_atomically
 #[test]
 fn runtime_activates_queued_prep_only_after_validation_and_reuses_it_for_pause() {
     let database = fixture();
@@ -1217,6 +1218,220 @@ fn runtime_activates_queued_prep_only_after_validation_and_reuses_it_for_pause()
     assert_eq!(progress["25"]["future_field"], 17);
 }
 
+// tests/test_dig_boss_prep.py::test_whetstone_adds_exactly_one_after_damage_multipliers
+#[test]
+fn whetstone_adds_one_after_the_prepared_damage_value() {
+    let database = fixture();
+    Connection::open(database.path())
+        .expect("whetstone helper DB")
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"active","active_prep":{"item_type":"tempered_whetstone","used":false}}}"#,
+                PLAYER,
+                GUILD
+            ],
+        )
+        .expect("active whetstone");
+    let repository = SqliteBossRepository::new(database.path(), 1_700_000_000);
+    let tunnel = repository.load_tunnel(key()).expect("tunnel");
+    let prepared = SqliteBossCombatPreparation::new(database.path(), 20).prepare(
+        BossCombatPreparationRequest {
+            key: key(),
+            tunnel: &tunnel,
+            boss: crate::dig_bosses::boss_by_id("grothak").expect("boss"),
+            boundary: 25,
+            risk_tier: RiskTier::Reckless,
+            wager: 0,
+            echo_applied: false,
+            now: 1_700_000_000,
+        },
+        CombatState {
+            player_hp: 5,
+            boss_hp: 8,
+            player_hit: 0.5,
+            player_damage: 4,
+            boss_hit: 0.4,
+            boss_damage: 1,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+    );
+    let applied_damage = prepared
+        .base_combat
+        .player_damage
+        .saturating_add(prepared.player_damage_after_phase_delta);
+    assert_eq!(prepared.base_combat.player_damage, 4);
+    assert_eq!(applied_damage, 5);
+}
+
+// tests/test_dig_boss_prep.py::test_existing_active_prep_is_reused_across_phases
+#[test]
+fn existing_active_prep_is_reused_and_does_not_consume_a_new_queue_row() {
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("reuse prep DB");
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"phase1_defeated","active_prep":{"item_type":"rescue_line","used":false}}}"#,
+                PLAYER,
+                GUILD
+            ],
+        )
+        .expect("active preparation");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'tempered_whetstone',1,101)",
+            params![PLAYER, GUILD],
+        )
+        .expect("queued replacement preparation");
+    let queued_id = connection.last_insert_rowid();
+    drop(connection);
+
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = false;
+    let result = DigBossRuntimeService::sqlite(config)
+        .start_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("reuse active preparation");
+    let StartBossDuelOutcome::Paused(paused) = result.outcome else {
+        panic!("expected authored preparation pause")
+    };
+    assert_eq!(
+        paused
+            .combat
+            .effects
+            .boss_preparation
+            .as_ref()
+            .map(|preparation| preparation.item_type.as_str()),
+        Some("rescue_line")
+    );
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("verify queued preparation")
+            .query_row(
+                "SELECT queued FROM dig_inventory WHERE id=?1",
+                [queued_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("queued row"),
+        1,
+    );
+}
+
+// tests/test_dig_boss_prep.py::test_boss_prep_effect_helpers
+#[test]
+fn boss_prep_effect_helpers_are_applied_by_the_typed_combat_preparation() {
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("prep helper DB");
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"active","active_prep":{"item_type":"tempered_whetstone","used":false}}}"#,
+                PLAYER,
+                GUILD
+            ],
+        )
+        .expect("whetstone preparation");
+    drop(connection);
+
+    let repository = SqliteBossRepository::new(database.path(), 1_700_000_000);
+    let tunnel = repository.load_tunnel(key()).expect("tunnel");
+    let adapter = SqliteBossCombatPreparation::new(database.path(), 20);
+    let prepared = adapter.prepare(
+        BossCombatPreparationRequest {
+            key: key(),
+            tunnel: &tunnel,
+            boss: crate::dig_bosses::boss_by_id("grothak").expect("boss"),
+            boundary: 25,
+            risk_tier: RiskTier::Cautious,
+            wager: 0,
+            echo_applied: false,
+            now: 1_700_000_000,
+        },
+        CombatState {
+            player_hp: 5,
+            boss_hp: 8,
+            player_hit: 0.5,
+            player_damage: 3,
+            boss_hit: 0.4,
+            boss_damage: 1,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+    );
+    assert_eq!(prepared.base_combat.player_damage, 3);
+    assert_eq!(prepared.player_damage_after_phase_delta, 1);
+    assert_eq!(
+        prepared
+            .boss_preparation
+            .as_ref()
+            .map(|preparation| preparation.item_type.as_str()),
+        Some("tempered_whetstone")
+    );
+
+    let rescue_database = fixture();
+    let rescue_repository = SqliteBossRepository::new(rescue_database.path(), 1_700_000_000);
+    let rescue_tunnel = rescue_repository.load_tunnel(key()).expect("rescue tunnel");
+    let rescue_connection = Connection::open(rescue_database.path()).expect("rescue prep DB");
+    rescue_connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"active","active_prep":{"item_type":"rescue_line","used":false}}}"#,
+                PLAYER,
+                GUILD
+            ],
+        )
+        .expect("rescue preparation");
+    drop(rescue_connection);
+    let rescue_prepared = SqliteBossCombatPreparation::new(rescue_database.path(), 20).prepare(
+        BossCombatPreparationRequest {
+            key: key(),
+            tunnel: &rescue_tunnel,
+            boss: crate::dig_bosses::boss_by_id("grothak").expect("boss"),
+            boundary: 25,
+            risk_tier: RiskTier::Cautious,
+            wager: 0,
+            echo_applied: false,
+            now: 1_700_000_000,
+        },
+        CombatState {
+            player_hp: 5,
+            boss_hp: 8,
+            player_hit: 0.5,
+            player_damage: 1,
+            boss_hit: 0.4,
+            boss_damage: 1,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+    );
+    assert_eq!(rescue_prepared.player_damage_after_phase_delta, 0);
+    assert_eq!(
+        rescue_prepared
+            .boss_preparation
+            .as_ref()
+            .map(|preparation| preparation.item_type.as_str()),
+        Some("rescue_line")
+    );
+}
+
 #[test]
 fn rescue_line_halves_loss_knockback_skips_extra_armor_tick_and_clears_attempt() {
     let database = fixture();
@@ -1298,6 +1513,7 @@ fn rescue_line_halves_loss_knockback_skips_extra_armor_tick_and_clears_attempt()
     assert_eq!(progress["25"]["future_field"], 17);
 }
 
+// tests/test_dig_boss_prep.py::test_warding_salts_block_only_first_mechanic
 #[test]
 fn warding_salts_survive_pause_block_one_mechanic_and_clear_on_resolution() {
     let database = fixture();
@@ -1916,6 +2132,7 @@ fn inherited_pinnacle_carry_bypasses_new_cap_but_invalid_carry_does_not() {
     );
 }
 
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_loss_extra_wear_only_hits_armor
 #[test]
 fn pinnacle_loss_clamps_debit_and_only_extra_ticks_snapshot_armor() {
     let database = fixture();
@@ -1995,6 +2212,246 @@ fn pinnacle_loss_clamps_debit_and_only_extra_ticks_snapshot_armor() {
     );
 }
 
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_scout_multiplier_matches_live_payout
+#[test]
+fn pinnacle_scout_multiplier_matches_the_settlement_policy() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    Connection::open(database.path())
+        .expect("multiplier DB")
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+            params![PLAYER, GUILD],
+        )
+        .expect("lantern");
+    let result = pinnacle_runtime(&database)
+        .scout_pinnacle(
+            pinnacle_request(1_700_000_000),
+            false,
+            SequenceEntropy::constant(0.5),
+        )
+        .expect("scout");
+    let cautious = result.outcome.cautious;
+    let expected = super::pinnacle_total_multiplier(RiskTier::Cautious, cautious.win_chance)
+        .expect("valid multiplier");
+    assert!((cautious.multiplier - expected).abs() < 1e-12);
+    assert!(cautious.multiplier > 1.0);
+}
+
+// tests/test_dig_pinnacle_combat.py::test_scout_pinnacle_uses_the_locked_phase_boss
+#[test]
+fn pinnacle_scout_uses_the_locked_phase_boss() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    Connection::open(database.path())
+        .expect("locked scout DB")
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+            params![PLAYER, GUILD],
+        )
+        .expect("lantern");
+    let result = pinnacle_runtime(&database)
+        .scout_pinnacle(
+            pinnacle_request(1_700_000_000),
+            false,
+            SequenceEntropy::constant(0.5),
+        )
+        .expect("locked boss scout");
+    assert_eq!(result.outcome.boss_id, "forgotten_king");
+    assert_eq!(result.outcome.boss_name, "The Forgotten King");
+    assert_eq!(result.outcome.phase, 1);
+}
+
+// tests/test_dig_pinnacle_combat.py::test_deaths_door_saves_a_killing_blow_without_a_pause
+#[test]
+fn pinnacle_deaths_door_saves_a_killing_blow_without_a_pause() {
+    let mut combat = CombatState {
+        player_hp: 1,
+        boss_hp: 10,
+        player_hit: 0.0,
+        player_damage: 1,
+        boss_hit: 1.0,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+        effects: CombatEffects {
+            relic_deaths_door: true,
+            ..CombatEffects::default()
+        },
+    };
+    let mut entropy = SequenceEntropy::new(vec![0.99, 0.0, 0.2, 0.99, 0.0], Vec::new(), Vec::new());
+    let (saved, terminal) = crate::boss_multi_tier::run_combat_round(1, &mut combat, &mut entropy);
+    assert_eq!(terminal, None);
+    assert_eq!(saved.player_hp, 1);
+    assert!(saved.effect_log.deaths_door);
+    let (_, terminal) = crate::boss_multi_tier::run_combat_round(2, &mut combat, &mut entropy);
+    assert_eq!(terminal, Some(false));
+    assert_eq!(combat.player_hp, 0);
+}
+
+// tests/test_dig_pinnacle_combat.py::test_lifesteal_heals_on_first_landed_hit_without_a_pause
+#[test]
+fn pinnacle_lifesteal_heals_on_the_first_landed_hit_without_a_pause() {
+    let mut combat = CombatState {
+        player_hp: 2,
+        boss_hp: 3,
+        player_hit: 1.0,
+        player_damage: 1,
+        boss_hit: 0.0,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+        effects: CombatEffects {
+            trophy_lifesteal: true,
+            ..CombatEffects::default()
+        },
+    };
+    let mut entropy = SequenceEntropy::constant(0.0);
+    let (record, terminal) = crate::boss_multi_tier::run_combat_round(1, &mut combat, &mut entropy);
+    assert_eq!(terminal, None);
+    assert!(record.player_hit);
+    assert!(record.effect_log.lifesteal);
+    assert_eq!(combat.player_hp, 3);
+    assert!(!combat.effects.trophy_lifesteal);
+}
+
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_fight_applies_pet_assist
+#[test]
+fn pinnacle_fight_applies_pet_assist_damage_to_a_landed_round() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let now = 1_700_000_000;
+    Connection::open(database.path())
+        .expect("pet fight DB")
+        .execute(
+            "INSERT INTO pets
+             (discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,
+              last_fed_at,hunger_at_last_fed,training_xp)
+             VALUES (?1,?2,'Dane','common_cama',?3,?3,0,?4,100,20)",
+            params![PLAYER, GUILD, now - 8 * 86_400, now],
+        )
+        .expect("trained pet");
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(now),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("pinnacle start");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected a durable mechanic pause")
+    };
+    let resumed = pinnacle_runtime(&database)
+        .resume_pinnacle(
+            pinnacle_request(now + 1),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("pinnacle resume");
+    assert!(resumed.outcome.round_log.iter().any(|round| {
+        round.pet_assist_damage > 0
+            && round
+                .pet_assist
+                .as_ref()
+                .is_some_and(|assist| assist.bonus_percent == 12)
+    }));
+}
+
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_victory_applies_bankruptcy_debuff
+#[test]
+fn pinnacle_final_victory_applies_the_persisted_bankruptcy_debuff() {
+    let database = fixture();
+    set_pinnacle(&database, 3, "phase2_defeated", None);
+    Connection::open(database.path())
+        .expect("bankruptcy DB")
+        .execute(
+            "INSERT INTO bankruptcy_state
+             (discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count)
+             VALUES (?1,?2,1,3,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("bankruptcy state");
+    let result = pinnacle_runtime(&database)
+        .settle_pinnacle(
+            pinnacle_request(1_700_000_000),
+            PinnacleSettlementInput {
+                boss_id: "forgotten_king".to_owned(),
+                phase: 3,
+                risk_tier: RiskTier::Cautious,
+                wager: 0,
+                won: true,
+                ending_boss_hp: 0,
+                boss_hp_max: 8,
+                starting_boss_hp: 8,
+                win_chance: 0.5,
+                attempts: 1,
+                round_log: Vec::new(),
+                gear_wear: GearWearResult::default(),
+                boss_preparation: None,
+                warding_salts_blocked: false,
+            },
+            &mut SequenceEntropy::new(Vec::new(), vec![0, 0], Vec::new()),
+        )
+        .expect("bankruptcy-adjusted victory");
+    assert!(result.outcome.won);
+    assert!(result.outcome.bankruptcy_penalty > 0);
+    assert!(result.outcome.jc_delta < result.outcome.gross_payout);
+}
+
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_loss_debit_floors_at_live_balance
+#[test]
+fn pinnacle_loss_debit_floors_at_the_live_balance() {
+    let database = fixture();
+    set_pinnacle(&database, 2, "phase1_defeated", None);
+    Connection::open(database.path())
+        .expect("debit floor DB")
+        .execute(
+            "UPDATE players SET jopacoin_balance=7 WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("live balance");
+    let result = pinnacle_runtime(&database)
+        .settle_pinnacle(
+            pinnacle_request(1_700_000_000),
+            PinnacleSettlementInput {
+                boss_id: "forgotten_king".to_owned(),
+                phase: 2,
+                risk_tier: RiskTier::Bold,
+                wager: 25,
+                won: false,
+                ending_boss_hp: 4,
+                boss_hp_max: 8,
+                starting_boss_hp: 8,
+                win_chance: 0.4,
+                attempts: 1,
+                round_log: Vec::new(),
+                gear_wear: GearWearResult::default(),
+                boss_preparation: None,
+                warding_salts_blocked: false,
+            },
+            &mut SequenceEntropy::new(Vec::new(), Vec::new(), vec![8]),
+        )
+        .expect("loss settlement");
+    assert_eq!(result.outcome.jc_delta, -7);
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("verify debit floor")
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("balance"),
+        0
+    );
+}
+
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_scout_models_and_reports_pet_assist
 #[test]
 fn pinnacle_scout_reports_pet_and_consumes_one_lantern_across_restart() {
     let database = fixture();
@@ -2140,6 +2597,7 @@ fn pinnacle_final_victory_fuses_reward_relic_status_and_audit() {
     );
 }
 
+// tests/test_dig_pinnacle_combat.py::test_paused_pinnacle_duel_persists_pet_assist
 #[test]
 fn paused_pinnacle_duel_snapshots_pet_assist_across_restart() {
     let database = fixture();
@@ -2196,6 +2654,7 @@ fn paused_pinnacle_duel_snapshots_pet_assist_across_restart() {
     }));
 }
 
+// tests/test_dig_pinnacle_combat.py::test_wagered_pinnacle_fight_keeps_ten_percent_hit_floor
 #[test]
 fn wagered_pinnacle_attempt_keeps_ten_percent_hit_floor() {
     let database = fixture();
@@ -2219,6 +2678,7 @@ fn wagered_pinnacle_attempt_keeps_ten_percent_hit_floor() {
     assert!((paid.combat.player_hit - WAGERED_PLAYER_HIT_FLOOR).abs() < f64::EPSILON);
 }
 
+// tests/test_dig_pinnacle_combat.py::test_pinnacle_loss_never_credits_a_negative_balance
 #[test]
 fn pinnacle_loss_never_credits_an_existing_negative_balance() {
     let database = fixture();
