@@ -310,6 +310,27 @@ fn test_mana_yield_tax_precedes_helltide_and_independent_profit_deductions() {
 }
 
 #[test]
+fn test_configured_minigame_scale_uses_half_up_before_positive_scale() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 5);
+    input.minigame_jc_delta_scale_millionths = 500_000;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert_eq!(
+        result.gross_jc, 3,
+        "2.5 rounds half-up before payout scaling"
+    );
+    assert_eq!(result.jc_earned, scale_positive_dig_jc(3));
+
+    let mut minimum_tunnel = started_tunnel(10);
+    input.minigame_jc_delta_scale_millionths = 0;
+    let minimum = apply_dig_outcome(&mut minimum_tunnel, input, 2_000_000);
+    assert_eq!(
+        minimum.gross_jc, 1,
+        "non-zero generated JC keeps a one-JC floor"
+    );
+}
+
+#[test]
 fn test_cave_in_reward_returns_before_helltide_tax() {
     let mut tunnel = started_tunnel(50);
     let mut input = outcome(0, 3);

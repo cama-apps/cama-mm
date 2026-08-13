@@ -74,7 +74,7 @@ use crate::dig_routes::{
 use crate::dig_service::{
     DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, MinerAllocation,
     TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig, cooldown_remaining, layer_at,
-    paid_dig_cost, scale_dig_yield_once,
+    paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
@@ -3423,14 +3423,11 @@ fn weather_effects(weather_id: &str) -> DigWeatherEffects {
 }
 
 fn weather_code(weather_id: Option<&str>) -> Option<&str> {
-    let weather_id = weather_id?;
-    if weather_id.contains("storm") {
-        Some("storm")
-    } else if weather_id.contains("sunny") {
-        Some("sunny")
-    } else {
-        None
-    }
+    // Python forwards the persisted weather id verbatim (lowercased by its
+    // repository). Authored ids such as `temporal_storm` and
+    // `whisper_storm` are not the special generic `storm` code and must not
+    // activate Stormcaller or Blue-Mana combo policy.
+    weather_id
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -4663,9 +4660,13 @@ where
             let mut entropy = SeededLootEntropy::new(seed_for(request));
             let advance = entropy.advance(3, 7);
             let jc_roll = entropy.advance(1, 5);
+            let scaled_jc = scale_dig_minigame_jc(
+                jc_roll,
+                multiplier_millionths(self.config.minigame_jc_delta_scale),
+            );
             let (daily_adjusted_jc, economy_multiplier) = self.store.adjust_daily_reward(
                 request.guild_id,
-                jc_roll,
+                scaled_jc,
                 now,
                 &self.config.economy_event,
             )?;
@@ -4707,7 +4708,8 @@ where
                 action_type: "dig".to_owned(),
                 detail: serde_json::json!({
                     "first_dig": true,
-                    "gross_jc": jc_roll,
+                    "gross_jc": daily_adjusted_jc,
+                    "minigame_scaled_jc": scaled_jc,
                     "economy_adjusted_jc": daily_adjusted_jc,
                     "economy_reward_multiplier": economy_multiplier,
                     "pet_dig_bonus": pet_dig_bonus,
@@ -5487,6 +5489,9 @@ where
             pre_cap_jc,
             economy_reward_multiplier_basis_points: economy_multiplier_basis_points,
             economy_before_positive_scale: loot_outcome.cave_in,
+            minigame_jc_delta_scale_millionths: multiplier_millionths(
+                self.config.minigame_jc_delta_scale,
+            ),
             streak_bonus: streak_reward,
             streak_bonus_multiplier_basis_points: bonus_basis_points(
                 perk_fx
@@ -6599,12 +6604,14 @@ mod tests {
     use cama_db::loan_repository::LoanRepository;
     use cama_db::manashop_rework_repository::{BuffData, GrantBuffRequest, ManashopRepository};
     use cama_db::schema_manager::initialize_or_migrate;
+    use cama_domain::dig_economy::scale_positive_dig_jc;
     use cama_domain::pet::DIG_WORK_UNITS_PER_BLOCK;
     use rusqlite::{Connection, params};
     use serde_json::Value;
     use tempfile::NamedTempFile;
 
     use crate::dig_loot::{LootEntropy, SeededLootEntropy};
+    use crate::economy_event_service::EconomyEventConfig;
 
     use super::{
         DigAdminMutationOutcome, DigRuntimeCommit, DigRuntimeConfig, DigRuntimeDeliveryContext,
@@ -6612,7 +6619,7 @@ mod tests {
         DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRequest,
         DigRuntimeService, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
         DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
-        proportional_mana_yield_tax,
+        proportional_mana_yield_tax, scale_dig_minigame_jc,
     };
     use cama_domain::game_date::game_date_for_timestamp;
 
@@ -8846,6 +8853,20 @@ mod tests {
             .expect("seed active Mana");
     }
 
+    fn latest_dig_detail(database: &NamedTempFile, actor: i64, guild: i64) -> Value {
+        let raw = Connection::open(database.path())
+            .expect("Dig detail connection")
+            .query_row(
+                "SELECT detail FROM dig_actions
+                 WHERE actor_id=?1 AND guild_id=?2 AND action_type='dig'
+                 ORDER BY id DESC LIMIT 1",
+                params![actor, guild],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("latest Dig detail");
+        serde_json::from_str(&raw).expect("latest Dig detail JSON")
+    }
+
     #[test]
     fn mana_base_yield_variance_and_steady_bonus_share_live_entropy() {
         let red = cama_domain::mana::ManaEffects::for_color(Some("Red"), Some("Mountain"));
@@ -8946,6 +8967,28 @@ mod tests {
     }
 
     #[test]
+    fn authored_storm_ids_do_not_activate_generic_storm_combo_or_stormcaller() {
+        let blue = cama_domain::mana::ManaEffects::for_color(Some("Blue"), Some("Island"));
+        let relics = crate::dig_relic_rework::RelicSet::new(["stormcaller"]);
+        for authored in ["temporal_storm", "whisper_storm"] {
+            let code = super::weather_code(Some(authored));
+            assert_eq!(code, Some(authored));
+            assert!(!cama_domain::mana::weather_combo_modifiers(&blue, code).applied);
+            assert!(!crate::dig_relic_rework::storm_negates_hazard(
+                &relics, code
+            ));
+        }
+        assert!(
+            cama_domain::mana::weather_combo_modifiers(&blue, super::weather_code(Some("storm")),)
+                .applied
+        );
+        assert!(crate::dig_relic_rework::storm_negates_hazard(
+            &relics,
+            super::weather_code(Some("storm")),
+        ));
+    }
+
+    #[test]
     fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_plain() {
         assert_stamina_cooldown_boundary("[]", 1_800);
     }
@@ -8953,6 +8996,129 @@ mod tests {
     #[test]
     fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_restless() {
         assert_stamina_cooldown_boundary(r#"[{"id":"restless"}]"#, 3_600);
+    }
+
+    #[test]
+    fn sqlite_configured_minigame_scale_applies_to_first_and_normal_dig() {
+        let first_control = NamedTempFile::new().expect("first control database");
+        let first_scaled = NamedTempFile::new().expect("first scaled database");
+        let first_actor = 60_087;
+        let first_guild = 60_088;
+        let first_now = 1_900_083_500;
+        for database in [&first_control, &first_scaled] {
+            seed_live_runtime_tunnel(database, first_actor, first_guild, first_now, 0, 0, None);
+        }
+        let first_request = DigRuntimeRequest {
+            discord_id: first_actor,
+            guild_id: first_guild,
+            now: first_now,
+            paid: false,
+            forced_event: false,
+        };
+        let first_control_outcome = DigRuntimeService::sqlite(first_control.path())
+            .dig(first_request)
+            .expect("default-scale first Dig");
+        let half_scale =
+            DigRuntimeConfig::default().with_runtime_policy(0.5, EconomyEventConfig::default());
+        let first_scaled_outcome =
+            DigRuntimeService::sqlite_with_config(first_scaled.path(), half_scale.clone())
+                .dig(first_request)
+                .expect("half-scale first Dig");
+        let first_control_detail = latest_dig_detail(&first_control, first_actor, first_guild);
+        let first_scaled_detail = latest_dig_detail(&first_scaled, first_actor, first_guild);
+        let first_structural = first_control_detail["minigame_scaled_jc"]
+            .as_i64()
+            .expect("first default-scale JC");
+        let first_expected = scale_dig_minigame_jc(first_structural, 500_000);
+        assert_eq!(
+            first_scaled_detail["minigame_scaled_jc"].as_i64(),
+            Some(first_expected),
+        );
+        assert_eq!(
+            first_scaled_outcome.jc_earned,
+            scale_positive_dig_jc(first_expected),
+        );
+        assert_eq!(
+            SqliteDigRuntimeStore::new(first_scaled.path())
+                .snapshot(first_actor, first_guild)
+                .expect("reload scaled first Dig")
+                .tunnel
+                .expect("scaled first tunnel")
+                .total_jc_earned,
+            first_scaled_outcome.jc_earned,
+        );
+        assert!(first_control_outcome.first_dig);
+
+        let normal_control = NamedTempFile::new().expect("normal control database");
+        let normal_scaled = NamedTempFile::new().expect("normal scaled database");
+        let normal_actor = 60_095;
+        let normal_guild = 60_096;
+        let normal_now = 1_900_084_750;
+        for database in [&normal_control, &normal_scaled] {
+            seed_live_runtime_tunnel(
+                database,
+                normal_actor,
+                normal_guild,
+                normal_now,
+                76,
+                1,
+                Some(normal_now - 7_200),
+            );
+            Connection::open(database.path())
+                .expect("normal scale boss-progress connection")
+                .execute(
+                    "UPDATE tunnels SET boss_progress=?1
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        normal_actor,
+                        normal_guild,
+                    ],
+                )
+                .expect("seed normal scale defeated bosses");
+        }
+        let normal_dig_now =
+            find_non_cave_dig_time_with_jc(normal_actor, normal_guild, normal_now, 76, 3);
+        let normal_today =
+            game_date_for_timestamp(normal_dig_now as f64).expect("normal scale date");
+        for database in [&normal_control, &normal_scaled] {
+            seed_two_weather_rows(
+                database,
+                normal_guild,
+                &normal_today,
+                "Magma",
+                "fossil_rush",
+            );
+        }
+        let normal_request = DigRuntimeRequest {
+            discord_id: normal_actor,
+            guild_id: normal_guild,
+            now: normal_dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let normal_control_outcome = DigRuntimeService::sqlite(normal_control.path())
+            .dig(normal_request)
+            .expect("default-scale normal Dig");
+        let normal_scaled_outcome =
+            DigRuntimeService::sqlite_with_config(normal_scaled.path(), half_scale)
+                .dig(normal_request)
+                .expect("half-scale normal Dig");
+        let normal_control_detail = latest_dig_detail(&normal_control, normal_actor, normal_guild);
+        let normal_scaled_detail = latest_dig_detail(&normal_scaled, normal_actor, normal_guild);
+        let normal_structural = normal_control_detail["gross_jc"]
+            .as_i64()
+            .expect("normal default-scale gross");
+        let normal_expected = scale_dig_minigame_jc(normal_structural, 500_000);
+        assert_eq!(
+            normal_scaled_detail["gross_jc"].as_i64(),
+            Some(normal_expected)
+        );
+        assert_eq!(
+            normal_scaled_outcome.jc_earned,
+            scale_positive_dig_jc(normal_expected),
+        );
+        assert!(normal_control_outcome.jc_earned >= normal_scaled_outcome.jc_earned);
     }
 
     #[test]

@@ -137,12 +137,17 @@ fn effective_yield_multiplier(explicit: Option<i64>, legacy_percent: i64) -> i64
     explicit.unwrap_or_else(|| percent_to_yield_millionths(legacy_percent))
 }
 
-fn scale_dig_minigame_jc(amount: i64) -> i64 {
-    // The Rust Dig adapter currently supplies the authored default scale of
-    // 1.0. Keep this boundary integer-only; if deployment-configurable scales
-    // are admitted later, they need an explicit fixed-point field rather than
-    // silently reintroducing float arithmetic here.
-    amount
+pub(crate) fn scale_dig_minigame_jc(amount: i64, scale_millionths: i64) -> i64 {
+    if amount == 0 {
+        return 0;
+    }
+    let magnitude = ((i128::from(amount.unsigned_abs())
+        .saturating_mul(i128::from(scale_millionths.max(0)))
+        + i128::from(DIG_YIELD_MULTIPLIER_SCALE / 2))
+        / i128::from(DIG_YIELD_MULTIPLIER_SCALE))
+    .max(1)
+    .min(i128::from(i64::MAX)) as i64;
+    if amount > 0 { magnitude } else { -magnitude }
 }
 
 fn scale_dig_helltide_tax(amount: i64) -> i64 {
@@ -713,6 +718,9 @@ pub struct DigOutcomeInput {
     /// Cave/event branches apply the daily economy before the central
     /// positive-JC scale; ordinary Digs apply it after structural bonuses.
     pub economy_before_positive_scale: bool,
+    /// Deployment minigame scale in millionths. Non-zero authored rewards
+    /// retain Python's half-up rounding and minimum magnitude of one.
+    pub minigame_jc_delta_scale_millionths: i64,
     /// Daily streak bonus is a separate bucket and is included in the
     /// economy-event basis for ordinary positive Digs only.
     pub streak_bonus: i64,
@@ -750,6 +758,7 @@ impl Default for DigOutcomeInput {
             overgrowth_bonus: 0,
             economy_reward_multiplier_basis_points: 10_000,
             economy_before_positive_scale: false,
+            minigame_jc_delta_scale_millionths: DIG_YIELD_MULTIPLIER_SCALE,
             streak_bonus: 0,
             streak_bonus_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
             milestone_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
@@ -868,7 +877,10 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     } else {
         milestone_bonus.saturating_add(streak_bonus)
     });
-    let gross_jc = scale_dig_minigame_jc(structural_base.max(0));
+    let gross_jc = scale_dig_minigame_jc(
+        structural_base.max(0),
+        input.minigame_jc_delta_scale_millionths,
+    );
     let scaled_base = if input.economy_before_positive_scale {
         scale_positive_dig_jc(apply_economy(gross_jc))
     } else {
