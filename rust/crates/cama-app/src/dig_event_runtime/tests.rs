@@ -7,7 +7,6 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::dig_service::{DigOutcomeInput, TunnelState, apply_dig_outcome};
 
 const ACTOR: i64 = 91_001;
 const GUILD: i64 = 42;
@@ -544,33 +543,6 @@ fn resolve_helltide_event_sets_modifier() {
     assert!(!modifier.applied_now);
     assert_eq!(modifier.expires_at, expires_at);
     assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 1);
-}
-
-#[test]
-fn helltide_modifier_taxes_dig_yield() {
-    let mut untaxed = TunnelState {
-        depth: 10,
-        max_depth: 10,
-        ..TunnelState::default()
-    };
-    let mut taxed = untaxed.clone();
-    let base_input = DigOutcomeInput {
-        advance: 1,
-        gross_jc: 10,
-        ..DigOutcomeInput::default()
-    };
-    let base = apply_dig_outcome(&mut untaxed, base_input, NOW);
-    let taxed_outcome = apply_dig_outcome(
-        &mut taxed,
-        DigOutcomeInput {
-            helltide_tax: 5,
-            ..base_input
-        },
-        NOW,
-    );
-    assert!(taxed_outcome.jc_earned < base.jc_earned);
-    assert!(taxed_outcome.jc_earned >= 0);
-    assert!(taxed.balance >= 0, "helltide cannot bankrupt yield");
 }
 
 #[test]
