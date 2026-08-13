@@ -670,7 +670,10 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    if inventory::required_count() == 0 {
+    if inventory::global_command_sync_allowed(
+        application_config.runtime.rust_cutover_candidate,
+        inventory::required_count(),
+    ) {
         registry.enable_global_command_sync();
     }
     let registry = registry.build();

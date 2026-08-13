@@ -638,6 +638,7 @@ mod tests {
             db_path: "/tmp/rejected-cama.db".into(),
             reconnect_initial: Duration::ZERO,
             reconnect_max: Duration::ZERO,
+            rust_cutover_candidate: false,
         };
         let runtime = Runtime::new(
             config,

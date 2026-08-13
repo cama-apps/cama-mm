@@ -10,4 +10,6 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
     environment:
       BOT_RUNTIME: ${BOT_RUNTIME:?BOT_RUNTIME must be rust for the Rust override}
+      # Global command replacement is a separate, exact-value runtime opt-in.
+      RUST_CUTOVER_CANDIDATE: ${RUST_CUTOVER_CANDIDATE:-false}
     command: ["serve"]

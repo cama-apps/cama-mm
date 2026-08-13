@@ -45,6 +45,11 @@ pub struct RuntimeConfig {
     pub db_path: PathBuf,
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
+    /// Explicit opt-in for replacing Discord's global command tree.
+    ///
+    /// This is deliberately stricter than the ordinary Python-compatible
+    /// boolean parser: only the exact lowercase value `true` enables it.
+    pub rust_cutover_candidate: bool,
 }
 
 impl RuntimeConfig {
@@ -70,6 +75,8 @@ impl RuntimeConfig {
             "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
             DEFAULT_RECONNECT_MAX_SECONDS,
         )?;
+        let rust_cutover_candidate =
+            matches!(lookup("RUST_CUTOVER_CANDIDATE").as_deref(), Some("true"));
         if reconnect_initial > reconnect_max {
             return Err(ConfigError::ReconnectRange {
                 initial: reconnect_initial,
@@ -82,6 +89,7 @@ impl RuntimeConfig {
             db_path,
             reconnect_initial: Duration::from_secs(reconnect_initial),
             reconnect_max: Duration::from_secs(reconnect_max),
+            rust_cutover_candidate,
         })
     }
 }
@@ -157,5 +165,39 @@ mod tests {
         let parsed = config(&[("DISCORD_BOT_TOKEN", "token"), ("DB_PATH", "")])
             .expect("configuration parses before database admission");
         assert_eq!(parsed.db_path, PathBuf::from(""));
+    }
+
+    #[test]
+    fn rust_cutover_candidate_requires_exact_lowercase_true() {
+        let disabled_values = [
+            None,
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some(" true"),
+            Some("true "),
+        ];
+        for value in disabled_values {
+            let mut values = vec![("DISCORD_BOT_TOKEN", "token")];
+            if let Some(value) = value {
+                values.push(("RUST_CUTOVER_CANDIDATE", value));
+            }
+            assert!(
+                !config(&values)
+                    .expect("candidate flag must not make config invalid")
+                    .rust_cutover_candidate,
+                "candidate value {value:?} must remain disabled"
+            );
+        }
+
+        assert!(
+            config(&[
+                ("DISCORD_BOT_TOKEN", "token"),
+                ("RUST_CUTOVER_CANDIDATE", "true"),
+            ])
+            .expect("exact candidate flag")
+            .rust_cutover_candidate
+        );
     }
 }

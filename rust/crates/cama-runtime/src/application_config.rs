@@ -757,6 +757,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
         "CAMA_GATEWAY_RECONNECT_INITIAL_SECONDS",
         "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
         "OPENDOTA_API_KEY",
+        "RUST_CUTOVER_CANDIDATE",
     ]);
     keys
 }
