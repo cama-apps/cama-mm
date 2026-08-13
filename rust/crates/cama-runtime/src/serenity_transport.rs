@@ -24,8 +24,9 @@ use serenity::all::{
     CreateModal, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
     EditAttachments, EditInteractionResponse, EditMessage, EditThread, EventHandler,
     GatewayIntents, GetMessages, Guild, GuildChannel, GuildId, GuildMemberUpdateEvent,
-    InputTextStyle, Interaction, Member, MessageId, ModalInteraction, Nonce, OnlineStatus,
-    Permissions, Reaction, ReactionType, Ready, UnavailableGuild, User, UserId,
+    InputTextStyle, Interaction, Member, MessageId, MessageInteractionMetadata, ModalInteraction,
+    Nonce, OnlineStatus, Permissions, Reaction, ReactionType, Ready, UnavailableGuild, User,
+    UserId,
 };
 use serenity::cache::Cache;
 use serenity::gateway::{ConnectionStage, ShardManager};
@@ -33,6 +34,9 @@ use serenity::http::Http;
 use tracing::{error, info, warn};
 
 use crate::admin_provider::{AdminCommandSyncResult, AdminDiscordControl, AdminDiscordHealth};
+use crate::dig_provider::{
+    DigChannelSnapshot, DigDiscordPort, DigPublicHistory, DigPublicHistoryMessage,
+};
 use crate::discord_transport::{
     DiscordDirectMessageError, DiscordDirectMessageErrorKind, DiscordEmoji,
     DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt, DiscordMessageSnapshot,
@@ -305,6 +309,196 @@ impl ShopDiscordPort for SerenityDiscordTransport {
             }
         });
         Ok(())
+    }
+}
+
+#[async_trait]
+impl DigDiscordPort for SerenityDiscordTransport {
+    async fn dig_channel(&self, channel_id: i64) -> Result<Option<DigChannelSnapshot>, String> {
+        let context = self.context()?;
+        let channel_id = u64::try_from(channel_id)
+            .map(ChannelId::new)
+            .map_err(|_| "Dig channel id is negative".to_owned())?;
+        let cached = context.cache.guilds().into_iter().find_map(|guild_id| {
+            context.cache.guild(guild_id).and_then(|guild| {
+                guild.channels.get(&channel_id).cloned().or_else(|| {
+                    guild
+                        .threads
+                        .iter()
+                        .find(|thread| thread.id == channel_id)
+                        .cloned()
+                })
+            })
+        });
+        let channel = if let Some(channel) = cached {
+            Some(channel)
+        } else {
+            match context.http.get_channel(channel_id).await {
+                Ok(Channel::Guild(channel)) => Some(channel),
+                Ok(Channel::Private(_)) => None,
+                Err(serenity::Error::Http(error))
+                    if error
+                        .status_code()
+                        .is_some_and(|status| status.as_u16() == 404) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.to_string()),
+                #[allow(unreachable_patterns)]
+                Ok(_) => None,
+            }
+        };
+        Ok(channel.and_then(|channel| dig_channel_snapshot(&context, &channel)))
+    }
+
+    async fn dig_channel_is_gamba(&self, guild_id: i64, channel_id: i64) -> Result<bool, String> {
+        PredictionCommandDiscordPort::prediction_channel_is_gamba(self, guild_id, channel_id).await
+    }
+
+    async fn dig_user_avatar_url(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+    ) -> Result<Option<String>, String> {
+        ShopDiscordPort::shop_user_avatar_url(self, guild_id, user_id).await
+    }
+
+    async fn dig_send_public(
+        &self,
+        channel_id: i64,
+        response: InteractionResponse,
+    ) -> Result<(), String> {
+        let context = self.context()?;
+        let channel_id = u64::try_from(channel_id)
+            .map(ChannelId::new)
+            .map_err(|_| "Dig channel id is negative".to_owned())?;
+        channel_id
+            .send_message(&context.http, channel_response(response))
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn dig_send_public_once(
+        &self,
+        channel_id: i64,
+        response: InteractionResponse,
+        nonce: &str,
+    ) -> Result<InteractionMessageReceipt, String> {
+        let context = self.context()?;
+        let channel_id = u64::try_from(channel_id)
+            .map(ChannelId::new)
+            .map_err(|_| "Dig channel id is negative".to_owned())?;
+        channel_id
+            .send_message(
+                &context.http,
+                channel_response(response)
+                    .nonce(Nonce::String(nonce.to_owned()))
+                    .enforce_nonce(true),
+            )
+            .await
+            .map(|message| InteractionMessageReceipt {
+                message_id: message.id.get(),
+                channel_id: message.channel_id.get(),
+                delivery: InteractionMessageDelivery::ChannelFallback,
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    async fn dig_public_history(
+        &self,
+        channel_id: i64,
+        after_unix_seconds: i64,
+        limit: usize,
+    ) -> Result<DigPublicHistory, String> {
+        let context = self.context()?;
+        let channel_id = u64::try_from(channel_id)
+            .map(ChannelId::new)
+            .map_err(|_| "Dig channel id is negative".to_owned())?;
+        let bot_user_id = context
+            .http
+            .get_current_user()
+            .await
+            .map_err(|error| error.to_string())?
+            .id
+            .get();
+        let mut before = None;
+        let mut messages = Vec::new();
+        while messages.len() < limit {
+            let page_limit = (limit - messages.len()).min(100) as u8;
+            let mut request = GetMessages::new().limit(page_limit);
+            if let Some(message_id) = before {
+                request = request.before(message_id);
+            }
+            let page = channel_id
+                .messages(&context.http, request)
+                .await
+                .map_err(|error| error.to_string())?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            let oldest_before_cutoff = page
+                .last()
+                .is_some_and(|message| message.timestamp.unix_timestamp() < after_unix_seconds);
+            before = page.last().map(|message| message.id);
+            for message in page {
+                if message.timestamp.unix_timestamp() < after_unix_seconds {
+                    continue;
+                }
+                messages.push(DigPublicHistoryMessage {
+                    message_id: message.id.get(),
+                    author_id: message.author.id.get(),
+                    nonce: message.nonce.map(|nonce| match nonce {
+                        Nonce::String(value) => value,
+                        Nonce::Number(value) => value.to_string(),
+                    }),
+                    interaction_id: message
+                        .interaction_metadata
+                        .as_deref()
+                        .and_then(|metadata| match metadata {
+                            MessageInteractionMetadata::Command(metadata) => {
+                                Some(metadata.id.get())
+                            }
+                            MessageInteractionMetadata::Component(metadata) => {
+                                Some(metadata.id.get())
+                            }
+                            MessageInteractionMetadata::ModalSubmit(metadata) => {
+                                Some(metadata.id.get())
+                            }
+                            MessageInteractionMetadata::Unknown(_) => None,
+                            _ => None,
+                        }),
+                    content: message.content,
+                    embed_titles: message
+                        .embeds
+                        .iter()
+                        .map(|embed| embed.title.clone())
+                        .collect(),
+                    embed_descriptions: message
+                        .embeds
+                        .iter()
+                        .map(|embed| embed.description.clone())
+                        .collect(),
+                });
+            }
+            if page_len < usize::from(page_limit) || oldest_before_cutoff {
+                break;
+            }
+        }
+        Ok(DigPublicHistory {
+            bot_user_id,
+            messages,
+        })
+    }
+
+    async fn dig_send_temporary(
+        &self,
+        channel_id: i64,
+        response: InteractionResponse,
+        delete_after: Duration,
+    ) -> Result<(), String> {
+        ShopDiscordPort::shop_send_temporary(self, channel_id, response, delete_after).await
     }
 }
 
@@ -2122,6 +2316,39 @@ fn serenity_duel_channel_snapshot(
         name: channel.name.clone(),
         kind,
         can_send,
+    })
+}
+
+fn dig_channel_snapshot(
+    context: &SerenityContext,
+    channel: &GuildChannel,
+) -> Option<DigChannelSnapshot> {
+    let id = i64::try_from(channel.id.get()).ok()?;
+    let guild_id = i64::try_from(channel.guild_id.get()).ok()?;
+    let is_thread = matches!(
+        channel.kind,
+        ChannelType::NewsThread | ChannelType::PublicThread | ChannelType::PrivateThread
+    );
+    let is_text = is_thread || matches!(channel.kind, ChannelType::Text | ChannelType::News);
+    let can_send = context.cache.guild(channel.guild_id).is_some_and(|guild| {
+        let Some(member) = guild.members.get(&context.cache.current_user().id) else {
+            return true;
+        };
+        let permissions = guild.user_permissions_in(channel, member);
+        if is_thread {
+            permissions.send_messages_in_threads()
+        } else {
+            permissions.send_messages()
+        }
+    });
+    Some(DigChannelSnapshot {
+        id,
+        guild_id: Some(guild_id),
+        parent_id: channel
+            .parent_id
+            .and_then(|parent| i64::try_from(parent.get()).ok()),
+        can_send,
+        is_text,
     })
 }
 
