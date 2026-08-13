@@ -356,13 +356,19 @@ impl MatchRuntimeFixture {
     }
 
     fn new_with_discord(discord: Arc<dyn DiscordTransport>) -> Self {
+        Self::new_with_config_and_discord(production_test_config(), discord)
+    }
+
+    fn new_with_config_and_discord(
+        config: ApplicationConfig,
+        discord: Arc<dyn DiscordTransport>,
+    ) -> Self {
         use crate::lobby_provider::{LobbyRegistrationProvider, LobbyRuntimeConfig};
         use cama_app::draft::DraftStateManager;
         use cama_app::service_container::ServiceContainer;
 
         let database = NamedTempFile::new().expect("temporary production match database");
         initialize_or_migrate(database.path()).expect("migrate production match fixture");
-        let config = production_test_config();
         let drafts = Arc::new(DraftStateManager::default());
         let lobby = LobbyRegistrationProvider::new(
             database.path(),
@@ -3452,6 +3458,126 @@ fn production_goodness_score_includes_configured_soft_avoid_penalty() {
 }
 
 #[test]
+fn test_goodness_includes_low_priority_selection_penalty_and_team_bonus() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let baseline = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    let low_priority_ids = player_ids[..2].to_vec();
+    let connection =
+        Connection::open(fixture.database.path()).expect("open low-priority goodness fixture");
+    for player_id in &low_priority_ids {
+        connection
+            .execute(
+                "INSERT INTO low_priority_state(
+                     discord_id,guild_id,wins_required,wins_remaining,
+                     start_pending_match_id,active,set_by
+                 ) VALUES(?1,?2,3,3,NULL,1,901)",
+                params![player_id, GUILD],
+            )
+            .expect("seed active low-priority player");
+    }
+    let penalized = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let low_priority = low_priority_ids.iter().copied().collect::<HashSet<_>>();
+    let radiant = penalized
+        .pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let dire = penalized
+        .pending
+        .state
+        .dire_team_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    assert!(low_priority.is_subset(&radiant) || low_priority.is_subset(&dire));
+    let baseline_score =
+        extra_f64(&baseline.pending.state, "goodness_score").expect("baseline goodness");
+    let penalized_score =
+        extra_f64(&penalized.pending.state, "goodness_score").expect("penalized goodness");
+    assert_eq!(penalized_score - baseline_score, 1_100.0);
+}
+
+#[test]
+fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
+    let mut config = production_test_config();
+    config.values.off_role_flat_value_penalty = 200.0;
+    let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+        config,
+        Arc::new(PublicationDiscord::default()),
+    );
+    let player_specs = [
+        (5_000_i64, 3_000_i64, "1"),
+        (5_001, 2_800, "2"),
+        (5_002, 2_600, "3"),
+        (5_003, 2_400, "4"),
+        (5_004, 2_200, "5"),
+        (5_005, 2_000, "2"),
+        (5_006, 2_700, "2"),
+        (5_007, 2_500, "3"),
+        (5_008, 2_300, "4"),
+        (5_009, 2_100, "5"),
+    ];
+    let player_ids = fixture.add_shuffle_pool_from(5_000, player_specs.len(), false);
+    let repository = PlayerRepository::new(fixture.database.path());
+    for (player_id, rating, preferred_role) in player_specs {
+        repository
+            .update_roles(player_id, Some(GUILD), &[preferred_role.to_owned()])
+            .expect("set configured display role");
+        repository
+            .update_glicko_rating(player_id, Some(GUILD), rating as f64, 350.0, 0.06)
+            .expect("set configured display rating");
+    }
+    let inputs = repository
+        .get_shuffle_inputs(&player_ids, Some(GUILD))
+        .expect("load configured display players");
+    let players_by_id = player_ids
+        .iter()
+        .map(|player_id| {
+            (
+                *player_id,
+                inputs
+                    .players
+                    .iter()
+                    .find(|player| player.discord_id == Some(*player_id))
+                    .cloned()
+                    .expect("configured display player"),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let team = |ids: std::ops::Range<i64>, roles: [&str; 5]| {
+        Team::new(
+            ids.map(|player_id| players_by_id[&player_id].clone())
+                .collect(),
+            Some(roles.map(str::to_owned).to_vec()),
+        )
+        .expect("fixed display team")
+    };
+    let radiant = team(5_000..5_005, ["1", "2", "3", "4", "5"]);
+    let dire = team(5_005..5_010, ["1", "2", "3", "4", "5"]);
+    assert_eq!(
+        fixture.provider.handler.config.off_role_flat_value_penalty,
+        200.0
+    );
+    let configured = [radiant, dire]
+        .into_iter()
+        .map(|team| {
+            team.get_team_value_with_off_role_value_penalty(
+                true,
+                fixture.provider.handler.config.off_role_multiplier,
+                false,
+                false,
+                fixture.provider.handler.config.off_role_flat_value_penalty,
+            )
+            .expect("calculate configured display value")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(configured, [13_000.0, 11_300.0]);
+}
+
+#[test]
 fn record_match_applies_one_exclusion_decay_per_inclusion_exactly_once() {
     let fixture = MatchRuntimeFixture::new();
     let mut pending = fixture.pending(unix_seconds() + 120);
@@ -4098,7 +4224,7 @@ impl DiscordTransport for PublicationProbeDiscord {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_match_completion_events_dm_only_the_affected_players() {
+async fn test_match_completion_events_skip_lowprio_dms_but_notify_suspensions() {
     use cama_db::moderation::{ModerationSource, RecordModerationEventRequest};
 
     let discord = Arc::new(PublicationProbeDiscord::default());
@@ -4145,17 +4271,10 @@ async fn test_match_completion_events_dm_only_the_affected_players() {
             .iter()
             .map(|(discord_id, _)| *discord_id)
             .collect::<Vec<_>>(),
-        vec![101, 202]
+        vec![202]
     );
     assert!(
         direct_messages[0]
-            .1
-            .response
-            .content
-            .contains("low-priority win requirement")
-    );
-    assert!(
-        direct_messages[1]
             .1
             .response
             .content
@@ -4166,6 +4285,12 @@ async fn test_match_completion_events_dm_only_the_affected_players() {
             .iter()
             .all(|(_, message)| message.response.content.contains("#314"))
     );
+    assert!(direct_messages.iter().all(|(_, message)| {
+        !message
+            .response
+            .content
+            .contains("low-priority win requirement")
+    }));
 }
 
 fn settled_bet(

@@ -17,19 +17,19 @@ pub struct CommandMetadata {
 pub const COMMANDS: [CommandMetadata; 4] = [
     CommandMetadata {
         name: "add",
-        manage_guild: true,
+        manage_guild: false,
     },
     CommandMetadata {
         name: "remove",
-        manage_guild: true,
+        manage_guild: false,
     },
     CommandMetadata {
         name: "status",
-        manage_guild: true,
+        manage_guild: false,
     },
     CommandMetadata {
         name: "list",
-        manage_guild: true,
+        manage_guild: false,
     },
 ];
 
@@ -55,6 +55,14 @@ pub trait LowPriorityCommandPort {
     -> Result<Option<LowPriorityState>, String>;
 
     fn set_low_priority(&self, input: &SetLowPriorityInput) -> Result<LowPriorityState, String>;
+
+    fn clear_low_priority(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        removed_by: i64,
+        reason: Option<&str>,
+    ) -> Result<bool, String>;
 }
 
 impl LowPriorityCommandPort for LowPriorityRepository {
@@ -69,6 +77,23 @@ impl LowPriorityCommandPort for LowPriorityRepository {
 
     fn set_low_priority(&self, input: &SetLowPriorityInput) -> Result<LowPriorityState, String> {
         LowPriorityRepository::set_low_priority(self, input).map_err(|error| error.to_string())
+    }
+
+    fn clear_low_priority(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        removed_by: i64,
+        reason: Option<&str>,
+    ) -> Result<bool, String> {
+        LowPriorityRepository::clear_low_priority(
+            self,
+            discord_id,
+            Some(guild_id),
+            removed_by,
+            reason,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -177,26 +202,13 @@ where
             });
         }
 
-        let mut direct_message = format!(
-            "You were placed in low priority for **{} wins**.\n\
-             The matchmaker is asking for a small course correction.",
-            state.wins_required
-        );
-        if let Some(reason) = reason {
-            direct_message.push_str(&format!("\nReason: {reason}"));
-        }
-        direct_message.push_str(&format!(
-            "\nWin {} recorded games to return to regular matchmaking.\n\
-             Use `/player lobby status` to view your progress.",
-            state.wins_required
-        ));
         Ok(CommandDelivery {
             response: format!(
                 "✅ Updated matchmaking state for <@{target_id}>. {} wins required.",
                 state.wins_remaining
             ),
             ephemeral: true,
-            direct_message: Some(direct_message),
+            direct_message: None,
         })
     }
 
@@ -229,6 +241,51 @@ where
         };
         Ok(CommandDelivery {
             response,
+            ephemeral: true,
+            direct_message: None,
+        })
+    }
+
+    pub fn remove(
+        &self,
+        admin_allowed: bool,
+        admin_id: i64,
+        target_id: i64,
+        guild_id: i64,
+        reason: Option<&str>,
+    ) -> Result<CommandDelivery, String> {
+        if !admin_allowed {
+            return Ok(CommandDelivery {
+                response: "❌ Admin only! You need Administrator or Manage Server permissions."
+                    .to_owned(),
+                ephemeral: true,
+                direct_message: None,
+            });
+        }
+        let previous = self.repository.get_state(target_id, guild_id)?;
+        let removed = self
+            .repository
+            .clear_low_priority(target_id, guild_id, admin_id, reason)?;
+        if removed && let Some(moderation) = self.moderation {
+            let previous = previous.as_ref();
+            let _ = moderation.record_event(LowPriorityAuditEvent {
+                discord_id: target_id,
+                guild_id,
+                event_type: "lowprio_clear",
+                wins_required: previous.map_or(DEFAULT_REQUIRED_WINS, |state| state.wins_required),
+                wins_remaining: 0,
+                pending_match_watermark: previous.and_then(|state| state.start_pending_match_id),
+                actor_id: admin_id,
+                reason: reason.map(str::to_owned),
+                source: "admin",
+            });
+        }
+        Ok(CommandDelivery {
+            response: if removed {
+                format!("✅ Cleared matchmaking state for <@{target_id}>.")
+            } else {
+                format!("<@{target_id}> does not have active restricted matchmaking state.")
+            },
             ephemeral: true,
             direct_message: None,
         })
@@ -289,6 +346,16 @@ mod tests {
             self.set_calls.lock().unwrap().push(input.clone());
             Ok(self.set_result.lock().unwrap().clone().unwrap())
         }
+
+        fn clear_low_priority(
+            &self,
+            _discord_id: i64,
+            _guild_id: i64,
+            _removed_by: i64,
+            _reason: Option<&str>,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
     }
 
     #[derive(Default)]
@@ -328,8 +395,8 @@ mod tests {
     }
 
     #[test]
-    fn test_low_priority_commands_require_manage_guild_by_default() {
-        assert!(COMMANDS.iter().all(|command| command.manage_guild));
+    fn test_low_priority_commands_have_no_static_permission_gate() {
+        assert!(COMMANDS.iter().all(|command| !command.manage_guild));
         assert_eq!(
             COMMANDS.map(|command| command.name),
             ["add", "remove", "status", "list"]
@@ -385,9 +452,7 @@ mod tests {
             }]
         );
         assert!(delivery.response.contains("7 wins required"));
-        let dm = delivery.direct_message.unwrap();
-        assert!(dm.contains("7 wins"));
-        assert!(dm.contains("internal"));
+        assert!(delivery.direct_message.is_none());
         assert!(delivery.ephemeral);
     }
 
@@ -426,5 +491,36 @@ mod tests {
         assert!(delivery.response.contains("<@901>"));
         assert!(delivery.response.contains("2026-08-05 12:34:56"));
         assert!(delivery.ephemeral);
+    }
+
+    #[test]
+    fn test_lowprio_remove_clears_state_and_records_audit_without_dm() {
+        let players = FakePlayers {
+            exists: true,
+            ..FakePlayers::default()
+        };
+        let repository = FakeRepository::default();
+        *repository.get_result.lock().unwrap() = Some(state(7, 3));
+        let moderation = FakeModeration::default();
+        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
+            .remove(true, 900, 42, 77, Some("internal"))
+            .unwrap();
+
+        assert!(delivery.direct_message.is_none());
+        assert!(delivery.response.contains("Cleared matchmaking state"));
+        assert_eq!(
+            *moderation.events.lock().unwrap(),
+            [LowPriorityAuditEvent {
+                discord_id: 42,
+                guild_id: 77,
+                event_type: "lowprio_clear",
+                wins_required: 7,
+                wins_remaining: 0,
+                pending_match_watermark: Some(314),
+                actor_id: 900,
+                reason: Some("internal".to_owned()),
+                source: "admin",
+            }]
+        );
     }
 }

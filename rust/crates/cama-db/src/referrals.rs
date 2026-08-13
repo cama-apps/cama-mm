@@ -87,8 +87,8 @@ pub enum ReferralRepositoryError {
     SelfReferral,
     #[error("Referrer must be registered in this guild.")]
     ReferrerNotRegistered,
-    #[error("That player is already registered in this guild.")]
-    ReferredAlreadyRegistered,
+    #[error("That player has already played a game in this guild.")]
+    ReferredAlreadyPlayed,
     #[error("That player already has a referral.")]
     AlreadyReferred,
     #[error("a referral match must have at least one participant and no duplicate players")]
@@ -124,7 +124,7 @@ impl ReferralRepository {
         open_runtime_connection(&self.path)
     }
 
-    /// Enroll an unregistered guild member under a registered referrer.
+    /// Enroll a player who has not yet played a guild game under a registered referrer.
     ///
     /// `BEGIN IMMEDIATE` serializes the existence checks and the unique insert, so two processes
     /// racing to enroll the same target produce exactly one success.
@@ -145,8 +145,9 @@ impl ReferralRepository {
         if !player_exists(&transaction, referrer_id, guild_id)? {
             return Err(ReferralRepositoryError::ReferrerNotRegistered);
         }
-        if player_exists(&transaction, referred_id, guild_id)? {
-            return Err(ReferralRepositoryError::ReferredAlreadyRegistered);
+        if player_games_played(&transaction, referred_id, guild_id)?.is_some_and(|games| games > 0)
+        {
+            return Err(ReferralRepositoryError::ReferredAlreadyPlayed);
         }
         if referral_exists(&transaction, referred_id, guild_id)? {
             return Err(ReferralRepositoryError::AlreadyReferred);
@@ -447,6 +448,21 @@ fn player_exists(
         )
         .optional()
         .map(|row| row.is_some())
+}
+
+fn player_games_played(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+) -> Result<Option<i64>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT COALESCE(wins, 0) + COALESCE(losses, 0)
+             FROM players WHERE discord_id = ?1 AND guild_id = ?2",
+            params![discord_id, guild_id],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 fn referral_exists(

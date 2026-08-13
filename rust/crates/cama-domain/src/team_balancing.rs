@@ -31,6 +31,7 @@ pub fn role_parity_delta_from_values(team1_values: &[f64], team2_values: &[f64])
 pub struct TeamBalancingService {
     pub use_glicko: bool,
     pub off_role_multiplier: f64,
+    pub off_role_flat_value_penalty: f64,
     pub off_role_flat_penalty: f64,
     pub role_matchup_delta_weight: f64,
 }
@@ -39,8 +40,9 @@ impl Default for TeamBalancingService {
     fn default() -> Self {
         Self {
             use_glicko: true,
-            off_role_multiplier: 0.9,
-            off_role_flat_penalty: 50.0,
+            off_role_multiplier: 0.95,
+            off_role_flat_value_penalty: 100.0,
+            off_role_flat_penalty: 500.0,
             role_matchup_delta_weight: 1.0,
         }
     }
@@ -55,9 +57,28 @@ impl TeamBalancingService {
         off_role_flat_penalty: f64,
         role_matchup_delta_weight: f64,
     ) -> Self {
+        Self::new_with_off_role_value_penalty(
+            use_glicko,
+            off_role_multiplier,
+            100.0,
+            off_role_flat_penalty,
+            role_matchup_delta_weight,
+        )
+    }
+
+    /// Construct a service with both off-role reductions explicit.
+    #[must_use]
+    pub const fn new_with_off_role_value_penalty(
+        use_glicko: bool,
+        off_role_multiplier: f64,
+        off_role_flat_value_penalty: f64,
+        off_role_flat_penalty: f64,
+        role_matchup_delta_weight: f64,
+    ) -> Self {
         Self {
             use_glicko,
             off_role_multiplier,
+            off_role_flat_value_penalty,
             off_role_flat_penalty,
             role_matchup_delta_weight,
         }
@@ -70,11 +91,12 @@ impl TeamBalancingService {
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> Result<f64, TeamError> {
-        team.get_team_value(
+        team.get_team_value_with_off_role_value_penalty(
             self.use_glicko,
             self.off_role_multiplier,
             use_openskill,
             use_jopacoin,
+            self.off_role_flat_value_penalty,
         )
     }
 
@@ -138,12 +160,13 @@ impl TeamBalancingService {
         use_jopacoin: bool,
     ) -> Result<[f64; 5], TeamError> {
         let role_value = |role| {
-            team.get_player_by_role(
+            team.get_player_by_role_with_off_role_value_penalty(
                 role,
                 self.use_glicko,
                 self.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
+                self.off_role_flat_value_penalty,
             )
             .map(|(_, value)| value)
         };
@@ -207,7 +230,8 @@ mod tests {
     #[test]
     fn test_role_matchup_delta_calculation() {
         let (team1, team2) = fixture_teams();
-        let service = TeamBalancingService::new(false, 1.0, 50.0, 1.0);
+        let service =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 0.0, 50.0, 1.0);
 
         assert_eq!(
             service
@@ -228,7 +252,8 @@ mod tests {
             2_700.0
         );
 
-        let weighted_service = TeamBalancingService::new(false, 1.0, 50.0, 0.5);
+        let weighted_service =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 0.0, 50.0, 0.5);
         assert_eq!(
             weighted_service
                 .calculate_role_matchup_delta(&team1, &team2, false, false)
@@ -245,7 +270,8 @@ mod tests {
         let mut swapped_team1 = team1.clone();
         swapped_team1.role_assignments =
             Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
-        let flat_penalty_only = TeamBalancingService::new(false, 1.0, 50.0, 0.0);
+        let flat_penalty_only =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 0.0, 50.0, 0.0);
         assert_eq!(
             flat_penalty_only
                 .calculate_matchup_score(&swapped_team1, &team1, false, false)
@@ -290,7 +316,8 @@ mod tests {
     #[test]
     fn test_service_and_shuffler_metrics_helpers_agree() {
         let (team1, team2) = fixture_teams();
-        let service = TeamBalancingService::new(false, 1.0, 50.0, 1.0);
+        let service =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 0.0, 50.0, 1.0);
         let team1_values = [2_000.0, 1_500.0, 1_200.0, 1_100.0, 1_000.0];
         let team2_values = [1_000.0, 1_500.0, 1_900.0, 1_050.0, 950.0];
 

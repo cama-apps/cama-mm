@@ -257,6 +257,15 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
+    /// Whether a channel is present in the guild's resolved channel cache.
+    ///
+    /// This deliberately answers only the same lookup question as Discord.py
+    /// `Guild.get_channel`: callers decide their own permission policy and
+    /// fall back when a configured ID is stale or unavailable.
+    async fn guild_channel_exists(&self, _guild_id: u64, _channel_id: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+
     async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
 
     async fn archive_thread(&self, thread_id: u64, name: &str, locked: bool) -> Result<(), String>;

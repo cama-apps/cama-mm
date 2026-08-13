@@ -77,6 +77,7 @@ struct MockDiscordState {
     direct_messages: Vec<(u64, DiscordMessage)>,
     direct_edits: Vec<(DiscordMessageReceipt, DiscordMessage)>,
     channel_messages: Vec<(u64, DiscordMessage)>,
+    channels: BTreeSet<(u64, u64)>,
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     reaction_users: Vec<DiscordUserSnapshot>,
     direct_error: Option<crate::discord_transport::DiscordDirectMessageErrorKind>,
@@ -124,6 +125,14 @@ impl MockDiscord {
 
     fn set_direct_error(&self, kind: crate::discord_transport::DiscordDirectMessageErrorKind) {
         self.state.lock().expect("Discord state").direct_error = Some(kind);
+    }
+
+    fn set_channel(&self, guild_id: u64, channel_id: u64) {
+        self.state
+            .lock()
+            .expect("Discord state")
+            .channels
+            .insert((guild_id, channel_id));
     }
 }
 
@@ -289,6 +298,15 @@ impl DiscordTransport for MockDiscord {
         Ok(Some(999))
     }
 
+    async fn guild_channel_exists(&self, guild_id: u64, channel_id: u64) -> Result<bool, String> {
+        Ok(self
+            .state
+            .lock()
+            .expect("Discord state")
+            .channels
+            .contains(&(guild_id, channel_id)))
+    }
+
     async fn guild_member(
         &self,
         guild_id: u64,
@@ -394,6 +412,8 @@ fn config() -> PlayerRegistrationConfig {
         neon_degen_enabled: false,
         lobby_rally_cooldown: Duration::from_secs(120),
         lobby_ready_cooldown: Duration::from_secs(60),
+        lobby_channel_id: None,
+        low_skill_lobby_channel_id: None,
     }
 }
 
@@ -768,7 +788,7 @@ fn command_schema_matches_python_extension() {
         .commands()
         .find(|command| command.name == "refer")
         .expect("refer schema");
-    assert_eq!(refer.description, "Refer a new player");
+    assert_eq!(refer.description, "Refer a player before their first game");
     assert_eq!(refer.options.len(), 1);
     assert_eq!(refer.options[0].name, "player");
     assert_eq!(refer.options[0].description, "…");
@@ -854,6 +874,137 @@ fn command_schema_matches_python_extension() {
     );
 }
 
+#[tokio::test]
+async fn test_referral_uses_private_ack_before_public_onboarding() {
+    let database = database();
+    let connection = Connection::open(database.path()).expect("open referral database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable legacy foreign keys for referral fixture");
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+             VALUES(10,42,'Referrer')",
+            [],
+        )
+        .expect("seed referral referrer");
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    discord.set_channel(42, 111);
+    discord.set_channel(42, 222);
+    let mut registration_config = config();
+    registration_config.lobby_channel_id = Some(111);
+    registration_config.low_skill_lobby_channel_id = Some(222);
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord,
+        registration_config,
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("refer")
+        .expect("refer handler")
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 700,
+                name: "refer".to_owned(),
+                user_id: 10,
+                user_display_name: "Referrer".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                options: vec![InteractionOption {
+                    name: "player".to_owned(),
+                    value: InteractionValue::User {
+                        id: 20,
+                        display_name: Some("New player".to_owned()),
+                        is_bot: Some(false),
+                    },
+                }],
+            },
+            responder.clone(),
+        )
+        .await
+        .expect("refer response");
+    let captured = responder.captured.lock().expect("response capture");
+    assert_eq!(captured.deferred, [true]);
+    assert_eq!(captured.followups.len(), 2);
+    assert_eq!(captured.followups[0].content, "✅ Referral created.");
+    assert!(captured.followups[0].ephemeral);
+    assert_eq!(
+        captured.followups[1].content,
+        concat!(
+            "**Referral: <@20>**\n",
+            "1. If needed, run `/player register` with your Steam32 ID ",
+            "(the number in your Dotabuff URL).\n",
+            "2. Run `/player roles` with your Dota positions (1-5).\n",
+            "3. React in <#111> or <#222> to join an active lobby, ",
+            "or run `/lobby` to start one."
+        )
+    );
+    assert!(!captured.followups[1].ephemeral);
+}
+
+#[tokio::test]
+async fn test_referral_onboarding_falls_back_when_lobby_channels_do_not_resolve() {
+    let database = database();
+    let connection = Connection::open(database.path()).expect("open referral database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable legacy foreign keys for referral fixture");
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username)
+             VALUES(10,42,'Referrer')",
+            [],
+        )
+        .expect("seed referral referrer");
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let mut registration_config = config();
+    registration_config.lobby_channel_id = Some(111);
+    registration_config.low_skill_lobby_channel_id = Some(222);
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord,
+        registration_config,
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("refer")
+        .expect("refer handler")
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 701,
+                name: "refer".to_owned(),
+                user_id: 10,
+                user_display_name: "Referrer".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                options: vec![InteractionOption {
+                    name: "player".to_owned(),
+                    value: InteractionValue::User {
+                        id: 20,
+                        display_name: Some("New player".to_owned()),
+                        is_bot: Some(false),
+                    },
+                }],
+            },
+            responder.clone(),
+        )
+        .await
+        .expect("refer response");
+    let captured = responder.captured.lock().expect("response capture");
+    assert_eq!(captured.followups.len(), 2);
+    assert!(captured.followups[1].content.ends_with(
+        "3. React in a lobby channel to join an active lobby, or run `/lobby` to start one."
+    ));
+    assert!(!captured.followups[1].ephemeral);
+}
+
 #[test]
 fn test_player_lobby_status_has_no_target_player_option() {
     let database = database();
@@ -925,7 +1076,7 @@ async fn lobby_status_response(database: &NamedTempFile, user_id: u64) -> Intera
 }
 
 #[tokio::test]
-async fn test_player_lobby_status_queries_caller_and_keeps_reasons_private() {
+async fn test_player_lobby_status_exposes_only_the_callers_suspension() {
     let database = database();
     let now = now_seconds();
     Connection::open(database.path())
@@ -953,25 +1104,26 @@ async fn test_player_lobby_status_queries_caller_and_keeps_reasons_private() {
             .content
             .contains("and 2 completed matches remaining")
     );
-    assert!(response.content.contains("repeat abandonment"));
+    assert!(response.content.contains("Reason: repeat abandonment"));
     assert!(
-        response
+        !response
             .content
-            .contains("Progress: 4/7 wins (3 remaining)")
+            .to_ascii_lowercase()
+            .contains("low priority")
     );
-    assert!(response.content.contains("missed ready checks"));
+    assert!(!response.content.to_ascii_lowercase().contains("progress"));
+    assert!(!response.content.contains("missed ready checks"));
     assert!(!response.content.contains("<@42>"));
 }
 
 #[tokio::test]
-async fn test_player_lobby_status_reports_clear_state_ephemerally() {
+async fn test_player_lobby_status_reports_no_active_suspension() {
     let database = database();
     let response = lobby_status_response(&database, 88).await;
     assert!(response.ephemeral);
-    assert!(
-        response
-            .content
-            .contains("no active lobby suspension or low-priority state")
+    assert_eq!(
+        response.content,
+        "✅ All clear — you have no active lobby suspension."
     );
 }
 

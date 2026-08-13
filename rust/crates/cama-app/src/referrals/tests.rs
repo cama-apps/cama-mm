@@ -59,6 +59,8 @@ fn request(target_id: i64, is_bot: bool) -> ReferCommandRequest {
             id: target_id,
             is_bot,
         },
+        lobby_channel_id: None,
+        low_skill_lobby_channel_id: None,
     }
 }
 
@@ -151,7 +153,10 @@ fn test_referral_rewards_join_the_netted_jc_summary() {
 #[test]
 fn test_referral_uses_private_ack_before_public_onboarding() {
     let port = FakeReferralPort::with_outcome(Ok(()));
-    let plan = execute_refer(&port, request(20, false));
+    let mut request = request(20, false);
+    request.lobby_channel_id = Some(111);
+    request.low_skill_lobby_channel_id = Some(222);
+    let plan = execute_refer(&port, request);
     assert_eq!(
         port.calls(),
         [CreateCall {
@@ -170,7 +175,10 @@ fn test_referral_uses_private_ack_before_public_onboarding() {
     assert_eq!(plan.followups.len(), 2);
     assert_eq!(plan.followups[0].content, REFERRAL_CREATED_MESSAGE);
     assert!(plan.followups[0].ephemeral);
-    assert_eq!(plan.followups[1].content, onboarding_message(20));
+    assert_eq!(
+        plan.followups[1].content,
+        onboarding_message_with_channels(20, Some(111), Some(222))
+    );
     assert!(!plan.followups[1].ephemeral);
     assert_eq!(
         plan.followups[1].allowed_mentions,
@@ -218,14 +226,13 @@ fn test_unregistered_referrer_error_is_ephemeral() {
 }
 
 #[test]
-fn test_registered_target_error_is_ephemeral() {
-    let port =
-        FakeReferralPort::with_outcome(Err(ReferralCreateFailure::ReferredAlreadyRegistered));
+fn test_played_target_error_is_ephemeral() {
+    let port = FakeReferralPort::with_outcome(Err(ReferralCreateFailure::ReferredAlreadyPlayed));
     let plan = execute_refer(&port, request(20, false));
     assert_eq!(port.calls().len(), 1);
     assert_eq!(plan.followups.len(), 1);
     assert!(plan.followups[0].ephemeral);
-    assert!(plan.followups[0].content.contains("already registered"));
+    assert!(plan.followups[0].content.contains("already played"));
 }
 
 #[test]
@@ -267,6 +274,8 @@ fn signed_ids_and_guild_are_forwarded_without_lossy_normalization() {
                 id: -20,
                 is_bot: false,
             },
+            lobby_channel_id: None,
+            low_skill_lobby_channel_id: None,
         },
     );
     assert_eq!(
@@ -278,4 +287,22 @@ fn signed_ids_and_guild_are_forwarded_without_lossy_normalization() {
         }]
     );
     assert_eq!(plan.followups[1].allowed_mentions.users, [-20]);
+}
+
+#[test]
+fn test_referral_onboarding_falls_back_when_lobby_channels_do_not_resolve() {
+    let port = FakeReferralPort::with_outcome(Ok(()));
+    let plan = execute_refer(
+        &port,
+        ReferCommandRequest {
+            lobby_channel_id: None,
+            low_skill_lobby_channel_id: None,
+            ..request(20, false)
+        },
+    );
+    assert!(
+        plan.followups[1]
+            .content
+            .contains("React in a lobby channel to join an active lobby")
+    );
 }

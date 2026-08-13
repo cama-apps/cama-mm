@@ -8,6 +8,17 @@ use crate::player::Player;
 /// The five Dota positions in the canonical permutation order.
 pub const ROLES: [&str; 5] = ["1", "2", "3", "4", "5"];
 
+/// Apply the canonical percentage and flat reductions to an off-role value.
+///
+/// Python's team model clamps the effective value at zero after both
+/// reductions.  Keeping this as a pure helper makes the rule available to
+/// the shuffler's optimized role metrics as well as the materialized team
+/// API.
+#[must_use]
+pub fn calculate_off_role_value(base_value: f64, multiplier: f64, flat_value_penalty: f64) -> f64 {
+    (base_value * multiplier - flat_value_penalty).max(0.0)
+}
+
 /// Errors raised while constructing or scoring a team.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamError {
@@ -178,6 +189,24 @@ impl Team {
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> Result<f64, TeamError> {
+        self.get_team_value_with_off_role_value_penalty(
+            use_glicko,
+            off_role_multiplier,
+            use_openskill,
+            use_jopacoin,
+            100.0,
+        )
+    }
+
+    /// Calculate team value with an explicit flat off-role value reduction.
+    pub fn get_team_value_with_off_role_value_penalty(
+        &self,
+        use_glicko: bool,
+        off_role_multiplier: f64,
+        use_openskill: bool,
+        use_jopacoin: bool,
+        off_role_flat_value_penalty: f64,
+    ) -> Result<f64, TeamError> {
         let role_assignments = self.require_role_assignments("get_team_value")?;
         Ok(self
             .players
@@ -192,7 +221,11 @@ impl Team {
                 {
                     base_value
                 } else {
-                    base_value * off_role_multiplier
+                    calculate_off_role_value(
+                        base_value,
+                        off_role_multiplier,
+                        off_role_flat_value_penalty,
+                    )
                 }
             })
             .sum())
@@ -226,6 +259,26 @@ impl Team {
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> Result<(&Player, f64), TeamError> {
+        self.get_player_by_role_with_off_role_value_penalty(
+            role,
+            use_glicko,
+            off_role_multiplier,
+            use_openskill,
+            use_jopacoin,
+            100.0,
+        )
+    }
+
+    /// Look up a role with an explicit flat off-role value reduction.
+    pub fn get_player_by_role_with_off_role_value_penalty(
+        &self,
+        role: &str,
+        use_glicko: bool,
+        off_role_multiplier: f64,
+        use_openskill: bool,
+        use_jopacoin: bool,
+        off_role_flat_value_penalty: f64,
+    ) -> Result<(&Player, f64), TeamError> {
         let role_assignments = self.require_role_assignments("get_player_by_role")?;
 
         for (player, assigned_role) in self.players.iter().zip(role_assignments) {
@@ -238,7 +291,11 @@ impl Team {
                 {
                     base_value
                 } else {
-                    base_value * off_role_multiplier
+                    calculate_off_role_value(
+                        base_value,
+                        off_role_multiplier,
+                        off_role_flat_value_penalty,
+                    )
                 };
                 return Ok((player, effective_value));
             }
@@ -253,7 +310,11 @@ impl Team {
             |player| {
                 Ok((
                     player,
-                    player.get_value(use_glicko, use_openskill, use_jopacoin) * off_role_multiplier,
+                    calculate_off_role_value(
+                        player.get_value(use_glicko, use_openskill, use_jopacoin),
+                        off_role_multiplier,
+                        off_role_flat_value_penalty,
+                    ),
                 ))
             },
         )
@@ -395,13 +456,102 @@ mod tests {
         .expect("five players form a team");
         assert_eq!(
             off_role
-                .get_team_value(false, 0.9, false, false)
+                .get_team_value_with_off_role_value_penalty(false, 0.9, false, false, 0.0)
                 .expect("roles are assigned"),
             7_620.0
         );
         assert_eq!(
             off_role.get_off_role_count().expect("roles are assigned"),
             2
+        );
+    }
+
+    #[test]
+    fn test_default_off_role_value_subtracts_five_percent_and_one_hundred() {
+        let players = vec![
+            player("P1", 3_000, &["1"]),
+            player("P2", 0, &["2"]),
+            player("P3", 0, &["3"]),
+            player("P4", 0, &["4"]),
+            player("P5", 0, &["5"]),
+        ];
+        let team = Team::new(
+            players,
+            Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        assert_eq!(
+            team.get_team_value(false, 0.95, false, false)
+                .expect("roles are assigned"),
+            2_750.0
+        );
+    }
+
+    #[test]
+    fn test_default_off_role_role_value_subtracts_five_percent_and_one_hundred() {
+        let players = vec![
+            player("P1", 3_000, &["1"]),
+            player("P2", 0, &["2"]),
+            player("P3", 0, &["3"]),
+            player("P4", 0, &["4"]),
+            player("P5", 0, &["5"]),
+        ];
+        let team = Team::new(
+            players,
+            Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        let (selected, value) = team
+            .get_player_by_role("2", false, 0.95, false, false)
+            .expect("roles are assigned");
+        assert_eq!(selected.name, "P1");
+        assert_eq!(value, 2_750.0);
+    }
+
+    #[test]
+    fn test_default_off_role_value_applies_to_jopacoin() {
+        let mut players = vec![
+            player("P1", 0, &["1"]),
+            player("P2", 0, &["2"]),
+            player("P3", 0, &["3"]),
+            player("P4", 0, &["4"]),
+            player("P5", 0, &["5"]),
+        ];
+        players[0].jopacoin_balance = 1_000;
+        let team = Team::new(
+            players,
+            Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        assert_eq!(
+            team.get_team_value(true, 0.95, false, true)
+                .expect("roles are assigned"),
+            850.0
+        );
+    }
+
+    #[test]
+    fn test_default_off_role_value_clamps_at_zero() {
+        let players = vec![
+            player("P1", 50, &["1"]),
+            player("P2", 0, &["2"]),
+            player("P3", 0, &["3"]),
+            player("P4", 0, &["4"]),
+            player("P5", 0, &["5"]),
+        ];
+        let team = Team::new(
+            players,
+            Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        assert_eq!(
+            team.get_team_value(false, 0.95, false, false)
+                .expect("roles are assigned"),
+            0.0
         );
     }
 
@@ -455,7 +605,7 @@ mod tests {
 
         team.role_assignments = Some(["3", "1", "2", "4", "5"].map(str::to_owned).to_vec());
         let (mid, value) = team
-            .get_player_by_role("1", false, 0.5, false, false)
+            .get_player_by_role_with_off_role_value_penalty("1", false, 0.5, false, false, 0.0)
             .expect("roles are assigned");
         assert_eq!(mid.name, "Mid");
         assert_eq!(value, 900.0);
@@ -490,7 +640,7 @@ mod tests {
         .expect("five players form a team");
         assert_eq!(
             off_role
-                .get_team_value(true, 0.9, false, true)
+                .get_team_value_with_off_role_value_penalty(true, 0.9, false, true, 0.0)
                 .expect("roles are assigned"),
             420.0
         );

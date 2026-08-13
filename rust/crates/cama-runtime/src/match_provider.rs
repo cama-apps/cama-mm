@@ -1093,6 +1093,7 @@ struct MatchConfig {
     jopacoin_per_game: i64,
     jopacoin_exclusion_reward: i64,
     off_role_multiplier: f64,
+    off_role_flat_value_penalty: f64,
     off_role_flat_penalty: f64,
     role_matchup_delta_weight: f64,
     exclusion_penalty_weight: f64,
@@ -1144,6 +1145,7 @@ impl MatchConfig {
             jopacoin_per_game: config.values.jopacoin_per_game,
             jopacoin_exclusion_reward: config.values.jopacoin_exclusion_reward,
             off_role_multiplier: config.values.off_role_multiplier,
+            off_role_flat_value_penalty: config.values.off_role_flat_value_penalty,
             off_role_flat_penalty: config.values.off_role_flat_penalty,
             role_matchup_delta_weight: config.values.role_matchup_delta_weight,
             exclusion_penalty_weight: config.values.exclusion_penalty_weight,
@@ -2243,14 +2245,13 @@ impl MatchHandler {
         };
 
         for event in events {
+            if event.event_type == ModerationEventType::LowprioComplete {
+                continue;
+            }
             let Ok(discord_id) = u64::try_from(event.discord_id) else {
                 continue;
             };
             let message = match event.event_type {
-                ModerationEventType::LowprioComplete => format!(
-                    "You completed your low-priority win requirement in match #{match_id}. \
-                     Nicely done — you're back to regular matchmaking."
-                ),
                 ModerationEventType::Complete => format!(
                     "Your matchmaking lobby suspension was completed by match #{match_id}. \
                      You may create and join eligible lobbies again."
@@ -3427,6 +3428,7 @@ impl MatchHandler {
         shuffler.use_openskill = use_openskill;
         shuffler.use_jopacoin = use_jopacoin;
         shuffler.off_role_multiplier = self.config.off_role_multiplier;
+        shuffler.off_role_flat_value_penalty = self.config.off_role_flat_value_penalty;
         shuffler.off_role_flat_penalty = self.config.off_role_flat_penalty;
         shuffler.role_matchup_delta_weight = self.config.role_matchup_delta_weight;
         shuffler.exclusion_penalty_weight = self.config.exclusion_penalty_weight;
@@ -3497,26 +3499,29 @@ impl MatchHandler {
             .clone()
             .ok_or_else(|| "Dire role assignments were not produced".to_owned())?;
         let radiant_value = radiant_team
-            .get_team_value(
+            .get_team_value_with_off_role_value_penalty(
                 true,
                 shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
+                shuffler.off_role_flat_value_penalty,
             )
             .map_err(|error| error.to_string())?;
         let dire_value = dire_team
-            .get_team_value(
+            .get_team_value_with_off_role_value_penalty(
                 true,
                 shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
+                shuffler.off_role_flat_value_penalty,
             )
             .map_err(|error| error.to_string())?;
         let value_diff = (radiant_value - dire_value).abs();
 
-        let balancing = TeamBalancingService::new(
+        let balancing = TeamBalancingService::new_with_off_role_value_penalty(
             true,
             shuffler.off_role_multiplier,
+            shuffler.off_role_flat_value_penalty,
             shuffler.off_role_flat_penalty,
             shuffler.role_matchup_delta_weight,
         );
@@ -3580,6 +3585,11 @@ impl MatchHandler {
             &selected_set,
             Some(&low_priority_ids),
         );
+        let low_priority_team_adjustment = BalancedShuffler::calculate_low_priority_team_adjustment(
+            &radiant_set,
+            &dire_set,
+            Some(&low_priority_ids),
+        );
         let region_split_penalty = if request.shuffle_mode == "region" {
             region_split_mismatches(
                 &region_inputs(&radiant_team.players),
@@ -3607,6 +3617,7 @@ impl MatchHandler {
             + package_deal_penalty
             + deal_split_penalty
             + low_priority_penalty
+            + low_priority_team_adjustment
             + region_split_penalty
             + shuffler.calculate_rating_spread_penalty(&selected_values)
             - BalancedShuffler::calculate_lobby_rating_bonus(&selected_values)

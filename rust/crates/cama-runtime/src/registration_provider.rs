@@ -18,7 +18,6 @@ use cama_app::player_mmr_fallback::{
 };
 use cama_app::registration::{RoleInputError, parse_roles};
 use cama_db::core_repositories::PlayerRepository;
-use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::moderation::{
     LobbySuspension, ModerationRepository, SuspensionCompletion, SuspensionScope,
 };
@@ -63,6 +62,8 @@ pub struct PlayerRegistrationConfig {
     pub neon_degen_enabled: bool,
     pub lobby_rally_cooldown: Duration,
     pub lobby_ready_cooldown: Duration,
+    pub lobby_channel_id: Option<i64>,
+    pub low_skill_lobby_channel_id: Option<i64>,
 }
 
 impl PlayerRegistrationConfig {
@@ -85,6 +86,8 @@ impl PlayerRegistrationConfig {
             lobby_ready_cooldown: Duration::from_secs(
                 config.values.lobby_ready_cooldown_seconds.max(0) as u64,
             ),
+            lobby_channel_id: config.channels.lobby,
+            low_skill_lobby_channel_id: config.channels.low_skill_lobby,
         }
     }
 }
@@ -132,7 +135,6 @@ impl PlayerRegistrationProvider {
                 referrals: ReferralRepository::new(path),
                 notifications: NotificationRepository::new(path),
                 moderation: ModerationRepository::new(path),
-                low_priority: LowPriorityRepository::new(path),
                 players: PlayerRepository::new(path),
                 opendota,
                 discord,
@@ -290,7 +292,7 @@ impl RegistrationProvider for PlayerRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
         registry.command(CommandSpec {
             name: "refer".to_owned(),
-            description: "Refer a new player".to_owned(),
+            description: "Refer a player before their first game".to_owned(),
             options: vec![required_option("player", "…", CommandOptionKind::User)],
             handler: self.handler.clone(),
         })?;
@@ -399,7 +401,7 @@ fn player_command_options() -> Vec<CommandOptionSpec> {
             ),
             subcommand(
                 "status",
-                "Privately view your lobby suspension and low-priority progress",
+                "Privately view your active lobby suspension",
                 Vec::new(),
             ),
         ]),
@@ -433,7 +435,6 @@ struct PlayerRegistrationHandler {
     referrals: ReferralRepository,
     notifications: NotificationRepository,
     moderation: ModerationRepository,
-    low_priority: LowPriorityRepository,
     players: PlayerRepository,
     opendota: Arc<OpenDotaRuntimeServices>,
     discord: Arc<dyn DiscordTransport>,
@@ -1064,13 +1065,49 @@ impl PlayerRegistrationHandler {
             return followup_ephemeral(&responder, format!("❌ {error}")).await;
         }
         followup_ephemeral(&responder, "✅ Referral created.").await?;
+        let mut lobby_channels = Vec::new();
+        for channel_id in [
+            self.config.lobby_channel_id,
+            self.config.low_skill_lobby_channel_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Ok(channel_id_u64) = u64::try_from(channel_id) else {
+                continue;
+            };
+            match self
+                .discord
+                .guild_channel_exists(guild_id, channel_id_u64)
+                .await
+            {
+                Ok(true) => {
+                    if !lobby_channels.contains(&channel_id) {
+                        lobby_channels.push(channel_id);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    debug!(%error, guild_id, channel_id, "could not resolve configured referral lobby channel")
+                }
+            }
+        }
+        let lobby_destination = if lobby_channels.is_empty() {
+            "a lobby channel".to_owned()
+        } else {
+            lobby_channels
+                .into_iter()
+                .map(|channel_id| format!("<#{channel_id}>"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
         responder
             .followup(
                 InteractionResponse::message(format!(
                     "**Referral: <@{target_id}>**\n\
-                     1. Run `/player register` with your Steam32 ID (the number in your Dotabuff URL).\n\
+                     1. If needed, run `/player register` with your Steam32 ID (the number in your Dotabuff URL).\n\
                      2. Run `/player roles` with your Dota positions (1-5).\n\
-                     3. Run `/join` for an active lobby, or `/lobby` to start one."
+                     3. React in {lobby_destination} to join an active lobby, or run `/lobby` to start one."
                 ))
                 .with_user_mentions(vec![target_id]),
             )
@@ -1985,50 +2022,19 @@ impl PlayerRegistrationHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let moderation = self.moderation.clone();
-        let low_priority = self.low_priority.clone();
         let user = signed_id(context.user_id, "user")?;
         let guild = signed_id(guild_id, "guild")?;
         let now = now_seconds();
-        let (suspension, low_priority) = tokio::try_join!(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    ModerationService::new(moderation).get_active_suspension(
-                        user,
-                        Some(guild),
-                        None,
-                        now,
-                    )
-                })
-                .await
-                .map_err(|error| format!("suspension lookup task failed: {error}"))?
-                .map_err(|error| format!("{error:?}"))
-            },
-            async move {
-                tokio::task::spawn_blocking(move || low_priority.get_state(user, Some(guild)))
-                    .await
-                    .map_err(|error| format!("low-priority lookup task failed: {error}"))?
-                    .map_err(|error| error.to_string())
-            }
-        )?;
-        let mut sections = Vec::new();
-        if let Some(suspension) = suspension {
-            sections.push(format_suspension(&suspension));
-        }
-        if let Some(state) = low_priority.filter(|state| state.active) {
-            let completed = state.wins_required.saturating_sub(state.wins_remaining);
-            sections.push(format!(
-                "**Low priority**\nA small matchmaking detour is in progress.\n\
-                 Progress: {completed}/{} wins ({} remaining)\nReason: {}",
-                state.wins_required,
-                state.wins_remaining,
-                state.reason.as_deref().unwrap_or("Not provided")
-            ));
-        }
-        let message = if sections.is_empty() {
-            "✅ All clear — you have no active lobby suspension or low-priority state.".to_owned()
-        } else {
-            sections.join("\n\n")
-        };
+        let suspension = tokio::task::spawn_blocking(move || {
+            ModerationService::new(moderation).get_active_suspension(user, Some(guild), None, now)
+        })
+        .await
+        .map_err(|error| format!("suspension lookup task failed: {error}"))?
+        .map_err(|error| format!("{error:?}"))?;
+        let message = suspension.map_or_else(
+            || "✅ All clear — you have no active lobby suspension.".to_owned(),
+            |suspension| format_suspension(&suspension),
+        );
         followup_ephemeral(&responder, message).await
     }
 

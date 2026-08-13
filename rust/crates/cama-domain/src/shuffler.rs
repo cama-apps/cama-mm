@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::player::{OPENSKILL_DISPLAY_SCALE, Player};
-use crate::team::{ROLES, Team, TeamError, compute_optimal_role_assignments};
+use crate::team::{
+    ROLES, Team, TeamError, calculate_off_role_value, compute_optimal_role_assignments,
+};
 use crate::team_balancing::{role_matchup_delta_from_values, role_parity_delta_from_values};
 
 /// Low-priority shoppers contribute half-strength penalties as actors.
@@ -22,7 +24,9 @@ pub const LOW_PRIORITY_EFFECTIVENESS: f64 = 0.5;
 /// Avoids aimed at a low-priority player are twice as effective.
 pub const LOW_PRIORITY_AVOID_TARGET_EFFECTIVENESS: f64 = 2.0;
 /// Match goodness penalty for every selected low-priority player.
-pub const LOW_PRIORITY_GOODNESS_PENALTY: f64 = 500.0;
+pub const LOW_PRIORITY_GOODNESS_PENALTY: f64 = 600.0;
+/// Goodness bonus for grouping low-priority players on one team.
+pub const LOW_PRIORITY_TEAM_GROUPING_BONUS: f64 = 100.0;
 
 /// Canonical five-position role assignment.
 pub type RoleAssignment = [String; 5];
@@ -339,6 +343,7 @@ pub struct BalancedShuffler {
     pub use_openskill: bool,
     pub use_jopacoin: bool,
     pub off_role_multiplier: f64,
+    pub off_role_flat_value_penalty: f64,
     pub off_role_flat_penalty: f64,
     pub role_matchup_delta_weight: f64,
     pub exclusion_penalty_weight: f64,
@@ -362,6 +367,7 @@ impl Clone for BalancedShuffler {
             use_openskill: self.use_openskill,
             use_jopacoin: self.use_jopacoin,
             off_role_multiplier: self.off_role_multiplier,
+            off_role_flat_value_penalty: self.off_role_flat_value_penalty,
             off_role_flat_penalty: self.off_role_flat_penalty,
             role_matchup_delta_weight: self.role_matchup_delta_weight,
             exclusion_penalty_weight: self.exclusion_penalty_weight,
@@ -387,14 +393,15 @@ impl Default for BalancedShuffler {
             use_openskill: false,
             use_jopacoin: false,
             off_role_multiplier: 0.95,
-            off_role_flat_penalty: 420.0,
+            off_role_flat_value_penalty: 100.0,
+            off_role_flat_penalty: 500.0,
             role_matchup_delta_weight: 0.17,
             exclusion_penalty_weight: 70.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 230.0,
-            soft_avoid_penalty: 180.0,
-            package_deal_penalty: 100.0,
-            package_deal_split_penalty: 100.0,
+            soft_avoid_penalty: 160.0,
+            package_deal_penalty: 90.0,
+            package_deal_split_penalty: 90.0,
             rating_spread_divisor: 10.0,
             region_split: false,
             region_split_penalty: 500.0,
@@ -667,6 +674,42 @@ impl BalancedShuffler {
         })
     }
 
+    /// Reward placing active low-priority players together, applying the
+    /// grouping adjustment once per matchup rather than once per player.
+    #[must_use]
+    pub fn calculate_low_priority_team_adjustment(
+        team1_ids: &HashSet<i64>,
+        team2_ids: &HashSet<i64>,
+        low_priority_ids: Option<&HashSet<i64>>,
+    ) -> f64 {
+        let Some(low_priority_ids) = low_priority_ids else {
+            return 0.0;
+        };
+        Self::low_priority_team_adjustment_from_counts(
+            team1_ids.intersection(low_priority_ids).count(),
+            team2_ids.intersection(low_priority_ids).count(),
+        )
+    }
+
+    #[must_use]
+    fn low_priority_team_adjustment_from_counts(team1_count: usize, team2_count: usize) -> f64 {
+        let largest_group = team1_count.max(team2_count);
+        -(largest_group.saturating_sub(1) as f64) * LOW_PRIORITY_TEAM_GROUPING_BONUS
+    }
+
+    #[must_use]
+    fn low_priority_team_adjustment_lower_bound(
+        selected_ids: &HashSet<i64>,
+        low_priority_ids: Option<&HashSet<i64>>,
+    ) -> f64 {
+        let Some(low_priority_ids) = low_priority_ids else {
+            return 0.0;
+        };
+        let largest_possible_group =
+            Team::TEAM_SIZE.min(selected_ids.intersection(low_priority_ids).count());
+        Self::low_priority_team_adjustment_from_counts(largest_possible_group, 0)
+    }
+
     fn player_value(&self, player: &Player, context: &mut ScoringContext) -> f64 {
         let key = player_key(player);
         if let Some(value) = context.player_values.get(&key) {
@@ -703,7 +746,11 @@ impl BalancedShuffler {
                 base_value
             } else {
                 off_role_count += 1;
-                base_value * self.off_role_multiplier
+                calculate_off_role_value(
+                    base_value,
+                    self.off_role_multiplier,
+                    self.off_role_flat_value_penalty,
+                )
             };
             team_value += effective_value;
             if let Ok(index) = assigned_role.parse::<usize>()
@@ -882,15 +929,22 @@ impl BalancedShuffler {
         let constrained = constraints.avoids.is_some_and(|items| !items.is_empty())
             || constraints.deals.is_some_and(|items| !items.is_empty())
             || (self.region_split && self.region_split_penalty > 0.0);
+        let team1_ids = discord_ids(team1_players);
+        let team2_ids = discord_ids(team2_players);
+        let low_priority_team_adjustment = Self::calculate_low_priority_team_adjustment(
+            &team1_ids,
+            &team2_ids,
+            constraints.low_priority_ids,
+        );
         if !constrained {
-            return self.score_unconstrained_metrics(&team1_metrics, &team2_metrics, rd_priority);
+            let (roles1, roles2, score) =
+                self.score_unconstrained_metrics(&team1_metrics, &team2_metrics, rd_priority);
+            return (roles1, roles2, score + low_priority_team_adjustment);
         }
 
         self.diagnostics
             .constrained_score_calls
             .fetch_add(1, AtomicOrdering::Relaxed);
-        let team1_ids = discord_ids(team1_players);
-        let team2_ids = discord_ids(team2_players);
         let avoid_penalty = self.calculate_soft_avoid_penalty(
             &team1_ids,
             &team2_ids,
@@ -926,6 +980,7 @@ impl BalancedShuffler {
                     - rd_priority
                     + avoid_penalty
                     + deal_penalty
+                    + low_priority_team_adjustment
                     + region_penalty;
                 if score < best_score {
                     best_score = score;
@@ -1798,6 +1853,10 @@ impl BalancedShuffler {
         } else {
             0.0
         };
+        let low_priority_team_lower_bound = Self::low_priority_team_adjustment_lower_bound(
+            &selected_ids,
+            options.constraints.low_priority_ids,
+        );
         PoolSelection {
             selected_indices,
             selected_players,
@@ -1807,7 +1866,9 @@ impl BalancedShuffler {
             exclusion_penalty,
             combo_penalty,
             rd_priority,
-            preselection_score: combo_penalty + recent_penalty - rd_priority + split_value_diff,
+            preselection_score: combo_penalty + recent_penalty - rd_priority
+                + split_value_diff
+                + low_priority_team_lower_bound,
         }
     }
 
@@ -1935,6 +1996,10 @@ impl BalancedShuffler {
             .constraints
             .deals
             .is_some_and(|items| !items.is_empty());
+        let low_priority_nonempty = options
+            .constraints
+            .low_priority_ids
+            .is_some_and(|ids| !ids.is_empty());
         let base_terms_nonnegative = self.off_role_flat_penalty.is_finite()
             && self.off_role_flat_penalty >= 0.0
             && self.role_matchup_delta_weight.is_finite()
@@ -1951,9 +2016,23 @@ impl BalancedShuffler {
             && !deals_nonempty
             && (!self.region_split || self.region_split_penalty <= 0.0);
 
+        let low_priority_player_mask = refs
+            .iter()
+            .enumerate()
+            .filter(|(_, player)| {
+                low_priority_nonempty
+                    && player.discord_id.is_some_and(|id| {
+                        options.constraints.low_priority_ids.unwrap().contains(&id)
+                    })
+            })
+            .fold(0_usize, |mask, (index, _)| mask | (1_usize << index));
+
         for selected_indices in combinations(14, 10) {
             let selected = pick_refs_vec(&refs, &selected_indices);
             let selected_set: HashSet<usize> = selected_indices.iter().copied().collect();
+            let selected_mask = selected_indices
+                .iter()
+                .fold(0_usize, |mask, index| mask | (1_usize << index));
             let excluded: Vec<&Player> = refs
                 .iter()
                 .enumerate()
@@ -1985,6 +2064,10 @@ impl BalancedShuffler {
                 &selected_ids,
                 options.constraints.low_priority_ids,
             );
+            let low_priority_team_lower_bound = Self::low_priority_team_adjustment_lower_bound(
+                &selected_ids,
+                options.constraints.low_priority_ids,
+            );
             let selected_values: Vec<f64> = selected_indices
                 .iter()
                 .map(|index| values[*index])
@@ -1996,7 +2079,7 @@ impl BalancedShuffler {
                 - Self::calculate_lobby_rating_bonus(&selected_values)
                 - Self::calculate_lobby_wait_bonus(&selected, options.lobby_wait_minutes);
             let rd_priority = self.calculate_rd_priority(&selected);
-            let combo_lower_bound = combo_penalty - rd_priority;
+            let combo_lower_bound = combo_penalty - rd_priority + low_priority_team_lower_bound;
             if base_terms_nonnegative && recent_nonnegative && combo_lower_bound >= best_score {
                 self.diagnostics
                     .branch_player_selections_pruned
@@ -2023,6 +2106,14 @@ impl BalancedShuffler {
             for (team1_indices, team2_indices) in unique_team_splits() {
                 let team1_refs = pick_refs(&selected, &team1_indices);
                 let team2_refs = pick_refs(&selected, &team2_indices);
+                let team1_mask = team1_indices.iter().fold(0_usize, |mask, index| {
+                    mask | (1_usize << selected_indices[*index])
+                });
+                let team2_mask = selected_mask ^ team1_mask;
+                let low_priority_team_adjustment = Self::low_priority_team_adjustment_from_counts(
+                    (team1_mask & low_priority_player_mask).count_ones() as usize,
+                    (team2_mask & low_priority_player_mask).count_ones() as usize,
+                );
                 let (roles1, roles2, base_score) = if use_split_bound {
                     let summary1 = self.team_role_metrics_summary(&team1_refs, 3, &mut context);
                     let summary2 = self.team_role_metrics_summary(&team2_refs, 3, &mut context);
@@ -2035,7 +2126,8 @@ impl BalancedShuffler {
                                 * self.off_role_flat_penalty;
                         let split_lower_bound = min_value_diff + min_off_role_penalty - rd_priority
                             + recent_penalty
-                            + combo_penalty;
+                            + combo_penalty
+                            + low_priority_team_adjustment;
                         if split_lower_bound.is_finite() && split_lower_bound >= best_score {
                             self.diagnostics
                                 .branch_team_splits_pruned
@@ -2043,11 +2135,12 @@ impl BalancedShuffler {
                             continue;
                         }
                     }
-                    self.score_unconstrained_metrics(
+                    let (roles1, roles2, base_score) = self.score_unconstrained_metrics(
                         &summary1.metrics,
                         &summary2.metrics,
                         rd_priority,
-                    )
+                    );
+                    (roles1, roles2, base_score + low_priority_team_adjustment)
                 } else {
                     self.score_role_refs(
                         &team1_refs,
@@ -2525,12 +2618,444 @@ mod tests {
     }
 
     #[test]
-    fn test_low_priority_penalty_is_500_per_selected_player() {
+    fn test_low_priority_penalty_is_600_per_selected_player() {
         let selected = HashSet::from([100, 101, 102]);
         let low_priority = HashSet::from([100, 101, 999]);
         assert_eq!(
             BalancedShuffler::calculate_low_priority_penalty(&selected, Some(&low_priority)),
-            1_000.0
+            1_200.0
+        );
+    }
+
+    #[test]
+    fn test_optimized_role_metrics_apply_default_off_role_value_adjustment() {
+        let player = player("Core", 3_000, &["1"]);
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            ..BalancedShuffler::default()
+        };
+        let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
+        let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
+
+        assert_eq!(metrics.team_value, 2_750.0);
+        assert_eq!(metrics.role_values, [0.0, 2_750.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_default_off_role_goodness_adds_500_per_player() {
+        let team1_players = (0..5)
+            .map(|index| {
+                player(
+                    format!("OnRole{index}"),
+                    1_000,
+                    &[["1", "2", "3", "4", "5"][index]],
+                )
+            })
+            .collect::<Vec<_>>();
+        let team2_players = ["2", "1", "3", "4", "5"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| player(format!("Team2-{index}"), 1_000, &[role]))
+            .collect::<Vec<_>>();
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+        let assignment = ["1", "2", "3", "4", "5"].map(str::to_owned);
+        let team1_metrics = shuffler.role_assignment_metrics(
+            &team1_players.iter().collect::<Vec<_>>(),
+            &assignment,
+            &[1_000.0; 5],
+        );
+        let team2_metrics = shuffler.role_assignment_metrics(
+            &team2_players.iter().collect::<Vec<_>>(),
+            &assignment,
+            &[1_000.0; 5],
+        );
+        let (_, _, score) =
+            shuffler.score_unconstrained_metrics(&[team1_metrics], &[team2_metrics], 0.0);
+
+        assert_eq!(score, 1_000.0);
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_singletons_are_not_discounted() {
+        let team1 = HashSet::from([100]);
+        let team2 = HashSet::from([200]);
+        let low_priority = HashSet::from([100, 200]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_two_in_one_team_is_minus_100() {
+        let team1 = HashSet::from([100, 101]);
+        let team2 = HashSet::new();
+        let low_priority = HashSet::from([100, 101]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            -100.0
+        );
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_two_each_team_is_minus_100() {
+        let team1 = HashSet::from([100, 101]);
+        let team2 = HashSet::from([200, 201]);
+        let low_priority = HashSet::from([100, 101, 200, 201]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            -100.0
+        );
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_three_vs_two_is_minus_200() {
+        let team1 = HashSet::from([100, 101, 102]);
+        let team2 = HashSet::from([200, 201]);
+        let low_priority = HashSet::from([100, 101, 102, 200, 201]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            -200.0
+        );
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_four_vs_one_is_minus_300() {
+        let team1 = HashSet::from([100, 101, 102, 103]);
+        let team2 = HashSet::from([200]);
+        let low_priority = HashSet::from([100, 101, 102, 103, 200]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            -300.0
+        );
+    }
+
+    #[test]
+    fn test_low_priority_team_adjustment_five_in_one_team_is_minus_400() {
+        let team1 = HashSet::from([100, 101, 102, 103, 104]);
+        let team2 = HashSet::new();
+        let low_priority = HashSet::from([100, 101, 102, 103, 104]);
+        assert_eq!(
+            BalancedShuffler::calculate_low_priority_team_adjustment(
+                &team1,
+                &team2,
+                Some(&low_priority),
+            ),
+            -400.0
+        );
+    }
+
+    #[test]
+    fn test_matchup_score_subtracts_low_priority_team_adjustment_once() {
+        let team1 = (0..5)
+            .map(|index| {
+                player(
+                    format!("Team1-{index}"),
+                    1_000,
+                    &[["1", "2", "3", "4", "5"][index]],
+                )
+            })
+            .enumerate()
+            .map(|(index, mut player)| {
+                player.discord_id = Some(100 + index as i64);
+                player
+            })
+            .collect::<Vec<_>>();
+        let team2 = (0..5)
+            .map(|index| {
+                player(
+                    format!("Team2-{index}"),
+                    1_000,
+                    &[["1", "2", "3", "4", "5"][index]],
+                )
+            })
+            .enumerate()
+            .map(|(index, mut player)| {
+                player.discord_id = Some(200 + index as i64);
+                player
+            })
+            .collect::<Vec<_>>();
+        let low_priority = HashSet::from([100, 101, 200, 201]);
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+
+        let (_, _, score) = shuffler
+            .score_role_assignments_for_matchup(
+                &team1,
+                &team2,
+                20,
+                ShuffleConstraints {
+                    low_priority_ids: Some(&low_priority),
+                    ..ShuffleConstraints::default()
+                },
+            )
+            .expect("matchup scores");
+        assert_eq!(score, -100.0);
+    }
+
+    #[test]
+    fn test_fixed_ten_search_does_not_stop_before_low_priority_grouping_bonus() {
+        let players = (0..10)
+            .map(|index| full_flex_player(format!("Player{index}"), 1_500, 100 + index))
+            .collect::<Vec<_>>();
+        let low_priority = HashSet::from([100, 105]);
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+        let (team1, team2) = shuffler
+            .shuffle_with_constraints(
+                &players,
+                ShuffleConstraints {
+                    low_priority_ids: Some(&low_priority),
+                    ..ShuffleConstraints::default()
+                },
+            )
+            .expect("fixed ten shuffle");
+        let team1_ids = team1
+            .players
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        let team2_ids = team2
+            .players
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        assert!(
+            low_priority.is_subset(&team1_ids) || low_priority.is_subset(&team2_ids),
+            "low-priority players should be grouped: {team1_ids:?} / {team2_ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_branch_bound_groups_selected_low_priority_players() {
+        let players = (0..14)
+            .map(|index| full_flex_player(format!("Player{index:02}"), 1_500, 100 + index))
+            .collect::<Vec<_>>();
+        let low_priority = HashSet::from([100, 101]);
+        let exclusion_counts = players
+            .iter()
+            .map(|player| {
+                (
+                    player.name.clone(),
+                    if low_priority.contains(&player.discord_id.unwrap()) {
+                        100
+                    } else {
+                        0
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            exclusion_penalty_weight: 70.0,
+            recent_match_penalty_weight: 0.0,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+        let result = shuffler
+            .shuffle_branch_bound(
+                &players,
+                PoolOptions {
+                    exclusion_counts: Some(&exclusion_counts),
+                    constraints: ShuffleConstraints {
+                        low_priority_ids: Some(&low_priority),
+                        ..ShuffleConstraints::default()
+                    },
+                    ..PoolOptions::default()
+                },
+                BranchSearchOptions::default(),
+            )
+            .expect("branch-bound shuffle");
+        let team1_ids = result
+            .team1
+            .players
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        let team2_ids = result
+            .team2
+            .players
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        let excluded_ids = result
+            .excluded
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        assert!(low_priority.is_disjoint(&excluded_ids));
+        assert!(low_priority.is_subset(&team1_ids) || low_priority.is_subset(&team2_ids));
+    }
+
+    #[test]
+    fn test_split_bound_matches_reference_with_low_priority_grouping_two() {
+        let players = seeded_pool(0x14A9, "Seeded", 3);
+        let low_priority = players[..2]
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        let exclusion_counts = players
+            .iter()
+            .map(|player| {
+                (
+                    player.name.clone(),
+                    if low_priority.contains(&player.discord_id.unwrap()) {
+                        20
+                    } else {
+                        0
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let recent_names = players
+            .iter()
+            .skip(10)
+            .map(|player| player.name.clone())
+            .collect::<HashSet<_>>();
+        let shuffler = BalancedShuffler {
+            off_role_multiplier: 0.8,
+            off_role_flat_penalty: 60.0,
+            role_matchup_delta_weight: 0.35,
+            exclusion_penalty_weight: 100.0,
+            rd_priority_weight: 0.08,
+            recent_match_penalty_weight: 75.0,
+            rating_spread_divisor: 15.0,
+            ..BalancedShuffler::default()
+        };
+        let options = PoolOptions {
+            exclusion_counts: Some(&exclusion_counts),
+            recent_match_names: Some(&recent_names),
+            constraints: ShuffleConstraints {
+                low_priority_ids: Some(&low_priority),
+                ..ShuffleConstraints::default()
+            },
+            ..PoolOptions::default()
+        };
+        let reference = shuffler
+            .shuffle_branch_bound(
+                &players,
+                options,
+                BranchSearchOptions {
+                    use_split_role_bound: false,
+                    initial_upper_bound: Some(f64::INFINITY),
+                },
+            )
+            .expect("reference search");
+        let optimized = shuffler
+            .shuffle_branch_bound(
+                &players,
+                options,
+                BranchSearchOptions {
+                    use_split_role_bound: true,
+                    initial_upper_bound: Some(f64::INFINITY),
+                },
+            )
+            .expect("optimized search");
+        assert_eq!(
+            result_signature(&optimized, false),
+            result_signature(&reference, false)
+        );
+    }
+
+    #[test]
+    fn test_split_bound_matches_reference_with_low_priority_grouping_five() {
+        let players = seeded_pool(0x14AC, "Seeded", 3);
+        let low_priority = players[..5]
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        let exclusion_counts = players
+            .iter()
+            .map(|player| {
+                (
+                    player.name.clone(),
+                    if low_priority.contains(&player.discord_id.unwrap()) {
+                        20
+                    } else {
+                        0
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let recent_names = players
+            .iter()
+            .skip(10)
+            .map(|player| player.name.clone())
+            .collect::<HashSet<_>>();
+        let shuffler = BalancedShuffler {
+            off_role_multiplier: 0.8,
+            off_role_flat_penalty: 60.0,
+            role_matchup_delta_weight: 0.35,
+            exclusion_penalty_weight: 100.0,
+            rd_priority_weight: 0.08,
+            recent_match_penalty_weight: 75.0,
+            rating_spread_divisor: 15.0,
+            ..BalancedShuffler::default()
+        };
+        let options = PoolOptions {
+            exclusion_counts: Some(&exclusion_counts),
+            recent_match_names: Some(&recent_names),
+            constraints: ShuffleConstraints {
+                low_priority_ids: Some(&low_priority),
+                ..ShuffleConstraints::default()
+            },
+            ..PoolOptions::default()
+        };
+        let reference = shuffler
+            .shuffle_branch_bound(
+                &players,
+                options,
+                BranchSearchOptions {
+                    use_split_role_bound: false,
+                    initial_upper_bound: Some(f64::INFINITY),
+                },
+            )
+            .expect("reference search");
+        let optimized = shuffler
+            .shuffle_branch_bound(
+                &players,
+                options,
+                BranchSearchOptions {
+                    use_split_role_bound: true,
+                    initial_upper_bound: Some(f64::INFINITY),
+                },
+            )
+            .expect("optimized search");
+        assert_eq!(
+            result_signature(&optimized, false),
+            result_signature(&reference, false)
         );
     }
 
@@ -2581,6 +3106,25 @@ mod tests {
             }
             .calculate_soft_avoid_penalty(&team1, &team2, Some(&avoids), None),
             500.0
+        );
+    }
+
+    #[test]
+    fn test_default_avoid_same_team_adds_160_goodness() {
+        let (team1, team2) = soft_avoid_teams();
+        let avoids = [SoftAvoid {
+            avoider_discord_id: 1000,
+            avoided_discord_id: 1001,
+        }];
+
+        assert_eq!(
+            BalancedShuffler::default().calculate_soft_avoid_penalty(
+                &team1,
+                &team2,
+                Some(&avoids),
+                None,
+            ),
+            160.0
         );
     }
 
@@ -2688,12 +3232,12 @@ mod tests {
     }
 
     #[test]
-    fn test_goodness_adds_500_per_active_low_priority_player() {
+    fn test_goodness_adds_600_per_active_low_priority_player() {
         let selected = (1_000..1_010).collect::<HashSet<_>>();
         let active = HashSet::from([1_000, 1_001]);
         let baseline = BalancedShuffler::calculate_low_priority_penalty(&selected, None);
         let penalized = BalancedShuffler::calculate_low_priority_penalty(&selected, Some(&active));
-        assert_eq!(penalized - baseline, 1_000.0);
+        assert_eq!(penalized - baseline, 1_200.0);
     }
 
     #[test]
@@ -3222,7 +3766,7 @@ mod tests {
         let shuffler = BalancedShuffler::default();
         assert_eq!(
             shuffler.calculate_package_deal_penalty(&team1_ids, &team2_ids, Some(&deals), None,),
-            shuffler.package_deal_penalty
+            90.0
         );
     }
 
@@ -3563,7 +4107,48 @@ mod tests {
         assert_eq!(
             shuffler
                 .calculate_package_deal_split_penalty(&selected, &excluded, Some(&deals), None,),
-            shuffler.package_deal_split_penalty
+            90.0
+        );
+    }
+
+    #[test]
+    fn test_package_deal_split_adds_90_goodness() {
+        let players = package_players(14, 2_000);
+        let deals = [PackageDeal {
+            buyer_discord_id: 100,
+            partner_discord_id: 113,
+        }];
+        let shuffler = BalancedShuffler::default();
+        let with_deal = shuffler
+            .greedy_shuffle(
+                &players,
+                PoolOptions {
+                    constraints: ShuffleConstraints {
+                        deals: Some(&deals),
+                        ..ShuffleConstraints::default()
+                    },
+                    ..PoolOptions::default()
+                },
+            )
+            .expect("package-deal split scoring succeeds");
+        let without_deal = shuffler
+            .greedy_shuffle(&players, PoolOptions::default())
+            .expect("baseline split scoring succeeds");
+        let included = selected_ids(&PoolResult {
+            team1: with_deal.team1.clone(),
+            team2: with_deal.team2.clone(),
+            excluded: with_deal.excluded.clone(),
+        });
+        let excluded = with_deal
+            .excluded
+            .iter()
+            .filter_map(|player| player.discord_id)
+            .collect::<HashSet<_>>();
+        assert_ne!(included.contains(&100), included.contains(&113));
+        assert_ne!(excluded.contains(&100), excluded.contains(&113));
+        approx(
+            with_deal.score - without_deal.score,
+            BalancedShuffler::default().package_deal_split_penalty,
         );
     }
 

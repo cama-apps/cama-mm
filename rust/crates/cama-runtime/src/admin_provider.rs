@@ -628,18 +628,6 @@ impl AdminHandler {
             ),
         )
         .await?;
-        let mut direct_message = format!(
-            "You were placed in low priority for **{} wins**.\nThe matchmaker is asking for a small course correction.",
-            state.wins_required
-        );
-        if let Some(reason) = reason {
-            direct_message.push_str(&format!("\nReason: {reason}"));
-        }
-        direct_message.push_str(&format!(
-            "\nWin {} recorded games to return to regular matchmaking.\nUse `/player lobby status` to view your progress.",
-            state.wins_required
-        ));
-        self.best_effort_dm(user.id, direct_message).await;
         Ok(())
     }
 
@@ -701,14 +689,6 @@ impl AdminHandler {
             )
         };
         respond_ephemeral(&responder, content).await?;
-        if removed {
-            let mut direct_message =
-                "Your low-priority matchmaking state was cleared. You're all set.".to_owned();
-            if let Some(reason) = reason {
-                direct_message.push_str(&format!("\nReason: {reason}"));
-            }
-            self.best_effort_dm(user.id, direct_message).await;
-        }
         Ok(())
     }
 
@@ -3284,7 +3264,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
                 required("user", "Player to update", CommandOptionKind::User),
                 option(
                     "reason",
-                    "Reason shown privately to the player and admins",
+                    "Reason visible to admins and recorded in moderation audit history",
                     CommandOptionKind::String,
                 ),
                 wins,
@@ -3297,7 +3277,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
                 required("user", "Player to update", CommandOptionKind::User),
                 option(
                     "reason",
-                    "Reason shown privately to the player and admins",
+                    "Reason visible to admins and recorded in moderation audit history",
                     CommandOptionKind::String,
                 ),
             ],

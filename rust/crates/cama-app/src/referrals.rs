@@ -22,8 +22,8 @@ pub enum ReferralCreateFailure {
     SelfReferral,
     #[error("Referrer must be registered in this guild.")]
     ReferrerNotRegistered,
-    #[error("That player is already registered in this guild.")]
-    ReferredAlreadyRegistered,
+    #[error("That player has already played a game in this guild.")]
+    ReferredAlreadyPlayed,
     #[error("That player already has a referral.")]
     AlreadyReferred,
     #[error("referral persistence failed: {0}")]
@@ -35,7 +35,7 @@ impl From<ReferralRepositoryError> for ReferralCreateFailure {
         match error {
             ReferralRepositoryError::SelfReferral => Self::SelfReferral,
             ReferralRepositoryError::ReferrerNotRegistered => Self::ReferrerNotRegistered,
-            ReferralRepositoryError::ReferredAlreadyRegistered => Self::ReferredAlreadyRegistered,
+            ReferralRepositoryError::ReferredAlreadyPlayed => Self::ReferredAlreadyPlayed,
             ReferralRepositoryError::AlreadyReferred => Self::AlreadyReferred,
             other => Self::Backend(other.to_string()),
         }
@@ -299,6 +299,8 @@ pub struct ReferCommandRequest {
     pub referrer_id: DiscordId,
     pub guild_id: GuildId,
     pub target: ReferTarget,
+    pub lobby_channel_id: Option<DiscordId>,
+    pub low_skill_lobby_channel_id: Option<DiscordId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,7 +367,11 @@ pub fn execute_refer(
             followups: vec![
                 FollowupPlan::ephemeral(REFERRAL_CREATED_MESSAGE),
                 FollowupPlan {
-                    content: onboarding_message(request.target.id),
+                    content: onboarding_message_with_channels(
+                        request.target.id,
+                        request.lobby_channel_id,
+                        request.low_skill_lobby_channel_id,
+                    ),
                     ephemeral: false,
                     allowed_mentions: AllowedMentions {
                         users: vec![request.target.id],
@@ -385,12 +391,40 @@ pub fn execute_refer(
 
 #[must_use]
 pub fn onboarding_message(target_id: DiscordId) -> String {
+    onboarding_message_with_channels(target_id, None, None)
+}
+
+#[must_use]
+pub fn onboarding_message_with_channels(
+    target_id: DiscordId,
+    lobby_channel_id: Option<DiscordId>,
+    low_skill_lobby_channel_id: Option<DiscordId>,
+) -> String {
+    let mut channels = Vec::new();
+    for channel_id in [lobby_channel_id, low_skill_lobby_channel_id]
+        .into_iter()
+        .flatten()
+    {
+        if !channels.contains(&channel_id) {
+            channels.push(channel_id);
+        }
+    }
+    let destination = if channels.is_empty() {
+        "a lobby channel".to_owned()
+    } else {
+        channels
+            .into_iter()
+            .map(|channel_id| format!("<#{}>", channel_id))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
     format!(
         "**Referral: <@{target_id}>**\n\
-         1. Run `/player register` with your Steam32 ID \
+         1. If needed, run `/player register` with your Steam32 ID \
          (the number in your Dotabuff URL).\n\
          2. Run `/player roles` with your Dota positions (1-5).\n\
-         3. Run `/join` for an active lobby, or `/lobby` to start one."
+         3. React in {destination} to join an active lobby, \
+         or run `/lobby` to start one."
     )
 }
 

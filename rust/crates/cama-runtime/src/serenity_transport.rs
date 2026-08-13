@@ -3176,6 +3176,16 @@ impl DiscordTransport for SerenityDiscordTransport {
             .contains(Permissions::SEND_MESSAGES))
     }
 
+    async fn guild_channel_exists(&self, guild_id: u64, channel_id: u64) -> Result<bool, String> {
+        let context = self.context()?;
+        let channel_id = ChannelId::new(channel_id);
+        let Some(guild) = context.cache.guild(GuildId::new(guild_id)) else {
+            return Ok(false);
+        };
+        Ok(guild.channels.contains_key(&channel_id)
+            || guild.threads.iter().any(|thread| thread.id == channel_id))
+    }
+
     async fn mafia_gamba_channel_id(&self, guild_id: u64) -> Result<Option<u64>, String> {
         let context = self.context()?;
         let guild_id = GuildId::new(guild_id);

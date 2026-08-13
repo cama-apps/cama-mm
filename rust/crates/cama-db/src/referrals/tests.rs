@@ -234,13 +234,49 @@ fn test_create_referral_rejects_unregistered_referrer() {
 }
 
 #[test]
-fn test_create_referral_rejects_registered_target() {
+fn test_create_referral_allows_registered_target_without_recorded_games() {
     let fixture = Fixture::new();
     fixture.add_player(10, GUILD);
     fixture.add_player(20, GUILD);
+    fixture
+        .repository
+        .create_referral(10, 20, Some(GUILD))
+        .expect("zero-game registered target is eligible");
+}
+
+#[test]
+fn test_create_referral_rejects_target_with_one_win() {
+    let fixture = Fixture::new();
+    fixture.add_player(10, GUILD);
+    fixture.add_player(20, GUILD);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET wins = 1 WHERE discord_id = ?1 AND guild_id = ?2",
+            params![20, GUILD],
+        )
+        .expect("seed recorded game");
     assert!(matches!(
         fixture.repository.create_referral(10, 20, Some(GUILD)),
-        Err(ReferralRepositoryError::ReferredAlreadyRegistered)
+        Err(ReferralRepositoryError::ReferredAlreadyPlayed)
+    ));
+}
+
+#[test]
+fn test_create_referral_rejects_target_with_one_loss() {
+    let fixture = Fixture::new();
+    fixture.add_player(10, GUILD);
+    fixture.add_player(20, GUILD);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET losses = 1 WHERE discord_id = ?1 AND guild_id = ?2",
+            params![20, GUILD],
+        )
+        .expect("seed recorded game");
+    assert!(matches!(
+        fixture.repository.create_referral(10, 20, Some(GUILD)),
+        Err(ReferralRepositoryError::ReferredAlreadyPlayed)
     ));
 }
 

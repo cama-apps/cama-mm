@@ -75,6 +75,34 @@ fn production_admin_tree_has_all_thirty_python_leaves() {
 }
 
 #[test]
+fn test_admin_payload_keeps_lowprio_group_discoverable() {
+    let fixture = ProviderFixture::new();
+    let registry = fixture.registry();
+    let command = registry
+        .commands()
+        .find(|command| command.name == "admin")
+        .expect("admin root command is registered");
+    let lowprio = command
+        .options
+        .iter()
+        .find(|option| option.name == "lowprio")
+        .expect("lowprio group is discoverable under admin");
+
+    assert_eq!(lowprio.kind, CommandOptionKind::SubcommandGroup);
+    assert_eq!(
+        lowprio
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        ["add", "remove", "status", "list"]
+    );
+    // CommandSpec deliberately has no default-member-permissions field: the
+    // root is discoverable, while each handler enforces admin permissions at
+    // dispatch time instead of applying a static Discord gate.
+}
+
+#[test]
 fn correctmatch_contract_is_exact_and_required() {
     let options = admin_options(3_000.0);
     let command = options
