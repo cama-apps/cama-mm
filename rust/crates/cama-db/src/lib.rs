@@ -26,6 +26,7 @@ pub mod dig_abandon_runtime;
 pub mod dig_action_history;
 #[path = "dig_bonus_events.rs"]
 pub mod dig_bonus_events_repository;
+pub mod dig_boss_runtime;
 pub mod dig_carry_wager;
 pub mod dig_event_runtime;
 pub mod dig_event_threats;

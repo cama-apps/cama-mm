@@ -23,8 +23,8 @@ extern crate cama_db as cama_db_external;
 extern crate self as cama_db;
 
 pub use cama_db_external::{
-    dig_tunnel_encounters_repository, loan_repository, mana_service_repository, schema_manager,
-    shop_runtime,
+    dig_tunnel_encounters_repository, economy_event_repository, loan_repository,
+    mana_service_repository, schema_manager, shop_runtime,
 };
 
 pub mod dig_event_runtime {

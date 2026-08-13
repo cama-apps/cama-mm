@@ -30,6 +30,7 @@ pub mod dig_abandon_runtime;
 pub mod dig_artifact_catalog_runtime;
 pub mod dig_assets;
 pub mod dig_bonus_events;
+pub mod dig_boss_runtime;
 pub mod dig_bosses;
 pub mod dig_carry_wager;
 pub mod dig_command_views;
