@@ -722,6 +722,10 @@ pub struct DigOutcomeInput {
     /// Ascension's milestone multiplier. Each crossed authored milestone is
     /// floored independently before the milestone buckets are summed.
     pub milestone_multiplier_basis_points: i64,
+    /// Request-local Plains/Blue deduction after the daily economy event and
+    /// before Helltide/profit policies. Plains is populated only when its
+    /// separate nonprofit credit succeeded; Blue is a deflationary sink.
+    pub mana_yield_tax: i64,
     pub helltide_tax: i64,
     pub authored_event: bool,
     /// Ordinary by default; the live adapter supplies the player's snapshot.
@@ -749,6 +753,7 @@ impl Default for DigOutcomeInput {
             streak_bonus: 0,
             streak_bonus_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
             milestone_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
+            mana_yield_tax: 0,
             helltide_tax: 0,
             authored_event: false,
             profit_policy: DigProfitPolicy::default(),
@@ -768,6 +773,7 @@ pub struct DigOutcome {
     pub milestone_bonus: i64,
     pub streak_bonus: i64,
     pub overgrowth_bonus: i64,
+    pub mana_yield_tax: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
     pub cave_in: bool,
@@ -868,7 +874,11 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     } else {
         scale_positive_dig_jc(gross_jc)
     };
-    let tax = scale_dig_helltide_tax(input.helltide_tax);
+    let tax = if cave_in {
+        0
+    } else {
+        scale_dig_helltide_tax(input.helltide_tax)
+    };
     let overgrowth_bonus = if cave_in {
         0
     } else {
@@ -889,7 +899,11 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     } else {
         economy_adjusted_jc
     };
-    let pre_policy_jc = (positive_jc - tax).max(0);
+    let mana_yield_tax = input.mana_yield_tax.max(0).min(positive_jc);
+    let pre_policy_jc = positive_jc
+        .saturating_sub(mana_yield_tax)
+        .saturating_sub(tax)
+        .max(0);
     let profit = apply_jc_profit_policies(pre_policy_jc, input.profit_policy);
     let jc_earned = profit.net;
     state.balance += jc_earned;
@@ -911,6 +925,7 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
         milestone_bonus,
         streak_bonus,
         overgrowth_bonus,
+        mana_yield_tax,
         bankruptcy_penalty: profit.bankruptcy_penalty,
         vanity_tax: profit.vanity_tax,
         cave_in,

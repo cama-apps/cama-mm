@@ -290,6 +290,38 @@ fn test_helltide_tax_precedes_independent_profit_deductions() {
 }
 
 #[test]
+fn test_mana_yield_tax_precedes_helltide_and_independent_profit_deductions() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 20);
+    input.mana_yield_tax = 2;
+    input.helltide_tax = 3;
+    input.profit_policy = DigProfitPolicy {
+        bankruptcy_keep_basis_points: 7_500,
+        vanity_tax_basis_points: 1_000,
+    };
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    // positive(20)=13, Mana removes 2, Helltide removes 3, then both profit
+    // policies independently inspect 8 (bankruptcy 2, vanity 0).
+    assert_eq!(result.economy_adjusted_jc, 13);
+    assert_eq!(result.mana_yield_tax, 2);
+    assert_eq!(result.bankruptcy_penalty, 2);
+    assert_eq!(result.vanity_tax, 0);
+    assert_eq!(result.jc_earned, 6);
+}
+
+#[test]
+fn test_cave_in_reward_returns_before_helltide_tax() {
+    let mut tunnel = started_tunnel(50);
+    let mut input = outcome(0, 3);
+    input.cave_in_loss = 5;
+    input.economy_before_positive_scale = true;
+    input.helltide_tax = 5;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert!(result.cave_in);
+    assert_eq!(result.jc_earned, scale_positive_dig_jc(3));
+}
+
+#[test]
 fn test_deterministic_dig_outcome_scales_full_positive_payout_before_sinks() {
     let mut tunnel = started_tunnel(10);
     tunnel.balance = 100;

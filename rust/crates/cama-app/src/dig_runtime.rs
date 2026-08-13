@@ -28,6 +28,7 @@ use cama_db::dig_inventory_repository::{
     AutoBuyRequest, AutoBuySelection, BuyInsuranceOutcome, DigInventoryRepository, SetTrapOutcome,
 };
 use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository};
+use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::ManashopRepository;
 use cama_db::pet_repository::PetRepository;
@@ -657,6 +658,20 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(ManaEffects::default())
     }
 
+    /// Credit a successfully computed Plains tithe before the actor's Dig
+    /// commit. Python keeps this as a separate fail-soft reserve boundary and
+    /// subtracts the tithe from payout only when this call succeeds.
+    fn credit_plains_tithe(
+        &self,
+        _discord_id: i64,
+        _guild_id: i64,
+        _total_jc: i64,
+        _tithe: i64,
+        _event_key: &str,
+    ) -> Result<Option<i64>, DigRuntimeStoreError> {
+        Ok(None)
+    }
+
     /// Whether the player has an unspent Overgrowth charge at this instant.
     fn overgrowth_active(
         &self,
@@ -1240,6 +1255,31 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         };
         let color = color_for_land(&row.current_land);
         Ok(ManaEffects::for_color(color, Some(&row.current_land)))
+    }
+
+    fn credit_plains_tithe(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        total_jc: i64,
+        tithe: i64,
+        event_key: &str,
+    ) -> Result<Option<i64>, DigRuntimeStoreError> {
+        if total_jc <= 0 || tithe <= 0 {
+            return Ok(None);
+        }
+        let context = LedgerContext {
+            source: Some("dig".to_owned()),
+            actor_id: Some(discord_id),
+            related_type: Some("plains_tithe".to_owned()),
+            related_id: Some(event_key.to_owned()),
+            reason: Some("dig plains tithe reserve credit".to_owned()),
+            metadata: Some(serde_json::json!({"total_jc": total_jc, "tithe": tithe}).to_string()),
+        };
+        LoanRepository::new(&self.path)
+            .add_to_nonprofit_fund_once(Some(guild_id), tithe, &context)
+            .map(|receipt| Some(receipt.amount))
+            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))
     }
 
     fn overgrowth_active(
@@ -3193,6 +3233,13 @@ fn apply_mana_base_yield(
         modified = modified.saturating_add(effects.green_steady_bonus);
     }
     modified.max(0)
+}
+
+fn proportional_mana_yield_tax(amount: i64, rate: f64) -> i64 {
+    if amount <= 0 || !rate.is_finite() || rate <= 0.0 {
+        return 0;
+    }
+    ((amount as f64 * rate) as i64).max(1).min(amount)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -5181,6 +5228,7 @@ where
         let mut cave_in_detail_value = None;
         let mut cave_in_medical_requested = 0_i64;
         let mut catastrophic_depth_after = None;
+        let mut catastrophic_cave_in = false;
         if loot_outcome.cave_in {
             let band = cave_in_band(depth_before);
             let injury_bonus = mutation_fx
@@ -5216,6 +5264,7 @@ where
                     "message": "Cave-in! Your grappling line snapped taut and absorbed the impact.",
                 }));
             } else if catastrophic {
+                catastrophic_cave_in = true;
                 let insured = tunnel.insured_until.is_some_and(|expires| expires > now);
                 let (depth_after, insurance_saved, total_loss) = catastrophic_cave_in_depth(
                     depth_before,
@@ -5418,7 +5467,7 @@ where
         }
         let mut state = tunnel_state(&staged, paid_charge_active.then_some(paid_cost));
         state.depth = depth_before;
-        let outcome_input = DigOutcomeInput {
+        let mut outcome_input = DigOutcomeInput {
             advance: loot_outcome.advance,
             gross_jc: if loot_outcome.cave_in {
                 cave_reward_gross
@@ -5451,6 +5500,49 @@ where
             helltide_tax,
             ..DigOutcomeInput::default()
         };
+        if !loot_outcome.cave_in
+            && (mana_effects.plains_tithe_rate > 0.0 || mana_effects.blue_tax_rate > 0.0)
+        {
+            let mut preview_state = state.clone();
+            let preview = apply_dig_outcome(&mut preview_state, outcome_input, now);
+            let total_jc = preview.economy_adjusted_jc.max(0);
+            let mut modified = total_jc;
+            if mana_effects.plains_tithe_rate > 0.0 && modified > 0 {
+                let tithe = proportional_mana_yield_tax(modified, mana_effects.plains_tithe_rate);
+                let event_key = delivery_context.as_ref().map_or_else(
+                    || {
+                        format!(
+                            "dig-request:{}:{}:{}:{}:{}",
+                            request.guild_id,
+                            request.discord_id,
+                            request.now,
+                            u8::from(request.paid),
+                            u8::from(request.forced_event),
+                        )
+                    },
+                    |context| format!("dig-interaction:{}", context.interaction_id),
+                );
+                let credited = self
+                    .store
+                    .credit_plains_tithe(
+                        request.discord_id,
+                        request.guild_id,
+                        total_jc,
+                        tithe,
+                        &event_key,
+                    )
+                    .unwrap_or_default()
+                    .unwrap_or_default()
+                    .max(0)
+                    .min(modified);
+                modified = modified.saturating_sub(credited);
+            }
+            if mana_effects.blue_tax_rate > 0.0 && modified > 0 {
+                let tax = proportional_mana_yield_tax(modified, mana_effects.blue_tax_rate);
+                modified = modified.saturating_sub(tax);
+            }
+            outcome_input.mana_yield_tax = total_jc.saturating_sub(modified);
+        }
         let mut outcome = apply_dig_outcome(&mut state, outcome_input, now);
         if let Some(depth_after) = catastrophic_depth_after {
             state.depth = depth_after;
@@ -5620,7 +5712,8 @@ where
                 Some(curse.to_string())
             };
         }
-        if buff_remaining > 0
+        if !catastrophic_cave_in
+            && buff_remaining > 0
             && let Some(next_tunnel) = staged.tunnel.as_mut()
         {
             next_tunnel.temp_buffs = if buff_remaining <= 1 {
@@ -5754,6 +5847,7 @@ where
             "items_used": loot_outcome.items_used,
             "paid": paid_charge_active,
             "pet_dig_bonus": pet_dig_bonus,
+            "mana_yield_tax": outcome.mana_yield_tax,
             "helltide_tax": helltide_tax,
             "gross_jc": outcome.economy_gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
@@ -6475,6 +6569,7 @@ mod tests {
     use cama_db::economy_event_repository::{
         EconomyEventRepository, EventDirection, EventDraft, EventEffects,
     };
+    use cama_db::loan_repository::LoanRepository;
     use cama_db::manashop_rework_repository::{BuffData, GrantBuffRequest, ManashopRepository};
     use cama_db::schema_manager::initialize_or_migrate;
     use cama_domain::pet::DIG_WORK_UNITS_PER_BLOCK;
@@ -6490,7 +6585,9 @@ mod tests {
         DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRequest,
         DigRuntimeService, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
         DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
+        proportional_mana_yield_tax,
     };
+    use cama_domain::game_date::game_date_for_timestamp;
 
     const PET_DAY: i64 = DIG_WORK_UNITS_PER_BLOCK;
 
@@ -8673,11 +8770,37 @@ mod tests {
         transaction
             .execute(
                 "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
-                 VALUES (?1,?2,'Dirt','earthworm_migration')",
-                params![guild_id, game_date],
+                 VALUES (?1,?2,?3,'earthworm_migration')",
+                params![
+                    guild_id,
+                    game_date,
+                    if active_layer == "Dirt" {
+                        "Stone"
+                    } else {
+                        "Dirt"
+                    }
+                ],
             )
             .expect("seed second weather row");
         transaction.commit().expect("commit weather rows");
+    }
+
+    fn seed_active_mana(
+        database: &NamedTempFile,
+        discord_id: i64,
+        guild_id: i64,
+        game_date: &str,
+        land: &str,
+    ) {
+        Connection::open(database.path())
+            .expect("Mana connection")
+            .execute(
+                "INSERT INTO player_mana(
+                     discord_id,guild_id,current_land,assigned_date,consumed_today
+                 ) VALUES(?1,?2,?3,?4,0)",
+                params![discord_id, guild_id, land, game_date],
+            )
+            .expect("seed active Mana");
     }
 
     #[test]
@@ -8787,6 +8910,145 @@ mod tests {
     #[test]
     fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_restless() {
         assert_stamina_cooldown_boundary(r#"[{"id":"restless"}]"#, 3_600);
+    }
+
+    #[test]
+    fn sqlite_blue_mana_tax_is_one_net_reward_sink_without_a_second_ledger() {
+        let control = NamedTempFile::new().expect("control Blue-tax database");
+        let blue = NamedTempFile::new().expect("Blue-tax database");
+        let actor = 60_089;
+        let guild = 60_090;
+        let now = 1_900_084_000;
+        for database in [&control, &blue] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("Blue-tax boss-progress connection")
+                .execute(
+                    "UPDATE tunnels SET boss_progress=?1
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        actor,
+                        guild,
+                    ],
+                )
+                .expect("seed defeated lower bosses");
+        }
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+        let today = game_date_for_timestamp(dig_now as f64).expect("Blue-tax date");
+        for database in [&control, &blue] {
+            seed_two_weather_rows(database, guild, &today, "Magma", "cooling_period");
+        }
+        seed_active_mana(&blue, actor, guild, &today, "Island");
+        for database in [&control, &blue] {
+            Connection::open(database.path())
+                .expect("clear Blue-tax setup ledger")
+                .execute("DELETE FROM economy_ledger_entries", [])
+                .expect("clear Blue-tax setup ledger");
+        }
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control Blue-tax Dig");
+        let blue_outcome = DigRuntimeService::sqlite(blue.path())
+            .dig(request)
+            .expect("Blue-tax Dig");
+        let expected_tax = proportional_mana_yield_tax(control_outcome.jc_earned, 0.055);
+        assert!(control_outcome.jc_earned > 0);
+        assert!(expected_tax > 0);
+        assert_eq!(
+            blue_outcome.jc_earned,
+            control_outcome.jc_earned - expected_tax
+        );
+        let connection = Connection::open(blue.path()).expect("inspect Blue-tax database");
+        let (ledger_count, detail): (i64, String) = connection
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM economy_ledger_entries
+                       WHERE account_id=?1),
+                     (SELECT detail FROM dig_actions
+                       WHERE actor_id=?1 AND guild_id=?2 AND action_type='dig'
+                       ORDER BY id DESC LIMIT 1)",
+                params![actor, guild],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("Blue-tax ledger and audit");
+        assert!(
+            ledger_count <= 1,
+            "Blue tax must not create a second debit ledger"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&detail)
+                .expect("Blue-tax detail JSON")
+                .get("mana_yield_tax")
+                .and_then(Value::as_i64),
+            Some(expected_tax),
+        );
+    }
+
+    #[test]
+    fn sqlite_plains_tithe_deducts_only_after_fail_soft_reserve_credit() {
+        let control = NamedTempFile::new().expect("control Plains database");
+        let plains = NamedTempFile::new().expect("Plains database");
+        let failing = NamedTempFile::new().expect("failing Plains database");
+        let actor = 60_097;
+        let guild = 60_098;
+        let now = 1_900_085_000;
+        for database in [&control, &plains, &failing] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 7_200));
+        }
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 10, 1);
+        let today = game_date_for_timestamp(dig_now as f64).expect("Plains tithe date");
+        for database in [&control, &plains, &failing] {
+            seed_two_weather_rows(database, guild, &today, "Dirt", "cooling_period");
+        }
+        seed_active_mana(&plains, actor, guild, &today, "Plains");
+        seed_active_mana(&failing, actor, guild, &today, "Plains");
+        Connection::open(failing.path())
+            .expect("failing reserve connection")
+            .execute(
+                "INSERT INTO nonprofit_fund(guild_id,total_collected)
+                 VALUES(?1,?2)",
+                params![guild, i64::MAX],
+            )
+            .expect("seed overflowing reserve");
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control Plains Dig");
+        let plains_outcome = DigRuntimeService::sqlite(plains.path())
+            .dig(request)
+            .expect("Plains tithe Dig");
+        let failing_outcome = DigRuntimeService::sqlite(failing.path())
+            .dig(request)
+            .expect("fail-soft Plains Dig");
+        let tithe = proportional_mana_yield_tax(control_outcome.jc_earned, 0.05);
+        assert_eq!(plains_outcome.jc_earned, control_outcome.jc_earned - tithe);
+        assert_eq!(
+            LoanRepository::new(plains.path())
+                .get_nonprofit_fund(Some(guild))
+                .expect("read credited reserve"),
+            tithe,
+        );
+        assert_eq!(failing_outcome.jc_earned, control_outcome.jc_earned);
+        assert_eq!(
+            LoanRepository::new(failing.path())
+                .get_nonprofit_fund(Some(guild))
+                .expect("read overflowing reserve"),
+            i64::MAX,
+        );
     }
 
     #[test]
@@ -9595,6 +9857,78 @@ mod tests {
                 .expect("expired cave buff"),
             None,
             "the active hazard buff is consumed by the same committed Dig",
+        );
+    }
+
+    #[test]
+    fn sqlite_catastrophic_cave_in_does_not_resurrect_cleared_multidig_buff() {
+        let database = NamedTempFile::new().expect("catastrophic cave database");
+        let actor = 60_091;
+        let guild = 60_092;
+        let seed_now = 1_900_083_000;
+        let dig_now = 1_900_083_041;
+        seed_live_runtime_tunnel(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            240,
+            1,
+            Some(seed_now - 7_200),
+        );
+        let today = game_date_for_timestamp(dig_now as f64).expect("catastrophic cave date");
+        seed_two_weather_rows(
+            &database,
+            guild,
+            &today,
+            crate::dig_service::layer_at(240).name,
+            "cooling_period",
+        );
+        Connection::open(database.path())
+            .expect("catastrophic buff connection")
+            .execute(
+                "UPDATE tunnels SET temp_buffs=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![
+                    r#"{"digs_remaining":2,"effect":{"advance_bonus":2}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed multi-Dig buff");
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: dig_now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("catastrophic cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("catastrophic detail"),
+        )
+        .expect("catastrophic detail JSON");
+        assert!(outcome.cave_in);
+        assert_eq!(
+            detail.get("type").and_then(Value::as_str),
+            Some("catastrophic")
+        );
+        assert_eq!(detail.get("depth_after").and_then(Value::as_i64), Some(225));
+        assert_eq!(outcome.depth_after, 225);
+        assert_eq!(
+            SqliteDigRuntimeStore::new(database.path())
+                .snapshot(actor, guild)
+                .expect("reload catastrophic cave")
+                .tunnel
+                .expect("persisted tunnel")
+                .temp_buffs,
+            None,
+            "the generic duration decrement must not recreate a catastrophic-cleared buff",
         );
     }
 

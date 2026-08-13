@@ -867,6 +867,43 @@ fn transfer_context() -> LedgerContext {
 }
 
 #[test]
+fn nonprofit_credit_once_recovers_the_first_receipt_without_minting_again() {
+    let fixture = Fixture::new();
+    let context = LedgerContext {
+        source: Some("dig".to_owned()),
+        actor_id: Some(88_000),
+        related_type: Some("plains_tithe".to_owned()),
+        related_id: Some("dig-interaction:123".to_owned()),
+        reason: Some("Dig Plains tithe".to_owned()),
+        metadata: None,
+    };
+    assert_eq!(
+        fixture
+            .repository
+            .add_to_nonprofit_fund_once(Some(TEST_GUILD_ID), 7, &context)
+            .expect("first idempotent credit"),
+        NonprofitCreditReceipt {
+            amount: 7,
+            total: 7,
+            applied: true,
+        }
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .add_to_nonprofit_fund_once(Some(TEST_GUILD_ID), 11, &context)
+            .expect("recover first idempotent credit"),
+        NonprofitCreditReceipt {
+            amount: 7,
+            total: 7,
+            applied: false,
+        }
+    );
+    assert_eq!(fixture.fund(), 7);
+    assert_eq!(fixture.ledger_count(), 1);
+}
+
+#[test]
 fn test_missing_player_raises_and_mints_nothing() {
     let fixture = Fixture::new();
     fixture

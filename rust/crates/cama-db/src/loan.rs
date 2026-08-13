@@ -119,6 +119,15 @@ pub struct StipendPayment {
     pub amount: i64,
 }
 
+/// One idempotent nonprofit credit. A retry returns the amount and balance
+/// recorded by the first ledger entry instead of applying a second credit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonprofitCreditReceipt {
+    pub amount: i64,
+    pub total: i64,
+    pub applied: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum LoanRepositoryError {
     #[error(
@@ -153,6 +162,8 @@ pub enum LoanRepositoryError {
     StipendRecipientChanged,
     #[error("loan monetary arithmetic exceeded SQLite's signed 64-bit range")]
     AmountOverflow,
+    #[error("idempotent nonprofit credits require source, related type, and related id")]
+    MissingIdempotencyContext,
     #[error("system clock is before the Unix epoch")]
     ClockBeforeUnixEpoch,
     #[error("loan SQLite operation failed: {0}")]
@@ -367,6 +378,59 @@ impl LoanRepository {
         })?;
         transaction.commit()?;
         Ok(updated)
+    }
+
+    /// Credit the reserve once for a stable ledger identity. This preserves
+    /// Python's separate fail-soft reserve boundary while making a retry after
+    /// a later actor-transaction failure recover the original credit instead
+    /// of minting it again.
+    pub fn add_to_nonprofit_fund_once(
+        &self,
+        guild_id: Option<i64>,
+        amount: i64,
+        context: &LedgerContext,
+    ) -> Result<NonprofitCreditReceipt, LoanRepositoryError> {
+        let (Some(source), Some(related_type), Some(related_id)) = (
+            context.source.as_deref(),
+            context.related_type.as_deref(),
+            context.related_id.as_deref(),
+        ) else {
+            return Err(LoanRepositoryError::MissingIdempotencyContext);
+        };
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((recorded_amount, recorded_total)) = transaction
+            .query_row(
+                "SELECT delta,balance_after FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_type='nonprofit'
+                   AND source=?2 AND related_type=?3 AND related_id=?4
+                 ORDER BY ledger_id ASC LIMIT 1",
+                params![guild_id, source, related_type, related_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        {
+            transaction.commit()?;
+            return Ok(NonprofitCreditReceipt {
+                amount: recorded_amount,
+                total: recorded_total,
+                applied: false,
+            });
+        }
+        let current = nonprofit_total(&transaction, guild_id)?;
+        let updated = current
+            .checked_add(amount)
+            .ok_or(LoanRepositoryError::AmountOverflow)?;
+        with_ledger_context(&transaction, context, || {
+            set_nonprofit_total(&transaction, guild_id, updated)
+        })?;
+        transaction.commit()?;
+        Ok(NonprofitCreditReceipt {
+            amount,
+            total: updated,
+            applied: true,
+        })
     }
 
     /// Debit one existing player and credit the reserve in one transaction.
