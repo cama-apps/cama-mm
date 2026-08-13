@@ -10566,6 +10566,7 @@ mod tests {
             depth_after: 10,
             advance: 0,
             jc_earned: 0,
+            vanity_tax: 0,
             balance_after: 100,
             cave_in: false,
             cave_in_detail: None,
@@ -11070,6 +11071,7 @@ mod tests {
             depth_after: 24,
             advance: 4,
             jc_earned: 6,
+            vanity_tax: 0,
             balance_after: 106,
             cave_in: false,
             cave_in_detail: None,
@@ -11152,6 +11154,7 @@ mod tests {
             depth_after: 24,
             advance: 4,
             jc_earned: 6,
+            vanity_tax: 0,
             balance_after: 106,
             cave_in: false,
             cave_in_detail: None,
@@ -11353,6 +11356,72 @@ mod tests {
         );
     }
 
+    fn live_buy_autocomplete_choices(query: &str) -> Vec<CommandOptionChoice> {
+        let (database, _provider, _discord) = fixture();
+        let connection = Connection::open(database.path()).expect("shop DB");
+        connection
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,prestige_level,pickaxe_tier)
+                 VALUES (?1,?2,0,275,5,0)",
+                params![USER as i64, GUILD as i64],
+            )
+            .expect("shop tunnel");
+        let shop = cama_app::dig_gear_runtime::DigGearRuntimeService::sqlite(database.path())
+            .shop(USER as i64, GUILD as i64)
+            .expect("shop")
+            .expect("registered player");
+        super::dig_buy_choices(query, &shop)
+    }
+
+    fn live_buy_autocomplete_values(query: &str) -> BTreeSet<String> {
+        live_buy_autocomplete_choices(query)
+            .into_iter()
+            .map(|choice| match choice {
+                CommandOptionChoice::String { name, value } => {
+                    assert!(!name.trim().is_empty());
+                    value
+                }
+                CommandOptionChoice::Integer { .. } | CommandOptionChoice::Number { .. } => {
+                    panic!("Dig buy choices must be strings")
+                }
+            })
+            .collect()
+    }
+
+    // tests/test_dig_buy_command.py::test_buy_autocomplete_exposes_new_sinks[whetstone-expected0]
+    #[test]
+    fn buy_autocomplete_exposes_tempered_whetstone_sink() {
+        assert!(live_buy_autocomplete_values("whetstone").contains("tempered_whetstone"));
+    }
+
+    // tests/test_dig_buy_command.py::test_buy_autocomplete_exposes_new_sinks[warding-expected1]
+    #[test]
+    fn buy_autocomplete_exposes_warding_salts_sink() {
+        assert!(live_buy_autocomplete_values("warding").contains("warding_salts"));
+    }
+
+    // tests/test_dig_buy_command.py::test_buy_autocomplete_exposes_new_sinks[rescue-expected2]
+    #[test]
+    fn buy_autocomplete_exposes_rescue_line_sink() {
+        assert!(live_buy_autocomplete_values("rescue").contains("rescue_line"));
+    }
+
+    // tests/test_dig_buy_command.py::test_buy_autocomplete_exposes_new_sinks[amulet-expected3]
+    #[test]
+    fn buy_autocomplete_exposes_every_high_tier_amulet_sink() {
+        let values = live_buy_autocomplete_values("amulet");
+        assert!((4..=7).all(|tier| values.contains(&format!("amulet:{tier}"))));
+    }
+
+    // tests/test_dig_buy_command.py::test_buy_autocomplete_exposes_new_sinks[boots-expected4]
+    #[test]
+    fn buy_autocomplete_exposes_every_high_tier_boots_sink() {
+        let values = live_buy_autocomplete_values("boots");
+        assert!((4..=7).all(|tier| values.contains(&format!("boots:{tier}"))));
+    }
+
+    // tests/test_dig_buy_command.py::test_every_shop_row_is_reachable_through_filtered_autocomplete
     #[test]
     fn live_shop_projection_drives_every_buy_autocomplete_row_with_owned_values() {
         let (database, _provider, _discord) = fixture();
