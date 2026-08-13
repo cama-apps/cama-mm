@@ -4692,7 +4692,7 @@ where
             let pet_work_claim = pet_work
                 .as_ref()
                 .and_then(|work| work.claim(pet_dig_bonus).ok());
-            let next = apply_state(&current, state, &today, false, 0);
+            let next = apply_state(&current, state, &today, false, first.jc_earned);
             let commit = DigRuntimeCommit {
                 expected: DigRuntimeVersion::from(&snapshot),
                 next,
@@ -5465,6 +5465,7 @@ where
                 .reinforced_until
                 .max(now.saturating_add(crate::dig_loot::REINFORCEMENT_SECONDS));
         }
+        let balance_before_outcome = staged.balance;
         let mut state = tunnel_state(&staged, paid_charge_active.then_some(paid_cost));
         state.depth = depth_before;
         let mut outcome_input = DigOutcomeInput {
@@ -5571,6 +5572,12 @@ where
                 }
             }
         }
+        let mana_paid_cave_refund = if outcome.cave_in && paid_charge_active {
+            proportional_mana_yield_tax(paid_cost, mana_effects.dig_paid_refund_on_caveins)
+        } else {
+            0
+        };
+        state.balance = state.balance.saturating_add(mana_paid_cave_refund);
         let base_advance = outcome.advance;
         let mut pet_dig_bonus = 0;
         // A cave-in is a loss-only branch in Python: the pet's stored work is
@@ -5613,7 +5620,22 @@ where
         let pet_work_claim = pet_work
             .as_ref()
             .and_then(|work| work.claim(pet_dig_bonus).ok());
-        staged = apply_state(&staged, state, &today, paid_charge_active, paid_cost);
+        let wallet_reward_delta = state
+            .balance
+            .saturating_sub(balance_before_outcome)
+            .saturating_add(if paid_charge_active { paid_cost } else { 0 });
+        let total_jc_increment = if outcome.cave_in {
+            0
+        } else {
+            outcome.jc_earned.max(0)
+        };
+        staged = apply_state(
+            &staged,
+            state,
+            &today,
+            paid_charge_active,
+            total_jc_increment,
+        );
         if let Some(next_tunnel) = staged.tunnel.as_mut() {
             if outcome.cave_in {
                 next_tunnel.cavein_free_streak = 0;
@@ -5848,6 +5870,7 @@ where
             "paid": paid_charge_active,
             "pet_dig_bonus": pet_dig_bonus,
             "mana_yield_tax": outcome.mana_yield_tax,
+            "mana_paid_cave_refund": mana_paid_cave_refund,
             "helltide_tax": helltide_tax,
             "gross_jc": outcome.economy_gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
@@ -5884,11 +5907,13 @@ where
             consume_overgrowth: overgrowth_active,
             depth_before,
             depth_after: outcome.depth_after,
-            jc_delta: outcome.jc_earned.saturating_sub(if paid_charge_active {
-                paid_cost
+            jc_delta: if outcome.cave_in {
+                wallet_reward_delta
             } else {
-                0
-            }),
+                outcome
+                    .jc_earned
+                    .saturating_sub(if paid_charge_active { paid_cost } else { 0 })
+            },
             balance_cost: if paid_charge_active { paid_cost } else { 0 },
             action_type: "dig".to_owned(),
             detail,
@@ -5900,7 +5925,11 @@ where
             depth_before,
             depth_after: outcome.depth_after,
             advance: outcome.advance,
-            jc_earned: outcome.jc_earned,
+            jc_earned: if outcome.cave_in {
+                0
+            } else {
+                outcome.jc_earned
+            },
             balance_after,
             cave_in: outcome.cave_in,
             cave_in_detail: cave_in_detail_value.map(|mut detail| {
@@ -6465,7 +6494,7 @@ fn apply_state(
     state: TunnelState,
     today: &str,
     paid: bool,
-    paid_cost: i64,
+    total_jc_increment: i64,
 ) -> DigRuntimeSnapshot {
     let mut next = snapshot.clone();
     next.balance = state.balance;
@@ -6475,12 +6504,10 @@ fn apply_state(
         tunnel.total_digs = state.total_digs;
         tunnel.last_dig_at = state.last_dig_at;
         tunnel.luminosity = state.luminosity;
-        tunnel.total_jc_earned = tunnel.total_jc_earned.max(0).saturating_add(
-            state
-                .balance
-                .saturating_sub(snapshot.balance)
-                .saturating_add(if paid { paid_cost } else { 0 }),
-        );
+        tunnel.total_jc_earned = tunnel
+            .total_jc_earned
+            .max(0)
+            .saturating_add(total_jc_increment.max(0));
         if paid {
             tunnel.paid_digs_today = tunnel.paid_digs_today.saturating_add(1);
             tunnel.paid_dig_date = Some(today.to_owned());
@@ -8702,6 +8729,22 @@ mod tests {
             .expect("deterministic cave seed")
     }
 
+    fn find_paid_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
+        (start..start.saturating_add(10_000))
+            .find(|candidate| {
+                super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: true,
+                    forced_event: false,
+                }))
+                .unit()
+                    < 0.04
+            })
+            .expect("deterministic paid cave seed")
+    }
+
     fn find_dig_time_with_unit_between(
         discord_id: i64,
         guild_id: i64,
@@ -8989,6 +9032,100 @@ mod tests {
                 .get("mana_yield_tax")
                 .and_then(Value::as_i64),
             Some(expected_tax),
+        );
+    }
+
+    #[test]
+    fn sqlite_blue_paid_cave_refund_is_atomic_and_not_counted_as_dig_income() {
+        let control = NamedTempFile::new().expect("control paid-cave database");
+        let blue = NamedTempFile::new().expect("Blue paid-cave database");
+        let actor = 60_093;
+        let guild = 60_094;
+        let now = 1_900_084_500;
+        for database in [&control, &blue] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 1));
+            Connection::open(database.path())
+                .expect("paid-cave setup connection")
+                .execute(
+                    "UPDATE players SET jopacoin_balance=100 WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                )
+                .expect("seed paid-cave balance");
+            Connection::open(database.path())
+                .expect("paid-cave tunnel connection")
+                .execute(
+                    "UPDATE tunnels
+                     SET grappling_hook_charges=1,total_jc_earned=25,current_run_jc=9
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                )
+                .expect("seed paid-cave tunnel counters");
+        }
+        let dig_now = find_paid_cave_dig_time(actor, guild, now);
+        let today = game_date_for_timestamp(dig_now as f64).expect("paid-cave date");
+        for database in [&control, &blue] {
+            seed_two_weather_rows(database, guild, &today, "Dirt", "earthworm_migration");
+        }
+        seed_active_mana(&blue, actor, guild, &today, "Island");
+        for database in [&control, &blue] {
+            Connection::open(database.path())
+                .expect("clear paid-cave setup ledger")
+                .execute("DELETE FROM economy_ledger_entries", [])
+                .expect("clear paid-cave setup ledger");
+        }
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: true,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control paid cave");
+        let blue_outcome = DigRuntimeService::sqlite(blue.path())
+            .dig(request)
+            .expect("Blue paid cave");
+        assert!(control_outcome.cave_in);
+        assert!(blue_outcome.cave_in);
+        assert_eq!(control_outcome.paid_dig_cost, 3);
+        assert_eq!(blue_outcome.paid_dig_cost, 3);
+        assert_eq!(control_outcome.jc_earned, 0);
+        assert_eq!(blue_outcome.jc_earned, 0);
+        assert_eq!(control_outcome.balance_after, 97);
+        assert_eq!(blue_outcome.balance_after, 98);
+
+        let connection = Connection::open(blue.path()).expect("inspect Blue paid cave");
+        let ledger_deltas = connection
+            .prepare(
+                "SELECT delta FROM economy_ledger_entries
+                 WHERE account_type='player' AND account_id=?1 ORDER BY ledger_id",
+            )
+            .expect("prepare paid-cave ledger query")
+            .query_map([actor], |row| row.get::<_, i64>(0))
+            .expect("query paid-cave ledger")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect paid-cave ledger");
+        assert_eq!(ledger_deltas, vec![-3, 1]);
+        let (total_jc, current_run_jc, audit_delta, detail): (i64, i64, i64, String) = connection
+            .query_row(
+                "SELECT t.total_jc_earned,t.current_run_jc,a.jc_delta,a.detail
+                     FROM tunnels t JOIN dig_actions a
+                       ON a.actor_id=t.discord_id AND a.guild_id=t.guild_id
+                     WHERE t.discord_id=?1 AND t.guild_id=?2
+                     ORDER BY a.id DESC LIMIT 1",
+                params![actor, guild],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("paid-cave counters and audit");
+        assert_eq!((total_jc, current_run_jc), (25, 9));
+        assert_eq!(audit_delta, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&detail)
+                .expect("paid-cave detail JSON")
+                .get("mana_paid_cave_refund")
+                .and_then(Value::as_i64),
+            Some(1),
         );
     }
 
