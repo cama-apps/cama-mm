@@ -63,6 +63,30 @@ pub const PRESTIGE_FOUR_TROPHY_IDS: [&str; 5] = [
 pub const PRESTIGE_FOUR_GENERAL_RELIC_IDS: [&str; 3] =
     ["deepveined_coal", "diviners_knot", "pathfinders_spur"];
 
+/// Compose the independent multipliers that affect an ordinary artifact find.
+///
+/// `weather_factor`, `route_factor`, `ascension_factor`, and
+/// `post_pinnacle_factor` are already multiplicative factors, so callers should
+/// pass `1.0` when a source has no effect. `treasure_bonus` is the additive
+/// bonus exposed by the Treasure Sense mutation (for example, `0.25` means
+/// `+25%`). The base find rate is deliberately not included here.
+#[must_use]
+pub fn artifact_rate_modifier(
+    echo_stone: bool,
+    weather_factor: f64,
+    route_factor: f64,
+    ascension_factor: f64,
+    treasure_bonus: f64,
+    post_pinnacle_factor: f64,
+) -> f64 {
+    (if echo_stone { 1.1 } else { 1.0 })
+        * weather_factor.max(0.0)
+        * route_factor.max(0.0)
+        * ascension_factor.max(0.0)
+        * (1.0 + treasure_bonus).max(0.0)
+        * post_pinnacle_factor.max(0.0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrestigeBossContent {
     pub boss: &'static BossDefinition,
@@ -177,6 +201,42 @@ pub fn is_ordinary_relic(artifact: ArtifactDef) -> bool {
         && artifact.min_prestige == 0
         && artifact.id != "aegis_fragment"
         && !artifact.trophy
+}
+
+/// Return the ordinary relics for a rolled rarity, preferring the current
+/// layer and falling back to the full rarity pool when that layer is empty.
+///
+/// The returned vector retains catalog order. Selection is intentionally left
+/// to the injected entropy source so callers can use a uniform index draw.
+#[must_use]
+pub fn ordinary_relic_candidates(
+    depth: i64,
+    rarity: Rarity,
+    owned: &BTreeSet<String>,
+) -> Vec<ArtifactDef> {
+    let layer = layer_at(depth).name;
+    let all = artifact_catalog();
+    let by_layer = all
+        .iter()
+        .copied()
+        .filter(|artifact| {
+            is_ordinary_relic(*artifact)
+                && artifact.rarity == rarity
+                && artifact.layer.eq_ignore_ascii_case(layer)
+                && !owned.contains(artifact.id)
+        })
+        .collect::<Vec<_>>();
+    if by_layer.is_empty() {
+        all.into_iter()
+            .filter(|artifact| {
+                is_ordinary_relic(*artifact)
+                    && artifact.rarity == rarity
+                    && !owned.contains(artifact.id)
+            })
+            .collect()
+    } else {
+        by_layer
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -364,6 +424,55 @@ pub trait Prestige4Entropy {
     fn choose_index(&mut self, upper_bound: usize) -> usize;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArtifactRollPlan {
+    pub depth: i64,
+    pub rate_modifier: f64,
+    pub skip_artifact: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArtifactStagePlan {
+    pub definition: ArtifactDef,
+    pub current_run_artifacts_delta: i64,
+}
+
+#[must_use]
+pub const fn artifact_stage_plan(definition: ArtifactDef) -> ArtifactStagePlan {
+    ArtifactStagePlan {
+        definition,
+        current_run_artifacts_delta: 1,
+    }
+}
+
+/// Apply the Python artifact-roll ordering without persistence side effects.
+///
+/// A skipped roll returns before touching entropy. Otherwise entropy is
+/// consumed in exactly this order: find gate, rarity, then uniform candidate
+/// selection (only when a candidate exists).
+#[must_use]
+pub fn roll_artifact_stage(
+    plan: ArtifactRollPlan,
+    owned: &BTreeSet<String>,
+    entropy: &mut impl Prestige4Entropy,
+) -> Option<ArtifactStagePlan> {
+    if plan.skip_artifact {
+        return None;
+    }
+    if entropy.unit() >= BASE_ARTIFACT_FIND_RATE * plan.rate_modifier.max(0.0) {
+        return None;
+    }
+    let rarity = rarity_for_roll(entropy.unit());
+    let candidates = ordinary_relic_candidates(plan.depth, rarity, owned);
+    if candidates.is_empty() {
+        return None;
+    }
+    let index = entropy
+        .choose_index(candidates.len())
+        .min(candidates.len() - 1);
+    Some(artifact_stage_plan(candidates[index]))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactDrop {
     pub id: &'static str,
@@ -478,6 +587,8 @@ where
         rate_modifier: f64,
         now: i64,
     ) -> Result<Option<ArtifactDrop>, P::Error> {
+        // Keep the Python query cadence: failed find rolls (including the
+        // rarity gate) must not query the player's inventory.
         if self.entropy.unit() >= BASE_ARTIFACT_FIND_RATE * rate_modifier.max(0.0) {
             return Ok(None);
         }
@@ -488,29 +599,7 @@ where
             .into_iter()
             .map(|artifact| artifact.artifact_id)
             .collect::<BTreeSet<_>>();
-        let layer = layer_at(depth).name;
-        let all = artifact_catalog();
-        let by_layer = all
-            .iter()
-            .copied()
-            .filter(|artifact| {
-                is_ordinary_relic(*artifact)
-                    && artifact.rarity == rarity
-                    && artifact.layer.eq_ignore_ascii_case(layer)
-                    && !owned.contains(artifact.id)
-            })
-            .collect::<Vec<_>>();
-        let eligible = if by_layer.is_empty() {
-            all.into_iter()
-                .filter(|artifact| {
-                    is_ordinary_relic(*artifact)
-                        && artifact.rarity == rarity
-                        && !owned.contains(artifact.id)
-                })
-                .collect::<Vec<_>>()
-        } else {
-            by_layer
-        };
+        let eligible = ordinary_relic_candidates(depth, rarity, &owned);
         if eligible.is_empty() {
             return Ok(None);
         }

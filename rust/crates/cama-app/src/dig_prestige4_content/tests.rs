@@ -9,6 +9,7 @@ const ACTOR: i64 = 111;
 struct FakeState {
     tunnel: Option<PrestigeTunnelSnapshot>,
     artifacts: Vec<ArtifactRow>,
+    artifact_queries: usize,
     next_id: i64,
     duel: Option<ClaimedDuel>,
     victory_calls: usize,
@@ -34,6 +35,7 @@ impl FakePort {
                     balance: 5_000,
                 }),
                 artifacts: Vec::new(),
+                artifact_queries: 0,
                 next_id: 1,
                 duel: None,
                 victory_calls: 0,
@@ -84,6 +86,10 @@ impl FakePort {
             .map(|artifact| artifact.artifact_id.clone())
             .collect()
     }
+
+    fn artifact_queries(&self) -> usize {
+        self.state.lock().expect("fake state").artifact_queries
+    }
 }
 
 impl Prestige4ContentPort for FakePort {
@@ -107,7 +113,9 @@ impl Prestige4ContentPort for FakePort {
         if requested != key() {
             return Ok(Vec::new());
         }
-        Ok(self.state.lock().map_err(|_| "poisoned")?.artifacts.clone())
+        let mut state = self.state.lock().map_err(|_| "poisoned")?;
+        state.artifact_queries += 1;
+        Ok(state.artifacts.clone())
     }
 
     fn grant_artifact_unique(
@@ -243,6 +251,33 @@ impl Prestige4Entropy for ScriptedEntropy {
         let index = self.selection % upper_bound;
         self.selection += 1;
         index
+    }
+}
+
+#[derive(Debug)]
+struct UnitChoosingEntropy {
+    units: VecDeque<f64>,
+}
+
+impl UnitChoosingEntropy {
+    fn new(units: impl IntoIterator<Item = f64>) -> Self {
+        Self {
+            units: units.into_iter().collect(),
+        }
+    }
+}
+
+impl Prestige4Entropy for UnitChoosingEntropy {
+    fn unit(&mut self) -> f64 {
+        self.units.pop_front().unwrap_or(0.99)
+    }
+
+    fn choose_index(&mut self, upper_bound: usize) -> usize {
+        if upper_bound == 0 {
+            return 0;
+        }
+        ((self.unit().clamp(0.0, 1.0 - f64::EPSILON) * upper_bound as f64) as usize)
+            .min(upper_bound - 1)
     }
 }
 
@@ -622,6 +657,101 @@ fn test_roll_artifact_relics_are_unique() {
     assert_eq!(
         found.len(),
         found.iter().copied().collect::<BTreeSet<_>>().len()
+    );
+}
+
+#[test]
+fn test_roll_artifact_find_failure_skips_artifact_query() {
+    let port = FakePort::new();
+    let mut service = DigPrestige4Service::new(port, ScriptedEntropy::new([0.99]));
+    assert!(
+        service
+            .roll_artifact(key(), 160, 1.0, 100)
+            .expect("artifact roll")
+            .is_none()
+    );
+    assert_eq!(service.port().artifact_queries(), 0);
+}
+
+#[test]
+fn test_artifact_skip_does_not_consume_entropy() {
+    let mut entropy = ScriptedEntropy::new([0.123]);
+    let result = roll_artifact_stage(
+        ArtifactRollPlan {
+            depth: 10,
+            rate_modifier: 1.0,
+            skip_artifact: true,
+        },
+        &BTreeSet::new(),
+        &mut entropy,
+    );
+    assert_eq!(result, None);
+    assert!((entropy.unit() - 0.123).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_artifact_rate_modifier_is_multiplicative() {
+    let modifier = artifact_rate_modifier(true, 2.0, 0.75, 2.0, 0.25, 0.5);
+    assert!((modifier - 2.0625).abs() < f64::EPSILON);
+    assert_eq!(artifact_rate_modifier(false, 1.0, 1.0, 1.0, 0.0, 1.0), 1.0);
+}
+
+#[test]
+fn test_artifact_rarity_and_layer_fallback_match_python_roll() {
+    assert_eq!(rarity_for_roll(0.59), Rarity::Common);
+    assert_eq!(rarity_for_roll(0.60), Rarity::Uncommon);
+    assert_eq!(rarity_for_roll(0.90), Rarity::Rare);
+    assert_eq!(rarity_for_roll(0.99), Rarity::Legendary);
+
+    let owned = BTreeSet::new();
+    let dirt_common = ordinary_relic_candidates(10, Rarity::Common, &owned);
+    assert!(!dirt_common.is_empty());
+    assert!(dirt_common.iter().all(|artifact| artifact.layer == "Dirt"));
+    assert!(
+        dirt_common
+            .iter()
+            .any(|artifact| artifact.id == "midas_splinter")
+    );
+
+    let legendary_fallback = ordinary_relic_candidates(10, Rarity::Legendary, &owned);
+    assert!(!legendary_fallback.is_empty());
+    assert!(
+        legendary_fallback
+            .iter()
+            .all(|artifact| is_ordinary_relic(*artifact) && artifact.rarity == Rarity::Legendary)
+    );
+    assert!(
+        legendary_fallback
+            .iter()
+            .any(|artifact| artifact.layer != "Dirt")
+    );
+
+    let mut entropy = UnitChoosingEntropy::new([0.0, 0.0, 0.999_999]);
+    let stage = roll_artifact_stage(
+        ArtifactRollPlan {
+            depth: 10,
+            rate_modifier: 1.0,
+            skip_artifact: false,
+        },
+        &owned,
+        &mut entropy,
+    )
+    .expect("deterministic common artifact");
+    assert_eq!(
+        stage.definition,
+        *dirt_common.last().expect("dirt candidate")
+    );
+    assert_eq!(stage.current_run_artifacts_delta, 1);
+
+    let owned_dirt = dirt_common
+        .iter()
+        .map(|artifact| artifact.id.to_owned())
+        .collect::<BTreeSet<_>>();
+    let fallback_after_owned = ordinary_relic_candidates(10, Rarity::Common, &owned_dirt);
+    assert!(
+        fallback_after_owned
+            .iter()
+            .any(|artifact| artifact.layer != "Dirt")
     );
 }
 
