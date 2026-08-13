@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use cama_db::dig_event_runtime::{
     AtomicDigEventSettlement, DigEventActorKey, DigEventActorSnapshot, DigEventFinaleJcRequest,
     DigEventFinaleRelicRequest, DigEventGuildModifierReceipt, DigEventGuildModifierRequest,
-    DigEventQuestMutation, DigEventRewardQueryPlan, DigEventRuntimeRepository,
-    DigEventRuntimeRepositoryError, DigEventSettlementOutcome, DigHostileSplashAuditRequest,
-    DigSplashGrantRequest, EventJsonMutation,
+    DigEventQuestMutation, DigEventQuestSnapshot, DigEventRewardQueryPlan,
+    DigEventRuntimeRepository, DigEventRuntimeRepositoryError, DigEventSettlementOutcome,
+    DigHostileSplashAuditRequest, DigSplashGrantRequest, EventJsonMutation,
 };
 use cama_db::dig_tunnel_encounters_repository::{
     DigTunnelEncounterRepository, EncounterCandidateQuery, EncounterVictimStrategy,
@@ -32,13 +32,15 @@ use thiserror::Error;
 
 use crate::dig_loot::{
     CANONICAL_EVENT_CHAIN_CHANCE, CanonicalEventPolicy, CanonicalEventPresentation,
-    CanonicalEventResolution, CanonicalEventResolutionRequest, CanonicalEventRolls,
-    CanonicalQuestFinale, CanonicalQuestFinaleOutcome, CanonicalQuestProgress, CanonicalReward,
-    CanonicalSplash, LootEntropy, SeededLootEntropy, advance_canonical_quest_on_desperate_success,
-    artifact_catalog, canonical_chain_event, canonical_event,
+    CanonicalEventResolution, CanonicalEventResolutionRequest, CanonicalEventRollContext,
+    CanonicalEventRolls, CanonicalQuestFinale, CanonicalQuestFinaleOutcome, CanonicalQuestProgress,
+    CanonicalReward, CanonicalSplash, LootEntropy, SeededLootEntropy,
+    advance_canonical_quest_on_desperate_success, artifact_catalog, canonical_chain_event,
+    canonical_eligible_events, canonical_eligible_quest_event_ids, canonical_event,
     canonical_event_needs_cruel_echo_roll, canonical_event_presentation, canonical_quest_for_event,
     resolve_canonical_event_with_policy, resolve_canonical_event_with_policy_and_rewards,
-    resolve_canonical_quest_finale, scale_canonical_splash_payout, select_canonical_reward,
+    resolve_canonical_quest_finale, roll_canonical_event, scale_canonical_splash_payout,
+    select_canonical_reward,
 };
 use crate::dig_runtime::{DigRuntimeConfig, DigRuntimeEventRequest};
 use crate::dig_tunnels::ascension_effects;
@@ -143,6 +145,47 @@ pub enum DigEventRuntimeError {
 pub struct DigEventRuntimeService {
     path: PathBuf,
     config: DigRuntimeConfig,
+    finale_tax_hook: Option<fn(i64) -> i64>,
+}
+
+/// A small typed seam for the legacy quest service's `tax_fn` callback.
+///
+/// The callback receives the already-scaled personal finale payout. Keeping
+/// it as a function pointer makes the application policy deterministic and
+/// restart-safe while allowing the runtime/provider layer to bind its own
+/// economy tax policy without importing Python callbacks.
+pub type DigEventFinaleTaxHook = fn(i64) -> i64;
+
+/// Public event-view projection for a unique gear reward. The Discord
+/// provider can render this as the `Gear Drop` field without reconstructing
+/// event-specific copy or trusting an untyped JSON payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigEventGearDropPresentation {
+    pub field_name: String,
+    pub field_value: String,
+}
+
+#[must_use]
+pub fn gear_drop_presentation(
+    name: &str,
+    slot: &str,
+    durability: i64,
+    effect: &str,
+) -> DigEventGearDropPresentation {
+    let slot = slot
+        .chars()
+        .next()
+        .map(|first| {
+            first.to_uppercase().collect::<String>()
+                + slot.get(first.len_utf8()..).unwrap_or_default()
+        })
+        .unwrap_or_default();
+    DigEventGearDropPresentation {
+        field_name: "Gear Drop".to_owned(),
+        field_value: format!(
+            "**{name}**\n{slot}\nDurability: {durability}\n{effect}\nStored in your gear inventory. View with `/dig gear`."
+        ),
+    }
 }
 
 /// Compact Discord component request for an event emitted by a committed Dig.
@@ -193,12 +236,113 @@ impl DigEventRuntimeService {
         Self {
             path: path.as_ref().to_path_buf(),
             config,
+            finale_tax_hook: None,
         }
+    }
+
+    /// Bind the legacy quest finale tax callback at the typed application
+    /// boundary. The hook is intentionally optional so the default runtime
+    /// remains identical to the no-tax path.
+    #[must_use]
+    pub fn with_finale_tax_hook(mut self, hook: DigEventFinaleTaxHook) -> Self {
+        self.finale_tax_hook = Some(hook);
+        self
     }
 
     #[must_use]
     pub const fn config(&self) -> &DigRuntimeConfig {
         &self.config
+    }
+
+    /// Roll an event from one already-loaded actor/tunnel snapshot.
+    ///
+    /// This is the application seam used by callers that have a tunnel in
+    /// scope already (for example, `/dig` preconditions). It deliberately
+    /// accepts the snapshot instead of fetching it again, and resolves quest
+    /// eligibility from the separately loaded quest snapshot. Thus a picker
+    /// can pass the tunnel through to the quest filter without a second DB
+    /// read, matching Python's `roll_event(..., tunnel=...)` contract.
+    pub fn roll_event_for_snapshot(
+        &self,
+        snapshot: &DigEventActorSnapshot,
+        quest_snapshot: &DigEventQuestSnapshot,
+        include_quest_events: bool,
+        in_boss: bool,
+        entropy: &mut impl LootEntropy,
+    ) -> Option<CanonicalEventPresentation> {
+        let predicates = if quest_snapshot.recent_bet {
+            BTreeSet::from(["bet_within_7d".to_owned()])
+        } else {
+            BTreeSet::new()
+        };
+        let eligible_quest_ids = canonical_eligible_quest_event_ids(
+            snapshot.depth,
+            snapshot.prestige_level,
+            quest_snapshot.active_quest_id.as_deref(),
+            quest_snapshot.active_quest_step,
+            &quest_snapshot.completed_quest_ids,
+            &predicates,
+        );
+        let context = CanonicalEventRollContext {
+            depth: snapshot.depth,
+            luminosity: snapshot.luminosity,
+            prestige_level: snapshot.prestige_level,
+            eligible_quest_ids: &eligible_quest_ids,
+            include_quest_events,
+            in_boss,
+            void_bait_active: snapshot
+                .temp_buff_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|value| {
+                    value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| id == "void_bait")
+                })
+                .unwrap_or(false),
+            rare_event_multiplier: 0.0,
+            legendary_event_multiplier: 0.0,
+        };
+        roll_canonical_event(context, entropy)
+            .and_then(|event| canonical_event_presentation(&event.id).ok())
+    }
+
+    /// Return the event-picker projection for an already-loaded actor and
+    /// quest snapshot. This is the non-random companion to
+    /// [`Self::roll_event_for_snapshot`] and makes the no-second-fetch
+    /// contract directly testable.
+    pub fn eligible_event_presentations_for_snapshot(
+        &self,
+        snapshot: &DigEventActorSnapshot,
+        quest_snapshot: &DigEventQuestSnapshot,
+        include_quest_events: bool,
+        in_boss: bool,
+    ) -> Vec<CanonicalEventPresentation> {
+        let predicates = if quest_snapshot.recent_bet {
+            BTreeSet::from(["bet_within_7d".to_owned()])
+        } else {
+            BTreeSet::new()
+        };
+        let eligible_quest_ids = canonical_eligible_quest_event_ids(
+            snapshot.depth,
+            snapshot.prestige_level,
+            quest_snapshot.active_quest_id.as_deref(),
+            quest_snapshot.active_quest_step,
+            &quest_snapshot.completed_quest_ids,
+            &predicates,
+        );
+        canonical_eligible_events(
+            snapshot.depth,
+            snapshot.luminosity,
+            snapshot.prestige_level,
+            &eligible_quest_ids,
+            include_quest_events,
+            in_boss,
+        )
+        .iter()
+        .filter_map(|event| canonical_event_presentation(&event.id).ok())
+        .collect()
     }
 
     pub fn presentation(
@@ -832,7 +976,10 @@ impl DigEventRuntimeService {
                 let daily = economy
                     .adjust_reward_at(request.guild_id, scaled, request.now)
                     .unwrap_or(scaled);
-                let net_jc = self.apply_finale_mana_taxes(request, daily, quest_id);
+                let hooked = self
+                    .finale_tax_hook
+                    .map_or(daily, |hook| hook(daily).max(0));
+                let net_jc = self.apply_finale_mana_taxes(request, hooked, quest_id);
                 let receipt = (net_jc > 0)
                     .then(|| {
                         repository.settle_finale_jc_atomic(DigEventFinaleJcRequest {

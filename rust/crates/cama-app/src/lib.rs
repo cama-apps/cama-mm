@@ -33,6 +33,7 @@ pub mod dig_bonus_events;
 pub mod dig_bosses;
 pub mod dig_carry_wager;
 pub mod dig_command_views;
+pub mod dig_event_runtime;
 pub mod dig_event_threats;
 pub mod dig_flavor;
 pub mod dig_gear_runtime;

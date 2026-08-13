@@ -2,10 +2,12 @@
 
 use cama_db::dig_event_runtime::{DigEventActorKey, DigEventRuntimeRepository};
 use cama_db::schema_manager::initialize_or_migrate;
+use cama_domain::dig_gear::{GearService, GearSlot};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::dig_service::{DigOutcomeInput, TunnelState, apply_dig_outcome};
 
 const ACTOR: i64 = 91_001;
 const GUILD: i64 = 42;
@@ -500,7 +502,7 @@ fn cooperative_splash_grant_is_durable_and_retry_safe() {
 }
 
 #[test]
-fn guild_modifier_precedes_actor_and_retry_does_not_extend_it() {
+fn resolve_helltide_event_sets_modifier() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 50, 0);
     let key = key_for_outcome(&fixture.snapshot(), "helltide_bell", "risky", true);
@@ -542,6 +544,33 @@ fn guild_modifier_precedes_actor_and_retry_does_not_extend_it() {
     assert!(!modifier.applied_now);
     assert_eq!(modifier.expires_at, expires_at);
     assert_eq!(fixture.count_actions(ACTOR, "event_modifier"), 1);
+}
+
+#[test]
+fn helltide_modifier_taxes_dig_yield() {
+    let mut untaxed = TunnelState {
+        depth: 10,
+        max_depth: 10,
+        ..TunnelState::default()
+    };
+    let mut taxed = untaxed.clone();
+    let base_input = DigOutcomeInput {
+        advance: 1,
+        gross_jc: 10,
+        ..DigOutcomeInput::default()
+    };
+    let base = apply_dig_outcome(&mut untaxed, base_input, NOW);
+    let taxed_outcome = apply_dig_outcome(
+        &mut taxed,
+        DigOutcomeInput {
+            helltide_tax: 5,
+            ..base_input
+        },
+        NOW,
+    );
+    assert!(taxed_outcome.jc_earned < base.jc_earned);
+    assert!(taxed_outcome.jc_earned >= 0);
+    assert!(taxed.balance >= 0, "helltide cannot bankrupt yield");
 }
 
 #[test]
@@ -627,7 +656,7 @@ fn protected_burn_reports_absorption_and_uses_post_shield_loss() {
 }
 
 #[test]
-fn selected_gear_reward_commits_with_actor_and_replays_original_row() {
+fn resolve_event_grants_and_returns_unique_gear_atomically() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 100, 0);
     let key = key_for_outcome(&fixture.snapshot(), "collapsed_armory", "risky", true);
@@ -662,6 +691,93 @@ fn selected_gear_reward_commits_with_actor_and_replays_original_row() {
                 .get::<_, i64>(0))
             .expect("gear count"),
         1
+    );
+}
+
+#[test]
+fn resolve_event_gear_grant_rolls_back_with_event_log_failure() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 100, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "collapsed_armory", "risky", true);
+    fixture
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER reject_event_log
+             BEFORE INSERT ON dig_actions
+             WHEN NEW.action_type = 'event'
+             BEGIN SELECT RAISE(ABORT, 'forced event log failure'); END;",
+        )
+        .expect("install event-log failure");
+
+    let result = fixture
+        .service()
+        .resolve_event(request("collapsed_armory", "risky", &key));
+    assert!(
+        result.is_err(),
+        "event log failure must abort gear settlement"
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row("SELECT COUNT(*) FROM dig_gear", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("gear count"),
+        0
+    );
+    assert_eq!(fixture.balance(ACTOR), 100);
+}
+
+#[test]
+fn unique_gear_repair_preview_matches_prorated_debit() {
+    let mut service = GearService::fixture();
+    let gear_id = service.store.add_gear(
+        111,
+        0,
+        GearSlot::Weapon,
+        3,
+        Some(4),
+        "event:collapsed_armory",
+        Some("glassbreaker_pick"),
+    );
+    let preview =
+        service.compute_repair_cost(GearSlot::Weapon, 3, Some("glassbreaker_pick"), 4, Some(8));
+    assert_eq!(preview, 10);
+    let result = service.repair_gear(111, 0, gear_id);
+    assert!(result.success);
+    assert_eq!(result.cost, preview);
+    assert_eq!(service.store.balance(111, 0), 5_000 - preview);
+    assert_eq!(
+        service
+            .store
+            .gear_by_id(gear_id)
+            .expect("repaired gear")
+            .durability,
+        8
+    );
+}
+
+#[test]
+fn event_result_embed_surfaces_gear_drop_details() {
+    let presentation = gear_drop_presentation(
+        "Glassbreaker Pick",
+        "weapon",
+        8,
+        "Diamond dig bonuses; +2 boss damage; -8% hit chance.",
+    );
+    assert_eq!(presentation.field_name, "Gear Drop");
+    assert!(presentation.field_value.contains("**Glassbreaker Pick**"));
+    assert!(presentation.field_value.contains("Weapon"));
+    assert!(presentation.field_value.contains("Durability: 8"));
+    assert!(
+        presentation
+            .field_value
+            .contains("Diamond dig bonuses; +2 boss damage; -8% hit chance.")
+    );
+    assert!(
+        presentation
+            .field_value
+            .contains("Stored in your gear inventory. View with `/dig gear`.")
     );
 }
 

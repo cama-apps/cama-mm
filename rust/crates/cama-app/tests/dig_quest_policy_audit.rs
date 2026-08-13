@@ -13,8 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use cama_app::dig_loot::{
-    CanonicalQuestFinale, CanonicalQuestFinaleOutcome, CanonicalQuestProgress, LootEntropy,
-    advance_canonical_quest_on_desperate_success, canonical_chain_event, canonical_eligible_events,
+    CanonicalQuestFinaleOutcome, CanonicalQuestProgress, LootEntropy,
+    advance_canonical_quest_on_desperate_success, canonical_eligible_events,
     canonical_eligible_quest_event_ids, canonical_quest_catalog, canonical_quest_for_event,
     resolve_canonical_quest_finale,
 };
@@ -246,6 +246,10 @@ fn eligible(
 
 fn assert_only(ids: &BTreeSet<String>, expected: &str) {
     assert_eq!(ids, &BTreeSet::from([expected.to_owned()]));
+}
+
+fn subtract_five_tax(value: i64) -> i64 {
+    value - 5
 }
 
 // -------------------------------------------------------------------------
@@ -530,37 +534,105 @@ fn audit_quest_for_event_lookup_returns_canonical_stage() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn audit_event_picker_excludes_quest_events_without_player_context() {
-    let allowed = BTreeSet::from(["agh_s1".to_owned()]);
-    let events = canonical_eligible_events(25, 100, 0, &allowed, false, false);
-    assert!(events.iter().all(|event| event.quest_id.is_none()));
-    assert!(!events.iter().any(|event| event.id == "agh_s1"));
+fn roll_event_excludes_quest_events_without_player_context() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    let actor =
+        dig_event_runtime_quest_repository::DigEventRuntimeRepository::new(fixture.database.path())
+            .actor_snapshot_for_event(dig_event_runtime_quest_repository::DigEventActorKey {
+                discord_id: ACTOR,
+                guild_id: Some(GUILD),
+            })
+            .expect("actor snapshot")
+            .expect("seeded actor");
+    let events = fixture.service().eligible_event_presentations_for_snapshot(
+        &actor,
+        &dig_event_runtime_quest_repository::DigEventQuestSnapshot::default(),
+        false,
+        false,
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| canonical_quest_for_event(&event.event_id).is_none())
+    );
+    assert!(!events.iter().any(|event| event.event_id == "agh_s1"));
 }
 
 #[test]
-fn audit_event_picker_includes_eligible_quest_starter() {
-    let allowed = BTreeSet::from(["agh_s1".to_owned()]);
-    let events = canonical_eligible_events(25, 100, 0, &allowed, true, false);
-    assert!(events.iter().any(|event| event.id == "agh_s1"));
+fn roll_event_includes_quest_starter_when_eligible() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    let repository =
+        dig_event_runtime_quest_repository::DigEventRuntimeRepository::new(fixture.database.path());
+    let actor = repository
+        .actor_snapshot_for_event(dig_event_runtime_quest_repository::DigEventActorKey {
+            discord_id: ACTOR,
+            guild_id: Some(GUILD),
+        })
+        .expect("actor snapshot")
+        .expect("seeded actor");
+    let events = fixture.service().eligible_event_presentations_for_snapshot(
+        &actor,
+        &fixture.quest_state(),
+        true,
+        false,
+    );
+    assert!(events.iter().any(|event| event.event_id == "agh_s1"));
 }
 
 #[test]
-fn audit_event_picker_excludes_quest_event_on_different_stage() {
-    let allowed = BTreeSet::from(["agh_s3".to_owned()]);
-    let events = canonical_eligible_events(25, 100, 0, &allowed, true, false);
-    assert!(!events.iter().any(|event| event.id == "agh_s1"));
-    assert!(events.iter().any(|event| event.id == "agh_s3"));
+fn roll_event_excludes_quest_event_when_player_on_different_step() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    fixture.set_active("agh_lost_trial", 3);
+    let repository =
+        dig_event_runtime_quest_repository::DigEventRuntimeRepository::new(fixture.database.path());
+    let actor = repository
+        .actor_snapshot_for_event(dig_event_runtime_quest_repository::DigEventActorKey {
+            discord_id: ACTOR,
+            guild_id: Some(GUILD),
+        })
+        .expect("actor snapshot")
+        .expect("seeded actor");
+    let events = fixture.service().eligible_event_presentations_for_snapshot(
+        &actor,
+        &fixture.quest_state(),
+        true,
+        false,
+    );
+    assert!(!events.iter().any(|event| event.event_id == "agh_s1"));
+    assert!(events.iter().any(|event| event.event_id == "agh_s3"));
 }
 
 #[test]
-fn audit_event_picker_excludes_quest_event_during_boss_combat() {
-    let allowed = BTreeSet::from(["agh_s1".to_owned()]);
-    let events = canonical_eligible_events(25, 100, 0, &allowed, true, true);
-    assert!(!events.iter().any(|event| event.quest_id.is_some()));
+fn roll_event_excludes_quest_event_during_boss_combat() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    let repository =
+        dig_event_runtime_quest_repository::DigEventRuntimeRepository::new(fixture.database.path());
+    let actor = repository
+        .actor_snapshot_for_event(dig_event_runtime_quest_repository::DigEventActorKey {
+            discord_id: ACTOR,
+            guild_id: Some(GUILD),
+        })
+        .expect("actor snapshot")
+        .expect("seeded actor");
+    let events = fixture.service().eligible_event_presentations_for_snapshot(
+        &actor,
+        &fixture.quest_state(),
+        true,
+        true,
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| canonical_quest_for_event(&event.event_id).is_none())
+    );
 }
 
 #[test]
-fn audit_event_runtime_advances_on_desperate_success_only() {
+fn resolve_event_advances_on_desperate_success_only() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
     let key = event_key_for("agh_s1", "desperate", 0.40, true);
@@ -573,7 +645,7 @@ fn audit_event_runtime_advances_on_desperate_success_only() {
 }
 
 #[test]
-fn audit_event_runtime_safe_success_does_not_advance() {
+fn resolve_event_no_advance_on_safe() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
     let outcome = fixture.event("agh_s1", "safe", "quest-audit:safe");
@@ -582,7 +654,7 @@ fn audit_event_runtime_safe_success_does_not_advance() {
 }
 
 #[test]
-fn audit_event_runtime_risky_success_does_not_advance() {
+fn resolve_event_no_advance_on_risky_success() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
     let key = event_key_for("agh_s1", "risky", 0.62, true);
@@ -592,7 +664,7 @@ fn audit_event_runtime_risky_success_does_not_advance() {
 }
 
 #[test]
-fn audit_event_runtime_desperate_failure_does_not_advance() {
+fn resolve_event_no_advance_on_desperate_failure() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
     let key = event_key_for("agh_s1", "desperate", 0.40, false);
@@ -602,7 +674,7 @@ fn audit_event_runtime_desperate_failure_does_not_advance() {
 }
 
 #[test]
-fn audit_event_runtime_final_stage_returns_necropolis_relic_and_persists_it() {
+fn resolve_event_final_stage_returns_finale() {
     let fixture = Fixture::new();
     fixture.seed_actor(0, 2, 100);
     fixture.set_active("necropolis_below", 5);
@@ -645,9 +717,38 @@ fn audit_event_runtime_final_stage_returns_necropolis_relic_and_persists_it() {
 }
 
 #[test]
-fn audit_chain_selector_excludes_quest_events() {
-    let event = canonical_chain_event("agh_s1", 50, 7, Some(0.0), Some(0.0));
-    assert!(event.is_none_or(|event| event.quest_id.is_none()));
+fn chain_event_filter_excludes_quest_events() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(50, 7, 100);
+    // `enchanting_table` has a zero-payout safe branch, so after the success
+    // draw the next seeded draw is the production chain roll. Search durable
+    // keys until that roll takes the P7+ chain path, then resolve through the
+    // full SQLite event service (including actor settlement and chain output).
+    let key = (0..10_000)
+        .map(|index| format!("quest-chain:{index}"))
+        .find(|key| {
+            let mut entropy =
+                dig_loot::SeededLootEntropy::new(event_seed("enchanting_table", "safe", key));
+            let _success_roll = entropy.unit();
+            entropy.unit() < dig_loot::CANONICAL_EVENT_CHAIN_CHANCE
+        })
+        .expect("deterministic chain key");
+    let outcome = fixture
+        .service()
+        .resolve_event(dig_runtime::DigRuntimeEventRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            event_id: "enchanting_table",
+            choice: "safe",
+            event_key: &key,
+            now: NOW,
+            chained: false,
+        })
+        .expect("resolved chained event");
+    let event = outcome
+        .chain_event
+        .expect("P7 chain roll should select an event");
+    assert!(canonical_quest_for_event(&event.event_id).is_none());
 }
 
 #[test]
@@ -658,29 +759,42 @@ fn audit_available_event_selector_excludes_quest_events() {
 }
 
 #[test]
-fn audit_finale_policy_exposes_gross_jc_without_a_tax_fn_seam() {
-    let quest = canonical_quest_catalog()
-        .iter()
-        .find(|quest| quest.quest_id == "agh_lost_trial")
-        .expect("Aghanim quest");
-    let CanonicalQuestFinale::JcPlusGuildModifier { personal_jc, .. } = &quest.finale else {
-        panic!("expected JC finale");
-    };
-    let outcome = resolve_canonical_quest_finale(&quest.finale, &[]).expect("JC finale");
-    let CanonicalQuestFinaleOutcome::JcPlusGuildModifier {
-        personal_jc: resolved,
+fn finale_jc_applies_tax_fn() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    fixture.set_active("agh_lost_trial", 5);
+    let key = event_key_for("agh_s5", "desperate", 0.40, true);
+    let outcome = fixture
+        .service()
+        .with_finale_tax_hook(subtract_five_tax)
+        .resolve_event(dig_runtime::DigRuntimeEventRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            event_id: "agh_s5",
+            choice: "desperate",
+            event_key: &key,
+            now: NOW,
+            chained: false,
+        })
+        .expect("taxed finale");
+    let Some(dig_event_runtime_quest_under_test::DigEventQuestFinale::JcAndModifier {
+        gross_jc,
+        net_jc,
         ..
-    } = outcome
+    }) = outcome.quest_finale
     else {
-        panic!("expected JC finale outcome");
+        panic!("expected Aghanim JC finale");
     };
-    assert_eq!(resolved, *personal_jc);
-    // The pure seam has no injected Python tax callback; runtime mana taxes
-    // are a separate SQLite adapter concern and remain an integration gap.
+    assert_eq!(gross_jc, 75);
+    assert_eq!(net_jc, 44);
+    assert_eq!(
+        fixture.balance(),
+        100 + outcome.resolution.expect("resolution").jc + 44
+    );
 }
 
 #[test]
-fn audit_finale_completion_precedes_dispatch_failure_and_retries_once() {
+fn finale_completes_quest_before_dispatch() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
     fixture.set_active("agh_lost_trial", 5);
@@ -743,12 +857,29 @@ fn audit_finale_completion_precedes_dispatch_failure_and_retries_once() {
 }
 
 #[test]
-fn audit_quest_eligibility_accepts_caller_state_but_has_no_tunnel_forwarding_adapter() {
-    // This is the production pure filter used by the eventual picker.  It
-    // accepts the already-loaded scalar state, so the Python no-second-fetch
-    // contract is not observable until an admitted roll_event adapter threads
-    // a tunnel snapshot through it.
-    let ids =
-        canonical_eligible_quest_event_ids(25, 0, None, None, &BTreeSet::new(), &BTreeSet::new());
-    assert!(ids.contains("agh_s1"));
+fn roll_event_passes_tunnel_through_to_quest_filter() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(25, 0, 100);
+    let repository =
+        dig_event_runtime_quest_repository::DigEventRuntimeRepository::new(fixture.database.path());
+    let key = dig_event_runtime_quest_repository::DigEventActorKey {
+        discord_id: ACTOR,
+        guild_id: Some(GUILD),
+    };
+    let actor = repository
+        .actor_snapshot_for_event(key)
+        .expect("actor snapshot")
+        .expect("seeded actor");
+    let quest = fixture.quest_state();
+    let eligible = fixture
+        .service()
+        .eligible_event_presentations_for_snapshot(&actor, &quest, true, false);
+    assert!(eligible.iter().any(|event| event.event_id == "agh_s1"));
+
+    let mut entropy = dig_loot::SeededLootEntropy::new(0);
+    let rolled = fixture
+        .service()
+        .roll_event_for_snapshot(&actor, &quest, true, false, &mut entropy)
+        .expect("one eligible event");
+    assert!(canonical_quest_for_event(&rolled.event_id).is_none() || rolled.event_id == "agh_s1");
 }

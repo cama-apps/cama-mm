@@ -289,7 +289,7 @@ fn audit_lore_curios_are_unique_and_statless() {
 }
 
 #[test]
-fn audit_event_runtime_can_grant_statless_artifact() {
+fn atomic_event_can_grant_statless_artifact() {
     let fixture = Fixture::new();
     fixture.seed_player(ACTOR, 100);
     fixture.seed_tunnel(ACTOR, 175);
@@ -316,7 +316,7 @@ fn audit_event_runtime_can_grant_statless_artifact() {
 }
 
 #[test]
-fn audit_event_runtime_grants_consumable_without_jc() {
+fn resolve_event_grants_consumable_without_minting_jc() {
     let fixture = Fixture::new();
     fixture.seed_player(ACTOR, 100);
     fixture.seed_tunnel(ACTOR, 20);

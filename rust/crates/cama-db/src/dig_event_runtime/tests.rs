@@ -281,7 +281,7 @@ fn pending_event_is_guarded_by_action_actor_guild_and_json_identity() {
 }
 
 #[test]
-fn actor_event_commits_state_wallet_reward_audit_and_ledger_context() {
+fn atomic_tunnel_update_can_grant_unique_gear() {
     let fixture = Fixture::new();
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
@@ -547,7 +547,7 @@ fn stale_snapshot_rejects_every_actor_side_effect() {
 }
 
 #[test]
-fn audit_failure_rolls_back_wallet_tunnel_reward_and_ledger_context() {
+fn atomic_unique_gear_grant_rolls_back_with_event_failure() {
     let fixture = Fixture::new();
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
@@ -597,6 +597,51 @@ fn audit_failure_rolls_back_wallet_tunnel_reward_and_ledger_context() {
             "{table} escaped rollback"
         );
     }
+}
+
+#[test]
+fn repository_persists_unique_item_identity_and_custom_durability() {
+    let fixture = Fixture::new();
+    fixture.seed(ACTOR, GUILD, 20);
+    let expected = fixture
+        .repository
+        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .expect("snapshot")
+        .expect("actor state");
+
+    let outcome = fixture
+        .repository
+        .settle_actor_atomic(gear_request(&expected, "interaction:identity"))
+        .expect("gear settlement");
+    let DigEventSettlementOutcome::Applied(receipt) = outcome else {
+        panic!("unexpected outcome");
+    };
+    let reward_id = receipt.reward_row_id.expect("gear reward row");
+    let row = fixture
+        .connection()
+        .query_row(
+            "SELECT item_id, slot, durability, source
+               FROM dig_gear WHERE id=?1",
+            params![reward_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("persisted unique gear");
+    assert_eq!(
+        row,
+        (
+            "glassbreaker_pick".to_owned(),
+            "weapon".to_owned(),
+            8,
+            "event:collapsed_armory".to_owned(),
+        )
+    );
 }
 
 #[test]
@@ -1066,7 +1111,7 @@ fn trace_plain_reward_queries(event: TraceEvent<'_>) {
 }
 
 #[test]
-fn migrated_plain_event_snapshot_skips_unneeded_reward_queries() {
+fn plain_event_skips_unneeded_reward_inventory_queries() {
     let fixture = Fixture::new();
     fixture.seed(ACTOR, GUILD, 20);
     PLAIN_INVENTORY_QUERY_COUNT.store(0, Ordering::Relaxed);
@@ -1119,7 +1164,7 @@ fn trace_artifact_reward_queries(event: TraceEvent<'_>) {
 }
 
 #[test]
-fn migrated_artifact_reward_pool_uses_one_owned_artifact_query() {
+fn artifact_reward_pool_uses_one_owned_artifact_query() {
     let fixture = Fixture::new();
     fixture.seed(ACTOR, GUILD, 20);
     fixture
