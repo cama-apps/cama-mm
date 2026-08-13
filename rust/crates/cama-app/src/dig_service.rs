@@ -11,9 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, cave_in_band};
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
-use cama_domain::economy_scaling::{
-    DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta,
-};
 
 pub const FREE_DIG_COOLDOWN_SECONDS: i64 = 3_600;
 pub const CHEER_COOLDOWN_SECONDS: i64 = 45;
@@ -38,6 +35,16 @@ pub const BOSS_WAGER_CAP: i64 = 1_000;
 pub const BOSS_LOSS_REPAIR_BILL: i64 = 8;
 pub const PINNACLE_DEPTH: i64 = 350;
 pub const BOSS_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
+
+/// Fixed-point denominator for composed Dig yield multipliers.
+///
+/// Python composes the live yield factors as floats and truncates the result
+/// once when it converts the multiplied base roll to `int`. Keeping the
+/// multiplier inputs in millionths lets the Rust policy preserve that order
+/// without carrying binary floating-point rounding into the payout boundary.
+pub const DIG_YIELD_MULTIPLIER_SCALE: i64 = 1_000_000;
+/// Fixed-point denominator for authored reward and perk multipliers.
+pub const DIG_REWARD_BASIS_POINTS: i64 = 10_000;
 
 pub const MILESTONES: [(i64, i64); 9] = [
     (25, 3),
@@ -81,6 +88,75 @@ pub struct DigProfitSettlement {
     pub vanity_tax: i64,
 }
 
+/// Apply a non-negative basis-point multiplier with Python's positive-value
+/// floor (`int(amount * multiplier)`). The i128 numerator keeps large but
+/// valid persisted amounts from overflowing before the authored truncation.
+#[must_use]
+pub fn scale_dig_reward_basis_points(amount: i64, basis_points: i64) -> i64 {
+    if amount <= 0 || basis_points <= 0 {
+        return 0;
+    }
+    let scaled =
+        (i128::from(amount) * i128::from(basis_points)) / i128::from(DIG_REWARD_BASIS_POINTS);
+    scaled.min(i128::from(i64::MAX)) as i64
+}
+
+/// Compose and apply one or more non-negative fixed-point yield factors.
+///
+/// The product is divided exactly once, after all factors have been applied,
+/// matching Python's `int(base * factor_a * factor_b * ...)` behavior. An
+/// empty factor list is an identity operation. Negative factors are treated
+/// as zero because a generated positive Dig reward cannot become negative
+/// through a yield multiplier.
+#[must_use]
+pub fn scale_dig_yield_once(amount: i64, multipliers_millionths: &[i64]) -> i64 {
+    if amount <= 0 {
+        return 0;
+    }
+    if multipliers_millionths.is_empty() {
+        return amount;
+    }
+
+    let mut numerator = i128::from(amount);
+    let mut denominator = 1_i128;
+    for multiplier in multipliers_millionths {
+        numerator = numerator.saturating_mul(i128::from((*multiplier).max(0)));
+        denominator = denominator.saturating_mul(i128::from(DIG_YIELD_MULTIPLIER_SCALE));
+    }
+
+    (numerator / denominator).min(i128::from(i64::MAX)) as i64
+}
+
+fn percent_to_yield_millionths(percent: i64) -> i64 {
+    percent
+        .max(0)
+        .saturating_mul(DIG_YIELD_MULTIPLIER_SCALE / 100)
+}
+
+fn effective_yield_multiplier(explicit: Option<i64>, legacy_percent: i64) -> i64 {
+    explicit.unwrap_or_else(|| percent_to_yield_millionths(legacy_percent))
+}
+
+fn scale_dig_minigame_jc(amount: i64) -> i64 {
+    // The Rust Dig adapter currently supplies the authored default scale of
+    // 1.0. Keep this boundary integer-only; if deployment-configurable scales
+    // are admitted later, they need an explicit fixed-point field rather than
+    // silently reintroducing float arithmetic here.
+    amount
+}
+
+fn scale_dig_helltide_tax(amount: i64) -> i64 {
+    let base = amount.max(0);
+    let stronger = ((i128::from(base) * 11 + 5) / 10).min(i128::from(i64::MAX)) as i64;
+    if base < 4 {
+        stronger
+    } else if stronger <= base {
+        base.saturating_add(1)
+    } else {
+        stronger
+    }
+}
+
 /// Apply both profit policies independently to the same positive gross yield.
 /// The withheld bankruptcy share is floored, rather than the kept share, so a
 /// 1-2 JC trivia- or Dig-sized reward is never rounded down to zero.
@@ -89,8 +165,9 @@ pub fn apply_jc_profit_policies(gross: i64, policy: DigProfitPolicy) -> DigProfi
     let gross = gross.max(0);
     let keep_basis_points = policy.bankruptcy_keep_basis_points.clamp(0, 10_000);
     let bankruptcy_penalty =
-        gross.saturating_mul(10_000_i64.saturating_sub(keep_basis_points)) / 10_000;
-    let vanity_tax = gross.saturating_mul(policy.vanity_tax_basis_points.clamp(0, 10_000)) / 10_000;
+        scale_dig_reward_basis_points(gross, 10_000_i64.saturating_sub(keep_basis_points));
+    let vanity_tax =
+        scale_dig_reward_basis_points(gross, policy.vanity_tax_basis_points.clamp(0, 10_000));
     DigProfitSettlement {
         gross,
         net: gross
@@ -610,8 +687,16 @@ pub struct DigOutcomeInput {
     pub depth_charge: bool,
     /// A temporary yield buff scales both loot and the base-payout ceiling.
     pub yield_buff_percent: i64,
+    /// Exact temporary yield-buff multiplier, when the caller has a
+    /// fractional authored value such as `1.75`. `None` preserves the legacy
+    /// integer-percent input above for source compatibility.
+    pub yield_buff_multiplier_millionths: Option<i64>,
     /// A mana/weather combo scales loot but does not lift the ceiling.
     pub weather_yield_percent: i64,
+    /// Exact composition of all non-buff yield factors. When present this
+    /// supersedes `weather_yield_percent`; the two factors are composed with
+    /// the temporary buff and truncated once at the base-roll boundary.
+    pub yield_multiplier_millionths: Option<i64>,
     /// Flat weather/gear/mutation JC bonuses are applied before the base cap
     /// and minigame scale, matching the Python normal-Dig pipeline.
     pub flat_jc_bonus: i64,
@@ -626,6 +711,12 @@ pub struct DigOutcomeInput {
     /// Daily streak bonus is a separate bucket and is included in the
     /// economy-event basis for ordinary positive Digs only.
     pub streak_bonus: i64,
+    /// Patient Step's multiplier for the daily streak bucket. Python floors
+    /// this bucket before it joins the minigame scale.
+    pub streak_bonus_multiplier_basis_points: i64,
+    /// Ascension's milestone multiplier. Each crossed authored milestone is
+    /// floored independently before the milestone buckets are summed.
+    pub milestone_multiplier_basis_points: i64,
     pub helltide_tax: i64,
     pub authored_event: bool,
     /// Ordinary by default; the live adapter supplies the player's snapshot.
@@ -642,12 +733,16 @@ impl Default for DigOutcomeInput {
             dynamite: false,
             depth_charge: false,
             yield_buff_percent: 100,
+            yield_buff_multiplier_millionths: None,
             weather_yield_percent: 100,
+            yield_multiplier_millionths: None,
             flat_jc_bonus: 0,
             overgrowth_bonus: 0,
             economy_reward_multiplier_basis_points: 10_000,
             economy_before_positive_scale: false,
             streak_bonus: 0,
+            streak_bonus_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
+            milestone_multiplier_basis_points: DIG_REWARD_BASIS_POINTS,
             helltide_tax: 0,
             authored_event: false,
             profit_policy: DigProfitPolicy::default(),
@@ -697,28 +792,57 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     state.total_digs += 1;
     state.last_dig_at = Some(now);
 
-    let buff_multiplier = input.yield_buff_percent.max(0);
-    let weather_multiplier = input.weather_yield_percent.max(0);
-    let lifted_cap = BASE_DIG_JC_PAYOUT_CAP * buff_multiplier / 100;
-    let adjusted_base = (input.gross_jc.max(0) * weather_multiplier / 100 * buff_multiplier / 100)
-        .saturating_add(input.flat_jc_bonus);
+    let buff_multiplier = effective_yield_multiplier(
+        input.yield_buff_multiplier_millionths,
+        input.yield_buff_percent,
+    );
+    let yield_multiplier = effective_yield_multiplier(
+        input.yield_multiplier_millionths,
+        input.weather_yield_percent,
+    );
+    // Python composes the weather/relic/ascension factors and the temporary
+    // buff before its one `int(...)` conversion. Keep that truncation at this
+    // boundary instead of truncating each factor in sequence.
+    let adjusted_base =
+        scale_dig_yield_once(input.gross_jc.max(0), &[yield_multiplier, buff_multiplier])
+            .saturating_add(input.flat_jc_bonus)
+            .max(0);
+    let lifted_cap = scale_dig_yield_once(BASE_DIG_JC_PAYOUT_CAP, &[buff_multiplier]);
     let capped_base = adjusted_base.min(lifted_cap);
     let milestone_bonus = if cave_in {
         0
     } else {
+        let multiplier = input.milestone_multiplier_basis_points.clamp(0, i64::MAX);
         MILESTONES
             .iter()
             .filter(|(depth, _)| old_max_depth < *depth && state.max_depth >= *depth)
-            .map(|(_, bonus)| *bonus)
+            .map(|(_, bonus)| scale_dig_reward_basis_points(*bonus, multiplier))
             .sum()
     };
-    let economy_multiplier = input.economy_reward_multiplier_basis_points.max(0) as f64 / 10_000.0;
     let apply_economy = |amount: i64| {
         if amount <= 0 {
             0
         } else {
-            ((amount as f64 * economy_multiplier) + 0.5) as i64
+            // Daily economy uses half-up rounding on an already integer
+            // bucket, unlike the floor used for authored yield/perk factors.
+            let numerator = i128::from(amount).saturating_mul(i128::from(
+                input.economy_reward_multiplier_basis_points.max(0),
+            ));
+            ((numerator + i128::from(DIG_REWARD_BASIS_POINTS / 2))
+                / i128::from(DIG_REWARD_BASIS_POINTS))
+            .min(i128::from(i64::MAX)) as i64
         }
+    };
+    let streak_bonus = if cave_in {
+        0
+    } else {
+        scale_dig_reward_basis_points(
+            input.streak_bonus.max(0),
+            input
+                .streak_bonus_multiplier_basis_points
+                .clamp(0, i64::MAX),
+        )
+        .min(DIG_STREAK_JC_PAYOUT_CAP)
     };
     // Normal Dig structural additions (milestone and streak) are part of the
     // minigame basis. Cave/event branches intentionally leave those buckets at
@@ -726,26 +850,19 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     let structural_base = capped_base.saturating_add(if input.economy_before_positive_scale {
         0
     } else {
-        milestone_bonus.saturating_add(input.streak_bonus.max(0))
+        milestone_bonus.saturating_add(streak_bonus)
     });
-    let gross_jc = scale_minigame_jc_delta(
-        structural_base.max(0) as f64,
-        DEFAULT_MINIGAME_JC_DELTA_SCALE,
-    );
+    let gross_jc = scale_dig_minigame_jc(structural_base.max(0));
     let scaled_base = if input.economy_before_positive_scale {
         scale_positive_dig_jc(apply_economy(gross_jc))
     } else {
         scale_positive_dig_jc(gross_jc)
     };
-    let tax = scale_deflationary_minigame_jc_delta(
-        input.helltide_tax.max(0) as f64,
-        DEFAULT_MINIGAME_JC_DELTA_SCALE,
-    );
-    let overgrowth_bonus = if cave_in { 0 } else { input.overgrowth_bonus };
-    let streak_bonus = if cave_in {
+    let tax = scale_dig_helltide_tax(input.helltide_tax);
+    let overgrowth_bonus = if cave_in {
         0
     } else {
-        input.streak_bonus.max(0)
+        input.overgrowth_bonus.max(0)
     };
     let economy_gross_jc = if input.economy_before_positive_scale {
         gross_jc

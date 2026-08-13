@@ -195,6 +195,87 @@ fn test_dig_scales_generated_jc_before_mana_taxes() {
 }
 
 #[test]
+fn test_composed_yield_factors_truncate_once_at_base_roll_boundary() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 7);
+    // 7 * 1.50 * 1.75 = 18.375, so Python's composed-float `int(...)`
+    // boundary yields 18. Sequential integer truncation would incorrectly
+    // produce 17.
+    input.yield_multiplier_millionths = Some(1_500_000);
+    input.yield_buff_multiplier_millionths = Some(1_750_000);
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert_eq!(result.gross_jc, 18);
+}
+
+#[test]
+fn test_fractional_yield_buff_lifts_base_cap_at_same_fixed_point_boundary() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 100);
+    input.yield_buff_multiplier_millionths = Some(1_750_000);
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert_eq!(result.gross_jc, 35);
+}
+
+#[test]
+fn test_milestone_multiplier_floors_each_crossed_reward() {
+    let mut tunnel = started_tunnel(24);
+    tunnel.defeated_bosses = [25, 50].into_iter().collect();
+    let mut input = outcome(30, 0);
+    input.authored_event = true;
+    input.milestone_multiplier_basis_points = 15_000;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    // 3*1.5 floors to 4 and 6*1.5 floors to 9; do not multiply the summed
+    // bucket and round once (which would obscure authored milestone edges).
+    assert_eq!(result.milestone_bonus, 13);
+    assert_eq!(result.gross_jc, 13);
+}
+
+#[test]
+fn test_patient_step_multiplier_is_applied_before_minigame_scale() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 1);
+    input.streak_bonus = 3;
+    input.streak_bonus_multiplier_basis_points = 15_000;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    // Patient Step turns 3 into floor(4.5)=4; the structural basis is then
+    // 1+4=5 and positive scaling settles it at 3 JC.
+    assert_eq!(result.streak_bonus, 4);
+    assert_eq!(result.gross_jc, 5);
+    assert_eq!(result.jc_earned, scale_positive_dig_jc(5));
+}
+
+#[test]
+fn test_overgrowth_is_added_after_positive_scale_before_daily_economy() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 10);
+    input.overgrowth_bonus = 10;
+    input.economy_reward_multiplier_basis_points = 5_000;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    // positive(10)=7, then +10 Overgrowth=17, then daily half-up 0.5x=9.
+    assert_eq!(result.gross_jc, 10);
+    assert_eq!(result.economy_gross_jc, 17);
+    assert_eq!(result.economy_adjusted_jc, 9);
+    assert_eq!(result.jc_earned, 9);
+}
+
+#[test]
+fn test_helltide_tax_precedes_independent_profit_deductions() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 10);
+    input.helltide_tax = 3;
+    input.profit_policy = DigProfitPolicy {
+        bankruptcy_keep_basis_points: 7_500,
+        vanity_tax_basis_points: 1_000,
+    };
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    // positive(10)=7, Helltide's deflationary 3 remains 3, leaving 4;
+    // bankruptcy floors 25% of 4 to 1 and vanity floors 10% to 0.
+    assert_eq!(result.jc_earned, 3);
+    assert_eq!(result.bankruptcy_penalty, 1);
+    assert_eq!(result.vanity_tax, 0);
+}
+
+#[test]
 fn test_deterministic_dig_outcome_scales_full_positive_payout_before_sinks() {
     let mut tunnel = started_tunnel(10);
     tunnel.balance = 100;
