@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::game_date::game_date_for_timestamp;
 
@@ -55,6 +56,38 @@ pub const TROPHY_RELIC_IDS: [&str; 6] = [
     "hateborn_ember",
     "deaths_door",
 ];
+
+/// The lazy Slow Drip settlement used at the beginning of a live Dig.
+/// `gross_jc` is the daily-cap amount consumed by the claim row; `credit_jc`
+/// is the amount that reaches the wallet after the guild economy multiplier
+/// and the central positive-JC scale. Keeping both values typed prevents a
+/// retry from applying the scaled credit while restoring the unscaled cap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlowDripClaim {
+    pub gross_jc: i64,
+    pub credit_jc: i64,
+    pub claimed_after: i64,
+}
+
+#[must_use]
+pub fn settle_slow_drip_claim(
+    elapsed_minutes: i64,
+    claimed_today: i64,
+    economy_multiplier: f64,
+) -> SlowDripClaim {
+    let already = claimed_today.clamp(0, 100);
+    let gross_jc = (elapsed_minutes.max(0) / 2).min(100 - already);
+    let adjusted = if gross_jc <= 0 {
+        0
+    } else {
+        ((gross_jc as f64 * economy_multiplier.max(0.0)) + 0.5) as i64
+    };
+    SlowDripClaim {
+        gross_jc,
+        credit_jc: scale_positive_dig_jc(adjusted.max(0)),
+        claimed_after: already.saturating_add(gross_jc),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelicText {

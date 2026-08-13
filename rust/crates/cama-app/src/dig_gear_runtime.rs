@@ -112,6 +112,43 @@ pub struct DigGearShop {
     pub has_tunnel: bool,
 }
 
+/// A value/label pair suitable for the `/dig buy` autocomplete boundary.
+/// Values deliberately use the same stable identifiers consumed by the buy
+/// command: consumable ids and `slot:tier` gear keys.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigGearShopChoice {
+    pub name: String,
+    pub value: String,
+}
+
+/// Filter the live shop projection into Discord-safe buy choices.
+#[must_use]
+pub fn shop_autocomplete(shop: &DigGearShop, query: &str) -> Vec<DigGearShopChoice> {
+    let query = query.to_ascii_lowercase();
+    let mut choices = Vec::new();
+    let mut push = |name: &str, value: String| {
+        let name_lower = name.to_ascii_lowercase();
+        if query.is_empty() || name_lower.contains(&query) || value.contains(&query) {
+            choices.push(DigGearShopChoice {
+                name: name.to_owned(),
+                value,
+            });
+        }
+    };
+
+    for item in &shop.consumables {
+        push(&item.name, item.id.clone());
+    }
+    for item in &shop.pickaxe_upgrades {
+        push(&item.name, format!("weapon:{}", item.tier));
+    }
+    for item in &shop.gear_for_sale {
+        push(&item.name, format!("{}:{}", item.slot.as_str(), item.tier));
+    }
+    choices.truncate(25);
+    choices
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DigGearRuntimeAction {
     EquipGear { gear_id: i64 },

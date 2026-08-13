@@ -1767,3 +1767,51 @@ fn test_deterministic_overgrowth_bonus_is_added_after_base_payout_scaling() {
     assert_eq!(result.jc_earned, scale_positive_dig_jc(20) + 10);
     assert_eq!(result.overgrowth_bonus, 10);
 }
+
+#[test]
+fn test_live_dig_scales_full_positive_payout_before_sinks() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 15);
+    input.overgrowth_bonus = 4;
+    input.helltide_tax = 3;
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert_eq!(result.gross_jc, 15);
+    assert_eq!(result.jc_earned, scale_positive_dig_jc(15) + 4 - 3);
+    assert_eq!(tunnel.balance, 100 + result.jc_earned);
+}
+
+#[test]
+fn test_cave_in_scales_combined_positive_reward_once() {
+    let mut tunnel = started_tunnel(180);
+    let result = apply_dig_outcome(
+        &mut tunnel,
+        DigOutcomeInput {
+            advance: 0,
+            gross_jc: 10,
+            cave_in_loss: 12,
+            ..DigOutcomeInput::default()
+        },
+        2_000_000,
+    );
+    assert!(result.cave_in);
+    assert_eq!(result.gross_jc, 10);
+    assert_eq!(result.jc_earned, scale_positive_dig_jc(10));
+    assert_eq!(tunnel.balance, 100 + scale_positive_dig_jc(10));
+}
+
+#[test]
+fn test_pinnacle_reward_applies_edict_to_base_and_wager_profit() {
+    let ordinary = resolve_boss(350, 1_000, 250, true, 1_000, 500, 20);
+    let policy = DigProfitPolicy {
+        bankruptcy_keep_basis_points: 7_500,
+        vanity_tax_basis_points: 1_000,
+    };
+    let settled = resolve_boss_with_policy(350, 1_000, 250, true, 1_000, 500, 20, policy);
+    let gross = scale_positive_dig_jc(1_000) + 500;
+    let expected = apply_jc_profit_policies(gross, policy);
+    assert_eq!(ordinary.payout, gross);
+    assert_eq!(settled.payout, expected.net);
+    assert_eq!(settled.bankruptcy_penalty, expected.bankruptcy_penalty);
+    assert_eq!(settled.vanity_tax, expected.vanity_tax);
+    assert_eq!(settled.balance_after, 1_000 + expected.net);
+}

@@ -782,3 +782,125 @@ fn concurrent_pickaxe_buys_admit_exactly_one_upgrade_and_debit() {
         1
     );
 }
+
+#[test]
+fn test_buy_autocomplete_exposes_new_sinks_whetstone() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+    let choices = shop_autocomplete(&shop, "whetstone");
+    assert!(
+        choices.iter().any(|choice| {
+            choice.value == "tempered_whetstone" && !choice.name.trim().is_empty()
+        })
+    );
+}
+
+#[test]
+fn test_buy_autocomplete_exposes_new_sinks_warding() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+    let choices = shop_autocomplete(&shop, "warding");
+    assert!(
+        choices
+            .iter()
+            .any(|choice| { choice.value == "warding_salts" && !choice.name.trim().is_empty() })
+    );
+}
+
+#[test]
+fn test_buy_autocomplete_exposes_new_sinks_rescue() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+    let choices = shop_autocomplete(&shop, "rescue");
+    assert!(
+        choices
+            .iter()
+            .any(|choice| { choice.value == "rescue_line" && !choice.name.trim().is_empty() })
+    );
+}
+
+#[test]
+fn test_buy_autocomplete_exposes_new_sinks_amulet() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+    let values = shop_autocomplete(&shop, "amulet")
+        .into_iter()
+        .map(|choice| choice.value)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        values.is_superset(
+            &(4..=7)
+                .map(|tier| format!("amulet:{tier}"))
+                .collect::<std::collections::BTreeSet<_>>()
+        )
+    );
+}
+
+#[test]
+fn test_buy_autocomplete_exposes_new_sinks_boots() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+    let values = shop_autocomplete(&shop, "boots")
+        .into_iter()
+        .map(|choice| choice.value)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        values.is_superset(
+            &(4..=7)
+                .map(|tier| format!("boots:{tier}"))
+                .collect::<std::collections::BTreeSet<_>>()
+        )
+    );
+}
+
+#[test]
+fn test_every_shop_row_is_reachable_through_filtered_autocomplete() {
+    let database = fixture(500, 100, 1);
+    let shop = DigGearRuntimeService::sqlite(database.path())
+        .shop(USER, GUILD)
+        .expect("shop")
+        .expect("tunnel");
+
+    for item in &shop.consumables {
+        assert!(
+            shop_autocomplete(&shop, &item.name)
+                .iter()
+                .any(|choice| choice.value == item.id),
+            "missing consumable {}",
+            item.id
+        );
+    }
+    for item in &shop.pickaxe_upgrades {
+        let value = format!("weapon:{}", item.tier);
+        assert!(
+            shop_autocomplete(&shop, &item.name)
+                .iter()
+                .any(|choice| choice.value == value),
+            "missing pickaxe {value}"
+        );
+    }
+    for item in &shop.gear_for_sale {
+        let value = format!("{}:{}", item.slot.as_str(), item.tier);
+        assert!(
+            shop_autocomplete(&shop, &item.name)
+                .iter()
+                .any(|choice| choice.value == value),
+            "missing gear {value}"
+        );
+    }
+}

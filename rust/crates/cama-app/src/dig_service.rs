@@ -602,6 +602,9 @@ impl Default for TunnelState {
 pub struct DigOutcomeInput {
     pub advance: i64,
     pub gross_jc: i64,
+    /// Explicit cave-in discriminator.  A grappling hook can absorb all
+    /// blocks while the Dig is still a cave-in (no advancement/milestones).
+    pub cave_in: bool,
     pub cave_in_loss: i64,
     pub dynamite: bool,
     pub depth_charge: bool,
@@ -609,7 +612,20 @@ pub struct DigOutcomeInput {
     pub yield_buff_percent: i64,
     /// A mana/weather combo scales loot but does not lift the ceiling.
     pub weather_yield_percent: i64,
+    /// Flat weather/gear/mutation JC bonuses are applied before the base cap
+    /// and minigame scale, matching the Python normal-Dig pipeline.
+    pub flat_jc_bonus: i64,
     pub overgrowth_bonus: i64,
+    /// Persisted daily-economy multiplier represented in basis points.  The
+    /// integer form keeps this policy input `Eq` while retaining Python's
+    /// half-up reward rounding at the settlement boundary.
+    pub economy_reward_multiplier_basis_points: i64,
+    /// Cave/event branches apply the daily economy before the central
+    /// positive-JC scale; ordinary Digs apply it after structural bonuses.
+    pub economy_before_positive_scale: bool,
+    /// Daily streak bonus is a separate bucket and is included in the
+    /// economy-event basis for ordinary positive Digs only.
+    pub streak_bonus: i64,
     pub helltide_tax: i64,
     pub authored_event: bool,
     /// Ordinary by default; the live adapter supplies the player's snapshot.
@@ -621,12 +637,17 @@ impl Default for DigOutcomeInput {
         Self {
             advance: 1,
             gross_jc: 0,
+            cave_in: false,
             cave_in_loss: 0,
             dynamite: false,
             depth_charge: false,
             yield_buff_percent: 100,
             weather_yield_percent: 100,
+            flat_jc_bonus: 0,
             overgrowth_bonus: 0,
+            economy_reward_multiplier_basis_points: 10_000,
+            economy_before_positive_scale: false,
+            streak_bonus: 0,
             helltide_tax: 0,
             authored_event: false,
             profit_policy: DigProfitPolicy::default(),
@@ -640,8 +661,11 @@ pub struct DigOutcome {
     pub depth_after: i64,
     pub max_depth_after: i64,
     pub gross_jc: i64,
+    pub economy_gross_jc: i64,
+    pub economy_adjusted_jc: i64,
     pub jc_earned: i64,
     pub milestone_bonus: i64,
+    pub streak_bonus: i64,
     pub overgrowth_bonus: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
@@ -651,7 +675,7 @@ pub struct DigOutcome {
 
 pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i64) -> DigOutcome {
     let old_max_depth = state.max_depth;
-    let cave_in = input.cave_in_loss > 0;
+    let cave_in = input.cave_in || input.cave_in_loss > 0;
     let (advance, depth_after, boss_encounter) = if cave_in {
         (0, (state.depth - input.cave_in_loss).max(0), None)
     } else {
@@ -676,10 +700,9 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     let buff_multiplier = input.yield_buff_percent.max(0);
     let weather_multiplier = input.weather_yield_percent.max(0);
     let lifted_cap = BASE_DIG_JC_PAYOUT_CAP * buff_multiplier / 100;
-    let adjusted_base = input.gross_jc.max(0) * weather_multiplier / 100 * buff_multiplier / 100;
+    let adjusted_base = (input.gross_jc.max(0) * weather_multiplier / 100 * buff_multiplier / 100)
+        .saturating_add(input.flat_jc_bonus);
     let capped_base = adjusted_base.min(lifted_cap);
-    let gross_jc = scale_minigame_jc_delta(capped_base as f64, DEFAULT_MINIGAME_JC_DELTA_SCALE);
-    let scaled_base = scale_positive_dig_jc(gross_jc);
     let milestone_bonus = if cave_in {
         0
     } else {
@@ -689,11 +712,57 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
             .map(|(_, bonus)| *bonus)
             .sum()
     };
+    let economy_multiplier = input.economy_reward_multiplier_basis_points.max(0) as f64 / 10_000.0;
+    let apply_economy = |amount: i64| {
+        if amount <= 0 {
+            0
+        } else {
+            ((amount as f64 * economy_multiplier) + 0.5) as i64
+        }
+    };
+    // Normal Dig structural additions (milestone and streak) are part of the
+    // minigame basis. Cave/event branches intentionally leave those buckets at
+    // zero and apply the economy event before the central positive scale.
+    let structural_base = capped_base.saturating_add(if input.economy_before_positive_scale {
+        0
+    } else {
+        milestone_bonus.saturating_add(input.streak_bonus.max(0))
+    });
+    let gross_jc = scale_minigame_jc_delta(
+        structural_base.max(0) as f64,
+        DEFAULT_MINIGAME_JC_DELTA_SCALE,
+    );
+    let scaled_base = if input.economy_before_positive_scale {
+        scale_positive_dig_jc(apply_economy(gross_jc))
+    } else {
+        scale_positive_dig_jc(gross_jc)
+    };
     let tax = scale_deflationary_minigame_jc_delta(
         input.helltide_tax.max(0) as f64,
         DEFAULT_MINIGAME_JC_DELTA_SCALE,
     );
-    let pre_policy_jc = (scaled_base + input.overgrowth_bonus + milestone_bonus - tax).max(0);
+    let overgrowth_bonus = if cave_in { 0 } else { input.overgrowth_bonus };
+    let streak_bonus = if cave_in {
+        0
+    } else {
+        input.streak_bonus.max(0)
+    };
+    let economy_gross_jc = if input.economy_before_positive_scale {
+        gross_jc
+    } else {
+        (scaled_base + overgrowth_bonus).max(0)
+    };
+    let economy_adjusted_jc = if input.economy_before_positive_scale {
+        apply_economy(gross_jc)
+    } else {
+        apply_economy(economy_gross_jc)
+    };
+    let positive_jc = if input.economy_before_positive_scale {
+        scaled_base
+    } else {
+        economy_adjusted_jc
+    };
+    let pre_policy_jc = (positive_jc - tax).max(0);
     let profit = apply_jc_profit_policies(pre_policy_jc, input.profit_policy);
     let jc_earned = profit.net;
     state.balance += jc_earned;
@@ -709,9 +778,12 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
         depth_after,
         max_depth_after: state.max_depth,
         gross_jc,
+        economy_gross_jc,
+        economy_adjusted_jc,
         jc_earned,
         milestone_bonus,
-        overgrowth_bonus: input.overgrowth_bonus,
+        streak_bonus,
+        overgrowth_bonus,
         bankruptcy_penalty: profit.bankruptcy_penalty,
         vanity_tax: profit.vanity_tax,
         cave_in,

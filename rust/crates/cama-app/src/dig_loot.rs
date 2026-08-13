@@ -2608,6 +2608,10 @@ pub struct DigLootOutcome {
     pub event_preview_included: bool,
     pub event_preview: Option<String>,
     pub sonar_skipped: bool,
+    /// The event-gate draw is kept separate from the catalog selection.  The
+    /// application runtime can therefore apply the gate after the post-boss
+    /// depth is known while preserving the single RNG draw used by Python.
+    pub event_roll_bits: Option<u64>,
     pub items_used: Vec<&'static str>,
 }
 
@@ -2635,6 +2639,11 @@ pub struct DigLootModifiers {
     pub artifact_multiplier: f64,
     pub cave_in_loss_bonus: i64,
     pub cave_in_loss_cap: Option<i64>,
+    /// Let the application-level canonical event picker own catalog
+    /// selection.  The loot service still consumes the event-gate draw and
+    /// applies queued tunnel-item state, but it never performs the legacy
+    /// catalog roll when this is enabled.
+    pub defer_event_selection: bool,
 }
 
 impl Default for DigLootModifiers {
@@ -2653,6 +2662,7 @@ impl Default for DigLootModifiers {
             artifact_multiplier: 1.0,
             cave_in_loss_bonus: 0,
             cave_in_loss_cap: None,
+            defer_event_selection: false,
         }
     }
 }
@@ -2871,34 +2881,40 @@ where
 
         let mut event = None;
         let mut sonar_skipped = false;
-        let event_roll = self.entropy.unit();
-        let mut event_chance = match layer.name {
-            "Crystal" | "Magma" => 0.27,
-            "Abyss" | "Frozen Core" => 0.31,
-            "Fungal Depths" => 0.38,
-            "The Hollow" => 0.45,
-            _ => 0.22,
-        };
-        event_chance *= modifiers.event_chance_multiplier.max(0.0);
-        if tunnel.void_bait_digs > 0 {
-            event_chance = (event_chance * 2.0_f64).min(0.75_f64);
-            tunnel.void_bait_digs -= 1;
-        }
-        if !cave_in && event_roll < event_chance {
-            if sonar_skip_active {
-                sonar_skipped = true;
-                tunnel.sonar_skip_pending = false;
-            } else if let Some(rolled) = roll_event_from_catalog(
-                &self.events,
-                tunnel.depth,
-                tunnel.luminosity,
-                0,
-                false,
-                &mut self.entropy,
-            ) {
-                event = Some(rolled.id.to_owned());
+        let event_roll_bits = if cave_in {
+            None
+        } else {
+            let event_roll = self.entropy.unit();
+            if tunnel.void_bait_digs > 0 {
+                tunnel.void_bait_digs -= 1;
             }
-        }
+            if !modifiers.defer_event_selection {
+                let mut event_chance = match layer.name {
+                    "Crystal" | "Magma" => 0.27,
+                    "Abyss" | "Frozen Core" => 0.31,
+                    "Fungal Depths" => 0.38,
+                    "The Hollow" => 0.45,
+                    _ => 0.22,
+                };
+                event_chance *= modifiers.event_chance_multiplier.max(0.0);
+                if event_roll < event_chance {
+                    if sonar_skip_active {
+                        sonar_skipped = true;
+                        tunnel.sonar_skip_pending = false;
+                    } else if let Some(rolled) = roll_event_from_catalog(
+                        &self.events,
+                        tunnel.depth,
+                        tunnel.luminosity,
+                        0,
+                        false,
+                        &mut self.entropy,
+                    ) {
+                        event = Some(rolled.id.to_owned());
+                    }
+                }
+            }
+            Some(event_roll.to_bits())
+        };
 
         let event_preview = if sonar_used {
             eligible_events(&self.events, tunnel.depth, tunnel.luminosity, 0, false)
@@ -2931,6 +2947,7 @@ where
             event_preview_included: sonar_used,
             event_preview,
             sonar_skipped,
+            event_roll_bits,
             items_used,
             error: None,
         }

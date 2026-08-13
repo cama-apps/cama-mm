@@ -37,6 +37,19 @@ fn test_new_relics_present_in_catalog() {
 }
 
 #[test]
+fn test_slow_drip_tracks_gross_cap_but_credits_scaled_reward() {
+    let claim = settle_slow_drip_claim(20, 0, 2.0);
+    assert_eq!(claim.gross_jc, 10);
+    assert_eq!(claim.credit_jc, 13);
+    assert_eq!(claim.claimed_after, 10);
+
+    let capped = settle_slow_drip_claim(400, 95, 2.0);
+    assert_eq!(capped.gross_jc, 5);
+    assert_eq!(capped.credit_jc, 7);
+    assert_eq!(capped.claimed_after, 100);
+}
+
+#[test]
 fn test_dormant_relics_present_in_catalog() {
     let ids = relic_catalog()
         .into_iter()

@@ -1,6 +1,9 @@
 //! Migrated-SQLite application tests for the canonical event runtime.
 
 use cama_db::dig_event_runtime::{DigEventActorKey, DigEventRuntimeRepository};
+use cama_db::economy_event_repository::{
+    EconomyEventRepository, EventDirection, EventDraft, EventEffects,
+};
 use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::dig_gear::{GearService, GearSlot};
 use rusqlite::{Connection, params};
@@ -191,6 +194,112 @@ fn migrated_safe_event_commits_full_actor_result_once() {
     assert!(!retry.applied_now);
     assert_eq!(retry.action_id, first.action_id);
     assert_eq!(retry.balance_after, first.balance_after);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn test_positive_event_reward_is_scaled_once_and_audited() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let outcome = service
+        .resolve_event(request(
+            "underground_stream",
+            "safe",
+            "reward-policy:positive",
+        ))
+        .expect("positive event reward");
+    let resolution = outcome.resolution.as_ref().expect("typed resolution");
+    assert!(outcome.success && outcome.applied_now);
+    assert_eq!(resolution.economy_gross_jc, 3);
+    assert_eq!(
+        resolution.jc,
+        cama_domain::dig_economy::scale_positive_dig_jc(3)
+    );
+    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
+    let detail: String = fixture
+        .connection()
+        .query_row(
+            "SELECT detail FROM dig_actions WHERE id=?1",
+            params![outcome.action_id.expect("event action")],
+            |row| row.get(0),
+        )
+        .expect("event audit detail");
+    let value: serde_json::Value = serde_json::from_str(&detail).expect("event detail JSON");
+    assert_eq!(value["gross_jc"], 3);
+    assert_eq!(value["reward_multiplier"], 0.65);
+    assert_eq!(value["jc"], resolution.jc);
+    let retry = service
+        .resolve_event(request(
+            "underground_stream",
+            "safe",
+            "reward-policy:positive",
+        ))
+        .expect("positive event retry");
+    assert!(!retry.applied_now);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn test_legacy_event_reward_is_scaled_once_and_audited() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let event_date =
+        cama_domain::game_date::game_date_for_timestamp(NOW as f64).expect("event date");
+    EconomyEventRepository::new(fixture.database.path())
+        .activate_event_atomic(
+            Some(GUILD),
+            &EventDraft {
+                event_date,
+                name: "Double legacy reward".to_owned(),
+                hero: "Earthshaker".to_owned(),
+                direction: EventDirection::Neutral,
+                severity: 1,
+                target_effect_jc: 0,
+                forecast_flow_jc: 0,
+                expected_effect_jc: 0,
+                monetary_stock_before: 0,
+                effects: EventEffects {
+                    reward_multiplier: 2.0,
+                    ..EventEffects::default()
+                },
+                announcement: "Double legacy reward".to_owned(),
+                starts_at: NOW - 60,
+                ends_at: NOW + 60,
+                created_at: NOW - 60,
+            },
+        )
+        .expect("persist doubling economy event");
+    let mut config = DigRuntimeConfig::default();
+    config.economy_event.enabled = true;
+    let service = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    let event_key = key_for_outcome(&fixture.snapshot(), "techies_cache", "safe", true);
+    let outcome = service
+        .resolve_event(request("techies_cache", "safe", &event_key))
+        .expect("legacy event reward");
+    let resolution = outcome
+        .resolution
+        .as_ref()
+        .expect("typed legacy resolution");
+    assert!(outcome.success && outcome.applied_now);
+    assert_eq!(resolution.economy_gross_jc, 15);
+    assert_eq!(
+        resolution.jc,
+        cama_domain::dig_economy::scale_positive_dig_jc(30)
+    );
+    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
+    let detail: String = fixture
+        .connection()
+        .query_row(
+            "SELECT detail FROM dig_actions WHERE id=?1",
+            params![outcome.action_id.expect("legacy event action")],
+            |row| row.get(0),
+        )
+        .expect("legacy event audit detail");
+    let value: serde_json::Value = serde_json::from_str(&detail).expect("legacy detail JSON");
+    assert_eq!(value["gross_jc"], 15);
+    assert_eq!(value["reward_multiplier"], 0.65);
+    assert_eq!(value["jc"], resolution.jc);
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
 }
 

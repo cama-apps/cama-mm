@@ -71,6 +71,19 @@ pub struct DigEventGuildModifierOutcome {
     pub applied_now: bool,
 }
 
+/// All request-local inputs for one canonical event roll.  Keeping the
+/// policy inputs typed prevents the live Dig callsite from silently dropping
+/// post-boss depth, Void Bait, or ascension rarity modifiers.
+pub struct CanonicalEventRollInput<'a> {
+    pub snapshot: &'a DigEventActorSnapshot,
+    pub quest_snapshot: &'a DigEventQuestSnapshot,
+    pub include_quest_events: bool,
+    pub in_boss: bool,
+    pub void_bait_active: bool,
+    pub rare_event_multiplier: f64,
+    pub legendary_event_multiplier: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DigEventQuestFinale {
     JcAndModifier {
@@ -270,39 +283,64 @@ impl DigEventRuntimeService {
         in_boss: bool,
         entropy: &mut impl LootEntropy,
     ) -> Option<CanonicalEventPresentation> {
-        let predicates = if quest_snapshot.recent_bet {
+        let void_bait_active = snapshot
+            .temp_buff_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| id == "void_bait")
+            })
+            .unwrap_or(false);
+        self.roll_event_for_snapshot_with_modifiers(
+            CanonicalEventRollInput {
+                snapshot,
+                quest_snapshot,
+                include_quest_events,
+                in_boss,
+                void_bait_active,
+                rare_event_multiplier: 0.0,
+                legendary_event_multiplier: 0.0,
+            },
+            entropy,
+        )
+    }
+
+    /// Roll the canonical catalog against the post-gate runtime context.
+    /// Unlike the compatibility wrapper above, this accepts the live
+    /// `void_bait_digs` charge and ascension rarity multipliers explicitly;
+    /// the tunnel snapshot remains the source for all other quest/predicate
+    /// context.
+    pub fn roll_event_for_snapshot_with_modifiers(
+        &self,
+        input: CanonicalEventRollInput<'_>,
+        entropy: &mut impl LootEntropy,
+    ) -> Option<CanonicalEventPresentation> {
+        let predicates = if input.quest_snapshot.recent_bet {
             BTreeSet::from(["bet_within_7d".to_owned()])
         } else {
             BTreeSet::new()
         };
         let eligible_quest_ids = canonical_eligible_quest_event_ids(
-            snapshot.depth,
-            snapshot.prestige_level,
-            quest_snapshot.active_quest_id.as_deref(),
-            quest_snapshot.active_quest_step,
-            &quest_snapshot.completed_quest_ids,
+            input.snapshot.depth,
+            input.snapshot.prestige_level,
+            input.quest_snapshot.active_quest_id.as_deref(),
+            input.quest_snapshot.active_quest_step,
+            &input.quest_snapshot.completed_quest_ids,
             &predicates,
         );
         let context = CanonicalEventRollContext {
-            depth: snapshot.depth,
-            luminosity: snapshot.luminosity,
-            prestige_level: snapshot.prestige_level,
+            depth: input.snapshot.depth,
+            luminosity: input.snapshot.luminosity,
+            prestige_level: input.snapshot.prestige_level,
             eligible_quest_ids: &eligible_quest_ids,
-            include_quest_events,
-            in_boss,
-            void_bait_active: snapshot
-                .temp_buff_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                .and_then(|value| {
-                    value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(|id| id == "void_bait")
-                })
-                .unwrap_or(false),
-            rare_event_multiplier: 0.0,
-            legendary_event_multiplier: 0.0,
+            include_quest_events: input.include_quest_events,
+            in_boss: input.in_boss,
+            void_bait_active: input.void_bait_active,
+            rare_event_multiplier: input.rare_event_multiplier,
+            legendary_event_multiplier: input.legendary_event_multiplier,
         };
         roll_canonical_event(context, entropy)
             .and_then(|event| canonical_event_presentation(&event.id).ok())
