@@ -11145,8 +11145,10 @@ mod tests {
             (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
         })
         .expect("configuration");
-        let mut effects = ManaEffects::default();
-        effects.color = Some("Red".to_owned());
+        let effects = ManaEffects {
+            color: Some("Red".to_owned()),
+            ..Default::default()
+        };
         let wedges = vec![
             cama_app::wheel::WheelWedge {
                 label: "LOSE".to_owned(),
