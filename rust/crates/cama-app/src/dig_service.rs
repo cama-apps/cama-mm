@@ -700,6 +700,11 @@ pub struct DigOutcomeInput {
     /// Flat weather/gear/mutation JC bonuses are applied before the base cap
     /// and minigame scale, matching the Python normal-Dig pipeline.
     pub flat_jc_bonus: i64,
+    /// Fully composed base loot after yield factors, flat rewards,
+    /// corruption/mutation, Mana variance, and Prospector's Streak. Live Dig
+    /// supplies this because those stages share its request entropy; the pure
+    /// fallback keeps composing the legacy fields above.
+    pub pre_cap_jc: Option<i64>,
     pub overgrowth_bonus: i64,
     /// Persisted daily-economy multiplier represented in basis points.  The
     /// integer form keeps this policy input `Eq` while retaining Python's
@@ -737,6 +742,7 @@ impl Default for DigOutcomeInput {
             weather_yield_percent: 100,
             yield_multiplier_millionths: None,
             flat_jc_bonus: 0,
+            pre_cap_jc: None,
             overgrowth_bonus: 0,
             economy_reward_multiplier_basis_points: 10_000,
             economy_before_positive_scale: false,
@@ -803,10 +809,14 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
     // Python composes the weather/relic/ascension factors and the temporary
     // buff before its one `int(...)` conversion. Keep that truncation at this
     // boundary instead of truncating each factor in sequence.
-    let adjusted_base =
-        scale_dig_yield_once(input.gross_jc.max(0), &[yield_multiplier, buff_multiplier])
-            .saturating_add(input.flat_jc_bonus)
-            .max(0);
+    let adjusted_base = input.pre_cap_jc.map_or_else(
+        || {
+            scale_dig_yield_once(input.gross_jc.max(0), &[yield_multiplier, buff_multiplier])
+                .saturating_add(input.flat_jc_bonus)
+                .max(0)
+        },
+        |pre_cap_jc| pre_cap_jc.max(0),
+    );
     let lifted_cap = scale_dig_yield_once(BASE_DIG_JC_PAYOUT_CAP, &[buff_multiplier]);
     let capped_base = adjusted_base.min(lifted_cap);
     let milestone_bonus = if cave_in {

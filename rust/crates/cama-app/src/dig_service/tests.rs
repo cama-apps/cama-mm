@@ -217,6 +217,20 @@ fn test_fractional_yield_buff_lifts_base_cap_at_same_fixed_point_boundary() {
 }
 
 #[test]
+fn test_request_local_pre_cap_reward_is_not_multiplied_twice() {
+    let mut tunnel = started_tunnel(10);
+    let mut input = outcome(1, 7);
+    input.yield_multiplier_millionths = Some(1_500_000);
+    input.yield_buff_multiplier_millionths = Some(1_750_000);
+    // The live adapter already composed 7 * 1.5 * 1.75, applied its shared
+    // entropy policies, and arrived at 19. The buff still lifts the cap to 35
+    // but must not multiply this request-local base a second time.
+    input.pre_cap_jc = Some(19);
+    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
+    assert_eq!(result.gross_jc, 19);
+}
+
+#[test]
 fn test_milestone_multiplier_floors_each_crossed_reward() {
     let mut tunnel = started_tunnel(24);
     tunnel.defeated_bosses = [25, 50].into_iter().collect();

@@ -42,6 +42,7 @@ use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::game_date::game_date_for_timestamp;
+use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
 use cama_domain::pet::{
     DIG_WORK_CAP_BLOCKS, DIG_WORK_UNITS_PER_BLOCK, PetDigWork, PetDigWorkClaim,
 };
@@ -69,15 +70,17 @@ use crate::dig_routes::{
     route_by_id, route_effect, route_status,
 };
 use crate::dig_service::{
-    DigOutcomeInput, MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome,
-    apply_first_dig, cooldown_remaining, layer_at, paid_dig_cost,
+    DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, MinerAllocation,
+    TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig, cooldown_remaining, layer_at,
+    paid_dig_cost, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
-    roll_corruption,
+    roll_corruption, round_prestige_perk_bonus_half_up,
 };
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
+use crate::mana_effects_service::color_for_land;
 
 /// Production image root used by the Rust deployment. The Docker image must
 /// copy the authored `assets/dig` tree here; procedural rendering is only the
@@ -641,26 +644,16 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(1.0)
     }
 
-    /// Resolve the mana paid-cost modifier from the same request-local
-    /// snapshot used by the live Dig.  Non-SQLite stores remain neutral.
-    fn paid_dig_cost_modifier(
+    /// Resolve one immutable Mana snapshot for the whole admitted Dig.
+    /// Every paid-cost, cooldown, hazard, yield, and tax policy reuses this
+    /// value so a request cannot observe two different daily assignments.
+    fn mana_effects(
         &self,
         _discord_id: i64,
         _guild_id: i64,
-        _now: i64,
-    ) -> Result<f64, DigRuntimeStoreError> {
-        Ok(1.0)
-    }
-
-    /// Resolve the active mana hazard adjustment once for the live Dig.
-    /// Non-SQLite stores stay neutral until they explicitly own this input.
-    fn cave_in_mana_hazard_modifier(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-        _now: i64,
-    ) -> Result<f64, DigRuntimeStoreError> {
-        Ok(0.0)
+        _today: &str,
+    ) -> Result<ManaEffects, DigRuntimeStoreError> {
+        Ok(ManaEffects::default())
     }
 
     /// Whether the player has an unspent Overgrowth charge at this instant.
@@ -1228,56 +1221,24 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         Ok(effects.reward_multiplier.max(0.0))
     }
 
-    fn paid_dig_cost_modifier(
+    fn mana_effects(
         &self,
         discord_id: i64,
         guild_id: i64,
-        now: i64,
-    ) -> Result<f64, DigRuntimeStoreError> {
-        let today = game_date_for_timestamp(now as f64)
-            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
+        today: &str,
+    ) -> Result<ManaEffects, DigRuntimeStoreError> {
         // Python treats a failed mana lookup as one neutral request-local
         // snapshot; it must not turn an otherwise valid Dig into an error or
         // retry the repository later in the same action.
         let row = match ManaRepository::new(&self.path).get_mana(discord_id, Some(guild_id)) {
             Ok(row) => row,
-            Err(_) => return Ok(0.0),
+            Err(_) => return Ok(ManaEffects::default()),
         };
-        let modifier = row
-            .filter(|row| row.assigned_date == today && !row.consumed_today)
-            .map(|row| match row.current_land.as_str() {
-                "Mountain" => -0.05,
-                _ => 0.0,
-            })
-            .unwrap_or(0.0);
-        Ok((1.0_f64 + modifier).max(0.0))
-    }
-
-    fn cave_in_mana_hazard_modifier(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        now: i64,
-    ) -> Result<f64, DigRuntimeStoreError> {
-        let today = game_date_for_timestamp(now as f64)
-            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
-        let row = ManaRepository::new(&self.path)
-            .get_mana(discord_id, Some(guild_id))
-            .map_err(|error| DigRuntimeStoreError::Event(error.to_string()))?;
-        Ok(row
-            .filter(|row| row.assigned_date == today && !row.consumed_today)
-            .map(|row| match row.current_land.as_str() {
-                "Forest" | "Mountain" => {
-                    if row.current_land == "Forest" {
-                        -0.01
-                    } else {
-                        0.01
-                    }
-                }
-                "Swamp" => 0.01,
-                _ => 0.0,
-            })
-            .unwrap_or(0.0))
+        let Some(row) = row.filter(|row| row.assigned_date == today && !row.consumed_today) else {
+            return Ok(ManaEffects::default());
+        };
+        let color = color_for_land(&row.current_land);
+        Ok(ManaEffects::for_color(color, Some(&row.current_land)))
     }
 
     fn overgrowth_active(
@@ -3142,6 +3103,97 @@ pub struct DigWeatherEffects {
     pub artifact_multiplier: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ActiveBuffEffects {
+    advance_bonus: i64,
+    cave_in_reduction: f64,
+    yield_multiplier: f64,
+}
+
+impl Default for ActiveBuffEffects {
+    fn default() -> Self {
+        Self {
+            advance_bonus: 0,
+            cave_in_reduction: 0.0,
+            yield_multiplier: 1.0,
+        }
+    }
+}
+
+fn active_buff_effects(raw: Option<&str>) -> Option<(ActiveBuffEffects, i64)> {
+    let value = serde_json::from_str::<Value>(raw?).ok()?;
+    let remaining = value.get("digs_remaining")?.as_i64()?;
+    if remaining <= 0 {
+        return None;
+    }
+    let effect = value.get("effect").or_else(|| value.get("effects"));
+    let number_i64 = |key: &str| {
+        effect
+            .and_then(|effect| effect.get(key))
+            .and_then(Value::as_i64)
+    };
+    let number_f64 = |key: &str| {
+        effect
+            .and_then(|effect| effect.get(key))
+            .and_then(Value::as_f64)
+    };
+    Some((
+        ActiveBuffEffects {
+            advance_bonus: number_i64("advance_bonus").unwrap_or(0),
+            cave_in_reduction: number_f64("cave_in_reduction").unwrap_or(0.0),
+            yield_multiplier: number_f64("yield_multiplier").unwrap_or(1.0).max(0.0),
+        },
+        remaining,
+    ))
+}
+
+fn multiplier_millionths(multiplier: f64) -> i64 {
+    if !multiplier.is_finite() || multiplier <= 0.0 {
+        return 0;
+    }
+    (multiplier * DIG_YIELD_MULTIPLIER_SCALE as f64)
+        .round()
+        .clamp(0.0, i64::MAX as f64) as i64
+}
+
+fn bonus_basis_points(bonus: f64) -> i64 {
+    multiplier_millionths(1.0 + bonus) / (DIG_YIELD_MULTIPLIER_SCALE / DIG_REWARD_BASIS_POINTS)
+}
+
+fn luminosity_jc_multiplier(luminosity: i64) -> f64 {
+    if luminosity >= 26 {
+        1.0
+    } else if luminosity >= 1 {
+        1.25
+    } else {
+        1.50
+    }
+}
+
+fn apply_mana_base_yield(
+    base_jc: i64,
+    effects: &ManaEffects,
+    entropy: &mut impl LootEntropy,
+) -> i64 {
+    if base_jc <= 0 {
+        return base_jc;
+    }
+    let mut modified = base_jc;
+    let variance = effects.dig_yield_variance.max(0.0);
+    if variance > 0.0 {
+        let roll = entropy.unit();
+        if roll < variance {
+            modified = modified.saturating_mul(2);
+        } else if roll < variance * 2.0 {
+            modified = 0;
+        }
+    }
+    if modified > 0 && effects.green_steady_bonus > 0 {
+        modified = modified.saturating_add(effects.green_steady_bonus);
+    }
+    modified.max(0)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ActiveCurseEffects {
     advance_bonus: i64,
@@ -3178,21 +3230,6 @@ fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffects, i64)> 
         },
         remaining,
     ))
-}
-
-fn active_buff_cave_in_reduction(raw: Option<&str>) -> Option<(f64, i64)> {
-    let value = serde_json::from_str::<Value>(raw?).ok()?;
-    let remaining = value.get("digs_remaining")?.as_i64()?;
-    if remaining <= 0 {
-        return None;
-    }
-    let reduction = value
-        .get("effect")
-        .or_else(|| value.get("effects"))
-        .and_then(|effect| effect.get("cave_in_reduction"))
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    Some((reduction, remaining))
 }
 
 impl DigWeatherEffects {
@@ -4431,6 +4468,12 @@ where
             .as_ref()
             .expect("Dig always has a staged tunnel")
             .clone();
+        let mana_effects = if first_dig {
+            ManaEffects::default()
+        } else {
+            self.store
+                .mana_effects(request.discord_id, request.guild_id, &today)?
+        };
         let paid_count = if tunnel.paid_dig_date.as_deref() == Some(today.as_str()) {
             usize::try_from(tunnel.paid_digs_today.max(0)).unwrap_or(usize::MAX)
         } else {
@@ -4443,9 +4486,7 @@ where
         let marked_up_paid_cost = paid_dig_cost(paid_count, 0, ascension_markup);
         let relic_paid_cost =
             relic_aware_paid_cost(marked_up_paid_cost, tunnel.stat_stamina, &relics);
-        let mana_paid_multiplier =
-            self.store
-                .paid_dig_cost_modifier(request.discord_id, request.guild_id, now)?;
+        let mana_paid_multiplier = (1.0 + mana_effects.dig_paid_cost_modifier_pct).max(0.0);
         let paid_cost_preview =
             ((relic_paid_cost as f64 * mana_paid_multiplier.max(0.0)) as i64).max(1);
         let (curse_fx, _curse_remaining) =
@@ -4458,6 +4499,9 @@ where
         let cooldown_seconds = (base_cooldown_seconds as f64
             * (1.0 + curse_fx.cooldown_penalty.clamp(0.0, 0.25)))
             as i64;
+        let cooldown_seconds = cooldown_seconds
+            .saturating_sub(mana_effects.dig_cooldown_reduction_seconds.max(0))
+            .max(0);
         let cooldown = cooldown_remaining(tunnel.last_dig_at, now, cooldown_seconds);
         // A paid flag only charges while it is actually bypassing an active
         // cooldown.  Python treats a paid click on an already-ready Dig as a
@@ -4670,6 +4714,7 @@ where
             .map(|weather| weather_effects(&weather.weather_id))
             .unwrap_or_default();
         let weather_id = weather.map(|weather| weather.weather_id.as_str());
+        let mana_weather_combo = weather_combo_modifiers(&mana_effects, weather_code(weather_id));
         let gear_fx = gear_effects(&current.gear, &tunnel);
         let ascension = ascension_effects(tunnel.prestige_level as i32);
         let ascension_number = |key: &str| {
@@ -4697,6 +4742,8 @@ where
             serde_json::from_str::<Vec<String>>(&tunnel.prestige_perks).unwrap_or_default();
         let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
         let mutation_fx = mutation_effects(&mutations_from_json(tunnel.mutations.as_deref()));
+        let (buff_fx, buff_remaining) =
+            active_buff_effects(tunnel.temp_buffs.as_deref()).unwrap_or_default();
         // Corruption is the first request-local random policy in Python. It
         // must consume the same entropy stream as the subsequent cave roll,
         // rather than a second seed that would shift only some Dig paths.
@@ -4712,9 +4759,7 @@ where
                     .and_then(|effect| effect.value.number())
             })
             .unwrap_or(0.0);
-        let mana_hazard_modifier =
-            self.store
-                .cave_in_mana_hazard_modifier(request.discord_id, request.guild_id, now)?;
+        let mana_hazard_modifier = mana_effects.dig_hazard_modifier;
         let overgrowth_active =
             self.store
                 .overgrowth_active(request.discord_id, request.guild_id, now)?;
@@ -4794,8 +4839,7 @@ where
                 .unwrap_or(false),
             perk_reduction: perk_fx.get("cave_in_reduction").copied().unwrap_or(0.0),
             active_pickaxe_reduction: gear_fx.cave_in_reduction,
-            active_buff_reduction: active_buff_cave_in_reduction(tunnel.temp_buffs.as_deref())
-                .map_or(0.0, |(reduction, _)| reduction),
+            active_buff_reduction: buff_fx.cave_in_reduction,
             smarts: tunnel.stat_smarts,
             lantern: current
                 .inventory
@@ -4821,7 +4865,8 @@ where
             advance_bonus: route_number("advance_bonus") as i64
                 + weather_fx.advance_bonus
                 + curse_fx.advance_bonus
-                + gear_fx.advance_bonus,
+                + gear_fx.advance_bonus
+                + buff_fx.advance_bonus,
             advance_min: None,
             advance_max: active_route
                 .and_then(|route| route_effect(route, "advance_max_penalty"))
@@ -4835,8 +4880,9 @@ where
             luminosity_drain_bonus: deep_luminosity_drain_bonus(depth_before),
             luminosity_pickaxe_reduction: active_pickaxe_tier >= 6,
             injury_reduces_advance,
-            jc_multiplier: (1.0 + weather_fx.jc_multiplier + ascension_number("jc_multiplier"))
-                .max(0.0),
+            jc_multiplier: (1.0 + weather_fx.jc_multiplier + ascension_number("jc_multiplier")
+                - ascension_number("jc_layer_penalty"))
+            .max(0.0),
             jc_bonus: weather_fx.jc_bonus + gear_fx.loot_bonus + curse_fx.jc_bonus,
             // Ordinary artifacts are settled below, after the cave branch
             // has established the final depth. Keep the loot-stage carrier
@@ -4952,24 +4998,6 @@ where
             }
         }
         let layer = layer_at(depth_before);
-        let gross_jc = loot
-            .entropy_mut()
-            .advance(layer.jc_range.0, layer.jc_range.1);
-        let relic_yield_multiplier = {
-            let mut entropy = LootRelicEntropy(loot.entropy_mut());
-            relic_jc_yield_multiplier(
-                &relics,
-                YieldContext {
-                    weather_code: weather_code(weather_id),
-                    luminosity: Some(tunnel.luminosity),
-                    is_first_dig_today: is_first_dig_of_day(tunnel.last_dig_at, now),
-                    is_paid_dig: paid_charge_active,
-                    include_random: true,
-                },
-                &mut entropy,
-            )
-        };
-        let post_pinnacle_multiplier = post_pinnacle_decay_factor(depth_before, &relics);
         let helltide_tax = self.store.helltide_tax(request.guild_id, now)?.max(0);
         let economy_multiplier = self.store.daily_reward_multiplier(
             request.guild_id,
@@ -4979,6 +5007,97 @@ where
         let economy_multiplier_basis_points = (economy_multiplier.max(0.0) * 10_000.0 + 0.5) as i64;
         let streak_days = next_daily_streak(&tunnel, &today);
         let streak_reward = crate::dig_service::streak_bonus(streak_days);
+        let next_cavein_free_streak = tunnel.cavein_free_streak.max(0).saturating_add(1);
+        let mut gross_jc = 0_i64;
+        let mut yield_multiplier_millionths = DIG_YIELD_MULTIPLIER_SCALE;
+        let mut pre_cap_jc = None;
+        if !loot_outcome.cave_in {
+            gross_jc = loot
+                .entropy_mut()
+                .advance(layer.jc_range.0, layer.jc_range.1);
+            let luminosity_after = staged
+                .tunnel
+                .as_ref()
+                .map_or(LUMINOSITY_MAX, |next_tunnel| next_tunnel.luminosity);
+            let relic_yield_multiplier = {
+                let mut entropy = LootRelicEntropy(loot.entropy_mut());
+                relic_jc_yield_multiplier(
+                    &relics,
+                    YieldContext {
+                        weather_code: weather_code(weather_id),
+                        luminosity: Some(luminosity_after),
+                        is_first_dig_today: is_first_dig_of_day(tunnel.last_dig_at, now),
+                        is_paid_dig: paid_charge_active,
+                        include_random: true,
+                    },
+                    &mut entropy,
+                )
+            };
+            let preview_state = tunnel_state(&staged, paid_charge_active.then_some(paid_cost));
+            let requested_pet_blocks = pet_work.as_ref().map_or(0, |work| work.available_blocks());
+            let projected_depth = apply_boss_gate(
+                depth_before,
+                loot_outcome.advance.saturating_add(requested_pet_blocks),
+                &preview_state.defeated_bosses,
+            )
+            .depth_after;
+            let composed_multiplier = loot_modifiers.jc_multiplier
+                * relic_yield_multiplier
+                * mana_weather_combo.yield_mult
+                * luminosity_jc_multiplier(luminosity_after)
+                * post_pinnacle_decay_factor(projected_depth, &relics);
+            yield_multiplier_millionths = multiplier_millionths(composed_multiplier);
+            let buff_multiplier_millionths = multiplier_millionths(buff_fx.yield_multiplier);
+            let perk_flat =
+                round_prestige_perk_bonus_half_up(perk_fx.get("jc_bonus").copied().unwrap_or(0.0));
+            let mut base_jc = scale_dig_yield_once(
+                gross_jc,
+                &[yield_multiplier_millionths, buff_multiplier_millionths],
+            )
+            .saturating_add(loot_modifiers.jc_bonus)
+            .saturating_add(i64::from(relics.contains("magma_heart")))
+            .saturating_add(perk_flat);
+            let corruption_number = |key: &str| {
+                corruption.as_ref().and_then(|corruption| {
+                    corruption
+                        .effects
+                        .iter()
+                        .find(|effect| effect.key == key)
+                        .and_then(|effect| effect.value.number())
+                })
+            };
+            let corruption_flag = |key: &str| {
+                corruption.as_ref().is_some_and(|corruption| {
+                    corruption
+                        .effects
+                        .iter()
+                        .any(|effect| effect.key == key && effect.value.boolean().unwrap_or(false))
+                })
+            };
+            if let Some(fixed) = corruption_number("fixed_jc") {
+                base_jc = fixed as i64;
+            } else if corruption_flag("double_half_jc") {
+                base_jc = base_jc.saturating_sub(base_jc.rem_euclid(2));
+            } else {
+                base_jc = base_jc
+                    .saturating_sub(corruption_number("jc_penalty").unwrap_or(0.0).max(0.0) as i64);
+            }
+            let zero_chance = mutation_fx
+                .get("zero_jc_chance")
+                .and_then(|effect| effect.number())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            if zero_chance > 0.0 && loot.entropy_mut().unit() < zero_chance {
+                base_jc = 0;
+            } else {
+                base_jc = base_jc.max(0);
+            }
+            base_jc = apply_mana_base_yield(base_jc, &mana_effects, loot.entropy_mut());
+            if relics.contains("prospectors_streak") {
+                base_jc = base_jc.saturating_add(next_cavein_free_streak.min(20));
+            }
+            pre_cap_jc = Some(base_jc);
+        }
         let mut cave_in_grappling_absorbed = false;
         let mut cave_reward_gross = 0_i64;
         let cave_loss = if loot_outcome.cave_in {
@@ -5299,22 +5418,23 @@ where
             dynamite: loot_outcome.items_used.contains(&"dynamite"),
             depth_charge: loot_outcome.items_used.contains(&"depth_charge"),
             authored_event: request.forced_event,
-            weather_yield_percent: if loot_outcome.cave_in {
-                100
-            } else {
-                (loot_modifiers.jc_multiplier
-                    * relic_yield_multiplier
-                    * post_pinnacle_multiplier
-                    * 100.0) as i64
-            },
-            flat_jc_bonus: if loot_outcome.cave_in {
-                0
-            } else {
-                loot_modifiers.jc_bonus
-            },
+            yield_buff_multiplier_millionths: (!loot_outcome.cave_in)
+                .then(|| multiplier_millionths(buff_fx.yield_multiplier)),
+            yield_multiplier_millionths: (!loot_outcome.cave_in)
+                .then_some(yield_multiplier_millionths),
+            pre_cap_jc,
             economy_reward_multiplier_basis_points: economy_multiplier_basis_points,
             economy_before_positive_scale: loot_outcome.cave_in,
             streak_bonus: streak_reward,
+            streak_bonus_multiplier_basis_points: bonus_basis_points(
+                perk_fx
+                    .get("streak_bonus_multiplier")
+                    .copied()
+                    .unwrap_or(0.0),
+            ),
+            milestone_multiplier_basis_points: bonus_basis_points(ascension_number(
+                "milestone_multiplier",
+            )),
             overgrowth_bonus: i64::from(overgrowth_active).saturating_mul(10),
             helltide_tax,
             ..DigOutcomeInput::default()
@@ -5390,6 +5510,16 @@ where
             .as_ref()
             .and_then(|work| work.claim(pet_dig_bonus).ok());
         staged = apply_state(&staged, state, &today, paid_charge_active, paid_cost);
+        if let Some(next_tunnel) = staged.tunnel.as_mut() {
+            if outcome.cave_in {
+                next_tunnel.cavein_free_streak = 0;
+            } else {
+                next_tunnel.cavein_free_streak = next_cavein_free_streak;
+                next_tunnel.current_run_jc = next_tunnel
+                    .current_run_jc
+                    .saturating_add(outcome.jc_earned.max(0));
+            }
+        }
         // Python rolls ordinary artifacts only after the cave branch has
         // settled the final post-boss depth. Keep this roll on the same
         // entropy stream as the cave/JC/event stages, but stage the new row on
@@ -5478,17 +5608,17 @@ where
                 Some(curse.to_string())
             };
         }
-        if let Some((_, remaining)) = active_buff_cave_in_reduction(tunnel.temp_buffs.as_deref())
+        if buff_remaining > 0
             && let Some(next_tunnel) = staged.tunnel.as_mut()
         {
-            next_tunnel.temp_buffs = if remaining <= 1 {
+            next_tunnel.temp_buffs = if buff_remaining <= 1 {
                 None
             } else {
                 let mut buff =
                     serde_json::from_str::<Value>(tunnel.temp_buffs.as_deref().unwrap_or("{}"))
                         .unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(value) = buff.get_mut("digs_remaining") {
-                    *value = Value::from(remaining - 1);
+                    *value = Value::from(buff_remaining - 1);
                 }
                 Some(buff.to_string())
             };
@@ -8486,6 +8616,246 @@ mod tests {
             .expect("deterministic cave probability seed")
     }
 
+    fn find_non_cave_dig_time_with_jc(
+        discord_id: i64,
+        guild_id: i64,
+        start: i64,
+        depth: i64,
+        wanted_jc: i64,
+    ) -> i64 {
+        let layer = super::layer_at(depth);
+        (start..start.saturating_add(10_000))
+            .find(|candidate| {
+                let mut entropy =
+                    super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
+                        discord_id,
+                        guild_id,
+                        now: *candidate,
+                        paid: false,
+                        forced_event: false,
+                    }));
+                let safely_not_cave = entropy.unit() > 0.60;
+                let _advance = entropy.advance(layer.advance_range.0, layer.advance_range.1);
+                let _event_gate = entropy.unit();
+                safely_not_cave && entropy.advance(layer.jc_range.0, layer.jc_range.1) == wanted_jc
+            })
+            .expect("deterministic non-cave JC roll")
+    }
+
+    fn seed_two_weather_rows(
+        database: &NamedTempFile,
+        guild_id: i64,
+        game_date: &str,
+        active_layer: &str,
+        active_weather: &str,
+    ) {
+        let mut connection = Connection::open(database.path()).expect("weather connection");
+        let transaction = connection.transaction().expect("weather transaction");
+        transaction
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,?3,?4)",
+                params![guild_id, game_date, active_layer, active_weather],
+            )
+            .expect("seed active weather row");
+        transaction
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,'Dirt','earthworm_migration')",
+                params![guild_id, game_date],
+            )
+            .expect("seed second weather row");
+        transaction.commit().expect("commit weather rows");
+    }
+
+    #[test]
+    fn mana_base_yield_variance_and_steady_bonus_share_live_entropy() {
+        let red = cama_domain::mana::ManaEffects::for_color(Some("Red"), Some("Mountain"));
+        let mut double = crate::dig_loot::ScriptedLootEntropy::new([0.149_999], []);
+        let mut zero = crate::dig_loot::ScriptedLootEntropy::new([0.15], []);
+        let mut ordinary = crate::dig_loot::ScriptedLootEntropy::new([0.30], []);
+        assert_eq!(super::apply_mana_base_yield(5, &red, &mut double), 10);
+        assert_eq!(super::apply_mana_base_yield(5, &red, &mut zero), 0);
+        assert_eq!(super::apply_mana_base_yield(5, &red, &mut ordinary), 5);
+
+        let green = cama_domain::mana::ManaEffects::for_color(Some("Green"), Some("Forest"));
+        let mut no_roll = crate::dig_loot::ScriptedLootEntropy::default();
+        assert_eq!(super::apply_mana_base_yield(5, &green, &mut no_roll), 6);
+        assert_eq!(super::apply_mana_base_yield(0, &green, &mut no_roll), 0);
+    }
+
+    #[test]
+    fn sqlite_forest_mana_makes_free_dig_ready_at_exact_3570_seconds() {
+        let control = NamedTempFile::new().expect("control cooldown database");
+        let forest = NamedTempFile::new().expect("Forest cooldown database");
+        let actor = 60_081;
+        let guild = 60_082;
+        let now = 1_900_080_000;
+        for database in [&control, &forest] {
+            seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 3_570));
+        }
+        let today =
+            cama_domain::game_date::game_date_for_timestamp(now as f64).expect("Forest mana date");
+        Connection::open(forest.path())
+            .expect("Forest mana connection")
+            .execute(
+                "INSERT INTO player_mana(
+                     discord_id,guild_id,current_land,assigned_date,consumed_today
+                 ) VALUES(?1,?2,'Forest',?3,0)",
+                params![actor, guild, today],
+            )
+            .expect("seed Forest mana");
+
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        };
+        let blocked = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control cooldown response");
+        assert!(!blocked.success);
+        assert_eq!(blocked.cooldown_remaining, 30);
+        let admitted = DigRuntimeService::sqlite(forest.path())
+            .dig(request)
+            .expect("Forest cooldown Dig");
+        assert!(admitted.success);
+        assert_eq!(admitted.cooldown_remaining, 0);
+    }
+
+    #[test]
+    fn sqlite_temp_yield_buff_composes_once_and_expires() {
+        let control = NamedTempFile::new().expect("control yield-buff database");
+        let boosted = NamedTempFile::new().expect("boosted yield-buff database");
+        let actor = 60_083;
+        let guild = 60_084;
+        let now = 1_900_081_000;
+        let depth = 76;
+        for database in [&control, &boosted] {
+            seed_live_runtime_tunnel(database, actor, guild, now, depth, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("yield-buff boss-progress connection")
+                .execute(
+                    "UPDATE tunnels SET boss_progress=?1
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        actor,
+                        guild,
+                    ],
+                )
+                .expect("seed defeated lower bosses");
+        }
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, depth, 3);
+        let today = cama_domain::game_date::game_date_for_timestamp(dig_now as f64)
+            .expect("yield-buff date");
+        for database in [&control, &boosted] {
+            seed_two_weather_rows(database, guild, &today, "Magma", "cooling_period");
+        }
+        Connection::open(boosted.path())
+            .expect("yield-buff connection")
+            .execute(
+                "UPDATE tunnels SET temp_buffs=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![
+                    r#"{"digs_remaining":1,"effect":{"yield_multiplier":1.75,"advance_bonus":2}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed yield buff");
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control yield Dig");
+        let boosted_outcome = DigRuntimeService::sqlite(boosted.path())
+            .dig(request)
+            .expect("boosted yield Dig");
+        assert!(!control_outcome.cave_in && !boosted_outcome.cave_in);
+        assert_eq!(boosted_outcome.advance, control_outcome.advance + 2);
+        assert!(boosted_outcome.jc_earned > control_outcome.jc_earned);
+        let tunnel = SqliteDigRuntimeStore::new(boosted.path())
+            .snapshot(actor, guild)
+            .expect("reload yield-buff tunnel")
+            .tunnel
+            .expect("yield-buff tunnel");
+        assert_eq!(tunnel.temp_buffs, None);
+        assert_eq!(tunnel.current_run_jc, boosted_outcome.jc_earned);
+        assert_eq!(tunnel.cavein_free_streak, 1);
+    }
+
+    #[test]
+    fn sqlite_relic_yield_uses_post_drain_luminosity() {
+        let control = NamedTempFile::new().expect("control luminosity-yield database");
+        let coal = NamedTempFile::new().expect("Deepveined Coal database");
+        let actor = 60_085;
+        let guild = 60_086;
+        let now = 1_900_082_000;
+        let depth = 76;
+        for database in [&control, &coal] {
+            seed_live_runtime_tunnel(database, actor, guild, now, depth, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("luminosity-yield connection")
+                .execute(
+                    "UPDATE tunnels SET luminosity=26,boss_progress=?1
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        actor,
+                        guild,
+                    ],
+                )
+                .expect("seed dim luminosity");
+        }
+        let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, depth, 3);
+        let today = cama_domain::game_date::game_date_for_timestamp(dig_now as f64)
+            .expect("luminosity-yield date");
+        for database in [&control, &coal] {
+            seed_two_weather_rows(database, guild, &today, "Magma", "cooling_period");
+        }
+        Connection::open(coal.path())
+            .expect("Coal connection")
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'deepveined_coal',?3,1,1)",
+                params![actor, guild, now - 100],
+            )
+            .expect("equip Deepveined Coal");
+        let request = DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        };
+        let control_outcome = DigRuntimeService::sqlite(control.path())
+            .dig(request)
+            .expect("control luminosity-yield Dig");
+        let coal_outcome = DigRuntimeService::sqlite(coal.path())
+            .dig(request)
+            .expect("Coal luminosity-yield Dig");
+        assert_eq!(
+            SqliteDigRuntimeStore::new(coal.path())
+                .snapshot(actor, guild)
+                .expect("reload Coal tunnel")
+                .tunnel
+                .expect("Coal tunnel")
+                .luminosity,
+            23,
+            "Magma drain must make the request dark before relic yield resolves",
+        );
+        assert_eq!(coal_outcome.jc_earned, control_outcome.jc_earned + 1);
+    }
+
     #[test]
     fn sqlite_overgrowth_adds_ten_and_consumes_one_charge_exactly_once() {
         let control = NamedTempFile::new().expect("control Overgrowth database");
@@ -8495,6 +8865,14 @@ mod tests {
         let now = 1_900_090_000;
         for database in [&control, &boosted] {
             seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("seed cave-free streak")
+                .execute(
+                    "UPDATE tunnels SET cavein_free_streak=9,current_run_jc=17
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                )
+                .expect("seed cave-free counters");
         }
         grant_overgrowth(&boosted, actor, guild, now, 2);
         let dig_now = find_non_cave_dig_time(actor, guild, now);
@@ -8517,6 +8895,13 @@ mod tests {
             .expect("read remaining Overgrowth");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].data.charges_remaining, Some(1));
+        let tunnel = SqliteDigRuntimeStore::new(boosted.path())
+            .snapshot(actor, guild)
+            .expect("reload successful Overgrowth tunnel")
+            .tunnel
+            .expect("successful Overgrowth tunnel");
+        assert_eq!(tunnel.cavein_free_streak, 10);
+        assert_eq!(tunnel.current_run_jc, 17 + boosted_outcome.jc_earned);
 
         let retry = service.dig(request).expect("duplicate request response");
         assert!(!retry.success, "cooldown must reject duplicate Dig");
@@ -8535,6 +8920,14 @@ mod tests {
         let now = 1_900_091_000;
         for database in [&control, &boosted] {
             seed_live_runtime_tunnel(database, actor, guild, now, 10, 1, Some(now - 7_200));
+            Connection::open(database.path())
+                .expect("seed cave counters")
+                .execute(
+                    "UPDATE tunnels SET cavein_free_streak=9,current_run_jc=17
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                )
+                .expect("seed cave counters");
         }
         grant_overgrowth(&boosted, actor, guild, now, 1);
         let dig_now = find_dig_time_with_unit_between(actor, guild, now, 0.0, 0.01);
@@ -8570,6 +8963,13 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(0)
         );
+        let tunnel = SqliteDigRuntimeStore::new(boosted.path())
+            .snapshot(actor, guild)
+            .expect("reload Overgrowth cave tunnel")
+            .tunnel
+            .expect("Overgrowth cave tunnel");
+        assert_eq!(tunnel.cavein_free_streak, 0);
+        assert_eq!(tunnel.current_run_jc, 17);
     }
 
     #[test]
