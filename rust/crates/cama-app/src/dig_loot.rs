@@ -19,7 +19,11 @@ use crate::dig_service::{AutoBuyStatus, layer_at};
 
 pub const MAX_INVENTORY_SLOTS: usize = 8;
 pub const HARD_HAT_USES: i64 = 3;
+pub const GRAPPLING_HOOK_USES: i64 = 5;
 pub const REINFORCEMENT_SECONDS: i64 = 48 * 3_600;
+/// Consumables reserved for a boss encounter.  A queued row is deliberately
+/// left in the inventory until the boss runtime consumes it.
+pub const BOSS_PREP_ITEM_IDS: [&str; 3] = ["tempered_whetstone", "warding_salts", "rescue_line"];
 pub const PRESTIGE_RELIC_DROP_RATE: f64 = 0.10;
 pub const RARITY_WEIGHTS: [(Rarity, u64); 4] = [
     (Rarity::Common, 70),
@@ -120,6 +124,27 @@ pub const CONSUMABLES: [ConsumableDef; 13] = [
 #[must_use]
 pub fn consumable(item_id: &str) -> Option<&'static ConsumableDef> {
     CONSUMABLES.iter().find(|item| item.id == item_id)
+}
+
+#[must_use]
+pub fn is_dig_consumable(item_id: &str) -> bool {
+    matches!(
+        item_id,
+        "dynamite"
+            | "hard_hat"
+            | "lantern"
+            | "torch"
+            | "grappling_hook"
+            | "depth_charge"
+            | "reinforcement"
+            | "sonar_pulse"
+            | "void_bait"
+    )
+}
+
+#[must_use]
+pub fn is_boss_prep_item(item_id: &str) -> bool {
+    BOSS_PREP_ITEM_IDS.contains(&item_id)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -2215,6 +2240,7 @@ pub struct TunnelLootState {
     pub reinforced_until: i64,
     pub void_bait_digs: i64,
     pub sonar_skip_pending: bool,
+    pub grappling_hook_charges: i64,
     pub temp_buff: Option<String>,
 }
 
@@ -2228,6 +2254,7 @@ impl Default for TunnelLootState {
             reinforced_until: 0,
             void_bait_digs: 0,
             sonar_skip_pending: false,
+            grappling_hook_charges: 0,
             temp_buff: None,
         }
     }
@@ -2631,6 +2658,11 @@ pub struct DigLootModifiers {
     pub event_chance_multiplier: f64,
     pub luminosity_drain_multiplier: f64,
     pub luminosity_drain_bonus: i64,
+    pub luminosity_pickaxe_reduction: bool,
+    /// Injury is ticked by the application before the roll.  Carry the
+    /// already-observed reduced-advance flag so the final charge still
+    /// affects this Dig after its persisted JSON is cleared.
+    pub injury_reduces_advance: bool,
     /// Yield modifiers are applied by the enclosing application settlement;
     /// the loot service carries them so weather/gear/relic policy is not lost
     /// between the policy graph and the final transaction.
@@ -2657,6 +2689,8 @@ impl Default for DigLootModifiers {
             event_chance_multiplier: 1.0,
             luminosity_drain_multiplier: 1.0,
             luminosity_drain_bonus: 0,
+            luminosity_pickaxe_reduction: false,
+            injury_reduces_advance: false,
             jc_multiplier: 1.0,
             jc_bonus: 0,
             artifact_multiplier: 1.0,
@@ -2799,7 +2833,7 @@ where
         &mut self,
         discord_id: i64,
         guild_id: i64,
-        now: i64,
+        _now: i64,
         modifiers: DigLootModifiers,
     ) -> DigLootOutcome {
         let Some(mut tunnel) = self.repository.tunnel(discord_id, guild_id) else {
@@ -2812,7 +2846,11 @@ where
             .repository
             .inventory(discord_id, guild_id)
             .into_iter()
-            .filter(|item| item.queued)
+            .filter(|item| {
+                item.queued
+                    && is_dig_consumable(item.item_type)
+                    && !is_boss_prep_item(item.item_type)
+            })
             .collect::<Vec<_>>();
         let consumed_ids = queued.iter().map(|item| item.id).collect::<Vec<_>>();
         let mut items_used = Vec::new();
@@ -2828,11 +2866,23 @@ where
                     flat_advance_bonus +=
                         consumable(item.item_type).map_or(0, |definition| definition.bonus_blocks);
                 }
-                "hard_hat" => tunnel.hard_hat_charges = HARD_HAT_USES,
+                "hard_hat" => {
+                    tunnel.hard_hat_charges = tunnel.hard_hat_charges.saturating_add(HARD_HAT_USES)
+                }
                 "lantern" => has_lantern = true,
-                "reinforcement" => tunnel.reinforced_until = now + REINFORCEMENT_SECONDS,
-                "torch" => tunnel.luminosity = (tunnel.luminosity + 50).min(100),
-                "void_bait" => tunnel.void_bait_digs = 3,
+                // The application uses the pre-stage value for this Dig's
+                // cave-loss cap, then carries this staged value into the
+                // committed tunnel for the following Dig.
+                "reinforcement" => tunnel.reinforced_until = _now + REINFORCEMENT_SECONDS,
+                // Torch is restored after the ordinary drain, in the same
+                // order as Python's _apply_luminosity_drain pipeline.
+                "torch" => {}
+                "grappling_hook" => {
+                    tunnel.grappling_hook_charges = tunnel
+                        .grappling_hook_charges
+                        .saturating_add(GRAPPLING_HOOK_USES)
+                }
+                "void_bait" => tunnel.void_bait_digs = tunnel.void_bait_digs.saturating_add(3),
                 "sonar_pulse" => sonar_used = true,
                 _ => {}
             }
@@ -2860,7 +2910,7 @@ where
             .unwrap_or(layer.advance_range.1)
             .max(minimum);
         let base_advance = self.entropy.advance(minimum, maximum);
-        let injury_adjusted = if tunnel.injured {
+        let injury_adjusted = if tunnel.injured || modifiers.injury_reduces_advance {
             (base_advance as f64 * 0.5) as i64
         } else {
             base_advance
@@ -2872,11 +2922,14 @@ where
         };
         tunnel.depth += advance;
 
-        let luminosity_drain = ((layer.luminosity_drain as f64
-            * modifiers.luminosity_drain_multiplier.max(0.0))
-            as i64)
-            .saturating_add(modifiers.luminosity_drain_bonus)
-            .max(0);
+        let mut base_luminosity_drain = layer.luminosity_drain;
+        if modifiers.luminosity_pickaxe_reduction {
+            base_luminosity_drain = base_luminosity_drain.saturating_sub(base_luminosity_drain / 4);
+        }
+        base_luminosity_drain =
+            base_luminosity_drain.saturating_add(modifiers.luminosity_drain_bonus);
+        let luminosity_drain =
+            (base_luminosity_drain as f64 * modifiers.luminosity_drain_multiplier.max(0.0)) as i64;
         tunnel.luminosity = tunnel.luminosity.saturating_sub(luminosity_drain).max(0);
 
         let mut event = None;
