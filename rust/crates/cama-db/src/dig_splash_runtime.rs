@@ -424,6 +424,7 @@ fn settle_grant(
         request,
         victim_id,
         None,
+        "splash_victim",
         request.amount,
         detail_json,
     )?;
@@ -626,7 +627,15 @@ fn settle_hostile(
         clear_ledger_context(transaction)?;
     }
     if applied > 0 {
-        insert_action(transaction, request, victim_id, None, -applied, detail_json)?;
+        insert_action(
+            transaction,
+            request,
+            victim_id,
+            None,
+            "splash_victim",
+            -applied,
+            detail_json,
+        )?;
     }
     if request.mode == SplashMode::Steal && applied > 0 {
         insert_action(
@@ -634,6 +643,7 @@ fn settle_hostile(
             request,
             request.digger_id,
             Some(victim_id),
+            "splash_thief",
             applied,
             detail_json,
         )?;
@@ -989,6 +999,7 @@ fn insert_action(
     request: &SplashSettlementRequest<'_>,
     actor_id: i64,
     target_id: Option<i64>,
+    action_type: &str,
     delta: i64,
     detail_json: &str,
 ) -> Result<(), rusqlite::Error> {
@@ -1001,7 +1012,7 @@ fn insert_action(
             request.guild_id,
             actor_id,
             target_id,
-            "splash_victim",
+            action_type,
             delta,
             detail_json,
             request.now,
