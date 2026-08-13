@@ -109,7 +109,7 @@ def test_shuffle_accounts_for_all_sixteen_players(repo_db_path):
     assert len(excluded_ids) == 6
 
 
-def test_goodness_adds_600_per_active_low_priority_player(repo_db_path):
+def test_goodness_includes_low_priority_selection_penalty_and_team_bonus(repo_db_path):
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     low_priority_repo = LowPriorityRepository(repo_db_path)
@@ -131,8 +131,13 @@ def test_goodness_adds_600_per_active_low_priority_player(repo_db_path):
     )
     penalized = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
+    low_priority_ids = set(player_ids[:2])
+    assert any(
+        low_priority_ids <= {player.discord_id for player in team.players}
+        for team in (penalized["radiant_team"], penalized["dire_team"])
+    )
     assert penalized["goodness_score"] - baseline["goodness_score"] == pytest.approx(
-        1200.0
+        1100.0
     )
 
 
