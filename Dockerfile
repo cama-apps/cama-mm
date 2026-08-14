@@ -21,6 +21,25 @@ COPY --chown=appuser:appuser pyproject.toml uv.lock ./
 USER appuser
 RUN uv sync --frozen --no-dev
 
+# Make Python's hard-coded DejaVu lookup use the same bytes retained by the
+# Rust image.  The distro package creates the conventional directory, while
+# this copy and check keep its four rendering faces pinned to the locked
+# Matplotlib wheel.
+USER root
+COPY assets/fonts/dejavu.sha256 /tmp/cama-dejavu.sha256
+RUN set -eux; \
+    for font in \
+        DejaVuSans.ttf \
+        DejaVuSans-Bold.ttf \
+        DejaVuSansMono.ttf \
+        DejaVuSansMono-Bold.ttf; do \
+        cp "/app/.venv/lib/python3.12/site-packages/matplotlib/mpl-data/fonts/ttf/$font" \
+            "/usr/share/fonts/truetype/dejavu/$font"; \
+    done; \
+    cd /usr/share/fonts/truetype/dejavu; \
+    sha256sum -c /tmp/cama-dejavu.sha256
+USER appuser
+
 # Copy application code
 COPY --chown=appuser:appuser . .
 

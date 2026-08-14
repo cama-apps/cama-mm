@@ -76,6 +76,7 @@ pub mod economy_actions;
 pub mod economy_event_service;
 pub mod economy_event_sqlite;
 pub mod embeds;
+pub mod font_assets;
 pub mod golden_wheel;
 pub mod hero_lookup;
 pub mod herogrid;
