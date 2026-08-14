@@ -38,6 +38,9 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert isinstance(animation["name"], str)
     assert isinstance(animation["value"], int)
     assert isinstance(animation["theme"], str)
+    terminal_crash = fixture["terminal_crash"]
+    assert terminal_crash["name"] == "Client 47"
+    assert terminal_crash["filing_number"] == 5
     assert pinnacle["source_path"].endswith("lantern_engine_encounter.png")
     assert pinnacle["boss_id"] == "lantern_engine"
     assert pinnacle["secret"] is True
@@ -63,6 +66,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_animation.gif").read_bytes() == (
         second / "python_animation.gif"
     ).read_bytes()
+    assert (first / "python_terminal_crash.gif").read_bytes() == (
+        second / "python_terminal_crash.gif"
+    ).read_bytes()
     assert (first / "python_pinnacle_phase3.gif").read_bytes() == (
         second / "python_pinnacle_phase3.gif"
     ).read_bytes()
@@ -71,6 +77,17 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert loop == 1
     assert len(frames) == 18
     assert durations == [80] * 17 + [60_000]
+    size, loop, durations, frames = gif_frames(first / "python_terminal_crash.gif")
+    assert size == (400, 300)
+    assert loop == 1
+    assert len(frames) == 58
+    assert durations == (
+        [120] * 10
+        + [80, 80, 90, 90, 100, 100, 110, 110, 120, 120,
+           130, 130, 140, 140, 150, 150, 160, 160, 170, 170]
+        + [60] * 20
+        + [1100, 300, 300, 300, 300, 600, 300, 60000]
+    )
     size, loop, durations, frames = gif_frames(first / "python_pinnacle_phase3.gif")
     assert size == (512, 288)
     assert loop is None

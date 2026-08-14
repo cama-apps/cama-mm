@@ -12,6 +12,7 @@ use std::path::Path;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
+use cama_app::neon_degen::GifAsset;
 use cama_app::post_match_gif_media::render_post_match_gif;
 use serde::Deserialize;
 
@@ -19,6 +20,7 @@ use serde::Deserialize;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
 }
@@ -44,6 +46,12 @@ struct AnimationFixture {
     name: String,
     value: i64,
     theme: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalCrashFixture {
+    name: String,
+    filing_number: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +124,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_animation.gif"),
         animation.bytes,
+    )?;
+
+    let terminal_crash = GifAsset::terminal_crash(
+        &fixture.terminal_crash.name,
+        fixture.terminal_crash.filing_number,
+    );
+    fs::write(
+        Path::new(&output_dir).join("rust_terminal_crash.gif"),
+        terminal_crash.bytes,
     )?;
 
     let pinnacle_source_path =

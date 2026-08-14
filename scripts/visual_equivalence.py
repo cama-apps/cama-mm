@@ -6,9 +6,9 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
     uv run --locked python scripts/visual_equivalence.py
 
-It renders production prediction-market, balance-journey, post-match, and
-pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
-sides to RGBA.
+It renders production prediction-market, balance-journey, post-match,
+terminal-crash, and pinnacle phase-3 artifacts from the shared JSON fixture,
+then decodes both sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
 an embedded bitmap font, while Python uses its configured Pillow font, so exact
@@ -53,6 +53,11 @@ BALANCE_MAX_RMS = 0.100
 ANIMATION_MAX_MEAN_FRAME_MAE = 0.130
 ANIMATION_MAX_MEAN_FRAME_RMS = 0.260
 ANIMATION_MAX_FRAME_MAE = 0.260
+TERMINAL_CRASH_MAX_MEAN_FRAME_MAE = 0.060
+TERMINAL_CRASH_MAX_MEAN_FRAME_RMS = 0.180
+TERMINAL_CRASH_MAX_FRAME_MAE = 0.100
+TERMINAL_CRASH_MIN_FOREGROUND_GRID_IOU = 0.08
+TERMINAL_CRASH_MIN_FOREGROUND_COUNT_RATIO = 0.45
 PINNACLE_MAX_MEAN_FRAME_MAE = 0.075
 PINNACLE_MAX_MEAN_FRAME_RMS = 0.120
 PINNACLE_MAX_FRAME_MAE = 0.085
@@ -99,11 +104,12 @@ def load_fixture(path: Path) -> dict[str, Any]:
     if not isinstance(fixture, dict) or set(fixture) != {
         "chart",
         "animation",
+        "terminal_crash",
         "pinnacle",
         "balance",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, pinnacle, and balance objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, and balance objects"
         )
     return fixture
 
@@ -116,7 +122,7 @@ def render_python(
     from utils import dig_drawing
     from utils.drawing import draw_balance_chart
     from utils.drawing.predictions import draw_market_fair_history
-    from utils.neon_drawing import create_post_match_gif
+    from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
 
     chart = fixture["chart"]
     snapshots = [tuple(snapshot) for snapshot in chart["snapshots"]]
@@ -156,6 +162,21 @@ def render_python(
     finally:
         random.setstate(random_state)
     (output_dir / "python_animation.gif").write_bytes(animation_bytes)
+
+    # The production terminal-crash renderer consumes random glitch/noise
+    # rolls.  Keep the existing runtime behavior while pinning the fixture's
+    # seed so Python output is reproducible for cross-language comparison.
+    terminal_crash = fixture["terminal_crash"]
+    random_state = random.getstate()
+    try:
+        random.seed(0xC0FFEE)
+        terminal_crash_bytes = create_terminal_crash_gif(
+            str(terminal_crash["name"]),
+            int(terminal_crash["filing_number"]),
+        ).getvalue()
+    finally:
+        random.setstate(random_state)
+    (output_dir / "python_terminal_crash.gif").write_bytes(terminal_crash_bytes)
 
     pinnacle = fixture["pinnacle"]
     source_root = (fixture_path or DEFAULT_FIXTURE).resolve().parent
@@ -391,6 +412,89 @@ def check_gif(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the production Python/Rust bankruptcy crash renderers.
+
+    Both implementations intentionally use different raster backends and
+    fonts.  The gate therefore checks exact playback metadata plus bounded
+    pixel/layout drift, while rejecting a blank or contentless replacement.
+    """
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    if python_size != (400, 300) or rust_size != python_size:
+        raise AssertionError(
+            f"terminal crash dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop != 1 or rust_loop != python_loop:
+        raise AssertionError(
+            f"terminal crash loop count differs: Python {python_loop}, Rust {rust_loop}"
+        )
+    if len(python_frames) != 58 or len(rust_frames) != len(python_frames):
+        raise AssertionError(
+            f"terminal crash frame count differs: Python {len(python_frames)}, Rust {len(rust_frames)}"
+        )
+    if rust_durations != python_durations:
+        raise AssertionError(
+            f"terminal crash durations/order differ: Python {python_durations}, Rust {rust_durations}"
+        )
+
+    metrics = [pixel_metrics(left, right) for left, right in zip(python_frames, rust_frames)]
+    structures = []
+    for index, (left, right) in enumerate(zip(python_frames, rust_frames)):
+        reference_count, reference_cells = foreground_structure(
+            left, python_size, (10, 10), 24
+        )
+        candidate_count, candidate_cells = foreground_structure(
+            right, rust_size, (10, 10), 24
+        )
+        if reference_count == 0:
+            if candidate_count != 0 or candidate_cells:
+                raise AssertionError(
+                    f"terminal crash frame {index} adds content during the intentional blank hold"
+                )
+            continue
+        structures.append(
+            compare_foreground_structure(
+                left,
+                right,
+                python_size,
+                grid=(10, 10),
+                margin=24,
+                minimum_grid_iou=TERMINAL_CRASH_MIN_FOREGROUND_GRID_IOU,
+                minimum_count_ratio=TERMINAL_CRASH_MIN_FOREGROUND_COUNT_RATIO,
+                label=f"terminal crash frame {index}",
+            )
+        )
+    if not structures:
+        raise AssertionError("terminal crash contains no nonblank foreground frames")
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    minimum_foreground_ratio = min(structure[0] for structure in structures)
+    minimum_foreground_iou = min(structure[1] for structure in structures)
+    print(
+        f"terminal_crash: size={python_size[0]}x{python_size[1]} frames={len(python_frames)} "
+        f"loop={python_loop} durations={python_durations} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} max_frame_MAE={max_mae:.5f} "
+        f"min_foreground_ratio={minimum_foreground_ratio:.3f} "
+        f"min_grid_IoU={minimum_foreground_iou:.3f} "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > TERMINAL_CRASH_MAX_MEAN_FRAME_MAE
+        or mean_rms > TERMINAL_CRASH_MAX_MEAN_FRAME_RMS
+        or max_mae > TERMINAL_CRASH_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            "terminal crash pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {TERMINAL_CRASH_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {TERMINAL_CRASH_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {TERMINAL_CRASH_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
 def check_pinnacle(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust pinnacle phase-3 renderers."""
 
@@ -517,6 +621,10 @@ def main(argv: list[str] | None = None) -> int:
             check_png(output_dir / "python_chart.png", output_dir / "rust_chart.png")
             check_balance(output_dir / "python_balance.png", output_dir / "rust_balance.png")
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
+            check_terminal_crash(
+                output_dir / "python_terminal_crash.gif",
+                output_dir / "rust_terminal_crash.gif",
+            )
             check_pinnacle(
                 output_dir / "python_pinnacle_phase3.gif",
                 output_dir / "rust_pinnacle_phase3.gif",

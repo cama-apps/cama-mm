@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
+use cama_app::neon_degen::GifAsset;
 use cama_app::pet_assets::decode_png_raster;
 use cama_app::post_match_gif_media::render_post_match_gif;
 use gif::{ColorOutput, DecodeOptions};
@@ -18,6 +19,7 @@ const FOREGROUND_THRESHOLD: u8 = 80;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
 }
@@ -43,6 +45,12 @@ struct AnimationFixture {
     name: String,
     value: i64,
     theme: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalCrashFixture {
+    name: String,
+    filing_number: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +142,8 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.animation.name, "Client 47");
     assert_eq!(fixture.animation.value, 1_337);
     assert_eq!(fixture.animation.theme, "odds_anomaly");
+    assert_eq!(fixture.terminal_crash.name, "Client 47");
+    assert_eq!(fixture.terminal_crash.filing_number, 5);
     assert_eq!(
         fixture.pinnacle.source_path,
         "../assets/dig/bosses/lantern_engine_encounter.png"
@@ -143,6 +153,53 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.balance.username, "Visual Balance");
     assert_eq!(fixture.balance.series.len(), 7);
     assert_eq!(fixture.balance.source_totals.len(), 7);
+}
+
+#[test]
+fn native_terminal_crash_fixture_render_has_exact_playback_contract() {
+    let fixture = fixture();
+    let first = GifAsset::terminal_crash(
+        &fixture.terminal_crash.name,
+        fixture.terminal_crash.filing_number,
+    );
+    let second = GifAsset::terminal_crash(
+        &fixture.terminal_crash.name,
+        fixture.terminal_crash.filing_number,
+    );
+    assert_eq!(first.bytes, second.bytes);
+    assert_eq!(first.frame_durations_ms.len(), 58);
+    assert_eq!(first.frame_durations_ms[..10], [120; 10]);
+    assert_eq!(
+        first.frame_durations_ms[10..30],
+        [
+            80, 80, 90, 90, 100, 100, 110, 110, 120, 120, 130, 130, 140, 140, 150, 150, 160, 160,
+            170, 170
+        ]
+    );
+    assert_eq!(first.frame_durations_ms[30..50], [60; 20]);
+    assert_eq!(
+        first.frame_durations_ms[50..],
+        [1_100, 300, 300, 300, 300, 600, 300, 60_000]
+    );
+    assert!(first.shared_palette);
+    assert_eq!(first.kind, "terminal_crash");
+
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(first.bytes))
+        .expect("decode fixture terminal crash GIF");
+    let mut durations = Vec::new();
+    let mut frame_count = 0;
+    while let Some(frame) = decoder
+        .read_next_frame()
+        .expect("read terminal crash frame")
+    {
+        durations.push(u32::from(frame.delay) * 10);
+        frame_count += 1;
+    }
+    assert_eq!(frame_count, 58);
+    assert_eq!(durations, first.frame_durations_ms);
 }
 
 #[test]

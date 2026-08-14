@@ -16,6 +16,10 @@
     "value": 1337,
     "theme": "odds_anomaly"
   },
+  "terminal_crash": {
+    "name": "Client 47",
+    "filing_number": 5
+  },
   "pinnacle": {
     "source_path": "../assets/dig/bosses/lantern_engine_encounter.png",
     "boss_id": "lantern_engine",
