@@ -18,21 +18,21 @@ use cama_runtime::process_lock::ProcessLock;
 use cama_runtime::{
     AdminMatchCorrectionRuntime, AdminRegistrationProvider, AdminRuntimePorts,
     AdvancedStatsRegistrationProvider, ApplicationConfig, AskRegistrationProvider,
-    BlameLukeRegistrationProvider, CompletedDatabaseAdmission, DatabaseAdmission,
-    DotaInfoRegistrationProvider, DraftRegistrationProvider, DuelRegistrationProvider,
-    EnrichmentRegistrationProvider, GatewayEventObservers, GlobalInteractionHooks, HealthReporter,
-    InfoRegistrationProvider, LobbyRegistrationProvider, LobbyRuntimeConfig,
-    MafiaRegistrationProvider, ManaRegistrationProvider, MatchRegistrationProvider,
-    PetRegistrationProvider, PlayerRegistrationProvider, PlayerTriviaRegistrationProvider,
-    PredictionRegistrationProvider, PredictionRuntimePorts, ProfileRegistrationProvider,
-    RatingAnalysisRegistrationProvider, RawReactionObservers, RegistryBuilder,
-    ReminderRegistrationProvider, Runtime, ScoutRegistrationProvider, SerenityDiscordTransport,
-    SerenityGateway, ShopRegistrationProvider, SqliteDatabaseAdmission, SurveyRegistrationProvider,
-    TaxRegistrationProvider, TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
-    WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
+    BlameLukeRegistrationProvider, CompletedDatabaseAdmission, DatabaseAdmission, DigBonusRuntime,
+    DigRegistrationProvider, DotaInfoRegistrationProvider, DraftRegistrationProvider,
+    DuelRegistrationProvider, EnrichmentRegistrationProvider, GatewayEventObservers,
+    GlobalInteractionHooks, HealthReporter, InfoRegistrationProvider, LobbyRegistrationProvider,
+    LobbyRuntimeConfig, MafiaRegistrationProvider, ManaRegistrationProvider,
+    MatchRegistrationProvider, PetRegistrationProvider, PlayerRegistrationProvider,
+    PlayerTriviaRegistrationProvider, PredictionRegistrationProvider, PredictionRuntimePorts,
+    ProfileRegistrationProvider, RatingAnalysisRegistrationProvider, RawReactionObservers,
+    RegistryBuilder, ReminderRegistrationProvider, Runtime, ScoutRegistrationProvider,
+    SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider, SqliteDatabaseAdmission,
+    SurveyRegistrationProvider, TaxRegistrationProvider, TriviaRegistrationProvider, UsageMonitor,
+    VanityTaxGatewayObserver, WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
     duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
     manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec,
-    prediction_refresh_worker_spec,
+    prediction_refresh_worker_spec, validate_production_registry,
 };
 use cama_runtime::{
     BettingRegistrationProvider, BettingRuntimeConfig, match_post_match_debrief_port,
@@ -453,6 +453,28 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let dig_bonus_runtime = DigBonusRuntime::from_application_config(
+        &config.db_path,
+        &application_config,
+        trivia_provider.catalog(),
+        betting_provider.clone(),
+        discord_transport.clone(),
+    );
+    let dig_provider = match DigRegistrationProvider::production(
+        &config.db_path,
+        &application_config,
+        Arc::clone(&vanity_tax_service),
+        discord_transport.clone(),
+        Some(reminder_provider.hooks()),
+        production_ai_service.clone(),
+        Arc::new(dig_bonus_runtime.clone()),
+    ) {
+        Ok(provider) => provider,
+        Err(error) => {
+            error!(%error, "Dig runtime construction refused startup");
+            return ExitCode::from(1);
+        }
+    };
     let mana_provider = ManaRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -534,6 +556,7 @@ async fn run_serve() -> ExitCode {
         mafia_provider.gateway_observer(),
         registration_provider.region_backfill_observer(),
         trivia_provider.gateway_observer(),
+        dig_provider.gateway_observer(),
         survey_provider.gateway_observer(),
     ]);
     let raw_reaction_observers =
@@ -607,6 +630,14 @@ async fn run_serve() -> ExitCode {
         error!(%error, "could not register trivia command provider");
         return ExitCode::from(1);
     }
+    if let Err(error) = registry.add_provider(&dig_bonus_runtime) {
+        error!(%error, "could not register Dig bonus component provider");
+        return ExitCode::from(1);
+    }
+    if let Err(error) = registry.add_provider(&dig_provider) {
+        error!(%error, "could not register Dig command provider");
+        return ExitCode::from(1);
+    }
     if let Err(error) = registry.add_provider(&mana_provider) {
         error!(%error, "could not register mana command provider");
         return ExitCode::from(1);
@@ -677,6 +708,10 @@ async fn run_serve() -> ExitCode {
         registry.enable_global_command_sync();
     }
     let registry = registry.build();
+    if let Err(error) = validate_production_registry(&registry) {
+        error!(%error, "production command-tree contract refused startup");
+        return ExitCode::from(1);
+    }
     let manashop_debt_worker = manashop_debt_worker_spec(&config.db_path);
     let duel_challenges_worker = duel_challenges_worker_spec(
         &config.db_path,

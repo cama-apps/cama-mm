@@ -113,7 +113,10 @@ pub const PYTHON_EXTENSIONS: &[CutoverItem] = &[
         "commands.mana",
         "ManaRegistrationProvider + migrated SQLite assignment/protection + live Serenity member/role paging",
     ),
-    required("commands.dig", "dig command/component provider"),
+    wired(
+        "commands.dig",
+        "DigRegistrationProvider + durable SQLite mechanics/event outboxes + bonus components + READY reconciliation + native media/flavor hooks",
+    ),
     wired(
         "commands.mafia",
         "MafiaRegistrationProvider + durable SQLite phase/setup/settlement recovery + private-thread Discord composition",
@@ -372,6 +375,7 @@ mod tests {
                 "commands.trivia",
                 "commands.player_trivia",
                 "commands.mana",
+                "commands.dig",
                 "commands.mafia",
                 "commands.pet (PET_CHANNEL_ID conditional)",
                 "commands.reminders",
@@ -635,8 +639,6 @@ mod tests {
         );
         assert_eq!(PYTHON_EXTENSIONS[5].python_name, "commands.betting");
         assert_eq!(PYTHON_EXTENSIONS[5].status, CutoverStatus::Wired);
-        assert_eq!(PYTHON_EXTENSIONS[24].python_name, "commands.dig");
-        assert_eq!(PYTHON_EXTENSIONS[24].status, CutoverStatus::Required);
         for seam in [
             "DraftRegistrationProvider::new_with_reminder_scheduler_and_neon(",
             "registration_provider.draft_neon_observer()",
@@ -645,6 +647,31 @@ mod tests {
             assert!(
                 MAIN_SOURCE.contains(seam),
                 "missing Draft production seam {seam}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_dig_provider_bonus_components_and_recovery_are_wired() {
+        assert_eq!(
+            PYTHON_EXTENSIONS[24],
+            wired(
+                "commands.dig",
+                "DigRegistrationProvider + durable SQLite mechanics/event outboxes + bonus components + READY reconciliation + native media/flavor hooks",
+            )
+        );
+        for seam in [
+            "DigBonusRuntime::from_application_config(",
+            "trivia_provider.catalog()",
+            "DigRegistrationProvider::production(",
+            "dig_provider.gateway_observer()",
+            "registry.add_provider(&dig_bonus_runtime)",
+            "registry.add_provider(&dig_provider)",
+            "validate_production_registry(&registry)",
+        ] {
+            assert!(
+                MAIN_SOURCE.contains(seam),
+                "missing Dig production seam {seam}"
             );
         }
     }
@@ -901,7 +928,6 @@ mod tests {
                 "configured AskRegistrationProvider + guild-scoped read-only SQLite/LLM adapter",
             )
         );
-        assert_eq!(PYTHON_EXTENSIONS[24].status, CutoverStatus::Required);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod application_config;
 pub mod ask_provider;
 pub mod betting_provider;
 pub mod blame_luke_provider;
+pub mod command_tree_contract;
 pub mod config;
 pub mod dig_bonus_runtime;
 pub mod dig_provider;
@@ -79,6 +80,9 @@ pub use betting_provider::{
     BettingWagerRefreshReport, match_post_match_debrief_port, match_wager_refresh_port,
 };
 pub use blame_luke_provider::BlameLukeRegistrationProvider;
+pub use command_tree_contract::{
+    CommandTreeContractError, CommandTreeSnapshot, snapshot_registry, validate_production_registry,
+};
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
 pub use dig_bonus_runtime::{
     BettingDigBonusWheelPort, DigBonusDiscordPort, DigBonusRewardSource, DigBonusRuntime,
