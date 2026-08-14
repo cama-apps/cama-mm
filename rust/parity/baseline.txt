@@ -1,3 +1,3 @@
 # Exact pytest collection baseline. xtask fails when node IDs drift.
-collected_cases=6723
-node_id_fnv1a64=fb6d0ab6a27bd88b
+collected_cases=6727
+node_id_fnv1a64=229fdeefd44bf4f3
