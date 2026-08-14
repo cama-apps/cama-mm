@@ -35,6 +35,24 @@ struct CapturingResponder {
     receipt: StdMutex<Option<InteractionMessageReceipt>>,
 }
 
+#[test]
+fn match_view_timeout_edit_is_component_only_and_preserves_body_media() {
+    let response = InteractionResponse::message("match summary")
+        .embed(InteractionEmbed::titled("Match #7"))
+        .attachment(InteractionAttachment::bytes("advantage.png", vec![1, 2, 3]))
+        .action_row(InteractionActionRow::buttons(vec![InteractionButton::new(
+            "enrichment:match:4242:7:999:1",
+            "Next >",
+        )]));
+
+    let timeout = disabled_component_response(&response).expect("view has controls");
+    assert!(timeout.content.is_empty());
+    assert!(timeout.embeds.is_empty());
+    assert!(timeout.attachments.is_empty());
+    assert_eq!(timeout.components.len(), 1);
+    assert!(timeout.components[0].buttons[0].disabled);
+}
+
 #[async_trait]
 impl InteractionResponder for CapturingResponder {
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {

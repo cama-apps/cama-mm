@@ -4732,6 +4732,7 @@ mod tests {
             .clone()
             .expect("captured edit request body");
         let serialized: serde_json::Value = serde_json::from_slice(&body).expect("JSON edit body");
+        assert!(serialized.get("content").is_none());
         assert!(serialized.get("embeds").is_none());
         assert!(serialized.get("attachments").is_none());
         assert_eq!(
