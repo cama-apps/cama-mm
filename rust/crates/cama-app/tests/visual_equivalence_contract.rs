@@ -20,9 +20,13 @@ use cama_app::pet_assets::{
     inspect_png, render_pet_card,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
-use cama_app::rating_analysis_command::RatingAnalysisDrawingPort;
+use cama_app::rating_analysis_command::{
+    CalibrationCurveData, CalibrationPoint, RatingAnalysisDrawingPort,
+};
 use cama_app::rating_analysis_media::NativeRatingAnalysisDrawing;
-use cama_app::rating_comparison_service::{RatingComparisonResult, RatingSystemStats};
+use cama_app::rating_comparison_service::{
+    RatingComparisonMatchData, RatingComparisonResult, RatingSystemStats,
+};
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
@@ -72,6 +76,26 @@ struct RatingHistoryEntryFixture {
 #[derive(Debug, Deserialize)]
 struct RatingAnalysisFixture {
     comparison: RatingComparisonFixture,
+    calibration: CalibrationFixture,
+    trend: TrendFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct CalibrationFixture {
+    glicko: Vec<[f64; 3]>,
+    openskill: Vec<[f64; 3]>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrendFixture {
+    window: usize,
+    match_data: Vec<TrendMatchFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrendMatchFixture {
+    glicko_correct: bool,
+    openskill_correct: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +334,10 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.rating_analysis.comparison.matches_analyzed, 25);
     assert_eq!(fixture.rating_analysis.comparison.glicko.brier_score, 0.21);
     assert_eq!(fixture.rating_analysis.comparison.openskill.accuracy, 0.72);
+    assert_eq!(fixture.rating_analysis.calibration.glicko.len(), 5);
+    assert_eq!(fixture.rating_analysis.calibration.openskill.len(), 5);
+    assert_eq!(fixture.rating_analysis.trend.window, 20);
+    assert_eq!(fixture.rating_analysis.trend.match_data.len(), 28);
     assert_eq!(fixture.advantage.match_id, 4_242);
     assert_eq!(fixture.advantage.radiant_gold_adv.len(), 7);
     assert_eq!(fixture.advantage.radiant_xp_adv.len(), 7);
@@ -647,6 +675,114 @@ fn native_rating_analysis_comparison_fixture_matches_live_attachment_contract() 
                 .count()
                 > 50,
             "rating-analysis comparison should preserve semantic chart color"
+        );
+    }
+}
+
+#[test]
+fn native_rating_analysis_calibration_fixture_matches_live_attachment_contract() {
+    let fixture = fixture();
+    let curves = CalibrationCurveData {
+        glicko: fixture
+            .rating_analysis
+            .calibration
+            .glicko
+            .iter()
+            .map(|point| CalibrationPoint {
+                predicted: point[0],
+                actual_rate: point[1],
+                count: point[2] as usize,
+            })
+            .collect(),
+        openskill: fixture
+            .rating_analysis
+            .calibration
+            .openskill
+            .iter()
+            .map(|point| CalibrationPoint {
+                predicted: point[0],
+                actual_rate: point[1],
+                count: point[2] as usize,
+            })
+            .collect(),
+        perfect_line: vec![(0.0, 0.0), (1.0, 1.0)],
+    };
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let first = drawing
+        .calibration_curve_chart(&curves)
+        .expect("render rating-analysis calibration fixture");
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let second = drawing
+        .calibration_curve_chart(&curves)
+        .expect("render rating-analysis calibration fixture again");
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode rating-analysis calibration PNG");
+    assert_eq!((raster.width, raster.height), (640, 490));
+    for expected_color in [[88, 101, 242, 255], [87, 242, 135, 255]] {
+        assert!(
+            raster
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == expected_color)
+                .count()
+                > 50,
+            "rating-analysis calibration should preserve semantic curve color"
+        );
+    }
+}
+
+#[test]
+fn native_rating_analysis_trend_fixture_matches_live_attachment_contract() {
+    let fixture = fixture();
+    let trend = &fixture.rating_analysis.trend;
+    let result = RatingComparisonResult {
+        glicko: rating_stats(
+            "Glicko-2",
+            trend.match_data.len(),
+            &fixture.rating_analysis.comparison.glicko,
+        ),
+        openskill: rating_stats(
+            "OpenSkill",
+            trend.match_data.len(),
+            &fixture.rating_analysis.comparison.openskill,
+        ),
+        matches_analyzed: trend.match_data.len(),
+        match_data: trend
+            .match_data
+            .iter()
+            .enumerate()
+            .map(|(index, row)| RatingComparisonMatchData {
+                match_id: index as i64 + 1,
+                match_date: index as i64,
+                radiant_won: row.glicko_correct,
+                glicko_radiant_prob: if row.glicko_correct { 0.75 } else { 0.25 },
+                openskill_radiant_prob: if row.openskill_correct { 0.75 } else { 0.25 },
+                raw_openskill_radiant_prob: if row.openskill_correct { 0.75 } else { 0.25 },
+                glicko_correct: row.glicko_correct,
+                openskill_correct: row.openskill_correct,
+            })
+            .collect(),
+    };
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let first = drawing
+        .prediction_over_time_chart(&result, trend.window)
+        .expect("render rating-analysis trend fixture");
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let second = drawing
+        .prediction_over_time_chart(&result, trend.window)
+        .expect("render rating-analysis trend fixture again");
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode rating-analysis trend PNG");
+    assert_eq!((raster.width, raster.height), (789, 390));
+    for expected_color in [[88, 101, 242, 255], [87, 242, 135, 255]] {
+        assert!(
+            raster
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == expected_color)
+                .count()
+                > 50,
+            "rating-analysis trend should preserve semantic series color"
         );
     }
 }

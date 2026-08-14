@@ -7,7 +7,7 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
-rating-analysis comparison,
+rating-analysis comparison, calibration, trend,
 OpenDota advantage, betting wheel/explosion, Blame Luke, scout report,
 Hero Grid, post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
 the shared JSON fixture, then decodes both
@@ -74,6 +74,14 @@ RATING_ANALYSIS_MAX_MAE = 0.180
 RATING_ANALYSIS_MAX_RMS = 0.340
 RATING_ANALYSIS_MIN_FOREGROUND_GRID_IOU = 0.70
 RATING_ANALYSIS_MIN_FOREGROUND_COUNT_RATIO = 0.35
+RATING_ANALYSIS_CALIBRATION_MAX_MAE = 0.180
+RATING_ANALYSIS_CALIBRATION_MAX_RMS = 0.340
+RATING_ANALYSIS_CALIBRATION_MIN_SERIES_GRID_IOU = 0.55
+RATING_ANALYSIS_CALIBRATION_MIN_SERIES_COUNT_RATIO = 0.30
+RATING_ANALYSIS_TREND_MAX_MAE = 0.180
+RATING_ANALYSIS_TREND_MAX_RMS = 0.340
+RATING_ANALYSIS_TREND_MIN_SERIES_GRID_IOU = 0.70
+RATING_ANALYSIS_TREND_MIN_SERIES_COUNT_RATIO = 0.30
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
 PINNACLE_MIN_FOREGROUND_GRID_IOU = 0.85
 PINNACLE_MIN_FOREGROUND_COUNT_RATIO = 0.80
@@ -194,7 +202,9 @@ def render_python(
     from utils.drawing import (
         draw_advantage_graph,
         draw_balance_chart,
+        draw_calibration_curve,
         draw_hero_grid,
+        draw_prediction_over_time,
         draw_rating_comparison_chart,
         draw_rating_history_chart,
     )
@@ -245,6 +255,22 @@ def render_python(
     (output_dir / "python_rating_analysis_comparison.png").write_bytes(
         rating_analysis_bytes
     )
+
+    calibration = rating_analysis["calibration"]
+    calibration_bytes = draw_calibration_curve(
+        [tuple(point) for point in calibration["glicko"]],
+        [tuple(point) for point in calibration["openskill"]],
+    ).getvalue()
+    (output_dir / "python_rating_analysis_calibration.png").write_bytes(
+        calibration_bytes
+    )
+
+    trend = rating_analysis["trend"]
+    trend_bytes = draw_prediction_over_time(
+        [dict(match) for match in trend["match_data"]],
+        window=int(trend["window"]),
+    ).getvalue()
+    (output_dir / "python_rating_analysis_trend.png").write_bytes(trend_bytes)
 
     advantage = fixture["advantage"]
     advantage_bytes = draw_advantage_graph(
@@ -561,6 +587,72 @@ def compare_foreground_structure(
     return candidate_count / reference_count, grid_iou
 
 
+def semantic_series_structure(
+    rgba: bytes,
+    size: tuple[int, int],
+    grid: tuple[int, int],
+    distance: int = 120,
+) -> tuple[int, set[tuple[int, int]]]:
+    """Return coarse placement of the accent/green chart series.
+
+    The Python Matplotlib charts alpha-blend and antialias their lines and
+    markers; the native renderer uses opaque palette pixels.  A bounded
+    distance from either series color captures both implementations while
+    ignoring shared dark backgrounds, axes, and labels.
+    """
+
+    width, height = size
+    columns, rows = grid
+    colors = ((88, 101, 242), (87, 242, 135))
+    interior_count = 0
+    occupied: set[tuple[int, int]] = set()
+    for pixel_index in range(width * height):
+        offset = pixel_index * 4
+        pixel = rgba[offset : offset + 3]
+        if min(
+            sum(abs(channel - expected) for channel, expected in zip(pixel, color))
+            for color in colors
+        ) > distance:
+            continue
+        x = pixel_index % width
+        y = pixel_index // width
+        occupied.add((x * columns // width, y * rows // height))
+        interior_count += 1
+    return interior_count, occupied
+
+
+def compare_semantic_series_structure(
+    reference: bytes,
+    candidate: bytes,
+    size: tuple[int, int],
+    *,
+    grid: tuple[int, int],
+    minimum_grid_iou: float,
+    minimum_count_ratio: float,
+    label: str,
+) -> tuple[float, float]:
+    """Reject a chart whose colored series are missing or misplaced."""
+
+    reference_count, reference_cells = semantic_series_structure(reference, size, grid)
+    candidate_count, candidate_cells = semantic_series_structure(candidate, size, grid)
+    if reference_count == 0 or not reference_cells:
+        raise AssertionError(f"{label} reference contains no semantic series")
+    minimum_count = max(50, reference_count * minimum_count_ratio)
+    if candidate_count < minimum_count:
+        raise AssertionError(
+            f"{label} semantic series is missing: {candidate_count} pixels, "
+            f"expected at least {minimum_count:.0f}"
+        )
+    union = reference_cells | candidate_cells
+    grid_iou = len(reference_cells & candidate_cells) / len(union) if union else 1.0
+    if grid_iou < minimum_grid_iou:
+        raise AssertionError(
+            f"{label} semantic series layout drifted: grid IoU {grid_iou:.3f} "
+            f"< {minimum_grid_iou:.3f}"
+        )
+    return candidate_count / reference_count, grid_iou
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
@@ -660,6 +752,107 @@ def check_rating_analysis_comparison(
             f"RMS {rms:.5f} <= {RATING_ANALYSIS_MAX_RMS:.5f}"
         )
     return []
+
+
+def _check_rating_analysis_plot(
+    python_path: Path,
+    rust_path: Path,
+    *,
+    label: str,
+    expected_size: tuple[int, int],
+    minimum_series_grid_iou: float,
+    minimum_series_count_ratio: float,
+    max_mae: float,
+    max_rms: float,
+) -> list[str]:
+    """Check one live calibration/trend attachment at its PNG boundary."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            f"{label} dimensions differ or are invalid: Python {python_size}, "
+            f"Rust {rust_size}; expected {expected_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    series_ratio, series_iou = compare_semantic_series_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(16, 12) if label.endswith("calibration") else (16, 8),
+        minimum_grid_iou=minimum_series_grid_iou,
+        minimum_count_ratio=minimum_series_count_ratio,
+        label=label,
+    )
+
+    def color_count(pixels: bytes, color: tuple[int, int, int, int]) -> int:
+        # Matplotlib alpha-blends and antialiases the same semantic series,
+        # while the native renderer emits opaque palette pixels.  Use a
+        # bounded RGB distance so this remains a palette gate on both sides.
+        return sum(
+            sum(
+                abs(channel - expected)
+                for channel, expected in zip(
+                    pixels[offset : offset + 3], color[:3]
+                )
+            )
+            <= 120
+            for offset in range(0, len(pixels), 4)
+        )
+
+    semantic_counts = {
+        "accent": color_count(rust_pixels, (88, 101, 242, 255)),
+        "green": color_count(rust_pixels, (87, 242, 135, 255)),
+    }
+    if min(semantic_counts.values()) == 0:
+        raise AssertionError(f"{label} lost a semantic series color: {semantic_counts}")
+    print(
+        f"{label}: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"series_ratio={series_ratio:.3f} series_grid_IoU={series_iou:.3f} "
+        f"semantic_colors={semantic_counts} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > max_mae or rms > max_rms:
+        raise AssertionError(
+            f"{label} pixel drift exceeds threshold: MAE {mae:.5f} <= {max_mae:.5f}, "
+            f"RMS {rms:.5f} <= {max_rms:.5f}"
+        )
+    return []
+
+
+def check_rating_analysis_calibration(
+    python_path: Path, rust_path: Path
+) -> list[str]:
+    """Compare the live `/ratinganalysis calibration` curve attachment."""
+
+    return _check_rating_analysis_plot(
+        python_path,
+        rust_path,
+        label="rating-analysis calibration",
+        expected_size=(640, 490),
+        minimum_series_grid_iou=RATING_ANALYSIS_CALIBRATION_MIN_SERIES_GRID_IOU,
+        minimum_series_count_ratio=RATING_ANALYSIS_CALIBRATION_MIN_SERIES_COUNT_RATIO,
+        max_mae=RATING_ANALYSIS_CALIBRATION_MAX_MAE,
+        max_rms=RATING_ANALYSIS_CALIBRATION_MAX_RMS,
+    )
+
+
+def check_rating_analysis_trend(
+    python_path: Path, rust_path: Path
+) -> list[str]:
+    """Compare the live `/ratinganalysis trend` rolling-accuracy attachment."""
+
+    return _check_rating_analysis_plot(
+        python_path,
+        rust_path,
+        label="rating-analysis trend",
+        expected_size=(789, 390),
+        minimum_series_grid_iou=RATING_ANALYSIS_TREND_MIN_SERIES_GRID_IOU,
+        minimum_series_count_ratio=RATING_ANALYSIS_TREND_MIN_SERIES_COUNT_RATIO,
+        max_mae=RATING_ANALYSIS_TREND_MAX_MAE,
+        max_rms=RATING_ANALYSIS_TREND_MAX_RMS,
+    )
 
 
 def check_gif(python_path: Path, rust_path: Path) -> list[str]:
@@ -1453,6 +1646,14 @@ def main(argv: list[str] | None = None) -> int:
             check_rating_analysis_comparison(
                 output_dir / "python_rating_analysis_comparison.png",
                 output_dir / "rust_rating_analysis_comparison.png",
+            )
+            check_rating_analysis_calibration(
+                output_dir / "python_rating_analysis_calibration.png",
+                output_dir / "rust_rating_analysis_calibration.png",
+            )
+            check_rating_analysis_trend(
+                output_dir / "python_rating_analysis_trend.png",
+                output_dir / "rust_rating_analysis_trend.png",
             )
             check_advantage(
                 output_dir / "python_advantage.png",

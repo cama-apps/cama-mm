@@ -13,10 +13,12 @@ use crate::rating_comparison_service::RatingComparisonResult;
 // that same Discord attachment contract.
 pub const COMPARISON_WIDTH: usize = 989;
 pub const COMPARISON_HEIGHT: usize = 413;
-pub const CALIBRATION_WIDTH: usize = 650;
-pub const CALIBRATION_HEIGHT: usize = 500;
-pub const TREND_WIDTH: usize = 800;
-pub const TREND_HEIGHT: usize = 400;
+// Matplotlib's tight bounding box trims the live attachments to these
+// dimensions for the fixed visual-equivalence inputs.
+pub const CALIBRATION_WIDTH: usize = 640;
+pub const CALIBRATION_HEIGHT: usize = 490;
+pub const TREND_WIDTH: usize = 789;
+pub const TREND_HEIGHT: usize = 390;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeRatingAnalysisDrawing;

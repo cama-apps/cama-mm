@@ -21,7 +21,9 @@ from scripts.visual_equivalence import (
     check_explosion,
     check_hero_grid,
     check_pet,
+    check_rating_analysis_calibration,
     check_rating_analysis_comparison,
+    check_rating_analysis_trend,
     check_scout,
     check_wheel,
     compare_foreground_structure,
@@ -74,6 +76,16 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
         "accuracy": 0.72,
         "log_loss": 0.56,
     }
+    assert rating_analysis["calibration"]["glicko"] == [
+        [0.12, 0.18, 8],
+        [0.27, 0.31, 12],
+        [0.46, 0.42, 15],
+        [0.64, 0.71, 11],
+        [0.83, 0.78, 9],
+    ]
+    assert rating_analysis["calibration"]["openskill"][-1] == [0.86, 0.88, 8]
+    assert rating_analysis["trend"]["window"] == 20
+    assert len(rating_analysis["trend"]["match_data"]) == 28
     assert advantage["match_id"] == 4242
     assert len(advantage["radiant_gold_adv"]) == len(advantage["radiant_xp_adv"]) == 7
     assert pet == {
@@ -126,6 +138,12 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     ).read_bytes()
     assert (first / "python_rating_analysis_comparison.png").read_bytes() == (
         second / "python_rating_analysis_comparison.png"
+    ).read_bytes()
+    assert (first / "python_rating_analysis_calibration.png").read_bytes() == (
+        second / "python_rating_analysis_calibration.png"
+    ).read_bytes()
+    assert (first / "python_rating_analysis_trend.png").read_bytes() == (
+        second / "python_rating_analysis_trend.png"
     ).read_bytes()
     assert (first / "python_advantage.png").read_bytes() == (
         second / "python_advantage.png"
@@ -182,6 +200,24 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     check_rating_analysis_comparison(
         first / "python_rating_analysis_comparison.png", rust_rating_analysis
     )
+    calibration_size, calibration_pixels = rgba_pixels(
+        first / "python_rating_analysis_calibration.png"
+    )
+    assert calibration_size == (640, 490)
+    assert max(calibration_pixels) == 255
+    rust_calibration = first / "rust_rating_analysis_calibration.png"
+    rust_calibration.write_bytes(
+        (first / "python_rating_analysis_calibration.png").read_bytes()
+    )
+    check_rating_analysis_calibration(
+        first / "python_rating_analysis_calibration.png", rust_calibration
+    )
+    trend_size, trend_pixels = rgba_pixels(first / "python_rating_analysis_trend.png")
+    assert trend_size == (789, 390)
+    assert max(trend_pixels) == 255
+    rust_trend = first / "rust_rating_analysis_trend.png"
+    rust_trend.write_bytes((first / "python_rating_analysis_trend.png").read_bytes())
+    check_rating_analysis_trend(first / "python_rating_analysis_trend.png", rust_trend)
     advantage_size, advantage_pixels = rgba_pixels(first / "python_advantage.png")
     assert advantage_size == (790, 340)
     assert max(advantage_pixels) == 255

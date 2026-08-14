@@ -22,9 +22,13 @@ use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
-use cama_app::rating_analysis_command::RatingAnalysisDrawingPort;
+use cama_app::rating_analysis_command::{
+    CalibrationCurveData, CalibrationPoint, RatingAnalysisDrawingPort,
+};
 use cama_app::rating_analysis_media::NativeRatingAnalysisDrawing;
-use cama_app::rating_comparison_service::{RatingComparisonResult, RatingSystemStats};
+use cama_app::rating_comparison_service::{
+    RatingComparisonMatchData, RatingComparisonResult, RatingSystemStats,
+};
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
@@ -70,6 +74,26 @@ struct RatingHistoryEntryFixture {
 #[derive(Debug, Deserialize)]
 struct RatingAnalysisFixture {
     comparison: RatingComparisonFixture,
+    calibration: CalibrationFixture,
+    trend: TrendFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct CalibrationFixture {
+    glicko: Vec<[f64; 3]>,
+    openskill: Vec<[f64; 3]>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrendFixture {
+    window: usize,
+    match_data: Vec<TrendMatchFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrendMatchFixture {
+    glicko_correct: bool,
+    openskill_correct: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,6 +315,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_rating_analysis_comparison.png"),
         rating_analysis_chart,
+    )?;
+
+    let calibration = &fixture.rating_analysis.calibration;
+    let calibration_data = CalibrationCurveData {
+        glicko: calibration
+            .glicko
+            .iter()
+            .map(|point| CalibrationPoint {
+                predicted: point[0],
+                actual_rate: point[1],
+                count: point[2] as usize,
+            })
+            .collect(),
+        openskill: calibration
+            .openskill
+            .iter()
+            .map(|point| CalibrationPoint {
+                predicted: point[0],
+                actual_rate: point[1],
+                count: point[2] as usize,
+            })
+            .collect(),
+        perfect_line: vec![(0.0, 0.0), (1.0, 1.0)],
+    };
+    let calibration_chart = drawing.calibration_curve_chart(&calibration_data)?;
+    fs::write(
+        Path::new(&output_dir).join("rust_rating_analysis_calibration.png"),
+        calibration_chart,
+    )?;
+
+    let trend = &fixture.rating_analysis.trend;
+    let trend_result = RatingComparisonResult {
+        glicko: rating_stats("Glicko-2", trend.match_data.len(), &comparison.glicko),
+        openskill: rating_stats("OpenSkill", trend.match_data.len(), &comparison.openskill),
+        matches_analyzed: trend.match_data.len(),
+        match_data: trend
+            .match_data
+            .iter()
+            .enumerate()
+            .map(|(index, row)| RatingComparisonMatchData {
+                match_id: index as i64 + 1,
+                match_date: index as i64,
+                radiant_won: row.glicko_correct,
+                glicko_radiant_prob: if row.glicko_correct { 0.75 } else { 0.25 },
+                openskill_radiant_prob: if row.openskill_correct { 0.75 } else { 0.25 },
+                raw_openskill_radiant_prob: if row.openskill_correct { 0.75 } else { 0.25 },
+                glicko_correct: row.glicko_correct,
+                openskill_correct: row.openskill_correct,
+            })
+            .collect(),
+    };
+    let trend_chart = drawing.prediction_over_time_chart(&trend_result, trend.window)?;
+    fs::write(
+        Path::new(&output_dir).join("rust_rating_analysis_trend.png"),
+        trend_chart,
     )?;
 
     let advantage = AdvantageData {
