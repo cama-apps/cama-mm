@@ -852,6 +852,206 @@ async fn fixed_button_and_encoded_modal_survive_a_provider_restart() {
 }
 
 #[tokio::test]
+async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate_side_effects() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let prediction_id = fixture.market("Will a stale callback stay harmless?");
+
+    // The first provider instance owns the interaction that was rendered
+    // before the process boundary.  The modal ID is the durable market key,
+    // not an in-memory view handle.
+    let first_registry = fixture.registry();
+    let first_responder = Arc::new(CapturingResponder::default());
+    first_registry
+        .component_handler(BUY_YES_ID)
+        .expect("persistent buy component")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 10,
+                custom_id: BUY_YES_ID.to_owned(),
+                user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Prediction Trader".to_owned(),
+                guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
+                channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
+                member_permissions: None,
+                values: vec![],
+            },
+            first_responder.clone(),
+        )
+        .await
+        .expect("open first-process buy modal");
+    let stale_modal = first_responder
+        .snapshot()
+        .modals
+        .into_iter()
+        .next()
+        .expect("first-process buy modal");
+    assert_eq!(
+        stale_modal.custom_id,
+        format!("{BUY_MODAL_PREFIX}{prediction_id}:yes")
+    );
+    drop(first_registry);
+
+    // A reconstructed provider can still resolve the fixed button through
+    // the current SQLite row, proving restart-safe resumption before the
+    // market is closed.
+    let restarted_registry = fixture.registry();
+    let resumed_responder = Arc::new(CapturingResponder::default());
+    restarted_registry
+        .component_handler(BUY_YES_ID)
+        .expect("restarted persistent buy component")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 11,
+                custom_id: BUY_YES_ID.to_owned(),
+                user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Prediction Trader".to_owned(),
+                guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
+                channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
+                member_permissions: None,
+                values: vec![],
+            },
+            resumed_responder.clone(),
+        )
+        .await
+        .expect("resume persistent buy component");
+    let resumed_modal = resumed_responder
+        .snapshot()
+        .modals
+        .into_iter()
+        .next()
+        .expect("restarted buy modal");
+    assert_eq!(resumed_modal.custom_id, stale_modal.custom_id);
+
+    // Close the market through the same composed provider.  This is the
+    // production state transition that makes both the rendered button and
+    // previously-issued modal stale.
+    restarted_registry
+        .command_handler("predict")
+        .expect("predict command handler")
+        .handle(
+            command_request(
+                "resolve",
+                vec![
+                    integer("prediction_id", prediction_id),
+                    string("outcome", "yes"),
+                ],
+                ADMIN,
+                None,
+            ),
+            Arc::new(CapturingResponder::default()),
+        )
+        .await
+        .expect("resolve market before stale callback");
+    assert_eq!(
+        PredictionRepository::new(&fixture.path)
+            .get_prediction(prediction_id)
+            .expect("read resolved market")
+            .expect("resolved market")
+            .status,
+        "resolved"
+    );
+    assert_eq!(
+        fixture.command.edits.lock().expect("terminal edits").len(),
+        1,
+        "settlement performs one terminal market edit"
+    );
+
+    // Recreate the provider once more and deliver the old modal callback.
+    // The repository's atomic open-market guard must reject it before any
+    // wallet/position mutation or market refresh.
+    let stale_registry = fixture.registry();
+    let stale_modal_responder = Arc::new(CapturingResponder::default());
+    stale_registry
+        .component_handler(&stale_modal.custom_id)
+        .expect("encoded stale modal route")
+        .handle(
+            InteractionRequest::Modal {
+                interaction_id: 12,
+                custom_id: stale_modal.custom_id.clone(),
+                user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
+                channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
+                member_permissions: None,
+                fields: BTreeMap::from([("contracts".to_owned(), "3".to_owned())]),
+            },
+            stale_modal_responder.clone(),
+        )
+        .await
+        .expect("stale modal is handled safely");
+    let stale_modal_responses = stale_modal_responder.snapshot();
+    assert_eq!(stale_modal_responses.deferred, [true]);
+    assert_eq!(stale_modal_responses.followups.len(), 1);
+    assert!(
+        stale_modal_responses.followups[0]
+            .content
+            .contains("Market is not open for trading.")
+    );
+    assert!(
+        PredictionRepository::new(&fixture.path)
+            .get_position(prediction_id, TRADER)
+            .expect("read stale position")
+            .is_none()
+    );
+    let balance: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![TRADER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read stale wallet");
+    assert_eq!(balance, 1_000);
+    assert_eq!(
+        fixture.command.edits.lock().expect("terminal edits").len(),
+        1,
+        "stale modal does not duplicate the terminal Discord edit"
+    );
+    assert!(
+        fixture
+            .market
+            .edits
+            .lock()
+            .expect("market edits")
+            .is_empty()
+    );
+
+    // The fixed button itself is stale too: it must produce one private
+    // denial and never open a second modal or trigger a Discord edit.
+    let stale_button_responder = Arc::new(CapturingResponder::default());
+    stale_registry
+        .component_handler(BUY_YES_ID)
+        .expect("stale persistent buy component")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 13,
+                custom_id: BUY_YES_ID.to_owned(),
+                user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Prediction Trader".to_owned(),
+                guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
+                channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
+                member_permissions: None,
+                values: vec![],
+            },
+            stale_button_responder.clone(),
+        )
+        .await
+        .expect("stale fixed button is handled safely");
+    let stale_button_responses = stale_button_responder.snapshot();
+    assert_eq!(stale_button_responses.immediate.len(), 1);
+    assert_eq!(
+        stale_button_responses.immediate[0].content,
+        "Market is not open for trading."
+    );
+    assert!(stale_button_responses.modals.is_empty());
+    assert_eq!(
+        fixture.command.edits.lock().expect("terminal edits").len(),
+        1,
+        "stale fixed button does not duplicate the terminal Discord edit"
+    );
+}
+
+#[tokio::test]
 async fn resolve_rollback_cancel_drive_durable_state_and_terminal_or_restored_components() {
     let fixture = Fixture::migrated();
     fixture.player(TRADER, 1_000);
