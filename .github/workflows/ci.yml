@@ -191,12 +191,13 @@ jobs:
           uv run --locked python -c 'import sys; from database import Database; database = Database(sys.argv[1]); database.close()' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
           cargo run --locked --manifest-path rust/Cargo.toml -p cama-db --example guild_config_snapshot_smoke -- "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db" --disposable-copy
           # SQLite needs a writable directory for WAL lock sidecars even though
-          # cama-rust opens the main database with SQLITE_OPEN_READ_ONLY.
+          # cama-rust's ordinary db-check opens the main database read-only;
+          # health-smoke intentionally exercises one current-schema write.
           chmod a+rwx "$RUNNER_TEMP/cama-rust-smoke"
           chmod a+rw "$RUNNER_TEMP/cama-rust-smoke"/*
           chmod a-w "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
 
-      - name: Smoke Rust runtime image and fail-closed health probe
+      - name: Smoke Rust runtime image with loopback gateway and fail-closed health probe
         run: |
           docker run --rm \
             --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
@@ -206,13 +207,14 @@ jobs:
           docker inspect --format '{{json .Config.Healthcheck.Test}}' cama-rust:ci \
             | grep -F '"health-check"'
 
-          uv run --locked python -c 'import json,sqlite3,sys,time; db=sys.argv[1]; count=sqlite3.connect(db).execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]; now=int(time.time()*1000); json.dump({"format_version":4,"pid":1,"database_path":"/app/data/cama_shuffle.db","status":"ready","database_ready":True,"gateway_ready":True,"commands_registered":True,"command_tree_synchronized":True,"connected_shards":[],"applied_migrations":count,"required_migrations":count,"recovery_failure_count":0,"worker_registration_complete":True,"expected_workers":[],"started_workers":[],"failed_workers":[],"lifecycle_gap_detected":False,"ready_at_unix_ms":now,"updated_at_unix_ms":now,"last_error":None},open(db+".rust-health.json","w"))' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
+          chmod a+rw "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
           docker run --rm \
+            --network none \
             --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
             cama-rust:ci \
-            health-check --db-path /app/data/cama_shuffle.db --max-age-seconds 90
+            health-smoke --db-path /app/data/cama_shuffle.db
 
-          uv run --locked python -c 'import json,sys; path=sys.argv[1]; value=json.load(open(path)); value["status"]="stopped"; json.dump(value,open(path,"w"))' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db.rust-health.json"
+          uv run --locked python -c "import sqlite3,sys; db=sys.argv[1]; value=sqlite3.connect(db).execute(\"SELECT value FROM app_kv WHERE guild_id=0 AND key='__rust_health_smoke__'\").fetchone(); assert value == ('loopback-discord-write',), value" "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
           set +e
           docker run --rm \
             --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \

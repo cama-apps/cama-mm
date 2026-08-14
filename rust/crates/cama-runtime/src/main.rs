@@ -8,10 +8,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use cama_app::ai_http::production_ai_service_from_settings;
 use cama_app::draft::DraftStateManager;
 use cama_app::service_container::ServiceContainer;
 use cama_db::audit_database;
+use cama_runtime::gateway::{GatewayError, GatewaySession};
 use cama_runtime::inventory;
 use cama_runtime::match_provider::production_betting_flavor;
 use cama_runtime::process_lock::ProcessLock;
@@ -19,14 +21,15 @@ use cama_runtime::{
     AdminMatchCorrectionRuntime, AdminRegistrationProvider, AdminRuntimePorts,
     AdvancedStatsRegistrationProvider, ApplicationConfig, AskRegistrationProvider,
     BlameLukeRegistrationProvider, CompletedDatabaseAdmission, DatabaseAdmission, DigBonusRuntime,
-    DigRegistrationProvider, DotaInfoRegistrationProvider, DraftRegistrationProvider,
+    DigRegistrationProvider, DiscordToken, DotaInfoRegistrationProvider, DraftRegistrationProvider,
     DuelRegistrationProvider, EnrichmentRegistrationProvider, GatewayEventObservers,
-    GlobalInteractionHooks, HealthReporter, InfoRegistrationProvider, LobbyRegistrationProvider,
-    LobbyRuntimeConfig, MafiaRegistrationProvider, ManaRegistrationProvider,
-    MatchRegistrationProvider, PetRegistrationProvider, PlayerRegistrationProvider,
-    PlayerTriviaRegistrationProvider, PredictionRegistrationProvider, PredictionRuntimePorts,
-    ProfileRegistrationProvider, RatingAnalysisRegistrationProvider, RawReactionObservers,
-    RegistryBuilder, ReminderRegistrationProvider, Runtime, ScoutRegistrationProvider,
+    GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks, HealthReporter,
+    InfoRegistrationProvider, LifecycleEvent, LobbyRegistrationProvider, LobbyRuntimeConfig,
+    MafiaRegistrationProvider, ManaRegistrationProvider, MatchRegistrationProvider,
+    PetRegistrationProvider, PlayerRegistrationProvider, PlayerTriviaRegistrationProvider,
+    PredictionRegistrationProvider, PredictionRuntimePorts, ProfileRegistrationProvider,
+    RatingAnalysisRegistrationProvider, RawReactionObservers, RegistryBuilder,
+    ReminderRegistrationProvider, Runtime, RuntimeConfig, ScoutRegistrationProvider,
     SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider, SqliteDatabaseAdmission,
     SurveyRegistrationProvider, TaxRegistrationProvider, TriviaRegistrationProvider, UsageMonitor,
     VanityTaxGatewayObserver, WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
@@ -38,6 +41,8 @@ use cama_runtime::{
     BettingRegistrationProvider, BettingRuntimeConfig, match_post_match_debrief_port,
     match_wager_refresh_port,
 };
+use rusqlite::Connection;
+use tokio::sync::oneshot;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -53,6 +58,9 @@ enum Command {
         path: PathBuf,
         maximum_age: Duration,
     },
+    HealthSmoke {
+        path: PathBuf,
+    },
     Inventory,
     CatalogCheck {
         path: PathBuf,
@@ -66,6 +74,7 @@ async fn main() -> ExitCode {
         Ok(Command::Serve) => run_serve().await,
         Ok(Command::DatabaseCheck { path }) => run_db_check(path),
         Ok(Command::HealthCheck { path, maximum_age }) => run_health_check(path, maximum_age),
+        Ok(Command::HealthSmoke { path }) => run_health_smoke(path).await,
         Ok(Command::Inventory) => {
             print_inventory();
             ExitCode::SUCCESS
@@ -99,8 +108,9 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("catalog-check") => parse_catalog_check(args),
         Some("db-check") => parse_db_check(args),
         Some("health-check") => parse_health_check(args),
+        Some("health-smoke") => parse_health_smoke(args),
         Some(command) => Err(format!(
-            "unknown command {command:?}; expected `serve`, `db-check`, `health-check`, `catalog-check`, or `inventory`"
+            "unknown command {command:?}; expected `serve`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
         )),
     }
 }
@@ -181,6 +191,198 @@ fn parse_health_check(mut args: impl Iterator<Item = String>) -> Result<Command,
         .or_else(|| env::var_os("DB_PATH").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("cama_shuffle.db"));
     Ok(Command::HealthCheck { path, maximum_age })
+}
+
+fn parse_health_smoke(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut explicit_path = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--db-path" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--db-path requires a path".to_owned())?;
+                explicit_path = Some(PathBuf::from(value));
+            }
+            _ => return Err(format!("unexpected health-smoke argument {argument:?}")),
+        }
+    }
+
+    Ok(Command::HealthSmoke {
+        path: explicit_path
+            .or_else(|| env::var_os("DB_PATH").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("cama_shuffle.db")),
+    })
+}
+
+/// A network-free gateway used only by the image-level health smoke.
+///
+/// This drives the same lifecycle and health reporter as `serve`, but never
+/// constructs a Serenity client or opens a Discord socket. The command-tree
+/// registration event is the loopback Discord seam; the accompanying `app_kv`
+/// transaction proves that a current-schema runtime write is possible while
+/// the process is healthy.
+#[derive(Debug)]
+struct HealthSmokeGateway {
+    database_path: PathBuf,
+}
+
+#[async_trait]
+impl GatewayTransport for HealthSmokeGateway {
+    async fn run_session(
+        &mut self,
+        session: GatewaySession,
+    ) -> Result<GatewaySessionEnd, GatewayError> {
+        let command_count = session.registry.commands().len();
+        let _ = session.events.send(LifecycleEvent::Ready {
+            bot_user_id: 0,
+            guild_count: 0,
+        });
+        let _ = session.events.send(LifecycleEvent::CommandsRegistered {
+            command_count,
+            component_route_count: session.registry.component_routes().len(),
+            synchronized: true,
+        });
+        let _ = session
+            .events
+            .send(LifecycleEvent::GatewayShardStageChanged {
+                shard_id: 0,
+                connected: true,
+                stage: "loopback".to_owned(),
+            });
+
+        let path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = Connection::open(&path).map_err(|error| {
+                GatewayError::Fatal(format!("health-smoke database write open failed: {error}"))
+            })?;
+            connection
+                .execute(
+                    "INSERT INTO app_kv (guild_id, key, value)
+                     VALUES (0, '__rust_health_smoke__', 'loopback-discord-write')
+                     ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
+                    [],
+                )
+                .map_err(|error| {
+                    GatewayError::Fatal(format!("health-smoke database write failed: {error}"))
+                })?;
+            Ok::<(), GatewayError>(())
+        })
+        .await
+        .map_err(|error| {
+            GatewayError::Fatal(format!("health-smoke write task failed: {error}"))
+        })??;
+
+        let mut shutdown = session.shutdown;
+        loop {
+            if *shutdown.borrow() {
+                return Ok(GatewaySessionEnd::Shutdown);
+            }
+            if shutdown.changed().await.is_err() || *shutdown.borrow() {
+                return Ok(GatewaySessionEnd::Shutdown);
+            }
+        }
+    }
+}
+
+async fn run_health_smoke(path: PathBuf) -> ExitCode {
+    let result = run_health_smoke_inner(path).await;
+    match result {
+        Ok(()) => {
+            println!("health_smoke=passed gateway=loopback database_write=app_kv");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("health-smoke failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_health_smoke_inner(path: PathBuf) -> Result<(), String> {
+    let database_path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("could not resolve current directory: {error}"))?
+            .join(path)
+    };
+    let health_reporter = HealthReporter::initialize(&database_path)
+        .map_err(|error| format!("could not initialize health reporter: {error}"))?;
+    let config = RuntimeConfig {
+        token: DiscordToken::parse("health-smoke-token")
+            .map_err(|error| format!("could not construct smoke token: {error}"))?,
+        db_path: database_path.clone(),
+        reconnect_initial: Duration::ZERO,
+        reconnect_max: Duration::ZERO,
+        rust_cutover_candidate: false,
+    };
+    let runtime = Runtime::new(
+        config,
+        RegistryBuilder::default().build(),
+        HealthSmokeGateway {
+            database_path: database_path.clone(),
+        },
+        SqliteDatabaseAdmission::default(),
+    );
+    let health_events = runtime.events().subscribe();
+    let health_task = tokio::spawn(async move { health_reporter.run(health_events).await });
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let runtime_task = tokio::spawn(async move {
+        runtime
+            .run_until(async move {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+    });
+
+    let startup_result = async {
+        for _ in 0..120 {
+            if let Ok(report) = check_health(&database_path, Duration::from_secs(30))
+                && report.snapshot.is_healthy()
+            {
+                    let value: String = tokio::task::spawn_blocking({
+                        let path = database_path.clone();
+                        move || {
+                            let connection = Connection::open(path)
+                                .map_err(|error| format!("could not verify smoke write: {error}"))?;
+                            connection
+                                .query_row(
+                                    "SELECT value FROM app_kv WHERE guild_id=0 AND key='__rust_health_smoke__'",
+                                    [],
+                                    |row| row.get(0),
+                                )
+                                .map_err(|error| format!("smoke write was not committed: {error}"))
+                        }
+                    })
+                    .await
+                    .map_err(|error| format!("smoke write verification task failed: {error}"))??;
+                    if value != "loopback-discord-write" {
+                        return Err(format!("unexpected smoke write value {value:?}"));
+                    }
+                    return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err("runtime did not reach a healthy ready state within 3 seconds".to_owned())
+    }
+    .await;
+
+    let _ = shutdown_sender.send(());
+    let runtime_result = runtime_task
+        .await
+        .map_err(|error| format!("runtime task failed: {error}"))?
+        .map_err(|error| format!("runtime stopped with an error: {error}"));
+    let health_result = health_task
+        .await
+        .map_err(|error| format!("health reporter task failed: {error}"))?
+        .map_err(|error| format!("health reporter stopped with an error: {error}"));
+    startup_result?;
+    runtime_result?;
+    health_result?;
+    if check_health(&database_path, Duration::from_secs(30)).is_ok() {
+        return Err("health-check accepted the stopped runtime marker".to_owned());
+    }
+    Ok(())
 }
 
 async fn run_serve() -> ExitCode {
@@ -1007,6 +1209,28 @@ mod tests {
         assert!(
             parse_command(
                 ["health-check", "--max-age-seconds", "0"]
+                    .map(str::to_owned)
+                    .into_iter()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn health_smoke_accepts_an_explicit_database_path() {
+        assert_eq!(
+            parse_command(
+                ["health-smoke", "--db-path", "/tmp/health-smoke.db"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Ok(Command::HealthSmoke {
+                path: PathBuf::from("/tmp/health-smoke.db")
+            })
+        );
+        assert!(
+            parse_command(
+                ["health-smoke", "--unexpected"]
                     .map(str::to_owned)
                     .into_iter()
             )

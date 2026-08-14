@@ -225,6 +225,14 @@ prove fail-closed guards, unhealthy-Rust rollback, explicit Python restoration,
 and a Python-free Rust redeploy. It does not touch the development database or
 require Docker, SSH, network access, or Discord credentials.
 
+The image smoke also starts `cama-rust health-smoke` against a disposable
+Python-migrated database with Docker networking disabled. This runs the real
+runtime supervisor and health reporter with a loopback gateway, commits and
+reads one `app_kv` write, then verifies that the health probe rejects the
+stopped marker. The loopback command-registration event is only a transport
+seam; it is not evidence of a live Discord REST write or a production gateway
+session, so `container_health_smoke` remains open until those are recorded.
+
 The default Compose graph still starts only the Python `bot`. All deployments
 now go through a checked same-service selector; leaving `BOT_RUNTIME` unset is
 equivalent to selecting `python`:
