@@ -524,7 +524,7 @@ pub(crate) fn freeze_financial_setup_plan(
     let mut required_ids = participant_ids.clone();
     required_ids.extend(investments.iter().map(|position| position.investor_id));
     let balances = balances_for(transaction, guild_id, &required_ids)?;
-    let totals = pending_totals(transaction, guild_id, pending_match_id)?;
+    let totals = pending_totals(transaction, guild_id, pending_match_id, shuffle_timestamp)?;
     let mut planner = Planner {
         transaction,
         completion_key,
@@ -624,23 +624,34 @@ impl Planner<'_, '_> {
 
     fn plan_seed(&mut self) -> Result<(), DraftFinancialSetupError> {
         let fund = fund_snapshot(self.transaction, self.guild_id)?;
-        let funding = simulate_daily_funding(
-            self.transaction,
-            self.guild_id,
-            &self.policy.game_date,
-            self.policy.first_game_daily_amount,
-            fund,
-        )?;
-        let date_claimed = self
-            .transaction
-            .query_row(
-                "SELECT 1 FROM first_game_pool_claims
-                 WHERE guild_id=?1 AND lobby_kind=?2 AND game_date=?3",
-                params![self.guild_id, self.lobby_kind, self.policy.game_date],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
+        let pool_mode = self.policy.betting_mode == "pool";
+        let funding = if pool_mode {
+            simulate_daily_funding(
+                self.transaction,
+                self.guild_id,
+                &self.policy.game_date,
+                self.policy.first_game_daily_amount,
+                fund,
+            )?
+        } else {
+            FundingSimulation {
+                after: fund,
+                steps: Vec::new(),
+            }
+        };
+        let date_claimed = if pool_mode {
+            self.transaction
+                .query_row(
+                    "SELECT 1 FROM first_game_pool_claims
+                     WHERE guild_id=?1 AND lobby_kind=?2 AND game_date=?3",
+                    params![self.guild_id, self.lobby_kind, self.policy.game_date],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+        } else {
+            false
+        };
         let first_game_reserved = if self.policy.betting_mode == "pool"
             && self.policy.first_game_daily_amount > 0
             && !date_claimed
@@ -1223,17 +1234,23 @@ fn pending_totals(
     transaction: &Transaction<'_>,
     guild_id: i64,
     pending_match_id: i64,
+    shuffle_timestamp: i64,
 ) -> Result<Totals, DraftFinancialSetupError> {
     let mut totals = Totals::default();
     let mut statement = transaction.prepare(
         "SELECT team_bet_on,COALESCE(SUM(amount*COALESCE(leverage,1)),0)
            FROM bets
-          WHERE guild_id=?1 AND pending_match_id=?2 AND match_id IS NULL
+          WHERE guild_id=?1 AND match_id IS NULL
+            AND (
+                pending_match_id=?2
+                OR (pending_match_id IS NULL AND bet_time>=?3)
+            )
           GROUP BY team_bet_on",
     )?;
-    let rows = statement.query_map(params![guild_id, pending_match_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
+    let rows = statement.query_map(
+        params![guild_id, pending_match_id, shuffle_timestamp],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
     for row in rows {
         let (team, amount) = row?;
         match team.as_str() {

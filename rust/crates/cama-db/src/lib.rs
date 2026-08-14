@@ -60,6 +60,7 @@ pub mod dota_bet_seed_repository;
 #[path = "dota_streak.rs"]
 pub mod dota_streak_repository;
 pub mod draft_finalization;
+pub mod draft_financial_execution;
 pub mod draft_financial_setup;
 pub mod draft_state;
 #[path = "duel.rs"]

@@ -152,6 +152,27 @@ impl DraftFinalizationRepository {
         }
     }
 
+    /// Execute or idempotently recover the frozen schema-v2 financial setup
+    /// while the caller owns an unexpired finalization-job lease.
+    pub fn run_leased_financial_setup(
+        &self,
+        completion_key: &str,
+        expected_revision: u64,
+        lease_owner: &str,
+        now: i64,
+    ) -> Result<
+        crate::draft_financial_execution::DraftFinancialSetupRun,
+        crate::draft_financial_execution::DraftFinancialExecutionError,
+    > {
+        crate::draft_financial_execution::run_leased_financial_setup(
+            &self.path,
+            completion_key,
+            expected_revision,
+            lease_owner,
+            now,
+        )
+    }
+
     /// Find or create exactly one pending match and link it into a fenced
     /// Draft envelope under the same immediate SQLite writer transaction.
     ///
