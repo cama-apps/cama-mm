@@ -7,8 +7,8 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
-post-match, terminal-crash, and pinnacle phase-3 artifacts from the shared
-JSON fixture, then decodes both sides to RGBA.
+OpenDota advantage, post-match, terminal-crash, and pinnacle phase-3 artifacts
+from the shared JSON fixture, then decodes both sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
 an embedded bitmap font, while Python uses its configured Pillow font, so exact
@@ -108,9 +108,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "pinnacle",
         "balance",
         "rating_history",
+        "advantage",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, and rating_history objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, and advantage objects"
         )
     return fixture
 
@@ -121,7 +122,7 @@ def render_python(
     fixture_path: Path | None = None,
 ) -> None:
     from utils import dig_drawing
-    from utils.drawing import draw_balance_chart, draw_rating_history_chart
+    from utils.drawing import draw_advantage_graph, draw_balance_chart, draw_rating_history_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
 
@@ -154,6 +155,18 @@ def render_python(
         list(rating_history["entries"]),
     ).getvalue()
     (output_dir / "python_rating_history.png").write_bytes(rating_history_bytes)
+
+    advantage = fixture["advantage"]
+    advantage_bytes = draw_advantage_graph(
+        {
+            "radiant_gold_adv": list(advantage["radiant_gold_adv"]),
+            "radiant_xp_adv": list(advantage["radiant_xp_adv"]),
+        },
+        int(advantage["match_id"]),
+    )
+    if advantage_bytes is None:
+        raise AssertionError("advantage fixture unexpectedly rendered no image")
+    (output_dir / "python_advantage.png").write_bytes(advantage_bytes.getvalue())
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -601,6 +614,43 @@ def check_balance(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_advantage(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the live OpenDota gold/XP advantage renderer."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != (790, 340) or rust_size != python_size:
+        raise AssertionError(
+            f"advantage dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(8, 8),
+        margin=12,
+        minimum_grid_iou=0.80,
+        # The native renderer uses an embedded bitmap font, so its text has
+        # fewer antialiased foreground pixels than Matplotlib while the chart
+        # geometry remains strongly constrained by the coarse-grid IoU gate.
+        minimum_count_ratio=0.25,
+        label="advantage",
+    )
+    print(
+        f"advantage: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > 0.090 or rms > 0.220:
+        raise AssertionError(
+            f"advantage pixel drift exceeds threshold: MAE {mae:.5f} <= 0.09000, "
+            f"RMS {rms:.5f} <= 0.22000"
+        )
+    return []
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
@@ -636,6 +686,10 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_rating_history.png",
                 output_dir / "rust_rating_history.png",
                 label="rating_history",
+            )
+            check_advantage(
+                output_dir / "python_advantage.png",
+                output_dir / "rust_advantage.png",
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

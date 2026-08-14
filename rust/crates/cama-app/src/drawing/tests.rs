@@ -665,9 +665,61 @@ fn test_returns_valid_png() {
         radiant_xp: vec![0.0, 200.0, 800.0, 100.0, 1_500.0, 3_000.0, 2_500.0],
     };
     let image = draw_advantage_graph(&data, Some(42)).expect("advantage attachment");
-    let decoded = assert_rgba_png(&image, Some((800, 350)));
+    let decoded = assert_rgba_png(&image, Some((790, 340)));
     assert!(decoded.contains(DISCORD_YELLOW));
     assert!(decoded.contains(DISCORD_ACCENT));
+    assert!(decoded.pixels.chunks_exact(4).any(|pixel| {
+        u16::from(pixel[1]) > u16::from(pixel[0]) + 10
+            && u16::from(pixel[1]) > u16::from(pixel[2]) + 5
+    }));
+    assert!(
+        decoded
+            .pixels
+            .chunks_exact(4)
+            .any(|pixel| u16::from(pixel[0]) > u16::from(pixel[1]) + 10)
+    );
+}
+
+#[test]
+fn long_mixed_sign_advantage_uses_full_data_span_and_minute_ticks() {
+    let gold = (0..91)
+        .map(|index| {
+            let minute = index as f64;
+            if index % 12 < 4 {
+                -350.0 - minute * 4.0
+            } else {
+                minute * 95.0 - 2_600.0
+            }
+        })
+        .collect::<Vec<_>>();
+    let xp = (0..73)
+        .map(|index| index as f64 * 80.0 - 1_800.0)
+        .collect::<Vec<_>>();
+    let data = AdvantageData {
+        radiant_gold: gold,
+        radiant_xp: xp,
+    };
+    let image = draw_advantage_graph(&data, Some(90)).expect("long advantage attachment");
+    let decoded = assert_rgba_png(&image, Some((790, 340)));
+    assert!(decoded.contains(DISCORD_YELLOW));
+    assert!(decoded.contains(DISCORD_ACCENT));
+
+    let projection = AdvantageProjection {
+        left: 56,
+        right: 780,
+        top: 35,
+        bottom: 288,
+        minimum: -2_600.0,
+        maximum: 6_000.0,
+    };
+    let ticks = advantage_ticks(projection);
+    assert_eq!(ticks.len(), 6);
+    assert_eq!(ticks.first().copied(), Some(projection.minimum));
+    assert_eq!(ticks.last().copied(), Some(projection.maximum));
+    assert!(ticks.iter().any(|value| *value < 0.0));
+    assert!(ticks.iter().any(|value| *value > 0.0));
+    assert_eq!(advantage_x_tick_values(90), vec![0, 15, 30, 45, 60, 75, 90]);
+    assert_eq!(advantage_x_tick_values(4), vec![0, 1, 2, 3, 4]);
 }
 
 #[test]
@@ -692,7 +744,7 @@ fn test_gold_only() {
     };
     let decoded = assert_rgba_png(
         &draw_advantage_graph(&data, None).expect("gold chart"),
-        None,
+        Some((790, 340)),
     );
     assert!(decoded.contains(DISCORD_YELLOW));
 }
@@ -703,7 +755,10 @@ fn test_xp_only() {
         radiant_xp: vec![0.0, 300.0, 600.0, 1_200.0, 900.0],
         ..AdvantageData::default()
     };
-    let decoded = assert_rgba_png(&draw_advantage_graph(&data, None).expect("XP chart"), None);
+    let decoded = assert_rgba_png(
+        &draw_advantage_graph(&data, None).expect("XP chart"),
+        Some((790, 340)),
+    );
     assert!(decoded.contains(DISCORD_ACCENT));
 }
 

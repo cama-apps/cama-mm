@@ -56,5 +56,10 @@
       {"rating": 1535.0, "os_mu_after": 35.8, "won": false},
       {"rating": 1490.0, "os_mu_after": 34.4, "won": true}
     ]
+  },
+  "advantage": {
+    "match_id": 4242,
+    "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],
+    "radiant_xp_adv": [0, 200, 800, 100, 1500, 3000, 2500]
   }
 }

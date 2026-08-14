@@ -765,6 +765,31 @@ pub struct AdvantageData {
     pub radiant_xp: Vec<f64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AdvantageProjection {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    minimum: f64,
+    maximum: f64,
+}
+
+impl AdvantageProjection {
+    fn y(self, value: f64) -> i32 {
+        self.top
+            + ((self.maximum - value) / (self.maximum - self.minimum)
+                * f64::from(self.bottom - self.top)) as i32
+    }
+
+    fn point(self, index: usize, count: usize, value: f64) -> (i32, i32) {
+        let x = self.left
+            + ((index as f64 / count.saturating_sub(1).max(1) as f64)
+                * f64::from(self.right - self.left)) as i32;
+        (x, self.y(value))
+    }
+}
+
 /// Render gold and XP advantage, or no attachment when both series are absent.
 #[must_use]
 pub fn draw_advantage_graph(
@@ -774,51 +799,267 @@ pub fn draw_advantage_graph(
     if data.radiant_gold.is_empty() && data.radiant_xp.is_empty() {
         return None;
     }
-    let mut raster = Raster::new(800, 350, DISCORD_BG);
-    raster.fill_rect(60, 55, 760, 300, DISCORD_DARKER);
+    // Matplotlib's ``tight_layout`` leaves a 790×340 attachment for the
+    // production Python renderer. Keep that public media contract while
+    // drawing the semantic layers directly in the native rasterizer.
+    const WIDTH: i32 = 790;
+    const HEIGHT: i32 = 340;
+    const LEFT: i32 = 56;
+    const RIGHT: i32 = 780;
+    const TOP: i32 = 35;
+    const BOTTOM: i32 = 288;
+
+    let mut raster = Raster::new(WIDTH as usize, HEIGHT as usize, DISCORD_BG);
+    raster.fill_rect(LEFT, TOP, RIGHT, BOTTOM, DISCORD_DARKER);
     let title = match_id.map_or_else(
         || "Team Advantages Per Minute".to_owned(),
-        |id| format!("Team Advantages Per Minute - Match #{id}"),
+        |id| format!("Team Advantages Per Minute — Match #{id}"),
     );
-    raster.text(180, 15, &title, DISCORD_WHITE, 1);
+    let title_width = Raster::text_width(&title, 1);
+    raster.text((WIDTH - title_width) / 2, 10, &title, DISCORD_WHITE, 1);
     let values = data
         .radiant_gold
         .iter()
         .chain(&data.radiant_xp)
         .copied()
+        .filter(|value| value.is_finite())
         .collect::<Vec<_>>();
-    let magnitude = values.iter().copied().map(f64::abs).fold(1.0_f64, f64::max);
-    raster.line((60, 177), (760, 177), DISCORD_GREY, 1);
+    let actual_min = values.iter().copied().fold(0.0_f64, f64::min);
+    let actual_max = values.iter().copied().fold(0.0_f64, f64::max);
+    let data_span = (actual_max - actual_min).max(1.0);
+    let minimum = actual_min - data_span * 0.05;
+    let maximum = actual_max + data_span * 0.05;
+    let projection = AdvantageProjection {
+        left: LEFT,
+        right: RIGHT,
+        top: TOP,
+        bottom: BOTTOM,
+        minimum,
+        maximum,
+    };
+    let zero = projection.y(0.0);
+
+    // Match the production chart's light grid and signed zero reference.
+    for value in advantage_ticks(projection) {
+        let y = projection.y(value);
+        raster.line((LEFT, y), (RIGHT, y), DISCORD_GREY.with_alpha(38), 1);
+    }
+    for index in 0..=6_i32 {
+        let x = LEFT + (RIGHT - LEFT) * index / 6;
+        raster.line((x, TOP), (x, BOTTOM), DISCORD_GREY.with_alpha(38), 1);
+    }
+    raster.line((LEFT, zero), (RIGHT, zero), DISCORD_GREY.with_alpha(128), 1);
+
+    // Fill each gold segment to zero before drawing its line. Splitting a
+    // segment at a zero crossing preserves matplotlib's ``interpolate=True``
+    // behavior instead of filling the entire interval with one sign.
+    draw_advantage_area(&mut raster, &data.radiant_gold, projection);
     draw_advantage_series(
         &mut raster,
         &data.radiant_gold,
-        magnitude,
+        projection,
         DISCORD_YELLOW,
         2,
+        false,
     );
-    draw_advantage_series(&mut raster, &data.radiant_xp, magnitude, DISCORD_ACCENT, 1);
+    draw_advantage_series(
+        &mut raster,
+        &data.radiant_xp,
+        projection,
+        DISCORD_ACCENT,
+        1,
+        true,
+    );
+
+    raster.text(
+        LEFT + 5,
+        TOP + 7,
+        "Radiant",
+        DISCORD_GREEN.with_alpha(180),
+        1,
+    );
+    raster.text(
+        LEFT + 5,
+        BOTTOM - 16,
+        "Dire",
+        DISCORD_RED.with_alpha(180),
+        1,
+    );
+    let minutes = "Minutes";
+    raster.text(
+        (LEFT + RIGHT - Raster::text_width(minutes, 1)) / 2,
+        BOTTOM + 24,
+        minutes,
+        DISCORD_GREY,
+        1,
+    );
+    let last_minute = data
+        .radiant_gold
+        .len()
+        .max(data.radiant_xp.len())
+        .saturating_sub(1);
+    let x_ticks = advantage_x_tick_values(last_minute);
+    let x_intervals = x_ticks.len().saturating_sub(1).max(1) as i32;
+    for (position, minute) in x_ticks.into_iter().enumerate() {
+        let position = position as i32;
+        let x = LEFT + (RIGHT - LEFT) * position / x_intervals;
+        let label = minute.to_string();
+        let label_width = Raster::text_width(&label, 1);
+        let label_x = (x - label_width / 2).clamp(LEFT, RIGHT - label_width);
+        raster.text(label_x, BOTTOM + 7, &label, DISCORD_GREY, 1);
+    }
+    draw_advantage_axis_labels(&mut raster, projection);
+    draw_advantage_legend(
+        &mut raster,
+        RIGHT - 120,
+        TOP + 8,
+        !data.radiant_gold.is_empty(),
+        !data.radiant_xp.is_empty(),
+    );
     Some(render(raster))
 }
 
 fn draw_advantage_series(
     raster: &mut Raster,
     values: &[f64],
-    magnitude: f64,
+    projection: AdvantageProjection,
     color: Rgba,
     width: i32,
+    dashed: bool,
 ) {
     let points = values
         .iter()
         .enumerate()
-        .map(|(index, value)| {
-            let x =
-                60 + (index as f64 / values.len().saturating_sub(1).max(1) as f64 * 700.0) as i32;
-            let y = 177 - (value / magnitude * 110.0) as i32;
-            (x, y)
-        })
+        .map(|(index, value)| projection.point(index, values.len(), *value))
         .collect::<Vec<_>>();
     for pair in points.windows(2) {
-        raster.line(pair[0], pair[1], color, width);
+        if dashed {
+            draw_dashed_line(raster, pair[0], pair[1], color, width);
+        } else {
+            raster.line(pair[0], pair[1], color, width);
+        }
+    }
+}
+
+fn draw_advantage_axis_labels(raster: &mut Raster, projection: AdvantageProjection) {
+    // Keep the labels compact and deterministic. The native chart uses the
+    // same signed values as the Python formatter, with ``k`` for thousands.
+    for value in advantage_ticks(projection) {
+        let y = projection.y(value);
+        let label = format_advantage_axis_value(value);
+        let width = Raster::text_width(&label, 1);
+        raster.text(projection.left - width - 7, y - 4, &label, DISCORD_GREY, 1);
+    }
+}
+
+fn advantage_ticks(projection: AdvantageProjection) -> Vec<f64> {
+    let span = (projection.maximum - projection.minimum).max(f64::EPSILON);
+    (0..=5)
+        .map(|index| projection.minimum + span * f64::from(index) / 5.0)
+        .collect()
+}
+
+fn advantage_x_tick_values(last_minute: usize) -> Vec<usize> {
+    let tick_count = last_minute.saturating_add(1).min(7);
+    let intervals = tick_count.saturating_sub(1).max(1);
+    (0..tick_count)
+        .map(|position| (last_minute as f64 * position as f64 / intervals as f64).round() as usize)
+        .collect()
+}
+
+fn format_advantage_axis_value(value: f64) -> String {
+    if value.abs() >= 1_000.0 {
+        format!("{:.0}k", value / 1_000.0)
+    } else {
+        format!("{value:.0}")
+    }
+}
+
+fn draw_advantage_area(raster: &mut Raster, values: &[f64], projection: AdvantageProjection) {
+    let points = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| projection.point(index, values.len(), *value))
+        .collect::<Vec<_>>();
+    let zero = projection.y(0.0);
+    for (index, pair) in points.windows(2).enumerate() {
+        let first_value = values[index];
+        let second_value = values[index + 1];
+        if !first_value.is_finite() || !second_value.is_finite() {
+            continue;
+        }
+        if first_value == 0.0
+            || second_value == 0.0
+            || first_value.signum() == second_value.signum()
+        {
+            let color = if first_value.max(second_value) >= 0.0 {
+                DISCORD_GREEN.with_alpha(38)
+            } else {
+                DISCORD_RED.with_alpha(38)
+            };
+            raster.polygon(
+                &[pair[0], pair[1], (pair[1].0, zero), (pair[0].0, zero)],
+                color,
+            );
+            continue;
+        }
+        let fraction = first_value.abs() / (first_value.abs() + second_value.abs());
+        let crossing_x = pair[0].0 + ((pair[1].0 - pair[0].0) as f64 * fraction).round() as i32;
+        let crossing = (crossing_x, zero);
+        let first_color = if first_value >= 0.0 {
+            DISCORD_GREEN.with_alpha(38)
+        } else {
+            DISCORD_RED.with_alpha(38)
+        };
+        let second_color = if second_value >= 0.0 {
+            DISCORD_GREEN.with_alpha(38)
+        } else {
+            DISCORD_RED.with_alpha(38)
+        };
+        raster.polygon(
+            &[pair[0], crossing, (crossing.0, zero), (pair[0].0, zero)],
+            first_color,
+        );
+        raster.polygon(&[crossing, pair[1], (pair[1].0, zero)], second_color);
+    }
+}
+
+fn draw_dashed_line(
+    raster: &mut Raster,
+    start: (i32, i32),
+    end: (i32, i32),
+    color: Rgba,
+    width: i32,
+) {
+    let dx = f64::from(end.0 - start.0);
+    let dy = f64::from(end.1 - start.1);
+    let length = dx.hypot(dy).max(1.0);
+    let mut offset = 0.0;
+    while offset < length {
+        let next = (offset + 5.0).min(length);
+        let first = (
+            start.0 + (dx * offset / length).round() as i32,
+            start.1 + (dy * offset / length).round() as i32,
+        );
+        let second = (
+            start.0 + (dx * next / length).round() as i32,
+            start.1 + (dy * next / length).round() as i32,
+        );
+        raster.line(first, second, color, width);
+        offset += 8.0;
+    }
+}
+
+fn draw_advantage_legend(raster: &mut Raster, left: i32, top: i32, has_gold: bool, has_xp: bool) {
+    let mut x = left;
+    if has_gold {
+        raster.line((x, top + 4), (x + 18, top + 4), DISCORD_YELLOW, 2);
+        raster.text(x + 23, top, "Gold", DISCORD_WHITE, 1);
+        x += 62;
+    }
+    if has_xp {
+        draw_dashed_line(raster, (x, top + 4), (x + 18, top + 4), DISCORD_ACCENT, 1);
+        raster.text(x + 23, top, "XP", DISCORD_WHITE, 1);
     }
 }
 

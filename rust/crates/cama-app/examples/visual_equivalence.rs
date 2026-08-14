@@ -12,8 +12,8 @@ use std::path::Path;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    BalancePoint, RatingHistoryEntry, draw_balance_chart, draw_prediction_market_chart,
-    draw_rating_history_chart,
+    AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
+    draw_prediction_market_chart, draw_rating_history_chart,
 };
 use cama_app::neon_degen::GifAsset;
 use cama_app::post_match_gif_media::render_post_match_gif;
@@ -27,6 +27,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    advantage: AdvantageFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +48,13 @@ struct RatingHistoryEntryFixture {
     rating: Option<f64>,
     os_mu_after: Option<f64>,
     won: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvantageFixture {
+    match_id: i64,
+    radiant_gold_adv: Vec<f64>,
+    radiant_xp_adv: Vec<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +156,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_rating_history.png"),
         rating_history_chart,
+    )?;
+
+    let advantage = AdvantageData {
+        radiant_gold: fixture.advantage.radiant_gold_adv,
+        radiant_xp: fixture.advantage.radiant_xp_adv,
+    };
+    let advantage_chart = draw_advantage_graph(&advantage, Some(fixture.advantage.match_id))
+        .ok_or("advantage fixture unexpectedly rendered no image")?
+        .into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_advantage.png"),
+        advantage_chart,
     )?;
 
     let animation = render_post_match_gif(

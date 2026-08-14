@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    BalancePoint, RatingHistoryEntry, draw_balance_chart, draw_prediction_market_chart,
-    draw_rating_history_chart,
+    AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
+    draw_prediction_market_chart, draw_rating_history_chart,
 };
 use cama_app::neon_degen::GifAsset;
 use cama_app::pet_assets::decode_png_raster;
@@ -26,6 +26,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    advantage: AdvantageFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +47,13 @@ struct RatingHistoryEntryFixture {
     rating: Option<f64>,
     os_mu_after: Option<f64>,
     won: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvantageFixture {
+    match_id: i64,
+    radiant_gold_adv: Vec<f64>,
+    radiant_xp_adv: Vec<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +193,48 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
             .entries
             .iter()
             .any(|entry| entry.os_mu_after.is_none())
+    );
+    assert_eq!(fixture.advantage.match_id, 4_242);
+    assert_eq!(fixture.advantage.radiant_gold_adv.len(), 7);
+    assert_eq!(fixture.advantage.radiant_xp_adv.len(), 7);
+}
+
+#[test]
+fn native_advantage_fixture_render_is_deterministic_and_semantically_layered() {
+    let fixture = fixture();
+    let data = AdvantageData {
+        radiant_gold: fixture.advantage.radiant_gold_adv.clone(),
+        radiant_xp: fixture.advantage.radiant_xp_adv.clone(),
+    };
+    let first = draw_advantage_graph(&data, Some(fixture.advantage.match_id))
+        .expect("advantage fixture should render")
+        .into_inner();
+    let second = draw_advantage_graph(&data, Some(fixture.advantage.match_id))
+        .expect("advantage fixture should render twice")
+        .into_inner();
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode advantage PNG");
+    assert_eq!((raster.width, raster.height), (790, 340));
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel == [254, 231, 92, 255]),
+        "gold series should be visible"
+    );
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel == [88, 101, 242, 255]),
+        "XP series should be visible"
+    );
+    assert!(
+        raster.pixels.chunks_exact(4).any(|pixel| {
+            u16::from(pixel[1]) > u16::from(pixel[0]) + 10
+                && u16::from(pixel[1]) > u16::from(pixel[2]) + 5
+        }),
+        "positive advantage fill should be visible"
     );
 }
 

@@ -33,6 +33,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
     rating_history = fixture["rating_history"]
+    advantage = fixture["advantage"]
     assert isinstance(chart["market_id"], int)
     assert isinstance(chart["snapshots"], list)
     assert all(len(snapshot) == 2 for snapshot in chart["snapshots"])
@@ -53,6 +54,8 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert len(rating_history["entries"]) == 6
     assert any(entry["rating"] is None for entry in rating_history["entries"])
     assert any(entry["os_mu_after"] is None for entry in rating_history["entries"])
+    assert advantage["match_id"] == 4242
+    assert len(advantage["radiant_gold_adv"]) == len(advantage["radiant_xp_adv"]) == 7
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -70,6 +73,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     ).read_bytes()
     assert (first / "python_rating_history.png").read_bytes() == (
         second / "python_rating_history.png"
+    ).read_bytes()
+    assert (first / "python_advantage.png").read_bytes() == (
+        second / "python_advantage.png"
     ).read_bytes()
     assert (first / "python_animation.gif").read_bytes() == (
         second / "python_animation.gif"
@@ -99,6 +105,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rating_size, rating_pixels = rgba_pixels(first / "python_rating_history.png")
     assert rating_size == (700, 400)
     assert max(rating_pixels) == 255
+    advantage_size, advantage_pixels = rgba_pixels(first / "python_advantage.png")
+    assert advantage_size == (790, 340)
+    assert max(advantage_pixels) == 255
     size, loop, durations, frames = gif_frames(first / "python_pinnacle_phase3.gif")
     assert size == (512, 288)
     assert loop is None
