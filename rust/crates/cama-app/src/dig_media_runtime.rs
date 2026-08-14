@@ -327,8 +327,8 @@ fn pinnacle_phase(
     phase: u8,
     secret: bool,
 ) -> Result<RenderedMedia, DigMediaRuntimeError> {
-    let mut base = decode_image(source, MediaFormat::Png)?
-        .resize(PINNACLE_SIZE.0 as usize, PINNACLE_SIZE.1 as usize);
+    let base = decode_image(source, MediaFormat::Png)?
+        .resize_lanczos(PINNACLE_SIZE.0 as usize, PINNACLE_SIZE.1 as usize);
     let theme = PINNACLE_THEMES
         .iter()
         .find(|theme| theme.boss_id == boss_id)
@@ -339,17 +339,13 @@ fn pinnacle_phase(
     } else {
         theme.highlight
     };
+    let base = prepare_pinnacle_base(base, accent);
     match phase {
         2 => {
-            apply_sparse_phase_overlay(
-                &mut base,
-                accent,
-                highlight,
-                7,
-                stable_hash(boss_id.as_bytes()),
-            );
+            let mut rendered = base;
+            draw_pinnacle_atmosphere(&mut rendered, theme.effect, accent, highlight, 0.55, secret);
             Ok(RenderedMedia {
-                bytes: encode_png(&base, PixelMode::Rgba),
+                bytes: encode_png(&rendered, PixelMode::Rgba),
                 info: MediaInfo {
                     format: MediaFormat::Png,
                     width: PINNACLE_SIZE.0,
@@ -363,16 +359,23 @@ fn pinnacle_phase(
             })
         }
         3 => {
-            let durations = vec![120, 120, 120, 120, 120, 120, 120, 1_200];
+            let durations = vec![95; 7]
+                .into_iter()
+                .chain(std::iter::once(1_500))
+                .collect::<Vec<_>>();
             let mut frames = Vec::with_capacity(durations.len());
             for index in 0..durations.len() {
-                let mut frame = base.clone();
-                apply_sparse_phase_overlay(
+                let progress = index as f64 / 7.0;
+                let eased = 0.5 - 0.5 * (progress * std::f64::consts::PI).cos();
+                let brightness = 0.96 + eased * 0.06;
+                let mut frame = apply_pinnacle_brightness(&base, brightness);
+                draw_pinnacle_atmosphere(
                     &mut frame,
+                    theme.effect,
                     accent,
                     highlight,
-                    index + 1,
-                    stable_hash(boss_id.as_bytes()),
+                    progress,
+                    secret,
                 );
                 frames.push(frame);
             }
@@ -396,22 +399,383 @@ fn pinnacle_phase(
     }
 }
 
-fn apply_sparse_phase_overlay(
+fn prepare_pinnacle_base(mut image: RgbaImage, accent: (u8, u8, u8)) -> RgbaImage {
+    // Match Pillow's ImageEnhance.Color(base).enhance(0.82), followed by a
+    // nine-percent blend toward the boss accent and ImageEnhance.Contrast
+    // (1.07).  Keeping this work in linear per-channel arithmetic is also
+    // important for source images that are not already 512x288.
+    let mut luma_sum = 0_u64;
+    let pixel_count = image.width.saturating_mul(image.height).max(1);
+    for pixel in image.pixels.chunks_exact_mut(4) {
+        let red = f64::from(pixel[0]);
+        let green = f64::from(pixel[1]);
+        let blue = f64::from(pixel[2]);
+        let gray = 0.299 * red + 0.587 * green + 0.114 * blue;
+        let colorized = [
+            gray * 0.18 + red * 0.82,
+            gray * 0.18 + green * 0.82,
+            gray * 0.18 + blue * 0.82,
+        ];
+        let tinted = [
+            colorized[0] * 0.91 + f64::from(accent.0) * 0.09,
+            colorized[1] * 0.91 + f64::from(accent.1) * 0.09,
+            colorized[2] * 0.91 + f64::from(accent.2) * 0.09,
+        ];
+        pixel[0] = round_channel(tinted[0]);
+        pixel[1] = round_channel(tinted[1]);
+        pixel[2] = round_channel(tinted[2]);
+        luma_sum = luma_sum.saturating_add(
+            (0.299 * tinted[0] + 0.587 * tinted[1] + 0.114 * tinted[2]).round() as u64,
+        );
+    }
+    let mean = luma_sum as f64 / pixel_count as f64;
+    for pixel in image.pixels.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            let contrasted = mean + 1.07 * (f64::from(*channel) - mean);
+            *channel = round_channel(contrasted);
+        }
+    }
+    image
+}
+
+fn apply_pinnacle_brightness(image: &RgbaImage, factor: f64) -> RgbaImage {
+    let mut rendered = image.clone();
+    for pixel in rendered.pixels.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            *channel = round_channel(f64::from(*channel) * factor);
+        }
+    }
+    rendered
+}
+
+fn round_channel(value: f64) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+fn draw_pinnacle_atmosphere(
     image: &mut RgbaImage,
+    effect: &str,
     accent: (u8, u8, u8),
     highlight: (u8, u8, u8),
-    progress: usize,
-    seed: u64,
+    progress: f64,
+    secret: bool,
 ) {
-    let count = image.width.saturating_mul(image.height) / 160;
-    for index in 0..count {
-        let mixed = seed
-            .wrapping_add((index as u64).wrapping_mul(0x9e37_79b9))
-            .rotate_left((progress % 31) as u32);
-        let x = usize::try_from(mixed).unwrap_or(0) % image.width;
-        let y = (usize::try_from(mixed >> 23).unwrap_or(0) + progress * 3) % image.height;
-        let color = if index % 5 == 0 { highlight } else { accent };
-        image.set(x, y, [color.0, color.1, color.2, 180]);
+    let eased = 0.5 - 0.5 * (progress * std::f64::consts::PI).cos();
+    let (center, radius, peak_alpha, mote_count) = match effect {
+        "crown_fire" => ((0.50, 0.29), 54, 50, 18),
+        "crystal_choir" => ((0.50, 0.50), 64, 44, 12),
+        "ghost_tunnel" => ((0.12 + 0.04 * eased, 0.62), 58, 30, 9),
+        "fortress_siege" => ((0.50, 0.38), 78, 46, 22),
+        "map_fold" => ((0.50, 0.50), 0, 0, 0),
+        "heat_gear" => ((0.50, 0.46), 72, 58, 20),
+        _ => return,
+    };
+    if radius != 0 {
+        draw_soft_pinnacle_glow(
+            image,
+            (
+                (image.width as f64 * center.0) as isize,
+                (image.height as f64 * center.1) as isize,
+            ),
+            radius,
+            accent,
+            (f64::from(peak_alpha) * (0.55 + 0.45 * eased)) as u8,
+        );
+    }
+    if mote_count != 0 {
+        draw_pinnacle_motes(image, effect, accent, highlight, progress, mote_count);
+    }
+    match effect {
+        "crystal_choir" => {
+            let sparkle_points = [
+                (0.19, 0.34),
+                (0.31, 0.19),
+                (0.45, 0.43),
+                (0.58, 0.24),
+                (0.71, 0.39),
+                (0.83, 0.21),
+            ];
+            for (index, (x_ratio, y_ratio)) in sparkle_points.into_iter().enumerate() {
+                let pulse =
+                    0.5 + 0.5 * (progress * std::f64::consts::TAU + index as f64 * 1.7).sin();
+                let alpha = 30 + (60.0 * pulse) as u8;
+                let length = 3 + (3.0 * pulse) as isize;
+                let x = (image.width as f64 * x_ratio) as isize;
+                let y = (image.height as f64 * y_ratio) as isize;
+                draw_line(
+                    image,
+                    (x - length, y),
+                    (x + length, y),
+                    [highlight.0, highlight.1, highlight.2, alpha],
+                );
+                draw_line(
+                    image,
+                    (x, y - length),
+                    (x, y + length),
+                    [highlight.0, highlight.1, highlight.2, alpha],
+                );
+            }
+        }
+        "ghost_tunnel" => {
+            draw_soft_pinnacle_glow(
+                image,
+                (
+                    (image.width as f64 * (0.88 - 0.04 * eased)) as isize,
+                    (image.height as f64 * 0.46) as isize,
+                ),
+                48,
+                highlight,
+                18,
+            );
+            let drift = (10.0 * eased) as isize;
+            for offset in [0_isize, 24, 49] {
+                draw_arc(
+                    image,
+                    (-70 + offset + drift, 70 + offset),
+                    (180 + offset + drift, image.height as isize + 75),
+                    205.0,
+                    326.0,
+                    [highlight.0, highlight.1, highlight.2, 42],
+                );
+            }
+        }
+        "map_fold" => {
+            let sweep_x = (-40.0 + (image.width as f64 + 80.0) * eased) as isize;
+            draw_line(
+                image,
+                (sweep_x - 58, 0),
+                (sweep_x + 26, image.height as isize),
+                [highlight.0, highlight.1, highlight.2, 58],
+            );
+            draw_line(
+                image,
+                (sweep_x - 76, 0),
+                (sweep_x + 8, image.height as isize),
+                [accent.0, accent.1, accent.2, 30],
+            );
+            for (node_index, y) in [48_isize, 103, 158, 217].into_iter().enumerate() {
+                let x = sweep_x - 42 + node_index as isize * 20;
+                draw_ellipse(
+                    image,
+                    (x, y),
+                    (3, 3),
+                    [highlight.0, highlight.1, highlight.2, 70],
+                    false,
+                );
+            }
+        }
+        "heat_gear" => {
+            let cx = image.width as isize / 2;
+            let cy = (image.height as f64 * 0.46) as isize;
+            let spread = 52 + (8.0 * eased) as isize;
+            for offset in [0_isize, 16] {
+                draw_arc(
+                    image,
+                    (cx - spread - offset, cy - 28 - offset),
+                    (cx + spread + offset, cy + 34 + offset),
+                    202.0,
+                    338.0,
+                    [
+                        highlight.0,
+                        highlight.1,
+                        highlight.2,
+                        40_u8.saturating_sub(offset as u8),
+                    ],
+                );
+            }
+        }
+        _ => {}
+    }
+    if secret {
+        draw_soft_pinnacle_glow(
+            image,
+            (image.width as isize / 2, image.height as isize / 2),
+            68,
+            highlight,
+            24 + (16.0 * eased) as u8,
+        );
+        draw_pinnacle_motes(
+            image,
+            &format!("{effect}:secret"),
+            accent,
+            highlight,
+            progress,
+            8,
+        );
+    }
+}
+
+fn draw_pinnacle_motes(
+    image: &mut RgbaImage,
+    seed_text: &str,
+    accent: (u8, u8, u8),
+    highlight: (u8, u8, u8),
+    progress: f64,
+    count: usize,
+) {
+    let mut rng = DeterministicRng::new(stable_hash(format!("pinnacle:{seed_text}").as_bytes()));
+    let width = image.width as isize;
+    let height = image.height as isize;
+    for mote_index in 0..count {
+        let x = rng.range(18, (width - 18).max(18));
+        let start_y = rng.range(height / 3, height + 18);
+        let travel = rng.range(height / 5, height / 2);
+        let y = start_y - (travel as f64 * progress) as isize;
+        if !(-5..=height + 5).contains(&y) {
+            continue;
+        }
+        let radius = [1_isize, 1, 2, 2, 3][rng.range(0, 4) as usize];
+        let alpha = rng.range(55, 105) as u8;
+        let color = if mote_index % 4 == 0 {
+            highlight
+        } else {
+            accent
+        };
+        draw_ellipse(
+            image,
+            (x, y),
+            (radius, radius),
+            [color.0, color.1, color.2, alpha],
+            true,
+        );
+        if mote_index % 6 == 0 {
+            draw_line(
+                image,
+                (x - radius - 2, y),
+                (x + radius + 2, y),
+                [highlight.0, highlight.1, highlight.2, alpha / 2],
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    const fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0xa076_1d64_78bd_642f,
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_add(0xe703_7ed1_a0b4_28db)
+            .rotate_left(17)
+            ^ 0x8ebc_6af0_9c88_c6e3;
+        self.state
+            .wrapping_mul(0xd6e8_feb8_6659_fd93)
+            .rotate_left(29)
+    }
+
+    fn range(&mut self, lower: isize, upper: isize) -> isize {
+        if upper <= lower {
+            return lower;
+        }
+        lower + (self.next() % u64::try_from(upper - lower + 1).unwrap_or(1)) as isize
+    }
+}
+
+fn draw_soft_pinnacle_glow(
+    image: &mut RgbaImage,
+    center: (isize, isize),
+    radius: usize,
+    color: (u8, u8, u8),
+    alpha: u8,
+) {
+    let mut glow = RgbaImage::new(image.width, image.height, [0, 0, 0, 0]).expect("fixed glow");
+    draw_ellipse(
+        &mut glow,
+        center,
+        (radius as isize, radius as isize),
+        [color.0, color.1, color.2, alpha],
+        true,
+    );
+    glow.blur(radius.saturating_div(3).max(1));
+    image.alpha_composite(&glow);
+}
+
+fn draw_ellipse(
+    image: &mut RgbaImage,
+    center: (isize, isize),
+    radii: (isize, isize),
+    color: [u8; 4],
+    filled: bool,
+) {
+    let (radius_x, radius_y) = (radii.0.max(1), radii.1.max(1));
+    let min_y = center.1 - radius_y;
+    let max_y = center.1 + radius_y;
+    let min_x = center.0 - radius_x;
+    let max_x = center.0 + radius_x;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = (x - center.0) as f64 / radius_x as f64;
+            let dy = (y - center.1) as f64 / radius_y as f64;
+            let distance = dx * dx + dy * dy;
+            if filled {
+                if distance <= 1.0 {
+                    image.blend_pixel(x, y, color);
+                }
+            } else if (0.72..=1.0).contains(&distance) {
+                image.blend_pixel(x, y, color);
+            }
+        }
+    }
+}
+
+fn draw_line(image: &mut RgbaImage, start: (isize, isize), end: (isize, isize), color: [u8; 4]) {
+    let (mut x0, mut y0) = start;
+    let dx = (end.0 - x0).abs();
+    let sx = if x0 < end.0 { 1 } else { -1 };
+    let dy = -(end.1 - y0).abs();
+    let sy = if y0 < end.1 { 1 } else { -1 };
+    let mut error = dx + dy;
+    loop {
+        image.blend_pixel(x0, y0, color);
+        if (x0, y0) == end {
+            break;
+        }
+        let twice = 2 * error;
+        if twice >= dy {
+            error += dy;
+            x0 += sx;
+        }
+        if twice <= dx {
+            error += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn draw_arc(
+    image: &mut RgbaImage,
+    bounds_min: (isize, isize),
+    bounds_max: (isize, isize),
+    start_degrees: f64,
+    end_degrees: f64,
+    color: [u8; 4],
+) {
+    let center_x = (bounds_min.0 + bounds_max.0) as f64 / 2.0;
+    let center_y = (bounds_min.1 + bounds_max.1) as f64 / 2.0;
+    let radius_x = (bounds_max.0 - bounds_min.0).unsigned_abs() as f64 / 2.0;
+    let radius_y = (bounds_max.1 - bounds_min.1).unsigned_abs() as f64 / 2.0;
+    let steps = ((end_degrees - start_degrees).abs() as usize).max(1) * 2;
+    let mut previous = None;
+    for step in 0..=steps {
+        let degrees = start_degrees + (end_degrees - start_degrees) * step as f64 / steps as f64;
+        let radians = degrees.to_radians();
+        let point = (
+            (center_x + radius_x * radians.cos()) as isize,
+            (center_y + radius_y * radians.sin()) as isize,
+        );
+        if let Some(previous) = previous {
+            draw_line(image, previous, point, color);
+        }
+        previous = Some(point);
     }
 }
 
@@ -471,6 +835,41 @@ fn quantize(image: &RgbaImage) -> Vec<u8> {
         .collect()
 }
 
+fn lanczos_weights(source_size: usize, target_size: usize) -> Vec<Vec<(usize, f64)>> {
+    let scale = source_size as f64 / target_size as f64;
+    let filter_scale = scale.max(1.0);
+    let support = 3.0 * filter_scale;
+    (0..target_size)
+        .map(|target| {
+            let center = (target as f64 + 0.5) * scale - 0.5;
+            let first = (center - support).floor() as isize;
+            let last = (center + support).ceil() as isize;
+            let mut weights = Vec::new();
+            for source in first..=last {
+                let distance = (center - source as f64) / filter_scale;
+                let weight = lanczos_kernel(distance);
+                if weight == 0.0 {
+                    continue;
+                }
+                let clamped = source.clamp(0, source_size as isize - 1) as usize;
+                weights.push((clamped, weight));
+            }
+            weights
+        })
+        .collect()
+}
+
+fn lanczos_kernel(value: f64) -> f64 {
+    if value.abs() < f64::EPSILON {
+        return 1.0;
+    }
+    if value.abs() >= 3.0 {
+        return 0.0;
+    }
+    let pi_value = std::f64::consts::PI * value;
+    (pi_value.sin() / pi_value) * ((pi_value / 3.0).sin() / (pi_value / 3.0))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RgbaImage {
     width: usize,
@@ -514,6 +913,51 @@ impl RgbaImage {
         self.pixels[at + 3] = self.pixels[at + 3].max(color[3]);
     }
 
+    fn blend_pixel(&mut self, x: isize, y: isize, color: [u8; 4]) {
+        let Ok(x) = usize::try_from(x) else {
+            return;
+        };
+        let Ok(y) = usize::try_from(y) else {
+            return;
+        };
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let at = (y * self.width + x) * 4;
+        let source_alpha = u32::from(color[3]);
+        let destination_alpha = u32::from(self.pixels[at + 3]);
+        if source_alpha == 0 {
+            return;
+        }
+        if source_alpha == 255 && destination_alpha == 0 {
+            self.pixels[at..at + 4].copy_from_slice(&color);
+            return;
+        }
+        let inverse = 255 - source_alpha;
+        let output_alpha = source_alpha + (destination_alpha * inverse + 127) / 255;
+        for (channel, source) in color[..3].iter().enumerate() {
+            let numerator = u32::from(*source) * source_alpha
+                + u32::from(self.pixels[at + channel]) * destination_alpha * inverse / 255;
+            self.pixels[at + channel] = ((numerator + output_alpha / 2) / output_alpha) as u8;
+        }
+        self.pixels[at + 3] = output_alpha as u8;
+    }
+
+    fn alpha_composite(&mut self, overlay: &Self) {
+        if self.width != overlay.width || self.height != overlay.height {
+            return;
+        }
+        for (index, pixel) in overlay.pixels.chunks_exact(4).enumerate() {
+            let x = index % self.width;
+            let y = index / self.width;
+            self.blend_pixel(
+                x as isize,
+                y as isize,
+                pixel.try_into().expect("RGBA pixel"),
+            );
+        }
+    }
+
     fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: [u8; 4]) {
         for row in y..y.saturating_add(height).min(self.height) {
             for column in x..x.saturating_add(width).min(self.width) {
@@ -536,6 +980,127 @@ impl RgbaImage {
             }
         }
         resized
+    }
+
+    fn resize_lanczos(&self, width: usize, height: usize) -> Self {
+        if self.width == width && self.height == height {
+            return self.clone();
+        }
+        if width == 0 || height == 0 || self.width == 0 || self.height == 0 {
+            return Self::new(width, height, [0, 0, 0, 0]).expect("bounded resize");
+        }
+        let x_weights = lanczos_weights(self.width, width);
+        let y_weights = lanczos_weights(self.height, height);
+        let mut resized = Self::new(width, height, [0, 0, 0, 0]).expect("bounded resize");
+        for (y, y_weights_for_pixel) in y_weights.iter().enumerate().take(height) {
+            for (x, x_weights_for_pixel) in x_weights.iter().enumerate().take(width) {
+                let mut channels = [0.0_f64; 4];
+                let mut total_weight = 0.0_f64;
+                for &(source_y, y_weight) in y_weights_for_pixel {
+                    for &(source_x, x_weight) in x_weights_for_pixel {
+                        let weight = x_weight * y_weight;
+                        let source = (source_y * self.width + source_x) * 4;
+                        for (channel, value) in channels.iter_mut().enumerate() {
+                            *value += f64::from(self.pixels[source + channel]) * weight;
+                        }
+                        total_weight += weight;
+                    }
+                }
+                let target = (y * width + x) * 4;
+                if total_weight.abs() > f64::EPSILON {
+                    for (channel, value) in channels.iter().enumerate() {
+                        resized.pixels[target + channel] = round_channel(*value / total_weight);
+                    }
+                }
+            }
+        }
+        resized
+    }
+
+    fn blur(&mut self, radius: usize) {
+        if radius == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+        // Three box passes are a close, bounded approximation to Pillow's
+        // GaussianBlur while keeping native rendering independent of a large
+        // image-processing dependency.
+        for _ in 0..3 {
+            self.box_blur(radius);
+        }
+    }
+
+    fn box_blur(&mut self, radius: usize) {
+        let mut horizontal = vec![0_u8; self.pixels.len()];
+        for y in 0..self.height {
+            let mut sums = [0_u32; 4];
+            let mut count = 0_u32;
+            let initial_end = (radius + 1).min(self.width);
+            for x in 0..initial_end {
+                let at = (y * self.width + x) * 4;
+                for (channel, sum) in sums.iter_mut().enumerate() {
+                    *sum += u32::from(self.pixels[at + channel]);
+                }
+                count += 1;
+            }
+            for x in 0..self.width {
+                if x > radius {
+                    let at = (y * self.width + x - radius - 1) * 4;
+                    for (channel, sum) in sums.iter_mut().enumerate() {
+                        *sum -= u32::from(self.pixels[at + channel]);
+                    }
+                    count -= 1;
+                }
+                let add_x = x + radius + 1;
+                if add_x < self.width {
+                    let at = (y * self.width + add_x) * 4;
+                    for (channel, sum) in sums.iter_mut().enumerate() {
+                        *sum += u32::from(self.pixels[at + channel]);
+                    }
+                    count += 1;
+                }
+                let at = (y * self.width + x) * 4;
+                for (channel, sum) in sums.iter().enumerate() {
+                    horizontal[at + channel] = ((*sum + count / 2) / count) as u8;
+                }
+            }
+        }
+        let original = std::mem::replace(&mut self.pixels, horizontal);
+        let mut vertical = vec![0_u8; original.len()];
+        for x in 0..self.width {
+            let mut sums = [0_u32; 4];
+            let mut count = 0_u32;
+            let initial_end = (radius + 1).min(self.height);
+            for y in 0..initial_end {
+                let at = (y * self.width + x) * 4;
+                for (channel, sum) in sums.iter_mut().enumerate() {
+                    *sum += u32::from(self.pixels[at + channel]);
+                }
+                count += 1;
+            }
+            for y in 0..self.height {
+                if y > radius {
+                    let at = ((y - radius - 1) * self.width + x) * 4;
+                    for (channel, sum) in sums.iter_mut().enumerate() {
+                        *sum -= u32::from(self.pixels[at + channel]);
+                    }
+                    count -= 1;
+                }
+                let add_y = y + radius + 1;
+                if add_y < self.height {
+                    let at = (add_y * self.width + x) * 4;
+                    for (channel, sum) in sums.iter_mut().enumerate() {
+                        *sum += u32::from(self.pixels[at + channel]);
+                    }
+                    count += 1;
+                }
+                let at = (y * self.width + x) * 4;
+                for (channel, sum) in sums.iter().enumerate() {
+                    vertical[at + channel] = ((*sum + count / 2) / count) as u8;
+                }
+            }
+        }
+        self.pixels = vertical;
+        drop(original);
     }
 
     fn blit(&mut self, x: usize, y: usize, source: &Self) {

@@ -481,37 +481,174 @@ pub struct GifAsset {
 
 impl GifAsset {
     #[must_use]
-    pub fn terminal_crash() -> Self {
+    pub fn terminal_crash(name: &str, filing_number: u32) -> Self {
+        // Pillow stores GIF delays in centiseconds, so its 80, 85, ... 175 ms
+        // phase is decoded as 80, 80, 90, ... 170 ms.  Keep the encoded
+        // timings here so the Rust asset has the same 58-frame/68.1-second
+        // playback contract as create_terminal_crash_gif.
         let mut durations = vec![120; 10];
-        durations.extend(vec![145; 46]);
-        durations.push(230);
+        durations.extend((0..20).map(|frame| 80 + (frame / 2) * 10));
+        durations.extend([60; 20]);
+        // Pillow coalesces the five identical black frames into one 1.1 s
+        // frame and the blank reboot line into its preceding frame.  Encode
+        // the same optimized 58-frame sequence rather than retaining
+        // invisible duplicate frames in the Rust GIF.
+        durations.push(1_100);
+        durations.extend([300; 4]);
+        durations.push(600);
+        durations.push(300);
         durations.push(60_000);
-        render_neon_animation("terminal_crash", &durations, 0x7e7e, |frame, canvas| {
-            if frame < 10 {
-                canvas.text_centered("JOPA-T/v3.7", 70, COLOR_GREEN, 2);
-                canvas.text_centered("SYSTEM FAILURE", 120, COLOR_RED, 2);
-                canvas.text_centered("RECONCILING...", 170, COLOR_YELLOW, 1);
-            } else if frame < 56 {
-                canvas.text_centered(
-                    if frame.is_multiple_of(3) {
-                        "KERNEL PANIC"
-                    } else if frame.is_multiple_of(2) {
-                        "FATAL ERROR"
+
+        let mut random = RollSource::seeded(scene_seed(&(name, filing_number)));
+        render_neon_animation(
+            "terminal_crash",
+            &durations,
+            scene_seed(&(name, filing_number, "terminal_crash")),
+            |frame, canvas| {
+                if frame < 10 {
+                    canvas.text_centered("JOPA-T/v3.7 TERMINAL", 20, COLOR_GREEN, 2);
+                    canvas.text_left(
+                        &format!("> Processing filing #{filing_number}..."),
+                        20,
+                        60,
+                        COLOR_DIM_GREEN,
+                        1,
+                    );
+                    canvas.text_left(&format!("> Debtor: {name}"), 20, 80, COLOR_DIM_GREEN, 1);
+                    canvas.text_left("> Status: PROCESSING", 20, 100, COLOR_YELLOW, 1);
+                    if frame.is_multiple_of(2) {
+                        canvas.text_left("> _", 20, 120, COLOR_GREEN, 1);
+                    }
+                    return;
+                }
+
+                if frame < 30 {
+                    let phase_frame = frame - 10;
+                    let intensity = phase_frame as f64 / 20.0;
+                    let header = corrupt_text("JOPA-T/v3.7 TERMINAL", intensity * 0.5, &mut random);
+                    let header_color = if phase_frame < 7 {
+                        COLOR_GREEN
+                    } else if phase_frame < 14 {
+                        COLOR_YELLOW
                     } else {
-                        "TERMINAL UNRESPONSIVE"
-                    },
-                    120,
-                    COLOR_RED,
-                    2,
-                );
-                canvas.text_centered("BANKRUPTCY PROTOCOL", 165, COLOR_YELLOW, 1);
-            } else {
-                canvas.text_left("> JOPA-T/v3.7 REBOOTING...", 20, 45, COLOR_GREEN, 1);
-                canvas.text_left("> LEDGER INTEGRITY... OK", 20, 75, COLOR_DIM_GREEN, 1);
-                canvas.text_left("> SYSTEM ENDURES.", 20, 120, COLOR_GREEN, 1);
-                canvas.text_left("> IT ALWAYS DOES.", 20, 145, COLOR_DIM_GREEN, 1);
-            }
-        })
+                        COLOR_RED
+                    };
+                    canvas.text_centered(&header, 20, header_color, 2);
+
+                    let visible_errors = (phase_frame / 2 + 1).min(8);
+                    for error_index in 0..visible_errors {
+                        let original = match error_index {
+                            0 => "ERR: COMPASSION_MODULE overflow".to_owned(),
+                            1 => "WARN: Dignity buffer underrun".to_owned(),
+                            2 => "ERR: Faith_in_humanity.dll CORRUPT".to_owned(),
+                            3 => "FATAL: Too many bankruptcies".to_owned(),
+                            4 => format!("ERR: Cannot process filing #{filing_number}"),
+                            5 => "WARN: System patience EXCEEDED".to_owned(),
+                            6 => "ERR: STACK OVERFLOW in empathy.c".to_owned(),
+                            _ => "SEGFAULT at 0xDEADBEEF".to_owned(),
+                        };
+                        let displayed = if random.sample() < intensity * 0.3 {
+                            corrupt_text(&original, 0.4, &mut random)
+                        } else {
+                            original
+                        };
+                        let color = if displayed.contains("FATAL") || displayed.contains("SEGFAULT")
+                        {
+                            COLOR_RED
+                        } else {
+                            COLOR_YELLOW
+                        };
+                        canvas.text_left(&displayed, 20, 60 + error_index as i32 * 16, color, 1);
+                    }
+
+                    if phase_frame > 10 {
+                        let glitch_bands = 3 + (random.sample() * 8.0) as i32;
+                        for band in 0..glitch_bands {
+                            let y = (random.sample() * 290.0) as i32;
+                            let offset = (random.sample() * 31.0) as i32 - 15;
+                            let color = if band % 2 == 0 {
+                                COLOR_DARK_RED
+                            } else {
+                                COLOR_DIM_GREEN
+                            };
+                            canvas.fill_rect(offset, y, offset + 70, y + 2, color);
+                        }
+                    }
+                    return;
+                }
+
+                if frame < 50 {
+                    let phase_frame = frame - 30;
+                    let block_count = 10 + phase_frame * 3;
+                    for _ in 0..block_count {
+                        let left = (random.sample() * 360.0) as i32;
+                        let top = (random.sample() * 290.0) as i32;
+                        let width = 10 + (random.sample() * 50.0) as i32;
+                        let height = 2 + (random.sample() * 6.0) as i32;
+                        let color = match (random.sample() * 4.0) as u8 {
+                            0 => COLOR_RED,
+                            1 => COLOR_GREEN,
+                            2 => COLOR_PINK,
+                            _ => COLOR_CYAN,
+                        };
+                        canvas.fill_rect(left, top, left + width, top + height, color);
+                    }
+
+                    if random.sample() > 0.3 {
+                        let crash_text = match (random.sample() * 5.0) as u8 {
+                            0 => "SYSTEM FAILURE".to_owned(),
+                            1 => "KERNEL PANIC".to_owned(),
+                            2 => "FATAL ERROR".to_owned(),
+                            3 => format!("BANKRUPTCY #{filing_number} CAUSED CRASH"),
+                            _ => "TERMINAL UNRESPONSIVE".to_owned(),
+                        };
+                        let y = 80 + (random.sample() * 120.0) as i32;
+                        canvas.text_centered(&crash_text, y, COLOR_RED, 2);
+                    }
+                    return;
+                }
+
+                if frame == 50 {
+                    // Python deliberately holds a black screen before reboot.
+                    canvas.fill(COLOR_BLACK);
+                    return;
+                }
+
+                let reboot_lines = [
+                    "JOPA-T/v3.7 REBOOTING...".to_owned(),
+                    "Memory check... OK".to_owned(),
+                    "Ledger integrity... OK".to_owned(),
+                    format!("Bankruptcy #{filing_number}... FILED"),
+                    format!("Client {name}... NOTED"),
+                    String::new(),
+                    "The system endures.".to_owned(),
+                    "It always does.".to_owned(),
+                ];
+                let visible_lines = match frame {
+                    51 => 1,
+                    52 => 2,
+                    53 => 3,
+                    54 => 4,
+                    55 => 5,
+                    // The sixth Python logical frame only repeats the fifth
+                    // frame (its line is empty), so Pillow folds its delay
+                    // into frame 55.
+                    56 => 7,
+                    _ => 8,
+                };
+                for (line_index, line) in reboot_lines.iter().enumerate().take(visible_lines) {
+                    if !line.is_empty() {
+                        let color = match line_index {
+                            0 | 6 => COLOR_GREEN,
+                            3 => COLOR_RED,
+                            4 => COLOR_YELLOW,
+                            _ => COLOR_DIM_GREEN,
+                        };
+                        canvas.text_left(line, 20, 40 + line_index as i32 * 18, color, 1);
+                    }
+                }
+            },
+        )
     }
 
     #[must_use]
@@ -528,6 +665,7 @@ const NEON_GIF_PIXELS: usize = NEON_GIF_WIDTH as usize * NEON_GIF_HEIGHT as usiz
 pub(crate) const COLOR_BLACK: u8 = 0;
 pub(crate) const COLOR_GREEN: u8 = 1;
 pub(crate) const COLOR_CYAN: u8 = 2;
+pub(crate) const COLOR_PINK: u8 = 3;
 pub(crate) const COLOR_RED: u8 = 4;
 pub(crate) const COLOR_YELLOW: u8 = 5;
 pub(crate) const COLOR_DIM_GREEN: u8 = 6;
@@ -1796,15 +1934,39 @@ impl NeonDegenService {
         debt_cleared: i64,
         filing_number: u32,
     ) -> Option<NeonResult> {
+        let display_name = client_name(discord_id);
+        self.on_bankruptcy_named(
+            discord_id,
+            guild_id,
+            &display_name,
+            debt_cleared,
+            filing_number,
+        )
+    }
+
+    /// Named bankruptcy hook for runtime adapters that already resolved the
+    /// Discord display name.  The source-compatible `on_bankruptcy` wrapper
+    /// above retains the deterministic client placeholder used by offline
+    /// callers while production adapters can preserve the Python name input.
+    #[must_use]
+    pub fn on_bankruptcy_named(
+        &mut self,
+        discord_id: u64,
+        guild_id: Option<u64>,
+        display_name: &str,
+        debt_cleared: i64,
+        filing_number: u32,
+    ) -> Option<NeonResult> {
         if !self.enabled {
             return None;
         }
-        let text = render_bankruptcy_filing(&client_name(discord_id), debt_cleared, filing_number);
+        let text = render_bankruptcy_filing(display_name, debt_cleared, filing_number);
         self.set_cooldown(discord_id, guild_id);
         let result = if filing_number == 1 {
-            NeonResult::text(3, text).with_gif(create_void_welcome_gif(&client_name(discord_id)))
+            NeonResult::text(3, text).with_gif(create_void_welcome_gif(display_name))
         } else if filing_number >= 3 {
-            NeonResult::text(3, text).with_gif(GifAsset::terminal_crash())
+            NeonResult::text(3, text)
+                .with_gif(GifAsset::terminal_crash(display_name, filing_number))
         } else {
             NeonResult::text(2, text)
         };

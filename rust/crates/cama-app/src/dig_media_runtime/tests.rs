@@ -174,6 +174,115 @@ fn native_pinnacle_phase_media_play_once_and_remain_within_runtime_limits() {
 }
 
 #[test]
+fn pinnacle_phase_three_matches_python_timing_and_brightness_contract() {
+    let source = encode_png(
+        &RgbaImage::new(512, 288, [80, 50, 25, 255]).expect("pinnacle source"),
+        PixelMode::Rgba,
+    );
+    let rendered = pinnacle_phase(&source, "forgotten_king", 3, false).expect("native phase three");
+    assert_eq!(rendered.info.frame_count, 8);
+    assert_eq!(
+        rendered.info.frame_durations_ms,
+        [95; 7].into_iter().chain([1_500]).collect::<Vec<_>>()
+    );
+    assert_eq!(rendered.info.loop_count, None);
+
+    let prepared = prepare_pinnacle_base(
+        decode_image(&source, MediaFormat::Png)
+            .expect("decode pinnacle source")
+            .resize_lanczos(512, 288),
+        PINNACLE_THEMES[0].accent,
+    );
+    let first_unquantized = apply_pinnacle_brightness(&prepared, 0.96);
+    let last_unquantized = apply_pinnacle_brightness(&prepared, 1.02);
+    assert!(
+        last_unquantized.pixels[..3]
+            .iter()
+            .copied()
+            .map(u16::from)
+            .sum::<u16>()
+            > first_unquantized.pixels[..3]
+                .iter()
+                .copied()
+                .map(u16::from)
+                .sum::<u16>(),
+        "phase-3 brightness pulse must rise from factor .96 to 1.02"
+    );
+
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(&rendered.bytes))
+        .expect("decode native phase three");
+    let mut frames = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().expect("read native phase frame") {
+        frames.push(frame.buffer.to_vec());
+    }
+    assert_eq!(frames.len(), 8);
+    let changed_pixels = frames[0]
+        .chunks_exact(4)
+        .zip(frames[7].chunks_exact(4))
+        .filter(|(before, after)| before[..3] != after[..3])
+        .count();
+    assert!(
+        changed_pixels > 512 * 288 / 100,
+        "brightness and atmosphere should alter more than isolated particles"
+    );
+}
+
+#[test]
+fn pinnacle_atmosphere_has_each_python_theme_layer_and_secret_pass() {
+    for theme in PINNACLE_THEMES {
+        let mut first = RgbaImage::new(128, 72, [0, 0, 0, 0]).expect("atmosphere frame");
+        draw_pinnacle_atmosphere(
+            &mut first,
+            theme.effect,
+            theme.accent,
+            theme.highlight,
+            0.5,
+            false,
+        );
+        let mut last = RgbaImage::new(128, 72, [0, 0, 0, 0]).expect("atmosphere frame");
+        draw_pinnacle_atmosphere(
+            &mut last,
+            theme.effect,
+            theme.accent,
+            theme.highlight,
+            0.75,
+            true,
+        );
+        assert!(
+            first.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+            "{} must draw an atmosphere",
+            theme.effect
+        );
+        assert!(
+            last.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+            "{} secret pass must draw an atmosphere",
+            theme.effect
+        );
+        assert_ne!(first.pixels, last.pixels, "{} must animate", theme.effect);
+    }
+}
+
+#[test]
+fn pinnacle_source_resize_uses_lanczos_filter_instead_of_nearest_neighbor() {
+    let mut source = RgbaImage::new(2, 1, [0, 0, 0, 255]).expect("resize source");
+    source.set(1, 0, [255, 255, 255, 255]);
+    let resized = source.resize_lanczos(8, 1);
+    let red_values = resized
+        .pixels
+        .chunks_exact(4)
+        .map(|pixel| pixel[0])
+        .collect::<Vec<_>>();
+    assert!(red_values.iter().any(|value| *value > 0 && *value < 255));
+    assert!(
+        red_values.windows(2).any(|window| window[0] != window[1]),
+        "filtered resize should preserve a smooth transition"
+    );
+}
+
+#[test]
 fn longest_dig_animation_uses_a_constant_bounded_global_palette() {
     const LONGEST_CANONICAL_FRAME_COUNT: usize = 34;
     assert_eq!(SCENE_SIZE, (320, 180));

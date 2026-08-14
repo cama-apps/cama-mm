@@ -2190,8 +2190,14 @@ impl BettingInteractionHandler {
             "economy invest" => self.invest(user_id, guild_id, &options, &responder).await,
             "economy paydebt" => self.paydebt(user_id, guild_id, &options, &responder).await,
             "economy bankruptcy" => {
-                self.bankruptcy(user_id, guild_id, channel_id, &responder)
-                    .await
+                self.bankruptcy(
+                    user_id,
+                    &user_display_name,
+                    guild_id,
+                    channel_id,
+                    &responder,
+                )
+                .await
             }
             "economy loan" => {
                 self.loan(user_id, guild_id, channel_id, &options, &responder)
@@ -3731,6 +3737,7 @@ impl BettingInteractionHandler {
         &self,
         channel_id: Option<u64>,
         user_id: i64,
+        user_display_name: &str,
         guild_id: Option<i64>,
         debt_cleared: i64,
         filing_number: i64,
@@ -3748,7 +3755,13 @@ impl BettingInteractionHandler {
         let now = unix_seconds().unwrap_or_default();
         let result = self.neon.lock().ok().and_then(|mut neon| {
             neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
-            neon.on_bankruptcy(discord_id, Some(guild_id), debt_cleared, filing_number)
+            neon.on_bankruptcy_named(
+                discord_id,
+                Some(guild_id),
+                user_display_name,
+                debt_cleared,
+                filing_number,
+            )
         });
         let fired = result.is_some();
         if let Some(result) = result {
@@ -4351,6 +4364,7 @@ impl BettingInteractionHandler {
     async fn bankruptcy(
         &self,
         user_id: i64,
+        user_display_name: &str,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         responder: &Arc<dyn InteractionResponder>,
@@ -4448,7 +4462,14 @@ impl BettingInteractionHandler {
             && let Some((debt_cleared, filing_number)) = neon_data
         {
             let fired = self
-                .emit_bankruptcy_neon(channel_id, user_id, guild_id, debt_cleared, filing_number)
+                .emit_bankruptcy_neon(
+                    channel_id,
+                    user_id,
+                    user_display_name,
+                    guild_id,
+                    debt_cleared,
+                    filing_number,
+                )
                 .await;
             if !fired && let (Some(channel_id), Some(guild_id)) = (channel_id, guild_id) {
                 self.emit_gamba_milestone(channel_id, user_id, guild_id)

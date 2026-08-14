@@ -297,6 +297,19 @@ fn test_on_bankruptcy_high_layer_filing_3() {
 }
 
 #[test]
+fn test_named_bankruptcy_preserves_display_name_in_terminal_crash() {
+    let result = service()
+        .on_bankruptcy_named(123, Some(456), "Alice", 200, 3)
+        .expect("bankruptcy trigger");
+    let actual = result.gif_file.expect("terminal crash attachment");
+    assert_eq!(actual.bytes, GifAsset::terminal_crash("Alice", 3).bytes);
+    assert_ne!(
+        actual.bytes,
+        GifAsset::terminal_crash("Client-123", 3).bytes
+    );
+}
+
+#[test]
 fn test_cooldown_prevents_rapid_fire() {
     let mut service = service();
     assert!(service.on_bankruptcy(123, Some(456), 100, 2).is_some());
@@ -765,12 +778,29 @@ fn test_neon_frames_share_one_adaptive_palette() {
 
 #[test]
 fn test_terminal_crash_gif_preserves_frame_timing_and_seekability() {
-    let gif = GifAsset::terminal_crash();
+    let gif = GifAsset::terminal_crash("TestUser", 5);
     assert!(gif.upload_safe());
     assert_eq!(gif.frame_durations_ms.len(), 58);
     assert_eq!(&gif.frame_durations_ms[..10], &[120; 10]);
     assert_eq!(gif.frame_durations_ms.iter().sum::<u32>(), 68_100);
     assert_eq!(gif.frame_durations_ms.last(), Some(&60_000));
+}
+
+#[test]
+fn test_terminal_crash_gif_carries_bankruptcy_inputs_through_all_phases() {
+    let alice = GifAsset::terminal_crash("Alice", 5);
+    let bob = GifAsset::terminal_crash("Bob", 5);
+    let later_filing = GifAsset::terminal_crash("Alice", 6);
+
+    assert_ne!(alice.bytes, bob.bytes);
+    assert_ne!(alice.bytes, later_filing.bytes);
+    let (frames, durations) = decoded_neon_gif(&alice);
+    assert_eq!(frames.len(), 58);
+    assert_eq!(durations, alice.frame_durations_ms);
+    assert!(frames[0] != frames[9], "cursor phase should animate");
+    assert!(frames[30] != frames[49], "breakdown noise should animate");
+    assert!(frames[50].iter().all(|pixel| *pixel == COLOR_BLACK));
+    assert!(frames[57] != frames[50], "reboot must leave the black hold");
 }
 
 macro_rules! gif_upload_test {
