@@ -14,7 +14,9 @@ use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_m
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::NamedTempFile;
 
-pub use cama_app::{dig_loot, dig_runtime, dig_tunnels, economy_event_sqlite};
+pub use cama_app::{
+    dig_loot, dig_runtime, dig_tunnels, economy_event_service, economy_event_sqlite,
+};
 
 // The in-progress application runtime deliberately is not admitted through
 // cama-app/lib.rs yet.  Mirror the two private crate seams locally so this

@@ -24,7 +24,8 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 pub use cama_app::{
-    dig_bosses, dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_sqlite,
+    dig_bosses, dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service,
+    economy_event_sqlite,
 };
 
 // The event/abandon/prestige/social application paths are deliberately not
