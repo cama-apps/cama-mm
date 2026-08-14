@@ -30,12 +30,32 @@ DEPLOY = ROOT / "scripts" / "deploy-runtime"
 RUNTIME_COMPOSE = ROOT / "scripts" / "runtime-compose"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
 READINESS = ROOT / "rust" / "parity" / "cutover_readiness.tsv"
+REHEARSAL_PLAYER_ID = -9_999_999_991
+EXPECTED_MIGRATION_COUNT = sum(
+    bool(line.strip())
+    for line in (ROOT / "rust" / "schema" / "expected_migrations.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+MINIMUM_PRODUCTION_TABLE_COUNT = 80
+
+
+def project_python_command(*arguments: str) -> list[str]:
+    """Return a locked project Python command for full-schema initialization."""
+
+    configured = os.environ.get("CAMA_PARITY_PYTHON")
+    if configured:
+        return [configured, *arguments]
+    return ["uv", "run", "--locked", "python", *arguments]
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
 import os
+import re
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -108,11 +128,76 @@ if command == "tag":
     finish()
 
 if command == "build":
-    finish("standalone docker build is not expected without a source database", 48)
+    if len(arguments) != 8 or arguments[:2] != ["build", "--file"]:
+        finish("unexpected fake backup image build", 48)
+    expected = [
+        "build",
+        "--file",
+        "Dockerfile",
+        "--build-arg",
+        f"GIT_SHA={event['git_sha']}",
+        "--tag",
+        arguments[6],
+        ".",
+    ]
+    if arguments != expected or not re.fullmatch(
+        r"cama-mm-python-backup:\d{8}T\d{6}Z", arguments[6]
+    ):
+        finish("unexpected fake backup image build arguments", 48)
+    state["backup_image"] = arguments[6]
+    finish()
 
 if command == "run":
-    state["unexpected_direct_run"] = True
-    finish("standalone docker run would start the Python backup helper", 49)
+    command_arguments = arguments[1:]
+    expected_prefix = [
+        "--rm",
+        "--volume",
+        f"{state['data_mount']}:/app/data",
+        "--entrypoint",
+        "python",
+        state.get("backup_image"),
+        "/app/scripts/sqlite_backup.py",
+        "/app/data/cama_shuffle.db",
+    ]
+    if len(command_arguments) != 9 or command_arguments[:8] != expected_prefix:
+        state["unexpected_direct_run"] = True
+        finish("unexpected fake backup helper invocation", 49)
+    destination = command_arguments[8]
+    if not re.fullmatch(
+        r"/app/data/backups/predeploy-\d{8}T\d{6}Z\.db", destination
+    ):
+        state["unexpected_direct_run"] = True
+        finish("unexpected fake backup destination", 49)
+    source_path = Path(state["data_mount"]) / "cama_shuffle.db"
+    destination_path = Path(state["data_mount"]) / destination.removeprefix("/app/data/")
+    source = sqlite3.connect(source_path, timeout=30)
+    try:
+        if source.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
+            finish("fake backup source did not use WAL", 49)
+        source.execute("PRAGMA wal_autocheckpoint=0")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path.cwd() / "scripts" / "sqlite_backup.py"),
+                str(source_path),
+                str(destination_path),
+            ],
+            cwd=Path.cwd(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        source.close()
+    if completed.returncode != 0:
+        finish(completed.stderr, 49)
+    state["backup"] = {
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "metadata": str(destination_path) + ".json",
+    }
+    state["backup_runs"] = state.get("backup_runs", 0) + 1
+    finish(completed.stdout.strip())
 
 if command != "compose":
     finish(f"unsupported fake docker command: {command}", 50)
@@ -228,30 +313,36 @@ def run_backup(source: Path, destination: Path) -> subprocess.CompletedProcess[s
     )
 
 
+def create_current_schema_database(path: Path) -> None:
+    """Create a disposable database through the retained Python migrations."""
+
+    migration_code = (
+        "import sys; from database import Database; "
+        "database = Database(sys.argv[1]); database.close()"
+    )
+    completed = subprocess.run(
+        project_python_command("-c", migration_code, str(path)),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+            (REHEARSAL_PLAYER_ID, "operational-rehearsal"),
+        )
+        connection.commit()
+
+
 def create_wal_source(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path)
+    """Open a current-schema source with a live WAL writer for backup tests."""
+
+    create_current_schema_database(path)
+    connection = sqlite3.connect(path, timeout=30)
     assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
     connection.execute("PRAGMA wal_autocheckpoint=0")
-    connection.executescript(
-        """
-        CREATE TABLE schema_migrations (
-            name TEXT PRIMARY KEY,
-            applied_at TEXT NOT NULL
-        );
-        CREATE TABLE rehearsal_state (
-            id INTEGER PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        """
-    )
-    connection.executemany(
-        "INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)",
-        [(f"migration_{index}", "2026-08-13T00:00:00Z") for index in range(4)],
-    )
-    connection.execute(
-        "INSERT INTO rehearsal_state(id, value) VALUES (1, 'before-deploy')"
-    )
-    connection.commit()
     return connection
 
 
@@ -264,6 +355,15 @@ def assert_backup_contract() -> None:
         try:
             wal_path = Path(f"{source_path}-wal")
             assert wal_path.exists(), "source fixture must contain uncheckpointed WAL data"
+            migration_count = source.execute(
+                "SELECT COUNT(*) FROM schema_migrations"
+            ).fetchone()[0]
+            table_count = source.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone()[0]
+            assert migration_count == EXPECTED_MIGRATION_COUNT, migration_count
+            assert table_count >= MINIMUM_PRODUCTION_TABLE_COUNT, table_count
 
             first = run_backup(source_path, backup_path)
             assert first.returncode == 0, first.stderr
@@ -276,16 +376,25 @@ def assert_backup_contract() -> None:
             assert metadata["quick_check"] == "ok"
             assert metadata["source"] == str(source_path.resolve())
             assert metadata["backup"] == str(backup_path.resolve())
-            assert metadata["schema_migration_count"] == 4
+            assert metadata["schema_migration_count"] == migration_count
             assert metadata["size_bytes"] == backup_path.stat().st_size
             assert metadata["sha256"] == digest(backup_path)
 
             with sqlite3.connect(backup_path) as backup:
                 assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
-                assert backup.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (4,)
-                assert backup.execute("SELECT value FROM rehearsal_state").fetchone() == (
-                    "before-deploy",
+                assert backup.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+                    migration_count,
                 )
+                assert backup.execute(
+                    "SELECT discord_username FROM players WHERE discord_id = ?",
+                    (REHEARSAL_PLAYER_ID,),
+                ).fetchone() == (
+                    "operational-rehearsal",
+                )
+                assert backup.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone() == (table_count,)
 
             backup_bytes = backup_path.read_bytes()
             metadata_bytes = metadata_path.read_bytes()
@@ -294,15 +403,20 @@ def assert_backup_contract() -> None:
             # Keep the source writer open and mutate the source after the
             # backup.  The copied snapshot must remain the pre-deploy view.
             source.execute(
-                "INSERT INTO rehearsal_state(id, value) VALUES (2, 'after-deploy-write')"
+                "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+                (REHEARSAL_PLAYER_ID - 1, "after-backup-write"),
             )
             source.commit()
-            assert source.execute("SELECT COUNT(*) FROM rehearsal_state").fetchone() == (2,)
+            assert source.execute(
+                "SELECT COUNT(*) FROM players WHERE discord_id < 0"
+            ).fetchone() == (2,)
             assert backup_path.read_bytes() == backup_bytes
             assert metadata_path.read_bytes() == metadata_bytes
             assert digest(backup_path) == backup_digest
             with sqlite3.connect(backup_path) as backup:
-                assert backup.execute("SELECT COUNT(*) FROM rehearsal_state").fetchone() == (1,)
+                assert backup.execute(
+                    "SELECT COUNT(*) FROM players WHERE discord_id < 0"
+                ).fetchone() == (1,)
 
             # A second invocation against the same destination must fail
             # closed and must not alter either artifact.
@@ -376,12 +490,17 @@ def prepare_deploy_fixture(
 
     copied_deploy = scripts / "deploy-runtime"
     copied_compose = scripts / "runtime-compose"
+    copied_backup = scripts / "sqlite_backup.py"
     shutil.copy2(DEPLOY, copied_deploy)
     shutil.copy2(RUNTIME_COMPOSE, copied_compose)
+    shutil.copy2(BACKUP, copied_backup)
     assert copied_deploy.read_bytes() == DEPLOY.read_bytes()
     assert copied_compose.read_bytes() == RUNTIME_COMPOSE.read_bytes()
+    assert copied_backup.read_bytes() == BACKUP.read_bytes()
     shutil.copy2(ROOT / "docker-compose.yml", fixture / "docker-compose.yml")
     shutil.copy2(ROOT / "docker-compose.rust.yml", fixture / "docker-compose.rust.yml")
+    database_path = data / "cama_shuffle.db"
+    create_current_schema_database(database_path)
     (parity / "cutover_readiness.tsv").write_text(
         readiness_manifest(readiness_status), encoding="utf-8"
     )
@@ -403,6 +522,10 @@ def prepare_deploy_fixture(
                 "data_mount": str(data),
                 "events": [],
                 "unexpected_direct_run": False,
+                "backup_runs": 0,
+                "backup": None,
+                "backup_image": None,
+                "rehearsal_player_id": REHEARSAL_PLAYER_ID,
                 "tags": {
                     f"cama-mm-bot-{initial_runtime}": f"sha256:initial-{initial_runtime}"
                 },
@@ -503,6 +626,72 @@ def assert_same_service_up(event: dict[str, object]) -> None:
     ]
 
 
+def assert_backup_survives_deploy(fixture: Path, state: dict[str, object]) -> None:
+    """Verify the deploy-time backup and its metadata remain immutable."""
+
+    assert state["backup_runs"] == 1
+    backup = state["backup"]
+    assert isinstance(backup, dict)
+    source_path = Path(str(backup["source"]))
+    backup_path = Path(str(backup["destination"]))
+    metadata_path = Path(str(backup["metadata"]))
+    assert source_path == fixture / "data" / "cama_shuffle.db"
+    assert backup_path == fixture / "data" / "backups" / backup_path.name
+    assert backup_path.is_file() and backup_path.stat().st_size > 0
+    assert metadata_path.is_file() and metadata_path.stat().st_size > 0
+
+    source_facts = sqlite3.connect(source_path)
+    try:
+        migration_count = source_facts.execute(
+            "SELECT COUNT(*) FROM schema_migrations"
+        ).fetchone()[0]
+        table_count = source_facts.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone()[0]
+    finally:
+        source_facts.close()
+    assert migration_count == EXPECTED_MIGRATION_COUNT
+    assert table_count >= MINIMUM_PRODUCTION_TABLE_COUNT
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["quick_check"] == "ok"
+    assert metadata["source"] == str(source_path.resolve())
+    assert metadata["backup"] == str(backup_path.resolve())
+    assert metadata["schema_migration_count"] == migration_count
+    assert metadata["size_bytes"] == backup_path.stat().st_size
+    assert metadata["sha256"] == digest(backup_path)
+    with sqlite3.connect(backup_path) as verified:
+        assert verified.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        assert verified.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            migration_count,
+        )
+        assert verified.execute(
+            "SELECT discord_username FROM players WHERE discord_id = ?",
+            (REHEARSAL_PLAYER_ID,),
+        ).fetchone() == ("operational-rehearsal",)
+        assert verified.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone() == (table_count,)
+
+    backup_bytes = backup_path.read_bytes()
+    metadata_bytes = metadata_path.read_bytes()
+    with sqlite3.connect(source_path) as source:
+        source.execute(
+            "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+            (REHEARSAL_PLAYER_ID - 1, "after-deploy-write"),
+        )
+        source.commit()
+    assert backup_path.read_bytes() == backup_bytes
+    assert metadata_path.read_bytes() == metadata_bytes
+    assert digest(backup_path) == metadata["sha256"]
+    with sqlite3.connect(backup_path) as verified:
+        assert verified.execute(
+            "SELECT COUNT(*) FROM players WHERE discord_id < 0"
+        ).fetchone() == (1,)
+
+
 def assert_deploy_runtime_rehearsal() -> None:
     with tempfile.TemporaryDirectory(prefix="cama-deploy-runtime-rehearsal-") as raw_dir:
         parent = Path(raw_dir)
@@ -524,6 +713,8 @@ def assert_deploy_runtime_rehearsal() -> None:
         assert result.returncode == 65
         assert "RUST_CUTOVER_CANDIDATE=true is required" in result.stderr
         assert state["events"] == []
+        assert state["backup_runs"] == 0
+        assert state["backup"] is None
 
         open_gate, open_gate_state = prepare_deploy_fixture(
             parent,
@@ -542,6 +733,8 @@ def assert_deploy_runtime_rehearsal() -> None:
         assert result.returncode == 65
         assert "cutover_readiness.tsv still has open gates" in result.stderr
         assert state["events"] == []
+        assert state["backup_runs"] == 0
+        assert state["backup"] is None
 
         failed, failed_state = prepare_deploy_fixture(
             parent,
@@ -570,8 +763,24 @@ def assert_deploy_runtime_rehearsal() -> None:
             "GIT_SHA=previous-python-sha",
             "DB_PATH=/app/data/cama_shuffle.db",
         ]
+        assert state["unexpected_direct_run"] is False
+        assert_backup_survives_deploy(failed, state)
         assert state["process_history"] == ["python", "cama-rust", "python"]
         events = state["events"]
+        backup_build = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "build"
+            and str(event["command_arguments"][0]) == "--file",
+            "build backup image",
+        )
+        backup_run = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and event["command_arguments"][0] == "--rm",
+            "run backup helper",
+        )
         build = compose_event(events, "build", "rust")
         preflight = compose_event(events, "run", "rust")
         candidate_up = compose_event(events, "up", "rust")
@@ -607,6 +816,7 @@ def assert_deploy_runtime_rehearsal() -> None:
             "restore retained image tag",
         )
         assert first_tag_index < events.index(build)
+        assert backup_build < backup_run < events.index(build)
         assert events.index(build) < events.index(preflight) < events.index(candidate_up)
         assert events.index(candidate_up) < health_index < events.index(rollback_config)
         assert events.index(rollback_config) < rollback_tag_index < events.index(rollback_up)
@@ -627,6 +837,8 @@ def assert_deploy_runtime_rehearsal() -> None:
         )
         assert result.returncode == 0, result.stderr
         assert "deployed BOT_RUNTIME=python GIT_SHA=python-restore-sha" in result.stdout
+        assert state["unexpected_direct_run"] is False
+        assert_backup_survives_deploy(restored, state)
         assert state["current"] == {
             "id": "python-container-1",
             "runtime": "python",
@@ -672,6 +884,7 @@ def assert_deploy_runtime_rehearsal() -> None:
         )
         assert result.returncode == 0, result.stderr
         assert "deployed BOT_RUNTIME=rust GIT_SHA=rust-success-sha" in result.stdout
+        assert_backup_survives_deploy(rust_only, state)
         assert state["current"]["runtime"] == "rust"
         assert state["current"]["process"] == "cama-rust"
         assert state["current"]["sha"] == "rust-success-sha"
@@ -685,6 +898,20 @@ def assert_deploy_runtime_rehearsal() -> None:
         assert state["process_history"] == ["cama-rust", "cama-rust"]
         assert state["unexpected_direct_run"] is False
         events = state["events"]
+        backup_build = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "build"
+            and str(event["command_arguments"][0]) == "--file",
+            "build backup image",
+        )
+        backup_run = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and event["command_arguments"][0] == "--rm",
+            "run backup helper",
+        )
         build = compose_event(events, "build", "rust")
         preflight = compose_event(events, "run", "rust")
         rust_up = compose_event(events, "up", "rust")
@@ -695,6 +922,7 @@ def assert_deploy_runtime_rehearsal() -> None:
             "docker-compose.yml",
             "docker-compose.rust.yml",
         ]
+        assert backup_build < backup_run < events.index(build)
         assert events.index(build) < events.index(preflight) < events.index(rust_up)
         assert not any(
             event["kind"] == "compose"
