@@ -3,8 +3,11 @@
 
 The source is opened read-only and copied with the existing online-backup
 helper.  Every migration, Rust preflight, repository smoke, and retained
-Python read runs against the disposable copy.  A JSON report is printed even
-when a step fails so this rehearsal is evidence rather than a cutover claim.
+Python read runs against the disposable copy.  The disposable copy also
+exercises the durable Survey recovery path so a current production-shaped
+database proves both repository and recovery writes.  A JSON report is
+printed even when a step fails so this rehearsal is evidence rather than a
+cutover claim.
 """
 
 from __future__ import annotations
@@ -61,6 +64,16 @@ EXPECTED_SMOKE_DELTAS = {
     "tip_transactions": 1,
     "tunnels": 1,
     "wheel_spins": 1,
+}
+# Survey recovery is deliberately kept as a separate delta contract. The
+# shared repository smoke above predates the Rust Survey READY-recovery path;
+# folding these rows into EXPECTED_SMOKE_DELTAS would make it too easy to
+# accidentally omit or double-count the provider-owned write.
+EXPECTED_SURVEY_SMOKE_DELTAS = {
+    "survey_answers": 0,
+    "survey_questions": 1,
+    "survey_recipients": 1,
+    "surveys": 1,
 }
 
 
@@ -426,6 +439,10 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 "the snapshot replay uses the smoke sentinel through the Python repository"
             ),
         },
+        "survey_recovery": {
+            "status": "not_run",
+            "expected_table_deltas": EXPECTED_SURVEY_SMOKE_DELTAS,
+        },
         "self_checks": {"volatile_digest": "not_run"},
         "errors": [],
     }
@@ -561,6 +578,71 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             report["repository_smoke"].update(
                 {"status": "passed", "sentinel_digests": sentinel_rows}
             )
+
+            survey_before_counts = {
+                table: after_counts.get(table, 0)
+                for table in EXPECTED_SURVEY_SMOKE_DELTAS
+            }
+            survey_smoke = run_step(
+                "rust_survey_recovery_smoke",
+                [
+                    cargo,
+                    "run",
+                    "--locked",
+                    "--manifest-path",
+                    str(runtime_manifest),
+                    "-p",
+                    "cama-runtime",
+                    "--example",
+                    "survey_snapshot_smoke",
+                    "--",
+                    str(copy),
+                    "--disposable-copy",
+                ],
+                cwd=root,
+                timeout_seconds=arguments.timeout_seconds,
+                report=report,
+            )
+            survey_after_counts = table_row_counts(copy)
+            survey_table_deltas = {
+                table: {
+                    "before": survey_before_counts[table],
+                    "after": survey_after_counts.get(table, 0),
+                    "delta": survey_after_counts.get(table, 0)
+                    - survey_before_counts[table],
+                }
+                for table in sorted(EXPECTED_SURVEY_SMOKE_DELTAS)
+            }
+            actual_survey_deltas = {
+                table: details["delta"]
+                for table, details in survey_table_deltas.items()
+                if details["delta"] != 0
+            }
+            survey_marker_found = "survey_snapshot_smoke=ok" in survey_smoke["stdout"]
+            report["survey_recovery"] = {
+                "status": "failed",
+                "recovery_marker": survey_marker_found,
+                "expected_table_deltas": EXPECTED_SURVEY_SMOKE_DELTAS,
+                "table_deltas": survey_table_deltas,
+            }
+            expected_nonzero_survey_deltas = {
+                table: delta
+                for table, delta in EXPECTED_SURVEY_SMOKE_DELTAS.items()
+                if delta != 0
+            }
+            if not survey_marker_found:
+                raise RuntimeError(
+                    "Rust Survey recovery smoke exited successfully without its "
+                    "recovery marker"
+                )
+            if actual_survey_deltas != expected_nonzero_survey_deltas:
+                raise RuntimeError(
+                    "Rust Survey recovery table delta mismatch: "
+                    f"expected {expected_nonzero_survey_deltas!r}, "
+                    f"found {actual_survey_deltas!r}"
+                )
+            report["survey_recovery"]["status"] = "passed"
+            report["disposable_copy"]["after_rust"] = inspect_database(copy)
 
             # The retained bridge is a serial 13-family fixture gate and
             # expects its own seeded IDs. A real development snapshot does
