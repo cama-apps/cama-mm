@@ -1,0 +1,19 @@
+{
+  "chart": {
+    "market_id": 42,
+    "title": "Market 42 - fair history",
+    "snapshots": [
+      [1700000000, 32],
+      [1700001800, 47],
+      [1700005400, 41],
+      [1700010800, 63]
+    ],
+    "created_at": 1700000000,
+    "now": 1700014400
+  },
+  "animation": {
+    "name": "Client 47",
+    "value": 1337,
+    "theme": "odds_anomaly"
+  }
+}
