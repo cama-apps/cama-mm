@@ -72,5 +72,8 @@
   "explosion": {
     "size": 500,
     "seed": 12648430
+  },
+  "blame_luke": {
+    "selected_index": 4
   }
 }

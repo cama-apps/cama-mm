@@ -17,6 +17,7 @@ from scripts.visual_equivalence import (
     BALANCE_MIN_FOREGROUND_COUNT_RATIO,
     BALANCE_MIN_FOREGROUND_GRID_IOU,
     DEFAULT_FIXTURE,
+    check_blame_luke,
     check_explosion,
     check_wheel,
     compare_foreground_structure,
@@ -66,6 +67,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
         "is_golden": False,
     }
     assert fixture["explosion"] == {"size": 500, "seed": 12648430}
+    assert fixture["blame_luke"] == {"selected_index": 4}
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -99,6 +101,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_wheel.gif").read_bytes() == (second / "python_wheel.gif").read_bytes()
     assert (first / "python_explosion.gif").read_bytes() == (
         second / "python_explosion.gif"
+    ).read_bytes()
+    assert (first / "python_blame_luke.gif").read_bytes() == (
+        second / "python_blame_luke.gif"
     ).read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
@@ -149,6 +154,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     )
     check_wheel(first / "python_wheel.gif", first / "python_wheel.gif")
     check_explosion(first / "python_explosion.gif", first / "python_explosion.gif")
+    rust_blame_luke = first / "rust_blame_luke.gif"
+    rust_blame_luke.write_bytes((first / "python_blame_luke.gif").read_bytes())
+    check_blame_luke(first / "python_blame_luke.gif", rust_blame_luke)
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():

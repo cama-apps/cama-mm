@@ -9,6 +9,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use cama_app::blame_luke_media::render_blame_luke;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
@@ -28,6 +29,7 @@ struct Fixture {
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
     advantage: AdvantageFixture,
+    blame_luke: BlameLukeFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +57,11 @@ struct AdvantageFixture {
     match_id: i64,
     radiant_gold_adv: Vec<f64>,
     radiant_xp_adv: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlameLukeFixture {
+    selected_index: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +175,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_advantage.png"),
         advantage_chart,
+    )?;
+
+    let blame_luke = render_blame_luke(fixture.blame_luke.selected_index)?;
+    fs::write(
+        Path::new(&output_dir).join("rust_blame_luke.gif"),
+        blame_luke.bytes,
     )?;
 
     let animation = render_post_match_gif(

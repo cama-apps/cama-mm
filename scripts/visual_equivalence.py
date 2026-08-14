@@ -7,8 +7,8 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
-OpenDota advantage, betting wheel/explosion, post-match, terminal-crash, and
-pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
+OpenDota advantage, betting wheel/explosion, Blame Luke, post-match,
+terminal-crash, and pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
 sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
@@ -88,6 +88,15 @@ EXPLOSION_MAX_AGGREGATE_COUNT_RATIO = 2.25
 EXPLOSION_MIN_AGGREGATE_CELL_RATIO = 0.75
 EXPLOSION_MAX_AGGREGATE_CELL_RATIO = 1.25
 EXPLOSION_MAX_AGGREGATE_CENTROID_DRIFT = 24.0
+BLAME_LUKE_MAX_MEAN_FRAME_MAE = 0.160
+BLAME_LUKE_MAX_MEAN_FRAME_RMS = 0.300
+BLAME_LUKE_MAX_FRAME_MAE = 0.300
+BLAME_LUKE_MIN_FOREGROUND_GRID_IOU = 0.65
+BLAME_LUKE_MIN_FOREGROUND_COUNT_RATIO = 0.45
+BLAME_LUKE_MIN_AGGREGATE_GRID_IOU = 0.80
+BLAME_LUKE_MIN_AGGREGATE_COUNT_RATIO = 0.70
+BLAME_LUKE_MAX_AGGREGATE_COUNT_RATIO = 1.40
+BLAME_LUKE_MAX_AGGREGATE_CENTROID_DRIFT = 18.0
 
 
 class FixedDateTime(dt.datetime):
@@ -129,9 +138,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "advantage",
         "wheel",
         "explosion",
+        "blame_luke",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, wheel, and explosion objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, wheel, explosion, and blame_luke objects"
         )
     return fixture
 
@@ -217,6 +227,15 @@ def render_python(
     finally:
         random.setstate(random_state)
     (output_dir / "python_explosion.gif").write_bytes(explosion_bytes)
+
+    blame_luke = fixture["blame_luke"]
+    from utils.blame_luke_drawing import BLAME_LUKE_REASONS, create_blame_luke_gif
+
+    selected_index = int(blame_luke["selected_index"])
+    if not 0 <= selected_index < len(BLAME_LUKE_REASONS):
+        raise ValueError(f"blame_luke.selected_index is out of range: {selected_index}")
+    blame_luke_bytes = create_blame_luke_gif(BLAME_LUKE_REASONS[selected_index]).getvalue()
+    (output_dir / "python_blame_luke.gif").write_bytes(blame_luke_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -741,6 +760,123 @@ def check_explosion(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_blame_luke(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the production Blame Luke scan/pin/hold animation.
+
+    The Python renderer uses Pillow's configured TrueType fonts and the Rust
+    renderer uses its bundled bitmap glyphs, so exact pixels are not expected.
+    The gate keeps the live GIF contract exact and constrains both individual
+    frame layout and aggregate temporal coverage so a static or contentless
+    replacement cannot pass on shared background pixels alone.
+    """
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    expected_durations = (
+        [170, 160, 150, 140, 140, 130, 120, 120, 110, 100, 100, 90, 80, 70, 70, 70, 70]
+        + [90, 110, 160, 8_000]
+    )
+    if python_size != (720, 420) or rust_size != python_size:
+        raise AssertionError(
+            f"Blame Luke dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop is not None or rust_loop != python_loop:
+        raise AssertionError(
+            f"Blame Luke loop count differs: Python {python_loop}, Rust {rust_loop}"
+        )
+    if len(python_frames) != 21 or len(rust_frames) != len(python_frames):
+        raise AssertionError(
+            f"Blame Luke frame count differs: Python {len(python_frames)}, Rust {len(rust_frames)}"
+        )
+    if python_durations != expected_durations or rust_durations != python_durations:
+        raise AssertionError(
+            f"Blame Luke durations/order differ: Python {python_durations}, Rust {rust_durations}"
+        )
+    if python_path.name != "python_blame_luke.gif" or rust_path.name != "rust_blame_luke.gif":
+        raise AssertionError("Blame Luke output filenames drifted from the live attachment contract")
+
+    metrics = [pixel_metrics(left, right) for left, right in zip(python_frames, rust_frames)]
+    structures = [
+        compare_foreground_structure(
+            left,
+            right,
+            python_size,
+            grid=(12, 10),
+            margin=24,
+            minimum_grid_iou=BLAME_LUKE_MIN_FOREGROUND_GRID_IOU,
+            minimum_count_ratio=BLAME_LUKE_MIN_FOREGROUND_COUNT_RATIO,
+            label=f"Blame Luke frame {index}",
+        )
+        for index, (left, right) in enumerate(zip(python_frames, rust_frames))
+    ]
+    reference_count, reference_cells, reference_centroid = _aggregate_foreground_structure(
+        python_frames, python_size
+    )
+    candidate_count, candidate_cells, candidate_centroid = _aggregate_foreground_structure(
+        rust_frames, rust_size
+    )
+    if reference_count == 0 or not reference_cells:
+        raise AssertionError("Blame Luke reference contains no aggregate foreground structure")
+    aggregate_ratio = candidate_count / reference_count
+    aggregate_union = reference_cells | candidate_cells
+    aggregate_iou = (
+        len(reference_cells & candidate_cells) / len(aggregate_union) if aggregate_union else 1.0
+    )
+    centroid_drift = (
+        (candidate_centroid[0] - reference_centroid[0]) ** 2
+        + (candidate_centroid[1] - reference_centroid[1]) ** 2
+    ) ** 0.5
+    if not (
+        BLAME_LUKE_MIN_AGGREGATE_COUNT_RATIO
+        <= aggregate_ratio
+        <= BLAME_LUKE_MAX_AGGREGATE_COUNT_RATIO
+    ):
+        raise AssertionError(
+            "Blame Luke aggregate foreground count drifted: "
+            f"ratio {aggregate_ratio:.3f} must be between "
+            f"{BLAME_LUKE_MIN_AGGREGATE_COUNT_RATIO:.3f} and "
+            f"{BLAME_LUKE_MAX_AGGREGATE_COUNT_RATIO:.3f}"
+        )
+    if aggregate_iou < BLAME_LUKE_MIN_AGGREGATE_GRID_IOU:
+        raise AssertionError(
+            "Blame Luke aggregate foreground layout drifted: "
+            f"grid IoU {aggregate_iou:.3f} < {BLAME_LUKE_MIN_AGGREGATE_GRID_IOU:.3f}"
+        )
+    if centroid_drift > BLAME_LUKE_MAX_AGGREGATE_CENTROID_DRIFT:
+        raise AssertionError(
+            "Blame Luke aggregate foreground centroid drifted: "
+            f"{centroid_drift:.2f}px > {BLAME_LUKE_MAX_AGGREGATE_CENTROID_DRIFT:.2f}px"
+        )
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    minimum_foreground_ratio = min(structure[0] for structure in structures)
+    minimum_foreground_iou = min(structure[1] for structure in structures)
+    print(
+        f"blame_luke: size={python_size[0]}x{python_size[1]} frames={len(python_frames)} "
+        f"loop={python_loop} durations={python_durations} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} max_frame_MAE={max_mae:.5f} "
+        f"min_foreground_ratio={minimum_foreground_ratio:.3f} "
+        f"min_grid_IoU={minimum_foreground_iou:.3f} "
+        f"aggregate_foreground_ratio={aggregate_ratio:.3f} "
+        f"aggregate_grid_IoU={aggregate_iou:.3f} "
+        f"aggregate_centroid_drift={centroid_drift:.2f}px "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > BLAME_LUKE_MAX_MEAN_FRAME_MAE
+        or mean_rms > BLAME_LUKE_MAX_MEAN_FRAME_RMS
+        or max_mae > BLAME_LUKE_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            "Blame Luke pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {BLAME_LUKE_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {BLAME_LUKE_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {BLAME_LUKE_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -999,6 +1135,10 @@ def main(argv: list[str] | None = None) -> int:
             check_explosion(
                 output_dir / "python_explosion.gif",
                 output_dir / "rust_explosion.gif",
+            )
+            check_blame_luke(
+                output_dir / "python_blame_luke.gif",
+                output_dir / "rust_blame_luke.gif",
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

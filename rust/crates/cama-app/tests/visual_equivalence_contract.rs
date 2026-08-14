@@ -3,6 +3,10 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use cama_app::blame_luke_media::{
+    BLAME_LUKE_FINAL_HOLD_MS, BLAME_LUKE_FRAME_COUNT, BLAME_LUKE_HEIGHT, BLAME_LUKE_REASONS,
+    BLAME_LUKE_WIDTH, render_blame_luke,
+};
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
@@ -27,6 +31,7 @@ struct Fixture {
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
     advantage: AdvantageFixture,
+    blame_luke: BlameLukeFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +59,11 @@ struct AdvantageFixture {
     match_id: i64,
     radiant_gold_adv: Vec<f64>,
     radiant_xp_adv: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlameLukeFixture {
+    selected_index: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +207,46 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.advantage.match_id, 4_242);
     assert_eq!(fixture.advantage.radiant_gold_adv.len(), 7);
     assert_eq!(fixture.advantage.radiant_xp_adv.len(), 7);
+    assert_eq!(fixture.blame_luke.selected_index, 4);
+    assert!(fixture.blame_luke.selected_index < BLAME_LUKE_REASONS.len());
+}
+
+#[test]
+fn native_blame_luke_fixture_render_has_exact_playback_contract() {
+    let fixture = fixture();
+    let first = render_blame_luke(fixture.blame_luke.selected_index)
+        .expect("render fixture Blame Luke GIF");
+    let second = render_blame_luke(fixture.blame_luke.selected_index)
+        .expect("render fixture Blame Luke GIF again");
+    assert_eq!(first.bytes, second.bytes);
+    assert_eq!(first.selected_index, fixture.blame_luke.selected_index);
+    assert_eq!(first.frame_durations_ms.len(), BLAME_LUKE_FRAME_COUNT);
+    assert_eq!(
+        first.frame_durations_ms.last(),
+        Some(&BLAME_LUKE_FINAL_HOLD_MS)
+    );
+
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(first.bytes))
+        .expect("decode fixture Blame Luke GIF");
+    assert_eq!(
+        (decoder.width(), decoder.height()),
+        (BLAME_LUKE_WIDTH, BLAME_LUKE_HEIGHT)
+    );
+    let mut durations = Vec::new();
+    let mut frame_count = 0;
+    while let Some(frame) = decoder
+        .read_next_frame()
+        .expect("read fixture Blame Luke frame")
+    {
+        durations.push(u32::from(frame.delay) * 10);
+        frame_count += 1;
+    }
+    assert_eq!(frame_count, BLAME_LUKE_FRAME_COUNT);
+    assert_eq!(durations, first.frame_durations_ms);
+    assert_eq!(durations.last(), Some(&BLAME_LUKE_FINAL_HOLD_MS));
 }
 
 #[test]
