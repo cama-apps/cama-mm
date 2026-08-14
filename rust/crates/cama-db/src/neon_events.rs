@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -111,7 +111,7 @@ impl NeonEventRepository {
         fired_at: i64,
     ) -> Result<bool, NeonEventRepositoryError> {
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists = transaction
             .query_row(
                 "SELECT 1 FROM neon_events
@@ -151,5 +151,43 @@ impl NeonEventRepository {
             params![discord_id, guild_id, event_type],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use tempfile::NamedTempFile;
+
+    use super::NeonEventRepository;
+    use crate::schema_manager::initialize_or_migrate;
+
+    #[test]
+    fn concurrent_one_time_claim_has_exactly_one_winner() {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("canonical schema");
+        let path = database.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    NeonEventRepository::new(path)
+                        .claim_one_time_event(101, 202, "dig:303:bonus:wheel", 404, 505)
+                        .expect("concurrent one-time claim")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+
+        let mut results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("claim thread"))
+            .collect::<Vec<_>>();
+        results.sort_unstable();
+        assert_eq!(results, vec![false, true]);
     }
 }
