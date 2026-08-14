@@ -4099,6 +4099,11 @@ mod tests {
     use super::*;
     use crate::gateway::GatewayIntentProfile;
     use crate::registration::InteractionButton;
+    use serenity::all::{ApplicationId, Message};
+    use serenity::http::HttpBuilder;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
 
     #[test]
     fn python_profile_maps_to_default_plus_exact_privileged_intents() {
@@ -4321,6 +4326,111 @@ mod tests {
             preserving["components"][0]["components"][0]["custom_id"],
             "wheel:keep"
         );
+    }
+
+    #[tokio::test]
+    async fn component_only_followup_transport_preserves_existing_media() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind local Discord HTTP capture server");
+        let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
+        let request_body = Arc::new(Mutex::new(None));
+        let captured_body = Arc::clone(&request_body);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Discord HTTP request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).expect("read Discord HTTP request");
+                assert!(read > 0, "capture server received an incomplete request");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .expect("JSON request content length");
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).expect("read JSON request body");
+                assert!(read > 0, "capture server received a truncated request body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            *captured_body.lock().expect("capture body lock") =
+                Some(request[header_end..header_end + content_length].to_vec());
+
+            let response = serde_json::to_vec(&Message::default()).expect("serialize HTTP reply");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            )
+            .expect("write Discord HTTP response headers");
+            stream
+                .write_all(&response)
+                .expect("write Discord HTTP response body");
+        });
+
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let response =
+            InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
+                InteractionButton::new("wheel:timeout", "Timed out"),
+            ]));
+        edit_component_only_followup(&http, "interaction-token", MessageId::new(99), response)
+            .await
+            .expect("component-only followup edit succeeds");
+        server.join().expect("capture server completes");
+
+        let body = request_body
+            .lock()
+            .expect("capture body lock")
+            .clone()
+            .expect("captured edit request body");
+        let serialized: serde_json::Value = serde_json::from_slice(&body).expect("JSON edit body");
+        assert!(serialized.get("embeds").is_none());
+        assert!(serialized.get("attachments").is_none());
+        assert_eq!(
+            serialized["components"][0]["components"][0]["custom_id"],
+            "wheel:timeout"
+        );
+    }
+
+    #[test]
+    fn followup_edit_without_components_intentionally_clears_media() {
+        let serialized = serde_json::to_value(edit_followup_message(InteractionResponse::message(
+            "timeout complete",
+        )))
+        .expect("serialize intentional media clear");
+
+        assert_eq!(serialized["embeds"], serde_json::json!([]));
+        assert_eq!(serialized["attachments"], serde_json::json!([]));
+        assert_eq!(serialized["content"], "timeout complete");
+    }
+
+    #[test]
+    fn followup_edit_with_new_media_replaces_existing_media() {
+        let serialized = serde_json::to_value(edit_followup_message(
+            InteractionResponse::message("replacement")
+                .embed(InteractionEmbed::titled("Replacement"))
+                .attachment(InteractionAttachment::bytes(
+                    "replacement.txt",
+                    b"new".to_vec(),
+                )),
+        ))
+        .expect("serialize media replacement");
+
+        assert_eq!(serialized["embeds"].as_array().map(Vec::len), Some(1));
+        assert_eq!(serialized["attachments"][0]["filename"], "replacement.txt");
+        assert_eq!(serialized["content"], "replacement");
     }
 
     #[test]
