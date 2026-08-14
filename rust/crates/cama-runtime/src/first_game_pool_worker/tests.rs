@@ -7,7 +7,7 @@ use cama_db::dota_bet_seed_repository::{DotaBetSeedRepository, FirstGamePoolBala
 use cama_db::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use super::*;
 
@@ -63,6 +63,20 @@ impl FirstGamePoolDisplayPort for FakeDisplay {
             .expect("display outcomes lock")
             .pop_front()
             .unwrap_or(Ok(()))
+    }
+}
+
+struct BlockingDisplay {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl FirstGamePoolDisplayPort for BlockingDisplay {
+    async fn refresh_first_game_pool_lobbies(&self, _guild_id: i64) -> Result<(), String> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
     }
 }
 
@@ -308,6 +322,87 @@ async fn run_catches_up_before_first_sleep_and_cancels_promptly() {
         .expect("900-second sleep cancelled promptly")
         .expect("worker task did not panic")
         .expect("clean worker shutdown");
+}
+
+#[tokio::test]
+async fn cancellation_during_display_refresh_preserves_outbox_for_restart() {
+    let fixture = Fixture::migrated();
+    fixture.fund(GUILD, 200);
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let first = worker(
+        &fixture.path,
+        vec![GUILD],
+        Arc::new(BlockingDisplay {
+            entered: Arc::clone(&entered),
+            release,
+        }),
+        "2026-08-05",
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut context = WorkerContext::new(shutdown_receiver);
+        first.wake_once(&mut context).await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("display refresh starts after durable funding");
+    shutdown_sender
+        .send(true)
+        .expect("request refresh cancellation");
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("in-flight display refresh is cancellation-safe")
+        .expect("worker task did not panic")
+        .expect("cancellation is a clean wake");
+
+    assert_eq!(
+        fixture.repository().pool_balances(Some(GUILD)).unwrap(),
+        FirstGamePoolBalances {
+            open: 100,
+            low_skill: 100,
+        }
+    );
+    assert_eq!(
+        fixture
+            .repository()
+            .pending_first_game_pool_refreshes()
+            .unwrap()
+            .len(),
+        1,
+        "the committed display outbox must survive cancellation"
+    );
+
+    let recovered_display = Arc::new(FakeDisplay::default());
+    let recovered = worker(
+        &fixture.path,
+        vec![GUILD],
+        recovered_display.clone(),
+        "2026-08-05",
+    );
+    let (_shutdown, mut context) = worker_context();
+    recovered
+        .wake_once(&mut context)
+        .await
+        .expect("fresh worker retries the durable display outbox");
+
+    assert_eq!(recovered_display.calls(), [GUILD]);
+    assert!(
+        fixture
+            .repository()
+            .pending_first_game_pool_refreshes()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fixture.repository().pool_balances(Some(GUILD)).unwrap(),
+        FirstGamePoolBalances {
+            open: 100,
+            low_skill: 100,
+        },
+        "restart recovery must not fund the same game-date twice"
+    );
 }
 
 #[tokio::test]

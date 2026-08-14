@@ -174,11 +174,11 @@ impl FirstGamePoolWorker {
             let mut delivered = false;
             let mut final_error = None;
             for attempt in 0..REFRESH_ATTEMPTS {
-                match self
-                    .display
-                    .refresh_first_game_pool_lobbies(refresh.guild_id)
-                    .await
-                {
+                let result = tokio::select! {
+                    result = self.display.refresh_first_game_pool_lobbies(refresh.guild_id) => result,
+                    () = context.cancelled() => return Ok(()),
+                };
+                match result {
                     Ok(()) => {
                         delivered = true;
                         break;
