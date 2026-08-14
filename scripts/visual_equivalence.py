@@ -8,7 +8,8 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
 It renders production prediction-market, balance-journey, rating-history,
 OpenDota advantage, betting wheel/explosion, Blame Luke, post-match,
-terminal-crash, and pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
+terminal-crash, pinnacle phase-3, and one production pet-card attachment from
+the shared JSON fixture, then decodes both
 sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
@@ -97,6 +98,14 @@ BLAME_LUKE_MIN_AGGREGATE_GRID_IOU = 0.80
 BLAME_LUKE_MIN_AGGREGATE_COUNT_RATIO = 0.70
 BLAME_LUKE_MAX_AGGREGATE_COUNT_RATIO = 1.40
 BLAME_LUKE_MAX_AGGREGATE_CENTROID_DRIFT = 18.0
+# The pet path shares checked-in RGBA components, so it gets a tighter pixel
+# gate than the intentionally native-only chart/GIF ports.  The foreground
+# checks still guard against a blank or badly registered component composite.
+PET_MAX_MAE = 0.050
+PET_MAX_RMS = 0.120
+PET_MIN_FOREGROUND_GRID_IOU = 0.85
+PET_MIN_FOREGROUND_COUNT_RATIO = 0.75
+PET_MAX_FOREGROUND_COUNT_RATIO = 1.35
 
 
 class FixedDateTime(dt.datetime):
@@ -136,12 +145,13 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "balance",
         "rating_history",
         "advantage",
+        "pet",
         "wheel",
         "explosion",
         "blame_luke",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, wheel, explosion, and blame_luke objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, and blame_luke objects"
         )
     return fixture
 
@@ -151,10 +161,11 @@ def render_python(
     output_dir: Path,
     fixture_path: Path | None = None,
 ) -> None:
-    from utils import dig_drawing
+    from utils import dig_drawing, pet_compositor
     from utils.drawing import draw_advantage_graph, draw_balance_chart, draw_rating_history_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
+    from utils.pet_assets import get_pet_card
     from utils.wheel_drawing import create_explosion_gif, create_wheel_gif
 
     chart = fixture["chart"]
@@ -198,6 +209,38 @@ def render_python(
     if advantage_bytes is None:
         raise AssertionError("advantage fixture unexpectedly rendered no image")
     (output_dir / "python_advantage.png").write_bytes(advantage_bytes.getvalue())
+
+    # This is the live Python attachment boundary: get_pet_card selects the
+    # full-card override, then pet_compositor's authored-layer hybrid, then
+    # render_pet_card's native fallback.  The fixture deliberately uses the
+    # checked-in component pack and a seed whose shared variant choices match
+    # the Rust HybridPetRenderer selection.
+    pet = fixture["pet"]
+    expected_components = (
+        (fixture_path or DEFAULT_FIXTURE).resolve().parent / str(pet["components_path"])
+    ).resolve()
+    if pet_compositor.COMPONENTS_DIR.resolve() != expected_components:
+        raise AssertionError(
+            "pet fixture components path does not match Python pet_compositor: "
+            f"{pet_compositor.COMPONENTS_DIR} != {expected_components}"
+        )
+    pet_file = get_pet_card(
+        str(pet["species_id"]),
+        str(pet["stage"]),
+        str(pet["mood"]),
+        int(pet["seed"]),
+        accessory=pet.get("accessory"),
+    )
+    if pet_file is None:
+        raise AssertionError("pet fixture unexpectedly rendered no attachment")
+    if pet_file.filename != str(pet["attachment_filename"]):
+        raise AssertionError(
+            f"unexpected pet attachment name: {pet_file.filename!r} "
+            f"(expected {pet['attachment_filename']!r})"
+        )
+    if str(pet["embed_image"]) != f"attachment://{pet_file.filename}":
+        raise AssertionError(f"unexpected pet attachment URL: {pet['embed_image']!r}")
+    (output_dir / "python_pet.png").write_bytes(pet_file.fp.read())
 
     # The production wheel renderer chooses an intentionally varied ending
     # style.  Pin the existing Python RNG for this explicit cross-language
@@ -1091,6 +1134,59 @@ def check_advantage(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_pet(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare one live production pet-card attachment.
+
+    Pet layers are authored/shared assets in Python and a native PNG decoder
+    plus the same HybridPetRenderer policy in Rust.  The gate therefore
+    checks exact card geometry/PNG mode through Pillow, bounded perceptual
+    drift, and a coarse foreground layout/count guard against a blank or
+    misregistered card.
+    """
+
+    for path in (python_path, rust_path):
+        with Image.open(path) as image:
+            if image.format != "PNG" or image.mode != "RGBA":
+                raise AssertionError(
+                    f"pet attachment must be an RGBA PNG: {path.name} "
+                    f"format={image.format!r} mode={image.mode!r}"
+                )
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != (512, 288) or rust_size != python_size:
+        raise AssertionError(
+            f"pet dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(16, 9),
+        margin=12,
+        minimum_grid_iou=PET_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PET_MIN_FOREGROUND_COUNT_RATIO,
+        label="pet",
+    )
+    print(
+        f"pet: size={python_size[0]}x{python_size[1]} format=RGBA PNG "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if not PET_MIN_FOREGROUND_COUNT_RATIO <= foreground_ratio <= PET_MAX_FOREGROUND_COUNT_RATIO:
+        raise AssertionError(
+            f"pet foreground count drifted: ratio {foreground_ratio:.3f} must be between "
+            f"{PET_MIN_FOREGROUND_COUNT_RATIO:.3f} and {PET_MAX_FOREGROUND_COUNT_RATIO:.3f}"
+        )
+    if mae > PET_MAX_MAE or rms > PET_MAX_RMS:
+        raise AssertionError(
+            f"pet pixel drift exceeds threshold: MAE {mae:.5f} <= {PET_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {PET_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
@@ -1131,6 +1227,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_advantage.png",
                 output_dir / "rust_advantage.png",
             )
+            check_pet(output_dir / "python_pet.png", output_dir / "rust_pet.png")
             check_wheel(output_dir / "python_wheel.gif", output_dir / "rust_wheel.gif")
             check_explosion(
                 output_dir / "python_explosion.gif",

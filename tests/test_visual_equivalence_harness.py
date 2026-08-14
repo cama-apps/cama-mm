@@ -19,6 +19,7 @@ from scripts.visual_equivalence import (
     DEFAULT_FIXTURE,
     check_blame_luke,
     check_explosion,
+    check_pet,
     check_wheel,
     compare_foreground_structure,
     gif_frames,
@@ -37,6 +38,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     balance = fixture["balance"]
     rating_history = fixture["rating_history"]
     advantage = fixture["advantage"]
+    pet = fixture["pet"]
     assert isinstance(chart["market_id"], int)
     assert isinstance(chart["snapshots"], list)
     assert all(len(snapshot) == 2 for snapshot in chart["snapshots"])
@@ -59,6 +61,16 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert any(entry["os_mu_after"] is None for entry in rating_history["entries"])
     assert advantage["match_id"] == 4242
     assert len(advantage["radiant_gold_adv"]) == len(advantage["radiant_xp_adv"]) == 7
+    assert pet == {
+        "species_id": "common_cama",
+        "stage": "adult",
+        "mood": "happy",
+        "seed": 7,
+        "accessory": "red_bow",
+        "components_path": "../assets/pets/components",
+        "attachment_filename": "pet_common_cama_adult_happy.png",
+        "embed_image": "attachment://pet_common_cama_adult_happy.png",
+    }
     assert fixture["wheel"] == {
         "target_index": 7,
         "size": 500,
@@ -89,6 +101,7 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_advantage.png").read_bytes() == (
         second / "python_advantage.png"
     ).read_bytes()
+    assert (first / "python_pet.png").read_bytes() == (second / "python_pet.png").read_bytes()
     assert (first / "python_animation.gif").read_bytes() == (
         second / "python_animation.gif"
     ).read_bytes()
@@ -127,6 +140,12 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     advantage_size, advantage_pixels = rgba_pixels(first / "python_advantage.png")
     assert advantage_size == (790, 340)
     assert max(advantage_pixels) == 255
+    pet_size, pet_pixels = rgba_pixels(first / "python_pet.png")
+    assert pet_size == (512, 288)
+    assert max(pet_pixels) == 255
+    rust_pet = first / "rust_pet.png"
+    rust_pet.write_bytes((first / "python_pet.png").read_bytes())
+    check_pet(first / "python_pet.png", rust_pet)
     size, loop, durations, frames = gif_frames(first / "python_pinnacle_phase3.gif")
     assert size == (512, 288)
     assert loop is None

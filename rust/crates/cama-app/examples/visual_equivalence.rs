@@ -17,7 +17,11 @@ use cama_app::drawing::{
     draw_prediction_market_chart, draw_rating_history_chart,
 };
 use cama_app::neon_degen::GifAsset;
+use cama_app::pet_assets::{
+    FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
+};
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_domain::pet::{PetMood, PetStage};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +33,7 @@ struct Fixture {
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
     advantage: AdvantageFixture,
+    pet: PetFixture,
     blame_luke: BlameLukeFixture,
 }
 
@@ -57,6 +62,18 @@ struct AdvantageFixture {
     match_id: i64,
     radiant_gold_adv: Vec<f64>,
     radiant_xp_adv: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PetFixture {
+    species_id: String,
+    stage: String,
+    mood: String,
+    seed: i64,
+    accessory: Option<String>,
+    components_path: String,
+    attachment_filename: String,
+    embed_image: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +115,24 @@ fn resolve_fixture_path(fixture_path: &Path, relative_path: &str) -> std::path::
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(relative_path)
+}
+
+fn pet_stage(value: &str) -> Result<PetStage, &'static str> {
+    match value {
+        "adult" => Ok(PetStage::Adult),
+        "baby" => Ok(PetStage::Baby),
+        "egg" => Ok(PetStage::Egg),
+        _ => Err("unsupported pet stage"),
+    }
+}
+
+fn pet_mood(value: &str) -> Result<PetMood, &'static str> {
+    match value {
+        "happy" => Ok(PetMood::Happy),
+        "neutral" | "content" => Ok(PetMood::Content),
+        "hungry" | "starving" => Ok(PetMood::Hungry),
+        _ => Err("unsupported pet mood"),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -175,6 +210,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_advantage.png"),
         advantage_chart,
+    )?;
+
+    // Exercise the same loader/HybridPetRenderer boundary used by
+    // cama-runtime::pet_provider.  The checked-in component pack is passed
+    // explicitly so this recording is hermetic and cannot silently use the
+    // container-only /app path.
+    let pet = fixture.pet;
+    let components_path = resolve_fixture_path(Path::new(&fixture_path), &pet.components_path);
+    let request = PetRenderRequest {
+        species_id: &pet.species_id,
+        stage: pet_stage(&pet.stage)?,
+        mood: pet_mood(&pet.mood)?,
+        seed: pet.seed,
+        accessory: pet.accessory.as_deref(),
+        evolution: None,
+    };
+    let assets_root = components_path
+        .parent()
+        .ok_or("pet components path has no parent")?;
+    let mut pet_assets = PetAssetLoader::new(
+        FilesystemPetAssets::new(assets_root),
+        HybridPetRenderer::new(&components_path),
+    );
+    let pet_file = pet_assets.get_pet_card(&request);
+    if pet_file.filename != pet.attachment_filename {
+        return Err(format!(
+            "unexpected pet attachment name: {} (expected {})",
+            pet_file.filename, pet.attachment_filename
+        )
+        .into());
+    }
+    if pet.embed_image != format!("attachment://{}", pet_file.filename) {
+        return Err(format!("unexpected pet attachment URL: {}", pet.embed_image).into());
+    }
+    fs::write(
+        Path::new(&output_dir).join("rust_pet.png"),
+        pet_file.bytes(),
     )?;
 
     let blame_luke = render_blame_luke(fixture.blame_luke.selected_index)?;

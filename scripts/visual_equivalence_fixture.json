@@ -62,6 +62,16 @@
     "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],
     "radiant_xp_adv": [0, 200, 800, 100, 1500, 3000, 2500]
   },
+  "pet": {
+    "species_id": "common_cama",
+    "stage": "adult",
+    "mood": "happy",
+    "seed": 7,
+    "accessory": "red_bow",
+    "components_path": "../assets/pets/components",
+    "attachment_filename": "pet_common_cama_adult_happy.png",
+    "embed_image": "attachment://pet_common_cama_adult_happy.png"
+  },
   "wheel": {
     "target_index": 7,
     "size": 500,

@@ -14,8 +14,12 @@ use cama_app::drawing::{
     draw_prediction_market_chart, draw_rating_history_chart,
 };
 use cama_app::neon_degen::GifAsset;
-use cama_app::pet_assets::decode_png_raster;
+use cama_app::pet_assets::{
+    FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest, decode_png_raster,
+    inspect_png, render_pet_card,
+};
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_domain::pet::{PetMood, PetStage};
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
 
@@ -31,6 +35,7 @@ struct Fixture {
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
     advantage: AdvantageFixture,
+    pet: PetFixture,
     blame_luke: BlameLukeFixture,
 }
 
@@ -59,6 +64,18 @@ struct AdvantageFixture {
     match_id: i64,
     radiant_gold_adv: Vec<f64>,
     radiant_xp_adv: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PetFixture {
+    species_id: String,
+    stage: String,
+    mood: String,
+    seed: i64,
+    accessory: Option<String>,
+    components_path: String,
+    attachment_filename: String,
+    embed_image: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +224,20 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.advantage.match_id, 4_242);
     assert_eq!(fixture.advantage.radiant_gold_adv.len(), 7);
     assert_eq!(fixture.advantage.radiant_xp_adv.len(), 7);
+    assert_eq!(fixture.pet.species_id, "common_cama");
+    assert_eq!(fixture.pet.stage, "adult");
+    assert_eq!(fixture.pet.mood, "happy");
+    assert_eq!(fixture.pet.seed, 7);
+    assert_eq!(fixture.pet.accessory.as_deref(), Some("red_bow"));
+    assert_eq!(fixture.pet.components_path, "../assets/pets/components");
+    assert_eq!(
+        fixture.pet.attachment_filename,
+        "pet_common_cama_adult_happy.png"
+    );
+    assert_eq!(
+        fixture.pet.embed_image,
+        "attachment://pet_common_cama_adult_happy.png"
+    );
     assert_eq!(fixture.blame_luke.selected_index, 4);
     assert!(fixture.blame_luke.selected_index < BLAME_LUKE_REASONS.len());
 }
@@ -285,6 +316,50 @@ fn native_advantage_fixture_render_is_deterministic_and_semantically_layered() {
                 && u16::from(pixel[1]) > u16::from(pixel[2]) + 5
         }),
         "positive advantage fill should be visible"
+    );
+}
+
+#[test]
+fn native_pet_fixture_render_uses_production_hybrid_and_attachment_contract() {
+    let components = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/pets/components");
+    let pets = components.parent().expect("components parent");
+    let request = PetRenderRequest {
+        species_id: "common_cama",
+        stage: PetStage::Adult,
+        mood: PetMood::Happy,
+        seed: 7,
+        accessory: Some("red_bow"),
+        evolution: None,
+    };
+    let mut loader = PetAssetLoader::new(
+        FilesystemPetAssets::new(pets),
+        HybridPetRenderer::new(&components),
+    );
+    let first = loader.get_pet_card(&request);
+    let second = loader.get_pet_card(&request);
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(
+        first.filename, "pet_common_cama_adult_happy.png",
+        "provider embeds this attachment as attachment://pet_common_cama_adult_happy.png"
+    );
+    let info = inspect_png(first.bytes()).expect("pet fixture must be a valid RGBA PNG");
+    assert_eq!((info.width, info.height, info.color_type), (512, 288, 6));
+    let raster = decode_png_raster(first.bytes()).expect("decode pet fixture PNG");
+    assert_eq!((raster.width, raster.height), (512, 288));
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3].iter().copied().max().unwrap_or(0) > 80)
+            .count()
+            > 10_000,
+        "pet fixture must contain a visible foreground"
+    );
+    let procedural = render_pet_card(&request).encode_png();
+    assert_ne!(
+        first.bytes(),
+        procedural,
+        "fixture must exercise the checked-in HybridPetRenderer component path"
     );
 }
 
