@@ -59,6 +59,7 @@ pub mod disbursement;
 pub mod dota_bet_seed_repository;
 #[path = "dota_streak.rs"]
 pub mod dota_streak_repository;
+pub mod draft_state;
 #[path = "duel.rs"]
 pub mod duel_repository;
 #[path = "economy_events.rs"]

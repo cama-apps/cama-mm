@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cama_domain::player::Player;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DRAFT_POOL_SIZE: usize = 10;
@@ -32,10 +33,12 @@ pub const AMBIGUOUS_LOBBY_MESSAGE: &str = concat!(
     "add the `lobby` option to pick one."
 );
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LobbyKind {
     #[default]
     Open,
+    #[serde(rename = "lowskill")]
     LowSkill,
 }
 
@@ -73,7 +76,8 @@ impl LobbyKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DraftPhase {
     #[default]
     Coinflip,
@@ -100,14 +104,14 @@ impl DraftPhase {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct PlayerPoolEntry {
     pub name: String,
     pub rating: f64,
     pub roles: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DraftState {
     pub session_id: u64,
     pub guild_id: i64,
@@ -360,8 +364,433 @@ impl DraftState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Version of the serde envelope stored by the draft persistence boundary.
+pub const DRAFT_STATE_SCHEMA_VERSION: u64 = cama_db::draft_state::DRAFT_STATE_ENVELOPE_VERSION;
+
+const fn default_draft_active() -> bool {
+    true
+}
+
+/// Complete, serde-compatible snapshot of the authoritative draft state.
+///
+/// The newtype keeps the pre-existing `DraftStateSnapshot` API while making
+/// every `DraftState` field durable.  It intentionally contains no derived
+/// or publication-only state.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct DraftStateSnapshot(DraftState);
+
+impl DraftStateSnapshot {
+    /// Borrow the complete authoritative state.
+    #[must_use]
+    pub const fn as_state(&self) -> &DraftState {
+        &self.0
+    }
+
+    /// Consume this snapshot into the authoritative state.
+    #[must_use]
+    pub fn into_state(self) -> DraftState {
+        self.0
+    }
+
+    /// Wrap this snapshot in the durable revision envelope used by the
+    /// SQLite adapter and future runtime ports.
+    #[must_use]
+    pub fn envelope(&self, revision: u64) -> DraftStateEnvelope {
+        DraftStateEnvelope::new(self.clone(), revision)
+    }
+
+    /// Encode the complete snapshot as its application-owned JSON payload.
+    pub fn to_json(&self) -> Result<String, DraftPersistenceError> {
+        serde_json::to_string(self).map_err(|error| DraftPersistenceError::Serialization {
+            message: error.to_string(),
+        })
+    }
+
+    /// Decode an application-owned JSON payload into a complete snapshot.
+    pub fn from_json(raw: &str) -> Result<Self, DraftPersistenceError> {
+        serde_json::from_str(raw).map_err(|error| DraftPersistenceError::Serialization {
+            message: error.to_string(),
+        })
+    }
+}
+
+/// Durable metadata plus the complete typed draft snapshot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DraftStateEnvelope {
+    /// Envelope format version, independent of the application payload.
+    #[serde(alias = "version")]
+    pub schema_version: u64,
+    /// Guild key used in `app_kv`.
+    pub guild_id: i64,
+    /// Monotonic identity allocated by the database adapter.
+    pub session_id: u64,
+    /// Optimistic-concurrency revision, starting at one.
+    pub revision: u64,
+    /// Original pre-draft/view deadline when one has been installed.  It is
+    /// optional in schema v1 so old envelopes remain loadable.
+    #[serde(default)]
+    pub deadline_at: Option<i64>,
+    /// Whether this envelope still owns the guild's active draft slot.
+    /// Missing legacy metadata defaults to active for safe recovery.
+    #[serde(default = "default_draft_active")]
+    pub active: bool,
+    /// Whether completion is finalizing its pending match/publication.
+    #[serde(default)]
+    pub finalizing: bool,
+    /// Pending match identity, when completion has crossed the match-create
+    /// boundary but cleanup/publication has not finished.
+    #[serde(default)]
+    pub pending_match_id: Option<i64>,
+    /// The complete authoritative state snapshot.
+    pub state: DraftStateSnapshot,
+    /// Forward-compatible application metadata unknown to this adapter
+    /// revision. Flattening retains future top-level fields across typed
+    /// load/replace cycles instead of silently discarding them.
+    #[serde(default, flatten)]
+    pub application_metadata: BTreeMap<String, serde_json::Value>,
+}
+
+impl DraftStateEnvelope {
+    /// Construct a new revision envelope around a complete state snapshot.
+    #[must_use]
+    pub fn new(state: DraftStateSnapshot, revision: u64) -> Self {
+        Self {
+            schema_version: DRAFT_STATE_SCHEMA_VERSION,
+            guild_id: state.as_state().guild_id,
+            session_id: state.as_state().session_id,
+            revision,
+            deadline_at: None,
+            active: true,
+            finalizing: false,
+            pending_match_id: None,
+            state,
+            application_metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Validate the envelope metadata against its embedded authoritative
+    /// state before it crosses a persistence or runtime boundary.
+    pub fn validate(&self) -> Result<(), DraftPersistenceError> {
+        if self.schema_version != DRAFT_STATE_SCHEMA_VERSION {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "unsupported draft state schema version {}",
+                    self.schema_version
+                ),
+            });
+        }
+        if self.revision == 0 {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "draft state revision must be positive".to_owned(),
+            });
+        }
+        if self.guild_id != self.state.as_state().guild_id {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "envelope guild {} does not match state guild {}",
+                    self.guild_id,
+                    self.state.as_state().guild_id
+                ),
+            });
+        }
+        if self.session_id != self.state.as_state().session_id {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "envelope session {} does not match state session {}",
+                    self.session_id,
+                    self.state.as_state().session_id
+                ),
+            });
+        }
+        if let Some(reserved) = self.application_metadata.keys().find(|key| {
+            matches!(
+                key.as_str(),
+                "schema_version"
+                    | "version"
+                    | "guild_id"
+                    | "session_id"
+                    | "revision"
+                    | "deadline_at"
+                    | "active"
+                    | "finalizing"
+                    | "pending_match_id"
+                    | "state"
+            )
+        }) {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!("application metadata uses reserved key {reserved}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Encode the envelope using the stable persisted JSON representation.
+    pub fn to_json(&self) -> Result<String, DraftPersistenceError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|error| DraftPersistenceError::Serialization {
+            message: error.to_string(),
+        })
+    }
+
+    /// Decode and validate a persisted envelope.
+    pub fn from_json(raw: &str) -> Result<Self, DraftPersistenceError> {
+        let envelope: Self =
+            serde_json::from_str(raw).map_err(|error| DraftPersistenceError::Serialization {
+                message: error.to_string(),
+            })?;
+        envelope.validate()?;
+        Ok(envelope)
+    }
+}
+
+/// Errors crossing the draft persistence port.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum DraftPersistenceError {
+    /// The backing repository rejected an operation for a non-CAS reason.
+    #[error("draft persistence backend failed: {message}")]
+    Backend { message: String },
+    /// The supplied or loaded envelope failed validation.
+    #[error("draft persistence envelope is invalid: {message}")]
+    InvalidEnvelope { message: String },
+    /// JSON encoding/decoding failed.
+    #[error("draft persistence JSON failed: {message}")]
+    Serialization { message: String },
+    /// A guild already has a durable active draft.
+    #[error("draft already exists for guild {guild_id}")]
+    Duplicate { guild_id: i64 },
+    /// No durable draft exists for the requested guild.
+    #[error("draft does not exist for guild {guild_id}")]
+    NotFound { guild_id: i64 },
+    /// The caller's CAS revision is stale.
+    #[error("draft revision is stale for guild {guild_id}: expected {expected}, found {actual:?}")]
+    StaleRevision {
+        guild_id: i64,
+        expected: u64,
+        actual: Option<u64>,
+    },
+    /// The callback's session identity is no longer active for the guild.
+    #[error("draft session is stale for guild {guild_id}: expected {expected}, found {actual:?}")]
+    StaleSession {
+        guild_id: i64,
+        expected: u64,
+        actual: Option<u64>,
+    },
+    /// The repository could not complete an otherwise valid CAS operation.
+    #[error("draft persistence conflict for guild {guild_id}: {reason}")]
+    Conflict { guild_id: i64, reason: String },
+}
+
+impl From<cama_db::draft_state::DraftStateRepositoryError> for DraftPersistenceError {
+    fn from(error: cama_db::draft_state::DraftStateRepositoryError) -> Self {
+        use cama_db::draft_state::DraftStateRepositoryError as DatabaseError;
+        match error {
+            DatabaseError::Duplicate { guild_id } => Self::Duplicate { guild_id },
+            DatabaseError::NotFound { guild_id } => Self::NotFound { guild_id },
+            DatabaseError::StaleRevision {
+                guild_id,
+                expected,
+                actual,
+            } => Self::StaleRevision {
+                guild_id,
+                expected,
+                actual,
+            },
+            DatabaseError::StaleSession {
+                guild_id,
+                expected,
+                actual,
+            } => Self::StaleSession {
+                guild_id,
+                expected,
+                actual,
+            },
+            DatabaseError::Conflict { guild_id, reason } => Self::Conflict { guild_id, reason },
+            DatabaseError::InvalidEnvelope(message) => Self::InvalidEnvelope { message },
+            DatabaseError::InvalidPayload(message) => Self::Serialization { message },
+            other => Self::Backend {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+/// Persistence boundary needed by the future gateway/runtime owner.
+///
+/// Runtime/provider/READY code is intentionally not coupled to this trait in
+/// the first persistence tranche.
+pub trait DraftStatePersistencePort: Send + Sync {
+    /// Load all active durable draft envelopes.
+    fn load_all(&self) -> Result<Vec<DraftStateEnvelope>, DraftPersistenceError>;
+
+    /// Allocate a session and create a new active draft.
+    fn create(
+        &self,
+        snapshot: &DraftStateSnapshot,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError>;
+
+    /// Allocate a session and create a snapshot plus recovery metadata in one
+    /// atomic row write.
+    fn create_envelope(
+        &self,
+        envelope: &DraftStateEnvelope,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError>;
+
+    /// Replace a snapshot under an optimistic-concurrency revision guard.
+    fn replace_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        snapshot: &DraftStateSnapshot,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError>;
+
+    /// Replace a complete snapshot plus recovery metadata under the same
+    /// session-and-revision guard.
+    fn replace_envelope_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        envelope: &DraftStateEnvelope,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError>;
+
+    /// Delete a snapshot under an optimistic-concurrency revision guard.
+    fn delete_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+    ) -> Result<bool, DraftPersistenceError>;
+}
+
+/// Short compatibility alias for callers that refer to the boundary as the
+/// generic draft persistence port.
+pub use DraftStatePersistencePort as DraftPersistencePort;
+
+/// Existing-schema SQLite implementation of [`DraftStatePersistencePort`].
+///
+/// This adapter is deliberately not installed into `DraftStateManager`; the
+/// runtime cutover can choose when to hydrate and publish it.
+#[derive(Clone, Debug)]
+pub struct SqliteDraftStatePersistence {
+    repository: cama_db::draft_state::DraftStateRepository,
+}
+
+/// Short compatibility alias for the SQLite draft persistence adapter.
+pub type SqliteDraftPersistence = SqliteDraftStatePersistence;
+
+impl SqliteDraftStatePersistence {
+    /// Build an adapter for an already migrated database.
+    #[must_use]
+    pub fn new(path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            repository: cama_db::draft_state::DraftStateRepository::new(path),
+        }
+    }
+
+    fn decode(
+        record: cama_db::draft_state::DraftStateRecord,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError> {
+        let envelope = DraftStateEnvelope::from_json(&record.envelope_json)?;
+        if envelope.guild_id != record.guild_id
+            || envelope.session_id != record.session_id
+            || envelope.revision != record.revision
+        {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "database row metadata does not match its envelope".to_owned(),
+            });
+        }
+        Ok(envelope)
+    }
+}
+
+impl DraftStatePersistencePort for SqliteDraftStatePersistence {
+    fn load_all(&self) -> Result<Vec<DraftStateEnvelope>, DraftPersistenceError> {
+        self.repository
+            .load_all()?
+            .into_iter()
+            .map(Self::decode)
+            .collect()
+    }
+
+    fn create(
+        &self,
+        snapshot: &DraftStateSnapshot,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError> {
+        self.create_envelope(&snapshot.envelope(1))
+    }
+
+    fn create_envelope(
+        &self,
+        envelope: &DraftStateEnvelope,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError> {
+        envelope.validate()?;
+        let envelope_json = envelope.to_json()?;
+        // The database owns session allocation and stamps the embedded state
+        // session field in the same transaction.
+        Self::decode(
+            self.repository
+                .create_envelope(envelope.guild_id, &envelope_json)?,
+        )
+    }
+
+    fn replace_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        snapshot: &DraftStateSnapshot,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError> {
+        if snapshot.as_state().guild_id != guild_id {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "snapshot guild does not match CAS guild".to_owned(),
+            });
+        }
+        let state_json = snapshot.to_json()?;
+        Self::decode(self.repository.replace_if_revision(
+            guild_id,
+            expected_session_id,
+            expected_revision,
+            &state_json,
+        )?)
+    }
+
+    fn replace_envelope_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        envelope: &DraftStateEnvelope,
+    ) -> Result<DraftStateEnvelope, DraftPersistenceError> {
+        if envelope.guild_id != guild_id || envelope.state.as_state().guild_id != guild_id {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "envelope guild does not match CAS guild".to_owned(),
+            });
+        }
+        envelope.validate()?;
+        let envelope_json = envelope.to_json()?;
+        Self::decode(self.repository.replace_envelope_if_revision(
+            guild_id,
+            expected_session_id,
+            expected_revision,
+            &envelope_json,
+        )?)
+    }
+
+    fn delete_if_revision(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+    ) -> Result<bool, DraftPersistenceError> {
+        Ok(self
+            .repository
+            .delete_if_revision(guild_id, expected_session_id, expected_revision)?)
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PendingMatchState {
@@ -2240,6 +2669,10 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
 
+    use rusqlite::Connection;
+    use serde_json::json;
+    use tempfile::NamedTempFile;
+
     const TEST_GUILD_ID: i64 = 123;
 
     fn ratings(values: &[(i64, f64)]) -> BTreeMap<i64, f64> {
@@ -2443,6 +2876,188 @@ mod tests {
         state.half_exclusion_increment_ids = vec![13];
         let restored = DraftState::from_snapshot(state.to_snapshot());
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn authoritative_draft_state_round_trips_every_field_through_sqlite() {
+        let fixture = NamedTempFile::new().expect("create draft persistence fixture");
+        cama_db::schema_manager::initialize_or_migrate(fixture.path())
+            .expect("initialize draft persistence fixture");
+        let persistence = SqliteDraftStatePersistence::new(fixture.path());
+
+        let mut state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::LowSkill, 0);
+        state.player_pool_ids = vec![11, 22, 33];
+        state.player_pool_data = BTreeMap::from([
+            (11, cached("Alice", 1812.5, &["1", "2"])),
+            (22, cached("Bob", 1700.25, &["3"])),
+            (33, cached("Carol", 1601.75, &[])),
+        ]);
+        state.excluded_player_ids = vec![44, 55];
+        state.full_exclusion_increment_ids = vec![44];
+        state.half_exclusion_increment_ids = vec![55];
+        state.captain1_id = Some(11);
+        state.captain2_id = Some(22);
+        state.captain1_rating = 1812.5;
+        state.captain2_rating = 1700.25;
+        state.radiant_captain_id = Some(11);
+        state.dire_captain_id = Some(22);
+        state.coinflip_winner_id = Some(22);
+        state.winner_choice_type = Some("side".to_owned());
+        state.winner_choice_value = Some("radiant".to_owned());
+        state.loser_choice_value = Some("first".to_owned());
+        state.radiant_hero_pick_order = Some(1);
+        state.dire_hero_pick_order = Some(2);
+        state.current_round_first_captain_id = Some(11);
+        state.current_pick_index = 5;
+        state.radiant_player_ids = vec![11, 33];
+        state.dire_player_ids = vec![22];
+        state.side_preferences =
+            BTreeMap::from([(33, "radiant".to_owned()), (44, "dire".to_owned())]);
+        state.phase = DraftPhase::Drafting;
+        state.draft_message_id = Some(9001);
+        state.draft_channel_id = Some(9002);
+        state.captain_ping_message_id = Some(9003);
+
+        let mut expected = state.clone();
+        let mut requested = state.to_snapshot().envelope(1);
+        requested.deadline_at = Some(1_700_000_000);
+        requested.active = true;
+        requested.finalizing = true;
+        requested.pending_match_id = Some(77);
+        requested
+            .application_metadata
+            .insert("future_mode".to_owned(), json!("alpha"));
+        requested.application_metadata.insert(
+            "provider_context".to_owned(),
+            json!({"attempt": 3, "flags": ["a", "b"]}),
+        );
+        let created = persistence
+            .create_envelope(&requested)
+            .expect("create full authoritative snapshot");
+        expected.session_id = created.session_id;
+        assert_eq!(created.revision, 1);
+        assert_eq!(created.guild_id, TEST_GUILD_ID);
+        assert_eq!(created.deadline_at, Some(1_700_000_000));
+        assert!(created.active);
+        assert!(created.finalizing);
+        assert_eq!(created.pending_match_id, Some(77));
+        assert_eq!(created.application_metadata["future_mode"], json!("alpha"));
+        assert_eq!(
+            created.application_metadata["provider_context"],
+            json!({"attempt": 3, "flags": ["a", "b"]})
+        );
+        assert_eq!(created.state.as_state(), &expected);
+
+        let loaded = persistence
+            .load_all()
+            .expect("load full authoritative snapshot");
+        assert_eq!(loaded, vec![created.clone()]);
+        assert_eq!(loaded[0].state.as_state(), &expected);
+
+        let mut replacement = expected.clone();
+        replacement.current_pick_index = 6;
+        replacement.phase = DraftPhase::Complete;
+        replacement.draft_message_id = Some(9010);
+        let mut replacement_envelope = replacement.to_snapshot().envelope(2);
+        replacement_envelope.deadline_at = Some(1_700_000_100);
+        replacement_envelope.active = true;
+        replacement_envelope.finalizing = false;
+        replacement_envelope.pending_match_id = Some(88);
+        replacement_envelope
+            .application_metadata
+            .insert("future_mode".to_owned(), json!("beta"));
+        let replaced = persistence
+            .replace_envelope_if_revision(
+                TEST_GUILD_ID,
+                created.session_id,
+                created.revision,
+                &replacement_envelope,
+            )
+            .expect("replace full authoritative snapshot");
+        assert_eq!(replaced.revision, 2);
+        assert_eq!(replaced.session_id, created.session_id);
+        assert_eq!(replaced.deadline_at, Some(1_700_000_100));
+        assert!(!replaced.finalizing);
+        assert_eq!(replaced.pending_match_id, Some(88));
+        assert_eq!(replaced.application_metadata["future_mode"], json!("beta"));
+        assert_eq!(
+            replaced.application_metadata["provider_context"],
+            json!({"attempt": 3, "flags": ["a", "b"]})
+        );
+        assert_eq!(replaced.state.as_state(), &replacement);
+
+        let mut bare_replacement = replacement.clone();
+        bare_replacement.current_pick_index = 7;
+        let preserved = persistence
+            .replace_if_revision(
+                TEST_GUILD_ID,
+                replaced.session_id,
+                replaced.revision,
+                &bare_replacement.to_snapshot(),
+            )
+            .expect("replace snapshot while preserving recovery metadata");
+        assert_eq!(preserved.deadline_at, Some(1_700_000_100));
+        assert!(!preserved.finalizing);
+        assert_eq!(preserved.pending_match_id, Some(88));
+        assert_eq!(preserved.application_metadata["future_mode"], json!("beta"));
+        assert_eq!(
+            preserved.application_metadata["provider_context"],
+            json!({"attempt": 3, "flags": ["a", "b"]})
+        );
+        assert_eq!(preserved.state.as_state(), &bare_replacement);
+    }
+
+    #[test]
+    fn draft_envelope_rejects_mismatched_metadata_and_malformed_rows() {
+        let state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::Open, 9);
+        let mut envelope = state.to_snapshot().envelope(1);
+        envelope.deadline_at = Some(1_700_000_000);
+        envelope.active = true;
+        envelope.finalizing = true;
+        envelope.pending_match_id = Some(77);
+        let raw = envelope.to_json().expect("encode envelope");
+        assert_eq!(
+            DraftStateEnvelope::from_json(&raw).expect("round-trip envelope"),
+            envelope
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&raw).expect("decode envelope");
+        value["guild_id"] = json!(999);
+        assert!(matches!(
+            DraftStateEnvelope::from_json(&value.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+        value["guild_id"] = json!(TEST_GUILD_ID);
+        value["session_id"] = json!(10);
+        assert!(matches!(
+            DraftStateEnvelope::from_json(&value.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+        value["session_id"] = json!(9);
+        value["revision"] = json!(0);
+        assert!(matches!(
+            DraftStateEnvelope::from_json(&value.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+
+        let fixture = NamedTempFile::new().expect("create malformed-row fixture");
+        cama_db::schema_manager::initialize_or_migrate(fixture.path())
+            .expect("initialize malformed-row fixture");
+        Connection::open(fixture.path())
+            .expect("open malformed-row fixture")
+            .execute(
+                "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,?2,?3)",
+                rusqlite::params![
+                    TEST_GUILD_ID,
+                    cama_db::draft_state::DRAFT_STATE_KEY,
+                    value.to_string()
+                ],
+            )
+            .expect("insert malformed metadata row");
+        let persistence = SqliteDraftStatePersistence::new(fixture.path());
+        assert!(matches!(
+            persistence.load_all(),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
     }
 
     #[test]
