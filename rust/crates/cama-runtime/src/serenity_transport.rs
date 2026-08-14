@@ -1775,16 +1775,26 @@ impl InteractionResponder for CommandResponder {
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
         match receipt.delivery {
-            InteractionMessageDelivery::InteractionFollowup => self
-                .interaction
-                .edit_followup(
-                    &self.http,
-                    MessageId::new(receipt.message_id),
-                    edit_followup_message(response),
-                )
-                .await
-                .map(drop)
-                .map_err(response_error),
+            InteractionMessageDelivery::InteractionFollowup => {
+                let message_id = MessageId::new(receipt.message_id);
+                if is_component_only_edit(&response) {
+                    edit_component_only_followup(
+                        &self.http,
+                        &self.interaction.token,
+                        message_id,
+                        response,
+                    )
+                    .await
+                    .map(drop)
+                    .map_err(response_error)
+                } else {
+                    self.interaction
+                        .edit_followup(&self.http, message_id, edit_followup_message(response))
+                        .await
+                        .map(drop)
+                        .map_err(response_error)
+                }
+            }
             InteractionMessageDelivery::ChannelFallback => ChannelId::new(receipt.channel_id)
                 .edit_message(
                     &self.http,
@@ -1955,16 +1965,26 @@ impl InteractionResponder for ComponentResponder {
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
         match receipt.delivery {
-            InteractionMessageDelivery::InteractionFollowup => self
-                .interaction
-                .edit_followup(
-                    &self.http,
-                    MessageId::new(receipt.message_id),
-                    edit_followup_message(response),
-                )
-                .await
-                .map(drop)
-                .map_err(response_error),
+            InteractionMessageDelivery::InteractionFollowup => {
+                let message_id = MessageId::new(receipt.message_id);
+                if is_component_only_edit(&response) {
+                    edit_component_only_followup(
+                        &self.http,
+                        &self.interaction.token,
+                        message_id,
+                        response,
+                    )
+                    .await
+                    .map(drop)
+                    .map_err(response_error)
+                } else {
+                    self.interaction
+                        .edit_followup(&self.http, message_id, edit_followup_message(response))
+                        .await
+                        .map(drop)
+                        .map_err(response_error)
+                }
+            }
             InteractionMessageDelivery::ChannelFallback => ChannelId::new(receipt.channel_id)
                 .edit_message(
                     &self.http,
@@ -2150,6 +2170,37 @@ fn edit_followup_message(response: InteractionResponse) -> CreateInteractionResp
     } else {
         followup_response(response)
     }
+}
+
+/// Serenity 0.12.5's `CreateInteractionResponseFollowup` always serializes
+/// its `attachments` field, even when no files were supplied. Discord treats
+/// that empty list as an instruction to remove existing uploads on an edit.
+/// Component-only edits must therefore use the lower-level HTTP adapter with
+/// a payload that omits the field entirely, matching Discord.py's view-only
+/// edit behavior.
+#[derive(serde::Serialize)]
+struct ComponentOnlyFollowupEdit {
+    components: Vec<CreateActionRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_mentions: Option<CreateAllowedMentions>,
+}
+
+fn component_only_followup_edit(response: InteractionResponse) -> ComponentOnlyFollowupEdit {
+    ComponentOnlyFollowupEdit {
+        components: serenity_components(&response.components),
+        allowed_mentions: serenity_allowed_mentions(&response.allowed_mentions),
+    }
+}
+
+async fn edit_component_only_followup(
+    http: &Http,
+    interaction_token: &str,
+    message_id: MessageId,
+    response: InteractionResponse,
+) -> serenity::Result<serenity::all::Message> {
+    let edit = component_only_followup_edit(response);
+    http.edit_followup_message(interaction_token, message_id, &edit, Vec::new())
+        .await
 }
 
 fn edit_receipt_channel_message(response: InteractionResponse) -> EditMessage {
@@ -4250,6 +4301,26 @@ mod tests {
         let serialized = serde_json::to_value(edit_channel_response(preserving))
             .expect("serialize component-only edit");
         assert!(serialized.get("attachments").is_none());
+    }
+
+    #[test]
+    fn component_only_followup_edit_omits_serenity_empty_attachment_list() {
+        let response =
+            InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
+                InteractionButton::new("wheel:keep", "Keep result"),
+            ]));
+
+        let regular_builder = serde_json::to_value(edit_followup_message(response.clone()))
+            .expect("serialize Serenity followup edit");
+        assert_eq!(regular_builder["attachments"], serde_json::json!([]));
+
+        let preserving = serde_json::to_value(component_only_followup_edit(response))
+            .expect("serialize attachment-preserving followup edit");
+        assert!(preserving.get("attachments").is_none());
+        assert_eq!(
+            preserving["components"][0]["components"][0]["custom_id"],
+            "wheel:keep"
+        );
     }
 
     #[test]
