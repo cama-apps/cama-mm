@@ -1762,11 +1762,14 @@ impl InteractionResponder for CommandResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
-        self.interaction
-            .edit_response(&self.http, edit_response(response))
-            .await
-            .map(drop)
-            .map_err(response_error)
+        let result = if is_component_only_edit(&response) {
+            edit_component_only_original(&self.http, &self.interaction.token, response).await
+        } else {
+            self.interaction
+                .edit_response(&self.http, edit_response(response))
+                .await
+        };
+        result.map(drop).map_err(response_error)
     }
 
     async fn edit_message(
@@ -1952,11 +1955,14 @@ impl InteractionResponder for ComponentResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
-        self.interaction
-            .edit_response(&self.http, edit_response(response))
-            .await
-            .map(drop)
-            .map_err(response_error)
+        let result = if is_component_only_edit(&response) {
+            edit_component_only_original(&self.http, &self.interaction.token, response).await
+        } else {
+            self.interaction
+                .edit_response(&self.http, edit_response(response))
+                .await
+        };
+        result.map(drop).map_err(response_error)
     }
 
     async fn edit_message(
@@ -2085,11 +2091,14 @@ impl InteractionResponder for ModalResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
-        self.interaction
-            .edit_response(&self.http, edit_response(response))
-            .await
-            .map(drop)
-            .map_err(response_error)
+        let result = if is_component_only_edit(&response) {
+            edit_component_only_original(&self.http, &self.interaction.token, response).await
+        } else {
+            self.interaction
+                .edit_response(&self.http, edit_response(response))
+                .await
+        };
+        result.map(drop).map_err(response_error)
     }
 }
 
@@ -2179,17 +2188,27 @@ fn edit_followup_message(response: InteractionResponse) -> CreateInteractionResp
 /// a payload that omits the field entirely, matching Discord.py's view-only
 /// edit behavior.
 #[derive(serde::Serialize)]
-struct ComponentOnlyFollowupEdit {
+struct ComponentOnlyInteractionEdit {
     components: Vec<CreateActionRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allowed_mentions: Option<CreateAllowedMentions>,
 }
 
-fn component_only_followup_edit(response: InteractionResponse) -> ComponentOnlyFollowupEdit {
-    ComponentOnlyFollowupEdit {
+fn component_only_interaction_edit(response: InteractionResponse) -> ComponentOnlyInteractionEdit {
+    ComponentOnlyInteractionEdit {
         components: serenity_components(&response.components),
         allowed_mentions: serenity_allowed_mentions(&response.allowed_mentions),
     }
+}
+
+async fn edit_component_only_original(
+    http: &Http,
+    interaction_token: &str,
+    response: InteractionResponse,
+) -> serenity::Result<serenity::all::Message> {
+    let edit = component_only_interaction_edit(response);
+    http.edit_original_interaction_response(interaction_token, &edit, Vec::new())
+        .await
 }
 
 async fn edit_component_only_followup(
@@ -2198,7 +2217,7 @@ async fn edit_component_only_followup(
     message_id: MessageId,
     response: InteractionResponse,
 ) -> serenity::Result<serenity::all::Message> {
-    let edit = component_only_followup_edit(response);
+    let edit = component_only_interaction_edit(response);
     http.edit_followup_message(interaction_token, message_id, &edit, Vec::new())
         .await
 }
@@ -4319,7 +4338,7 @@ mod tests {
             .expect("serialize Serenity followup edit");
         assert_eq!(regular_builder["attachments"], serde_json::json!([]));
 
-        let preserving = serde_json::to_value(component_only_followup_edit(response))
+        let preserving = serde_json::to_value(component_only_interaction_edit(response))
             .expect("serialize attachment-preserving followup edit");
         assert!(preserving.get("attachments").is_none());
         assert_eq!(
@@ -4401,6 +4420,83 @@ mod tests {
         assert_eq!(
             serialized["components"][0]["components"][0]["custom_id"],
             "wheel:timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn component_only_original_transport_preserves_existing_media() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind local Discord HTTP capture server");
+        let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
+        let request_body = Arc::new(Mutex::new(None));
+        let captured_body = Arc::clone(&request_body);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Discord HTTP request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).expect("read Discord HTTP request");
+                assert!(read > 0, "capture server received an incomplete request");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .expect("JSON request content length");
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).expect("read JSON request body");
+                assert!(read > 0, "capture server received a truncated request body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            *captured_body.lock().expect("capture body lock") =
+                Some(request[header_end..header_end + content_length].to_vec());
+
+            let response = serde_json::to_vec(&Message::default()).expect("serialize HTTP reply");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            )
+            .expect("write Discord HTTP response headers");
+            stream
+                .write_all(&response)
+                .expect("write Discord HTTP response body");
+        });
+
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let response =
+            InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
+                InteractionButton::new("wheel:original-timeout", "Timed out"),
+            ]));
+        edit_component_only_original(&http, "interaction-token", response)
+            .await
+            .expect("component-only original edit succeeds");
+        server.join().expect("capture server completes");
+
+        let body = request_body
+            .lock()
+            .expect("capture body lock")
+            .clone()
+            .expect("captured edit request body");
+        let serialized: serde_json::Value = serde_json::from_slice(&body).expect("JSON edit body");
+        assert!(serialized.get("content").is_none());
+        assert!(serialized.get("embeds").is_none());
+        assert!(serialized.get("attachments").is_none());
+        assert_eq!(
+            serialized["components"][0]["components"][0]["custom_id"],
+            "wheel:original-timeout"
         );
     }
 
