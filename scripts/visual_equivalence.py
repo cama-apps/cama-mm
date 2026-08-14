@@ -200,6 +200,49 @@ PROFILE_GAMBA_MIN_MARKER_SHAPE_IOU = 0.60
 PROFILE_GAMBA_MARKER_COLOR_DISTANCE = 55
 PROFILE_GAMBA_MARKER_DARK_DISTANCE = 18
 PROFILE_GAMBA_MARKER_WHITE_DISTANCE = 40
+# `/wrapped` renders the same authored 700x400 Gamba chart into a separate
+# 800x600 story canvas. The native bitmap font and PNG compositing differ from
+# Pillow, but the wrapper geometry, chart layers, and footer remain guarded.
+WRAPPED_GAMBA_MAX_MAE = 0.105
+WRAPPED_GAMBA_MAX_RMS = 0.235
+WRAPPED_GAMBA_MIN_FOREGROUND_GRID_IOU = 0.78
+WRAPPED_GAMBA_MIN_FOREGROUND_COUNT_RATIO = 0.50
+# Native copy is intentionally bitmap-backed. Whole-frame error is too
+# background-heavy to catch a middle dot falling through to `?` or authored
+# lowercase being uppercased, so the Rust boundary also verifies these glyph
+# cells directly. This remains scoped to the Wrapped/Gamba visual gate.
+_NATIVE_CASE_GLYPHS: dict[str, tuple[int, ...]] = {
+    "a": (0, 0, 14, 1, 15, 17, 15),
+    "b": (16, 16, 30, 17, 17, 17, 30),
+    "c": (0, 0, 14, 17, 16, 17, 14),
+    "d": (1, 1, 15, 17, 17, 17, 15),
+    "e": (0, 0, 14, 17, 31, 16, 14),
+    "f": (6, 9, 8, 28, 8, 8, 8),
+    "g": (0, 0, 15, 17, 15, 1, 14),
+    "h": (16, 16, 30, 17, 17, 17, 17),
+    "i": (4, 0, 12, 4, 4, 4, 14),
+    "j": (2, 0, 6, 2, 2, 18, 12),
+    "k": (16, 16, 18, 20, 24, 20, 18),
+    "l": (12, 4, 4, 4, 4, 4, 14),
+    "m": (0, 0, 26, 21, 21, 21, 21),
+    "n": (0, 0, 30, 17, 17, 17, 17),
+    "o": (0, 0, 14, 17, 17, 17, 14),
+    "p": (0, 0, 30, 17, 30, 16, 16),
+    "q": (0, 0, 15, 17, 15, 1, 1),
+    "r": (0, 0, 22, 25, 16, 16, 16),
+    "s": (0, 0, 15, 16, 14, 1, 30),
+    "t": (8, 8, 28, 8, 8, 9, 6),
+    "u": (0, 0, 17, 17, 17, 19, 13),
+    "v": (0, 0, 17, 17, 17, 10, 4),
+    "w": (0, 0, 17, 17, 21, 21, 10),
+    "x": (0, 0, 17, 10, 4, 10, 17),
+    "y": (0, 0, 17, 17, 15, 1, 14),
+    "z": (0, 0, 31, 2, 4, 8, 31),
+}
+_NATIVE_MIDDLE_DOT_GLYPH = (0, 0, 0, 4, 0, 0, 0)
+_NATIVE_WRAPPED_GREY = (170, 174, 190, 255)
+_NATIVE_GAMBA_GREY = (185, 187, 190, 255)
+_NATIVE_GAMBA_WHITE = (255, 255, 255, 255)
 
 
 class FixedDateTime(dt.datetime):
@@ -238,6 +281,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "pinnacle",
         "balance",
         "gamba",
+        "wrapped_gamba",
         "rating_history",
         "rating_distribution",
         "rating_analysis",
@@ -251,7 +295,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "profile",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, gamba, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, gamba, wrapped_gamba, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
         )
     return fixture
 
@@ -334,6 +378,45 @@ def render_python(
         },
     ).getvalue()
     (output_dir / "python_profile_gamba.png").write_bytes(gamba_bytes)
+
+    # This is the live `/wrapped` Gamba story boundary. It deliberately
+    # reuses the typed chart payload but then applies Python's separate
+    # wrap_chart_in_slide canvas and attachment lifecycle.
+    wrapped_gamba = fixture["wrapped_gamba"]
+    wrapped_payload = wrapped_gamba["gamba"]
+    wrapped_chart = draw_gamba_chart(
+        username=str(wrapped_payload["username"]),
+        degen_score=int(wrapped_payload["degen_score"]),
+        degen_title=str(wrapped_payload["degen_title"]),
+        degen_emoji=str(wrapped_payload.get("degen_emoji", "")),
+        pnl_series=[
+            (
+                int(point["event_number"]),
+                int(point["cumulative"]),
+                {
+                    "source": str(point["source"]),
+                    "outcome": str(point["outcome"]),
+                    "leverage": int(point["leverage"]),
+                    "profit": int(point["profit"]),
+                },
+            )
+            for point in wrapped_payload["series"]
+        ],
+        stats={
+            "total_bets": int(wrapped_payload["stats"]["total_bets"]),
+            "win_rate": float(wrapped_payload["stats"]["win_rate"]),
+            "net_pnl": int(wrapped_payload["stats"]["net_pnl"]),
+            "roi": float(wrapped_payload["stats"]["roi"]),
+        },
+    ).getvalue()
+    from utils.wrapped_drawing import wrap_chart_in_slide
+
+    wrapped_bytes = wrap_chart_in_slide(
+        wrapped_chart,
+        str(wrapped_gamba["title"]),
+        str(wrapped_gamba["footer"]),
+    ).getvalue()
+    (output_dir / "python_wrapped_gamba.png").write_bytes(wrapped_bytes)
 
     rating_history = fixture["rating_history"]
     rating_history_bytes = draw_rating_history_chart(
@@ -2052,6 +2135,207 @@ def check_profile_gamba(
     return []
 
 
+def _assert_native_bitmap_copy(
+    rgba: bytes,
+    size: tuple[int, int],
+    *,
+    text: str,
+    left: int,
+    top: int,
+    scale: int,
+    color: tuple[int, int, int, int],
+    label: str,
+) -> None:
+    """Verify case-sensitive/dot cells in one deterministic native text run."""
+
+    width, height = size
+    if len(rgba) != width * height * 4:
+        raise ValueError(f"{label} received a malformed RGBA buffer")
+    checked = 0
+    for index, character in enumerate(text):
+        glyph = (
+            _NATIVE_MIDDLE_DOT_GLYPH
+            if character == "·"
+            else _NATIVE_CASE_GLYPHS.get(character)
+        )
+        if glyph is None:
+            continue
+        checked += 1
+        glyph_left = left + index * 6 * scale
+        for row, bits in enumerate(glyph):
+            for column in range(5):
+                expected_on = bool(bits & (1 << (4 - column)))
+                for offset_y in range(scale):
+                    for offset_x in range(scale):
+                        x = glyph_left + column * scale + offset_x
+                        y = top + row * scale + offset_y
+                        if not (0 <= x < width and 0 <= y < height):
+                            raise AssertionError(f"{label} falls outside the native canvas")
+                        offset = (y * width + x) * 4
+                        actual = tuple(rgba[offset : offset + 4])
+                        if expected_on and actual != color:
+                            raise AssertionError(
+                                f"{label} authored copy drifted at {character!r} "
+                                f"row {row} column {column}: expected native "
+                                f"foreground {color}, got {actual}"
+                            )
+                        if not expected_on and actual == color:
+                            raise AssertionError(
+                                f"{label} authored copy drifted at {character!r} "
+                                f"row {row} column {column}: unexpected native "
+                                "foreground pixel"
+                            )
+    if checked == 0:
+        raise AssertionError(f"{label} contains no case-sensitive or middle-dot glyphs")
+
+
+def _assert_native_wrapped_gamba_copy(
+    rgba: bytes,
+    size: tuple[int, int],
+    wrapped_gamba: dict[str, Any],
+) -> None:
+    """Guard exact live Rust copy where aggregate image metrics are insensitive."""
+
+    footer = str(wrapped_gamba["footer"])
+    payload = wrapped_gamba.get("gamba", wrapped_gamba)
+    subtitle = f'Degen Score {int(payload["degen_score"])}'
+    degen_title = str(payload.get("degen_title", ""))
+    if degen_title:
+        subtitle += f"  ·  {degen_title}"
+    chart_title = f'{payload["username"]}\'s Gamba Journey'
+    footer_left = (size[0] - len(footer) * 12) // 2
+    _assert_native_bitmap_copy(
+        rgba,
+        size,
+        text=footer,
+        left=footer_left,
+        top=560,
+        scale=2,
+        color=_NATIVE_WRAPPED_GREY,
+        label="wrapped Gamba footer",
+    )
+    _assert_native_bitmap_copy(
+        rgba,
+        size,
+        text=chart_title,
+        left=110,
+        top=57,
+        scale=2,
+        color=_NATIVE_GAMBA_WHITE,
+        label="wrapped Gamba chart title",
+    )
+    _assert_native_bitmap_copy(
+        rgba,
+        size,
+        text=subtitle,
+        left=110,
+        top=85,
+        scale=2,
+        color=_NATIVE_GAMBA_GREY,
+        label="wrapped Gamba chart subtitle",
+    )
+
+
+def check_wrapped_gamba(
+    python_path: Path,
+    rust_path: Path,
+    wrapped_gamba: dict[str, Any] | None = None,
+    *,
+    require_native_copy: bool = False,
+) -> list[str]:
+    """Compare the separate `/wrapped` Gamba story attachment boundary."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != (800, 600) or rust_size != python_size:
+        raise AssertionError(
+            f"wrapped gamba dimensions differ or are invalid: Python {python_size}, "
+            f"Rust {rust_size}; expected (800, 600)"
+        )
+    if require_native_copy:
+        if wrapped_gamba is None:
+            raise ValueError("native Wrapped Gamba copy requires typed fixture metadata")
+        _assert_native_wrapped_gamba_copy(rust_pixels, rust_size, wrapped_gamba)
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(16, 12),
+        margin=0,
+        minimum_grid_iou=WRAPPED_GAMBA_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=WRAPPED_GAMBA_MIN_FOREGROUND_COUNT_RATIO,
+        label="wrapped gamba",
+    )
+    chart_region = (110, 133, 724, 355)
+    strip_region = (110, 391, 690, 434)
+    layer_metrics = {
+        "positive fill": _compare_gamba_layer(
+            python_pixels,
+            rust_pixels,
+            python_size,
+            label="wrapped gamba positive fill",
+            expected=(75, 120, 80),
+            region=chart_region,
+        ),
+        "negative fill": _compare_gamba_layer(
+            python_pixels,
+            rust_pixels,
+            python_size,
+            label="wrapped gamba negative fill",
+            expected=(105, 70, 75),
+            region=chart_region,
+        ),
+        "stat strip": _compare_gamba_layer(
+            python_pixels,
+            rust_pixels,
+            python_size,
+            label="wrapped gamba stat strip",
+            expected=(47, 49, 54),
+            region=strip_region,
+        ),
+        "story accent": _compare_gamba_layer(
+            python_pixels,
+            rust_pixels,
+            python_size,
+            label="wrapped gamba story accent",
+            expected=(241, 196, 15),
+            region=(0, 0, 800, 45),
+        ),
+    }
+    marker_metrics = {}
+    if wrapped_gamba is not None:
+        payload = wrapped_gamba.get("gamba", wrapped_gamba)
+        marker_specs = _gamba_marker_specs(payload)
+        translated = {
+            kind: [(x + 50, y + 45, outcome) for x, y, outcome in specs]
+            for kind, specs in marker_specs.items()
+        }
+        for kind in ("bet", "wheel", "leverage", "double_or_nothing"):
+            specs = translated.get(kind, [])
+            if specs:
+                marker_metrics[kind] = _compare_gamba_marker_kind(
+                    python_pixels,
+                    rust_pixels,
+                    python_size,
+                    kind=kind,
+                    specs=specs,
+                )
+    print(
+        f"wrapped gamba: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"layers={layer_metrics} markers={marker_metrics} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > WRAPPED_GAMBA_MAX_MAE or rms > WRAPPED_GAMBA_MAX_RMS:
+        raise AssertionError(
+            f"wrapped gamba pixel drift exceeds threshold: MAE {mae:.5f} <= "
+            f"{WRAPPED_GAMBA_MAX_MAE:.5f}, RMS {rms:.5f} <= {WRAPPED_GAMBA_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -2419,6 +2703,12 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_profile_gamba.png",
                 output_dir / "rust_profile_gamba.png",
                 fixture["gamba"],
+            )
+            check_wrapped_gamba(
+                output_dir / "python_wrapped_gamba.png",
+                output_dir / "rust_wrapped_gamba.png",
+                fixture["wrapped_gamba"],
+                require_native_copy=True,
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

@@ -668,6 +668,19 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
             .all(|line| !line.contains("Guild Ally"))
     );
     assert!(!locked.slides[11].avatars.is_empty());
+    let wrapped_gamba = locked
+        .slides
+        .iter()
+        .find(|slide| slide.kind == "chart_gamba")
+        .expect("live Wrapped Gamba slide");
+    assert_eq!(wrapped_gamba.title, "Gamba (All-Time)");
+    assert_eq!(wrapped_gamba.lines, ["+140 JC · 3 bets · Degen Score: 47"]);
+    let gamba = wrapped_gamba.gamba.as_ref().expect("typed Gamba payload");
+    assert!(!gamba.points.is_empty());
+    assert_eq!(gamba.points[0].event_number, 1);
+    assert_eq!(gamba.stats.total_bets, 3);
+    assert_eq!(gamba.degen_score, 47);
+    assert_eq!(gamba.degen_title, "Committed");
     drop(locked);
     assert!(discord.peak.load(AtomicOrdering::SeqCst) <= PROFILE_CONCURRENCY);
 
@@ -916,7 +929,7 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         package_purchases: Vec::new(),
         rating_history: Vec::new(),
         gamba_stats: None,
-        gamba_series: Vec::new(),
+        gamba_points: Vec::new(),
     };
     let awards = generate_awards(&raw, 3, 3);
     let titles = awards.iter().map(|award| award.title).collect::<Vec<_>>();

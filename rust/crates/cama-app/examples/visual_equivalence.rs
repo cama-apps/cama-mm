@@ -34,6 +34,7 @@ use cama_app::rating_comparison_service::{
 };
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
+use cama_app::wrapped_media::{WrappedGambaData, WrappedSlideData, render_wrapped_slide};
 use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
 use cama_domain::pet::{PetMood, PetStage};
 use serde::Deserialize;
@@ -46,6 +47,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     gamba: GambaFixture,
+    wrapped_gamba: WrappedGambaFixture,
     rating_history: RatingHistoryFixture,
     rating_distribution: RatingDistributionFixture,
     rating_analysis: RatingAnalysisFixture,
@@ -71,6 +73,13 @@ struct GambaFixture {
     degen_title: String,
     series: Vec<GambaPointFixture>,
     stats: GambaStatsFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrappedGambaFixture {
+    title: String,
+    footer: String,
+    gamba: GambaFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,6 +392,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_profile_gamba.png"),
         gamba_chart,
+    )?;
+
+    // This is the live `/wrapped` Gamba story boundary. It intentionally
+    // renders the same typed 700×400 chart payload first, then lets the
+    // wrapped media renderer own the 800×600 story canvas and attachment
+    // lifecycle; it must not share the `/profile` attachment output above.
+    let wrapped_gamba = &fixture.wrapped_gamba;
+    let wrapped_data = &wrapped_gamba.gamba;
+    let wrapped_points = wrapped_data
+        .series
+        .iter()
+        .map(|point| GambaPoint {
+            event_number: point.event_number,
+            cumulative: point.cumulative,
+            info: GambaInfo {
+                source: point.source.clone(),
+                outcome: point.outcome.clone(),
+                leverage: point.leverage,
+                profit: point.profit,
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut wrapped_slide = WrappedSlideData::new("chart_gamba", &wrapped_gamba.title);
+    wrapped_slide.username = wrapped_data.username.clone();
+    wrapped_slide.lines = vec![wrapped_gamba.footer.clone()];
+    wrapped_slide.gamba = Some(WrappedGambaData {
+        degen_score: wrapped_data.degen_score,
+        degen_title: wrapped_data.degen_title.clone(),
+        points: wrapped_points,
+        stats: GambaStats {
+            total_bets: wrapped_data.stats.total_bets,
+            win_rate: wrapped_data.stats.win_rate,
+            net_pnl: wrapped_data.stats.net_pnl,
+            roi: wrapped_data.stats.roi,
+        },
+    });
+    let wrapped_png = render_wrapped_slide(&wrapped_slide)?;
+    fs::write(
+        Path::new(&output_dir).join("rust_wrapped_gamba.png"),
+        wrapped_png,
     )?;
 
     let rating_history = fixture

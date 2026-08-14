@@ -8,6 +8,7 @@
 
 use std::io::{Read, Write};
 
+use crate::drawing::{GambaPoint, GambaStats, draw_gamba_chart};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use thiserror::Error;
 
@@ -22,11 +23,30 @@ const GRID: Rgba = Rgba::rgb(62, 64, 78);
 const GREEN: Rgba = Rgba::rgb(46, 204, 113);
 const RED: Rgba = Rgba::rgb(237, 66, 69);
 const YELLOW: Rgba = Rgba::rgb(241, 196, 15);
+const WRAPPED_BACKGROUND_START: Rgba = Rgba::rgb(30, 30, 35);
+const WRAPPED_BACKGROUND_END: Rgba = Rgba::rgb(45, 45, 55);
+// `wrap_chart_in_slide` keeps its default ACCENT_GOLD even for the Gamba
+// slide; the chart itself carries the Discord red/green event palette.
+const WRAPPED_GAMBA_ACCENT: Rgba = Rgba::rgb(241, 196, 15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WrappedAvatar {
     pub discord_id: i64,
     pub png: Vec<u8>,
+}
+
+/// Exact typed payload for the all-time Gamba page in `/wrapped`.
+///
+/// This is deliberately separate from the live `/profile` chart payload. The
+/// wrapped command first renders the 700×400 chart and then places that
+/// attachment on the 800×600 story canvas, matching Python's
+/// `wrap_chart_in_slide` lifecycle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WrappedGambaData {
+    pub degen_score: i32,
+    pub degen_title: String,
+    pub points: Vec<GambaPoint>,
+    pub stats: GambaStats,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +64,7 @@ pub struct WrappedSlideData {
     pub secondary_series: Vec<f64>,
     pub outcomes: Vec<Option<bool>>,
     pub avatars: Vec<WrappedAvatar>,
+    pub gamba: Option<WrappedGambaData>,
 }
 
 impl WrappedSlideData {
@@ -63,6 +84,7 @@ impl WrappedSlideData {
             secondary_series: Vec::new(),
             outcomes: Vec::new(),
             avatars: Vec::new(),
+            gamba: None,
         }
     }
 }
@@ -90,6 +112,9 @@ pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, Wrapped
     {
         return Err(WrappedMediaError::OversizedText);
     }
+    if slide.kind == "chart_gamba" {
+        return render_wrapped_gamba(slide);
+    }
     let accent = Rgba::rgb(slide.accent[0], slide.accent[1], slide.accent[2]);
     let mut canvas = Canvas::new(WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT, BACKGROUND);
     canvas.fill_rect(0, 0, WRAPPED_SLIDE_WIDTH as i32, 10, accent);
@@ -111,6 +136,47 @@ pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, Wrapped
         canvas.text(28, 568, &slide.username, GREY, 2);
     }
     canvas.text_right("CAMA WRAPPED", 772, 568, GREY, 2);
+    Ok(encode_png(&canvas))
+}
+
+fn render_wrapped_gamba(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
+    // Python's wrap_chart_in_slide owns this canvas, not the generic Wrapped
+    // header/footer used by the other story pages. Preserve its gradient,
+    // title position, 700×400 chart boundary, and optional footer line.
+    let mut canvas = Canvas::new(
+        WRAPPED_SLIDE_WIDTH,
+        WRAPPED_SLIDE_HEIGHT,
+        WRAPPED_BACKGROUND_START,
+    );
+    canvas.vertical_gradient(WRAPPED_BACKGROUND_START, WRAPPED_BACKGROUND_END);
+    canvas.text_centered(
+        &slide.title.to_ascii_uppercase(),
+        15,
+        WRAPPED_GAMBA_ACCENT,
+        2,
+    );
+
+    if let Some(gamba) = &slide.gamba {
+        let chart = draw_gamba_chart(
+            &slide.username,
+            gamba.degen_score,
+            &gamba.degen_title,
+            &gamba.points,
+            gamba.stats,
+        )
+        .into_inner();
+        if let Some(chart) = decode_png(&chart) {
+            canvas.blit_opaque(&chart, 50, 45);
+        } else {
+            canvas.text_centered("Chart unavailable", 250, GREY, 2);
+        }
+    } else {
+        canvas.text_centered("Chart unavailable", 250, GREY, 2);
+    }
+
+    if let Some(footer) = slide.lines.first().filter(|line| !line.is_empty()) {
+        canvas.text_centered_case_sensitive(footer, 560, GREY, 2);
+    }
     Ok(encode_png(&canvas))
 }
 
@@ -393,6 +459,22 @@ impl Canvas {
         }
     }
 
+    fn vertical_gradient(&mut self, start: Rgba, end: Rgba) {
+        let height = self.height.max(1) as f64;
+        for y in 0..self.height {
+            let ratio = y as f64 / height;
+            let color = Rgba::rgb(
+                (f64::from(start.0[0]) + (f64::from(end.0[0]) - f64::from(start.0[0])) * ratio)
+                    as u8,
+                (f64::from(start.0[1]) + (f64::from(end.0[1]) - f64::from(start.0[1])) * ratio)
+                    as u8,
+                (f64::from(start.0[2]) + (f64::from(end.0[2]) - f64::from(start.0[2])) * ratio)
+                    as u8,
+            );
+            self.fill_rect(0, y as i32, self.width as i32, y as i32 + 1, color);
+        }
+    }
+
     fn outline_rect(&mut self, l: i32, t: i32, r: i32, b: i32, color: Rgba, width: i32) {
         self.fill_rect(l, t, r, t + width, color);
         self.fill_rect(l, b - width, r, b, color);
@@ -460,6 +542,26 @@ impl Canvas {
         self.text((self.width as i32 - width) / 2, y, text, color, scale);
     }
 
+    fn text_case_sensitive(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
+        for (index, character) in text.chars().enumerate() {
+            let x = x + i32::try_from(index).unwrap_or_default() * 6 * scale;
+            for (row, bits) in case_sensitive_glyph(character).into_iter().enumerate() {
+                for column in 0..5_u8 {
+                    if bits & (1 << (4 - column)) != 0 {
+                        let left = x + i32::from(column) * scale;
+                        let top = y + i32::try_from(row).unwrap_or_default() * scale;
+                        self.fill_rect(left, top, left + scale, top + scale, color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn text_centered_case_sensitive(&mut self, text: &str, y: i32, color: Rgba, scale: i32) {
+        let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
+        self.text_case_sensitive((self.width as i32 - width) / 2, y, text, color, scale);
+    }
+
     fn text_right(&mut self, text: &str, right: i32, y: i32, color: Rgba, scale: i32) {
         let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
         self.text(right - width, y, text, color, scale);
@@ -490,6 +592,24 @@ impl Canvas {
                 let destination_x = left + i32::try_from(x).unwrap_or_default();
                 let destination_y = top + i32::try_from(y).unwrap_or_default();
                 self.blend(destination_x, destination_y, Rgba(source_pixel));
+            }
+        }
+    }
+
+    fn blit_opaque(&mut self, source: &DecodedPng, left: i32, top: i32) {
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let offset = (y * source.width + x) * 4;
+                let color = Rgba(
+                    source.pixels[offset..offset + 4]
+                        .try_into()
+                        .unwrap_or([0; 4]),
+                );
+                self.blend(
+                    left + i32::try_from(x).unwrap_or_default(),
+                    top + i32::try_from(y).unwrap_or_default(),
+                    color,
+                );
             }
         }
     }
@@ -681,8 +801,41 @@ fn glyph(character: char) -> [u8; 7] {
         '+' => [0, 4, 4, 31, 4, 4, 0],
         '(' => [2, 4, 8, 8, 8, 4, 2],
         ')' => [8, 4, 2, 2, 2, 4, 8],
+        '·' => [0, 0, 0, 4, 0, 0, 0],
         ' ' => [0; 7],
         _ => [14, 17, 1, 2, 4, 0, 4],
+    }
+}
+
+fn case_sensitive_glyph(character: char) -> [u8; 7] {
+    match character {
+        'a' => [0, 0, 14, 1, 15, 17, 15],
+        'b' => [16, 16, 30, 17, 17, 17, 30],
+        'c' => [0, 0, 14, 17, 16, 17, 14],
+        'd' => [1, 1, 15, 17, 17, 17, 15],
+        'e' => [0, 0, 14, 17, 31, 16, 14],
+        'f' => [6, 9, 8, 28, 8, 8, 8],
+        'g' => [0, 0, 15, 17, 15, 1, 14],
+        'h' => [16, 16, 30, 17, 17, 17, 17],
+        'i' => [4, 0, 12, 4, 4, 4, 14],
+        'j' => [2, 0, 6, 2, 2, 18, 12],
+        'k' => [16, 16, 18, 20, 24, 20, 18],
+        'l' => [12, 4, 4, 4, 4, 4, 14],
+        'm' => [0, 0, 26, 21, 21, 21, 21],
+        'n' => [0, 0, 30, 17, 17, 17, 17],
+        'o' => [0, 0, 14, 17, 17, 17, 14],
+        'p' => [0, 0, 30, 17, 30, 16, 16],
+        'q' => [0, 0, 15, 17, 15, 1, 1],
+        'r' => [0, 0, 22, 25, 16, 16, 16],
+        's' => [0, 0, 15, 16, 14, 1, 30],
+        't' => [8, 8, 28, 8, 8, 9, 6],
+        'u' => [0, 0, 17, 17, 17, 19, 13],
+        'v' => [0, 0, 17, 17, 17, 10, 4],
+        'w' => [0, 0, 17, 17, 21, 21, 10],
+        'x' => [0, 0, 17, 10, 4, 10, 17],
+        'y' => [0, 0, 17, 17, 15, 1, 14],
+        'z' => [0, 0, 31, 2, 4, 8, 31],
+        _ => glyph(character),
     }
 }
 
@@ -734,6 +887,45 @@ fn crc32(bytes: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
+    fn wrapped_gamba_fixture_slide() -> WrappedSlideData {
+        let mut slide = WrappedSlideData::new("chart_gamba", "Gamba (All-Time)");
+        slide.username = "Wrapped Gambler".to_owned();
+        slide.lines = vec!["+60 JC · 6 bets · Degen Score: 73".to_owned()];
+        slide.gamba = Some(WrappedGambaData {
+            degen_score: 73,
+            degen_title: "House Favorite".to_owned(),
+            points: vec![
+                GambaPoint {
+                    event_number: 1,
+                    cumulative: -20,
+                    info: crate::drawing::GambaInfo {
+                        source: "bet".to_owned(),
+                        outcome: Some("lost".to_owned()),
+                        leverage: 1,
+                        profit: -20,
+                    },
+                },
+                GambaPoint {
+                    event_number: 2,
+                    cumulative: 60,
+                    info: crate::drawing::GambaInfo {
+                        source: "wheel".to_owned(),
+                        outcome: Some("won".to_owned()),
+                        leverage: 1,
+                        profit: 80,
+                    },
+                },
+            ],
+            stats: GambaStats {
+                total_bets: 1,
+                win_rate: 1.0,
+                net_pnl: 60,
+                roi: 0.5,
+            },
+        });
+        slide
+    }
+
     #[test]
     fn all_production_slide_kinds_are_native_rgba_pngs() {
         for kind in [
@@ -765,6 +957,86 @@ mod tests {
             assert_eq!((decoded.width, decoded.height), (800, 600));
             assert!(png.len() > 1_000);
         }
+    }
+
+    #[test]
+    fn wrapped_gamba_renders_typed_chart_inside_separate_story_canvas() {
+        let slide = wrapped_gamba_fixture_slide();
+        let png = render_wrapped_slide(&slide).expect("wrapped Gamba PNG");
+        let decoded = decode_png(&png).expect("wrapped Gamba native PNG");
+        assert_eq!((decoded.width, decoded.height), (800, 600));
+        assert_eq!(
+            &decoded.pixels[(45 * decoded.width + 50) * 4..][..4],
+            crate::drawing::DISCORD_BG.0,
+            "the typed 700x400 chart begins at Python's wrapped offset"
+        );
+        assert_ne!(
+            &decoded.pixels[(15 * decoded.width + 400) * 4..][..3],
+            &WRAPPED_BACKGROUND_START.0[..3],
+            "the story title is drawn on the wrapped gradient"
+        );
+    }
+
+    #[test]
+    fn wrapped_gamba_footer_preserves_authored_case_dot_and_uppercase_title() {
+        const FOOTER: &str = "+60 JC · 6 bets · Degen Score: 73";
+        assert_eq!(glyph('·'), [0, 0, 0, 4, 0, 0, 0]);
+        assert_ne!(case_sensitive_glyph('e'), glyph('e'));
+
+        let slide = wrapped_gamba_fixture_slide();
+        let rendered = render_wrapped_slide(&slide).expect("authored Wrapped Gamba copy");
+        let decoded = decode_png(&rendered).expect("native Wrapped Gamba PNG");
+        let pixel = |x: usize, y: usize| -> &[u8] {
+            let offset = (y * decoded.width + x) * 4;
+            &decoded.pixels[offset..offset + 4]
+        };
+        let footer_left = (WRAPPED_SLIDE_WIDTH - FOOTER.chars().count() * 12) / 2;
+        let first_dot = FOOTER
+            .chars()
+            .position(|character| character == '·')
+            .expect("middle dot in footer");
+        let dot_left = footer_left + first_dot * 12;
+        assert_eq!(pixel(dot_left + 4, 566), GREY.0);
+        assert_ne!(
+            pixel(dot_left + 2, 560),
+            GREY.0,
+            "a middle dot must not render as the question-mark fallback"
+        );
+        let first_lowercase = FOOTER
+            .chars()
+            .position(|character| character == 'b')
+            .expect("lowercase footer copy");
+        let lowercase_left = footer_left + first_lowercase * 12;
+        assert_eq!(
+            pixel(lowercase_left, 560),
+            GREY.0,
+            "lowercase b retains its ascender"
+        );
+        assert_ne!(
+            pixel(lowercase_left + 2, 560),
+            GREY.0,
+            "the lowercase bitmap does not acquire uppercase B's top bar"
+        );
+
+        let mut upper_footer = slide.clone();
+        upper_footer.lines[0] = FOOTER.to_ascii_uppercase();
+        assert_ne!(
+            rendered,
+            render_wrapped_slide(&upper_footer).expect("uppercase sensitivity")
+        );
+        let mut fallback_dot = slide.clone();
+        fallback_dot.lines[0] = FOOTER.replace('·', "?");
+        assert_ne!(
+            rendered,
+            render_wrapped_slide(&fallback_dot).expect("middle-dot sensitivity")
+        );
+        let mut uppercase_title = slide;
+        uppercase_title.title = uppercase_title.title.to_ascii_uppercase();
+        assert_eq!(
+            rendered,
+            render_wrapped_slide(&uppercase_title).expect("uppercase title contract"),
+            "the story title remains intentionally uppercased"
+        );
     }
 
     #[test]

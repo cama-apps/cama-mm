@@ -13,14 +13,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use cama_app::wrapped_media::{WrappedAvatar, WrappedSlideData, render_wrapped_slide};
+use cama_app::drawing::{GambaInfo, GambaPoint, GambaStats as NativeGambaStats};
+use cama_app::wrapped_media::{
+    WrappedAvatar, WrappedGambaData, WrappedSlideData, render_wrapped_slide,
+};
 use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PairwiseEntry, PairwiseInput, PairwiseRaw,
     PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
     hero_spotlight, package_deal_wrapped, pairwise_player_ids, pairwise_wrapped, personal_summary,
     role_breakdown, year_timestamps,
 };
-use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
+use cama_db::gambling_stats_repository::{
+    GamblingOutcome, GamblingSource, GamblingStatsRepository, GamblingStatsService,
+};
 use cama_db::package_deal_repository::PackageDealRepository;
 use cama_db::pairings_repository::PairingsRepository;
 use cama_db::wrapped_live::{
@@ -268,7 +273,7 @@ impl WrappedSources {
             .gambling
             .get_player_stats(target_id, Some(guild_id))
             .map_err(|error| error.to_string())?;
-        let gamba_series = self
+        let gamba_points = self
             .gambling
             .cumulative_pnl_series(target_id, Some(guild_id))
             .map_err(|error| error.to_string())?;
@@ -289,11 +294,40 @@ impl WrappedSources {
             package_purchases,
             rating_history,
             gamba_stats,
-            gamba_series: gamba_series
-                .into_iter()
-                .map(|point| point.cumulative_pnl as f64)
-                .collect(),
+            gamba_points: gamba_points.into_iter().map(wrapped_gamba_point).collect(),
         }))
+    }
+}
+
+fn wrapped_gamba_point(point: cama_db::gambling_stats_repository::PnlPoint) -> GambaPoint {
+    let source = match point.event.source {
+        GamblingSource::Bet => "bet",
+        GamblingSource::Wheel => "wheel",
+        GamblingSource::DoubleOrNothing => "double_or_nothing",
+    };
+    let outcome = match point.event.outcome {
+        GamblingOutcome::Won => "won",
+        GamblingOutcome::Lost => "lost",
+        GamblingOutcome::Neutral => "neutral",
+    };
+    GambaPoint {
+        event_number: i32::try_from(point.event_number).unwrap_or(i32::MAX),
+        cumulative: point.cumulative_pnl,
+        info: GambaInfo {
+            source: source.to_owned(),
+            outcome: Some(outcome.to_owned()),
+            leverage: point.event.leverage,
+            profit: point.event.profit,
+        },
+    }
+}
+
+fn wrapped_gamba_stats(stats: &cama_db::gambling_stats_repository::GambaStats) -> NativeGambaStats {
+    NativeGambaStats {
+        total_bets: usize::try_from(stats.total_bets.max(0)).unwrap_or(usize::MAX),
+        win_rate: stats.win_rate,
+        net_pnl: stats.net_pnl,
+        roi: stats.roi,
     }
 }
 
@@ -335,7 +369,7 @@ struct WrappedRawData {
     package_purchases: Vec<cama_db::package_deal_repository::PackageDealPurchase>,
     rating_history: Vec<WrappedRatingPoint>,
     gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
-    gamba_series: Vec<f64>,
+    gamba_points: Vec<GambaPoint>,
 }
 
 #[async_trait]
@@ -1186,24 +1220,29 @@ fn build_slides(
     }
 
     if let Some(gamba) = raw.gamba_stats
-        && !raw.gamba_series.is_empty()
+        && !raw.gamba_points.is_empty()
     {
         let mut slide = base_slide(
             "chart_gamba",
-            "Gamba Chart",
+            "Gamba (All-Time)",
             target_display_name,
             &year_label,
         );
         slide.headline = "GAMBA (ALL-TIME)".to_owned();
-        let pnl = raw.gamba_series.last().copied().unwrap_or_default() as i64;
+        let pnl = raw.gamba_points.last().map_or(0, |point| point.cumulative);
         slide.lines = vec![format!(
-            "{}{} JC - {} bets - Degen Score: {}",
+            "{}{} JC · {} bets · Degen Score: {}",
             if pnl >= 0 { "+" } else { "" },
             pnl,
             gamba.total_bets,
             gamba.degen_score.total
         )];
-        slide.series = raw.gamba_series;
+        slide.gamba = Some(WrappedGambaData {
+            degen_score: i32::try_from(gamba.degen_score.total).unwrap_or_default(),
+            degen_title: gamba.degen_score.title.to_owned(),
+            points: raw.gamba_points,
+            stats: wrapped_gamba_stats(&gamba),
+        });
         slide.accent = [237, 66, 69];
         slides.push(slide);
     }

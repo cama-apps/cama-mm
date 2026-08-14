@@ -14,12 +14,18 @@ import pytest
 from PIL import Image, ImageDraw
 
 from scripts.visual_equivalence import (
+    _NATIVE_CASE_GLYPHS,
+    _NATIVE_GAMBA_GREY,
+    _NATIVE_GAMBA_WHITE,
+    _NATIVE_MIDDLE_DOT_GLYPH,
+    _NATIVE_WRAPPED_GREY,
     ANIMATION_MIN_FOREGROUND_GRID_IOU,
     BALANCE_MIN_FOREGROUND_COUNT_RATIO,
     BALANCE_MIN_FOREGROUND_GRID_IOU,
     DEFAULT_FIXTURE,
     RATING_DISTRIBUTION_COLOR_DISTANCE,
     RATING_DISTRIBUTION_COLOR_VARIANTS,
+    _assert_native_wrapped_gamba_copy,
     _gamba_marker_specs,
     check_blame_luke,
     check_explosion,
@@ -36,6 +42,7 @@ from scripts.visual_equivalence import (
     check_rating_distribution,
     check_scout,
     check_wheel,
+    check_wrapped_gamba,
     compare_foreground_structure,
     gif_frames,
     load_fixture,
@@ -59,6 +66,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
     gamba = fixture["gamba"]
+    wrapped_gamba = fixture["wrapped_gamba"]
     rating_history = fixture["rating_history"]
     rating_distribution = fixture["rating_distribution"]
     rating_analysis = fixture["rating_analysis"]
@@ -90,6 +98,9 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert any(point["cumulative"] > 0 for point in gamba["series"])
     assert any(point["cumulative"] < 0 for point in gamba["series"])
     assert gamba["stats"]["total_bets"] == 6
+    assert wrapped_gamba["title"] == "Gamba (All-Time)"
+    assert wrapped_gamba["footer"] == "+60 JC · 6 bets · Degen Score: 73"
+    assert wrapped_gamba["gamba"] == gamba
     assert rating_history["username"] == "Client 47"
     assert len(rating_history["entries"]) == 6
     assert any(entry["rating"] is None for entry in rating_history["entries"])
@@ -406,6 +417,107 @@ def test_profile_gamba_fixture_renders_all_event_types_and_is_sensitive_to_stats
     assert (first / "python_profile_gamba.png").read_bytes() != (
         second / "python_profile_gamba.png"
     ).read_bytes()
+
+
+def test_wrapped_gamba_fixture_renders_separate_story_canvas_and_footer(tmp_path: Path):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    render_python(fixture, first)
+    check_wrapped_gamba(
+        first / "python_wrapped_gamba.png",
+        first / "python_wrapped_gamba.png",
+        fixture["wrapped_gamba"],
+    )
+    fixture["wrapped_gamba"]["footer"] = "+999 JC · 6 bets · Degen Score: 73"
+    render_python(fixture, second)
+    assert (first / "python_wrapped_gamba.png").read_bytes() != (
+        second / "python_wrapped_gamba.png"
+    ).read_bytes()
+
+
+def test_wrapped_gamba_native_copy_gate_rejects_uppercase_and_dot_fallbacks():
+    fixture = load_fixture(DEFAULT_FIXTURE)["wrapped_gamba"]
+    payload = fixture["gamba"]
+    footer = fixture["footer"]
+    chart_title = f"{payload['username']}'s Gamba Journey"
+    subtitle = (
+        f"Degen Score {payload['degen_score']}  ·  {payload['degen_title']}"
+    )
+
+    def render_native_copy(
+        *,
+        footer_overrides: dict[int, tuple[int, ...]] | None = None,
+        subtitle_overrides: dict[int, tuple[int, ...]] | None = None,
+    ) -> bytes:
+        image = Image.new("RGBA", (800, 600), (1, 2, 3, 255))
+        draw = ImageDraw.Draw(image)
+
+        def paint(
+            text: str,
+            left: int,
+            top: int,
+            color: tuple[int, int, int, int],
+            overrides: dict[int, tuple[int, ...]] | None = None,
+        ) -> None:
+            for index, character in enumerate(text):
+                glyph = (overrides or {}).get(index)
+                if glyph is None:
+                    glyph = (
+                        _NATIVE_MIDDLE_DOT_GLYPH
+                        if character == "·"
+                        else _NATIVE_CASE_GLYPHS.get(character)
+                    )
+                if glyph is None:
+                    continue
+                for row, bits in enumerate(glyph):
+                    for column in range(5):
+                        if bits & (1 << (4 - column)):
+                            x = left + index * 12 + column * 2
+                            y = top + row * 2
+                            draw.rectangle((x, y, x + 1, y + 1), fill=color)
+
+        paint(
+            footer,
+            (800 - len(footer) * 12) // 2,
+            560,
+            _NATIVE_WRAPPED_GREY,
+            footer_overrides,
+        )
+        paint(chart_title, 110, 57, _NATIVE_GAMBA_WHITE)
+        paint(subtitle, 110, 85, _NATIVE_GAMBA_GREY, subtitle_overrides)
+        return image.tobytes()
+
+    correct = render_native_copy()
+    _assert_native_wrapped_gamba_copy(correct, (800, 600), fixture)
+
+    footer_lowercase = footer.index("b")
+    uppercase_b = (30, 17, 17, 30, 17, 17, 30)
+    with pytest.raises(AssertionError, match="footer authored copy drifted"):
+        _assert_native_wrapped_gamba_copy(
+            render_native_copy(footer_overrides={footer_lowercase: uppercase_b}),
+            (800, 600),
+            fixture,
+        )
+
+    question_mark = (14, 17, 1, 2, 4, 0, 4)
+    footer_dot = footer.index("·")
+    with pytest.raises(AssertionError, match="footer authored copy drifted"):
+        _assert_native_wrapped_gamba_copy(
+            render_native_copy(footer_overrides={footer_dot: question_mark}),
+            (800, 600),
+            fixture,
+        )
+
+    subtitle_dot = subtitle.index("·")
+    with pytest.raises(AssertionError, match="chart subtitle authored copy drifted"):
+        _assert_native_wrapped_gamba_copy(
+            render_native_copy(subtitle_overrides={subtitle_dot: question_mark}),
+            (800, 600),
+            fixture,
+        )
 
 
 def test_profile_gamba_gate_rejects_missing_positive_fill(tmp_path: Path):

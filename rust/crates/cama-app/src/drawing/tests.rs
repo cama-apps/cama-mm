@@ -1006,6 +1006,64 @@ fn test_gamba_grouped_integer_copy_and_pixels_match_python() {
 }
 
 #[test]
+fn test_gamba_authored_copy_preserves_case_and_native_middle_dot_pixels() {
+    const SUBTITLE: &str = "Degen Score 73  ·  House Favorite";
+    assert_eq!(glyph('·'), [0, 0, 0, 4, 0, 0, 0]);
+    assert_ne!(
+        case_sensitive_glyph('e'),
+        glyph('e'),
+        "the authored-copy path must not silently reuse uppercase bitmaps"
+    );
+
+    let width = usize::try_from(Raster::text_width(SUBTITLE, 2)).expect("text width");
+    let mut authored = Raster::new(width, 14, DISCORD_BG);
+    authored.text_case_sensitive(0, 0, SUBTITLE, DISCORD_GREY, 2);
+    let mut uppercased = Raster::new(width, 14, DISCORD_BG);
+    uppercased.text(0, 0, SUBTITLE, DISCORD_GREY, 2);
+    let mut missing_dot = Raster::new(width, 14, DISCORD_BG);
+    missing_dot.text_case_sensitive(0, 0, &SUBTITLE.replace('·', "?"), DISCORD_GREY, 2);
+    assert_ne!(authored.pixels, uppercased.pixels);
+    assert_ne!(authored.pixels, missing_dot.pixels);
+
+    let pixel = |raster: &Raster, x: usize, y: usize| -> [u8; 4] {
+        let offset = (y * raster.width + x) * 4;
+        raster.pixels[offset..offset + 4]
+            .try_into()
+            .expect("RGBA pixel")
+    };
+    let dot_index = SUBTITLE
+        .chars()
+        .position(|character| character == '·')
+        .expect("middle dot in authored subtitle");
+    let dot_left = dot_index * 12;
+    assert_eq!(pixel(&authored, dot_left + 4, 6), DISCORD_GREY.0);
+    assert_eq!(pixel(&authored, dot_left + 2, 0), DISCORD_BG.0);
+    assert_eq!(pixel(&missing_dot, dot_left + 2, 0), DISCORD_GREY.0);
+    assert_eq!(
+        pixel(&authored, 12, 0),
+        DISCORD_BG.0,
+        "lowercase e begins with an empty bitmap row"
+    );
+    assert_eq!(pixel(&uppercased, 12, 0), DISCORD_GREY.0);
+
+    let chart = decode_png(&draw_gamba_chart(
+        "Visual Gambler",
+        73,
+        "House Favorite",
+        &[],
+        GambaStats::default(),
+    ));
+    let chart_dot_x = 60 + dot_left + 4;
+    let chart_dot_y = 40 + 6;
+    let offset = (chart_dot_y * chart.width + chart_dot_x) * 4;
+    assert_eq!(
+        &chart.pixels[offset..offset + 4],
+        &DISCORD_GREY.0,
+        "the production Gamba subtitle carries the native middle dot"
+    );
+}
+
+#[test]
 fn test_rounded_rect_outline_uses_each_corner_quarter_arc() {
     let mut raster = Raster::new(30, 22, DISCORD_BG);
     raster.rounded_rect((5, 4, 25, 18), 4, DISCORD_DARKER, Some(DISCORD_WHITE));
