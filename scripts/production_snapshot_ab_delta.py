@@ -365,8 +365,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "readiness_gate_closed": False,
         "readiness_evidence": (
             "bounded current-schema A/B representative passed; full gate remains "
-            "open for old-schema coverage, all repository families, and retained "
-            "Python rollback/readback transitions"
+            "open for old-schema coverage and all repository families"
         ),
         "source": {"path": str(source), "before": None, "after": None},
         "copies": {

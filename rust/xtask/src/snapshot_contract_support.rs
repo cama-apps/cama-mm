@@ -2,9 +2,10 @@
 //! snapshot contract tests.
 //!
 //! These helpers intentionally live with `xtask`: they are evidence probes,
-//! not runtime repositories.  The tests still write through the real Rust
-//! adapters, read through the retained Python repositories, and admit only a
-//! migrated existing-schema database.
+//! not runtime repositories. The tests write through the real Rust adapters,
+//! compare exact scoped database projections, and admit only a migrated
+//! existing-schema database. A retained Python helper seeds only the independent
+//! A/B copy where that one-way migration comparison requires it.
 
 use std::error::Error;
 use std::fs;
@@ -35,7 +36,6 @@ pub const SURVEY_PROMPT: &str = "Can the Rust recovery worker deliver this clone
 pub const SURVEY_CHANNEL_ID: i64 = 8_000_000_000_000_001;
 pub const SURVEY_MESSAGE_ID: i64 = 8_000_000_000_000_002;
 pub const ROUTE_STATE_REVERSED: &str = r#"{"status":"active","route_id":"shored_passage"}"#;
-pub const ROUTE_STATE_CANONICAL: &str = r#"{"route_id":"shored_passage","status":"active"}"#;
 
 /// The exact columns and reserved-row filters used by the Python A/B runner.
 /// Keeping these as constants makes the Rust evidence query schema-aware
@@ -497,75 +497,17 @@ pub fn expected_scope_after() -> JsonValue {
     })
 }
 
-pub fn expected_retained_python_read() -> JsonValue {
-    json!({
-        "guild_config": {
-            "guild_id": SMOKE_GUILD_ID,
-            "league_id": 777,
-            "auto_enrich_matches": 0,
-            "ai_features_enabled": 1
-        },
-        "dig": {
-            "inventory": {
-                "row_count": 1,
-                "discord_id": DIG_PLAYER_ID,
-                "guild_id": SMOKE_GUILD_ID,
-                "item_type": "hard_hat",
-                "queued": true
-            },
-            "tunnel": {
-                "discord_id": DIG_PLAYER_ID,
-                "guild_id": SMOKE_GUILD_ID,
-                "depth": 100,
-                "route_state": ROUTE_STATE_CANONICAL
-            }
-        },
-        "survey": {
-            "survey": {
-                "guild_id": SURVEY_GUILD_ID,
-                "title": SURVEY_TITLE,
-                "status": "open",
-                "target_type": "member",
-                "registered_only": false
-            },
-            "question": {
-                "position": 1,
-                "prompt": SURVEY_PROMPT,
-                "question_type": "nps",
-                "required": true
-            },
-            "recipient": {
-                "guild_id": SURVEY_GUILD_ID,
-                "discord_id": SURVEY_USER_ID,
-                "delivery_status": "sent",
-                "attempt_count": 1,
-                "dm_channel_id": SURVEY_CHANNEL_ID,
-                "dm_message_id": SURVEY_MESSAGE_ID,
-                "ui_channel_id": SURVEY_CHANNEL_ID,
-                "ui_message_id": SURVEY_MESSAGE_ID,
-                "current_question_is_first": true,
-                "in_review": false,
-                "submitted": false,
-                "answer_count": 0
-            }
-        }
-    })
-}
-
-/// The retained replay parser is intentionally exact: unknown keys, missing
+/// The one-way snapshot parser is intentionally exact: unknown keys, missing
 /// keys, stale route JSON, or a raw repository-shaped response are rejected.
-pub fn parse_retained_python_read(output: &str) -> TestResult<JsonValue> {
+pub fn parse_expected_scope_after(output: &str) -> TestResult<JsonValue> {
     let value: JsonValue = serde_json::from_str(output.trim())
-        .map_err(|error| format!("retained Python repository read was not JSON: {error}"))?;
+        .map_err(|error| format!("Rust snapshot was not JSON: {error}"))?;
     if !value.is_object() {
-        return Err(format!("retained Python repository read was not an object: {value}").into());
+        return Err(format!("Rust snapshot was not an object: {value}").into());
     }
-    let expected = expected_retained_python_read();
+    let expected = expected_scope_after();
     if value != expected {
-        return Err(format!(
-            "retained Python repository read mismatch: expected {expected}, found {value}"
-        )
-        .into());
+        return Err(format!("Rust snapshot mismatch: expected {expected}, found {value}").into());
     }
     Ok(value)
 }

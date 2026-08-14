@@ -1,97 +1,79 @@
-//! Rust twins for `tests/test_production_snapshot_replay.py`.
+//! One-way Rust twins for `tests/test_production_snapshot_replay.py`.
+//!
+//! The retained Python tests remain part of the Python behavior inventory, but
+//! Rust cutover is intentionally one-way: these twins prove that production
+//! Rust repositories normalize and mutate a disposable Python-era SQLite
+//! shape. They do not require Python to read post-cutover Rust writes.
 
-use serde_json::{Value, json};
+use rusqlite::Connection;
+use serde_json::json;
 
 use super::snapshot_contract_support as support;
 
 #[test]
-fn test_retained_read_normalizes_dig_and_survey_api_values() -> support::TestResult {
+fn test_rust_snapshot_normalizes_dig_and_survey_api_values() -> support::TestResult {
     let (_directory, database) = support::fresh_database()?;
+    let before = support::scope_snapshot(&database)?;
     support::apply_rust_snapshot_transitions(&database)?;
+    let after = support::scope_snapshot(&database)?;
 
-    let root = support::repository_root()?;
-    let script = root.join("scripts/retained_python_snapshot_read.py");
-    let output = support::run_python_script(&root, &script, &database)?;
-    let encoded = support::output_text(&output, "retained Python repository read")?;
-    let actual = support::parse_retained_python_read(&encoded)?;
-
-    assert_eq!(actual, support::expected_retained_python_read());
+    assert_eq!(after, support::expected_scope_after());
+    let delta = support::scope_delta(&before, &after)?;
+    assert_eq!(delta["dig_inventory"]["delta"], 1);
     assert_eq!(
-        actual["dig"]["tunnel"]["route_state"],
-        support::ROUTE_STATE_CANONICAL
+        after["tunnels"]["rows"][0]["route_state"],
+        json!({"route_id": "shored_passage", "status": "active"})
     );
-    assert_eq!(actual["survey"]["recipient"]["answer_count"], 0);
+    assert_eq!(after["survey_answers"]["row_count"], 0);
     Ok(())
 }
 
 #[test]
-fn test_retained_read_reports_missing_repository_field() -> support::TestResult {
-    let root = support::repository_root()?;
-    let output = support::run_python_code(
-        &root,
-        r#"from scripts import retained_python_snapshot_read as reader
-
-class Guild:
-    def __init__(self, _db_path):
-        pass
-    def get_config(self, _guild_id):
-        return {"guild_id": reader.DIG_GUILD_ID, "league_id": 777, "auto_enrich_matches": 0, "ai_features_enabled": 1}
-
-class Dig:
-    def __init__(self, _db_path):
-        pass
-    def get_inventory(self, _discord_id, _guild_id):
-        return [{"discord_id": reader.DIG_PLAYER_ID, "guild_id": reader.DIG_GUILD_ID, "item_type": reader.DIG_ITEM_TYPE, "queued": 1}]
-    def get_tunnel(self, _discord_id, _guild_id):
-        return {"discord_id": reader.DIG_PLAYER_ID, "guild_id": reader.DIG_GUILD_ID, "depth": 100}
-
-reader.GuildConfigRepository = Guild
-reader.DigRepository = Dig
-try:
-    reader.read_snapshot("unused-disposable-copy.db")
-except RuntimeError as error:
-    expected = "Python repository API blocker: DigRepository.get_tunnel sentinel row does not expose 'route_state'"
-    assert str(error) == expected, (str(error), expected)
-else:
-    raise AssertionError("missing route_state was accepted")"#,
+fn test_rust_snapshot_reports_missing_repository_field() -> support::TestResult {
+    let (_directory, database) = support::fresh_database()?;
+    support::apply_rust_snapshot_transitions(&database)?;
+    Connection::open(&database)?.execute(
+        "ALTER TABLE tunnels RENAME COLUMN route_state TO missing_route_state",
+        [],
     )?;
-    assert!(output.stdout.is_empty());
+
+    let error = support::scope_snapshot(&database)
+        .expect_err("missing production projection column must fail closed");
+    assert!(error.to_string().contains("route_state"), "{error}");
     Ok(())
 }
 
 #[test]
-fn test_retained_reader_has_no_raw_sql_fallback() -> support::TestResult {
+fn test_python_seed_helper_uses_repositories_for_transitions() -> support::TestResult {
     let root = support::repository_root()?;
-    let source = support::source_text(&root, "scripts/retained_python_snapshot_read.py")?;
-    assert!(!source.contains("sqlite3"));
-    assert!(!source.contains("SELECT "));
-    assert!(source.contains("DigRepository"));
-    assert!(source.contains("SurveyRepository"));
+    let source = support::source_text(&root, "scripts/python_snapshot_ab_write.py")?;
+    let (_, transitions) = source
+        .split_once("def write_snapshot")
+        .ok_or("Python snapshot writer is missing write_snapshot")?;
+
+    assert!(transitions.contains("GuildConfigRepository"));
+    assert!(transitions.contains("DigRepository"));
+    assert!(transitions.contains("SurveyRepository"));
+    assert!(transitions.contains("_seed_dig_fixture(db_path)"));
+    assert!(!transitions.contains("connection.execute("));
     Ok(())
 }
 
 #[test]
-fn test_snapshot_parser_accepts_only_the_normalized_contract() -> support::TestResult {
+fn test_snapshot_parser_accepts_only_the_normalized_rust_contract() -> support::TestResult {
     let (_directory, database) = support::fresh_database()?;
     support::apply_rust_snapshot_transitions(&database)?;
-
-    let root = support::repository_root()?;
-    let script = root.join("scripts/retained_python_snapshot_read.py");
-    let output = support::run_python_script(&root, &script, &database)?;
-    let encoded = support::output_text(&output, "retained Python repository read")?;
+    let actual = support::scope_snapshot(&database)?;
+    let encoded = serde_json::to_string(&actual)?;
     assert_eq!(
-        support::parse_retained_python_read(&encoded)?,
-        support::expected_retained_python_read()
+        support::parse_expected_scope_after(&encoded)?,
+        support::expected_scope_after()
     );
 
-    let mut malformed: Value = serde_json::from_str(&encoded)?;
-    malformed["dig"]["tunnel"]["route_state"] = json!("{}");
-    let error = support::parse_retained_python_read(&serde_json::to_string(&malformed)?)
-        .expect_err("stale route JSON must not satisfy the normalized contract");
-    assert!(
-        error
-            .to_string()
-            .contains("retained Python repository read mismatch")
-    );
+    let mut malformed = actual;
+    malformed["tunnels"]["rows"][0]["route_state"] = json!({});
+    let error = support::parse_expected_scope_after(&serde_json::to_string(&malformed)?)
+        .expect_err("stale route JSON must not satisfy the normalized Rust contract");
+    assert!(error.to_string().contains("Rust snapshot mismatch"));
     Ok(())
 }

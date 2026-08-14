@@ -255,7 +255,10 @@ pub const EXTERNAL_PROVIDERS: &[CutoverItem] = &[
         "remaining Discord media upload/edit surfaces",
         "typed command/worker upload, replacement, preservation, clear, and delete lifecycles + Serenity transport",
     ),
-    required("image/chart rendering", "Rust rendering adapter"),
+    wired(
+        "image/chart rendering",
+        "production native PNG/GIF/chart renderers + typed attachment delivery/edit/retry adapters",
+    ),
 ];
 
 pub const CONFIGURATION_DOMAINS: &[CutoverItem] = &[
@@ -324,14 +327,6 @@ const fn wired(python_name: &'static str, rust_boundary: &'static str) -> Cutove
         python_name,
         rust_boundary,
         status: CutoverStatus::Wired,
-    }
-}
-
-const fn required(python_name: &'static str, rust_boundary: &'static str) -> CutoverItem {
-    CutoverItem {
-        python_name,
-        rust_boundary,
-        status: CutoverStatus::Required,
     }
 }
 
@@ -406,11 +401,13 @@ mod tests {
             )
         );
         for seam in [
-            "struct ComponentOnlyFollowupEdit",
-            "fn component_only_followup_edit(",
+            "struct ComponentOnlyInteractionEdit",
+            "fn component_only_interaction_edit(",
             "async fn edit_component_only_followup(",
             "http.edit_followup_message(interaction_token, message_id, &edit, Vec::new())",
-            "component_only_followup_edit_omits_serenity_empty_attachment_list",
+            "auto_component_only_followup_uses_attachment_omitting_raw_payload",
+            "component_only_explicit_clear_serializes_empty_attachments",
+            "component_only_followup_transport_preserves_existing_media",
         ] {
             assert!(
                 SERENITY_TRANSPORT_SOURCE.contains(seam),
@@ -778,16 +775,16 @@ mod tests {
     }
 
     #[test]
-    fn no_required_item_is_disguised_as_a_gap() {
+    fn production_runtime_inventory_is_fully_wired() {
         assert_eq!(required_count() + wired_count(), 67);
-        assert!(required_count() > 0);
-        assert!(wired_count() >= 4);
+        assert_eq!(required_count(), 0);
+        assert_eq!(wired_count(), 67);
         assert!(all_items().all(|item| !item.rust_boundary.is_empty()));
     }
 
     #[test]
-    fn production_global_command_replacement_is_gated_on_an_empty_inventory() {
-        assert!(required_count() > 0);
+    fn production_global_command_replacement_still_requires_explicit_cutover_candidate() {
+        assert_eq!(required_count(), 0);
         assert!(MAIN_SOURCE.contains("inventory::global_command_sync_allowed("));
         assert!(MAIN_SOURCE.contains("application_config.runtime.rust_cutover_candidate,"));
         assert!(MAIN_SOURCE.contains("inventory::required_count(),"));

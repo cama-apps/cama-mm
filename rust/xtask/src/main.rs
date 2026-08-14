@@ -28,7 +28,6 @@ const REQUIRED_CUTOVER_GATES: &[&str] = &[
     "observability_and_post_deploy",
     "persistent_views_and_reconnect",
     "production_snapshot_replay",
-    "python_rollback_compatibility",
     "runtime_selector_and_same_deploy",
     "scheduled_workers_and_shutdown",
     "single_writer_and_process_lock",
@@ -90,7 +89,7 @@ fn parity(require_complete: bool) -> Result<(), String> {
     let runtime_wired = cama_runtime::inventory::wired_count();
     verify_schema_contract(&root)?;
     let vector_count = verify_domain_vectors(&root)?;
-    verify_repository_interoperability(&root)?;
+    verify_python_to_rust_repository_migration(&root)?;
     let readiness = read_cutover_readiness(&root.join("rust/parity/cutover_readiness.tsv"))?;
 
     let python_output = checked_output(
@@ -202,7 +201,7 @@ fn parity(require_complete: bool) -> Result<(), String> {
         "Rust parity inventory: {mapped}/{total} Python cases mapped to distinct existing Rust tests ({percentage:.2}%)"
     );
     println!(
-        "Differential contracts: {vector_count} domain vectors plus one thirteen-repository serial Python→Rust→Python SQLite bridge"
+        "Differential contracts: {vector_count} domain vectors plus one thirteen-repository serial Python→Rust SQLite migration bridge"
     );
     let open_readiness: Vec<_> = readiness
         .iter()
@@ -266,7 +265,7 @@ fn unmapped_module_counts(
     counts
 }
 
-fn verify_repository_interoperability(root: &Path) -> Result<(), String> {
+fn verify_python_to_rust_repository_migration(root: &Path) -> Result<(), String> {
     use cama_db::core_repositories::PlayerRepository as CorePlayerRepository;
     use cama_db::duel_repository::{DuelChallengeRepository, DuelStatus, DuelTrial};
     use cama_db::economy_event_repository::{EconomyEventRepository, PolicyMode};
@@ -285,7 +284,7 @@ fn verify_repository_interoperability(root: &Path) -> Result<(), String> {
 
     let temporary_directory =
         tempfile::tempdir().map_err(|error| format!("cannot create interop temp dir: {error}"))?;
-    let database_path = temporary_directory.path().join("python-rust-interop.db");
+    let database_path = temporary_directory.path().join("python-rust-migration.db");
     let python_seed = run_python_db_bridge(root, "seed", &database_path)?;
     if python_seed
         != "424242\t777\tfalse\ttrue\t515151\t5\t5\t41\ttrue\tpython seed\t901\t424242\t616161\t626262\t3\t424242\t717171\t727272\t4\t70\t12\t1\t2\t0\t0\t1\t1\t1\t1\t901\t1010101\tInterop Blep\tunhatched\tstandard\t1800000000\t1800086400\t980\t0\t3\t1\tpending\t2\tnone\t1\tpending\tnone\tnone\t450\t1000\t1\t25\tCROWN\t0\tpython-wheel-1\t{\"a\":{\"b\":true},\"z\":2}\t25\tCROWN\t0\tpython-wheel-1\t{\"a\":{\"b\":true},\"z\":2}\t424242\tnormal\t0.02\t0.08\tnone\t1700000000\t1060606\t434343\t1\t0\t0\t100\t10\t150\t0\tloan\t\tnone\tnone\tnone"
@@ -681,14 +680,6 @@ fn verify_repository_interoperability(root: &Path) -> Result<(), String> {
         })
         .map_err(|error| format!("Rust core repository cannot update Python player: {error}"))?;
 
-    let python_read = run_python_db_bridge(root, "read", &database_path)?;
-    if python_read
-        != "424242\t888\ttrue\tfalse\t515151\t7\t7\t84\ttrue\trust replacement\t904\t424242\t616161\t626262\t2\t424242\t717171\t727272\t3\t70\t30\t2\t5\t0\t0\t2\t1\t2\t1\t902\t1010101\tInterop Blep\tunhatched\tstandard\t1800000000\t1800086400\t965\t3\t4\t1\tactive\t2\t3\t1\taccepted\t5555\ttrial_by_combat\t450\t500\t2\t25\tCROWN\t0\tpython-wheel-1\t{\"a\":{\"b\":true},\"z\":2}\t0\tLIGHTNING_BOLT\t1\trust-wheel-2\t{\"lightning_count\":2,\"lightning_total\":40}\t424242\trecovery\t0.01\t0.06\t1700000100\t1700000100\t1060606\t434343\t1\t10\t0\t0\t0\t40\t10\tloan,loan_repayment,loan_repayment\t1,5\t1777.0\t88.0\t0.07"
-    {
-        return Err(format!(
-            "Python decoded Rust repository writes incorrectly: {python_read:?}"
-        ));
-    }
     Ok(())
 }
 

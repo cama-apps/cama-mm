@@ -9,8 +9,8 @@ is mapped, tested, wired to production adapters, and exercised against the same
 SQLite storage contract.
 
 Current measured status: **6,746 of 6,746 Python test cases mapped (100%)**.
-The parity ledger is complete, but operational cutover status is **4 of 14
-required readiness gates complete**; **66 of 67 production runtime inventory
+The parity ledger is complete, but operational cutover status is **4 of 13
+required readiness gates complete**; **67 of 67 production runtime inventory
 items are wired**, and the default and only live runtime remains Python.
 
 ## Non-negotiable invariants
@@ -130,19 +130,19 @@ CAMA_PARITY_PYTHON=.venv/bin/python cargo run --locked --manifest-path rust/Carg
 The root `.python-version` pins local `uv` commands to CPython 3.12, matching
 the CI runtime.
 
-The visual gate exercises the production Python and Rust prediction-chart,
+The optional visual-equivalence development check exercises the production
+Python and Rust prediction-chart,
 balance-journey, rating-history, calibration rating-distribution,
 rating-analysis, advantage, profile, pet, wheel/explosion, Blame Luke, scout,
 Hero Grid, post-match GIF, terminal-crash GIF, and pinnacle phase-three
-renderers from one deterministic fixture. It requires
-matching dimensions, animation frame order/timing/loop count, bounded RGBA
-error, foreground spatial overlap, and media-specific semantic colors; blank,
-border-only, and missing-series candidates are rejected even when the shared
-dark background would otherwise dominate whole-frame error. This is
-representative regression evidence, not a claim that every renderer or font is
-pixel-identical. The rating-distribution tranche checks the representative live
-640x390 attachment; Matplotlib's content-dependent tight-crop rounding outside
-that fixture is not claimed as a native geometry contract.
+renderers from one deterministic fixture. It remains useful regression evidence
+for matching dimensions, animation frame order/timing/loop count, bounded RGBA
+error, foreground spatial overlap, and media-specific semantic colors, but it
+is not a cutover requirement. The `image_and_attachment_equivalence` readiness
+gate instead requires an isolated staging proof against real Discord of correct
+asset selection, filename/type/dimensions, behavior-relevant animation timing,
+and attachment replace/preserve/clear/retry behavior. Pixel/perceptual matching
+and font equivalence are not required for that gate.
 
 `xtask parity` fails if Python's migration list changes, if pytest node IDs
 change without review, if a mapped Rust test disappears or is ambiguous across
@@ -206,7 +206,8 @@ CAMA_PARITY_PYTHON=.venv/bin/python \
 ```
 
 This is development evidence only; it does not close the cutover readiness
-gate or replace the broader repository and rollback coverage requirements.
+gate or replace the broader repository and backup-rollback rehearsal
+requirements.
 
 The narrower A/B evidence runner uses two independent copies and completes the
 retained-Python write subprocess before running the Rust writes on the second
@@ -221,9 +222,10 @@ CAMA_PARITY_PYTHON=.venv/bin/python \
 ```
 
 This bounded current-schema representative passes as development evidence. The
-`production_snapshot_replay` gate remains open until old-schema coverage, all
-repository families, and complete retained-Python rollback/readback
-transitions are covered.
+`production_snapshot_replay` gate remains open until old-schema coverage and all
+repository families are covered. Retained-Python reads remain useful
+differential evidence, but are not a post-cutover readiness residual; the
+`backup_rollback_rehearsal` gate carries the tested rollback proof.
 
 The explicit confirmation is intentional: this smoke writes reserved negative
 sentinels through fourteen shared repository families: guild configuration,
@@ -236,7 +238,7 @@ workspace or server database.
 
 The existing `CI` workflow still requires the full Python lint and test suite.
 Its Rust job additionally requires formatting, Clippy, unit tests, the parity
-gate, Python→Rust→Python SQLite interoperability, builds of both production
+gate, Python→Rust SQLite migration interoperability, builds of both production
 images, a Python import smoke, and a Rust preflight against a freshly
 Python-migrated database. Setting the repository variable
 `RUST_CUTOVER_CANDIDATE=true` enables `--require-complete` as a hard CI gate.
@@ -341,12 +343,15 @@ documentation checklist:
 - language-neutral golden vectors for deterministic domain behavior;
 - Python/Rust A/B operations against separate copies of identical SQLite
   snapshots, comparing normalized return values and table deltas;
-- serial Python-write → Rust-read/write → Python-read interoperability;
+- Python-created old/current SQLite snapshots are readable and writable through
+  Rust adapters; retained-Python reads remain optional differential evidence;
 - command schema, interaction timing, ephemeral/mention/component, persistent
   view, reconnect, and scheduled-worker parity;
 - recorded offline fixtures for OpenDota, Dotabase, Steam assets, and LLM
   provider requests/fallbacks;
-- semantic/perceptual image checks with the production font and asset set;
+- functional media checks for asset selection, filename/type/dimensions,
+  behavior-relevant animation timing, and attachment replace/preserve/clear/retry
+  behavior under real Discord;
 - a copied-dev-database migration rehearsal, integrity checks, restart recovery,
   container smoke test, backup, rollback, and verified single-writer cutover.
 
