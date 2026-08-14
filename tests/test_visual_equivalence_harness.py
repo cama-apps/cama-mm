@@ -30,6 +30,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     fixture = load_fixture(DEFAULT_FIXTURE)
     chart = fixture["chart"]
     animation = fixture["animation"]
+    pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
     assert isinstance(chart["market_id"], int)
     assert isinstance(chart["snapshots"], list)
@@ -37,6 +38,9 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert isinstance(animation["name"], str)
     assert isinstance(animation["value"], int)
     assert isinstance(animation["theme"], str)
+    assert pinnacle["source_path"].endswith("lantern_engine_encounter.png")
+    assert pinnacle["boss_id"] == "lantern_engine"
+    assert pinnacle["secret"] is True
     assert isinstance(balance["username"], str)
     assert isinstance(balance["series"], list)
     assert all(len(point) == 3 for point in balance["series"])
@@ -59,11 +63,19 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_animation.gif").read_bytes() == (
         second / "python_animation.gif"
     ).read_bytes()
+    assert (first / "python_pinnacle_phase3.gif").read_bytes() == (
+        second / "python_pinnacle_phase3.gif"
+    ).read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
     assert loop == 1
     assert len(frames) == 18
     assert durations == [80] * 17 + [60_000]
+    size, loop, durations, frames = gif_frames(first / "python_pinnacle_phase3.gif")
+    assert size == (512, 288)
+    assert loop is None
+    assert len(frames) == 8
+    assert durations == [90] * 7 + [1_500]
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():

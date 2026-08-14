@@ -16,6 +16,11 @@
     "value": 1337,
     "theme": "odds_anomaly"
   },
+  "pinnacle": {
+    "source_path": "../assets/dig/bosses/lantern_engine_encounter.png",
+    "boss_id": "lantern_engine",
+    "secret": true
+  },
   "balance": {
     "username": "Visual Balance",
     "series": [

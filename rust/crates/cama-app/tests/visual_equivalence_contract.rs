@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
+use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
+use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
 use cama_app::pet_assets::decode_png_raster;
 use cama_app::post_match_gif_media::render_post_match_gif;
@@ -14,6 +18,7 @@ const FOREGROUND_THRESHOLD: u8 = 80;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    pinnacle: PinnacleFixture,
     balance: BalanceFixture,
 }
 
@@ -40,8 +45,22 @@ struct AnimationFixture {
     theme: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PinnacleFixture {
+    source_path: String,
+    boss_id: String,
+    secret: bool,
+}
+
 fn fixture() -> Fixture {
     serde_json::from_str(FIXTURE_JSON).expect("visual fixture is typed Rust input")
+}
+
+fn fixture_source_path(source_path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("scripts")
+        .join(source_path)
 }
 
 fn pixel_metrics(left: &[u8], right: &[u8]) -> (f64, f64, f64) {
@@ -115,6 +134,12 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.animation.name, "Client 47");
     assert_eq!(fixture.animation.value, 1_337);
     assert_eq!(fixture.animation.theme, "odds_anomaly");
+    assert_eq!(
+        fixture.pinnacle.source_path,
+        "../assets/dig/bosses/lantern_engine_encounter.png"
+    );
+    assert_eq!(fixture.pinnacle.boss_id, "lantern_engine");
+    assert!(fixture.pinnacle.secret);
     assert_eq!(fixture.balance.username, "Visual Balance");
     assert_eq!(fixture.balance.series.len(), 7);
     assert_eq!(fixture.balance.source_totals.len(), 7);
@@ -176,6 +201,60 @@ fn native_fixture_render_is_deterministic_and_seekable() {
         durations.push(u32::from(frame.delay) * 10);
     }
     assert_eq!(durations, [vec![80; 17], vec![60_000]].concat());
+}
+
+#[test]
+fn native_pinnacle_fixture_render_has_exact_phase_three_contract() {
+    let fixture = fixture();
+    let source = fs::read(fixture_source_path(&fixture.pinnacle.source_path))
+        .expect("fixture pinnacle source image");
+    let request = RenderRequest::PinnaclePhase {
+        boss_id: fixture.pinnacle.boss_id.clone(),
+        phase: 3,
+        secret: fixture.pinnacle.secret,
+    };
+    let renderer = NativeDigRenderer;
+    let first = renderer
+        .render(&request, Some(&source))
+        .expect("render fixture pinnacle phase three");
+    let second = renderer
+        .render(&request, Some(&source))
+        .expect("render fixture pinnacle phase three again");
+    assert_eq!(first.bytes, second.bytes);
+    let info = inspect_media(&first.bytes).expect("inspect fixture pinnacle GIF");
+    assert_eq!(info.format, MediaFormat::Gif);
+    assert_eq!((info.width, info.height), (512, 288));
+    assert_eq!(info.frame_count, 8);
+    assert_eq!(info.loop_count, None);
+    assert_eq!(
+        info.frame_durations_ms,
+        [90; 7].into_iter().chain([1_500]).collect::<Vec<_>>()
+    );
+
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(Cursor::new(first.bytes))
+        .expect("decode fixture pinnacle GIF");
+    let mut frame_count = 0;
+    let mut first_frame = None;
+    let mut durations = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().expect("read pinnacle frame") {
+        durations.push(u32::from(frame.delay) * 10);
+        if first_frame.is_none() {
+            first_frame = Some(frame.buffer.to_vec());
+        }
+        frame_count += 1;
+    }
+    assert_eq!(frame_count, 8);
+    assert_eq!(
+        durations,
+        [90; 7].into_iter().chain([1_500]).collect::<Vec<_>>()
+    );
+    let first_frame = first_frame.expect("fixture pinnacle has a first frame");
+    let (foreground_count, foreground_cells) = foreground_signature(&first_frame, 512, 288);
+    assert!(foreground_count > 512 * 288 / 10);
+    assert!(foreground_cells.len() >= 20);
 }
 
 #[test]

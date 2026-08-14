@@ -6,8 +6,9 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
     uv run --locked python scripts/visual_equivalence.py
 
-It renders production prediction-market, balance-journey, and post-match
-artifacts from the shared JSON fixture, then decodes both sides to RGBA.
+It renders production prediction-market, balance-journey, post-match, and
+pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
+sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
 an embedded bitmap font, while Python uses its configured Pillow font, so exact
@@ -52,9 +53,14 @@ BALANCE_MAX_RMS = 0.100
 ANIMATION_MAX_MEAN_FRAME_MAE = 0.130
 ANIMATION_MAX_MEAN_FRAME_RMS = 0.260
 ANIMATION_MAX_FRAME_MAE = 0.260
+PINNACLE_MAX_MEAN_FRAME_MAE = 0.075
+PINNACLE_MAX_MEAN_FRAME_RMS = 0.120
+PINNACLE_MAX_FRAME_MAE = 0.085
 FOREGROUND_CHANNEL_THRESHOLD = 80
 CHART_MIN_FOREGROUND_GRID_IOU = 0.80
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
+PINNACLE_MIN_FOREGROUND_GRID_IOU = 0.85
+PINNACLE_MIN_FOREGROUND_COUNT_RATIO = 0.80
 BALANCE_MIN_FOREGROUND_GRID_IOU = 0.80
 BALANCE_MIN_FOREGROUND_COUNT_RATIO = 0.80
 MIN_FOREGROUND_COUNT_RATIO = 0.50
@@ -90,12 +96,24 @@ def fixed_python_clock(timestamp: int) -> Iterator[None]:
 
 def load_fixture(path: Path) -> dict[str, Any]:
     fixture = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(fixture, dict) or set(fixture) != {"chart", "animation", "balance"}:
-        raise ValueError("fixture must contain exactly chart, animation, and balance objects")
+    if not isinstance(fixture, dict) or set(fixture) != {
+        "chart",
+        "animation",
+        "pinnacle",
+        "balance",
+    }:
+        raise ValueError(
+            "fixture must contain exactly chart, animation, pinnacle, and balance objects"
+        )
     return fixture
 
 
-def render_python(fixture: dict[str, Any], output_dir: Path) -> None:
+def render_python(
+    fixture: dict[str, Any],
+    output_dir: Path,
+    fixture_path: Path | None = None,
+) -> None:
+    from utils import dig_drawing
     from utils.drawing import draw_balance_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif
@@ -138,6 +156,18 @@ def render_python(fixture: dict[str, Any], output_dir: Path) -> None:
     finally:
         random.setstate(random_state)
     (output_dir / "python_animation.gif").write_bytes(animation_bytes)
+
+    pinnacle = fixture["pinnacle"]
+    source_root = (fixture_path or DEFAULT_FIXTURE).resolve().parent
+    source_path = (source_root / str(pinnacle["source_path"])).resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"pinnacle source image does not exist: {source_path}")
+    pinnacle_bytes = dig_drawing.animate_pinnacle_phase3(
+        source_path.read_bytes(),
+        str(pinnacle["boss_id"]),
+        secret=bool(pinnacle["secret"]),
+    ).getvalue()
+    (output_dir / "python_pinnacle_phase3.gif").write_bytes(pinnacle_bytes)
 
 
 def run_rust(fixture_path: Path, output_dir: Path, target_dir: Path | None) -> None:
@@ -361,6 +391,70 @@ def check_gif(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_pinnacle(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the production Python/Rust pinnacle phase-3 renderers."""
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    expected_durations = [90] * 7 + [1_500]
+    if python_size != (512, 288) or rust_size != python_size:
+        raise AssertionError(
+            f"pinnacle dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop is not None or rust_loop != python_loop:
+        raise AssertionError(
+            f"pinnacle loop count differs: Python {python_loop}, Rust {rust_loop}"
+        )
+    if len(python_frames) != 8 or len(rust_frames) != len(python_frames):
+        raise AssertionError(
+            f"pinnacle frame count differs: Python {len(python_frames)}, Rust {len(rust_frames)}"
+        )
+    if python_durations != expected_durations or rust_durations != python_durations:
+        raise AssertionError(
+            f"pinnacle durations/order differ: Python {python_durations}, Rust {rust_durations}"
+        )
+
+    metrics = [pixel_metrics(left, right) for left, right in zip(python_frames, rust_frames)]
+    structures = [
+        compare_foreground_structure(
+            left,
+            right,
+            python_size,
+            grid=(10, 10),
+            margin=24,
+            minimum_grid_iou=PINNACLE_MIN_FOREGROUND_GRID_IOU,
+            minimum_count_ratio=PINNACLE_MIN_FOREGROUND_COUNT_RATIO,
+            label=f"pinnacle frame {index}",
+        )
+        for index, (left, right) in enumerate(zip(python_frames, rust_frames))
+    ]
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    minimum_foreground_ratio = min(structure[0] for structure in structures)
+    minimum_foreground_iou = min(structure[1] for structure in structures)
+    print(
+        f"pinnacle: size={python_size[0]}x{python_size[1]} frames={len(python_frames)} "
+        f"loop={python_loop} durations={python_durations} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} max_frame_MAE={max_mae:.5f} "
+        f"min_foreground_ratio={minimum_foreground_ratio:.3f} "
+        f"min_grid_IoU={minimum_foreground_iou:.3f} "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > PINNACLE_MAX_MEAN_FRAME_MAE
+        or mean_rms > PINNACLE_MAX_MEAN_FRAME_RMS
+        or max_mae > PINNACLE_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            "pinnacle pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {PINNACLE_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {PINNACLE_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {PINNACLE_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
 def check_balance(python_path: Path, rust_path: Path) -> list[str]:
     python_size, python_pixels = rgba_pixels(python_path)
     rust_size, rust_pixels = rgba_pixels(rust_path)
@@ -416,13 +510,17 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         if not args.rust_only:
-            render_python(fixture, output_dir)
+            render_python(fixture, output_dir, args.fixture.resolve())
         if not args.python_only:
             run_rust(args.fixture.resolve(), output_dir, args.target_dir)
         if not args.rust_only and not args.python_only:
             check_png(output_dir / "python_chart.png", output_dir / "rust_chart.png")
             check_balance(output_dir / "python_balance.png", output_dir / "rust_balance.png")
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
+            check_pinnacle(
+                output_dir / "python_pinnacle_phase3.gif",
+                output_dir / "rust_pinnacle_phase3.gif",
+            )
         print(f"visual-equivalence artifacts: {output_dir}")
     finally:
         if owns_output:

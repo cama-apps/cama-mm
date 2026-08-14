@@ -9,6 +9,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use cama_app::dig_assets::{DigRenderPort, RenderRequest};
+use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
 use cama_app::post_match_gif_media::render_post_match_gif;
 use serde::Deserialize;
@@ -17,6 +19,7 @@ use serde::Deserialize;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    pinnacle: PinnacleFixture,
     balance: BalanceFixture,
 }
 
@@ -41,6 +44,20 @@ struct AnimationFixture {
     name: String,
     value: i64,
     theme: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinnacleFixture {
+    source_path: String,
+    boss_id: String,
+    secret: bool,
+}
+
+fn resolve_fixture_path(fixture_path: &Path, relative_path: &str) -> std::path::PathBuf {
+    fixture_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(relative_path)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -99,6 +116,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_animation.gif"),
         animation.bytes,
+    )?;
+
+    let pinnacle_source_path =
+        resolve_fixture_path(Path::new(&fixture_path), &fixture.pinnacle.source_path);
+    let pinnacle_source = fs::read(pinnacle_source_path)?;
+    let request = RenderRequest::PinnaclePhase {
+        boss_id: fixture.pinnacle.boss_id,
+        phase: 3,
+        secret: fixture.pinnacle.secret,
+    };
+    let pinnacle = NativeDigRenderer
+        .render(&request, Some(&pinnacle_source))
+        .map_err(|error| error.to_string())?;
+    fs::write(
+        Path::new(&output_dir).join("rust_pinnacle_phase3.gif"),
+        pinnacle.bytes,
     )?;
     Ok(())
 }
