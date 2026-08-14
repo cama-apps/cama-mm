@@ -1108,10 +1108,15 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
     );
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "rating_distribution.png");
-    assert!(
-        response.attachments[0]
-            .bytes
-            .starts_with(b"\x89PNG\r\n\x1a\n")
+    let rating_png = &response.attachments[0].bytes;
+    assert!(rating_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(
+        (
+            u32::from_be_bytes(rating_png[16..20].try_into().expect("PNG width")),
+            u32::from_be_bytes(rating_png[20..24].try_into().expect("PNG height")),
+        ),
+        (640, 390),
+        "the live attachment preserves the reviewed native calibration geometry"
     );
     assert_eq!(
         response.allowed_mentions,
@@ -1156,6 +1161,33 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
         response.allowed_mentions,
         InteractionAllowedMentions::Users(vec![ALICE])
     );
+    assert!(response.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn calibration_with_no_ratings_preserves_the_live_no_attachment_boundary() {
+    let (_directory, path) = migrated_database();
+    let provider =
+        InfoRegistrationProvider::new(path, &config(), Arc::new(RecordingDiscord::default()));
+    let handler = registry(&provider)
+        .command_handler("calibration")
+        .expect("calibration handler");
+    let responder = Arc::new(RecordingResponder::default());
+
+    handler
+        .handle(
+            command_request("calibration", ALICE, Some(GUILD), None, Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("empty server calibration");
+
+    let response = responder.followups.lock().expect("followups")[0].clone();
+    assert_eq!(
+        response.embeds[0].title.as_deref(),
+        Some("Rating System Health")
+    );
+    assert!(response.embeds[0].image_url.is_none());
     assert!(response.attachments.is_empty());
 }
 

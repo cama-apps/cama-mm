@@ -12,7 +12,8 @@ use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
     AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
     draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
-    draw_matches_table, draw_prediction_market_chart, draw_rating_history_chart, draw_role_graph,
+    draw_matches_table, draw_prediction_market_chart, draw_rating_distribution_with_median,
+    draw_rating_history_chart, draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -46,6 +47,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    rating_distribution: RatingDistributionFixture,
     rating_analysis: RatingAnalysisFixture,
     advantage: AdvantageFixture,
     pet: PetFixture,
@@ -66,6 +68,12 @@ struct BalanceFixture {
 struct RatingHistoryFixture {
     username: String,
     entries: Vec<RatingHistoryEntryFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingDistributionFixture {
+    ratings: Vec<f64>,
+    median_rating: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -366,6 +374,11 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
             .iter()
             .any(|entry| entry.os_mu_after.is_none())
     );
+    assert_eq!(
+        fixture.rating_distribution.ratings,
+        vec![1_400.0, 1_500.0, 1_520.0, 1_600.0, 1_700.0, 1_450.0]
+    );
+    assert_eq!(fixture.rating_distribution.median_rating, Some(1_510.0));
     assert_eq!(fixture.rating_analysis.comparison.matches_analyzed, 25);
     assert_eq!(fixture.rating_analysis.comparison.glicko.brier_score, 0.21);
     assert_eq!(fixture.rating_analysis.comparison.openskill.accuracy, 0.72);
@@ -815,6 +828,57 @@ fn native_rating_history_fixture_render_is_deterministic_and_nonblank() {
             })
             .count()
             > 1_000
+    );
+}
+
+#[test]
+fn native_rating_distribution_fixture_preserves_geometry_and_semantic_layers() {
+    let fixture = fixture();
+    let distribution = &fixture.rating_distribution;
+    let first =
+        draw_rating_distribution_with_median(&distribution.ratings, distribution.median_rating)
+            .into_inner();
+    let second =
+        draw_rating_distribution_with_median(&distribution.ratings, distribution.median_rating)
+            .into_inner();
+    assert_eq!(first, second);
+
+    let raster = decode_png_raster(&first).expect("decode rating-distribution PNG");
+    assert_eq!((raster.width, raster.height), (640, 390));
+    for expected_color in [
+        [88, 101, 242, 255],
+        [87, 242, 135, 255],
+        [254, 231, 92, 255],
+        [237, 66, 69, 255],
+        [244, 123, 103, 255],
+    ] {
+        assert!(
+            raster
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "rating distribution should preserve every semantic layer"
+        );
+    }
+    assert!(
+        (130..330).any(|y| {
+            (242..249).any(|x| {
+                let offset = (y * raster.width as usize + x) * 4;
+                raster.pixels[offset..offset + 4] == [244, 123, 103, 255]
+            })
+        }),
+        "the explicit 1510 median should appear at its plot coordinate"
+    );
+
+    let without_median = draw_rating_distribution_with_median(&distribution.ratings, None);
+    let without_median = decode_png_raster(without_median.get_ref())
+        .expect("decode rating distribution without median");
+    assert!(
+        !without_median
+            .pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel == [244, 123, 103, 255]),
+        "the explicit None median must suppress the marker and legend"
     );
 }
 

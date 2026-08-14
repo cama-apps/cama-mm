@@ -57,6 +57,10 @@
       {"rating": 1490.0, "os_mu_after": 34.4, "won": true}
     ]
   },
+  "rating_distribution": {
+    "ratings": [1400.0, 1500.0, 1520.0, 1600.0, 1700.0, 1450.0],
+    "median_rating": 1510.0
+  },
   "rating_analysis": {
     "comparison": {
       "matches_analyzed": 25,

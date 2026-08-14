@@ -7,7 +7,7 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
     It renders production prediction-market, balance-journey, rating-history,
-    rating-analysis comparison, calibration, trend,
+    rating distribution, rating-analysis comparison, calibration, trend,
     OpenDota advantage, profile role/lane/hero/recent-match media, betting
     wheel/explosion, Blame Luke, scout report, Hero Grid, post-match,
     terminal-crash, pinnacle phase-3, and one production pet-card attachment from
@@ -83,6 +83,30 @@ RATING_ANALYSIS_TREND_MAX_MAE = 0.180
 RATING_ANALYSIS_TREND_MAX_RMS = 0.340
 RATING_ANALYSIS_TREND_MIN_SERIES_GRID_IOU = 0.70
 RATING_ANALYSIS_TREND_MIN_SERIES_COUNT_RATIO = 0.30
+# The calibration rating distribution crosses Matplotlib/Scipy and the native
+# bitmap renderer at the representative live 640x390 attachment boundary. Its histogram,
+# normal fit, KDE, mean, and explicit median each get a separate palette gate
+# in addition to coarse semantic placement and bounded whole-frame drift.
+RATING_DISTRIBUTION_MAX_MAE = 0.080
+RATING_DISTRIBUTION_MAX_RMS = 0.180
+RATING_DISTRIBUTION_MIN_SEMANTIC_GRID_IOU = 0.90
+RATING_DISTRIBUTION_MIN_COLOR_GRID_IOU = 0.82
+RATING_DISTRIBUTION_MIN_COLOR_COUNT_RATIO = 0.20
+RATING_DISTRIBUTION_COLOR_DISTANCE = 60
+RATING_DISTRIBUTION_COLORS = {
+    "histogram": (88, 101, 242),
+    "normal": (87, 242, 135),
+    "kde": (254, 231, 92),
+    "mean": (237, 66, 69),
+    "median": (244, 123, 103),
+}
+RATING_DISTRIBUTION_COLOR_VARIANTS = {
+    "histogram": ((88, 101, 242), (76, 85, 186)),
+    "normal": ((87, 242, 135),),
+    "kde": ((254, 231, 92), (213, 195, 84)),
+    "mean": ((237, 66, 69), (199, 63, 66)),
+    "median": ((244, 123, 103), (205, 108, 93)),
+}
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
 PINNACLE_MIN_FOREGROUND_GRID_IOU = 0.85
 PINNACLE_MIN_FOREGROUND_COUNT_RATIO = 0.80
@@ -197,6 +221,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "pinnacle",
         "balance",
         "rating_history",
+        "rating_distribution",
         "rating_analysis",
         "advantage",
         "pet",
@@ -208,7 +233,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "profile",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
         )
     return fixture
 
@@ -227,6 +252,7 @@ def render_python(
         draw_hero_grid,
         draw_prediction_over_time,
         draw_rating_comparison_chart,
+        draw_rating_distribution,
         draw_rating_history_chart,
     )
     from utils.drawing import heroes as drawing_heroes
@@ -267,6 +293,17 @@ def render_python(
     ).getvalue()
     (output_dir / "python_rating_history.png").write_bytes(rating_history_bytes)
 
+    # This is the live Python `/calibration` attachment boundary. The service
+    # computes the median once and passes it explicitly to the production
+    # helper, just as the Rust provider does below.
+    rating_distribution = fixture["rating_distribution"]
+    rating_distribution_bytes = draw_rating_distribution(
+        [float(rating) for rating in rating_distribution["ratings"]],
+        median_rating=float(rating_distribution["median_rating"]),
+    ).getvalue()
+    (output_dir / "python_rating_distribution.png").write_bytes(
+        rating_distribution_bytes
+    )
     # This is the live `/ratinganalysis compare` attachment boundary: the
     # command receives the comparison service payload and passes it directly
     # to the production drawing helper.  The Rust example invokes the same
@@ -735,6 +772,129 @@ def check_png(
         raise AssertionError(
             f"{label} pixel drift exceeds threshold: MAE {mae:.5f} <= {CHART_MAX_MAE:.5f}, "
             f"RMS {rms:.5f} <= {CHART_MAX_RMS:.5f}"
+        )
+    return []
+
+
+def _rating_distribution_color_structure(
+    rgba: bytes,
+    size: tuple[int, int],
+    colors: tuple[tuple[int, int, int], ...],
+    *,
+    grid: tuple[int, int] = (16, 10),
+) -> tuple[int, set[tuple[int, int]]]:
+    """Locate one authored rating-distribution layer by semantic color."""
+
+    width, height = size
+    columns, rows = grid
+    expected = width * height * 4
+    if len(rgba) != expected:
+        raise ValueError(f"RGBA buffer has {len(rgba)} bytes, expected {expected}")
+    count = 0
+    occupied: set[tuple[int, int]] = set()
+    for pixel_index in range(width * height):
+        offset = pixel_index * 4
+        pixel = rgba[offset : offset + 3]
+        if min(
+            sum(
+                abs(channel - expected_channel)
+                for channel, expected_channel in zip(pixel, color)
+            )
+            for color in colors
+        ) > RATING_DISTRIBUTION_COLOR_DISTANCE:
+            continue
+        x = pixel_index % width
+        y = pixel_index // width
+        count += 1
+        occupied.add((x * columns // width, y * rows // height))
+    return count, occupied
+
+
+def check_rating_distribution(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the live server `/calibration` rating-distribution attachment."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    expected_size = (640, 390)
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            "rating distribution dimensions differ or are invalid: "
+            f"Python {python_size}, Rust {rust_size}; expected {expected_size}"
+        )
+
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    reference_cells: set[tuple[int, int]] = set()
+    candidate_cells: set[tuple[int, int]] = set()
+    reference_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    color_ratios: dict[str, float] = {}
+    color_grid_ious: dict[str, float] = {}
+    for name, colors in RATING_DISTRIBUTION_COLOR_VARIANTS.items():
+        reference_count, reference_color_cells = _rating_distribution_color_structure(
+            python_pixels, python_size, colors
+        )
+        candidate_count, candidate_color_cells = _rating_distribution_color_structure(
+            rust_pixels, rust_size, colors
+        )
+        if reference_count < 12 or not reference_color_cells:
+            raise AssertionError(
+                f"rating distribution Python reference lost {name}: "
+                f"{reference_count} semantic pixels"
+            )
+        minimum_count = max(
+            12,
+            reference_count * RATING_DISTRIBUTION_MIN_COLOR_COUNT_RATIO,
+        )
+        if candidate_count < minimum_count:
+            raise AssertionError(
+                f"rating distribution {name} is missing: {candidate_count} pixels, "
+                f"expected at least {minimum_count:.0f}"
+            )
+        reference_counts[name] = reference_count
+        candidate_counts[name] = candidate_count
+        color_ratios[name] = candidate_count / reference_count
+        color_union = reference_color_cells | candidate_color_cells
+        color_grid_iou = (
+            len(reference_color_cells & candidate_color_cells) / len(color_union)
+            if color_union
+            else 1.0
+        )
+        if color_grid_iou < RATING_DISTRIBUTION_MIN_COLOR_GRID_IOU:
+            raise AssertionError(
+                f"rating distribution {name} layout drifted: grid IoU "
+                f"{color_grid_iou:.3f} < "
+                f"{RATING_DISTRIBUTION_MIN_COLOR_GRID_IOU:.3f}"
+            )
+        color_grid_ious[name] = color_grid_iou
+        reference_cells.update(reference_color_cells)
+        candidate_cells.update(candidate_color_cells)
+
+    semantic_union = reference_cells | candidate_cells
+    semantic_iou = (
+        len(reference_cells & candidate_cells) / len(semantic_union)
+        if semantic_union
+        else 1.0
+    )
+    if semantic_iou < RATING_DISTRIBUTION_MIN_SEMANTIC_GRID_IOU:
+        raise AssertionError(
+            "rating distribution semantic layout drifted: "
+            f"grid IoU {semantic_iou:.3f} < "
+            f"{RATING_DISTRIBUTION_MIN_SEMANTIC_GRID_IOU:.3f}"
+        )
+
+    print(
+        f"rating_distribution: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"semantic_grid_IoU={semantic_iou:.3f} color_ratios={color_ratios} "
+        f"color_grid_IoUs={color_grid_ious} "
+        f"python_colors={reference_counts} rust_colors={candidate_counts} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > RATING_DISTRIBUTION_MAX_MAE or rms > RATING_DISTRIBUTION_MAX_RMS:
+        raise AssertionError(
+            "rating distribution pixel drift exceeds threshold: "
+            f"MAE {mae:.5f} <= {RATING_DISTRIBUTION_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {RATING_DISTRIBUTION_MAX_RMS:.5f}"
         )
     return []
 
@@ -1857,6 +2017,10 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_rating_history.png",
                 output_dir / "rust_rating_history.png",
                 label="rating_history",
+            )
+            check_rating_distribution(
+                output_dir / "python_rating_distribution.png",
+                output_dir / "rust_rating_distribution.png",
             )
             check_rating_analysis_comparison(
                 output_dir / "python_rating_analysis_comparison.png",

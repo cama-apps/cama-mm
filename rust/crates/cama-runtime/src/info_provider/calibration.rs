@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cama_app::drawing::draw_rating_distribution;
+use cama_app::drawing::draw_rating_distribution_with_median;
 use cama_db::core_repositories::{LobbyTypeStats, MatchRepository, PlayerRepository};
 use cama_domain::openskill::{CamaOpenSkillSystem, Rating as OpenSkillRating};
 use cama_domain::player::Player;
@@ -433,7 +433,7 @@ impl CalibrationDataSources {
         if !ratings.is_empty() {
             response = response.attachment(InteractionAttachment::bytes(
                 "rating_distribution.png",
-                draw_rating_distribution(&ratings).into_inner(),
+                draw_rating_distribution_with_median(&ratings, stats.median_rating).into_inner(),
             ));
         }
         response.ephemeral = true;

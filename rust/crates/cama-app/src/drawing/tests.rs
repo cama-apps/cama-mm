@@ -979,7 +979,7 @@ fn test_shared_axis_changes_keep_balance_chart_rendering() {
 fn test_successful_and_failed_renders_register_no_figure() {
     let ratings = [1_400.0, 1_500.0, 1_520.0, 1_600.0, 1_700.0, 1_450.0];
     let varied = draw_rating_distribution(&ratings);
-    let decoded = assert_rgba_png(&varied, Some((650, 400)));
+    let decoded = assert_rgba_png(&varied, Some((640, 390)));
     assert!(
         decoded.contains(DISCORD_GREEN),
         "spread distribution draws normal fit"
@@ -1026,12 +1026,56 @@ fn test_successful_and_failed_renders_register_no_figure() {
     let mut outputs = BTreeSet::new();
     for _ in 0..3 {
         let flat = draw_rating_distribution(&[1_500.0; 8]);
-        assert_rgba_png(&flat, Some((650, 400)));
+        assert_rgba_png(&flat, Some((640, 390)));
         outputs.insert(flat.into_inner());
     }
     assert_eq!(
         outputs.len(),
         1,
         "degenerate rendering is deterministic and stateless"
+    );
+}
+
+#[test]
+fn rating_distribution_font_supports_authored_stats_punctuation() {
+    assert_eq!(
+        glyph('a'),
+        glyph('A'),
+        "native bitmap letters are uppercase"
+    );
+    assert_ne!(glyph('μ'), glyph('?'));
+    assert_ne!(glyph('σ'), glyph('?'));
+    assert_ne!(glyph(','), glyph('?'));
+}
+
+#[test]
+fn rating_distribution_explicit_median_controls_the_live_marker() {
+    let ratings = [1_400.0, 1_450.0, 1_500.0, 1_520.0, 1_600.0, 1_700.0];
+    let median_color = Rgba::rgb(0xf4, 0x7b, 0x67);
+
+    let low = decode_png(&draw_rating_distribution_with_median(
+        &ratings,
+        Some(1_425.0),
+    ));
+    assert_eq!((low.width, low.height), (640, 390));
+    assert!(
+        low.contains_in((135, 130, 145, 330), median_color),
+        "the explicit service median should control the plot marker"
+    );
+
+    let high = decode_png(&draw_rating_distribution_with_median(
+        &ratings,
+        Some(1_675.0),
+    ));
+    assert!(
+        high.contains_in((445, 130, 456, 330), median_color),
+        "changing the service median should move the plot marker"
+    );
+    assert_ne!(low.pixels, high.pixels);
+
+    let without_median = decode_png(&draw_rating_distribution_with_median(&ratings, None));
+    assert!(
+        !without_median.contains(median_color),
+        "None must suppress both the median marker and its legend entry"
     );
 }

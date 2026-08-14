@@ -11,12 +11,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from scripts.visual_equivalence import (
     ANIMATION_MIN_FOREGROUND_GRID_IOU,
     BALANCE_MIN_FOREGROUND_COUNT_RATIO,
     BALANCE_MIN_FOREGROUND_GRID_IOU,
     DEFAULT_FIXTURE,
+    RATING_DISTRIBUTION_COLOR_DISTANCE,
+    RATING_DISTRIBUTION_COLOR_VARIANTS,
     check_blame_luke,
     check_explosion,
     check_hero_grid,
@@ -28,6 +31,7 @@ from scripts.visual_equivalence import (
     check_rating_analysis_calibration,
     check_rating_analysis_comparison,
     check_rating_analysis_trend,
+    check_rating_distribution,
     check_scout,
     check_wheel,
     compare_foreground_structure,
@@ -46,6 +50,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
     rating_history = fixture["rating_history"]
+    rating_distribution = fixture["rating_distribution"]
     rating_analysis = fixture["rating_analysis"]
     advantage = fixture["advantage"]
     pet = fixture["pet"]
@@ -69,6 +74,15 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert len(rating_history["entries"]) == 6
     assert any(entry["rating"] is None for entry in rating_history["entries"])
     assert any(entry["os_mu_after"] is None for entry in rating_history["entries"])
+    assert rating_distribution["ratings"] == [
+        1400.0,
+        1500.0,
+        1520.0,
+        1600.0,
+        1700.0,
+        1450.0,
+    ]
+    assert rating_distribution["median_rating"] == 1510.0
     assert rating_analysis["comparison"]["matches_analyzed"] == 25
     assert rating_analysis["comparison"]["glicko"] == {
         "brier_score": 0.21,
@@ -158,6 +172,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_rating_history.png").read_bytes() == (
         second / "python_rating_history.png"
     ).read_bytes()
+    assert (first / "python_rating_distribution.png").read_bytes() == (
+        second / "python_rating_distribution.png"
+    ).read_bytes()
     assert (first / "python_rating_analysis_comparison.png").read_bytes() == (
         second / "python_rating_analysis_comparison.png"
     ).read_bytes()
@@ -217,6 +234,18 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rating_size, rating_pixels = rgba_pixels(first / "python_rating_history.png")
     assert rating_size == (700, 400)
     assert max(rating_pixels) == 255
+    distribution_size, distribution_pixels = rgba_pixels(
+        first / "python_rating_distribution.png"
+    )
+    assert distribution_size == (640, 390)
+    assert max(distribution_pixels) == 255
+    rust_distribution = first / "rust_rating_distribution.png"
+    rust_distribution.write_bytes(
+        (first / "python_rating_distribution.png").read_bytes()
+    )
+    check_rating_distribution(
+        first / "python_rating_distribution.png", rust_distribution
+    )
     rating_analysis_size, rating_analysis_pixels = rgba_pixels(
         first / "python_rating_analysis_comparison.png"
     )
@@ -335,6 +364,67 @@ def test_profile_recent_duration_is_rendered_at_python_boundary(tmp_path: Path):
     assert (first / "python_profile_recent_matches.png").read_bytes() != (
         second / "python_profile_recent_matches.png"
     ).read_bytes()
+
+
+def test_rating_distribution_median_is_used_at_python_boundary(tmp_path: Path):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    render_python(fixture, first)
+    fixture["rating_distribution"]["median_rating"] = 1650.0
+    render_python(fixture, second)
+    assert (first / "python_rating_distribution.png").read_bytes() != (
+        second / "python_rating_distribution.png"
+    ).read_bytes()
+
+
+def test_rating_distribution_gate_rejects_missing_median_and_wrong_geometry(
+    tmp_path: Path,
+):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    render_python(fixture, tmp_path)
+    reference = tmp_path / "python_rating_distribution.png"
+
+    with Image.open(reference) as source:
+        image = source.convert("RGBA")
+        median_variants = RATING_DISTRIBUTION_COLOR_VARIANTS["median"]
+        mean_variants = RATING_DISTRIBUTION_COLOR_VARIANTS["mean"]
+        image.putdata(
+            [
+                (47, 49, 54, 255)
+                if min(
+                    sum(
+                        abs(channel - expected)
+                        for channel, expected in zip(pixel[:3], median)
+                    )
+                    for median in median_variants
+                )
+                <= RATING_DISTRIBUTION_COLOR_DISTANCE
+                and min(
+                    sum(
+                        abs(channel - expected)
+                        for channel, expected in zip(pixel[:3], mean)
+                    )
+                    for mean in mean_variants
+                )
+                > RATING_DISTRIBUTION_COLOR_DISTANCE
+                else pixel
+                for pixel in image.get_flattened_data()
+            ]
+        )
+        missing_median = tmp_path / "missing_median.png"
+        image.save(missing_median)
+
+    with pytest.raises(AssertionError, match=r"median (?:is missing|layout drifted)"):
+        check_rating_distribution(reference, missing_median)
+
+    with Image.open(reference) as source:
+        wrong_geometry = tmp_path / "wrong_geometry.png"
+        source.resize((639, 390)).save(wrong_geometry)
+    with pytest.raises(AssertionError, match="dimensions differ"):
+        check_rating_distribution(reference, wrong_geometry)
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():

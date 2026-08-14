@@ -304,6 +304,7 @@ fn glyph(character: char) -> [u8; 7] {
         '+' => [0, 4, 4, 31, 4, 4, 0],
         '=' => [0, 31, 0, 31, 0, 0, 0],
         '.' => [0, 0, 0, 0, 0, 12, 12],
+        ',' => [0, 0, 0, 0, 0, 4, 8],
         ':' => [0, 12, 12, 0, 12, 12, 0],
         '|' => [4, 4, 4, 4, 4, 4, 4],
         '%' => [25, 25, 2, 4, 8, 19, 19],
@@ -313,6 +314,8 @@ fn glyph(character: char) -> [u8; 7] {
         '#' => [10, 31, 10, 10, 31, 10, 0],
         '\'' => [4, 4, 2, 0, 0, 0, 0],
         '?' => [14, 17, 1, 2, 4, 0, 4],
+        'μ' => [0, 0, 17, 17, 17, 27, 21],
+        'σ' => [0, 0, 14, 17, 17, 17, 14],
         '—' => [0, 0, 0, 31, 0, 0, 0],
         ' ' => [0; 7],
         _ => [14, 17, 1, 2, 4, 0, 4],
@@ -2025,18 +2028,43 @@ fn format_compact_axis_value(value: f64) -> String {
 /// production Rust process does not require matplotlib/scipy.
 #[must_use]
 pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
-    const LEFT: i32 = 65;
-    const RIGHT: i32 = 620;
-    const TOP: i32 = 50;
-    const BOTTOM: i32 = 335;
-    const PLOT_HEIGHT: f64 = 250.0;
+    let median_rating = if ratings.is_empty() {
+        None
+    } else {
+        let mut sorted = ratings.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        Some(if sorted.len().is_multiple_of(2) {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        } else {
+            sorted[sorted.len() / 2]
+        })
+    };
+    draw_rating_distribution_with_median(ratings, median_rating)
+}
+
+/// Render the rating-distribution diagnostic with the service's explicit
+/// median value.
+///
+/// The live Python `/calibration` boundary passes its already-computed median
+/// into the drawing helper. `None` intentionally suppresses the median marker
+/// and legend entry instead of silently recomputing it.
+#[must_use]
+pub fn draw_rating_distribution_with_median(
+    ratings: &[f64],
+    median_rating: Option<f64>,
+) -> Cursor<Vec<u8>> {
+    const LEFT: i32 = 84;
+    const RIGHT: i32 = 630;
+    const TOP: i32 = 39;
+    const BOTTOM: i32 = 338;
+    const PLOT_HEIGHT: f64 = 285.0;
     const BIN_WIDTH: f64 = 100.0;
     const SPINE: Rgba = Rgba::rgb(0x4f, 0x54, 0x5c);
     const MEDIAN: Rgba = Rgba::rgb(0xf4, 0x7b, 0x67);
 
-    let mut raster = Raster::new(650, 400, DISCORD_BG);
-    raster.fill_rect(LEFT, TOP, RIGHT, BOTTOM, DISCORD_DARKER);
     if ratings.is_empty() {
+        let mut raster = Raster::new(640, 390, DISCORD_BG);
+        raster.fill_rect(84, TOP, RIGHT, BOTTOM, DISCORD_DARKER);
         raster.text(240, 190, "No rating data", DISCORD_WHITE, 2);
         return render(raster);
     }
@@ -2050,19 +2078,18 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
     let has_spread = deviation > f64::EPSILON * mean.abs().max(1.0);
     let mut sorted = ratings.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let median = if sorted.len().is_multiple_of(2) {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
-    } else {
-        sorted[sorted.len() / 2]
-    };
     let minimum = ratings.iter().copied().fold(f64::INFINITY, f64::min);
     let maximum = ratings.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let start = (minimum / BIN_WIDTH).floor().max(0.0) * BIN_WIDTH;
-    let end = (maximum / BIN_WIDTH).ceil() * BIN_WIDTH + BIN_WIDTH;
-    let bin_count = (((end - start) / BIN_WIDTH) as usize).max(1);
+    let histogram_start = (minimum / BIN_WIDTH).floor().max(0.0) * BIN_WIDTH;
+    let histogram_end = (maximum / BIN_WIDTH).ceil() * BIN_WIDTH + BIN_WIDTH;
+    let histogram_span = histogram_end - histogram_start;
+    let axis_padding = histogram_span * 0.05;
+    let axis_start = (histogram_start - axis_padding).max(0.0);
+    let axis_end = histogram_end + axis_padding;
+    let bin_count = ((histogram_span / BIN_WIDTH) as usize).max(1);
     let mut bins = vec![0_usize; bin_count];
     for rating in ratings {
-        let index = (((rating - start) / BIN_WIDTH) as usize).min(bin_count - 1);
+        let index = (((rating - histogram_start) / BIN_WIDTH) as usize).min(bin_count - 1);
         bins[index] += 1;
     }
 
@@ -2102,19 +2129,26 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
         .iter()
         .map(|count| *count as f64 / (ratings.len() as f64 * BIN_WIDTH))
         .fold(0.0_f64, f64::max);
-    let curve_peak = (0..=RIGHT - LEFT)
-        .map(|offset| start + f64::from(offset) / f64::from(RIGHT - LEFT) * (end - start))
+    let curve_peak = (0..200)
+        .map(|index| histogram_start + f64::from(index) / 199.0 * histogram_span)
         .map(|x| normal_density(x).max(kde_density(x)))
         .fold(0.0_f64, f64::max);
     let density_peak = histogram_peak.max(curve_peak).max(f64::EPSILON);
+    let mut raster = Raster::new(640, 390, DISCORD_BG);
+    raster.fill_rect(LEFT, TOP, RIGHT, BOTTOM, DISCORD_DARKER);
+    let rating_x = |rating: f64| {
+        LEFT + ((rating - axis_start) / (axis_end - axis_start) * f64::from(RIGHT - LEFT)) as i32
+    };
+    let curve_left = rating_x(histogram_start);
+    let curve_right = rating_x(histogram_end);
 
-    for index in 1..=4 {
-        let y = BOTTOM - index * 50;
+    for index in 1..=8 {
+        let y = BOTTOM - index * (BOTTOM - TOP) / 8;
         raster.line((LEFT, y), (RIGHT, y), DISCORD_GRID, 1);
     }
     for (index, count) in bins.iter().enumerate() {
-        let left = LEFT + (index * (RIGHT - LEFT) as usize / bin_count) as i32;
-        let right = LEFT + ((index + 1) * (RIGHT - LEFT) as usize / bin_count) as i32;
+        let left = rating_x(histogram_start + index as f64 * BIN_WIDTH);
+        let right = rating_x(histogram_start + (index + 1) as f64 * BIN_WIDTH);
         let density = *count as f64 / (ratings.len() as f64 * BIN_WIDTH);
         let top = BOTTOM - (density / density_peak * PLOT_HEIGHT) as i32;
         raster.fill_rect(left, top, right - 1, BOTTOM, DISCORD_ACCENT.with_alpha(180));
@@ -2122,12 +2156,12 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
 
     if has_spread {
         let mut previous = None;
-        for pixel_x in LEFT..=RIGHT {
-            let x = start + f64::from(pixel_x - LEFT) / f64::from(RIGHT - LEFT) * (end - start);
-            let point = (
-                pixel_x,
-                BOTTOM - (normal_density(x) / density_peak * PLOT_HEIGHT) as i32,
-            );
+        for pixel_x in curve_left..=curve_right {
+            let x = histogram_start
+                + f64::from(pixel_x - curve_left) / f64::from(curve_right - curve_left)
+                    * histogram_span;
+            let curve_y = BOTTOM - (normal_density(x) / density_peak * PLOT_HEIGHT) as i32;
+            let point = (pixel_x, curve_y.min(BOTTOM - 1));
             if let Some(before) = previous {
                 raster.line(before, point, DISCORD_GREEN, 2);
             }
@@ -2137,12 +2171,12 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
 
     if kde_bandwidth.is_some() {
         let mut previous = None;
-        for pixel_x in LEFT..=RIGHT {
-            let x = start + f64::from(pixel_x - LEFT) / f64::from(RIGHT - LEFT) * (end - start);
-            let point = (
-                pixel_x,
-                BOTTOM - (kde_density(x) / density_peak * PLOT_HEIGHT) as i32,
-            );
+        for pixel_x in curve_left..=curve_right {
+            let x = histogram_start
+                + f64::from(pixel_x - curve_left) / f64::from(curve_right - curve_left)
+                    * histogram_span;
+            let curve_y = BOTTOM - (kde_density(x) / density_peak * PLOT_HEIGHT) as i32;
+            let point = (pixel_x, curve_y.min(BOTTOM - 1));
             if pixel_x % 8 < 5
                 && let Some(before) = previous
             {
@@ -2152,8 +2186,6 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
         }
     }
 
-    let rating_x =
-        |rating: f64| LEFT + ((rating - start) / (end - start) * f64::from(RIGHT - LEFT)) as i32;
     let mean_x = rating_x(mean);
     raster.line(
         (mean_x, TOP),
@@ -2161,24 +2193,26 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
         DISCORD_RED.with_alpha(205),
         1,
     );
-    let median_x = rating_x(median);
-    let mut y = TOP;
-    while y < BOTTOM {
-        raster.line((median_x, y), (median_x, (y + 5).min(BOTTOM)), MEDIAN, 1);
-        y += 9;
+    if let Some(median) = median_rating {
+        let median_x = rating_x(median);
+        let mut y = TOP;
+        while y < BOTTOM {
+            raster.line((median_x, y), (median_x, (y + 5).min(BOTTOM)), MEDIAN, 1);
+            y += 9;
+        }
     }
 
     raster.line((LEFT, TOP), (LEFT, BOTTOM), SPINE, 1);
     raster.line((LEFT, BOTTOM), (RIGHT, BOTTOM), SPINE, 1);
-    let tick_count = bin_count.min(5);
+    let tick_count = ((histogram_span / 50.0) as usize).max(1);
     for index in 0..=tick_count {
-        let x = LEFT + index as i32 * (RIGHT - LEFT) / tick_count as i32;
-        let value = start + index as f64 / tick_count as f64 * (end - start);
+        let value = histogram_start + index as f64 / tick_count as f64 * histogram_span;
+        let x = rating_x(value);
         raster.line((x, BOTTOM), (x, BOTTOM + 4), SPINE, 1);
         raster.text(x - 12, BOTTOM + 8, &format!("{value:.0}"), DISCORD_GREY, 1);
     }
-    raster.text(300, 374, "RATING", DISCORD_GREY, 1);
-    raster.text(8, 188, "DENSITY", DISCORD_GREY, 1);
+    raster.text(300, 366, "Rating", DISCORD_GREY, 1);
+    raster.text(8, 188, "Density", DISCORD_GREY, 1);
 
     let (skewness, kurtosis) = if has_spread {
         let skewness = ratings
@@ -2198,59 +2232,69 @@ pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
     };
     let normality = distribution_normality_p_value(&sorted).map(|probability| {
         format!(
-            "{} (P={probability:.3})",
+            "{} (p={probability:.3})",
             if probability > 0.05 {
-                "NORMAL"
+                "Normal"
             } else {
-                "NON-NORMAL"
+                "Non-normal"
             }
         )
     });
-    raster.fill_rect(75, 61, 270, 103, DISCORD_DARKER.with_alpha(230));
-    raster.text(
-        81,
-        67,
-        &format!("MU {mean:.0}  SIGMA {deviation:.0}"),
-        DISCORD_GREY,
-        1,
-    );
-    raster.text(
-        81,
-        79,
-        &format!("SKEW {skewness}  KURT {kurtosis}"),
-        DISCORD_GREY,
-        1,
-    );
-    if let Some(normality) = normality {
-        raster.text(81, 91, &normality, DISCORD_GREY, 1);
-    }
-
-    let legend_x = 445;
+    let stats_left = LEFT + 6;
+    let stats_bottom = if normality.is_some() { 100 } else { 88 };
     raster.fill_rect(
-        legend_x - 8,
-        60,
-        RIGHT - 5,
-        125,
+        stats_left,
+        42,
+        stats_left + 182,
+        stats_bottom,
         DISCORD_DARKER.with_alpha(230),
     );
-    for (index, (label, color)) in [
-        (format!("DATA N={}", ratings.len()), DISCORD_ACCENT),
-        ("NORMAL FIT".to_owned(), DISCORD_GREEN),
-        ("KDE".to_owned(), DISCORD_YELLOW),
-        (format!("MEAN {mean:.0}"), DISCORD_RED),
-        (format!("MEDIAN {median:.0}"), MEDIAN),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let y = 66 + index as i32 * 11;
+    raster.text(
+        stats_left + 6,
+        48,
+        &format!("μ={mean:.0}, σ={deviation:.0}"),
+        DISCORD_GREY,
+        1,
+    );
+    raster.text(
+        stats_left + 6,
+        60,
+        &format!("Skew={skewness}, Kurt={kurtosis}"),
+        DISCORD_GREY,
+        1,
+    );
+    if let Some(normality) = &normality {
+        raster.text(stats_left + 6, 72, normality, DISCORD_GREY, 1);
+    }
+
+    let legend_x = 510;
+    let mut legend = vec![(format!("Data (n={})", ratings.len()), DISCORD_ACCENT)];
+    if has_spread {
+        legend.push(("Normal fit".to_owned(), DISCORD_GREEN));
+    }
+    if kde_bandwidth.is_some() {
+        legend.push(("KDE".to_owned(), DISCORD_YELLOW));
+    }
+    legend.push((format!("Mean: {mean:.0}"), DISCORD_RED));
+    if let Some(median) = median_rating {
+        legend.push((format!("Median: {median:.0}"), MEDIAN));
+    }
+    raster.fill_rect(
+        legend_x - 8,
+        40,
+        RIGHT - 5,
+        54 + i32::try_from(legend.len()).unwrap_or(5) * 15,
+        DISCORD_DARKER.with_alpha(230),
+    );
+    for (index, (label, color)) in legend.into_iter().enumerate() {
+        let y = 47 + index as i32 * 15;
         raster.line((legend_x, y + 3), (legend_x + 16, y + 3), color, 2);
         raster.text(legend_x + 22, y, &label, DISCORD_WHITE, 1);
     }
     raster.text(
         145,
         15,
-        &format!("Rating Distribution (N={})", ratings.len()),
+        &format!("Rating Distribution (n={})", ratings.len()),
         DISCORD_WHITE,
         2,
     );

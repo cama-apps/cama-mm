@@ -15,7 +15,8 @@ use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
     AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
     draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
-    draw_matches_table, draw_prediction_market_chart, draw_rating_history_chart, draw_role_graph,
+    draw_matches_table, draw_prediction_market_chart, draw_rating_distribution_with_median,
+    draw_rating_history_chart, draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -44,6 +45,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    rating_distribution: RatingDistributionFixture,
     rating_analysis: RatingAnalysisFixture,
     advantage: AdvantageFixture,
     pet: PetFixture,
@@ -64,6 +66,12 @@ struct BalanceFixture {
 struct RatingHistoryFixture {
     username: String,
     entries: Vec<RatingHistoryEntryFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingDistributionFixture {
+    ratings: Vec<f64>,
+    median_rating: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -328,6 +336,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_rating_history.png"),
         rating_history_chart,
+    )?;
+
+    // Exercise the exact native helper called by the live Rust calibration
+    // provider, including the median computed by the service layer.
+    let rating_distribution = draw_rating_distribution_with_median(
+        &fixture.rating_distribution.ratings,
+        fixture.rating_distribution.median_rating,
+    )
+    .into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_rating_distribution.png"),
+        rating_distribution,
     )?;
 
     // Exercise the same native renderer selected by the live

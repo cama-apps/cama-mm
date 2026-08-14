@@ -131,13 +131,18 @@ The root `.python-version` pins local `uv` commands to CPython 3.12, matching
 the CI runtime.
 
 The visual gate exercises the production Python and Rust prediction-chart,
-balance-journey, rating-history, post-match GIF, terminal-crash GIF, and
-pinnacle phase-three renderers from one deterministic fixture. It requires
+balance-journey, rating-history, calibration rating-distribution,
+rating-analysis, advantage, profile, pet, wheel/explosion, Blame Luke, scout,
+Hero Grid, post-match GIF, terminal-crash GIF, and pinnacle phase-three
+renderers from one deterministic fixture. It requires
 matching dimensions, animation frame order/timing/loop count, bounded RGBA
-error, and foreground spatial overlap; a blank or border-only candidate is
-rejected even when the shared dark background would otherwise dominate
-whole-frame error. This is representative regression evidence, not a claim
-that every renderer or font is pixel-identical.
+error, foreground spatial overlap, and media-specific semantic colors; blank,
+border-only, and missing-series candidates are rejected even when the shared
+dark background would otherwise dominate whole-frame error. This is
+representative regression evidence, not a claim that every renderer or font is
+pixel-identical. The rating-distribution tranche checks the representative live
+640x390 attachment; Matplotlib's content-dependent tight-crop rounding outside
+that fixture is not claimed as a native geometry contract.
 
 `xtask parity` fails if Python's migration list changes, if pytest node IDs
 change without review, if a mapped Rust test disappears or is ambiguous across
