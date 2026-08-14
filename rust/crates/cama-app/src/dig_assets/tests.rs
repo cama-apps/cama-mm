@@ -263,6 +263,13 @@ fn repository_asset_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/dig")
 }
 
+fn repository_asset_tree_root() -> PathBuf {
+    repository_asset_root()
+        .parent()
+        .expect("Dig asset root has an assets parent")
+        .to_path_buf()
+}
+
 fn repository_service() -> DigAssetService {
     DigAssetService::new(
         Arc::new(FilesystemAssetSource::new(repository_asset_root())),
@@ -278,6 +285,75 @@ fn assert_repository_png(relative: &Path, size: (u32, u32), mode: PixelMode) -> 
     assert_eq!((info.width, info.height), size);
     assert_eq!(info.mode, mode);
     bytes.len()
+}
+
+#[test]
+fn authored_asset_manifest_covers_every_repository_file() {
+    let entries = authored_asset_manifest::entries().expect("manifest parses");
+    assert_eq!(entries.len(), 347);
+    authored_asset_manifest::verify_root(repository_asset_tree_root())
+        .expect("every checked-in Dig and Pet asset matches its manifest hash");
+}
+
+#[test]
+fn authored_asset_manifest_rejects_changed_bytes() {
+    let entry = authored_asset_manifest::entries()
+        .expect("manifest parses")
+        .into_iter()
+        .find(|entry| entry.path == "dig/layers/dirt.png")
+        .expect("representative Dig asset is manifested");
+    let root = tempfile::tempdir().expect("temporary asset root");
+    let path = root.path().join(&entry.path);
+    std::fs::create_dir_all(path.parent().expect("manifest asset has a parent"))
+        .expect("create temporary asset directory");
+    let mut bytes = std::fs::read(repository_asset_tree_root().join(&entry.path))
+        .expect("read representative asset");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&path, bytes).expect("write modified representative asset");
+
+    assert!(matches!(
+        authored_asset_manifest::verify_entry(root.path(), &entry),
+        Err(authored_asset_manifest::ManifestError::HashMismatch { .. })
+    ));
+}
+
+#[test]
+fn authored_asset_manifest_rejects_missing_bytes() {
+    let entry = authored_asset_manifest::entries()
+        .expect("manifest parses")
+        .into_iter()
+        .find(|entry| entry.path == "pets/egg.png")
+        .expect("representative Pet asset is manifested");
+    let root = tempfile::tempdir().expect("temporary asset root");
+    assert!(matches!(
+        authored_asset_manifest::verify_entry(root.path(), &entry),
+        Err(authored_asset_manifest::ManifestError::MissingFile(_))
+    ));
+}
+
+#[test]
+fn authored_docker_image_retains_both_asset_roots() {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|path| path.join("Dockerfile.rust").is_file())
+        .expect("repository root contains Dockerfile.rust");
+    let dockerfile = std::fs::read_to_string(repository_root.join("Dockerfile.rust"))
+        .expect("read Rust Dockerfile");
+    assert!(dockerfile.contains("COPY --chown=appuser:appuser assets/dig/ /app/assets/dig/"));
+    assert!(dockerfile.contains("COPY --chown=appuser:appuser assets/pets/ /app/assets/pets/"));
+}
+
+#[test]
+fn authored_dig_file_takes_precedence_over_render_fallback() {
+    let service = repository_service();
+    let expected = std::fs::read(repository_asset_root().join("events/collapsed_armory.png"))
+        .expect("representative authored event asset");
+    let attachment = service
+        .get_event_art("collapsed_armory", "Dirt")
+        .expect("authored event asset is selected");
+    assert_eq!(attachment.filename, "event_collapsed_armory.png");
+    assert_eq!(attachment.bytes, expected);
 }
 
 #[test]

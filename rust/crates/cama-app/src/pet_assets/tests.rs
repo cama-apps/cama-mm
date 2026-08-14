@@ -456,10 +456,13 @@ mod test_pet_asset_loader {
 mod test_filesystem_pet_assets {
     use super::*;
 
+    fn repository_asset_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets")
+    }
+
     #[test]
     fn production_authored_pngs_decode_and_tombstone_is_engraved() {
-        let directory =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/pets");
+        let directory = repository_asset_root().join("pets");
         let assets = FilesystemPetAssets::new(directory);
         let egg = assets.load("egg").expect("authored egg");
         assert_eq!(egg.extension, "png");
@@ -480,6 +483,24 @@ mod test_filesystem_pet_assets {
             decode_png_raster(engraved.bytes()).map(|image| (image.width, image.height)),
             Some((CARD_WIDTH, CARD_HEIGHT))
         );
+    }
+
+    #[test]
+    fn production_authored_cards_are_selected_byte_for_byte() {
+        let asset_root = repository_asset_root();
+        let pets = asset_root.join("pets");
+        let assets = FilesystemPetAssets::new(&pets);
+        let expected_egg = std::fs::read(pets.join("egg.png")).expect("authored egg bytes");
+        let expected_altar = std::fs::read(pets.join("altar.png")).expect("authored altar bytes");
+        let mut loader = PetAssetLoader::new(assets, ProceduralPetRenderer);
+
+        let egg = loader.get_egg_card(17);
+        assert_eq!(egg.filename, "pet_egg.png");
+        assert_eq!(egg.bytes(), expected_egg);
+
+        let altar = loader.get_altar_card("Blep", 17);
+        assert_eq!(altar.filename, "pet_altar.png");
+        assert_eq!(altar.bytes(), expected_altar);
     }
 
     #[test]

@@ -13,6 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
+pub mod authored_asset_manifest;
+
 /// Discord's per-file limit used by the Python dig asset loader.
 pub const MAX_FILE_SIZE: usize = 8 * 1024 * 1024;
 pub const PHASE_TWO_LIMIT: usize = 512 * 1024;
