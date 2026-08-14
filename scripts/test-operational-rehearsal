@@ -596,9 +596,13 @@ def assert_deploy_workflow_handoff() -> None:
         'RUST_CUTOVER_CANDIDATE=true',
         'export RUST_CUTOVER_CANDIDATE',
         'GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime',
+        'BOT_RUNTIME=rust GIT_SHA="$DEPLOY_SHA" ./scripts/post-deploy-verify',
     )
     missing = [fragment for fragment in required_fragments if fragment not in workflow]
     assert not missing, f"deploy workflow handoff changed; missing: {missing!r}"
+    assert workflow.index('GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime') < workflow.index(
+        'BOT_RUNTIME=rust GIT_SHA="$DEPLOY_SHA" ./scripts/post-deploy-verify'
+    ), "post-deploy verification must run after the deployment succeeds"
 
 
 def readiness_manifest(status: str) -> str:

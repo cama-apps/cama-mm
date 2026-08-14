@@ -47,3 +47,6 @@ jobs:
               unset RUST_CUTOVER_CANDIDATE
             fi
             GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime
+            if [ "${BOT_RUNTIME-}" = rust ]; then
+              BOT_RUNTIME=rust GIT_SHA="$DEPLOY_SHA" ./scripts/post-deploy-verify
+            fi
