@@ -684,6 +684,171 @@ async fn migrated_provider_runs_command_correct_answer_and_game_over_with_sqlite
     );
 }
 
+#[tokio::test]
+async fn classic_trivia_restart_drops_ephemeral_session_but_preserves_economic_state() {
+    let fixture = MigratedFixture::new();
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let catalog = flow_catalog(cache.path());
+    let vanity_tax = fixture.vanity_tax();
+
+    // Python-equivalent restart contract: the active classic Trivia question,
+    // rendered view, streak, and timeout are process-local. SQLite remains
+    // authoritative for cooldown claims, settled answer balance/ledger writes,
+    // and completed leaderboard sessions.
+    let first_correct = {
+        let provider = TriviaRegistrationProvider::from_catalog(
+            &fixture.path,
+            catalog.clone(),
+            TriviaImageCache::new(cache.path()).expect("image cache"),
+            &flow_config(),
+            Arc::clone(&vanity_tax),
+            Arc::new(FlowDiscord::default()),
+            None,
+        )
+        .expect("construct pre-restart trivia provider");
+        let registry = flow_registry(&provider);
+        let command_responses = Arc::new(FlowResponses::with_receipt(700));
+        registry
+            .command_handler("trivia")
+            .expect("trivia command handler")
+            .handle(trivia_command(), command_responses)
+            .await
+            .expect("start pre-restart trivia command");
+
+        let first_correct = provider
+            .handler
+            .state
+            .sessions_lock()
+            .expect("pre-restart session")
+            .get(&(FLOW_USER, FLOW_GUILD))
+            .expect("active pre-restart question")
+            .current
+            .question
+            .correct_index;
+        let answer_responses = Arc::new(FlowResponses::with_receipt(701));
+        registry
+            .component_handler(&format!("trivia_{FLOW_USER}_1_{first_correct}"))
+            .expect("pre-restart trivia component handler")
+            .handle(trivia_component(702, 1, first_correct), answer_responses)
+            .await
+            .expect("settle pre-restart correct answer");
+        assert_eq!(fixture.balance(), 4);
+        assert!(
+            provider
+                .handler
+                .state
+                .session_is_active(FLOW_USER, FLOW_GUILD)
+                .expect("pre-restart session state")
+        );
+        first_correct
+    };
+
+    let before_restart = fixture.connection();
+    let cooldown: Option<i64> = before_restart
+        .query_row(
+            "SELECT last_trivia_session FROM players
+             WHERE discord_id = ?1 AND guild_id = ?2",
+            params![FLOW_USER, FLOW_GUILD],
+            |row| row.get(0),
+        )
+        .expect("read pre-restart cooldown");
+    assert!(cooldown.is_some(), "the start claim must survive restart");
+    let ledger_count: i64 = before_restart
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id = ?1 AND account_id = ?2 AND source = 'trivia'",
+            params![FLOW_GUILD, FLOW_USER],
+            |row| row.get(0),
+        )
+        .expect("count pre-restart trivia ledger entries");
+    assert_eq!(ledger_count, 1);
+    let unfinished_sessions: i64 = before_restart
+        .query_row(
+            "SELECT COUNT(*) FROM trivia_sessions
+             WHERE discord_id = ?1 AND guild_id = ?2",
+            params![FLOW_USER, FLOW_GUILD],
+            |row| row.get(0),
+        )
+        .expect("count unfinished trivia leaderboard rows");
+    assert_eq!(unfinished_sessions, 0);
+
+    let provider = TriviaRegistrationProvider::from_catalog(
+        &fixture.path,
+        catalog,
+        TriviaImageCache::new(cache.path()).expect("restarted image cache"),
+        &flow_config(),
+        vanity_tax,
+        Arc::new(FlowDiscord::default()),
+        None,
+    )
+    .expect("construct restarted trivia provider");
+    assert!(
+        !provider
+            .handler
+            .state
+            .session_is_active(FLOW_USER, FLOW_GUILD)
+            .expect("restarted session state")
+    );
+
+    let registry = flow_registry(&provider);
+    let stale_responses = Arc::new(FlowResponses::default());
+    registry
+        .component_handler(&format!("trivia_{FLOW_USER}_1_{first_correct}"))
+        .expect("restarted trivia component handler")
+        .handle(
+            trivia_component(703, 1, first_correct),
+            stale_responses.clone(),
+        )
+        .await
+        .expect("reject stale pre-restart component");
+    let immediate = stale_responses.immediate.lock().expect("stale response");
+    assert_eq!(immediate.len(), 1);
+    assert_eq!(
+        immediate[0].content,
+        "This trivia question is no longer active."
+    );
+    assert!(immediate[0].ephemeral);
+    drop(immediate);
+
+    let after_restart = fixture.connection();
+    let balance: i64 = after_restart
+        .query_row(
+            "SELECT jopacoin_balance FROM players
+             WHERE discord_id = ?1 AND guild_id = ?2",
+            params![FLOW_USER, FLOW_GUILD],
+            |row| row.get(0),
+        )
+        .expect("read post-restart balance");
+    assert_eq!(balance, 4, "settled answer reward must survive restart");
+    let remaining_ledger_count: i64 = after_restart
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id = ?1 AND account_id = ?2 AND source = 'trivia'",
+            params![FLOW_GUILD, FLOW_USER],
+            |row| row.get(0),
+        )
+        .expect("count post-restart trivia ledger entries");
+    assert_eq!(remaining_ledger_count, ledger_count);
+    let remaining_cooldown: Option<i64> = after_restart
+        .query_row(
+            "SELECT last_trivia_session FROM players
+             WHERE discord_id = ?1 AND guild_id = ?2",
+            params![FLOW_USER, FLOW_GUILD],
+            |row| row.get(0),
+        )
+        .expect("read post-restart cooldown");
+    assert_eq!(remaining_cooldown, cooldown);
+    let leaderboard_rows: i64 = after_restart
+        .query_row(
+            "SELECT COUNT(*) FROM trivia_sessions
+             WHERE discord_id = ?1 AND guild_id = ?2",
+            params![FLOW_USER, FLOW_GUILD],
+            |row| row.get(0),
+        )
+        .expect("count post-restart leaderboard rows");
+    assert_eq!(leaderboard_rows, 0);
+}
+
 #[test]
 #[ignore = "requires the pinned Dotabase package asset"]
 fn pinned_catalog_constructs_the_full_production_provider() {
