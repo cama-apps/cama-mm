@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use cama_app::drawing::draw_prediction_market_chart;
+use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
 use cama_app::post_match_gif_media::render_post_match_gif;
 use serde::Deserialize;
 
@@ -17,6 +17,14 @@ use serde::Deserialize;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    balance: BalanceFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct BalanceFixture {
+    username: String,
+    series: Vec<(i32, i64, String)>,
+    source_totals: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +69,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .into_inner();
     fs::write(Path::new(&output_dir).join("rust_chart.png"), chart)?;
+
+    let balance = fixture
+        .balance
+        .series
+        .iter()
+        .map(|(event_number, cumulative, source)| BalancePoint {
+            event_number: *event_number,
+            cumulative: *cumulative,
+            source: source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let balance_chart = draw_balance_chart(
+        &fixture.balance.username,
+        &balance,
+        &fixture.balance.source_totals,
+    )
+    .into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_balance.png"),
+        balance_chart,
+    )?;
 
     let animation = render_post_match_gif(
         &fixture.animation.name,

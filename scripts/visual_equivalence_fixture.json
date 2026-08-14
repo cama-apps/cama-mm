@@ -15,5 +15,26 @@
     "name": "Client 47",
     "value": 1337,
     "theme": "odds_anomaly"
+  },
+  "balance": {
+    "username": "Visual Balance",
+    "series": [
+      [1, 120, "bets"],
+      [2, -80, "wheel"],
+      [3, 260, "predictions"],
+      [4, 0, "tips"],
+      [5, -180, "double_or_nothing"],
+      [6, 420, "bonus"],
+      [7, 140, "dig"]
+    ],
+    "source_totals": {
+      "bets": 120,
+      "wheel": -200,
+      "predictions": 340,
+      "tips": -260,
+      "double_or_nothing": -180,
+      "bonus": 600,
+      "dig": -280
+    }
   }
 }

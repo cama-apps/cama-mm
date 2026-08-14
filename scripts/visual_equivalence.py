@@ -6,11 +6,11 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
     uv run --locked python scripts/visual_equivalence.py
 
-It renders one production prediction-market PNG and one production post-match
-GIF from the shared JSON fixture, then decodes both sides to RGBA.  Geometry,
-animation metadata, and ordered frame correspondence are checked separately
-from pixel similarity.  The native Rust renderers intentionally use an
-embedded bitmap font, while Python uses its configured Pillow font, so exact
+It renders production prediction-market, balance-journey, and post-match
+artifacts from the shared JSON fixture, then decodes both sides to RGBA.
+Geometry, animation metadata, and ordered frame correspondence are checked
+separately from pixel similarity.  The native Rust renderers intentionally use
+an embedded bitmap font, while Python uses its configured Pillow font, so exact
 pixel identity is not an appropriate acceptance criterion.  The thresholds
 below are fixed regression guards, not tuning knobs: a future implementation
 must either remain within them or update this gate with an explicit review of
@@ -47,12 +47,16 @@ if str(ROOT) not in sys.path:
 # MAE/RMS are normalized to 0..1 (channel difference divided by 255).
 CHART_MAX_MAE = 0.080
 CHART_MAX_RMS = 0.180
+BALANCE_MAX_MAE = 0.040
+BALANCE_MAX_RMS = 0.100
 ANIMATION_MAX_MEAN_FRAME_MAE = 0.130
 ANIMATION_MAX_MEAN_FRAME_RMS = 0.260
 ANIMATION_MAX_FRAME_MAE = 0.260
 FOREGROUND_CHANNEL_THRESHOLD = 80
 CHART_MIN_FOREGROUND_GRID_IOU = 0.80
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
+BALANCE_MIN_FOREGROUND_GRID_IOU = 0.80
+BALANCE_MIN_FOREGROUND_COUNT_RATIO = 0.80
 MIN_FOREGROUND_COUNT_RATIO = 0.50
 MIN_FOREGROUND_PIXELS = 200
 
@@ -86,12 +90,13 @@ def fixed_python_clock(timestamp: int) -> Iterator[None]:
 
 def load_fixture(path: Path) -> dict[str, Any]:
     fixture = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(fixture, dict) or set(fixture) != {"chart", "animation"}:
-        raise ValueError("fixture must contain exactly chart and animation objects")
+    if not isinstance(fixture, dict) or set(fixture) != {"chart", "animation", "balance"}:
+        raise ValueError("fixture must contain exactly chart, animation, and balance objects")
     return fixture
 
 
 def render_python(fixture: dict[str, Any], output_dir: Path) -> None:
+    from utils.drawing import draw_balance_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif
 
@@ -105,6 +110,18 @@ def render_python(fixture: dict[str, Any], output_dir: Path) -> None:
             title=chart.get("title"),
         ).getvalue()
     (output_dir / "python_chart.png").write_bytes(chart_bytes)
+
+    balance = fixture["balance"]
+    balance_series = [
+        (int(event_number), int(cumulative), {"source": str(source)})
+        for event_number, cumulative, source in balance["series"]
+    ]
+    balance_bytes = draw_balance_chart(
+        str(balance["username"]),
+        balance_series,
+        {str(source): int(total) for source, total in balance["source_totals"].items()},
+    ).getvalue()
+    (output_dir / "python_balance.png").write_bytes(balance_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -230,6 +247,7 @@ def compare_foreground_structure(
     margin: int,
     minimum_grid_iou: float,
     label: str,
+    minimum_count_ratio: float = MIN_FOREGROUND_COUNT_RATIO,
 ) -> tuple[float, float]:
     """Reject blank/border-only output hidden by a shared dark background."""
 
@@ -237,7 +255,7 @@ def compare_foreground_structure(
     candidate_count, candidate_cells = foreground_structure(candidate, size, grid, margin)
     if reference_count == 0 or not reference_cells:
         raise AssertionError(f"{label} reference contains no foreground structure")
-    minimum_count = max(MIN_FOREGROUND_PIXELS, reference_count * MIN_FOREGROUND_COUNT_RATIO)
+    minimum_count = max(MIN_FOREGROUND_PIXELS, reference_count * minimum_count_ratio)
     if candidate_count < minimum_count:
         raise AssertionError(
             f"{label} foreground is missing: {candidate_count} pixels, "
@@ -343,6 +361,36 @@ def check_gif(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_balance(python_path: Path, rust_path: Path) -> list[str]:
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != rust_size:
+        raise AssertionError(f"balance dimensions differ: Python {python_size}, Rust {rust_size}")
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(10, 10),
+        margin=24,
+        minimum_grid_iou=BALANCE_MIN_FOREGROUND_GRID_IOU,
+        label="balance",
+        minimum_count_ratio=BALANCE_MIN_FOREGROUND_COUNT_RATIO,
+    )
+    print(
+        f"balance: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > BALANCE_MAX_MAE or rms > BALANCE_MAX_RMS:
+        raise AssertionError(
+            f"balance pixel drift exceeds threshold: MAE {mae:.5f} <= {BALANCE_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {BALANCE_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
@@ -373,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             run_rust(args.fixture.resolve(), output_dir, args.target_dir)
         if not args.rust_only and not args.python_only:
             check_png(output_dir / "python_chart.png", output_dir / "rust_chart.png")
+            check_balance(output_dir / "python_balance.png", output_dir / "rust_balance.png")
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
         print(f"visual-equivalence artifacts: {output_dir}")
     finally:

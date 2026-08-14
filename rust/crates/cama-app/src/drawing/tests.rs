@@ -886,6 +886,10 @@ fn test_shared_axis_changes_keep_balance_chart_rendering() {
     );
     assert!(decoded.contains(source_color("bets")));
     assert!(decoded.contains(source_color("wheel")));
+    assert!(decoded.contains(DISCORD_GRID));
+    assert!(decoded.contains(DISCORD_GREEN));
+    assert!(decoded.contains(DISCORD_RED));
+    assert!(decoded.contains(DISCORD_WHITE));
 }
 
 #[test]

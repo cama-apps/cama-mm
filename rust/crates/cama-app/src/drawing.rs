@@ -305,6 +305,7 @@ fn glyph(character: char) -> [u8; 7] {
         '=' => [0, 31, 0, 31, 0, 0, 0],
         '.' => [0, 0, 0, 0, 0, 12, 12],
         ':' => [0, 12, 12, 0, 12, 12, 0],
+        '|' => [4, 4, 4, 4, 4, 4, 4],
         '%' => [25, 25, 2, 4, 8, 19, 19],
         '/' => [1, 2, 2, 4, 8, 8, 16],
         '(' => [2, 4, 8, 8, 8, 4, 2],
@@ -1194,12 +1195,25 @@ pub fn draw_balance_chart(
     source_totals: &BTreeMap<String, i64>,
 ) -> Cursor<Vec<u8>> {
     let mut raster = Raster::new(700, 400, DISCORD_BG);
+    const CHART_X: i32 = 60;
+    const CHART_Y: i32 = 70;
+    const CHART_WIDTH: i32 = 580;
+    const CHART_HEIGHT: i32 = 250;
+    const PADDING: i32 = 60;
     raster.text(
-        60,
+        PADDING,
         12,
         &format!("{username}'s Balance Journey"),
         DISCORD_WHITE,
         2,
+    );
+    let net = source_totals.values().sum::<i64>();
+    raster.text(
+        PADDING,
+        38,
+        &format!("Net: {net:+} jopacoin across {} events", series.len()),
+        if net >= 0 { DISCORD_GREEN } else { DISCORD_RED },
+        1,
     );
     if series.is_empty() {
         raster.text(220, 200, "No balance history yet", DISCORD_GREY, 2);
@@ -1209,13 +1223,93 @@ pub fn draw_balance_chart(
         .iter()
         .map(|point| point.cumulative as f64)
         .collect::<Vec<_>>();
-    let projection = make_projection(&values, series.len(), (60, 70, 580, 250));
+    let projection = make_projection(
+        &values,
+        series.len(),
+        (CHART_X, CHART_Y, CHART_WIDTH, CHART_HEIGHT),
+    );
     let zero_y = projection.to_pixel(1, 0.0).1;
-    raster.line((60, zero_y), (640, zero_y), DISCORD_GREY, 1);
+    raster.line(
+        (CHART_X, zero_y),
+        (CHART_X + CHART_WIDTH, zero_y),
+        DISCORD_GREY,
+        1,
+    );
+    raster.text(CHART_X - 25, zero_y - 6, "0", DISCORD_GREY, 1);
+    for (value, y_pos) in select_y_axis_ticks(
+        projection,
+        values.iter().copied().fold(f64::INFINITY, f64::min),
+        values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    ) {
+        raster.line(
+            (CHART_X, y_pos),
+            (CHART_X + CHART_WIDTH, y_pos),
+            DISCORD_GRID,
+            1,
+        );
+        let label = format_compact_axis_value(value);
+        let text_width = Raster::text_width(&label, 1);
+        raster.text(CHART_X - text_width - 8, y_pos - 6, &label, DISCORD_GREY, 1);
+    }
+    let event_numbers = series
+        .iter()
+        .map(|point| point.event_number)
+        .collect::<Vec<_>>();
+    let baseline_y = CHART_Y + CHART_HEIGHT;
+    raster.line(
+        (CHART_X, baseline_y),
+        (CHART_X + CHART_WIDTH, baseline_y),
+        DISCORD_GRID,
+        1,
+    );
+    for value in select_x_axis_ticks(&event_numbers, 5) {
+        let (x_pos, _) = projection.to_pixel(value, 0.0);
+        raster.line(
+            (x_pos, baseline_y),
+            (x_pos, baseline_y + 3),
+            DISCORD_GREY,
+            1,
+        );
+        let label = value.to_string();
+        let text_width = Raster::text_width(&label, 1);
+        raster.text(
+            x_pos - text_width / 2,
+            baseline_y + 6,
+            &label,
+            DISCORD_GREY,
+            1,
+        );
+    }
     let points = series
         .iter()
         .map(|point| projection.to_pixel(point.event_number, point.cumulative as f64))
         .collect::<Vec<_>>();
+    if points.len() > 1 {
+        let mut positive = vec![(CHART_X, zero_y)];
+        let mut negative = vec![(CHART_X, zero_y)];
+        for (point, pixel) in series.iter().zip(&points) {
+            positive.push((
+                pixel.0,
+                if point.cumulative >= 0 {
+                    pixel.1
+                } else {
+                    zero_y
+                },
+            ));
+            negative.push((
+                pixel.0,
+                if point.cumulative <= 0 {
+                    pixel.1
+                } else {
+                    zero_y
+                },
+            ));
+        }
+        positive.push((CHART_X + CHART_WIDTH, zero_y));
+        negative.push((CHART_X + CHART_WIDTH, zero_y));
+        raster.polygon(&positive, Rgba::rgb(0x57, 0xf2, 0x87).with_alpha(60));
+        raster.polygon(&negative, Rgba::rgb(0xed, 0x42, 0x45).with_alpha(60));
+    }
     for index in 0..points.len().saturating_sub(1) {
         let color = if series[index + 1].cumulative >= series[index].cumulative {
             DISCORD_GREEN
@@ -1225,16 +1319,118 @@ pub fn draw_balance_chart(
         raster.line(points[index], points[index + 1], color, 2);
     }
     for (point, pixel) in series.iter().zip(points) {
-        raster.circle(pixel, 4, source_color(&point.source));
+        raster.circle_with_outline(pixel, 4, source_color(&point.source), DISCORD_WHITE);
     }
-    let net = source_totals.values().sum::<i64>();
+
+    let peak_value = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let peak_index = values
+        .iter()
+        .position(|value| *value == peak_value)
+        .unwrap_or(0);
+    let trough_value = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let trough_index = values
+        .iter()
+        .position(|value| *value == trough_value)
+        .unwrap_or(0);
+    let (peak_x, peak_y) = projection.to_pixel(
+        series[peak_index].event_number,
+        series[peak_index].cumulative as f64,
+    );
+    if series[peak_index].cumulative > 0 {
+        raster.text(
+            peak_x + 5,
+            peak_y - 15,
+            &format!("Peak: +{}", series[peak_index].cumulative),
+            DISCORD_GREEN,
+            1,
+        );
+    }
+    let (trough_x, trough_y) = projection.to_pixel(
+        series[trough_index].event_number,
+        series[trough_index].cumulative as f64,
+    );
+    if series[trough_index].cumulative < 0 {
+        raster.text(
+            trough_x + 5,
+            trough_y + 5,
+            &format!("Trough: {}", series[trough_index].cumulative),
+            DISCORD_RED,
+            1,
+        );
+    }
+    let current = series.last().expect("non-empty balance series");
+    let (current_x, current_y) =
+        projection.to_pixel(current.event_number, current.cumulative as f64);
     raster.text(
-        60,
-        350,
-        &format!("Net {net:+} across {} events", series.len()),
-        if net >= 0 { DISCORD_GREEN } else { DISCORD_RED },
+        current_x - 40,
+        current_y - 20,
+        &format!("Now: {:+}", current.cumulative),
+        if current.cumulative >= 0 {
+            DISCORD_GREEN
+        } else {
+            DISCORD_RED
+        },
         1,
     );
+
+    let mut sources_present = Vec::new();
+    for point in series {
+        if !sources_present.iter().any(|source| source == &point.source)
+            && source_label(&point.source).is_some()
+        {
+            sources_present.push(point.source.as_str());
+        }
+    }
+    let legend_y = CHART_Y + CHART_HEIGHT + 22;
+    let mut cursor_x = PADDING;
+    let max_x = 700 - PADDING;
+    for source in sources_present {
+        let label = source_label(source).unwrap_or(source);
+        let label_width = Raster::text_width(label, 1);
+        let entry_width = 10 + 4 + label_width + 14;
+        if cursor_x + entry_width > max_x && cursor_x != PADDING {
+            break;
+        }
+        raster.circle_with_outline(
+            (cursor_x + 5, legend_y + 6),
+            5,
+            source_color(source),
+            DISCORD_WHITE,
+        );
+        raster.text(cursor_x + 14, legend_y, label, DISCORD_GREY, 1);
+        cursor_x += entry_width;
+    }
+
+    let mut totals = source_totals.iter().collect::<Vec<_>>();
+    totals.sort_by_key(|(_, value)| std::cmp::Reverse(value.abs()));
+    let mut footer = if totals.is_empty() {
+        "No activity".to_owned()
+    } else {
+        totals
+            .iter()
+            .map(|(source, value)| {
+                format!("{} {:+}", source_label(source).unwrap_or(source), value)
+            })
+            .collect::<Vec<_>>()
+            .join("  |  ")
+    };
+    if Raster::text_width(&footer, 1) > 700 - PADDING * 2 {
+        // The deterministic bitmap font is wider than Python's pinned TTF.
+        // Preserve the same per-source information with tighter separators
+        // before falling back to the terse overflow summary.
+        footer = totals
+            .iter()
+            .map(|(source, value)| {
+                format!("{} {:+}", source_label(source).unwrap_or(source), value)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
+    if Raster::text_width(&footer, 1) > 700 - PADDING * 2 {
+        footer = format!("{} events | net {net:+}", series.len());
+    }
+    let footer_width = Raster::text_width(&footer, 1);
+    raster.text((700 - footer_width) / 2, 365, &footer, DISCORD_WHITE, 1);
     render(raster)
 }
 
@@ -1454,6 +1650,36 @@ fn source_color(source: &str) -> Rgba {
         "bonus" => Rgba::rgb(0x9c, 0xa3, 0xaf),
         "dig" => Rgba::rgb(0xa1, 0x62, 0x07),
         _ => Rgba::rgb(0x3b, 0x82, 0xf6),
+    }
+}
+
+fn source_label(source: &str) -> Option<&'static str> {
+    match source {
+        "bets" => Some("Bets"),
+        "predictions" => Some("Predictions"),
+        "wheel" => Some("Wheel"),
+        "double_or_nothing" => Some("DoN"),
+        "tips" => Some("Tips"),
+        "disburse" => Some("Disburse"),
+        "bonus" => Some("Bonuses"),
+        "dig" => Some("Dig"),
+        _ => None,
+    }
+}
+
+fn format_compact_axis_value(value: f64) -> String {
+    let magnitude = value.abs();
+    let compact = if magnitude >= 1_000_000.0 {
+        format!("{}m", magnitude / 1_000_000.0)
+    } else if magnitude >= 1_000.0 {
+        format!("{}k", magnitude / 1_000.0)
+    } else {
+        format!("{magnitude}")
+    };
+    if value > 0.0 {
+        format!("+{compact}")
+    } else {
+        format!("-{compact}")
     }
 }
 

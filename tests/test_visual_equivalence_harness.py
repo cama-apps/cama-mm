@@ -14,25 +14,33 @@ import pytest
 
 from scripts.visual_equivalence import (
     ANIMATION_MIN_FOREGROUND_GRID_IOU,
+    BALANCE_MIN_FOREGROUND_COUNT_RATIO,
+    BALANCE_MIN_FOREGROUND_GRID_IOU,
     DEFAULT_FIXTURE,
     compare_foreground_structure,
     gif_frames,
     load_fixture,
     pixel_metrics,
     render_python,
+    rgba_pixels,
 )
 
 
-def test_visual_fixture_has_typed_chart_and_animation_inputs():
+def test_visual_fixture_has_typed_inputs():
     fixture = load_fixture(DEFAULT_FIXTURE)
     chart = fixture["chart"]
     animation = fixture["animation"]
+    balance = fixture["balance"]
     assert isinstance(chart["market_id"], int)
     assert isinstance(chart["snapshots"], list)
     assert all(len(snapshot) == 2 for snapshot in chart["snapshots"])
     assert isinstance(animation["name"], str)
     assert isinstance(animation["value"], int)
     assert isinstance(animation["theme"], str)
+    assert isinstance(balance["username"], str)
+    assert isinstance(balance["series"], list)
+    assert all(len(point) == 3 for point in balance["series"])
+    assert isinstance(balance["source_totals"], dict)
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -45,6 +53,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     render_python(fixture, second)
 
     assert (first / "python_chart.png").read_bytes() == (second / "python_chart.png").read_bytes()
+    assert (first / "python_balance.png").read_bytes() == (
+        second / "python_balance.png"
+    ).read_bytes()
     assert (first / "python_animation.gif").read_bytes() == (
         second / "python_animation.gif"
     ).read_bytes()
@@ -79,3 +90,30 @@ def test_foreground_gate_rejects_contentless_animation(tmp_path: Path):
             minimum_grid_iou=ANIMATION_MIN_FOREGROUND_GRID_IOU,
             label="blank regression frame",
         )
+
+
+def test_balance_gate_rejects_contentless_candidate(tmp_path: Path):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    render_python(fixture, tmp_path)
+    size, reference = rgba_pixels(tmp_path / "python_balance.png")
+    blank = bytes((5, 5, 8, 255)) * (size[0] * size[1])
+    border = bytearray(blank)
+    width, height = size
+    for y in range(height):
+        for x in range(width):
+            if x < 3 or x >= width - 3 or y < 3 or y >= height - 3:
+                offset = (y * width + x) * 4
+                border[offset : offset + 4] = bytes((255, 255, 255, 255))
+
+    for candidate, label in ((blank, "blank"), (bytes(border), "border-only")):
+        with pytest.raises(AssertionError, match="foreground is missing"):
+            compare_foreground_structure(
+                reference,
+                candidate,
+                size,
+                grid=(10, 10),
+                margin=24,
+                minimum_grid_iou=BALANCE_MIN_FOREGROUND_GRID_IOU,
+                minimum_count_ratio=BALANCE_MIN_FOREGROUND_COUNT_RATIO,
+                label=f"{label} balance regression",
+            )

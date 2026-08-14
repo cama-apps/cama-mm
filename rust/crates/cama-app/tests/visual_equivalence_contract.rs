@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-use cama_app::drawing::draw_prediction_market_chart;
+use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
 use cama_app::post_match_gif_media::render_post_match_gif;
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
@@ -13,6 +13,14 @@ const FOREGROUND_THRESHOLD: u8 = 80;
 struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
+    balance: BalanceFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct BalanceFixture {
+    username: String,
+    series: Vec<(i32, i64, String)>,
+    source_totals: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,7 +99,7 @@ fn foreground_gate(reference: &[u8], candidate: &[u8], width: usize, height: usi
 }
 
 #[test]
-fn visual_fixture_has_typed_chart_and_animation_inputs() {
+fn visual_fixture_has_typed_inputs() {
     let fixture = fixture();
     assert_eq!(fixture.chart.market_id, 42);
     assert_eq!(fixture.chart.snapshots.len(), 4);
@@ -99,6 +107,9 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.animation.name, "Client 47");
     assert_eq!(fixture.animation.value, 1_337);
     assert_eq!(fixture.animation.theme, "odds_anomaly");
+    assert_eq!(fixture.balance.username, "Visual Balance");
+    assert_eq!(fixture.balance.series.len(), 7);
+    assert_eq!(fixture.balance.source_totals.len(), 7);
 }
 
 #[test]
@@ -122,6 +133,23 @@ fn native_fixture_render_is_deterministic_and_seekable() {
     )
     .into_inner();
     assert_eq!(first_chart, second_chart);
+
+    let balance = &fixture.balance;
+    let series = balance
+        .series
+        .iter()
+        .map(|(event_number, cumulative, source)| BalancePoint {
+            event_number: *event_number,
+            cumulative: *cumulative,
+            source: source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let first_balance =
+        draw_balance_chart(&balance.username, &series, &balance.source_totals).into_inner();
+    let second_balance =
+        draw_balance_chart(&balance.username, &series, &balance.source_totals).into_inner();
+    assert_eq!(first_balance, second_balance);
+    assert_eq!(&first_balance[..8], b"\x89PNG\r\n\x1a\n");
 
     let animation = &fixture.animation;
     let first = render_post_match_gif(&animation.name, animation.value, &animation.theme)
