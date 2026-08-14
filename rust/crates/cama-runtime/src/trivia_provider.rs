@@ -178,6 +178,15 @@ impl TriviaRegistrationProvider {
     pub fn gateway_observer(&self) -> Arc<dyn GatewayEventObserver> {
         self.cache_observer.clone()
     }
+
+    /// Share the already-loaded Dotabase-backed catalog with the live Dig
+    /// bonus dispatcher.  Keeping one immutable catalog avoids a second
+    /// SQLite load and guarantees both `/trivia` and Dig use the same question
+    /// generators and authored records.
+    #[must_use]
+    pub fn catalog(&self) -> Arc<TriviaCatalog> {
+        Arc::clone(&self.handler.state.catalog)
+    }
 }
 
 impl RegistrationProvider for TriviaRegistrationProvider {

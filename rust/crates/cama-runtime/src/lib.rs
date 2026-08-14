@@ -12,6 +12,7 @@ pub mod ask_provider;
 pub mod betting_provider;
 pub mod blame_luke_provider;
 pub mod config;
+pub mod dig_bonus_runtime;
 pub mod dig_provider;
 pub mod dig_weather_worker;
 pub mod discord_transport;
@@ -79,6 +80,11 @@ pub use betting_provider::{
 };
 pub use blame_luke_provider::BlameLukeRegistrationProvider;
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
+pub use dig_bonus_runtime::{
+    BettingDigBonusWheelPort, DigBonusDiscordPort, DigBonusRewardSource, DigBonusRuntime,
+    DigBonusRuntimeConfig, DigBonusRuntimeError, DigBonusSendFailure, DigBonusWheelFailure,
+    DigBonusWheelPort, ResponderDigBonusMessagePort, SqliteDigBonusRewardSource,
+};
 pub use dig_provider::{
     DigChannelSnapshot, DigDiscordPort, DigProviderBuildError, DigPublicHistory,
     DigPublicHistoryMessage, DigRegistrationProvider,

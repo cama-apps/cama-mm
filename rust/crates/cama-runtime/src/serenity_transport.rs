@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cama_app::dig_bonus_events::GuildMember as DigBonusGuildMember;
 use cama_app::predictions::resolve_and_neutralize_discord_mentions;
 use serenity::Client;
 use serenity::all::ShardStageUpdateEvent;
@@ -34,6 +35,7 @@ use serenity::http::Http;
 use tracing::{error, info, warn};
 
 use crate::admin_provider::{AdminCommandSyncResult, AdminDiscordControl, AdminDiscordHealth};
+use crate::dig_bonus_runtime::{DigBonusDiscordPort, DigBonusSendFailure};
 use crate::dig_provider::{
     DigChannelSnapshot, DigDiscordPort, DigPublicHistory, DigPublicHistoryMessage,
     DigPublicSendFailure, DigPublicSendFailureKind,
@@ -512,6 +514,64 @@ impl DigDiscordPort for SerenityDiscordTransport {
         delete_after: Duration,
     ) -> Result<(), String> {
         ShopDiscordPort::shop_send_temporary(self, channel_id, response, delete_after).await
+    }
+}
+
+#[async_trait]
+impl DigBonusDiscordPort for SerenityDiscordTransport {
+    async fn guild_members(&self, guild_id: i64) -> Result<Vec<DigBonusGuildMember>, String> {
+        let context = self.context()?;
+        let guild_id = u64::try_from(guild_id)
+            .map(GuildId::new)
+            .map_err(|_| "Dig bonus guild id is negative".to_owned())?;
+        let guild = context.cache.guild(guild_id).ok_or_else(|| {
+            "Dig bonus guild is unavailable from Discord's authoritative member cache".to_owned()
+        })?;
+        guild
+            .members
+            .values()
+            .map(|member| {
+                Ok(DigBonusGuildMember {
+                    id: i64::try_from(member.user.id.get())
+                        .map_err(|_| "Dig bonus member id exceeds SQLite INTEGER".to_owned())?,
+                    display_name: member.display_name().to_owned(),
+                    bot: member.user.bot,
+                })
+            })
+            .collect()
+    }
+
+    async fn send_bonus(
+        &self,
+        responder: Arc<dyn InteractionResponder>,
+        response: InteractionResponse,
+    ) -> Result<InteractionMessageReceipt, DigBonusSendFailure> {
+        responder
+            .followup_with_receipt(response)
+            .await
+            .map_err(|error| DigBonusSendFailure::Ambiguous(error.to_string()))?
+            .ok_or_else(|| {
+                DigBonusSendFailure::Ambiguous(
+                    "Dig bonus follow-up did not return a message receipt".to_owned(),
+                )
+            })
+    }
+
+    async fn edit_bonus_message(
+        &self,
+        receipt: InteractionMessageReceipt,
+        response: InteractionResponse,
+    ) -> Result<(), String> {
+        let context = self.context()?;
+        ChannelId::new(receipt.channel_id)
+            .edit_message(
+                (&context.cache, context.http.as_ref()),
+                MessageId::new(receipt.message_id),
+                edit_channel_response(DiscordMessage::default_mentions(response)),
+            )
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
     }
 }
 
