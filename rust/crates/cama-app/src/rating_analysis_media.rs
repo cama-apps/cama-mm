@@ -7,8 +7,12 @@ use crate::drawing::{
 use crate::rating_analysis_command::{CalibrationCurveData, RatingAnalysisDrawingPort};
 use crate::rating_comparison_service::RatingComparisonResult;
 
-pub const COMPARISON_WIDTH: usize = 1_000;
-pub const COMPARISON_HEIGHT: usize = 400;
+// Matplotlib's production `draw_rating_comparison_chart` uses a tight
+// bounding box around a 10x4-inch figure.  The resulting attachment geometry
+// for the fixed comparison fixture is 989x413; keep the native renderer on
+// that same Discord attachment contract.
+pub const COMPARISON_WIDTH: usize = 989;
+pub const COMPARISON_HEIGHT: usize = 413;
 pub const CALIBRATION_WIDTH: usize = 650;
 pub const CALIBRATION_HEIGHT: usize = 500;
 pub const TREND_WIDTH: usize = 800;
@@ -74,40 +78,72 @@ pub fn draw_rating_comparison_chart(comparison: &RatingComparisonResult) -> Vec<
         ),
     ];
     for (index, (label, glicko, openskill, lower_is_better)) in metrics.into_iter().enumerate() {
-        let left = 22 + i32::try_from(index).unwrap_or_default() * 326;
-        let right = left + 304;
-        canvas.fill_rect(left, 55, right, 370, DISCORD_DARKER);
-        canvas.text_centered_in(label, left, right, 72, DISCORD_WHITE, 2);
-        canvas.line((left + 25, 325), (right - 25, 325), DISCORD_GRID, 1);
-        let maximum = glicko.max(openskill).max(0.001) * 1.2;
-        let g_height = (220.0 * (glicko / maximum).clamp(0.0, 1.0)).round() as i32;
-        let o_height = (220.0 * (openskill / maximum).clamp(0.0, 1.0)).round() as i32;
-        canvas.fill_rect(left + 55, 325 - g_height, left + 125, 325, DISCORD_ACCENT);
-        canvas.fill_rect(left + 180, 325 - o_height, left + 250, 325, DISCORD_GREEN);
+        // These are the three axes produced by the live Python chart after
+        // its tight layout: 275x275 panels with 48px gaps.
+        let left = 58 + i32::try_from(index).unwrap_or_default() * 323;
+        let right = left + 275;
+        let top = 104;
+        let baseline = 379;
+        canvas.fill_rect(left, top, right, baseline, DISCORD_DARKER);
+        canvas.text_centered_in(label, left, right, 67, DISCORD_WHITE, 2);
+        let subtitle = if lower_is_better {
+            "(LOWER = BETTER)"
+        } else {
+            "(HIGHER = BETTER)"
+        };
+        canvas.text_centered_in(subtitle, left, right, 82, DISCORD_WHITE, 1);
+        canvas.line((left, baseline), (right, baseline), DISCORD_GRID, 1);
+        // Matplotlib's y-axis leaves only a small automatic headroom above
+        // the tallest bar.  The fixed native plot uses the same 264px data
+        // span and lets the maximum value reach that span.
+        let maximum = glicko.max(openskill).max(0.001);
+        let g_height = (264.0 * (glicko / maximum).clamp(0.0, 1.0)).round() as i32;
+        let o_height = (264.0 * (openskill / maximum).clamp(0.0, 1.0)).round() as i32;
+        canvas.fill_rect(
+            left + 11,
+            baseline - g_height,
+            left + 124,
+            baseline,
+            DISCORD_ACCENT,
+        );
+        canvas.fill_rect(
+            left + 151,
+            baseline - o_height,
+            left + 264,
+            baseline,
+            DISCORD_GREEN,
+        );
         let glicko_wins = if lower_is_better {
             glicko < openskill
         } else {
             glicko > openskill
         };
         let winner = if glicko_wins {
-            (left + 53, 323 - g_height, left + 127, 328)
+            (left + 9, baseline - g_height - 2, left + 126, baseline + 2)
         } else {
-            (left + 178, 323 - o_height, left + 252, 328)
+            (
+                left + 149,
+                baseline - o_height - 2,
+                left + 266,
+                baseline + 2,
+            )
         };
         canvas.outline_rect(winner.0, winner.1, winner.2, winner.3, DISCORD_YELLOW, 2);
-        canvas.text(left + 52, 340, "GLICKO", DISCORD_GREY, 1);
-        canvas.text(left + 178, 340, "OPENSKILL", DISCORD_GREY, 1);
-        canvas.text(
-            left + 57,
-            307 - g_height,
+        canvas.text_centered_in("GLICKO-2", left + 11, left + 124, 389, DISCORD_GREY, 1);
+        canvas.text_centered_in("OPENSKILL", left + 151, left + 264, 389, DISCORD_GREY, 1);
+        canvas.text_centered_in(
             &format!("{glicko:.3}"),
+            left + 11,
+            left + 124,
+            baseline - g_height - 17,
             DISCORD_WHITE,
             1,
         );
-        canvas.text(
-            left + 182,
-            307 - o_height,
+        canvas.text_centered_in(
             &format!("{openskill:.3}"),
+            left + 151,
+            left + 264,
+            baseline - o_height - 17,
             DISCORD_WHITE,
             1,
         );

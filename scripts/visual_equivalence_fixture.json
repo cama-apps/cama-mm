@@ -57,6 +57,21 @@
       {"rating": 1490.0, "os_mu_after": 34.4, "won": true}
     ]
   },
+  "rating_analysis": {
+    "comparison": {
+      "matches_analyzed": 25,
+      "glicko": {
+        "brier_score": 0.21,
+        "accuracy": 0.64,
+        "log_loss": 0.61
+      },
+      "openskill": {
+        "brier_score": 0.18,
+        "accuracy": 0.72,
+        "log_loss": 0.56
+      }
+    }
+  },
   "advantage": {
     "match_id": 4242,
     "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],

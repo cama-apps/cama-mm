@@ -7,6 +7,7 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
+rating-analysis comparison,
 OpenDota advantage, betting wheel/explosion, Blame Luke, scout report,
 Hero Grid, post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
 the shared JSON fixture, then decodes both
@@ -65,6 +66,14 @@ PINNACLE_MAX_MEAN_FRAME_RMS = 0.120
 PINNACLE_MAX_FRAME_MAE = 0.085
 FOREGROUND_CHANNEL_THRESHOLD = 80
 CHART_MIN_FOREGROUND_GRID_IOU = 0.80
+# The rating-analysis comparison uses the live Python Matplotlib renderer on
+# one side and the native Rust bitmap renderer on the other.  Their fonts and
+# raster primitives differ, but the three metric panels, bars, winner
+# outlines, and labels must remain in the same coarse layout.
+RATING_ANALYSIS_MAX_MAE = 0.180
+RATING_ANALYSIS_MAX_RMS = 0.340
+RATING_ANALYSIS_MIN_FOREGROUND_GRID_IOU = 0.70
+RATING_ANALYSIS_MIN_FOREGROUND_COUNT_RATIO = 0.35
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
 PINNACLE_MIN_FOREGROUND_GRID_IOU = 0.85
 PINNACLE_MIN_FOREGROUND_COUNT_RATIO = 0.80
@@ -160,6 +169,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "pinnacle",
         "balance",
         "rating_history",
+        "rating_analysis",
         "advantage",
         "pet",
         "wheel",
@@ -169,7 +179,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "hero_grid",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, blame_luke, scout, and hero_grid objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, and hero_grid objects"
         )
     return fixture
 
@@ -185,6 +195,7 @@ def render_python(
         draw_advantage_graph,
         draw_balance_chart,
         draw_hero_grid,
+        draw_rating_comparison_chart,
         draw_rating_history_chart,
     )
     from utils.drawing.predictions import draw_market_fair_history
@@ -221,6 +232,19 @@ def render_python(
         list(rating_history["entries"]),
     ).getvalue()
     (output_dir / "python_rating_history.png").write_bytes(rating_history_bytes)
+
+    # This is the live `/ratinganalysis compare` attachment boundary: the
+    # command receives the comparison service payload and passes it directly
+    # to the production drawing helper.  The Rust example invokes the same
+    # native renderer that RatingAnalysisDrawingPort wires into the runtime
+    # provider.
+    rating_analysis = fixture["rating_analysis"]
+    rating_analysis_bytes = draw_rating_comparison_chart(
+        dict(rating_analysis["comparison"])
+    ).getvalue()
+    (output_dir / "python_rating_analysis_comparison.png").write_bytes(
+        rating_analysis_bytes
+    )
 
     advantage = fixture["advantage"]
     advantage_bytes = draw_advantage_graph(
@@ -570,6 +594,70 @@ def check_png(
         raise AssertionError(
             f"{label} pixel drift exceeds threshold: MAE {mae:.5f} <= {CHART_MAX_MAE:.5f}, "
             f"RMS {rms:.5f} <= {CHART_MAX_RMS:.5f}"
+        )
+    return []
+
+
+def check_rating_analysis_comparison(
+    python_path: Path, rust_path: Path
+) -> list[str]:
+    """Compare the live `/ratinganalysis compare` chart attachment.
+
+    Matplotlib's tight bounding box gives this production chart a stable
+    989x413 RGBA canvas for the checked-in fixture, while Rust intentionally
+    uses a native bitmap font and raster primitives.  The exact canvas and
+    semantic palette are part of the attachment contract; the bounded pixel
+    and coarse foreground gates cover the intentional backend differences.
+    """
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    expected_size = (989, 413)
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            "rating-analysis comparison dimensions differ or are invalid: "
+            f"Python {python_size}, Rust {rust_size}; expected {expected_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(20, 10),
+        margin=0,
+        minimum_grid_iou=RATING_ANALYSIS_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=RATING_ANALYSIS_MIN_FOREGROUND_COUNT_RATIO,
+        label="rating-analysis comparison",
+    )
+
+    def color_count(pixels: bytes, color: tuple[int, int, int, int]) -> int:
+        return sum(
+            pixels[offset : offset + 4] == bytes(color)
+            for offset in range(0, len(pixels), 4)
+        )
+
+    semantic_counts = {
+        "accent": color_count(rust_pixels, (88, 101, 242, 255)),
+        "green": color_count(rust_pixels, (87, 242, 135, 255)),
+        "winner": color_count(rust_pixels, (254, 231, 92, 255)),
+    }
+    if min(semantic_counts.values()) == 0:
+        raise AssertionError(
+            "rating-analysis comparison lost a semantic metric color: "
+            f"{semantic_counts}"
+        )
+    print(
+        f"rating_analysis_comparison: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"semantic_colors={semantic_counts} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > RATING_ANALYSIS_MAX_MAE or rms > RATING_ANALYSIS_MAX_RMS:
+        raise AssertionError(
+            "rating-analysis comparison pixel drift exceeds threshold: "
+            f"MAE {mae:.5f} <= {RATING_ANALYSIS_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {RATING_ANALYSIS_MAX_RMS:.5f}"
         )
     return []
 
@@ -1361,6 +1449,10 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_rating_history.png",
                 output_dir / "rust_rating_history.png",
                 label="rating_history",
+            )
+            check_rating_analysis_comparison(
+                output_dir / "python_rating_analysis_comparison.png",
+                output_dir / "rust_rating_analysis_comparison.png",
             )
             check_advantage(
                 output_dir / "python_advantage.png",

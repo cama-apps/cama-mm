@@ -21,6 +21,7 @@ from scripts.visual_equivalence import (
     check_explosion,
     check_hero_grid,
     check_pet,
+    check_rating_analysis_comparison,
     check_scout,
     check_wheel,
     compare_foreground_structure,
@@ -39,6 +40,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
     rating_history = fixture["rating_history"]
+    rating_analysis = fixture["rating_analysis"]
     advantage = fixture["advantage"]
     pet = fixture["pet"]
     assert isinstance(chart["market_id"], int)
@@ -61,6 +63,17 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert len(rating_history["entries"]) == 6
     assert any(entry["rating"] is None for entry in rating_history["entries"])
     assert any(entry["os_mu_after"] is None for entry in rating_history["entries"])
+    assert rating_analysis["comparison"]["matches_analyzed"] == 25
+    assert rating_analysis["comparison"]["glicko"] == {
+        "brier_score": 0.21,
+        "accuracy": 0.64,
+        "log_loss": 0.61,
+    }
+    assert rating_analysis["comparison"]["openskill"] == {
+        "brier_score": 0.18,
+        "accuracy": 0.72,
+        "log_loss": 0.56,
+    }
     assert advantage["match_id"] == 4242
     assert len(advantage["radiant_gold_adv"]) == len(advantage["radiant_xp_adv"]) == 7
     assert pet == {
@@ -111,6 +124,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_rating_history.png").read_bytes() == (
         second / "python_rating_history.png"
     ).read_bytes()
+    assert (first / "python_rating_analysis_comparison.png").read_bytes() == (
+        second / "python_rating_analysis_comparison.png"
+    ).read_bytes()
     assert (first / "python_advantage.png").read_bytes() == (
         second / "python_advantage.png"
     ).read_bytes()
@@ -154,6 +170,18 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rating_size, rating_pixels = rgba_pixels(first / "python_rating_history.png")
     assert rating_size == (700, 400)
     assert max(rating_pixels) == 255
+    rating_analysis_size, rating_analysis_pixels = rgba_pixels(
+        first / "python_rating_analysis_comparison.png"
+    )
+    assert rating_analysis_size == (989, 413)
+    assert max(rating_analysis_pixels) == 255
+    rust_rating_analysis = first / "rust_rating_analysis_comparison.png"
+    rust_rating_analysis.write_bytes(
+        (first / "python_rating_analysis_comparison.png").read_bytes()
+    )
+    check_rating_analysis_comparison(
+        first / "python_rating_analysis_comparison.png", rust_rating_analysis
+    )
     advantage_size, advantage_pixels = rgba_pixels(first / "python_advantage.png")
     assert advantage_size == (790, 340)
     assert max(advantage_pixels) == 255

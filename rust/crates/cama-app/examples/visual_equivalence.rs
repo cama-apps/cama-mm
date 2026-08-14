@@ -22,6 +22,9 @@ use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_app::rating_analysis_command::RatingAnalysisDrawingPort;
+use cama_app::rating_analysis_media::NativeRatingAnalysisDrawing;
+use cama_app::rating_comparison_service::{RatingComparisonResult, RatingSystemStats};
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
@@ -36,6 +39,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    rating_analysis: RatingAnalysisFixture,
     advantage: AdvantageFixture,
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
@@ -61,6 +65,25 @@ struct RatingHistoryEntryFixture {
     rating: Option<f64>,
     os_mu_after: Option<f64>,
     won: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingAnalysisFixture {
+    comparison: RatingComparisonFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingComparisonFixture {
+    matches_analyzed: usize,
+    glicko: RatingComparisonStatsFixture,
+    openskill: RatingComparisonStatsFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingComparisonStatsFixture {
+    brier_score: f64,
+    accuracy: f64,
+    log_loss: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +271,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rating_history_chart,
     )?;
 
+    // Exercise the same native renderer selected by the live
+    // RatingAnalysisDrawingPort in the Rust `/ratinganalysis` provider.  The
+    // fixture contains the comparison service payload at the Python command's
+    // drawing boundary, so neither side needs a database or Discord adapter.
+    let comparison = &fixture.rating_analysis.comparison;
+    let comparison_result = RatingComparisonResult {
+        glicko: rating_stats("Glicko-2", comparison.matches_analyzed, &comparison.glicko),
+        openskill: rating_stats(
+            "OpenSkill",
+            comparison.matches_analyzed,
+            &comparison.openskill,
+        ),
+        matches_analyzed: comparison.matches_analyzed,
+        match_data: Vec::new(),
+    };
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let rating_analysis_chart = drawing.rating_comparison_chart(&comparison_result)?;
+    fs::write(
+        Path::new(&output_dir).join("rust_rating_analysis_comparison.png"),
+        rating_analysis_chart,
+    )?;
+
     let advantage = AdvantageData {
         radiant_gold: fixture.advantage.radiant_gold_adv,
         radiant_xp: fixture.advantage.radiant_xp_adv,
@@ -393,4 +438,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pinnacle.bytes,
     )?;
     Ok(())
+}
+
+fn rating_stats(
+    name: &str,
+    total_predictions: usize,
+    stats: &RatingComparisonStatsFixture,
+) -> RatingSystemStats {
+    RatingSystemStats {
+        name: name.to_owned(),
+        total_predictions,
+        brier_score: stats.brier_score,
+        accuracy: stats.accuracy,
+        calibration_buckets: std::collections::BTreeMap::new(),
+        log_loss: stats.log_loss,
+    }
 }

@@ -20,6 +20,9 @@ use cama_app::pet_assets::{
     inspect_png, render_pet_card,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_app::rating_analysis_command::RatingAnalysisDrawingPort;
+use cama_app::rating_analysis_media::NativeRatingAnalysisDrawing;
+use cama_app::rating_comparison_service::{RatingComparisonResult, RatingSystemStats};
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
@@ -38,6 +41,7 @@ struct Fixture {
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     rating_history: RatingHistoryFixture,
+    rating_analysis: RatingAnalysisFixture,
     advantage: AdvantageFixture,
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
@@ -63,6 +67,25 @@ struct RatingHistoryEntryFixture {
     rating: Option<f64>,
     os_mu_after: Option<f64>,
     won: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingAnalysisFixture {
+    comparison: RatingComparisonFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingComparisonFixture {
+    matches_analyzed: usize,
+    glicko: RatingComparisonStatsFixture,
+    openskill: RatingComparisonStatsFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingComparisonStatsFixture {
+    brier_score: f64,
+    accuracy: f64,
+    log_loss: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +194,21 @@ fn fixture_source_path(source_path: &str) -> PathBuf {
         .join(source_path)
 }
 
+fn rating_stats(
+    name: &str,
+    total_predictions: usize,
+    stats: &RatingComparisonStatsFixture,
+) -> RatingSystemStats {
+    RatingSystemStats {
+        name: name.to_owned(),
+        total_predictions,
+        brier_score: stats.brier_score,
+        accuracy: stats.accuracy,
+        calibration_buckets: std::collections::BTreeMap::new(),
+        log_loss: stats.log_loss,
+    }
+}
+
 fn pixel_metrics(left: &[u8], right: &[u8]) -> (f64, f64, f64) {
     assert_eq!(left.len(), right.len());
     let mut absolute = 0_u64;
@@ -269,6 +307,9 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
             .iter()
             .any(|entry| entry.os_mu_after.is_none())
     );
+    assert_eq!(fixture.rating_analysis.comparison.matches_analyzed, 25);
+    assert_eq!(fixture.rating_analysis.comparison.glicko.brier_score, 0.21);
+    assert_eq!(fixture.rating_analysis.comparison.openskill.accuracy, 0.72);
     assert_eq!(fixture.advantage.match_id, 4_242);
     assert_eq!(fixture.advantage.radiant_gold_adv.len(), 7);
     assert_eq!(fixture.advantage.radiant_xp_adv.len(), 7);
@@ -566,6 +607,48 @@ fn native_rating_history_fixture_render_is_deterministic_and_nonblank() {
             .count()
             > 1_000
     );
+}
+
+#[test]
+fn native_rating_analysis_comparison_fixture_matches_live_attachment_contract() {
+    let fixture = fixture();
+    let comparison = &fixture.rating_analysis.comparison;
+    let result = RatingComparisonResult {
+        glicko: rating_stats("Glicko-2", comparison.matches_analyzed, &comparison.glicko),
+        openskill: rating_stats(
+            "OpenSkill",
+            comparison.matches_analyzed,
+            &comparison.openskill,
+        ),
+        matches_analyzed: comparison.matches_analyzed,
+        match_data: Vec::new(),
+    };
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let first = drawing
+        .rating_comparison_chart(&result)
+        .expect("render rating-analysis comparison fixture");
+    let mut drawing = NativeRatingAnalysisDrawing;
+    let second = drawing
+        .rating_comparison_chart(&result)
+        .expect("render rating-analysis comparison fixture again");
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode rating-analysis comparison PNG");
+    assert_eq!((raster.width, raster.height), (989, 413));
+    for expected_color in [
+        [88, 101, 242, 255],
+        [87, 242, 135, 255],
+        [254, 231, 92, 255],
+    ] {
+        assert!(
+            raster
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == expected_color)
+                .count()
+                > 50,
+            "rating-analysis comparison should preserve semantic chart color"
+        );
+    }
 }
 
 #[test]
