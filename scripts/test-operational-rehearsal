@@ -5,23 +5,213 @@ This deliberately exercises the checked-in backup helper rather than
 reimplementing its copy logic.  It keeps a production-shaped SQLite source
 connection open in WAL mode while the helper runs, then proves that the
 verified backup is immutable and cannot be overwritten.  The deploy workflow
-checks are intentionally textual: this rehearsal never needs Docker, SSH,
-Discord credentials, or the repository's development database.
+handoff is checked textually, while byte-identical copies of the deploy scripts
+run in a temporary root against a recording Docker/Compose shim.  The rehearsal
+never needs live Docker, SSH, network access, Discord credentials, or the
+repository's development database.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKUP = ROOT / "scripts" / "sqlite_backup.py"
+DEPLOY = ROOT / "scripts" / "deploy-runtime"
+RUNTIME_COMPOSE = ROOT / "scripts" / "runtime-compose"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
+READINESS = ROOT / "rust" / "parity" / "cutover_readiness.tsv"
+
+FAKE_DOCKER = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+state_path = Path(os.environ["CAMA_FAKE_DOCKER_STATE"])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+arguments = sys.argv[1:]
+event = {
+    "arguments": arguments,
+    "bot_runtime": os.environ.get("BOT_RUNTIME"),
+    "git_sha": os.environ.get("GIT_SHA"),
+    "cutover_candidate": os.environ.get("RUST_CUTOVER_CANDIDATE"),
+}
+
+
+def finish(output: str = "", status: int = 0) -> None:
+    state["events"].append(event)
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    if output:
+        print(output)
+    raise SystemExit(status)
+
+
+def current_container() -> dict[str, object]:
+    return state["current"]
+
+
+if not arguments:
+    finish("fake docker received no command", 97)
+
+command = arguments[0]
+event["kind"] = "docker"
+event["command"] = command
+event["command_arguments"] = arguments[1:]
+
+if command == "inspect":
+    container = current_container()
+    if arguments[-1] != container["id"]:
+        finish("unknown fake container", 44)
+    template = arguments[arguments.index("--format") + 1]
+    event["format"] = template
+    if ".Image" in template:
+        finish(str(container["image"]))
+    if ".Config.Env" in template:
+        finish("\n".join(container["env"]))
+    if ".State.Running" in template:
+        finish("true" if container["running"] else "false")
+    if ".Mounts" in template:
+        finish(str(container["data_mount"]))
+    if ".State.Health" in template:
+        finish(str(container["health"]))
+    finish("unknown fake inspect format", 45)
+
+if command == "exec":
+    container = current_container()
+    if arguments[1] != container["id"] or arguments[2:] != ["id", "-u"]:
+        finish("unexpected fake exec", 46)
+    finish(str(container["uid"]))
+
+if command == "tag":
+    if len(arguments) != 3:
+        finish("unexpected fake docker tag", 47)
+    source, destination = arguments[1:]
+    resolved_source = state["tags"].get(source)
+    if resolved_source is None and source.startswith("sha256:"):
+        resolved_source = source
+    if resolved_source is None:
+        finish("unknown fake source image", 47)
+    state["tags"][destination] = resolved_source
+    event["resolved_source_image"] = resolved_source
+    finish()
+
+if command == "build":
+    finish("standalone docker build is not expected without a source database", 48)
+
+if command == "run":
+    state["unexpected_direct_run"] = True
+    finish("standalone docker run would start the Python backup helper", 49)
+
+if command != "compose":
+    finish(f"unsupported fake docker command: {command}", 50)
+
+remaining = arguments[1:]
+compose_files: list[str] = []
+while remaining[:1] == ["--file"]:
+    compose_files.append(remaining[1])
+    remaining = remaining[2:]
+if not remaining:
+    finish("fake compose received no command", 51)
+
+compose_command = remaining[0]
+compose_arguments = remaining[1:]
+runtime = os.environ.get("BOT_RUNTIME")
+event.update(
+    {
+        "kind": "compose",
+        "command": compose_command,
+        "command_arguments": compose_arguments,
+        "compose_files": compose_files,
+    }
+)
+
+if compose_command == "ps":
+    if compose_arguments != ["--quiet", "bot"]:
+        finish("unexpected fake compose ps", 52)
+    finish(str(current_container()["id"]))
+
+if compose_command == "config":
+    if compose_arguments != ["--images"]:
+        finish("unexpected fake compose config", 53)
+    finish(f"cama-mm-bot-{runtime}")
+
+if compose_command == "build":
+    if compose_arguments != ["bot"]:
+        finish("unexpected fake compose build", 54)
+    state["tags"][f"cama-mm-bot-{runtime}"] = (
+        f"sha256:built-{runtime}-{os.environ.get('GIT_SHA')}"
+    )
+    finish()
+
+if compose_command == "run":
+    if runtime != "rust" or compose_arguments != [
+        "--rm",
+        "--no-deps",
+        "bot",
+        "db-check",
+        "--db-path",
+        "/app/data/cama_shuffle.db",
+    ]:
+        finish("unexpected fake compose preflight", 55)
+    finish("schema_compatible=true")
+
+if compose_command == "up":
+    if compose_arguments != [
+        "--detach",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "bot",
+    ]:
+        finish("unexpected fake compose up", 56)
+    if runtime not in {"python", "rust"}:
+        finish("fake compose up has no selected runtime", 57)
+    image = state["tags"].get(f"cama-mm-bot-{runtime}")
+    if image is None:
+        finish("fake compose up has no built or retained image", 58)
+    health = "none"
+    if runtime == "rust":
+        health = (
+            "unhealthy"
+            if state["scenario"] == "rust_health_failure"
+            and not state.get("candidate_failed")
+            else "healthy"
+        )
+        state["candidate_failed"] = health == "unhealthy"
+    state["generation"] += 1
+    state["current"] = {
+        "id": f"{runtime}-container-{state['generation']}",
+        "runtime": runtime,
+        "sha": os.environ.get("GIT_SHA"),
+        "image": image,
+        "running": True,
+        "health": health,
+        "uid": 1001,
+        "data_mount": state["data_mount"],
+        "process": "cama-rust" if runtime == "rust" else "python",
+        "env": [
+            f"BOT_RUNTIME={runtime}",
+            f"GIT_SHA={os.environ.get('GIT_SHA')}",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ],
+    }
+    state["process_history"].append(state["current"]["process"])
+    finish()
+
+finish(f"unsupported fake compose command: {compose_command}", 59)
+'''
 
 
 def digest(path: Path) -> str:
@@ -121,6 +311,19 @@ def assert_backup_contract() -> None:
             assert "refusing to overwrite backup" in second.stderr
             assert backup_path.read_bytes() == backup_bytes
             assert metadata_path.read_bytes() == metadata_bytes
+
+            # A pre-existing metadata sidecar must also fail closed before a
+            # database artifact is published, preserving the sidecar exactly.
+            collision_path = directory / "backups" / "metadata-collision.db"
+            collision_metadata_path = Path(f"{collision_path}.json")
+            collision_metadata = b"pre-existing metadata sentinel\n"
+            collision_metadata_path.write_bytes(collision_metadata)
+            collision = run_backup(source_path, collision_path)
+            assert collision.returncode != 0
+            assert "refusing to overwrite backup metadata" in collision.stderr
+            assert not collision_path.exists()
+            assert collision_metadata_path.read_bytes() == collision_metadata
+            assert list(collision_path.parent.glob(".*.partial")) == []
         finally:
             source.close()
 
@@ -143,12 +346,377 @@ def assert_deploy_workflow_handoff() -> None:
     assert not missing, f"deploy workflow handoff changed; missing: {missing!r}"
 
 
+def readiness_manifest(status: str) -> str:
+    assert status in {"open", "complete"}
+    output: list[str] = []
+    for line in READINESS.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            output.append(line)
+            continue
+        gate, _current_status, evidence = line.split("\t")
+        output.append(f"{gate}\t{status}\t{evidence}")
+    return "\n".join(output) + "\n"
+
+
+def prepare_deploy_fixture(
+    parent: Path,
+    name: str,
+    *,
+    scenario: str,
+    initial_runtime: str,
+    readiness_status: str,
+) -> tuple[Path, Path]:
+    fixture = parent / name
+    scripts = fixture / "scripts"
+    parity = fixture / "rust" / "parity"
+    fake_bin = fixture / "fake-bin"
+    data = fixture / "data"
+    for directory in (scripts, parity, fake_bin, data):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    copied_deploy = scripts / "deploy-runtime"
+    copied_compose = scripts / "runtime-compose"
+    shutil.copy2(DEPLOY, copied_deploy)
+    shutil.copy2(RUNTIME_COMPOSE, copied_compose)
+    assert copied_deploy.read_bytes() == DEPLOY.read_bytes()
+    assert copied_compose.read_bytes() == RUNTIME_COMPOSE.read_bytes()
+    shutil.copy2(ROOT / "docker-compose.yml", fixture / "docker-compose.yml")
+    shutil.copy2(ROOT / "docker-compose.rust.yml", fixture / "docker-compose.rust.yml")
+    (parity / "cutover_readiness.tsv").write_text(
+        readiness_manifest(readiness_status), encoding="utf-8"
+    )
+
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(FAKE_DOCKER, encoding="utf-8")
+    fake_docker.chmod(0o755)
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+
+    previous_sha = f"previous-{initial_runtime}-sha"
+    state_path = fixture / "fake-docker-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "scenario": scenario,
+                "generation": 0,
+                "data_mount": str(data),
+                "events": [],
+                "unexpected_direct_run": False,
+                "tags": {
+                    f"cama-mm-bot-{initial_runtime}": f"sha256:initial-{initial_runtime}"
+                },
+                "process_history": [
+                    "cama-rust" if initial_runtime == "rust" else "python"
+                ],
+                "current": {
+                    "id": f"initial-{initial_runtime}-container",
+                    "runtime": initial_runtime,
+                    "sha": previous_sha,
+                    "image": f"sha256:initial-{initial_runtime}",
+                    "running": True,
+                    "health": "healthy" if initial_runtime == "rust" else "none",
+                    "uid": 1001,
+                    "data_mount": str(data),
+                    "process": "cama-rust" if initial_runtime == "rust" else "python",
+                    "env": [
+                        f"BOT_RUNTIME={initial_runtime}",
+                        f"GIT_SHA={previous_sha}",
+                        "DB_PATH=/app/data/cama_shuffle.db",
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return fixture, state_path
+
+
+def run_deploy(
+    fixture: Path,
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+    cutover_candidate: str | None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fixture / 'fake-bin'}{os.pathsep}{environment['PATH']}",
+            "CAMA_FAKE_DOCKER_STATE": str(state_path),
+            "BOT_RUNTIME": runtime,
+            "GIT_SHA": git_sha,
+            "DEPLOY_HEALTH_TIMEOUT_SECONDS": "30",
+        }
+    )
+    if cutover_candidate is None:
+        environment.pop("RUST_CUTOVER_CANDIDATE", None)
+    else:
+        environment["RUST_CUTOVER_CANDIDATE"] = cutover_candidate
+    result = subprocess.run(
+        [str(fixture / "scripts" / "deploy-runtime")],
+        cwd=fixture,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert not (fixture / "data" / ".cama-deploy.lock").exists()
+    return result, state
+
+
+def compose_event(
+    events: list[dict[str, object]], command: str, runtime: str
+) -> dict[str, object]:
+    matches = [
+        event
+        for event in events
+        if event["kind"] == "compose"
+        and event["command"] == command
+        and event["bot_runtime"] == runtime
+    ]
+    assert len(matches) == 1, (command, runtime, matches)
+    return matches[0]
+
+
+def event_index(
+    events: list[dict[str, object]],
+    predicate: Callable[[dict[str, object]], bool],
+    description: str,
+) -> int:
+    matches = [index for index, event in enumerate(events) if predicate(event)]
+    assert len(matches) == 1, (description, matches)
+    return matches[0]
+
+
+def assert_same_service_up(event: dict[str, object]) -> None:
+    assert event["command_arguments"] == [
+        "--detach",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "bot",
+    ]
+
+
+def assert_deploy_runtime_rehearsal() -> None:
+    with tempfile.TemporaryDirectory(prefix="cama-deploy-runtime-rehearsal-") as raw_dir:
+        parent = Path(raw_dir)
+
+        missing_flag, missing_flag_state = prepare_deploy_fixture(
+            parent,
+            "missing-cutover-flag",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            missing_flag,
+            missing_flag_state,
+            runtime="rust",
+            git_sha="guard-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 65
+        assert "RUST_CUTOVER_CANDIDATE=true is required" in result.stderr
+        assert state["events"] == []
+
+        open_gate, open_gate_state = prepare_deploy_fixture(
+            parent,
+            "open-readiness-gate",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="open",
+        )
+        result, state = run_deploy(
+            open_gate,
+            open_gate_state,
+            runtime="rust",
+            git_sha="guard-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "cutover_readiness.tsv still has open gates" in result.stderr
+        assert state["events"] == []
+
+        failed, failed_state = prepare_deploy_fixture(
+            parent,
+            "rust-health-failure",
+            scenario="rust_health_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            failed,
+            failed_state,
+            runtime="rust",
+            git_sha="failed-rust-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "BOT_RUNTIME=rust failed post-deploy health; rolling back" in result.stderr
+        assert "automatic rollback restored BOT_RUNTIME=python" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["current"]["image"] == "sha256:initial-python"
+        assert state["current"]["uid"] == 1001
+        assert state["current"]["data_mount"] == str(failed / "data")
+        assert state["current"]["env"] == [
+            "BOT_RUNTIME=python",
+            "GIT_SHA=previous-python-sha",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ]
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        events = state["events"]
+        build = compose_event(events, "build", "rust")
+        preflight = compose_event(events, "run", "rust")
+        candidate_up = compose_event(events, "up", "rust")
+        rollback_config = compose_event(events, "config", "python")
+        rollback_up = compose_event(events, "up", "python")
+        assert_same_service_up(candidate_up)
+        assert_same_service_up(rollback_up)
+        assert rollback_up["git_sha"] == "previous-python-sha"
+        assert candidate_up["compose_files"] == [
+            "docker-compose.yml",
+            "docker-compose.rust.yml",
+        ]
+        assert rollback_up["compose_files"] == ["docker-compose.yml"]
+        first_tag_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and str(event["command_arguments"][1]).startswith("cama-mm-bot-rollback:"),
+            "retain previous image",
+        )
+        health_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "inspect"
+            and ".State.Health" in str(event.get("format")),
+            "candidate health inspection",
+        )
+        rollback_tag_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and str(event["command_arguments"][0]).startswith("cama-mm-bot-rollback:"),
+            "restore retained image tag",
+        )
+        assert first_tag_index < events.index(build)
+        assert events.index(build) < events.index(preflight) < events.index(candidate_up)
+        assert events.index(candidate_up) < health_index < events.index(rollback_config)
+        assert events.index(rollback_config) < rollback_tag_index < events.index(rollback_up)
+
+        restored, restored_state = prepare_deploy_fixture(
+            parent,
+            "explicit-python-restoration",
+            scenario="python_restore",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            restored,
+            restored_state,
+            runtime="python",
+            git_sha="python-restore-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "deployed BOT_RUNTIME=python GIT_SHA=python-restore-sha" in result.stdout
+        assert state["current"] == {
+            "id": "python-container-1",
+            "runtime": "python",
+            "sha": "python-restore-sha",
+            "image": "sha256:built-python-python-restore-sha",
+            "running": True,
+            "health": "none",
+            "uid": 1001,
+            "data_mount": str(restored / "data"),
+            "process": "python",
+            "env": [
+                "BOT_RUNTIME=python",
+                "GIT_SHA=python-restore-sha",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+        events = state["events"]
+        build = compose_event(events, "build", "python")
+        restore_up = compose_event(events, "up", "python")
+        assert_same_service_up(restore_up)
+        assert restore_up["git_sha"] == "python-restore-sha"
+        assert restore_up["cutover_candidate"] is None
+        assert restore_up["compose_files"] == ["docker-compose.yml"]
+        assert events.index(build) < events.index(restore_up)
+        assert not any(
+            event["kind"] == "compose" and event["command"] == "run"
+            for event in events
+        )
+
+        rust_only, rust_only_state = prepare_deploy_fixture(
+            parent,
+            "rust-only-success",
+            scenario="rust_success",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            rust_only,
+            rust_only_state,
+            runtime="rust",
+            git_sha="rust-success-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "deployed BOT_RUNTIME=rust GIT_SHA=rust-success-sha" in result.stdout
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["process"] == "cama-rust"
+        assert state["current"]["sha"] == "rust-success-sha"
+        assert state["current"]["uid"] == 1001
+        assert state["current"]["data_mount"] == str(rust_only / "data")
+        assert state["current"]["env"] == [
+            "BOT_RUNTIME=rust",
+            "GIT_SHA=rust-success-sha",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ]
+        assert state["process_history"] == ["cama-rust", "cama-rust"]
+        assert state["unexpected_direct_run"] is False
+        events = state["events"]
+        build = compose_event(events, "build", "rust")
+        preflight = compose_event(events, "run", "rust")
+        rust_up = compose_event(events, "up", "rust")
+        assert_same_service_up(rust_up)
+        assert rust_up["git_sha"] == "rust-success-sha"
+        assert rust_up["cutover_candidate"] == "true"
+        assert rust_up["compose_files"] == [
+            "docker-compose.yml",
+            "docker-compose.rust.yml",
+        ]
+        assert events.index(build) < events.index(preflight) < events.index(rust_up)
+        assert not any(
+            event["kind"] == "compose"
+            and event["command"] in {"build", "run", "up"}
+            and event["bot_runtime"] == "python"
+            for event in events
+        )
+
+
 def main() -> int:
     assert BACKUP.is_file(), BACKUP
+    assert DEPLOY.is_file(), DEPLOY
+    assert RUNTIME_COMPOSE.is_file(), RUNTIME_COMPOSE
     assert DEPLOY_WORKFLOW.is_file(), DEPLOY_WORKFLOW
+    assert READINESS.is_file(), READINESS
     assert_backup_contract()
     assert_deploy_workflow_handoff()
-    print("operational rehearsal passed (WAL backup, immutable snapshot, no-overwrite, deploy handoff)")
+    assert_deploy_runtime_rehearsal()
+    print(
+        "operational rehearsal passed "
+        "(WAL backup, fail-closed guards, rollback, Python restore, Rust-only deploy)"
+    )
     return 0
 
 

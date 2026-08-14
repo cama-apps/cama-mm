@@ -24,14 +24,26 @@ def sha256(path: Path) -> str:
 def backup(source_path: Path, destination_path: Path) -> dict[str, object]:
     source_path = source_path.resolve(strict=True)
     destination_path = destination_path.resolve(strict=False)
+    metadata_path = destination_path.with_suffix(destination_path.suffix + ".json")
     if destination_path.exists():
         raise FileExistsError(f"refusing to overwrite backup: {destination_path}")
+    if metadata_path.exists():
+        raise FileExistsError(f"refusing to overwrite backup metadata: {metadata_path}")
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = destination_path.with_name(f".{destination_path.name}.{os.getpid()}.partial")
+    metadata_partial_path = metadata_path.with_name(
+        f".{metadata_path.name}.{os.getpid()}.partial"
+    )
     if partial_path.exists():
         raise FileExistsError(f"partial backup already exists: {partial_path}")
+    if metadata_partial_path.exists():
+        raise FileExistsError(
+            f"partial backup metadata already exists: {metadata_partial_path}"
+        )
 
     started_at = int(time.time())
+    published_destination = False
+    published_metadata = False
     try:
         source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True, timeout=30)
         destination = sqlite3.connect(partial_path, timeout=30)
@@ -53,24 +65,40 @@ def backup(source_path: Path, destination_path: Path) -> dict[str, object]:
         finally:
             verification.close()
 
-        os.replace(partial_path, destination_path)
         metadata = {
             "format_version": 1,
             "source": str(source_path),
             "backup": str(destination_path),
             "created_at_unix": started_at,
-            "size_bytes": destination_path.stat().st_size,
-            "sha256": sha256(destination_path),
+            "size_bytes": partial_path.stat().st_size,
+            "sha256": sha256(partial_path),
             "quick_check": "ok",
             "schema_migration_count": migration_count,
         }
-        metadata_path = destination_path.with_suffix(destination_path.suffix + ".json")
-        with metadata_path.open("x", encoding="utf-8") as output:
+        with metadata_partial_path.open("x", encoding="utf-8") as output:
             json.dump(metadata, output, sort_keys=True)
             output.write("\n")
+
+        # Publish both artifacts with no-overwrite filesystem operations.  A
+        # prior existence check alone is racy: another deploy could create the
+        # destination between that check and publication.  Both partial files
+        # live beside their final paths, so hard-link creation is atomic and
+        # guaranteed to stay on one filesystem.
+        os.link(partial_path, destination_path)
+        published_destination = True
+        os.link(metadata_partial_path, metadata_path)
+        published_metadata = True
+
+        partial_path.unlink()
+        metadata_partial_path.unlink()
         return metadata
     except BaseException:
+        if published_metadata:
+            metadata_path.unlink(missing_ok=True)
+        if published_destination:
+            destination_path.unlink(missing_ok=True)
         partial_path.unlink(missing_ok=True)
+        metadata_partial_path.unlink(missing_ok=True)
         raise
 
 

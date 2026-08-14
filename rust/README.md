@@ -186,6 +186,21 @@ cargo run --locked --manifest-path rust/Cargo.toml -p cama-db \
   "$CAMA_RUST_SNAPSHOT_DIR/cama_shuffle.db" --disposable-copy
 ```
 
+The same bounded rehearsal is available as a machine-readable, fail-closed
+runner. It keeps the clone in a temporary directory, records source
+immutability before and after, runs Python migration, Rust `db-check`, the
+fourteen-family repository smoke, and retained Python reads, then prints a
+normalized JSON report (use a new `--report` path to retain it):
+
+```bash
+CAMA_PARITY_PYTHON=.venv/bin/python \
+  python scripts/production_snapshot_replay.py \
+  /path/to/cama_shuffle.db --report /tmp/cama-snapshot-replay.json
+```
+
+This is development evidence only; it does not close the cutover readiness
+gate or replace the broader repository and rollback coverage requirements.
+
 The explicit confirmation is intentional: this smoke writes reserved negative
 sentinels through fourteen shared repository families: guild configuration,
 economy-event policy, low-priority state, soft avoids, package deals, tips,
@@ -204,8 +219,11 @@ Python-migrated database. Setting the repository variable
 The Rust job also runs `scripts/test-operational-rehearsal`, which uses only a
 temporary WAL-mode SQLite source to exercise the real online-backup helper,
 verify backup metadata and immutability, reject destination overwrite, and
-check the deploy workflow's exact SHA/runtime handoff. It does not touch the
-development database or require Docker, SSH, or Discord credentials.
+check the deploy workflow's exact SHA/runtime handoff. It then runs the real
+deploy script in a temporary root against a recording Docker/Compose shim to
+prove fail-closed guards, unhealthy-Rust rollback, explicit Python restoration,
+and a Python-free Rust redeploy. It does not touch the development database or
+require Docker, SSH, network access, or Discord credentials.
 
 The default Compose graph still starts only the Python `bot`. All deployments
 now go through a checked same-service selector; leaving `BOT_RUNTIME` unset is

@@ -175,7 +175,7 @@ jobs:
       - name: Verify fail-closed same-service runtime selector
         run: ./scripts/test-runtime-selector
 
-      - name: Rehearse offline backup and deploy handoff
+      - name: Rehearse offline backup, selector, and rollback
         run: ./scripts/test-operational-rehearsal
 
       - name: Create and exercise Python-migrated Rust smoke database
