@@ -27,16 +27,21 @@ use cama_app::dig_boss_runtime::{
 use cama_app::dig_bosses::{
     PINNACLE_DEPTH, PINNACLE_SECRET_PHASE_CHANCE, luminosity_combat_penalty, pinnacle_by_id,
 };
+use cama_app::dig_event_runtime::{
+    DigEventDeliveryContext, DigEventDeliveryMarkRequest, DigEventDeliverySnapshot,
+    DigEventPendingDeliveryQuery,
+};
 use cama_app::dig_flavor::{
-    AIServiceDigFlavorAiPort, ArtifactFlavorInfo, BossFlavorInfo, DigFlavorAiPort,
-    DigFlavorDataPort, DigFlavorOutcome, DigFlavorRequest, DigFlavorService, DigToolCallResult,
-    EligibleEvent, FlavorDeliveryReceipt, FlavorDeliveryState, SeededDigFlavorRng,
-    SqliteDigFlavorConfigAdapter, SqliteDigFlavorContextAdapter, SqliteDigFlavorDataAdapter,
+    AIServiceDigFlavorAiPort, ArtifactFlavorInfo, BossFlavorInfo, CATASTROPHIC_LINES,
+    DigFlavorAiPort, DigFlavorDataPort, DigFlavorOutcome, DigFlavorRequest, DigFlavorService,
+    DigToolCallResult, EligibleEvent, FlavorDeliveryReceipt, FlavorDeliveryState,
+    SeededDigFlavorRng, SqliteDigFlavorConfigAdapter, SqliteDigFlavorContextAdapter,
+    SqliteDigFlavorDataAdapter,
 };
 use cama_app::dig_inventory::DigInventoryService;
 use cama_app::dig_media_runtime::DigMediaRuntime;
 use cama_app::dig_miner_runtime::{DigMinerProfile, DigMinerRuntimeService};
-use cama_app::dig_neon::{DigNeonCooldownPort, DigNeonService, SeededDigNeonRandom};
+use cama_app::dig_neon::{DigNeonCooldownPort, DigNeonService, RelicFound, SeededDigNeonRandom};
 use cama_app::dig_prestige_runtime::{
     DigPrestigePreview, DigPrestigeRequest, DigPrestigeResult, DigPrestigeRuntimeService,
 };
@@ -55,7 +60,10 @@ use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
+use cama_db::neon_events::NeonEventRepository;
+use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::pet_evolution::PetActivity;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
@@ -122,6 +130,18 @@ enum DigDeliveryFailure {
         error: String,
     },
     Ambiguous(String),
+}
+
+#[derive(Debug)]
+enum DigEventDeliveryFailure {
+    Rejected(String),
+    Ambiguous(String),
+}
+
+#[derive(Clone, Debug)]
+enum DigNeonPost {
+    Cave { block_loss: i64 },
+    Relic { name: String, rarity: String },
 }
 
 /// Whether a nonce-addressed Discord send was definitely rejected or may
@@ -227,6 +247,22 @@ pub trait DigDiscordPort: Send + Sync {
         nonce: &str,
     ) -> Result<InteractionMessageReceipt, DigPublicSendFailure>;
 
+    /// Add one of the authored result reactions to a committed Dig message.
+    ///
+    /// This is deliberately best-effort at the provider boundary: the Dig
+    /// transaction and its public message are already durable by the time a
+    /// reaction is attempted.  The default keeps isolated transports source
+    /// compatible; the Serenity adapter delegates to the existing
+    /// [`DiscordTransport`] reaction operation.
+    async fn dig_add_reaction(
+        &self,
+        _channel_id: i64,
+        _message_id: u64,
+        _emoji: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Read at most `limit` recent messages at or after the supplied time.
     /// Implementations must retain the Discord nonce and author identity.
     async fn dig_public_history(
@@ -245,6 +281,36 @@ pub trait DigDiscordPort: Send + Sync {
         _delete_after: Duration,
     ) -> Result<(), String> {
         self.dig_send_public(channel_id, response).await
+    }
+}
+
+/// Runtime adapter for the three rare bonus surfaces owned by the migrated
+/// application layer (wheel, package deal, and trivia). The provider owns the
+/// post-UI trigger and durable action claim; the adapter owns the existing
+/// interactive Discord/session implementations.
+#[async_trait]
+pub trait DigBonusDispatchPort: Send + Sync {
+    async fn dispatch_bonus(
+        &self,
+        action_id: i64,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: i64,
+        bonus: cama_app::dig_bonus_events::DigBonus,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String>;
+
+    async fn report_partial_failure(
+        &self,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .followup(
+                InteractionResponse::message(cama_app::dig_bonus_events::PARTIAL_BONUS_FAILURE)
+                    .ephemeral(),
+            )
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -274,9 +340,10 @@ impl DigRegistrationProvider {
         discord: Arc<dyn DigDiscordPort>,
         reminder_hooks: Option<ReminderHooks>,
         ai_service: Option<Arc<AIService>>,
+        bonus_dispatcher: Arc<dyn DigBonusDispatchPort>,
     ) -> Result<Self, DigProviderBuildError> {
         let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig::production()));
-        Self::with_media_ai_and_vanity(
+        let provider = Self::with_media_ai_and_vanity(
             database_path,
             config,
             discord,
@@ -284,7 +351,9 @@ impl DigRegistrationProvider {
             media,
             ai_service,
             Some(vanity_tax),
-        )
+        )?;
+        provider.set_bonus_dispatcher(bonus_dispatcher);
+        Ok(provider)
     }
 
     /// Compose the complete production `/dig` command/component surface.
@@ -427,6 +496,7 @@ impl DigRegistrationProvider {
                     route_views: Mutex::new(BTreeMap::new()),
                     rate_limits: Mutex::new(BTreeMap::new()),
                     force_events: Mutex::new(BTreeSet::new()),
+                    bonus_dispatcher: Mutex::new(None),
                 }),
             }),
         })
@@ -440,6 +510,15 @@ impl DigRegistrationProvider {
         Arc::new(DigGatewayObserver {
             state: Arc::clone(&self.handler.state),
         })
+    }
+
+    /// Attach the composition-layer dispatcher for wheel/package/trivia
+    /// bonus sessions. Keeping this setter separate lets the provider be
+    /// admitted before the gateway has assembled those shared adapters.
+    pub fn set_bonus_dispatcher(&self, dispatcher: Arc<dyn DigBonusDispatchPort>) {
+        if let Ok(mut slot) = self.handler.state.bonus_dispatcher.lock() {
+            *slot = Some(dispatcher);
+        }
     }
 }
 
@@ -489,6 +568,68 @@ impl GatewayEventObserver for DigGatewayObserver {
                 });
                 continue;
             };
+            let mut recovered = 0;
+            let mut failed = None;
+
+            // Event settlement has a two-phase application boundary. READY
+            // first freezes any actor-committed Pending projection, then the
+            // normal scan admits only Ready rows to the nonce/history sender.
+            match handler
+                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(guild_id_signed),
+                    discord_id: None,
+                    limit: 100,
+                })
+                .await
+            {
+                Ok(recoveries) => {
+                    for delivery in recoveries {
+                        match handler.recover_event_delivery(delivery.action_id).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                failed = Some(format!(
+                                    "Dig event recovery did not freeze action {}",
+                                    delivery.action_id
+                                ));
+                                break;
+                            }
+                            Err(message) => {
+                                failed = Some(message);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(message) => failed = Some(message),
+            }
+
+            if failed.is_none() {
+                match handler
+                    .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                        guild_id: Some(guild_id_signed),
+                        discord_id: None,
+                        limit: 100,
+                    })
+                    .await
+                {
+                    Ok(deliveries) => {
+                        for delivery in deliveries {
+                            match handler.deliver_event_to_channel(&delivery).await {
+                                Ok(()) => recovered += 1,
+                                Err(message) => {
+                                    failed = Some(message);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(message) => failed = Some(message),
+                }
+            }
+
+            // The original Dig outbox remains independent from event rows;
+            // process it in the same READY pass so an event failure cannot
+            // prevent recovery of an already committed normal result.
             let pending = match handler
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
                     guild_id: Some(guild_id_signed),
@@ -499,20 +640,19 @@ impl GatewayEventObserver for DigGatewayObserver {
             {
                 Ok(pending) => pending,
                 Err(message) => {
-                    report.failures.push(ReadyRecoveryFailure {
-                        guild_id: *guild_id,
-                        message,
-                    });
-                    continue;
+                    if failed.is_none() {
+                        failed = Some(message);
+                    }
+                    Vec::new()
                 }
             };
-            let mut recovered = 0;
-            let mut failed = None;
             for delivery in pending {
                 match handler.deliver_to_channel(&delivery).await {
                     Ok(()) => recovered += 1,
                     Err(message) => {
-                        failed = Some(message);
+                        if failed.is_none() {
+                            failed = Some(message);
+                        }
                         break;
                     }
                 }
@@ -547,6 +687,7 @@ struct DigRuntimeState {
     /// independent from gateway membership refresh state.
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
+    bonus_dispatcher: Mutex<Option<Arc<dyn DigBonusDispatchPort>>>,
     view_nonce: String,
     abandon_views: Mutex<BTreeMap<String, DigAbandonViewState>>,
     prestige_views: Mutex<BTreeMap<String, DigPrestigeViewState>>,
@@ -1985,6 +2126,7 @@ impl DigInteractionHandler {
                 Some(delivery) => Some(self.prepare_delivery(delivery).await?),
                 None => None,
             };
+            let bonus_outcome = result.outcome.clone();
             let (stats, event) = if let Some(delivery) = delivery.as_ref() {
                 dig_delivery_responses(delivery, &self.state.media, &self.state.view_nonce)
             } else if result.boss_boundary.is_some() {
@@ -1995,7 +2137,7 @@ impl DigInteractionHandler {
                 )
             } else {
                 self.render_dig_responses(
-                    result.outcome,
+                    bonus_outcome.clone(),
                     user_id,
                     guild_id,
                     user_display_name,
@@ -2021,6 +2163,14 @@ impl DigInteractionHandler {
                         .await?;
                 }
             }
+            self.maybe_send_dig_bonus(
+                &bonus_outcome,
+                user_id,
+                guild_id,
+                delivery_channel,
+                Arc::clone(&responder),
+            )
+            .await;
             return Ok(());
         }
         if let Some(raw) = action.strip_prefix("event-action:") {
@@ -2042,10 +2192,13 @@ impl DigInteractionHandler {
             let action_id = action_id.expect("validated action id");
             let now = unix_now();
             let path = self.state.database_path.clone();
+            let config = self.state.dig_config.clone();
             let prompt = match blocking(move || {
-                cama_app::dig_event_runtime::DigEventRuntimeService::sqlite(&path)
-                    .action_presentation(user_id, guild_id, action_id, now)
-                    .map_err(|error| error.to_string())
+                cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(
+                    &path, config,
+                )
+                .action_presentation(user_id, guild_id, action_id, now)
+                .map_err(|error| error.to_string())
             })
             .await
             {
@@ -2091,18 +2244,28 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
 
+            let delivery_channel = channel_id
+                .ok_or_else(|| "Dig event interaction is missing its channel".to_owned())?;
+            let event_delivery_context =
+                DigEventDeliveryContext::new(user_id, guild_id, interaction_id, delivery_channel);
             let path = self.state.database_path.clone();
+            let config = self.state.dig_config.clone();
             let choice_for_db = choice.clone();
             let result = match blocking(move || {
-                cama_app::dig_event_runtime::DigEventRuntimeService::sqlite(&path)
-                    .resolve_action_event(cama_app::dig_event_runtime::DigEventActionRequest {
+                cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(
+                    &path, config,
+                )
+                .resolve_action_event_with_delivery(
+                    cama_app::dig_event_runtime::DigEventActionRequest {
                         discord_id: user_id,
                         guild_id,
                         dig_action_id: action_id,
                         choice: &choice_for_db,
                         now,
-                    })
-                    .map_err(|error| error.to_string())
+                    },
+                    event_delivery_context,
+                )
+                .map_err(|error| error.to_string())
             })
             .await
             {
@@ -2119,14 +2282,20 @@ impl DigInteractionHandler {
                         .map_err(|error| error.to_string());
                 }
             };
-            let response = event_resolution_response(&result);
             if !result.success {
+                let response = event_resolution_response(&result);
                 return responder
                     .followup(response)
                     .await
                     .map_err(|error| error.to_string());
             }
-            if !result.applied_now {
+            let resolved_action_id = result
+                .action_id
+                .ok_or_else(|| "Resolved Dig event has no durable action id".to_owned())?;
+            let Some(delivery) = self
+                .event_delivery_for_action(resolved_action_id, user_id, guild_id)
+                .await?
+            else {
                 return responder
                     .followup(
                         InteractionResponse::message("You've already resolved this event.")
@@ -2134,21 +2303,17 @@ impl DigInteractionHandler {
                     )
                     .await
                     .map_err(|error| error.to_string());
+            };
+            let response = event_resolution_response(&delivery.outcome);
+            if result.applied_now {
+                return self
+                    .deliver_event_from_interaction(&delivery, response, responder)
+                    .await;
             }
-            if let Some(target) = self.public_channel(guild_id, channel_id).await?
-                && self
-                    .state
-                    .discord
-                    .dig_send_public(target, response.clone())
-                    .await
-                    .is_ok()
-            {
-                return Ok(());
-            }
-            return responder
-                .followup(response)
-                .await
-                .map_err(|error| error.to_string());
+            // A prior click may have settled the actor but lost the delivery
+            // CAS. Retry the immutable Ready projection by nonce/history;
+            // never bind this newer interaction to the old outbox context.
+            return self.deliver_event_to_channel(&delivery).await;
         }
         // Messages emitted by the pre-cutover provider carried the authored
         // event id in the component instead of a durable Dig action id. They
@@ -2928,6 +3093,16 @@ impl DigInteractionHandler {
             Some(delivery) => Some(self.prepare_delivery(delivery).await?),
             None => None,
         };
+        if result.success && !result.first_dig && !result.paid_dig_available {
+            self.post_result_hooks(
+                &result.outcome,
+                user_id,
+                guild_id,
+                channel_id.unwrap_or(delivery_channel),
+            )
+            .await;
+        }
+        let reaction_outcome = result.outcome.clone();
         let (response, event_response) = if let Some(delivery) = delivery.as_ref() {
             dig_delivery_responses(delivery, &self.state.media, &self.state.view_nonce)
         } else if result.boss_boundary.is_some() {
@@ -2937,7 +3112,7 @@ impl DigInteractionHandler {
             )
         } else {
             self.render_dig_responses(
-                result.outcome,
+                reaction_outcome.clone(),
                 user_id,
                 guild_id,
                 display_name.to_owned(),
@@ -2953,7 +3128,17 @@ impl DigInteractionHandler {
             // to the configured channel rather than the interaction channel.
             if let Some(delivery) = delivery.as_ref() {
                 match self.deliver_to_channel_with_failure(delivery).await {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => {
+                        self.maybe_send_dig_bonus(
+                            &reaction_outcome,
+                            user_id,
+                            guild_id,
+                            delivery_channel,
+                            Arc::clone(&responder),
+                        )
+                        .await;
+                        return Ok(());
+                    }
                     Err(DigDeliveryFailure::SafeFallback { part, error }) => {
                         // Preserve Python's channel fallback, but keep it in
                         // the same durable nonce/history path.  Rebind the
@@ -2982,6 +3167,14 @@ impl DigInteractionHandler {
                                 DigDeliveryFailure::SafeFallback { error, .. }
                                 | DigDeliveryFailure::Ambiguous(error) => error,
                             })?;
+                        self.maybe_send_dig_bonus(
+                            &reaction_outcome,
+                            user_id,
+                            guild_id,
+                            interaction_channel,
+                            Arc::clone(&responder),
+                        )
+                        .await;
                         return Ok(());
                     }
                     Err(DigDeliveryFailure::Ambiguous(error)) => {
@@ -2992,10 +3185,14 @@ impl DigInteractionHandler {
                 }
             }
         }
-        responder
-            .followup(response)
+        let main_receipt = responder
+            .followup_with_receipt(response)
             .await
             .map_err(|error| error.to_string())?;
+        if let Some(receipt) = main_receipt.as_ref() {
+            self.add_result_reactions(receipt, delivery.as_ref(), &reaction_outcome)
+                .await;
+        }
         if let Some(delivery) = delivery.as_ref() {
             self.mark_delivery_part(delivery, DigRuntimeDeliveryPart::Main, unix_now())
                 .await?;
@@ -3010,6 +3207,14 @@ impl DigInteractionHandler {
                     .await?;
             }
         }
+        self.maybe_send_dig_bonus(
+            &reaction_outcome,
+            user_id,
+            guild_id,
+            channel_id.unwrap_or(delivery_channel),
+            Arc::clone(&responder),
+        )
+        .await;
         Ok(())
     }
 
@@ -3076,10 +3281,13 @@ impl DigInteractionHandler {
         let event_prompt =
             if let Some(action_id) = result.action_id.filter(|_| result.event_id.is_some()) {
                 let path = self.state.database_path.clone();
+                let config = self.state.dig_config.clone();
                 blocking(move || {
-                    cama_app::dig_event_runtime::DigEventRuntimeService::sqlite(&path)
-                        .action_presentation(user_id, guild_id, action_id, unix_now())
-                        .map_err(|error| error.to_string())
+                    cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(
+                        &path, config,
+                    )
+                    .action_presentation(user_id, guild_id, action_id, unix_now())
+                    .map_err(|error| error.to_string())
                 })
                 .await
                 .ok()
@@ -3604,6 +3812,7 @@ impl DigInteractionHandler {
         let config = self.state.dig_config.clone();
         let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
+            let pet_path = path.clone();
             let service = configured_dig_runtime(path, config, vanity_tax);
             let outcome = service
                 .dig_with_delivery(
@@ -3617,9 +3826,525 @@ impl DigInteractionHandler {
                     delivery,
                 )
                 .map_err(|error| error.to_string())?;
+            if outcome.success
+                && let Some(action_id) = outcome.action_id
+            {
+                let source_key = dig_pet_activity_source_key(action_id);
+                // Python records DIG_COMPLETED after the committed Dig. The
+                // repository owns eligibility, daily caps, and duplicate
+                // source-key suppression, so a retry after a provider crash
+                // cannot award the activity twice.
+                let _ = PetEvolutionRepository::new(pet_path).record_activity(
+                    user_id,
+                    Some(guild_id),
+                    PetActivity::DigCompleted,
+                    &source_key,
+                    now,
+                );
+            }
             Ok(outcome)
         })
         .await
+    }
+
+    async fn record_dig_pet_activity(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        action_id: i64,
+        occurred_at: i64,
+    ) {
+        let path = self.state.database_path.clone();
+        let source_key = dig_pet_activity_source_key(action_id);
+        if let Err(error) = blocking(move || {
+            PetEvolutionRepository::new(path)
+                .record_activity(
+                    user_id,
+                    Some(guild_id),
+                    PetActivity::DigCompleted,
+                    &source_key,
+                    occurred_at,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        {
+            warn!(action_id, %error, "Dig pet activity recovery failed");
+        }
+    }
+
+    /// Run the Python post-result side effects after the Dig transaction has
+    /// committed. These effects are intentionally outside the canonical
+    /// delivery result: a Discord or Neon failure must never turn a settled
+    /// Dig into an interaction failure.
+    async fn post_result_hooks(
+        &self,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: i64,
+    ) {
+        if !outcome.success
+            || outcome.first_dig
+            || outcome.paid_dig_available
+            || outcome.action_id.is_none()
+        {
+            return;
+        }
+        let action_id = outcome.action_id.expect("checked action id");
+
+        if let Some(block_loss) = catastrophic_cave_in_block_loss(outcome) {
+            self.post_catastrophic_flame(action_id, user_id, guild_id, outcome, channel_id)
+                .await;
+            self.post_dig_neon(
+                action_id,
+                user_id,
+                guild_id,
+                outcome,
+                channel_id,
+                DigNeonPost::Cave { block_loss },
+            )
+            .await;
+        } else if let Some(artifact_id) = outcome.artifact_id.as_deref()
+            && let Some((name, rarity)) = dig_artifact_neon_info(artifact_id)
+        {
+            self.post_dig_neon(
+                action_id,
+                user_id,
+                guild_id,
+                outcome,
+                channel_id,
+                DigNeonPost::Relic { name, rarity },
+            )
+            .await;
+        }
+    }
+
+    async fn post_catastrophic_flame(
+        &self,
+        action_id: i64,
+        user_id: i64,
+        guild_id: i64,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+        channel_id: i64,
+    ) {
+        let event_type = format!("dig:{action_id}:catastrophic_flame");
+        let path = self.state.database_path.clone();
+        let depth_after = outcome.depth_after;
+        let claimed = blocking(move || {
+            NeonEventRepository::new(path)
+                .claim_one_time_event(user_id, guild_id, &event_type, depth_after, unix_now())
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        if !matches!(claimed, Ok(true)) {
+            if let Err(error) = claimed {
+                warn!(action_id, %error, "Dig catastrophic flame claim failed");
+            }
+            return;
+        }
+        let response =
+            InteractionResponse::message(format!("💥 *{}*", catastrophic_flame_line(action_id)))
+                .without_mentions();
+        if let Err(error) = self
+            .state
+            .discord
+            .dig_send_public(channel_id, response)
+            .await
+        {
+            warn!(action_id, %error, "Dig catastrophic flame delivery failed");
+            // The transport API cannot distinguish a definite rejection from
+            // an accepted message followed by a lost response. Keep the
+            // action marker terminal rather than risking a duplicate flame
+            // on READY/retry.
+        }
+    }
+
+    async fn post_dig_neon(
+        &self,
+        action_id: i64,
+        user_id: i64,
+        guild_id: i64,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+        channel_id: i64,
+        post: DigNeonPost,
+    ) {
+        let Ok(discord_id) = u64::try_from(user_id) else {
+            return;
+        };
+        let Ok(guild_id_u64) = u64::try_from(guild_id) else {
+            return;
+        };
+        let event_type = format!("dig:{action_id}:neon");
+        let path = self.state.database_path.clone();
+        let depth_after = outcome.depth_after;
+        let claimed = blocking(move || {
+            NeonEventRepository::new(path)
+                .claim_one_time_event(user_id, guild_id, &event_type, depth_after, unix_now())
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        if !matches!(claimed, Ok(true)) {
+            if let Err(error) = claimed {
+                warn!(action_id, %error, "Dig Neon claim failed");
+            }
+            return;
+        }
+
+        let layer_name = layer_at(depth_after).name;
+        let neon_result = {
+            let state = Arc::clone(&self.state);
+            blocking(move || {
+                let mut neon = state
+                    .neon
+                    .lock()
+                    .map_err(|_| "Dig Neon lock poisoned".to_owned())?;
+                let result = match post {
+                    DigNeonPost::Cave { block_loss } => neon.on_dig_cave_in(
+                        discord_id,
+                        Some(guild_id_u64),
+                        depth_after.saturating_add(block_loss),
+                        depth_after,
+                        layer_name,
+                    ),
+                    DigNeonPost::Relic { name, rarity } => neon.on_dig_relic_found(
+                        discord_id,
+                        Some(guild_id_u64),
+                        RelicFound {
+                            relic_name: &name,
+                            rarity: &rarity,
+                            layer_name,
+                        },
+                    ),
+                };
+                Ok(result)
+            })
+            .await
+        };
+        let neon_result = match neon_result {
+            Ok(Some(result)) => result,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(action_id, %error, "Dig Neon hook failed");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .state
+            .discord
+            .dig_send_temporary(
+                channel_id,
+                dig_neon_response(neon_result),
+                Duration::from_secs(60),
+            )
+            .await
+        {
+            warn!(action_id, %error, "Dig Neon delivery failed");
+            // `String` errors may arrive after Discord accepted the message;
+            // retain the claim to make retries at-most-once.
+        }
+    }
+
+    async fn add_result_reactions(
+        &self,
+        receipt: &InteractionMessageReceipt,
+        delivery: Option<&DigRuntimeDeliverySnapshot>,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+    ) {
+        let Ok(channel_id) = i64::try_from(receipt.channel_id) else {
+            warn!("Dig reaction channel id exceeds SQLite INTEGER");
+            return;
+        };
+        self.add_result_reactions_to_message(channel_id, receipt.message_id, delivery, outcome)
+            .await;
+    }
+
+    async fn add_result_reactions_to_message(
+        &self,
+        channel_id: i64,
+        message_id: u64,
+        delivery: Option<&DigRuntimeDeliverySnapshot>,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+    ) {
+        for emoji in dig_result_reactions(outcome, delivery) {
+            if let Err(error) = self
+                .state
+                .discord
+                .dig_add_reaction(channel_id, message_id, emoji)
+                .await
+            {
+                warn!(message_id, emoji, %error, "Dig result reaction failed");
+            }
+        }
+    }
+
+    async fn maybe_send_dig_bonus(
+        &self,
+        outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) {
+        if !outcome.success || outcome.first_dig {
+            return;
+        }
+        let Some(action_id) = outcome.action_id else {
+            return;
+        };
+        let dispatcher = self
+            .state
+            .bonus_dispatcher
+            .lock()
+            .ok()
+            .and_then(|dispatcher| dispatcher.clone());
+        let Some(dispatcher) = dispatcher else {
+            return;
+        };
+        let Some(bonus) =
+            cama_app::dig_bonus_events::pick_dig_bonus(deterministic_dig_bonus_roll(action_id))
+        else {
+            return;
+        };
+        let event_type = format!("dig:{action_id}:bonus:{}", bonus.as_str());
+        let path = self.state.database_path.clone();
+        let depth_after = outcome.depth_after;
+        let claimed = blocking(move || {
+            NeonEventRepository::new(path)
+                .claim_one_time_event(user_id, guild_id, &event_type, depth_after, unix_now())
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        if !matches!(claimed, Ok(true)) {
+            if let Err(error) = claimed {
+                warn!(action_id, %error, "Dig bonus claim failed");
+            }
+            return;
+        }
+
+        if let Err(error) = dispatcher
+            .dispatch_bonus(
+                action_id,
+                user_id,
+                guild_id,
+                channel_id,
+                bonus,
+                Arc::clone(&responder),
+            )
+            .await
+        {
+            warn!(action_id, bonus = bonus.as_str(), %error, "Dig bonus dispatch failed");
+            // Claim before dispatch is terminal.  The adapter may have
+            // settled a wheel/package/trivia session before its presentation
+            // failed; releasing this marker would permit a retry to settle
+            // the same bonus twice.  The partial-failure notice is the
+            // recoverable user-facing path, while the durable claim keeps the
+            // economy at-most-once across provider restarts.
+            if let Err(report_error) = dispatcher.report_partial_failure(responder).await {
+                warn!(action_id, %report_error, "Dig bonus failure report failed");
+            }
+        }
+    }
+
+    async fn event_delivery_for_action(
+        &self,
+        action_id: i64,
+        discord_id: i64,
+        guild_id: i64,
+    ) -> Result<Option<DigEventDeliverySnapshot>, String> {
+        Ok(self
+            .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                guild_id: Some(guild_id),
+                discord_id: Some(discord_id),
+                limit: 100,
+            })
+            .await?
+            .into_iter()
+            .find(|delivery| delivery.action_id == action_id))
+    }
+
+    async fn pending_event_deliveries(
+        &self,
+        query: DigEventPendingDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        blocking(move || {
+            cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
+                .pending_event_deliveries(query)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    async fn pending_event_delivery_recoveries(
+        &self,
+        query: DigEventPendingDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        blocking(move || {
+            cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
+                .pending_event_delivery_recoveries(query)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    async fn recover_event_delivery(&self, action_id: i64) -> Result<bool, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        blocking(move || {
+            cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
+                .recover_event_delivery(action_id)
+                .map(|outcome| outcome.is_some())
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    async fn mark_event_delivery(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+    ) -> Result<bool, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        let request = DigEventDeliveryMarkRequest {
+            action_id: delivery.action_id,
+            discord_id: delivery.discord_id,
+            guild_id: delivery.guild_id,
+            source_key: delivery.source_key.clone(),
+            delivered_at: unix_now(),
+        };
+        blocking(move || {
+            cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
+                .mark_event_delivery_delivered(request)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    async fn reconcile_event_delivery(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+        expected: &InteractionResponse,
+    ) -> Result<bool, String> {
+        let nonce = delivery.nonce();
+        let history = self
+            .state
+            .discord
+            .dig_public_history(
+                delivery.context.channel_id,
+                delivery
+                    .committed_at
+                    .saturating_sub(DELIVERY_RECEIPT_GRACE_SECONDS),
+                DELIVERY_RECEIPT_SCAN_LIMIT,
+            )
+            .await?;
+        let found = history
+            .messages
+            .iter()
+            .take(DELIVERY_RECEIPT_SCAN_LIMIT)
+            .any(|message| {
+                message.author_id == history.bot_user_id
+                    && (message.nonce.as_deref() == Some(nonce.as_str())
+                        || event_history_matches(message, delivery, expected))
+            });
+        if found {
+            self.mark_event_delivery(delivery).await?;
+        }
+        Ok(found)
+    }
+
+    async fn deliver_event_from_interaction(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+        response: InteractionResponse,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        match responder.followup_with_receipt(response.clone()).await {
+            Ok(Some(receipt))
+                if i64::try_from(receipt.channel_id).ok() == Some(delivery.context.channel_id) =>
+            {
+                self.mark_event_delivery(delivery).await.map(|_| ())
+            }
+            Ok(Some(_)) | Ok(None) => {
+                if self.reconcile_event_delivery(delivery, &response).await? {
+                    Ok(())
+                } else {
+                    Err("Dig event follow-up was accepted without a bound receipt".to_owned())
+                }
+            }
+            Err(send_error) => match self.reconcile_event_delivery(delivery, &response).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(send_error.to_string()),
+                Err(history_error) => Err(format!(
+                    "{}; event delivery history reconciliation failed: {history_error}",
+                    send_error
+                )),
+            },
+        }
+    }
+
+    async fn deliver_event_to_channel_with_failure(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+        response: InteractionResponse,
+    ) -> Result<(), DigEventDeliveryFailure> {
+        match self.reconcile_event_delivery(delivery, &response).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(DigEventDeliveryFailure::Ambiguous(error)),
+        }
+        match self
+            .state
+            .discord
+            .dig_send_public_once(
+                delivery.context.channel_id,
+                response.clone(),
+                &delivery.nonce(),
+            )
+            .await
+        {
+            Ok(receipt)
+                if i64::try_from(receipt.channel_id).ok() == Some(delivery.context.channel_id) =>
+            {
+                self.mark_event_delivery(delivery)
+                    .await
+                    .map(|_| ())
+                    .map_err(DigEventDeliveryFailure::Ambiguous)
+            }
+            Ok(_) => Err(DigEventDeliveryFailure::Ambiguous(
+                "Dig event delivery receipt belongs to a different channel".to_owned(),
+            )),
+            Err(send_error) => match self.reconcile_event_delivery(delivery, &response).await {
+                Ok(true) => Ok(()),
+                Ok(false) if send_error.kind == DigPublicSendFailureKind::Rejected => {
+                    Err(DigEventDeliveryFailure::Rejected(send_error.message))
+                }
+                Ok(false) => Err(DigEventDeliveryFailure::Ambiguous(send_error.message)),
+                Err(history_error) => Err(DigEventDeliveryFailure::Ambiguous(format!(
+                    "{}; event delivery history reconciliation failed: {history_error}",
+                    send_error.message
+                ))),
+            },
+        }
+    }
+
+    async fn deliver_event_to_channel(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+    ) -> Result<(), String> {
+        self.deliver_event_to_channel_with_failure(
+            delivery,
+            event_resolution_response(&delivery.outcome),
+        )
+        .await
+        .map_err(|failure| match failure {
+            DigEventDeliveryFailure::Rejected(error)
+            | DigEventDeliveryFailure::Ambiguous(error) => error,
+        })
     }
 
     async fn pending_deliveries(
@@ -3794,19 +4519,29 @@ impl DigInteractionHandler {
                 DELIVERY_RECEIPT_SCAN_LIMIT,
             )
             .await?;
-        let found = history
+        let found_message_id = history
             .messages
             .iter()
             .take(DELIVERY_RECEIPT_SCAN_LIMIT)
-            .any(|message| {
+            .find(|message| {
                 message.author_id == history.bot_user_id
                     && (message.nonce.as_deref() == Some(nonce.as_str())
                         || interaction_history_matches(message, delivery, expected))
-            });
-        if found {
+            })
+            .map(|message| message.message_id);
+        if let Some(message_id) = found_message_id {
+            if part == DigRuntimeDeliveryPart::Main {
+                self.add_result_reactions_to_message(
+                    delivery.context.channel_id,
+                    message_id,
+                    Some(delivery),
+                    &delivery.outcome,
+                )
+                .await;
+            }
             self.mark_delivery_part(delivery, part, unix_now()).await?;
         }
-        Ok(found)
+        Ok(found_message_id.is_some())
     }
 
     async fn deliver_part_once_with_failure(
@@ -3833,11 +4568,16 @@ impl DigInteractionHandler {
             .dig_send_public_once(delivery.context.channel_id, response.clone(), &nonce)
             .await
         {
-            Ok(_receipt) => self
-                .mark_delivery_part(delivery, part, unix_now())
-                .await
-                .map(|_| ())
-                .map_err(DigDeliveryFailure::Ambiguous),
+            Ok(receipt) => {
+                if part == DigRuntimeDeliveryPart::Main {
+                    self.add_result_reactions(&receipt, Some(delivery), &delivery.outcome)
+                        .await;
+                }
+                self.mark_delivery_part(delivery, part, unix_now())
+                    .await
+                    .map(|_| ())
+                    .map_err(DigDeliveryFailure::Ambiguous)
+            }
             Err(send_error) => {
                 // HTTP cancellation and timeouts can be ambiguous. Re-read a
                 // bounded history before deciding the send failed.
@@ -3866,10 +4606,29 @@ impl DigInteractionHandler {
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> Result<(), DigDeliveryFailure> {
+        // READY recovery may be the first process to observe a committed
+        // Dig if the original worker stopped after the aggregate commit. The
+        // activity key and post-result claims are action-scoped, so replaying
+        // them here repairs that crash window without duplicating rewards or
+        // atmospheric messages.
+        self.record_dig_pet_activity(
+            delivery.discord_id,
+            delivery.guild_id,
+            delivery.action_id,
+            delivery.committed_at,
+        )
+        .await;
         let delivery = self
             .prepare_delivery(delivery)
             .await
             .map_err(DigDeliveryFailure::Ambiguous)?;
+        self.post_result_hooks(
+            &delivery.outcome,
+            delivery.discord_id,
+            delivery.guild_id,
+            delivery.context.channel_id,
+        )
+        .await;
         let (main, event) =
             dig_delivery_responses(&delivery, &self.state.media, &self.state.view_nonce);
         if delivery.main_delivered_at.is_none() {
@@ -5705,6 +6464,100 @@ fn dig_neon_response(result: cama_app::neon_degen::NeonResult) -> InteractionRes
         ));
     }
     response
+}
+
+fn cave_in_detail(outcome: &cama_app::dig_runtime::DigRuntimeOutcome) -> Option<serde_json::Value> {
+    outcome
+        .cave_in_detail
+        .as_deref()
+        .and_then(|detail| serde_json::from_str(detail).ok())
+}
+
+fn catastrophic_cave_in_block_loss(
+    outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+) -> Option<i64> {
+    let detail = cave_in_detail(outcome)?;
+    (detail.get("type").and_then(serde_json::Value::as_str) == Some("catastrophic")).then(|| {
+        detail
+            .get("block_loss")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_else(|| outcome.depth_before.saturating_sub(outcome.depth_after))
+            .max(0)
+    })
+}
+
+#[must_use]
+fn catastrophic_flame_line(action_id: i64) -> &'static str {
+    let index = action_id.unsigned_abs() as usize % CATASTROPHIC_LINES.len();
+    CATASTROPHIC_LINES[index]
+}
+
+#[must_use]
+fn dig_artifact_neon_info(artifact_id: &str) -> Option<(String, String)> {
+    if let Some(pinnacle) = artifact_id.strip_prefix("pinnacle:") {
+        let name = pinnacle.split(':').next().unwrap_or("a relic");
+        return Some((name.to_owned(), "legendary".to_owned()));
+    }
+    cama_app::dig_loot::artifact_catalog()
+        .into_iter()
+        .find(|artifact| {
+            artifact.id == artifact_id
+                && matches!(
+                    artifact.rarity,
+                    cama_app::dig_loot::Rarity::Rare | cama_app::dig_loot::Rarity::Legendary
+                )
+        })
+        .map(|artifact| {
+            (
+                artifact.name.to_owned(),
+                artifact.rarity.as_str().to_owned(),
+            )
+        })
+}
+
+#[must_use]
+fn dig_result_reactions(
+    outcome: &cama_app::dig_runtime::DigRuntimeOutcome,
+    delivery: Option<&DigRuntimeDeliverySnapshot>,
+) -> Vec<&'static str> {
+    let kind = delivery.map(|delivery| delivery.render.kind);
+    if kind == Some(DigRuntimeRenderKind::First) || outcome.first_dig {
+        return Vec::new();
+    }
+    if kind == Some(DigRuntimeRenderKind::Boss) || outcome.boss_boundary.is_some() {
+        return vec!["💀"];
+    }
+    if kind == Some(DigRuntimeRenderKind::Event)
+        && delivery.is_some_and(|delivery| {
+            delivery.render.event_kind != Some(cama_app::dig_runtime::DigRuntimeEventKind::Simple)
+        })
+    {
+        return Vec::new();
+    }
+    let mut reactions = vec!["⛏️"];
+    if outcome.cave_in {
+        reactions.push("💥");
+    }
+    if outcome.artifact_id.is_some() {
+        reactions.push("💎");
+    }
+    reactions
+}
+
+#[must_use]
+fn deterministic_dig_bonus_roll(action_id: i64) -> f64 {
+    // The action id is already durable. Deriving the roll from it avoids a
+    // second RNG draw when a delivery is retried after a process restart.
+    let mut state = action_id.unsigned_abs().wrapping_add(0x9E37_79B9_7F4A_7C15);
+    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    state ^= state >> 31;
+    state as f64 / u64::MAX as f64
+}
+
+#[must_use]
+fn dig_pet_activity_source_key(action_id: i64) -> String {
+    format!("dig:{action_id}")
 }
 
 fn prestige_admission_response(admission: DigPrestigeViewAdmission) -> Option<InteractionResponse> {
@@ -8104,6 +8957,27 @@ fn interaction_history_matches(
                 .collect::<Vec<_>>()
 }
 
+fn event_history_matches(
+    message: &DigPublicHistoryMessage,
+    delivery: &DigEventDeliverySnapshot,
+    expected: &InteractionResponse,
+) -> bool {
+    message.interaction_id == Some(delivery.context.interaction_id)
+        && message.content == expected.content
+        && message.embed_titles
+            == expected
+                .embeds
+                .iter()
+                .map(|embed| embed.title.clone())
+                .collect::<Vec<_>>()
+        && message.embed_descriptions
+            == expected
+                .embeds
+                .iter()
+                .map(|embed| embed.description.clone())
+                .collect::<Vec<_>>()
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -8130,8 +9004,9 @@ mod tests {
 
     use super::dig_options;
     use super::{
-        DigAbandonViewAdmission, DigChannelSnapshot, DigDiscordPort, DigPrestigeViewAdmission,
-        DigPublicHistory, DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
+        DigAbandonViewAdmission, DigBonusDispatchPort, DigChannelSnapshot, DigDiscordPort,
+        DigEventPendingDeliveryQuery, DigPrestigeViewAdmission, DigPublicHistory,
+        DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
         DigRuntimeBloodPactSnapshot, JOPACOIN_EMOTE,
     };
     use crate::application_config::ApplicationConfig;
@@ -8183,6 +9058,7 @@ mod tests {
             Arc::new(TestDiscord::default()),
             None,
             None,
+            Arc::new(RecordingBonusDispatcher::default()),
         )
         .expect("production constructor admits canonical schema");
         let mut registry = crate::registration::RegistryBuilder::default();
@@ -8198,6 +9074,7 @@ mod tests {
             Arc::new(TestDiscord::default()),
             None,
             None,
+            Arc::new(RecordingBonusDispatcher::default()),
         );
         assert!(matches!(
             result,
@@ -8869,6 +9746,7 @@ mod tests {
 
     struct TestDiscord {
         public: StdMutex<Vec<InteractionResponse>>,
+        reactions: StdMutex<Vec<(i64, u64, String)>>,
         public_history: StdMutex<Vec<DigPublicHistoryMessage>>,
         message_channels: StdMutex<BTreeMap<u64, i64>>,
         available_channels: StdMutex<BTreeSet<i64>>,
@@ -8884,6 +9762,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 public: StdMutex::new(Vec::new()),
+                reactions: StdMutex::new(Vec::new()),
                 public_history: StdMutex::new(Vec::new()),
                 message_channels: StdMutex::new(BTreeMap::new()),
                 available_channels: StdMutex::new(BTreeSet::new()),
@@ -9063,6 +9942,20 @@ mod tests {
             })
         }
 
+        async fn dig_add_reaction(
+            &self,
+            channel_id: i64,
+            message_id: u64,
+            emoji: &str,
+        ) -> Result<(), String> {
+            self.reactions.lock().expect("reactions").push((
+                channel_id,
+                message_id,
+                emoji.to_owned(),
+            ));
+            Ok(())
+        }
+
         async fn dig_public_history(
             &self,
             channel_id: i64,
@@ -9199,6 +10092,84 @@ mod tests {
         }
     }
 
+    struct AcceptedThenLostEventResponder {
+        inner: Arc<TestResponder>,
+        discord: Arc<TestDiscord>,
+        interaction_id: u64,
+        channel_id: i64,
+    }
+
+    #[async_trait]
+    impl InteractionResponder for AcceptedThenLostEventResponder {
+        async fn respond(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.inner.respond(response).await
+        }
+
+        async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+            self.inner.defer(ephemeral).await
+        }
+
+        async fn followup(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.inner.followup(response).await
+        }
+
+        async fn followup_with_receipt(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<Option<InteractionMessageReceipt>, InteractionResponseError> {
+            self.inner.followup(response.clone()).await?;
+            self.discord
+                .public
+                .lock()
+                .expect("accepted event public response")
+                .push(response.clone());
+            let mut history = self
+                .discord
+                .public_history
+                .lock()
+                .expect("accepted event history");
+            let message_id = u64::try_from(history.len() + 1).expect("event history id");
+            history.push(DigPublicHistoryMessage {
+                message_id,
+                author_id: 8_008,
+                nonce: None,
+                interaction_id: Some(self.interaction_id),
+                content: response.content,
+                embed_titles: response
+                    .embeds
+                    .iter()
+                    .map(|embed| embed.title.clone())
+                    .collect(),
+                embed_descriptions: response
+                    .embeds
+                    .iter()
+                    .map(|embed| embed.description.clone())
+                    .collect(),
+            });
+            self.discord
+                .message_channels
+                .lock()
+                .expect("accepted event channel")
+                .insert(message_id, self.channel_id);
+            Err(InteractionResponseError::new(
+                "test connection lost after event follow-up acceptance",
+            ))
+        }
+
+        async fn update(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.inner.update(response).await
+        }
+    }
+
     #[derive(Default)]
     struct RejectingPublicFollowupResponder {
         defers: StdMutex<Vec<bool>>,
@@ -9289,6 +10260,264 @@ mod tests {
             media,
         );
         (database, provider, discord)
+    }
+
+    fn hook_outcome() -> DigRuntimeOutcome {
+        DigRuntimeOutcome {
+            success: true,
+            error: None,
+            depth_before: 100,
+            depth_after: 90,
+            advance: 1,
+            jc_earned: 2,
+            vanity_tax: 0,
+            balance_after: 100,
+            cave_in: false,
+            cave_in_detail: None,
+            event_id: None,
+            artifact_id: None,
+            boss_boundary: None,
+            first_dig: false,
+            paid_dig_cost: 0,
+            cooldown_remaining: 0,
+            paid_dig_available: false,
+            items_used: Vec::new(),
+            consumed_item_ids: Vec::new(),
+            action_id: Some(11),
+            route_choice_required: false,
+            pickaxe_tier: 1,
+            pet_dig_bonus: 0,
+            pet_name: None,
+            forced_event_consumed: false,
+            relic_trim_notice: false,
+            weather: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBonusDispatcher {
+        bonuses: StdMutex<Vec<cama_app::dig_bonus_events::DigBonus>>,
+    }
+
+    #[async_trait]
+    impl DigBonusDispatchPort for RecordingBonusDispatcher {
+        async fn dispatch_bonus(
+            &self,
+            _action_id: i64,
+            _user_id: i64,
+            _guild_id: i64,
+            _channel_id: i64,
+            bonus: cama_app::dig_bonus_events::DigBonus,
+            _responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), String> {
+            self.bonuses.lock().expect("bonus calls").push(bonus);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingBonusDispatcher {
+        attempts: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl DigBonusDispatchPort for FailingBonusDispatcher {
+        async fn dispatch_bonus(
+            &self,
+            _action_id: i64,
+            _user_id: i64,
+            _guild_id: i64,
+            _channel_id: i64,
+            _bonus: cama_app::dig_bonus_events::DigBonus,
+            _responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), String> {
+            *self.attempts.lock().expect("bonus attempts") += 1;
+            Err("bonus adapter failed after dispatch began".to_owned())
+        }
+    }
+
+    #[test]
+    fn post_result_policy_reuses_authored_flame_copy_and_stable_bonus_roll() {
+        assert_eq!(
+            super::catastrophic_flame_line(11),
+            super::catastrophic_flame_line(11)
+        );
+        assert!(super::CATASTROPHIC_LINES.contains(&super::catastrophic_flame_line(11)));
+        let roll = super::deterministic_dig_bonus_roll(11);
+        assert!((0.0..=1.0).contains(&roll));
+        assert_eq!(
+            cama_app::dig_bonus_events::pick_dig_bonus(roll),
+            cama_app::dig_bonus_events::pick_dig_bonus(roll)
+        );
+    }
+
+    #[test]
+    fn pet_activity_source_key_is_action_scoped_and_retry_stable() {
+        assert_eq!(
+            super::dig_pet_activity_source_key(42),
+            super::dig_pet_activity_source_key(42)
+        );
+        assert_ne!(
+            super::dig_pet_activity_source_key(42),
+            super::dig_pet_activity_source_key(43)
+        );
+    }
+
+    #[test]
+    fn post_result_policy_maps_only_rare_or_legendary_artifacts_to_neon() {
+        assert_eq!(
+            super::dig_artifact_neon_info("echo_stone"),
+            Some(("Echo Stone".to_owned(), "rare".to_owned()))
+        );
+        assert_eq!(
+            super::dig_artifact_neon_info("hollow_eye"),
+            Some(("Hollow Eye".to_owned(), "legendary".to_owned()))
+        );
+        assert_eq!(super::dig_artifact_neon_info("crystal_compass"), None);
+        assert_eq!(
+            super::dig_artifact_neon_info("pinnacle:Cloak of the Necropolis:Long Silence"),
+            Some(("Cloak of the Necropolis".to_owned(), "legendary".to_owned()))
+        );
+    }
+
+    #[test]
+    fn post_result_reactions_match_python_result_shapes() {
+        let mut outcome = hook_outcome();
+        outcome.cave_in = true;
+        outcome.artifact_id = Some("echo_stone".to_owned());
+        assert_eq!(
+            super::dig_result_reactions(&outcome, None),
+            vec!["⛏️", "💥", "💎"]
+        );
+        outcome.boss_boundary = Some(101);
+        assert_eq!(super::dig_result_reactions(&outcome, None), vec!["💀"]);
+        outcome.boss_boundary = None;
+        outcome.first_dig = true;
+        assert!(super::dig_result_reactions(&outcome, None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn catastrophic_flame_is_claimed_once_and_never_blocks_dig_delivery() {
+        let (_database, provider, discord) = fixture();
+        let mut outcome = hook_outcome();
+        outcome.cave_in = true;
+        outcome.cave_in_detail =
+            Some(serde_json::json!({"type": "catastrophic", "block_loss": 10}).to_string());
+        provider
+            .handler
+            .post_catastrophic_flame(11, USER as i64, GUILD as i64, &outcome, CHANNEL as i64)
+            .await;
+        provider
+            .handler
+            .post_catastrophic_flame(11, USER as i64, GUILD as i64, &outcome, CHANNEL as i64)
+            .await;
+        assert_eq!(discord.public.lock().expect("public responses").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn catastrophic_flame_transport_error_keeps_terminal_claim() {
+        let (_database, provider, discord) = fixture();
+        let mut outcome = hook_outcome();
+        outcome.cave_in = true;
+        outcome.cave_in_detail = Some(serde_json::json!({"type": "catastrophic"}).to_string());
+        *discord
+            .reject_un_nonnced_public_send
+            .lock()
+            .expect("send fault") = true;
+        provider
+            .handler
+            .post_catastrophic_flame(12, USER as i64, GUILD as i64, &outcome, CHANNEL as i64)
+            .await;
+        *discord
+            .reject_un_nonnced_public_send
+            .lock()
+            .expect("send fault") = false;
+        provider
+            .handler
+            .post_catastrophic_flame(12, USER as i64, GUILD as i64, &outcome, CHANNEL as i64)
+            .await;
+        assert!(
+            discord.public.lock().expect("public responses").is_empty(),
+            "an ambiguous post-send error must not be retried into a duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn dig_bonus_roll_and_dispatch_are_stable_across_provider_retry() {
+        let (_database, provider, _discord) = fixture();
+        let dispatcher = Arc::new(RecordingBonusDispatcher::default());
+        provider.set_bonus_dispatcher(dispatcher.clone());
+        let action_id = (1_i64..10_000)
+            .find(|action_id| {
+                cama_app::dig_bonus_events::pick_dig_bonus(super::deterministic_dig_bonus_roll(
+                    *action_id,
+                ))
+                .is_some()
+            })
+            .expect("stable test action should select a bonus");
+        let mut outcome = hook_outcome();
+        outcome.action_id = Some(action_id);
+        let responder: Arc<dyn InteractionResponder> = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                Arc::clone(&responder),
+            )
+            .await;
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                responder,
+            )
+            .await;
+        assert_eq!(dispatcher.bonuses.lock().expect("bonus calls").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_bonus_dispatch_keeps_claim_terminal_across_retry() {
+        let (_database, provider, _discord) = fixture();
+        let dispatcher = Arc::new(FailingBonusDispatcher::default());
+        provider.set_bonus_dispatcher(dispatcher.clone());
+        let action_id = (1_i64..10_000)
+            .find(|action_id| {
+                cama_app::dig_bonus_events::pick_dig_bonus(super::deterministic_dig_bonus_roll(
+                    *action_id,
+                ))
+                .is_some()
+            })
+            .expect("stable test action should select a bonus");
+        let mut outcome = hook_outcome();
+        outcome.action_id = Some(action_id);
+        let responder: Arc<dyn InteractionResponder> = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                Arc::clone(&responder),
+            )
+            .await;
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                responder,
+            )
+            .await;
+        assert_eq!(*dispatcher.attempts.lock().expect("bonus attempts"), 1);
     }
 
     fn go_request() -> InteractionRequest {
@@ -9514,6 +10743,103 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn accepted_event_delivery_is_reconciled_after_restart_without_duplicate_send() {
+        let (database, provider, discord) = fixture();
+        let connection = Connection::open(database.path()).expect("open event outbox database");
+        connection
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                  prestige_perks,boss_progress)
+                 VALUES (?1,?2,30,30,1,100,'[]','{}')",
+                params![USER as i64, GUILD as i64],
+            )
+            .expect("seed event outbox tunnel");
+        let prompt_action_id = {
+            connection
+                .execute(
+                    "INSERT INTO dig_actions (
+                         guild_id, actor_id, target_id, action_type, depth_before,
+                         depth_after, jc_delta, detail, created_at
+                     ) VALUES (?1, ?2, NULL, 'dig', 30, 30, 0, ?3, ?4)",
+                    params![
+                        GUILD as i64,
+                        USER as i64,
+                        serde_json::json!({"event":"underground_stream"}).to_string(),
+                        super::unix_now() - 1,
+                    ],
+                )
+                .expect("seed event outbox prompt");
+            connection.last_insert_rowid()
+        };
+        let service = cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(
+            database.path(),
+            provider.handler.state.dig_config.clone(),
+        );
+        let outcome = service
+            .resolve_action_event_with_delivery(
+                cama_app::dig_event_runtime::DigEventActionRequest {
+                    discord_id: USER as i64,
+                    guild_id: GUILD as i64,
+                    dig_action_id: prompt_action_id,
+                    choice: "safe",
+                    now: super::unix_now(),
+                },
+                cama_app::dig_event_runtime::DigEventDeliveryContext::new(
+                    USER as i64,
+                    GUILD as i64,
+                    0x1234_5678,
+                    CHANNEL as i64,
+                ),
+            )
+            .expect("settle event and attach outbox");
+        let action_id = outcome.action_id.expect("resolved event action id");
+        let delivery = provider
+            .handler
+            .event_delivery_for_action(action_id, USER as i64, GUILD as i64)
+            .await
+            .expect("query event Ready projection")
+            .expect("event Ready projection");
+        assert_eq!(delivery.context.channel_id, CHANNEL as i64);
+        let response = super::event_resolution_response(&delivery.outcome);
+        discord
+            .dig_send_public_once(CHANNEL as i64, response, &delivery.nonce())
+            .await
+            .expect("Discord accepted event result before CAS");
+
+        let restarted = DigRegistrationProvider::with_media(
+            database.path(),
+            &config(),
+            discord.clone(),
+            None,
+            provider.handler.state.media.clone(),
+        );
+        restarted
+            .handler
+            .deliver_event_to_channel(&delivery)
+            .await
+            .expect("restart reconciles accepted event nonce");
+        assert_eq!(
+            discord.public.lock().expect("single event response").len(),
+            1,
+            "event history reconciliation must not issue a duplicate send"
+        );
+        assert!(
+            restarted
+                .handler
+                .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query event outbox after restart")
+                .is_empty(),
+            "event delivery CAS completes after nonce reconciliation"
+        );
+    }
+
     struct EmptyGatewayMembers;
 
     #[async_trait]
@@ -9526,6 +10852,224 @@ mod tests {
         ) -> Result<Vec<GatewayMember>, String> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn live_event_followup_acceptance_is_reconciled_by_ready_without_duplicate() {
+        let (database, provider, discord) = fixture();
+        let connection = Connection::open(database.path()).expect("open live event database");
+        connection
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                  prestige_perks,boss_progress)
+                 VALUES (?1,?2,30,30,1,100,'[]','{}')",
+                params![USER as i64, GUILD as i64],
+            )
+            .expect("seed live event tunnel");
+        let prompt_action_id = {
+            connection
+                .execute(
+                    "INSERT INTO dig_actions (
+                         guild_id, actor_id, target_id, action_type, depth_before,
+                         depth_after, jc_delta, detail, created_at
+                     ) VALUES (?1, ?2, NULL, 'dig', 30, 30, 0, ?3, ?4)",
+                    params![
+                        GUILD as i64,
+                        USER as i64,
+                        serde_json::json!({"event":"underground_stream"}).to_string(),
+                        super::unix_now() - 1,
+                    ],
+                )
+                .expect("seed live event prompt");
+            connection.last_insert_rowid()
+        };
+        // The follow-up is recorded with the component interaction metadata,
+        // then the history read fails. This models a process dying after
+        // Discord accepted the message and before the delivery CAS.
+        *discord
+            .fail_next_history
+            .lock()
+            .expect("event history fault") = true;
+        let inner = Arc::new(TestResponder::default());
+        let responder: Arc<dyn InteractionResponder> = Arc::new(AcceptedThenLostEventResponder {
+            inner: Arc::clone(&inner),
+            discord: Arc::clone(&discord),
+            interaction_id: 2,
+            channel_id: CHANNEL as i64,
+        });
+        let result = provider
+            .handler
+            .handle(
+                component_request(
+                    event_component_id(&provider, prompt_action_id, "safe"),
+                    Vec::new(),
+                ),
+                responder,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "the lost history read leaves Ready for recovery"
+        );
+        assert_eq!(inner.updates.lock().expect("event source update").len(), 1);
+        assert_eq!(
+            discord.public.lock().expect("accepted event result").len(),
+            1
+        );
+        assert_eq!(
+            provider
+                .handler
+                .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query Ready event")
+                .len(),
+            1
+        );
+
+        let restarted = DigRegistrationProvider::with_media(
+            database.path(),
+            &config(),
+            discord.clone(),
+            None,
+            provider.handler.state.media.clone(),
+        );
+        let report = restarted
+            .gateway_observer()
+            .ready_recovery(ReadyRecoveryContext::new(
+                vec![GUILD],
+                Arc::new(EmptyGatewayMembers),
+            ))
+            .await;
+        assert!(
+            report.failures.is_empty(),
+            "event READY recovery: {report:?}"
+        );
+        assert_eq!(report.members_refreshed, 1);
+        assert_eq!(
+            discord.public.lock().expect("single event result").len(),
+            1,
+            "interaction-history reconciliation must avoid a nonce repost"
+        );
+        assert!(
+            restarted
+                .handler
+                .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query recovered event")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_recovery_freezes_pending_event_before_sending_once() {
+        let (database, provider, discord) = fixture();
+        let connection = Connection::open(database.path()).expect("open pending event database");
+        connection
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                  prestige_perks,boss_progress)
+                 VALUES (?1,?2,30,30,1,100,'[]','{}')",
+                params![USER as i64, GUILD as i64],
+            )
+            .expect("seed pending event tunnel");
+        let prompt_action_id = {
+            connection
+                .execute(
+                    "INSERT INTO dig_actions (
+                         guild_id, actor_id, target_id, action_type, depth_before,
+                         depth_after, jc_delta, detail, created_at
+                     ) VALUES (?1, ?2, NULL, 'dig', 30, 30, 0, ?3, ?4)",
+                    params![
+                        GUILD as i64,
+                        USER as i64,
+                        serde_json::json!({"event":"underground_stream"}).to_string(),
+                        super::unix_now() - 1,
+                    ],
+                )
+                .expect("seed pending event prompt");
+            connection.last_insert_rowid()
+        };
+        let service = cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(
+            database.path(),
+            provider.handler.state.dig_config.clone(),
+        );
+        let outcome = service
+            .resolve_action_event_with_delivery(
+                cama_app::dig_event_runtime::DigEventActionRequest {
+                    discord_id: USER as i64,
+                    guild_id: GUILD as i64,
+                    dig_action_id: prompt_action_id,
+                    choice: "safe",
+                    now: super::unix_now(),
+                },
+                cama_app::dig_event_runtime::DigEventDeliveryContext::new(
+                    USER as i64,
+                    GUILD as i64,
+                    0xfeed_beef,
+                    CHANNEL as i64,
+                ),
+            )
+            .expect("settle event outbox");
+        let action_id = outcome.action_id.expect("event action id");
+        // Simulate a process stopping after actor settlement but before the
+        // application-owned quest/finale follow-up froze the projection.
+        connection
+            .execute(
+                "UPDATE dig_actions
+                    SET detail=json_set(detail, '$.event_delivery.state', 'pending')
+                  WHERE id=?1 AND action_type='event'",
+                params![action_id],
+            )
+            .expect("rewind event delivery to pending crash state");
+        assert_eq!(
+            provider
+                .handler
+                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query pending event recovery")
+                .len(),
+            1
+        );
+
+        let report = provider
+            .gateway_observer()
+            .ready_recovery(ReadyRecoveryContext::new(
+                vec![GUILD],
+                Arc::new(EmptyGatewayMembers),
+            ))
+            .await;
+        assert!(
+            report.failures.is_empty(),
+            "pending event recovery: {report:?}"
+        );
+        assert_eq!(report.members_refreshed, 1);
+        assert_eq!(discord.public.lock().expect("event send").len(), 1);
+        assert!(
+            provider
+                .handler
+                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query recovered pending event")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -9949,14 +11493,27 @@ mod tests {
             );
         }
         {
-            let public = discord.public.lock().expect("public event result");
-            assert_eq!(public.len(), 1);
-            assert_eq!(public[0].embeds.len(), 1);
+            let followups = event_responder.followups.lock().expect("event followup");
+            assert_eq!(followups.len(), 1);
+            assert_eq!(followups[0].embeds.len(), 1);
             assert_eq!(
-                public[0].embeds[0].description.as_deref(),
+                followups[0].embeds[0].description.as_deref(),
                 Some("You cross safely and find coins on the far bank.")
             );
         }
+        assert!(
+            provider
+                .handler
+                .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD as i64),
+                    discord_id: Some(USER as i64),
+                    limit: 10,
+                })
+                .await
+                .expect("query resolved event delivery")
+                .is_empty(),
+            "the resolved action's event outbox is marked, not the prompt action"
+        );
 
         let info_responder = Arc::new(TestResponder::default());
         provider
@@ -10096,14 +11653,14 @@ mod tests {
             );
         }
         {
-            let public = discord.public.lock().expect("boon public result");
-            assert_eq!(public.len(), 1);
+            let followups = first.followups.lock().expect("boon followup result");
+            assert_eq!(followups.len(), 1);
             assert_eq!(
-                public[0].embeds[0].title.as_deref(),
+                followups[0].embeds[0].title.as_deref(),
                 Some("Enchanting Table")
             );
             assert!(
-                public[0].embeds[0]
+                followups[0].embeds[0]
                     .fields
                     .iter()
                     .any(|field| field.name.starts_with("Buff:"))
@@ -10128,8 +11685,8 @@ mod tests {
         }
         assert_eq!(
             discord.public.lock().expect("single public result").len(),
-            1,
-            "duplicate Discord delivery must not publish a second result"
+            0,
+            "event results stay on the interaction follow-up path"
         );
 
         let restarted = DigRegistrationProvider::with_media(

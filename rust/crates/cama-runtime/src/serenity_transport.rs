@@ -406,6 +406,18 @@ impl DigDiscordPort for SerenityDiscordTransport {
             .map_err(dig_public_send_failure)
     }
 
+    async fn dig_add_reaction(
+        &self,
+        channel_id: i64,
+        message_id: u64,
+        emoji: &str,
+    ) -> Result<(), String> {
+        let channel_id = u64::try_from(channel_id)
+            .map_err(|_| "Dig reaction channel id is negative".to_owned())?;
+        DiscordTransport::add_reaction(self, channel_id, message_id, &DiscordEmoji::unicode(emoji))
+            .await
+    }
+
     async fn dig_public_history(
         &self,
         channel_id: i64,
