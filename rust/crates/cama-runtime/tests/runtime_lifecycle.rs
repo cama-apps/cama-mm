@@ -279,3 +279,97 @@ async fn startup_ready_registration_reconnect_and_shutdown_are_supervised() {
             .any(|event| matches!(event, LifecycleEvent::Stopped))
     );
 }
+
+#[tokio::test]
+async fn shutdown_during_worker_restart_backoff_prevents_stale_restart() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = RegistryBuilder::default();
+    registry
+        .command(CommandSpec {
+            name: "health".to_owned(),
+            description: "Runtime health".to_owned(),
+            options: Vec::new(),
+            handler: Arc::new(RecordingHandler {
+                calls: Arc::clone(&handler_calls),
+            }),
+        })
+        .expect("register command");
+    let admissions = Arc::new(AtomicUsize::new(0));
+    let sessions = Arc::new(AtomicUsize::new(0));
+    let worker_calls = Arc::new(AtomicUsize::new(0));
+    let config = RuntimeConfig {
+        token: DiscordToken::parse("test-token").expect("test token"),
+        db_path: "/tmp/cama-runtime-worker-shutdown.db".into(),
+        reconnect_initial: Duration::ZERO,
+        reconnect_max: Duration::ZERO,
+        rust_cutover_candidate: false,
+    };
+    let runtime = Runtime::new(
+        config,
+        registry.build(),
+        MockGateway {
+            sessions: Arc::clone(&sessions),
+        },
+        MockDatabase {
+            admissions: Arc::clone(&admissions),
+        },
+    )
+    .with_global_interaction_hooks(GlobalInteractionHooks::new(UsageMonitor::default()))
+    .with_worker(
+        BackgroundWorkerSpec::new(
+            "shutdown-worker",
+            Arc::new(RestartingWorker {
+                calls: Arc::clone(&worker_calls),
+            }),
+        )
+        .restart_policy(ReconnectPolicy::new(
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )),
+    );
+    let mut events = runtime.events().subscribe();
+    let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(runtime.run_until(async move {
+        let _ = stop_receiver.await;
+    }));
+
+    let mut observed = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("lifecycle event timeout")
+            .expect("lifecycle channel");
+        let should_stop = matches!(
+            event,
+            LifecycleEvent::BackgroundWorkerRestartScheduled {
+                ref name,
+                attempt: 1,
+                delay,
+            } if name == "shutdown-worker" && delay == Duration::from_secs(60)
+        );
+        observed.push(event);
+        if should_stop {
+            stop_sender.send(()).expect("request shutdown");
+            break;
+        }
+    }
+
+    task.await
+        .expect("runtime task")
+        .expect("clean runtime exit");
+    while let Ok(event) = events.try_recv() {
+        observed.push(event);
+    }
+
+    assert_eq!(admissions.load(Ordering::SeqCst), 1);
+    assert!(sessions.load(Ordering::SeqCst) >= 1);
+    assert_eq!(worker_calls.load(Ordering::SeqCst), 1);
+    assert!(observed.iter().any(|event| matches!(
+        event,
+        LifecycleEvent::BackgroundWorkerStopped { name } if name == "shutdown-worker"
+    )));
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        LifecycleEvent::BackgroundWorkerStarting { name, attempt: 2 } if name == "shutdown-worker"
+    )));
+}
