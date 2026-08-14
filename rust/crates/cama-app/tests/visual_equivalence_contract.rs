@@ -367,6 +367,473 @@ fn foreground_gate(
     union > 0 && intersection as f64 / union as f64 >= minimum_grid_iou
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GambaMarkerKind {
+    Bet,
+    Wheel,
+    Leverage,
+    DoubleOrNothing,
+}
+
+fn gamba_marker_kind_name(kind: GambaMarkerKind) -> &'static str {
+    match kind {
+        GambaMarkerKind::Bet => "bet",
+        GambaMarkerKind::Wheel => "wheel",
+        GambaMarkerKind::Leverage => "leverage",
+        GambaMarkerKind::DoubleOrNothing => "double_or_nothing",
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GambaMarkerSpec {
+    center_x: i32,
+    center_y: i32,
+    kind: GambaMarkerKind,
+    outcome: [u8; 3],
+}
+
+type MarkerCells = BTreeSet<(usize, u8, i32, i32)>;
+type MarkerSignature = ([usize; 3], MarkerCells);
+
+fn native_gamba_fixture() -> (Vec<u8>, Vec<GambaMarkerSpec>) {
+    let fixture = fixture();
+    let series = fixture
+        .gamba
+        .series
+        .iter()
+        .map(|point| GambaPoint {
+            event_number: point.event_number,
+            cumulative: point.cumulative,
+            info: GambaInfo {
+                source: point.source.clone(),
+                outcome: point.outcome.clone(),
+                leverage: point.leverage,
+                profit: point.profit,
+            },
+        })
+        .collect::<Vec<_>>();
+    let stats = GambaStats {
+        total_bets: fixture.gamba.stats.total_bets,
+        win_rate: fixture.gamba.stats.win_rate,
+        net_pnl: fixture.gamba.stats.net_pnl,
+        roi: fixture.gamba.stats.roi,
+    };
+    let bytes = draw_gamba_chart(
+        &fixture.gamba.username,
+        fixture.gamba.degen_score,
+        &fixture.gamba.degen_title,
+        &series,
+        stats,
+    )
+    .into_inner();
+    let pixels = decode_png_raster(&bytes)
+        .expect("native Gamba fixture must be a PNG")
+        .pixels;
+
+    let values = series
+        .iter()
+        .map(|point| point.cumulative as f64)
+        .collect::<Vec<_>>();
+    let logs = values
+        .iter()
+        .map(|value| value.signum() * value.abs().ln_1p())
+        .collect::<Vec<_>>();
+    let mut minimum = logs.iter().copied().fold(0.0_f64, f64::min);
+    let mut maximum = logs.iter().copied().fold(0.0_f64, f64::max);
+    let range = (maximum - minimum).abs().max(0.1);
+    minimum -= range * 0.1;
+    maximum += range * 0.1;
+    let log_span = (maximum - minimum).max(1e-9);
+    let specs = series
+        .iter()
+        .map(|point| {
+            let center_x = 60
+                + (((point.event_number - 1) as f64
+                    / (series.len().saturating_sub(1).max(1) as f64))
+                    * 614.0) as i32;
+            let signed =
+                point.cumulative.signum() as f64 * (point.cumulative.unsigned_abs() as f64).ln_1p();
+            let center_y = 88 + (((maximum - signed) / log_span) * 222.0) as i32;
+            let kind = if point.info.source == "double_or_nothing" {
+                GambaMarkerKind::DoubleOrNothing
+            } else if point.info.source == "wheel" {
+                GambaMarkerKind::Wheel
+            } else if point.info.leverage.max(1) > 1 {
+                GambaMarkerKind::Leverage
+            } else {
+                GambaMarkerKind::Bet
+            };
+            let outcome = match point.info.outcome.as_deref() {
+                Some("won") => [87, 242, 135],
+                Some("neutral") => [185, 187, 190],
+                _ => [237, 66, 69],
+            };
+            GambaMarkerSpec {
+                center_x,
+                center_y,
+                kind,
+                outcome,
+            }
+        })
+        .collect();
+    (pixels, specs)
+}
+
+fn color_distance(pixel: &[u8], expected: [u8; 3]) -> u32 {
+    pixel[..3]
+        .iter()
+        .zip(expected)
+        .map(|(actual, target)| u32::from(actual.abs_diff(target)))
+        .sum()
+}
+
+fn semantic_mask(
+    pixels: &[u8],
+    width: usize,
+    expected: [u8; 3],
+    region: (usize, usize, usize, usize),
+    distance: u32,
+    grid: (usize, usize),
+) -> (usize, BTreeSet<(usize, usize)>) {
+    let (left, top, right, bottom) = region;
+    let mut count = 0;
+    let mut cells = BTreeSet::new();
+    for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        let x = index % width;
+        let y = index / width;
+        if x < left || x >= right || y < top || y >= bottom {
+            continue;
+        }
+        if color_distance(pixel, expected) <= distance {
+            count += 1;
+            cells.insert((x * grid.0 / width, y * grid.1 / (pixels.len() / width / 4)));
+        }
+    }
+    (count, cells)
+}
+
+fn marker_signature(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    specs: &[GambaMarkerSpec],
+) -> MarkerSignature {
+    let mut counts = [0_usize; 3];
+    let mut cells = BTreeSet::new();
+    for (marker_index, spec) in specs.iter().enumerate() {
+        let radius = 7;
+        for y in (spec.center_y - radius).max(0)..=(spec.center_y + radius).min(height as i32 - 1) {
+            for x in
+                (spec.center_x - radius).max(0)..=(spec.center_x + radius).min(width as i32 - 1)
+            {
+                let offset = (y as usize * width + x as usize) * 4;
+                let pixel = &pixels[offset..offset + 4];
+                let role = if color_distance(pixel, spec.outcome) <= 55 {
+                    Some(0_u8)
+                } else if color_distance(pixel, [47, 49, 54]) <= 18 {
+                    Some(1_u8)
+                } else if color_distance(pixel, [255, 255, 255]) <= 40 {
+                    Some(2_u8)
+                } else {
+                    None
+                };
+                if let Some(role) = role {
+                    counts[role as usize] += 1;
+                    cells.insert((
+                        marker_index,
+                        role,
+                        (x - spec.center_x + radius) / 2,
+                        (y - spec.center_y + radius) / 2,
+                    ));
+                }
+            }
+        }
+    }
+    (counts, cells)
+}
+
+fn marker_kind_contract(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+    height: usize,
+    specs: &[GambaMarkerSpec],
+    kind: GambaMarkerKind,
+) -> Result<(), String> {
+    let selected = specs
+        .iter()
+        .copied()
+        .filter(|spec| spec.kind == kind)
+        .collect::<Vec<_>>();
+    let reference_signature = marker_signature(reference, width, height, &selected);
+    let candidate_signature = marker_signature(candidate, width, height, &selected);
+    let required_roles: &[usize] = match kind {
+        GambaMarkerKind::Bet => &[0],
+        GambaMarkerKind::Wheel => &[0, 1, 2],
+        GambaMarkerKind::Leverage | GambaMarkerKind::DoubleOrNothing => &[0, 1],
+    };
+    for &role in required_roles {
+        let reference_count = reference_signature.0[role];
+        let candidate_count = candidate_signature.0[role];
+        let ratio = candidate_count as f64 / reference_count.max(1) as f64;
+        if reference_count == 0 || ratio < 0.18 {
+            return Err(format!(
+                "{} marker role {role} occupancy is missing",
+                gamba_marker_kind_name(kind)
+            ));
+        }
+    }
+    if kind != GambaMarkerKind::Wheel && candidate_signature.0[2] > reference_signature.0[2] + 2 {
+        return Err(format!(
+            "{} marker gained forbidden wheel spokes",
+            gamba_marker_kind_name(kind)
+        ));
+    }
+    let intersection = reference_signature
+        .1
+        .intersection(&candidate_signature.1)
+        .count();
+    let union = reference_signature.1.union(&candidate_signature.1).count();
+    let iou = intersection as f64 / union.max(1) as f64;
+    if iou < 0.60 {
+        return Err(format!(
+            "{} marker shape drifted: IoU {iou:.3}",
+            gamba_marker_kind_name(kind)
+        ));
+    }
+    Ok(())
+}
+
+fn gamba_contract(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+    height: usize,
+    specs: &[GambaMarkerSpec],
+) -> Result<(), String> {
+    if (width, height) != (700, 400) || candidate.len() != width * height * 4 {
+        return Err("profile gamba dimensions differ".to_owned());
+    }
+    let (reference_fill, reference_cells) = semantic_mask(
+        reference,
+        width,
+        [59, 85, 74],
+        (60, 88, 674, 310),
+        3,
+        (14, 8),
+    );
+    let (candidate_fill, candidate_cells) = semantic_mask(
+        candidate,
+        width,
+        [59, 85, 74],
+        (60, 88, 674, 310),
+        3,
+        (14, 8),
+    );
+    let fill_ratio = candidate_fill as f64 / reference_fill.max(1) as f64;
+    let fill_union = reference_cells.union(&candidate_cells).count();
+    let fill_iou =
+        reference_cells.intersection(&candidate_cells).count() as f64 / fill_union.max(1) as f64;
+    if reference_fill == 0 || fill_ratio < 0.35 || fill_iou < 0.45 {
+        return Err(format!(
+            "positive fill layer is missing: ratio {fill_ratio:.3}, IoU {fill_iou:.3}"
+        ));
+    }
+    for kind in [
+        GambaMarkerKind::Bet,
+        GambaMarkerKind::Wheel,
+        GambaMarkerKind::Leverage,
+        GambaMarkerKind::DoubleOrNothing,
+    ] {
+        marker_kind_contract(reference, candidate, width, height, specs, kind)?;
+    }
+    Ok(())
+}
+
+fn rating_distribution_contract(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(), String> {
+    if (width, height) != (640, 390) || candidate.len() != width * height * 4 {
+        return Err("rating distribution dimensions differ".to_owned());
+    }
+    for (name, color) in [
+        ("histogram", [88, 101, 242]),
+        ("normal", [87, 242, 135]),
+        ("kde", [254, 231, 92]),
+        ("mean", [237, 66, 69]),
+        ("median", [244, 123, 103]),
+    ] {
+        let (reference_count, reference_cells) =
+            semantic_mask(reference, width, color, (0, 0, width, height), 60, (16, 10));
+        let (candidate_count, candidate_cells) =
+            semantic_mask(candidate, width, color, (0, 0, width, height), 60, (16, 10));
+        if reference_count < 12 || reference_cells.is_empty() {
+            return Err(format!("rating distribution reference lost {name}"));
+        }
+        let ratio = candidate_count as f64 / reference_count as f64;
+        let union = reference_cells.union(&candidate_cells).count();
+        let iou =
+            reference_cells.intersection(&candidate_cells).count() as f64 / union.max(1) as f64;
+        if candidate_count < 12 || ratio < 0.20 || iou < 0.82 {
+            return Err(format!(
+                "rating distribution {name} is missing or misplaced: ratio {ratio:.3}, IoU {iou:.3}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn paint_bg_circle(pixels: &mut [u8], width: usize, center_x: i32, center_y: i32, radius: i32) {
+    for y in -radius..=radius {
+        for x in -radius..=radius {
+            if x * x + y * y > radius * radius {
+                continue;
+            }
+            let px = center_x + x;
+            let py = center_y + y;
+            if px < 0
+                || py < 0
+                || px >= width as i32
+                || py >= pixels.len() as i32 / width as i32 / 4
+            {
+                continue;
+            }
+            let offset = (py as usize * width + px as usize) * 4;
+            pixels[offset..offset + 4].copy_from_slice(&[54, 57, 63, 255]);
+        }
+    }
+}
+
+fn paint_marker_shape(
+    pixels: &mut [u8],
+    width: usize,
+    spec: GambaMarkerSpec,
+    replacement: GambaMarkerKind,
+) {
+    let radius = match replacement {
+        GambaMarkerKind::Bet => 3,
+        GambaMarkerKind::Wheel | GambaMarkerKind::Leverage => 5,
+        GambaMarkerKind::DoubleOrNothing => 6,
+    };
+    let mut set = |x: i32, y: i32, color: [u8; 4]| {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let height = pixels.len() / width / 4;
+        if x >= width as i32 || y >= height as i32 {
+            return;
+        }
+        let offset = (y as usize * width + x as usize) * 4;
+        pixels[offset..offset + 4].copy_from_slice(&color);
+    };
+    match replacement {
+        GambaMarkerKind::Bet => {
+            for y in -radius..=radius {
+                for x in -radius..=radius {
+                    if x * x + y * y <= radius * radius {
+                        set(
+                            spec.center_x + x,
+                            spec.center_y + y,
+                            [spec.outcome[0], spec.outcome[1], spec.outcome[2], 255],
+                        );
+                    }
+                }
+            }
+        }
+        GambaMarkerKind::Leverage => {
+            for y in -radius..=radius {
+                for x in -radius..=radius {
+                    if x.abs() + y.abs() <= radius {
+                        let color = if x.abs() + y.abs() == radius {
+                            [47, 49, 54, 255]
+                        } else {
+                            [spec.outcome[0], spec.outcome[1], spec.outcome[2], 255]
+                        };
+                        set(spec.center_x + x, spec.center_y + y, color);
+                    }
+                }
+            }
+        }
+        GambaMarkerKind::Wheel => {
+            for y in -radius..=radius {
+                for x in -radius..=radius {
+                    if x * x + y * y <= radius * radius {
+                        let color = if x.abs() == radius || y.abs() == radius {
+                            [47, 49, 54, 255]
+                        } else {
+                            [spec.outcome[0], spec.outcome[1], spec.outcome[2], 255]
+                        };
+                        set(spec.center_x + x, spec.center_y + y, color);
+                    }
+                }
+            }
+            for offset in -3..=3 {
+                set(spec.center_x + offset, spec.center_y, [255, 255, 255, 255]);
+                set(spec.center_x, spec.center_y + offset, [255, 255, 255, 255]);
+            }
+        }
+        GambaMarkerKind::DoubleOrNothing => {
+            let points = (0..16)
+                .map(|index| {
+                    let angle =
+                        index as f64 * std::f64::consts::PI / 8.0 - std::f64::consts::FRAC_PI_2;
+                    let point_radius = if index % 2 == 0 { 6.0 } else { 6.0 * 0.42 };
+                    (
+                        spec.center_x + (point_radius * angle.cos()) as i32,
+                        spec.center_y + (point_radius * angle.sin()) as i32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for y in -radius..=radius {
+                for x in -radius..=radius {
+                    let point_x = spec.center_x + x;
+                    let point_y = spec.center_y + y;
+                    let mut inside = false;
+                    for (first, second) in points
+                        .iter()
+                        .zip(points.iter().cycle().skip(1))
+                        .take(points.len())
+                    {
+                        if (first.1 > point_y) != (second.1 > point_y)
+                            && (point_x as f64)
+                                < (second.0 - first.0) as f64 * (point_y - first.1) as f64
+                                    / (second.1 - first.1) as f64
+                                    + first.0 as f64
+                        {
+                            inside = !inside;
+                        }
+                    }
+                    if inside {
+                        set(
+                            point_x,
+                            point_y,
+                            [spec.outcome[0], spec.outcome[1], spec.outcome[2], 255],
+                        );
+                    }
+                }
+            }
+            for (first, second) in points
+                .iter()
+                .zip(points.iter().cycle().skip(1))
+                .take(points.len())
+            {
+                let steps = (second.0 - first.0)
+                    .abs()
+                    .max((second.1 - first.1).abs())
+                    .max(1);
+                for step in 0..=steps {
+                    let x = first.0 + (second.0 - first.0) * step / steps;
+                    let y = first.1 + (second.1 - first.1) * step / steps;
+                    set(x, y, [47, 49, 54, 255]);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn visual_fixture_has_typed_chart_and_animation_inputs() {
     let fixture = fixture();
@@ -917,6 +1384,106 @@ fn native_profile_gamba_fixture_matches_live_attachment_contract() {
 }
 
 #[test]
+fn test_profile_gamba_gate_rejects_missing_positive_fill() {
+    let (reference, specs) = native_gamba_fixture();
+    let pristine = gamba_contract(&reference, &reference, 700, 400, &specs);
+    assert!(pristine.is_ok(), "{pristine:?}");
+
+    let mut missing_fill = reference.clone();
+    for (index, pixel) in missing_fill.chunks_exact_mut(4).enumerate() {
+        let x = index % 700;
+        let y = index / 700;
+        if (60..674).contains(&x)
+            && (88..310).contains(&y)
+            && color_distance(pixel, [59, 85, 74]) <= 3
+        {
+            // Keep the chart occupied while removing only the authored green
+            // area layer, matching the Python gate's semantic mutation.
+            pixel.copy_from_slice(&[88, 101, 242, 255]);
+        }
+    }
+    assert!(
+        gamba_contract(&reference, &missing_fill, 700, 400, &specs)
+            .expect_err("missing positive fill must be rejected")
+            .contains("positive fill")
+    );
+}
+
+#[test]
+fn test_profile_gamba_gate_rejects_erased_and_substituted_marker_shapes() {
+    let (reference, specs) = native_gamba_fixture();
+    let pristine = gamba_contract(&reference, &reference, 700, 400, &specs);
+    assert!(pristine.is_ok(), "{pristine:?}");
+
+    for kind in [
+        GambaMarkerKind::Bet,
+        GambaMarkerKind::Wheel,
+        GambaMarkerKind::Leverage,
+        GambaMarkerKind::DoubleOrNothing,
+    ] {
+        for substituted in [false, true] {
+            let mut candidate = reference.clone();
+            for spec in specs.iter().copied().filter(|spec| spec.kind == kind) {
+                paint_bg_circle(&mut candidate, 700, spec.center_x, spec.center_y, 7);
+                if substituted {
+                    for y in -7..=7 {
+                        for x in -7..=7 {
+                            if x * x + y * y <= 49 {
+                                let px = spec.center_x + x;
+                                let py = spec.center_y + y;
+                                let offset = (py as usize * 700 + px as usize) * 4;
+                                candidate[offset..offset + 4].copy_from_slice(&[88, 101, 242, 255]);
+                            }
+                        }
+                    }
+                }
+            }
+            let error = gamba_contract(&reference, &candidate, 700, 400, &specs)
+                .expect_err("marker mutation should be rejected");
+            assert!(
+                error.contains(&format!("{} marker", gamba_marker_kind_name(kind))),
+                "{kind:?} mutation should fail its own marker contract: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_profile_gamba_gate_rejects_every_cross_kind_marker_substitution() {
+    let (reference, specs) = native_gamba_fixture();
+    let pristine = gamba_contract(&reference, &reference, 700, 400, &specs);
+    assert!(pristine.is_ok(), "{pristine:?}");
+    let kinds = [
+        GambaMarkerKind::Bet,
+        GambaMarkerKind::Wheel,
+        GambaMarkerKind::Leverage,
+        GambaMarkerKind::DoubleOrNothing,
+    ];
+    for target_kind in kinds {
+        for replacement_kind in kinds {
+            if target_kind == replacement_kind {
+                continue;
+            }
+            let mut candidate = reference.clone();
+            for spec in specs
+                .iter()
+                .copied()
+                .filter(|spec| spec.kind == target_kind)
+            {
+                paint_bg_circle(&mut candidate, 700, spec.center_x, spec.center_y, 7);
+                paint_marker_shape(&mut candidate, 700, spec, replacement_kind);
+            }
+            let error = gamba_contract(&reference, &candidate, 700, 400, &specs)
+                .expect_err("cross-kind marker substitution should be rejected");
+            assert!(
+                error.contains(&format!("{} marker", gamba_marker_kind_name(target_kind))),
+                "{target_kind:?} replaced by {replacement_kind:?} should fail its own marker contract: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn native_rating_distribution_fixture_preserves_geometry_and_semantic_layers() {
     let fixture = fixture();
     let distribution = &fixture.rating_distribution;
@@ -964,6 +1531,44 @@ fn native_rating_distribution_fixture_preserves_geometry_and_semantic_layers() {
             .chunks_exact(4)
             .any(|pixel| pixel == [244, 123, 103, 255]),
         "the explicit None median must suppress the marker and legend"
+    );
+}
+
+#[test]
+fn test_rating_distribution_gate_rejects_missing_median_and_wrong_geometry() {
+    let fixture = fixture();
+    let reference = decode_png_raster(
+        &draw_rating_distribution_with_median(
+            &fixture.rating_distribution.ratings,
+            fixture.rating_distribution.median_rating,
+        )
+        .into_inner(),
+    )
+    .expect("rating distribution fixture must be a PNG")
+    .pixels;
+    let pristine = rating_distribution_contract(&reference, &reference, 640, 390);
+    assert!(pristine.is_ok(), "{pristine:?}");
+
+    let mut missing_median = reference.clone();
+    for pixel in missing_median.chunks_exact_mut(4) {
+        if color_distance(pixel, [244, 123, 103]) <= 1 {
+            pixel.copy_from_slice(&[47, 49, 54, 255]);
+        }
+    }
+    assert!(
+        rating_distribution_contract(&reference, &missing_median, 640, 390)
+            .expect_err("missing median must be rejected")
+            .contains("median")
+    );
+
+    let mut wrong_geometry = Vec::with_capacity(639 * 390 * 4);
+    for row in reference.chunks_exact(640 * 4) {
+        wrong_geometry.extend_from_slice(&row[..639 * 4]);
+    }
+    assert!(
+        rating_distribution_contract(&reference, &wrong_geometry, 639, 390)
+            .expect_err("wrong geometry must be rejected")
+            .contains("dimensions")
     );
 }
 
