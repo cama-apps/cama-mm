@@ -115,6 +115,8 @@ cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
 cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
+uv run --locked python rust/scripts/generate_authored_asset_manifest.py --check
+uv run --locked python scripts/visual_equivalence.py
 ```
 
 For an offline/local checkout that already has the locked Python environment,
@@ -128,6 +130,14 @@ CAMA_PARITY_PYTHON=.venv/bin/python cargo run --locked --manifest-path rust/Carg
 The root `.python-version` pins local `uv` commands to CPython 3.12, matching
 the CI runtime.
 
+The visual gate exercises the production Python and Rust prediction-chart and
+post-match GIF renderers from one deterministic fixture. It requires matching
+dimensions, animation frame order/timing/loop count, bounded RGBA error, and
+foreground spatial overlap; a blank or border-only candidate is rejected even
+when the shared dark background would otherwise dominate whole-frame error.
+This is representative regression evidence, not a claim that every renderer
+or font is pixel-identical.
+
 `xtask parity` fails if Python's migration list changes, if pytest node IDs
 change without review, if a mapped Rust test disappears or is ambiguous across
 crates, or if a Python/Rust domain vector differs. It also exercises thirteen
@@ -139,7 +149,7 @@ progress. The cutover gate is stricter:
 cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
 ```
 
-That command must remain failing until all 6,633 current cases—and any cases
+That command must remain failing until all 6,722 current cases—and any cases
 added later—have an explicit passing Rust contract, and every required gate in
 `parity/cutover_readiness.tsv` is marked complete with evidence. The required
 gate names are compiled into `xtask`, so deleting an open row cannot make the

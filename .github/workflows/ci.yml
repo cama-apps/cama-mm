@@ -54,6 +54,7 @@ jobs:
           uv run --locked python rust/scripts/generate_dig_event_catalog.py --check
           uv run --locked python rust/scripts/generate_dig_event_catalog.py --quests --check
           uv run --locked python rust/scripts/generate_dig_artifact_catalog.py --check
+          uv run --locked python rust/scripts/generate_authored_asset_manifest.py --check
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
@@ -63,6 +64,11 @@ jobs:
 
       - name: Test Rust
         run: cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
+
+      - name: Compare representative Python and Rust visuals
+        run: >-
+          uv run --locked python scripts/visual_equivalence.py
+          --output-dir "$RUNNER_TEMP/cama-visual-equivalence"
 
       - name: Verify Rust schema authority against Python history
         run: >-
