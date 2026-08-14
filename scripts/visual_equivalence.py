@@ -6,9 +6,9 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
     uv run --locked python scripts/visual_equivalence.py
 
-It renders production prediction-market, balance-journey, post-match,
-terminal-crash, and pinnacle phase-3 artifacts from the shared JSON fixture,
-then decodes both sides to RGBA.
+It renders production prediction-market, balance-journey, rating-history,
+post-match, terminal-crash, and pinnacle phase-3 artifacts from the shared
+JSON fixture, then decodes both sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
 an embedded bitmap font, while Python uses its configured Pillow font, so exact
@@ -107,9 +107,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "terminal_crash",
         "pinnacle",
         "balance",
+        "rating_history",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, and balance objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, and rating_history objects"
         )
     return fixture
 
@@ -120,7 +121,7 @@ def render_python(
     fixture_path: Path | None = None,
 ) -> None:
     from utils import dig_drawing
-    from utils.drawing import draw_balance_chart
+    from utils.drawing import draw_balance_chart, draw_rating_history_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
 
@@ -146,6 +147,13 @@ def render_python(
         {str(source): int(total) for source, total in balance["source_totals"].items()},
     ).getvalue()
     (output_dir / "python_balance.png").write_bytes(balance_bytes)
+
+    rating_history = fixture["rating_history"]
+    rating_history_bytes = draw_rating_history_chart(
+        str(rating_history["username"]),
+        list(rating_history["entries"]),
+    ).getvalue()
+    (output_dir / "python_rating_history.png").write_bytes(rating_history_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -325,11 +333,15 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def check_png(python_path: Path, rust_path: Path) -> list[str]:
+def check_png(
+    python_path: Path, rust_path: Path, *, label: str = "chart"
+) -> list[str]:
     python_size, python_pixels = rgba_pixels(python_path)
     rust_size, rust_pixels = rgba_pixels(rust_path)
     if python_size != rust_size:
-        raise AssertionError(f"chart dimensions differ: Python {python_size}, Rust {rust_size}")
+        raise AssertionError(
+            f"{label} dimensions differ: Python {python_size}, Rust {rust_size}"
+        )
     mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
     foreground_ratio, foreground_iou = compare_foreground_structure(
         python_pixels,
@@ -338,17 +350,17 @@ def check_png(python_path: Path, rust_path: Path) -> list[str]:
         grid=(max(1, python_size[0] // 20), max(1, python_size[1] // 20)),
         margin=0,
         minimum_grid_iou=CHART_MIN_FOREGROUND_GRID_IOU,
-        label="chart",
+        label=label,
     )
     print(
-        f"chart: size={python_size[0]}x{python_size[1]} "
+        f"{label}: size={python_size[0]}x{python_size[1]} "
         f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
         f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
         f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
     )
     if mae > CHART_MAX_MAE or rms > CHART_MAX_RMS:
         raise AssertionError(
-            f"chart pixel drift exceeds threshold: MAE {mae:.5f} <= {CHART_MAX_MAE:.5f}, "
+            f"{label} pixel drift exceeds threshold: MAE {mae:.5f} <= {CHART_MAX_MAE:.5f}, "
             f"RMS {rms:.5f} <= {CHART_MAX_RMS:.5f}"
         )
     return []
@@ -620,6 +632,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.rust_only and not args.python_only:
             check_png(output_dir / "python_chart.png", output_dir / "rust_chart.png")
             check_balance(output_dir / "python_balance.png", output_dir / "rust_balance.png")
+            check_png(
+                output_dir / "python_rating_history.png",
+                output_dir / "rust_rating_history.png",
+                label="rating_history",
+            )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(
                 output_dir / "python_terminal_crash.gif",

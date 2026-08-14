@@ -45,5 +45,16 @@
       "bonus": 600,
       "dig": -280
     }
+  },
+  "rating_history": {
+    "username": "Client 47",
+    "entries": [
+      {"rating": 1675.0, "os_mu_after": 40.5, "won": true},
+      {"rating": 1620.0, "os_mu_after": 39.1, "won": false},
+      {"rating": null, "os_mu_after": 38.7, "won": true},
+      {"rating": 1580.0, "os_mu_after": null, "won": null},
+      {"rating": 1535.0, "os_mu_after": 35.8, "won": false},
+      {"rating": 1490.0, "os_mu_after": 34.4, "won": true}
+    ]
   }
 }

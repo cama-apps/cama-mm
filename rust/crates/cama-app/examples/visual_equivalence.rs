@@ -11,7 +11,10 @@ use std::path::Path;
 
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
-use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
+use cama_app::drawing::{
+    BalancePoint, RatingHistoryEntry, draw_balance_chart, draw_prediction_market_chart,
+    draw_rating_history_chart,
+};
 use cama_app::neon_degen::GifAsset;
 use cama_app::post_match_gif_media::render_post_match_gif;
 use serde::Deserialize;
@@ -23,6 +26,7 @@ struct Fixture {
     terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
+    rating_history: RatingHistoryFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +34,19 @@ struct BalanceFixture {
     username: String,
     series: Vec<(i32, i64, String)>,
     source_totals: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingHistoryFixture {
+    username: String,
+    entries: Vec<RatingHistoryEntryFixture>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct RatingHistoryEntryFixture {
+    rating: Option<f64>,
+    os_mu_after: Option<f64>,
+    won: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +131,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_balance.png"),
         balance_chart,
+    )?;
+
+    let rating_history = fixture
+        .rating_history
+        .entries
+        .iter()
+        .map(|entry| RatingHistoryEntry {
+            rating: entry.rating,
+            openskill_mu: entry.os_mu_after,
+            won: entry.won,
+        })
+        .collect::<Vec<_>>();
+    let rating_history_chart =
+        draw_rating_history_chart(&fixture.rating_history.username, &rating_history).into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_rating_history.png"),
+        rating_history_chart,
     )?;
 
     let animation = render_post_match_gif(

@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
-use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
+use cama_app::drawing::{
+    BalancePoint, RatingHistoryEntry, draw_balance_chart, draw_prediction_market_chart,
+    draw_rating_history_chart,
+};
 use cama_app::neon_degen::GifAsset;
 use cama_app::pet_assets::decode_png_raster;
 use cama_app::post_match_gif_media::render_post_match_gif;
@@ -22,6 +25,7 @@ struct Fixture {
     terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
+    rating_history: RatingHistoryFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +33,19 @@ struct BalanceFixture {
     username: String,
     series: Vec<(i32, i64, String)>,
     source_totals: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RatingHistoryFixture {
+    username: String,
+    entries: Vec<RatingHistoryEntryFixture>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct RatingHistoryEntryFixture {
+    rating: Option<f64>,
+    os_mu_after: Option<f64>,
+    won: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +170,52 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.balance.username, "Visual Balance");
     assert_eq!(fixture.balance.series.len(), 7);
     assert_eq!(fixture.balance.source_totals.len(), 7);
+    assert_eq!(fixture.rating_history.username, "Client 47");
+    assert_eq!(fixture.rating_history.entries.len(), 6);
+    assert!(
+        fixture
+            .rating_history
+            .entries
+            .iter()
+            .any(|entry| entry.rating.is_none())
+    );
+    assert!(
+        fixture
+            .rating_history
+            .entries
+            .iter()
+            .any(|entry| entry.os_mu_after.is_none())
+    );
+}
+
+#[test]
+fn native_rating_history_fixture_render_is_deterministic_and_nonblank() {
+    let fixture = fixture();
+    let entries = fixture
+        .rating_history
+        .entries
+        .iter()
+        .map(|entry| RatingHistoryEntry {
+            rating: entry.rating,
+            openskill_mu: entry.os_mu_after,
+            won: entry.won,
+        })
+        .collect::<Vec<_>>();
+    let first = draw_rating_history_chart(&fixture.rating_history.username, &entries).into_inner();
+    let second = draw_rating_history_chart(&fixture.rating_history.username, &entries).into_inner();
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode rating-history PNG");
+    assert_eq!((raster.width, raster.height), (700, 400));
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                pixel[..3].iter().copied().max().unwrap_or(0) > FOREGROUND_THRESHOLD
+            })
+            .count()
+            > 1_000
+    );
 }
 
 #[test]

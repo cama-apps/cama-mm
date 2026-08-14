@@ -625,7 +625,7 @@ pub fn draw_rating_history_chart(
         12,
         &format!("{username}'s Rating History"),
         DISCORD_WHITE,
-        2,
+        1,
     );
     if most_recent_first.len() < 2 {
         let message = if most_recent_first.is_empty() {
@@ -663,6 +663,18 @@ pub fn draw_rating_history_chart(
         let y = chart.y + step * chart.height / 4;
         raster.line((chart.x, y), (chart.x + chart.width, y), DISCORD_GRID, 1);
     }
+    for step in 0..=4 {
+        let fraction = f64::from(step) / 4.0;
+        let value = upper - fraction * (upper - lower);
+        let label = format!("{:.0}", (value / 50.0).round() * 50.0);
+        raster.text(
+            chart.x - Raster::text_width(&label, 1) - 6,
+            chart.y + step * chart.height / 4 - 6,
+            &label,
+            DISCORD_GREY,
+            1,
+        );
+    }
     draw_optional_series(&mut raster, &glicko, lower, upper, chart, DISCORD_ACCENT);
     draw_optional_series(&mut raster, &openskill, lower, upper, chart, DISCORD_YELLOW);
 
@@ -683,17 +695,17 @@ pub fn draw_rating_history_chart(
     if glicko.iter().any(Option::is_some) {
         raster.line((legend_x, 348), (legend_x + 20, 348), DISCORD_ACCENT, 2);
         raster.text(legend_x + 25, 345, "Glicko-2", DISCORD_GREY, 1);
-        legend_x += 100;
+        legend_x += 110;
     }
     if openskill.iter().any(Option::is_some) {
         raster.line((legend_x, 348), (legend_x + 20, 348), DISCORD_YELLOW, 2);
         raster.text(legend_x + 25, 345, "OpenSkill", DISCORD_GREY, 1);
         legend_x += 110;
     }
-    raster.circle((legend_x + 4, 348), 4, DISCORD_GREEN);
-    raster.text(legend_x + 12, 345, "Win", DISCORD_GREY, 1);
-    raster.circle((legend_x + 64, 348), 4, DISCORD_RED);
-    raster.text(legend_x + 72, 345, "Loss", DISCORD_GREY, 1);
+    raster.circle((legend_x + 6, 348), 6, DISCORD_GREEN);
+    raster.text(legend_x + 17, 345, "Win", DISCORD_GREY, 1);
+    raster.circle((legend_x + 66, 348), 6, DISCORD_RED);
+    raster.text(legend_x + 77, 345, "Loss", DISCORD_GREY, 1);
     render(raster)
 }
 
