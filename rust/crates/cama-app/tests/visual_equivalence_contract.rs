@@ -19,6 +19,8 @@ use cama_app::pet_assets::{
     inspect_png, render_pet_card,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_app::scout::media::NativeScoutImageRenderer;
+use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_domain::pet::{PetMood, PetStage};
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
@@ -37,6 +39,7 @@ struct Fixture {
     advantage: AdvantageFixture,
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
+    scout: ScoutFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +84,26 @@ struct PetFixture {
 #[derive(Debug, Deserialize)]
 struct BlameLukeFixture {
     selected_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScoutFixture {
+    player_count: usize,
+    total_matches: i64,
+    player_names: Vec<String>,
+    title: String,
+    heroes: Vec<ScoutHeroFixture>,
+    portrait_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScoutHeroFixture {
+    hero_id: i64,
+    games: i64,
+    wins: i64,
+    losses: i64,
+    bans: i64,
+    primary_role: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +263,60 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     );
     assert_eq!(fixture.blame_luke.selected_index, 4);
     assert!(fixture.blame_luke.selected_index < BLAME_LUKE_REASONS.len());
+    assert_eq!(fixture.scout.player_count, 3);
+    assert_eq!(fixture.scout.total_matches, 24);
+    assert_eq!(
+        fixture.scout.player_names,
+        vec!["Ada".to_owned(), "Linus".to_owned(), "Grace".to_owned()]
+    );
+    assert_eq!(fixture.scout.title, "SCOUT: Radiant");
+    assert_eq!(fixture.scout.heroes.len(), 3);
+    assert_eq!(fixture.scout.heroes[0].hero_id, 1);
+    assert_eq!(fixture.scout.portrait_mode, "cache_miss_fallback");
+}
+
+#[test]
+fn native_scout_fixture_render_is_deterministic_and_preserves_report_geometry() {
+    let fixture = fixture();
+    assert_eq!(fixture.scout.portrait_mode, "cache_miss_fallback");
+    let report = ScoutReportInput {
+        scout_data: ScoutData {
+            player_count: fixture.scout.player_count,
+            total_matches: Some(fixture.scout.total_matches),
+            heroes: fixture
+                .scout
+                .heroes
+                .iter()
+                .map(|hero| ScoutHero {
+                    hero_id: hero.hero_id,
+                    games: hero.games,
+                    wins: hero.wins,
+                    losses: hero.losses,
+                    bans: hero.bans,
+                    primary_role: hero.primary_role,
+                })
+                .collect(),
+        },
+        player_names: fixture.scout.player_names.clone(),
+        title: fixture.scout.title.clone(),
+    };
+    let renderer = NativeScoutImageRenderer::default();
+    let first = renderer.render(&report).expect("render scout fixture");
+    let second = renderer
+        .render(&report)
+        .expect("render scout fixture again");
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("scout fixture must be a PNG");
+    assert_eq!((raster.width, raster.height), (360, 12 + 50 + 3 * 32 + 12));
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3].iter().copied().max().unwrap_or(0) > FOREGROUND_THRESHOLD)
+            .count()
+            > 200,
+        "scout fixture must contain visible report structure"
+    );
 }
 
 #[test]

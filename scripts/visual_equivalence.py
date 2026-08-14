@@ -7,8 +7,8 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
-OpenDota advantage, betting wheel/explosion, Blame Luke, post-match,
-terminal-crash, pinnacle phase-3, and one production pet-card attachment from
+OpenDota advantage, betting wheel/explosion, Blame Luke, scout report,
+post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
 the shared JSON fixture, then decodes both
 sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
@@ -98,6 +98,14 @@ BLAME_LUKE_MIN_AGGREGATE_GRID_IOU = 0.80
 BLAME_LUKE_MIN_AGGREGATE_COUNT_RATIO = 0.70
 BLAME_LUKE_MAX_AGGREGATE_COUNT_RATIO = 1.40
 BLAME_LUKE_MAX_AGGREGATE_CENTROID_DRIFT = 18.0
+# Scout reports share the live 360px mobile table geometry, but Pillow's
+# TrueType text and the native renderer's bitmap glyphs are intentionally not
+# pixel-identical.  This gate constrains both the report's row structure and
+# its semantic foreground without requiring the network/cache portrait path.
+SCOUT_MAX_MAE = 0.080
+SCOUT_MAX_RMS = 0.180
+SCOUT_MIN_FOREGROUND_GRID_IOU = 0.75
+SCOUT_MIN_FOREGROUND_COUNT_RATIO = 0.50
 # The pet path shares checked-in RGBA components, so it gets a tighter pixel
 # gate than the intentionally native-only chart/GIF ports.  The foreground
 # checks still guard against a blank or badly registered component composite.
@@ -149,9 +157,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "wheel",
         "explosion",
         "blame_luke",
+        "scout",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, and blame_luke objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, blame_luke, and scout objects"
         )
     return fixture
 
@@ -162,6 +171,7 @@ def render_python(
     fixture_path: Path | None = None,
 ) -> None:
     from utils import dig_drawing, pet_compositor
+    from utils.drawing import analysis as drawing_analysis
     from utils.drawing import draw_advantage_graph, draw_balance_chart, draw_rating_history_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
@@ -279,6 +289,28 @@ def render_python(
         raise ValueError(f"blame_luke.selected_index is out of range: {selected_index}")
     blame_luke_bytes = create_blame_luke_gif(BLAME_LUKE_REASONS[selected_index]).getvalue()
     (output_dir / "python_blame_luke.gif").write_bytes(blame_luke_bytes)
+
+    # The live Python command calls draw_scout_report after loading portraits
+    # from its cache/CDN helper.  Keep this cross-language fixture hermetic by
+    # exercising the production cache-miss fallback branch on both sides; the
+    # normal provider still uses its unchanged cache/network behavior.
+    scout = fixture["scout"]
+    if scout.get("portrait_mode") != "cache_miss_fallback":
+        raise ValueError("scout fixture must explicitly select cache_miss_fallback")
+    scout_data = {
+        "player_count": int(scout["player_count"]),
+        "total_matches": int(scout["total_matches"]),
+        "heroes": [dict(hero) for hero in scout["heroes"]],
+    }
+    from unittest.mock import patch
+
+    with patch.object(drawing_analysis, "_get_hero_images_batch", return_value={}):
+        scout_bytes = drawing_analysis.draw_scout_report(
+            scout_data=scout_data,
+            player_names=[str(name) for name in scout["player_names"]],
+            title=str(scout["title"]),
+        ).getvalue()
+    (output_dir / "python_scout.png").write_bytes(scout_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -920,6 +952,43 @@ def check_blame_luke(python_path: Path, rust_path: Path) -> list[str]:
     return []
 
 
+def check_scout(python_path: Path, rust_path: Path, expected_rows: int) -> list[str]:
+    """Compare the production Scout report's cache-miss fallback geometry."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    expected_size = (360, 12 + 50 + expected_rows * 32 + 12)
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            f"scout dimensions differ or are invalid: Python {python_size}, Rust {rust_size}; "
+            f"expected {expected_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(18, max(1, python_size[1] // 10)),
+        margin=0,
+        minimum_grid_iou=SCOUT_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=SCOUT_MIN_FOREGROUND_COUNT_RATIO,
+        label="scout",
+    )
+    print(
+        f"scout: size={python_size[0]}x{python_size[1]} rows={expected_rows} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > SCOUT_MAX_MAE or rms > SCOUT_MAX_RMS:
+        raise AssertionError(
+            "scout pixel drift exceeds threshold: "
+            f"MAE {mae:.5f} <= {SCOUT_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {SCOUT_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -1236,6 +1305,11 @@ def main(argv: list[str] | None = None) -> int:
             check_blame_luke(
                 output_dir / "python_blame_luke.gif",
                 output_dir / "rust_blame_luke.gif",
+            )
+            check_scout(
+                output_dir / "python_scout.png",
+                output_dir / "rust_scout.png",
+                expected_rows=len(fixture["scout"]["heroes"]),
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

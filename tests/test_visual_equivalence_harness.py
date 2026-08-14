@@ -20,6 +20,7 @@ from scripts.visual_equivalence import (
     check_blame_luke,
     check_explosion,
     check_pet,
+    check_scout,
     check_wheel,
     compare_foreground_structure,
     gif_frames,
@@ -80,6 +81,12 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     }
     assert fixture["explosion"] == {"size": 500, "seed": 12648430}
     assert fixture["blame_luke"] == {"selected_index": 4}
+    assert fixture["scout"]["player_count"] == 3
+    assert fixture["scout"]["total_matches"] == 24
+    assert fixture["scout"]["player_names"] == ["Ada", "Linus", "Grace"]
+    assert fixture["scout"]["title"] == "SCOUT: Radiant"
+    assert len(fixture["scout"]["heroes"]) == 3
+    assert fixture["scout"]["portrait_mode"] == "cache_miss_fallback"
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -118,6 +125,7 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_blame_luke.gif").read_bytes() == (
         second / "python_blame_luke.gif"
     ).read_bytes()
+    assert (first / "python_scout.png").read_bytes() == (second / "python_scout.png").read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
     assert loop == 1
@@ -176,6 +184,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rust_blame_luke = first / "rust_blame_luke.gif"
     rust_blame_luke.write_bytes((first / "python_blame_luke.gif").read_bytes())
     check_blame_luke(first / "python_blame_luke.gif", rust_blame_luke)
+    rust_scout = first / "rust_scout.png"
+    rust_scout.write_bytes((first / "python_scout.png").read_bytes())
+    check_scout(first / "python_scout.png", rust_scout, expected_rows=3)
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():

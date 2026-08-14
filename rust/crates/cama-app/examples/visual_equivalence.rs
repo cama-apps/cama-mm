@@ -21,6 +21,8 @@ use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
 use cama_app::post_match_gif_media::render_post_match_gif;
+use cama_app::scout::media::NativeScoutImageRenderer;
+use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
 use cama_domain::pet::{PetMood, PetStage};
 use serde::Deserialize;
 
@@ -35,6 +37,7 @@ struct Fixture {
     advantage: AdvantageFixture,
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
+    scout: ScoutFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +82,26 @@ struct PetFixture {
 #[derive(Debug, Deserialize)]
 struct BlameLukeFixture {
     selected_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScoutFixture {
+    player_count: usize,
+    total_matches: i64,
+    player_names: Vec<String>,
+    title: String,
+    heroes: Vec<ScoutHeroFixture>,
+    portrait_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScoutHeroFixture {
+    hero_id: i64,
+    games: i64,
+    wins: i64,
+    losses: i64,
+    bans: i64,
+    primary_role: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +277,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Path::new(&output_dir).join("rust_blame_luke.gif"),
         blame_luke.bytes,
     )?;
+
+    if fixture.scout.portrait_mode != "cache_miss_fallback" {
+        return Err("scout fixture must explicitly select cache_miss_fallback".into());
+    }
+    let scout = ScoutData {
+        player_count: fixture.scout.player_count,
+        total_matches: Some(fixture.scout.total_matches),
+        heroes: fixture
+            .scout
+            .heroes
+            .iter()
+            .map(|hero| ScoutHero {
+                hero_id: hero.hero_id,
+                games: hero.games,
+                wins: hero.wins,
+                losses: hero.losses,
+                bans: hero.bans,
+                primary_role: hero.primary_role,
+            })
+            .collect(),
+    };
+    let scout_png = NativeScoutImageRenderer::default().render(&ScoutReportInput {
+        scout_data: scout,
+        player_names: fixture.scout.player_names,
+        title: fixture.scout.title,
+    })?;
+    fs::write(Path::new(&output_dir).join("rust_scout.png"), scout_png)?;
 
     let animation = render_post_match_gif(
         &fixture.animation.name,

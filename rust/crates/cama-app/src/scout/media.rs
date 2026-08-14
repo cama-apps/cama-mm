@@ -140,16 +140,16 @@ fn render_report(
             raster.fill_rect(
                 HERO_X,
                 image_y,
-                HERO_X + PORTRAIT_WIDTH as i32,
-                image_y + PORTRAIT_HEIGHT as i32,
+                HERO_X + PORTRAIT_WIDTH as i32 + 1,
+                image_y + PORTRAIT_HEIGHT as i32 + 1,
                 DARKER,
             );
-            raster.text(
-                HERO_X + 4,
-                image_y + 9,
-                &format!("H{}", hero.hero_id),
+            raster.rect_outline(
+                HERO_X,
+                image_y,
+                HERO_X + PORTRAIT_WIDTH as i32,
+                image_y + PORTRAIT_HEIGHT as i32,
                 GREY,
-                1,
             );
         }
         let games = hero.wins.saturating_add(hero.losses);
@@ -278,6 +278,17 @@ impl Raster {
     fn horizontal_line(&mut self, left: i32, right: i32, y: i32, color: Rgba) {
         for x in left..right {
             self.set(x, y, color);
+        }
+    }
+
+    fn rect_outline(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: Rgba) {
+        for x in left..=right {
+            self.set(x, top, color);
+            self.set(x, bottom, color);
+        }
+        for y in top..=bottom {
+            self.set(left, y, color);
+            self.set(right, y, color);
         }
     }
 

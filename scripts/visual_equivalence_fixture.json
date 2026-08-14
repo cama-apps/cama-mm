@@ -85,5 +85,17 @@
   },
   "blame_luke": {
     "selected_index": 4
+  },
+  "scout": {
+    "player_count": 3,
+    "total_matches": 24,
+    "player_names": ["Ada", "Linus", "Grace"],
+    "title": "SCOUT: Radiant",
+    "heroes": [
+      {"hero_id": 1, "games": 14, "wins": 9, "losses": 5, "bans": 3, "primary_role": 1},
+      {"hero_id": 2, "games": 11, "wins": 4, "losses": 7, "bans": 1, "primary_role": 2},
+      {"hero_id": 3, "games": 7, "wins": 5, "losses": 2, "bans": 0, "primary_role": 3}
+    ],
+    "portrait_mode": "cache_miss_fallback"
   }
 }
