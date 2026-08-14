@@ -44,6 +44,10 @@ impl Fixture {
             )
             .expect("count weather")
     }
+
+    fn repository(&self) -> DigWeatherRepository {
+        DigWeatherRepository::new(&self.path)
+    }
 }
 
 struct FakeGuilds(Vec<i64>);
@@ -102,6 +106,7 @@ struct FakeDiscord {
     sends: Mutex<Vec<(i64, Vec<DigWeatherEntry>)>>,
     entered: Option<Arc<Notify>>,
     release: Option<Arc<Notify>>,
+    record_before_release: bool,
 }
 
 #[async_trait]
@@ -121,13 +126,21 @@ impl DigWeatherDiscordPort for FakeDiscord {
         if let Some(entered) = &self.entered {
             entered.notify_one();
         }
+        if self.record_before_release {
+            self.sends
+                .lock()
+                .expect("send lock")
+                .push((channel_id, weather.to_vec()));
+        }
         if let Some(release) = &self.release {
             release.notified().await;
         }
-        self.sends
-            .lock()
-            .expect("send lock")
-            .push((channel_id, weather.to_vec()));
+        if !self.record_before_release {
+            self.sends
+                .lock()
+                .expect("send lock")
+                .push((channel_id, weather.to_vec()));
+        }
         if self.failures.contains(&channel_id) {
             Err(format!("channel {channel_id} rejected send"))
         } else {
@@ -164,6 +177,11 @@ fn test_worker(
         clock,
         interval,
     )
+}
+
+fn worker_context() -> (watch::Sender<bool>, WorkerContext) {
+    let (sender, receiver) = watch::channel(false);
+    (sender, WorkerContext::new(receiver))
 }
 
 #[tokio::test]
@@ -275,7 +293,334 @@ async fn cancellation_interrupts_in_flight_delivery_before_next_guild() {
         .expect("clean cancellation");
     assert!(discord.sends.lock().expect("send lock").is_empty());
     assert_eq!(fixture.weather_count(1, TOMORROW), 2);
-    assert_eq!(fixture.weather_count(2, TOMORROW), 0);
+    assert_eq!(fixture.weather_count(2, TOMORROW), 2);
+    assert_eq!(
+        fixture.repository().pending_broadcasts().unwrap().len(),
+        2,
+        "queued forecasts remain pending when cancellation wins delivery"
+    );
+}
+
+#[tokio::test]
+async fn failed_delivery_is_retried_by_fresh_worker_startup_without_double_roll() {
+    let fixture = Fixture::migrated();
+    let failed_discord = Arc::new(FakeDiscord {
+        failures: BTreeSet::from([602]),
+        ..FakeDiscord::default()
+    });
+    let first = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 602)]),
+        failed_discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (_shutdown, mut context) = worker_context();
+    first
+        .broadcast_rollover(TOMORROW, &mut context)
+        .await
+        .expect("send failure is isolated and durable");
+    assert_eq!(failed_discord.sends.lock().expect("send lock").len(), 1);
+    assert_eq!(fixture.repository().pending_broadcasts().unwrap().len(), 1);
+
+    let recovered_discord = Arc::new(FakeDiscord::default());
+    let recovered = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 602)]),
+        recovered_discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW, TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task =
+        tokio::spawn(async move { recovered.run(WorkerContext::new(shutdown_receiver)).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if recovered_discord.sends.lock().expect("send lock").len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("fresh worker drains pending weather at startup");
+    shutdown_sender.send(true).expect("request shutdown");
+    task.await
+        .expect("worker task did not panic")
+        .expect("clean restart shutdown");
+
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.weather_count(1, TOMORROW), 2);
+}
+
+#[tokio::test]
+async fn queue_failure_keeps_old_date_and_retries_without_duplicate_healthy_send() {
+    let fixture = Fixture::migrated();
+    Connection::open(&fixture.path)
+        .expect("open fixture")
+        .execute_batch(
+            "INSERT INTO dig_weather(guild_id, game_date, layer_name, weather_id)
+             VALUES
+                 (1, '2033-05-19', 'Dirt', 'earthworm_migration'),
+                 (1, '2033-05-19', 'Stone', 'fossil_rush'),
+                 (1, '2033-05-19', 'Crystal', 'crystal_resonance')",
+        )
+        .expect("seed invalid three-row forecast for one guild");
+    let discord = Arc::new(FakeDiscord::default());
+    let worker = test_worker(
+        &fixture.path,
+        vec![1, 2],
+        BTreeMap::from([(1, 601), (2, 602)]),
+        discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW, TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (_shutdown, mut context) = worker_context();
+    let mut last_weather_date = TODAY.to_owned();
+
+    worker
+        .poll_once(&mut last_weather_date, &mut context)
+        .await
+        .expect("one guild queue failure remains retryable");
+    assert_eq!(last_weather_date, TODAY);
+    assert_eq!(
+        discord
+            .sends
+            .lock()
+            .expect("send lock")
+            .iter()
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>(),
+        vec![602],
+        "healthy guild still drains on the failed queue wake"
+    );
+    assert_eq!(fixture.repository().pending_broadcasts().unwrap().len(), 0);
+
+    Connection::open(&fixture.path)
+        .expect("reopen fixture")
+        .execute(
+            "DELETE FROM dig_weather
+             WHERE guild_id=1 AND game_date=?1 AND layer_name='Crystal'",
+            [TOMORROW],
+        )
+        .expect("repair failed guild forecast");
+    worker
+        .poll_once(&mut last_weather_date, &mut context)
+        .await
+        .expect("later wake retries failed guild");
+
+    assert_eq!(last_weather_date, TOMORROW);
+    assert_eq!(
+        discord
+            .sends
+            .lock()
+            .expect("send lock")
+            .iter()
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>(),
+        vec![602, 601],
+        "the already-stamped healthy guild is not announced twice"
+    );
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.weather_count(1, TOMORROW), 2);
+    assert_eq!(fixture.weather_count(2, TOMORROW), 2);
+}
+
+#[tokio::test]
+async fn shutdown_after_rollover_queue_keeps_all_guilds_pending_for_restart() {
+    let fixture = Fixture::migrated();
+    let discord = Arc::new(FakeDiscord::default());
+    let worker = test_worker(
+        &fixture.path,
+        vec![1, 2],
+        BTreeMap::from([(1, 601), (2, 602)]),
+        discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    shutdown_sender
+        .send(true)
+        .expect("signal shutdown while queue is pending");
+    let mut context = WorkerContext::new(shutdown_receiver);
+    let mut last_weather_date = TODAY.to_owned();
+    worker
+        .poll_once(&mut last_weather_date, &mut context)
+        .await
+        .expect("bounded queue completes before shutdown return");
+
+    assert_eq!(last_weather_date, TODAY);
+    assert_eq!(fixture.weather_count(1, TOMORROW), 2);
+    assert_eq!(fixture.weather_count(2, TOMORROW), 2);
+    assert!(discord.sends.lock().expect("send lock").is_empty());
+    assert_eq!(fixture.repository().pending_broadcasts().unwrap().len(), 2);
+
+    let recovered_discord = Arc::new(FakeDiscord::default());
+    let recovered = test_worker(
+        &fixture.path,
+        vec![1, 2],
+        BTreeMap::from([(1, 601), (2, 602)]),
+        recovered_discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW, TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (recovery_shutdown_sender, recovery_shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        recovered
+            .run(WorkerContext::new(recovery_shutdown_receiver))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if recovered_discord.sends.lock().expect("send lock").len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("restart drains every queued guild");
+    recovery_shutdown_sender
+        .send(true)
+        .expect("request recovered worker shutdown");
+    task.await
+        .expect("recovered worker task did not panic")
+        .expect("clean recovered worker shutdown");
+
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        recovered_discord
+            .sends
+            .lock()
+            .expect("send lock")
+            .iter()
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>(),
+        vec![601, 602]
+    );
+}
+
+#[tokio::test]
+async fn durable_sent_stamp_prevents_repeated_rollover_announcement() {
+    let fixture = Fixture::migrated();
+    let discord = Arc::new(FakeDiscord::default());
+    let worker = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 602)]),
+        discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (_shutdown, mut context) = worker_context();
+    worker
+        .broadcast_rollover(TOMORROW, &mut context)
+        .await
+        .expect("first daily broadcast");
+    worker
+        .broadcast_rollover(TOMORROW, &mut context)
+        .await
+        .expect("idempotent repeated rollover");
+
+    assert_eq!(discord.sends.lock().expect("send lock").len(), 1);
+    assert_eq!(fixture.weather_count(1, TOMORROW), 2);
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn accepted_delivery_cancellation_leaves_ambiguous_outbox_for_retry() {
+    let fixture = Fixture::migrated();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let discord = Arc::new(FakeDiscord {
+        entered: Some(Arc::clone(&entered)),
+        release: Some(release),
+        record_before_release: true,
+        ..FakeDiscord::default()
+    });
+    let worker = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 602)]),
+        discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut context = WorkerContext::new(shutdown_receiver);
+        worker.broadcast_rollover(TOMORROW, &mut context).await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if discord.sends.lock().expect("send lock").len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("transport accepted delivery before cancellation");
+    shutdown_sender.send(true).expect("request shutdown");
+    task.await
+        .expect("worker task did not panic")
+        .expect("clean cancellation");
+    assert_eq!(fixture.repository().pending_broadcasts().unwrap().len(), 1);
+
+    let retry_discord = Arc::new(FakeDiscord::default());
+    let retry = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 602)]),
+        retry_discord.clone(),
+        Arc::new(SequenceClock::new([TOMORROW])),
+        Duration::from_secs(600),
+    );
+    let (_shutdown, mut context) = worker_context();
+    retry
+        .broadcast_rollover(TOMORROW, &mut context)
+        .await
+        .expect("retry ambiguous delivery");
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(retry_discord.sends.lock().expect("send lock").len(), 1);
+    assert_eq!(fixture.weather_count(1, TOMORROW), 2);
+    assert_eq!(
+        discord.sends.lock().expect("send lock").len(),
+        1,
+        "the first accepted delivery remains observable as a possible duplicate"
+    );
 }
 
 #[test]

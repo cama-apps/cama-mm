@@ -13,6 +13,12 @@ use thiserror::Error;
 use crate::open_runtime_connection;
 
 pub const DIG_WEATHER_ACTIVE_WINDOW_SECONDS: i64 = 7 * 86_400;
+/// `app_kv` namespace for durable per-guild/day Discord delivery state.
+///
+/// The forecast itself remains in `dig_weather`; this key records whether
+/// that immutable forecast still needs delivery or has received a successful
+/// transport acknowledgement.
+pub const DIG_WEATHER_BROADCAST_KEY_PREFIX: &str = "dig_weather_broadcast:";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DigWeatherDefinition {
@@ -232,6 +238,12 @@ pub struct DigWeatherEntry {
     pub weather_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigWeatherBroadcast {
+    pub guild_id: i64,
+    pub game_date: String,
+}
+
 impl DigWeatherEntry {
     #[must_use]
     pub fn definition(&self) -> Option<&'static DigWeatherDefinition> {
@@ -292,6 +304,30 @@ impl DigWeatherRepository {
         self.ensure_for_day_with_picker(guild_id, game_date, now, &mut picker)
     }
 
+    /// Ensure the immutable forecast and its pending Discord delivery marker
+    /// in one transaction. A pre-existing `sent` marker is never downgraded
+    /// to pending, so retries cannot create a second daily announcement.
+    pub fn ensure_for_day_and_queue_broadcast(
+        &self,
+        guild_id: i64,
+        game_date: &str,
+        now: i64,
+    ) -> Result<Vec<DigWeatherEntry>, DigWeatherRepositoryError> {
+        let mut picker = RandomWeatherPicker;
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let entries =
+            ensure_entries_in_transaction(&transaction, guild_id, game_date, now, &mut picker)?;
+        transaction.execute(
+            "INSERT INTO app_kv(guild_id, key, value)
+             VALUES (?1, ?2, 'pending')
+             ON CONFLICT(guild_id, key) DO NOTHING",
+            params![guild_id, broadcast_key(game_date)],
+        )?;
+        transaction.commit()?;
+        Ok(entries)
+    }
+
     fn ensure_for_day_with_picker(
         &self,
         guild_id: i64,
@@ -301,38 +337,98 @@ impl DigWeatherRepository {
     ) -> Result<Vec<DigWeatherEntry>, DigWeatherRepositoryError> {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut entries = load_entries(&transaction, guild_id, game_date)?;
-
-        if entries.len() > 2 {
-            return Err(DigWeatherRepositoryError::InvalidRowCount(entries.len()));
-        }
-
-        if entries.len() < 2 {
-            let populations = active_layer_populations(
-                &transaction,
-                guild_id,
-                now.saturating_sub(DIG_WEATHER_ACTIVE_WINDOW_SECONDS),
-            )?;
-            if entries.is_empty() {
-                let first_layer = choose_first_layer(&populations, picker);
-                insert_random_weather(&transaction, guild_id, game_date, first_layer, picker)?;
-                entries = load_entries(&transaction, guild_id, game_date)?;
-            }
-
-            if entries.len() == 1 {
-                let first_layer = entries[0].layer_name.as_str();
-                let second_layer = choose_second_layer(&populations, first_layer, picker);
-                insert_random_weather(&transaction, guild_id, game_date, second_layer, picker)?;
-                entries = load_entries(&transaction, guild_id, game_date)?;
-            }
-        }
-
-        if entries.len() != 2 {
-            return Err(DigWeatherRepositoryError::InvalidRowCount(entries.len()));
-        }
+        let entries =
+            ensure_entries_in_transaction(&transaction, guild_id, game_date, now, picker)?;
         transaction.commit()?;
         Ok(entries)
     }
+
+    /// Return unacknowledged daily forecasts in deterministic order. The
+    /// weather rows are immutable and loaded separately by the worker, so the
+    /// outbox only needs to carry guild/date identity.
+    pub fn pending_broadcasts(
+        &self,
+    ) -> Result<Vec<DigWeatherBroadcast>, DigWeatherRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let prefix_length = i64::try_from(DIG_WEATHER_BROADCAST_KEY_PREFIX.len())
+            .expect("broadcast key prefix length fits SQLite integer");
+        let mut statement = connection.prepare(
+            "SELECT guild_id, substr(key, ?1 + 1) AS game_date
+             FROM app_kv
+             WHERE substr(key, 1, ?1) = ?2 AND value = 'pending'
+             ORDER BY guild_id, key",
+        )?;
+        let rows = statement.query_map(
+            params![prefix_length, DIG_WEATHER_BROADCAST_KEY_PREFIX],
+            |row| {
+                Ok(DigWeatherBroadcast {
+                    guild_id: row.get(0)?,
+                    game_date: row.get(1)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Stamp a successful transport response without removing the daily
+    /// record. Returning `false` means another worker already acknowledged it
+    /// or the marker was replaced/removed, so callers must not infer a second
+    /// delivery from a stale response.
+    pub fn mark_broadcast_sent(
+        &self,
+        guild_id: i64,
+        game_date: &str,
+    ) -> Result<bool, DigWeatherRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        Ok(connection.execute(
+            "UPDATE app_kv SET value = 'sent'
+             WHERE guild_id = ?1 AND key = ?2 AND value = 'pending'",
+            params![guild_id, broadcast_key(game_date)],
+        )? == 1)
+    }
+}
+
+fn broadcast_key(game_date: &str) -> String {
+    format!("{DIG_WEATHER_BROADCAST_KEY_PREFIX}{game_date}")
+}
+
+fn ensure_entries_in_transaction(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    game_date: &str,
+    now: i64,
+    picker: &mut impl WeatherPicker,
+) -> Result<Vec<DigWeatherEntry>, DigWeatherRepositoryError> {
+    let mut entries = load_entries(transaction, guild_id, game_date)?;
+
+    if entries.len() > 2 {
+        return Err(DigWeatherRepositoryError::InvalidRowCount(entries.len()));
+    }
+
+    if entries.len() < 2 {
+        let populations = active_layer_populations(
+            transaction,
+            guild_id,
+            now.saturating_sub(DIG_WEATHER_ACTIVE_WINDOW_SECONDS),
+        )?;
+        if entries.is_empty() {
+            let first_layer = choose_first_layer(&populations, picker);
+            insert_random_weather(transaction, guild_id, game_date, first_layer, picker)?;
+            entries = load_entries(transaction, guild_id, game_date)?;
+        }
+
+        if entries.len() == 1 {
+            let first_layer = entries[0].layer_name.as_str();
+            let second_layer = choose_second_layer(&populations, first_layer, picker);
+            insert_random_weather(transaction, guild_id, game_date, second_layer, picker)?;
+            entries = load_entries(transaction, guild_id, game_date)?;
+        }
+    }
+
+    if entries.len() != 2 {
+        return Err(DigWeatherRepositoryError::InvalidRowCount(entries.len()));
+    }
+    Ok(entries)
 }
 
 fn load_entries(
@@ -559,6 +655,92 @@ mod tests {
             .expect("persisted forecast");
 
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn broadcast_outbox_and_sent_stamp_are_per_day_idempotent() {
+        let fixture = Fixture::migrated();
+        let repository = DigWeatherRepository::new(&fixture.path);
+
+        let first = repository
+            .ensure_for_day_and_queue_broadcast(GUILD, TODAY, NOW)
+            .expect("queue first forecast");
+        let second = repository
+            .ensure_for_day_and_queue_broadcast(GUILD, TODAY, NOW)
+            .expect("requeue persisted forecast");
+        assert_eq!(second, first);
+        assert_eq!(
+            repository.pending_broadcasts().unwrap(),
+            vec![DigWeatherBroadcast {
+                guild_id: GUILD,
+                game_date: TODAY.to_owned(),
+            }]
+        );
+
+        assert!(
+            repository
+                .mark_broadcast_sent(GUILD, TODAY)
+                .expect("stamp successful delivery")
+        );
+        assert!(repository.pending_broadcasts().unwrap().is_empty());
+        assert!(
+            !repository
+                .mark_broadcast_sent(GUILD, TODAY)
+                .expect("re-stamp already acknowledged delivery")
+        );
+
+        repository
+            .ensure_for_day_and_queue_broadcast(GUILD, TODAY, NOW)
+            .expect("re-read stamped forecast");
+        assert!(repository.pending_broadcasts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_broadcasts_require_exact_namespace_prefix() {
+        let fixture = Fixture::migrated();
+        let repository = DigWeatherRepository::new(&fixture.path);
+        repository
+            .ensure_for_day_and_queue_broadcast(GUILD, TODAY, NOW)
+            .expect("queue real broadcast");
+        Connection::open(&fixture.path)
+            .expect("open fixture")
+            .execute(
+                "INSERT INTO app_kv(guild_id, key, value)
+                 VALUES (?1, 'digXweather_broadcast:2033-05-19', 'pending')",
+                params![GUILD],
+            )
+            .expect("insert lookalike namespace row");
+
+        assert_eq!(
+            repository.pending_broadcasts().unwrap(),
+            vec![DigWeatherBroadcast {
+                guild_id: GUILD,
+                game_date: TODAY.to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn broadcast_outbox_rolls_back_forecast_when_marker_cannot_be_written() {
+        let fixture = Fixture::migrated();
+        Connection::open(&fixture.path)
+            .expect("open fixture")
+            .execute("DROP TABLE app_kv", [])
+            .expect("remove marker table");
+        let repository = DigWeatherRepository::new(&fixture.path);
+
+        repository
+            .ensure_for_day_and_queue_broadcast(GUILD, TODAY, NOW)
+            .expect_err("missing marker table must abort queue transaction");
+        let weather_count = Connection::open(&fixture.path)
+            .expect("reopen fixture")
+            .query_row(
+                "SELECT COUNT(*) FROM dig_weather WHERE guild_id=?1 AND game_date=?2",
+                params![GUILD, TODAY],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count rolled-back forecast");
+        assert_eq!(weather_count, 0);
     }
 
     #[test]

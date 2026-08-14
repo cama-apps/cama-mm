@@ -3,8 +3,10 @@
 //! The worker starts after the gateway's Ready event, snapshots the current
 //! game date without broadcasting it, and then checks every ten minutes. On a
 //! rollover it records one forecast per live guild through SQLite's blocking
-//! pool and attempts one Discord announcement, matching Python's in-memory
-//! `_last_weather_date` delivery semantics.
+//! pool, queues a per-guild/day delivery marker, and drains that marker through
+//! Discord. The forecast and delivery state survive a process restart even
+//! though the startup date snapshot still follows Python's in-memory
+//! `_last_weather_date` suppression.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository};
+use cama_db::dig_weather::{DigWeatherBroadcast, DigWeatherEntry, DigWeatherRepository};
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
@@ -183,6 +185,45 @@ impl DigWeatherWorker {
         .map_err(|error| format!("Dig weather SQLite task failed: {error}"))?
     }
 
+    async fn ensure_weather_and_queue(
+        &self,
+        guild_id: i64,
+        game_date: String,
+        now: i64,
+    ) -> Result<(), String> {
+        let repository = self.repository.clone();
+        tokio::task::spawn_blocking(move || {
+            repository
+                .ensure_for_day_and_queue_broadcast(guild_id, &game_date, now)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("Dig weather SQLite queue task failed: {error}"))?
+    }
+
+    async fn pending_broadcasts(&self) -> Result<Vec<DigWeatherBroadcast>, String> {
+        let repository = self.repository.clone();
+        tokio::task::spawn_blocking(move || {
+            repository
+                .pending_broadcasts()
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("Dig weather outbox read task failed: {error}"))?
+    }
+
+    async fn mark_broadcast_sent(&self, guild_id: i64, game_date: String) -> Result<bool, String> {
+        let repository = self.repository.clone();
+        tokio::task::spawn_blocking(move || {
+            repository
+                .mark_broadcast_sent(guild_id, &game_date)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("Dig weather outbox stamp task failed: {error}"))?
+    }
+
     async fn channel_for_guild(
         &self,
         guild_id: i64,
@@ -207,12 +248,33 @@ impl DigWeatherWorker {
         fallback_channels.get(&guild_id).copied()
     }
 
-    async fn broadcast_rollover(
-        &self,
-        game_date: &str,
-        context: &mut WorkerContext,
-    ) -> Result<(), String> {
+    async fn queue_rollover(&self, game_date: &str) -> Result<bool, String> {
         let guild_ids = self
+            .guild_source
+            .live_guild_ids()?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let now = self.clock.now();
+        let mut complete = true;
+
+        for guild_id in guild_ids {
+            if let Err(error) = self
+                .ensure_weather_and_queue(guild_id, game_date.to_owned(), now)
+                .await
+            {
+                warn!(guild_id, %error, "failed to roll Dig weather for guild");
+                complete = false;
+            }
+        }
+        Ok(complete)
+    }
+
+    async fn drain_pending(&self, context: &mut WorkerContext) -> Result<(), String> {
+        let pending = self.pending_broadcasts().await?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let live_guilds = self
             .guild_source
             .live_guild_ids()?
             .into_iter()
@@ -223,39 +285,80 @@ impl DigWeatherWorker {
             .into_iter()
             .map(|destination| (destination.guild_id, destination.channel_id))
             .collect::<BTreeMap<_, _>>();
-        let now = self.clock.now();
 
-        for guild_id in guild_ids {
+        for delivery in pending {
             if context.shutdown_requested() {
                 return Ok(());
             }
+            if !live_guilds.contains(&delivery.guild_id) {
+                continue;
+            }
             let weather = match self
-                .ensure_weather(guild_id, game_date.to_owned(), now)
+                .ensure_weather(
+                    delivery.guild_id,
+                    delivery.game_date.clone(),
+                    self.clock.now(),
+                )
                 .await
             {
                 Ok(weather) => weather,
                 Err(error) => {
-                    warn!(guild_id, %error, "failed to roll Dig weather for guild");
+                    warn!(
+                        guild_id = delivery.guild_id,
+                        game_date = %delivery.game_date,
+                        %error,
+                        "failed to load queued Dig weather"
+                    );
                     continue;
                 }
             };
-            let Some(channel_id) = self.channel_for_guild(guild_id, &fallback_channels).await
+            let Some(channel_id) = self
+                .channel_for_guild(delivery.guild_id, &fallback_channels)
+                .await
             else {
-                debug!(guild_id, "no Dig weather broadcast channel found");
+                debug!(
+                    guild_id = delivery.guild_id,
+                    game_date = %delivery.game_date,
+                    "no Dig weather broadcast channel found"
+                );
                 continue;
             };
 
-            let delivery = self.discord.announce(channel_id, &weather);
             let result = tokio::select! {
-                result = delivery => result,
+                result = self.discord.announce(channel_id, &weather) => result,
                 () = context.cancelled() => return Ok(()),
             };
             match result {
-                Ok(()) => info!(guild_id, channel_id, game_date, "broadcast Dig weather"),
+                Ok(()) => {
+                    match self
+                        .mark_broadcast_sent(delivery.guild_id, delivery.game_date.clone())
+                        .await
+                    {
+                        Ok(true) => info!(
+                            guild_id = delivery.guild_id,
+                            channel_id,
+                            game_date = %delivery.game_date,
+                            "broadcast Dig weather"
+                        ),
+                        Ok(false) => debug!(
+                            guild_id = delivery.guild_id,
+                            channel_id,
+                            game_date = %delivery.game_date,
+                            "Dig weather broadcast was already stamped"
+                        ),
+                        Err(error) => warn!(
+                            guild_id = delivery.guild_id,
+                            channel_id,
+                            game_date = %delivery.game_date,
+                            %error,
+                            "Dig weather sent but durable stamp failed; retry may duplicate"
+                        ),
+                    }
+                }
                 Err(error) => warn!(
-                    guild_id,
+                    guild_id = delivery.guild_id,
                     channel_id,
-                    game_date,
+                    game_date = %delivery.game_date,
                     %error,
                     "failed to broadcast Dig weather for guild"
                 ),
@@ -264,20 +367,41 @@ impl DigWeatherWorker {
         Ok(())
     }
 
+    #[cfg(test)]
+    async fn broadcast_rollover(
+        &self,
+        game_date: &str,
+        context: &mut WorkerContext,
+    ) -> Result<(), String> {
+        self.queue_rollover(game_date).await?;
+        self.drain_pending(context).await
+    }
+
     async fn poll_once(
         &self,
         last_weather_date: &mut String,
         context: &mut WorkerContext,
     ) -> Result<(), String> {
         let today = self.clock.game_date();
-        if today == *last_weather_date {
-            return Ok(());
+        if today != *last_weather_date {
+            // Queue the immutable forecast before advancing the in-memory
+            // marker. A failed queue transaction is therefore retried on the
+            // next wake, while the subsequent Discord delivery is durable.
+            let queue_complete = match self.queue_rollover(&today).await {
+                Ok(complete) => complete,
+                Err(error) => {
+                    warn!(game_date = %today, %error, "failed to enumerate Dig weather guilds");
+                    false
+                }
+            };
+            if queue_complete && !context.shutdown_requested() {
+                *last_weather_date = today;
+            }
         }
-
-        // Python advances this in-memory marker before guild I/O and does not
-        // retry failed announcements until the next date rollover.
-        *last_weather_date = today.clone();
-        self.broadcast_rollover(&today, context).await
+        if let Err(error) = self.drain_pending(context).await {
+            warn!(%error, "failed to drain queued Dig weather broadcasts");
+        }
+        Ok(())
     }
 }
 
