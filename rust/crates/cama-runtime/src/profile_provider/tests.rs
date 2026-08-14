@@ -346,14 +346,24 @@ fn insert_rating_chart_fixture(database: &NamedTempFile) {
 }
 
 fn insert_gambling_chart_fixture(database: &NamedTempFile) {
+    insert_gambling_chart_fixture_for(
+        database,
+        &[
+            (10_i64, 1_i64, 1_700_000_000_i64, Some(20_i64)),
+            (11_i64, 2_i64, 1_700_000_100_i64, None),
+        ],
+    );
+}
+
+fn insert_gambling_chart_fixture_for(
+    database: &NamedTempFile,
+    events: &[(i64, i64, i64, Option<i64>)],
+) {
     let connection = Connection::open(database.path()).expect("open profile fixture");
     connection
         .pragma_update(None, "foreign_keys", false)
         .expect("disable legacy foreign-key mismatch for fixture row");
-    for (match_id, winning_team, bet_time, payout) in [
-        (10_i64, 1_i64, 1_700_000_000_i64, Some(20_i64)),
-        (11_i64, 2_i64, 1_700_000_100_i64, None),
-    ] {
+    for &(match_id, winning_team, bet_time, payout) in events {
         connection
             .execute(
                 "INSERT INTO matches (
@@ -1488,6 +1498,19 @@ fn test_gambling_loads_balance_impact_and_chart_series_concurrently() {
     assert!(page.fields.iter().any(|field| field.name == "Performance"));
     assert_eq!(page.attachments.len(), 1);
     assert_eq!(page.attachments[0].filename, "gamba_chart.png");
+}
+
+#[test]
+fn test_gambling_does_not_attach_chart_for_one_event() {
+    let database = migrated_player_fixture();
+    insert_gambling_chart_fixture_for(
+        &database,
+        &[(10_i64, 1_i64, 1_700_000_000_i64, Some(20_i64))],
+    );
+
+    let page = profile_page(&database, ProfileTab::Gambling);
+    assert_eq!(page.title, "Profile: Player > Gambling");
+    assert!(page.attachments.is_empty());
 }
 
 #[test]

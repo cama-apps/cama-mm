@@ -10,10 +10,11 @@ use cama_app::blame_luke_media::{
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
-    draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
-    draw_matches_table, draw_prediction_market_chart, draw_rating_distribution_with_median,
-    draw_rating_history_chart, draw_role_graph,
+    AdvantageData, BalancePoint, GambaInfo, GambaPoint, GambaStats, HeroPerformanceEntry, MatchRow,
+    RatingHistoryEntry, draw_advantage_graph, draw_balance_chart, draw_gamba_chart,
+    draw_hero_performance_chart, draw_lane_distribution, draw_matches_table,
+    draw_prediction_market_chart, draw_rating_distribution_with_median, draw_rating_history_chart,
+    draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -46,6 +47,7 @@ struct Fixture {
     terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
+    gamba: GambaFixture,
     rating_history: RatingHistoryFixture,
     rating_distribution: RatingDistributionFixture,
     rating_analysis: RatingAnalysisFixture,
@@ -62,6 +64,33 @@ struct BalanceFixture {
     username: String,
     series: Vec<(i32, i64, String)>,
     source_totals: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaFixture {
+    username: String,
+    degen_score: i32,
+    degen_title: String,
+    series: Vec<GambaPointFixture>,
+    stats: GambaStatsFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaPointFixture {
+    event_number: i32,
+    cumulative: i64,
+    source: String,
+    outcome: Option<String>,
+    leverage: i64,
+    profit: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaStatsFixture {
+    total_bets: usize,
+    win_rate: f64,
+    net_pnl: i64,
+    roi: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -829,6 +858,62 @@ fn native_rating_history_fixture_render_is_deterministic_and_nonblank() {
             .count()
             > 1_000
     );
+}
+
+#[test]
+fn native_profile_gamba_fixture_matches_live_attachment_contract() {
+    let fixture = fixture();
+    let series = fixture
+        .gamba
+        .series
+        .iter()
+        .map(|point| GambaPoint {
+            event_number: point.event_number,
+            cumulative: point.cumulative,
+            info: GambaInfo {
+                source: point.source.clone(),
+                outcome: point.outcome.clone(),
+                leverage: point.leverage,
+                profit: point.profit,
+            },
+        })
+        .collect::<Vec<_>>();
+    let stats = GambaStats {
+        total_bets: fixture.gamba.stats.total_bets,
+        win_rate: fixture.gamba.stats.win_rate,
+        net_pnl: fixture.gamba.stats.net_pnl,
+        roi: fixture.gamba.stats.roi,
+    };
+    let first = draw_gamba_chart(
+        &fixture.gamba.username,
+        fixture.gamba.degen_score,
+        &fixture.gamba.degen_title,
+        &series,
+        stats,
+    )
+    .into_inner();
+    let second = draw_gamba_chart(
+        &fixture.gamba.username,
+        fixture.gamba.degen_score,
+        &fixture.gamba.degen_title,
+        &series,
+        stats,
+    )
+    .into_inner();
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("decode profile Gamba PNG");
+    assert_eq!((raster.width, raster.height), (700, 400));
+    for expected in [
+        [87, 242, 135, 255],
+        [237, 66, 69, 255],
+        [185, 187, 190, 255],
+        [47, 49, 54, 255],
+    ] {
+        assert!(
+            raster.pixels.chunks_exact(4).any(|pixel| pixel == expected),
+            "Gamba fixture should preserve semantic color {expected:?}"
+        );
+    }
 }
 
 #[test]

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from scripts.visual_equivalence import (
     ANIMATION_MIN_FOREGROUND_GRID_IOU,
@@ -20,10 +20,12 @@ from scripts.visual_equivalence import (
     DEFAULT_FIXTURE,
     RATING_DISTRIBUTION_COLOR_DISTANCE,
     RATING_DISTRIBUTION_COLOR_VARIANTS,
+    _gamba_marker_specs,
     check_blame_luke,
     check_explosion,
     check_hero_grid,
     check_pet,
+    check_profile_gamba,
     check_profile_hero_performance,
     check_profile_lane_distribution,
     check_profile_recent_matches,
@@ -41,6 +43,13 @@ from scripts.visual_equivalence import (
     render_python,
     rgba_pixels,
 )
+from utils.drawing._common import (
+    DISCORD_BG,
+    DISCORD_GREEN,
+    DISCORD_GREY,
+    DISCORD_RED,
+)
+from utils.drawing.gamba import _draw_event_marker, _marker_radius
 
 
 def test_visual_fixture_has_typed_chart_and_animation_inputs():
@@ -49,6 +58,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     animation = fixture["animation"]
     pinnacle = fixture["pinnacle"]
     balance = fixture["balance"]
+    gamba = fixture["gamba"]
     rating_history = fixture["rating_history"]
     rating_distribution = fixture["rating_distribution"]
     rating_analysis = fixture["rating_analysis"]
@@ -70,6 +80,16 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert isinstance(balance["series"], list)
     assert all(len(point) == 3 for point in balance["series"])
     assert isinstance(balance["source_totals"], dict)
+    assert gamba["username"] == "Visual Gambler"
+    assert len(gamba["series"]) == 8
+    assert {point["source"] for point in gamba["series"]} == {
+        "bet",
+        "wheel",
+        "double_or_nothing",
+    }
+    assert any(point["cumulative"] > 0 for point in gamba["series"])
+    assert any(point["cumulative"] < 0 for point in gamba["series"])
+    assert gamba["stats"]["total_bets"] == 6
     assert rating_history["username"] == "Client 47"
     assert len(rating_history["entries"]) == 6
     assert any(entry["rating"] is None for entry in rating_history["entries"])
@@ -364,6 +384,129 @@ def test_profile_recent_duration_is_rendered_at_python_boundary(tmp_path: Path):
     assert (first / "python_profile_recent_matches.png").read_bytes() != (
         second / "python_profile_recent_matches.png"
     ).read_bytes()
+
+
+def test_profile_gamba_fixture_renders_all_event_types_and_is_sensitive_to_stats(
+    tmp_path: Path,
+):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    render_python(fixture, first)
+    fixture["gamba"]["stats"]["net_pnl"] = -123
+    fixture["gamba"]["stats"]["roi"] = -0.75
+    render_python(fixture, second)
+    check_profile_gamba(
+        first / "python_profile_gamba.png",
+        first / "python_profile_gamba.png",
+        fixture["gamba"],
+    )
+    assert (first / "python_profile_gamba.png").read_bytes() != (
+        second / "python_profile_gamba.png"
+    ).read_bytes()
+
+
+def test_profile_gamba_gate_rejects_missing_positive_fill(tmp_path: Path):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    render_python(fixture, tmp_path)
+    reference = tmp_path / "python_profile_gamba.png"
+    with Image.open(reference) as source:
+        image = source.convert("RGBA")
+        pixels = list(image.get_flattened_data())
+        for index, pixel in enumerate(pixels):
+            x = index % image.width
+            y = index // image.width
+            if not (60 <= x < 674 and 88 <= y < 310):
+                continue
+            if (
+                sum(
+                    abs(channel - expected)
+                    for channel, expected in zip(pixel[:3], (75, 120, 80))
+                )
+                <= 72
+            ):
+                # Preserve foreground occupancy so the independent semantic
+                # fill mask, rather than the coarse blank-image guard, fails.
+                pixels[index] = (88, 101, 242, 255)
+        image.putdata(pixels)
+        missing_fill = tmp_path / "missing_positive_fill.png"
+        image.save(missing_fill)
+    with pytest.raises(AssertionError, match="positive fill layer is missing"):
+        check_profile_gamba(reference, missing_fill, fixture["gamba"])
+
+
+def test_profile_gamba_gate_rejects_erased_and_substituted_marker_shapes(
+    tmp_path: Path,
+):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    render_python(fixture, tmp_path)
+    reference = tmp_path / "python_profile_gamba.png"
+    marker_specs = _gamba_marker_specs(fixture["gamba"])
+
+    for kind in ("bet", "wheel", "leverage", "double_or_nothing"):
+        for mutation, replacement in (
+            ("erased", (54, 57, 63, 255)),
+            ("substituted", (88, 101, 242, 255)),
+        ):
+            with Image.open(reference) as source:
+                image = source.convert("RGBA")
+                pixels = list(image.get_flattened_data())
+                for center_x, center_y, _outcome in marker_specs[kind]:
+                    for y in range(center_y - 7, center_y + 8):
+                        for x in range(center_x - 7, center_x + 8):
+                            if (x - center_x) ** 2 + (y - center_y) ** 2 <= 7**2:
+                                pixels[y * image.width + x] = replacement
+                image.putdata(pixels)
+                candidate = tmp_path / f"{mutation}_{kind}.png"
+                image.save(candidate)
+            with pytest.raises(AssertionError, match=rf"{kind} marker"):
+                check_profile_gamba(reference, candidate, fixture["gamba"])
+
+
+def test_profile_gamba_gate_rejects_every_cross_kind_marker_substitution(
+    tmp_path: Path,
+):
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    render_python(fixture, tmp_path)
+    reference = tmp_path / "python_profile_gamba.png"
+    marker_specs = _gamba_marker_specs(fixture["gamba"])
+    replacement_infos = {
+        "bet": {"source": "bet", "leverage": 1},
+        "wheel": {"source": "wheel", "leverage": 1},
+        "leverage": {"source": "bet", "leverage": 2},
+        "double_or_nothing": {"source": "double_or_nothing", "leverage": 1},
+    }
+    outcome_colors = {
+        "won": DISCORD_GREEN,
+        "lost": DISCORD_RED,
+        "neutral": DISCORD_GREY,
+    }
+
+    for target_kind, specs in marker_specs.items():
+        for replacement_kind, replacement_info in replacement_infos.items():
+            if target_kind == replacement_kind:
+                continue
+            with Image.open(reference) as source:
+                image = source.convert("RGBA")
+                draw = ImageDraw.Draw(image)
+                for center_x, center_y, outcome in specs:
+                    draw.ellipse(
+                        (center_x - 7, center_y - 7, center_x + 7, center_y + 7),
+                        fill=DISCORD_BG,
+                    )
+                    _draw_event_marker(
+                        draw,
+                        (center_x, center_y),
+                        replacement_info,
+                        outcome_colors[outcome],
+                        _marker_radius(replacement_info),
+                    )
+                candidate = tmp_path / f"{target_kind}_as_{replacement_kind}.png"
+                image.save(candidate)
+            with pytest.raises(AssertionError, match=rf"{target_kind} marker"):
+                check_profile_gamba(reference, candidate, fixture["gamba"])
 
 
 def test_rating_distribution_median_is_used_at_python_boundary(tmp_path: Path):

@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import random
 import subprocess
 import sys
@@ -183,6 +184,22 @@ PROFILE_RECENT_MAX_MAE = 0.090
 PROFILE_RECENT_MAX_RMS = 0.200
 PROFILE_RECENT_MIN_FOREGROUND_GRID_IOU = 0.80
 PROFILE_RECENT_MIN_FOREGROUND_COUNT_RATIO = 0.55
+# The live `/profile` Gambling chart has a deliberately native bitmap-font
+# backend on the Rust side. Keep the whole-frame gate broad enough for that
+# font difference, while the independent semantic masks below keep every
+# authored chart layer present and in the same coarse region.
+PROFILE_GAMBA_MAX_MAE = 0.110
+PROFILE_GAMBA_MAX_RMS = 0.240
+PROFILE_GAMBA_MIN_FOREGROUND_GRID_IOU = 0.72
+PROFILE_GAMBA_MIN_FOREGROUND_COUNT_RATIO = 0.50
+PROFILE_GAMBA_MIN_LAYER_COUNT_RATIO = 0.35
+PROFILE_GAMBA_MIN_LAYER_GRID_IOU = 0.45
+PROFILE_GAMBA_COLOR_DISTANCE = 72
+PROFILE_GAMBA_MIN_MARKER_ROLE_RATIO = 0.18
+PROFILE_GAMBA_MIN_MARKER_SHAPE_IOU = 0.60
+PROFILE_GAMBA_MARKER_COLOR_DISTANCE = 55
+PROFILE_GAMBA_MARKER_DARK_DISTANCE = 18
+PROFILE_GAMBA_MARKER_WHITE_DISTANCE = 40
 
 
 class FixedDateTime(dt.datetime):
@@ -220,6 +237,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "terminal_crash",
         "pinnacle",
         "balance",
+        "gamba",
         "rating_history",
         "rating_distribution",
         "rating_analysis",
@@ -233,7 +251,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "profile",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, gamba, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
         )
     return fixture
 
@@ -249,6 +267,7 @@ def render_python(
         draw_advantage_graph,
         draw_balance_chart,
         draw_calibration_curve,
+        draw_gamba_chart,
         draw_hero_grid,
         draw_prediction_over_time,
         draw_rating_comparison_chart,
@@ -285,6 +304,36 @@ def render_python(
         {str(source): int(total) for source, total in balance["source_totals"].items()},
     ).getvalue()
     (output_dir / "python_balance.png").write_bytes(balance_bytes)
+
+    # This is the live `/profile` Gambling attachment boundary. `/wrapped`
+    # intentionally owns a separate chart path and is not included here.
+    gamba = fixture["gamba"]
+    gamba_bytes = draw_gamba_chart(
+        username=str(gamba["username"]),
+        degen_score=int(gamba["degen_score"]),
+        degen_title=str(gamba["degen_title"]),
+        degen_emoji=str(gamba.get("degen_emoji", "")),
+        pnl_series=[
+            (
+                int(point["event_number"]),
+                int(point["cumulative"]),
+                {
+                    "source": str(point["source"]),
+                    "outcome": str(point["outcome"]),
+                    "leverage": int(point["leverage"]),
+                    "profit": int(point["profit"]),
+                },
+            )
+            for point in gamba["series"]
+        ],
+        stats={
+            "total_bets": int(gamba["stats"]["total_bets"]),
+            "win_rate": float(gamba["stats"]["win_rate"]),
+            "net_pnl": int(gamba["stats"]["net_pnl"]),
+            "roi": float(gamba["stats"]["roi"]),
+        },
+    ).getvalue()
+    (output_dir / "python_profile_gamba.png").write_bytes(gamba_bytes)
 
     rating_history = fixture["rating_history"]
     rating_history_bytes = draw_rating_history_chart(
@@ -1715,6 +1764,294 @@ def check_profile_recent_matches(
     )
 
 
+def _gamba_layer_structure(
+    rgba: bytes,
+    size: tuple[int, int],
+    expected: tuple[int, int, int],
+    region: tuple[int, int, int, int],
+    *,
+    distance: int = PROFILE_GAMBA_COLOR_DISTANCE,
+    grid: tuple[int, int] = (14, 8),
+) -> tuple[int, set[tuple[int, int]]]:
+    """Locate one authored Gamba layer independently of whole-frame pixels."""
+
+    width, height = size
+    left, top, right, bottom = region
+    columns, rows = grid
+    count = 0
+    cells: set[tuple[int, int]] = set()
+    for pixel_index in range(width * height):
+        x = pixel_index % width
+        y = pixel_index // width
+        if not left <= x < right or not top <= y < bottom:
+            continue
+        offset = pixel_index * 4
+        pixel = rgba[offset : offset + 3]
+        if sum(abs(channel - target) for channel, target in zip(pixel, expected)) > distance:
+            continue
+        count += 1
+        cells.add((x * columns // width, y * rows // height))
+    return count, cells
+
+
+def _compare_gamba_layer(
+    reference: bytes,
+    candidate: bytes,
+    size: tuple[int, int],
+    *,
+    label: str,
+    expected: tuple[int, int, int],
+    region: tuple[int, int, int, int],
+    minimum_count_ratio: float = PROFILE_GAMBA_MIN_LAYER_COUNT_RATIO,
+    minimum_grid_iou: float = PROFILE_GAMBA_MIN_LAYER_GRID_IOU,
+) -> tuple[float, float]:
+    reference_count, reference_cells = _gamba_layer_structure(reference, size, expected, region)
+    candidate_count, candidate_cells = _gamba_layer_structure(candidate, size, expected, region)
+    if reference_count == 0 or not reference_cells:
+        raise AssertionError(f"profile gamba {label} reference layer is empty")
+    ratio = candidate_count / reference_count
+    union = reference_cells | candidate_cells
+    iou = len(reference_cells & candidate_cells) / len(union) if union else 1.0
+    if ratio < minimum_count_ratio:
+        raise AssertionError(
+            f"profile gamba {label} layer is missing: count ratio {ratio:.3f} "
+            f"< {minimum_count_ratio:.3f}"
+        )
+    if iou < minimum_grid_iou:
+        raise AssertionError(
+            f"profile gamba {label} layer layout drifted: grid IoU {iou:.3f} "
+            f"< {minimum_grid_iou:.3f}"
+        )
+    return ratio, iou
+
+
+def _gamba_marker_specs(
+    gamba: dict[str, Any],
+) -> dict[str, list[tuple[int, int, str]]]:
+    """Project fixture marker centers and preserve their authored shape/color."""
+
+    series = gamba["series"]
+    values = [float(point["cumulative"]) for point in series]
+    logs = [
+        (1.0 if value > 0 else -1.0 if value < 0 else 0.0) * math.log1p(abs(value))
+        for value in values
+    ] or [0.0]
+    minimum = min(min(logs), 0.0)
+    maximum = max(max(logs), 0.0)
+    span = max(abs(maximum - minimum), 0.1)
+    minimum -= span * 0.1
+    maximum += span * 0.1
+    log_span = max(maximum - minimum, 1e-9)
+    result: dict[str, list[tuple[int, int, str]]] = {}
+    for point in series:
+        x = 60 + int(
+            (int(point["event_number"]) - 1) / max(len(series) - 1, 1) * 614
+        )
+        value = float(point["cumulative"])
+        signed = (1.0 if value > 0 else -1.0 if value < 0 else 0.0) * math.log1p(abs(value))
+        y = 88 + int((maximum - signed) / log_span * 222)
+        source = str(point["source"])
+        if source == "double_or_nothing":
+            kind = "double_or_nothing"
+        elif source == "wheel":
+            kind = "wheel"
+        elif int(point.get("leverage", 1)) > 1:
+            kind = "leverage"
+        else:
+            kind = "bet"
+        result.setdefault(kind, []).append((x, y, str(point.get("outcome", "lost"))))
+    return result
+
+
+def _gamba_marker_signature(
+    rgba: bytes,
+    size: tuple[int, int],
+    specs: list[tuple[int, int, str]],
+    *,
+    radius: int = 7,
+) -> tuple[dict[str, int], set[tuple[int, str, int, int]]]:
+    """Capture local shape and semantic-color occupancy for one marker kind."""
+
+    width, height = size
+    palette = {
+        "white": (255, 255, 255),
+        "dark": (47, 49, 54),
+        "won": (87, 242, 135),
+        "lost": (237, 66, 69),
+        "neutral": (185, 187, 190),
+    }
+    counts = {"outcome": 0, "dark": 0, "white": 0}
+    cells: set[tuple[int, str, int, int]] = set()
+    for marker_index, (center_x, center_y, outcome) in enumerate(specs):
+        outcome_color = palette.get(outcome, palette["lost"])
+        for y in range(max(0, center_y - radius), min(height, center_y + radius + 1)):
+            for x in range(max(0, center_x - radius), min(width, center_x + radius + 1)):
+                offset = (y * width + x) * 4
+                pixel = rgba[offset : offset + 3]
+                outcome_distance = sum(
+                    abs(channel - expected)
+                    for channel, expected in zip(pixel, outcome_color)
+                )
+                dark_distance = sum(
+                    abs(channel - expected)
+                    for channel, expected in zip(pixel, palette["dark"])
+                )
+                white_distance = sum(
+                    abs(channel - expected)
+                    for channel, expected in zip(pixel, palette["white"])
+                )
+                if outcome_distance <= PROFILE_GAMBA_MARKER_COLOR_DISTANCE:
+                    role = "outcome"
+                elif dark_distance <= PROFILE_GAMBA_MARKER_DARK_DISTANCE:
+                    role = "dark"
+                elif white_distance <= PROFILE_GAMBA_MARKER_WHITE_DISTANCE:
+                    role = "white"
+                else:
+                    continue
+                counts[role] += 1
+                cells.add(
+                    (
+                        marker_index,
+                        role,
+                        (x - center_x + radius) // 2,
+                        (y - center_y + radius) // 2,
+                    )
+                )
+    return counts, cells
+
+
+def _compare_gamba_marker_kind(
+    reference: bytes,
+    candidate: bytes,
+    size: tuple[int, int],
+    *,
+    kind: str,
+    specs: list[tuple[int, int, str]],
+) -> dict[str, float]:
+    """Reject erased, recolored, or shape-substituted markers by kind."""
+
+    reference_counts, reference_cells = _gamba_marker_signature(reference, size, specs)
+    candidate_counts, candidate_cells = _gamba_marker_signature(candidate, size, specs)
+    required_roles = {
+        "bet": ("outcome",),
+        "wheel": ("outcome", "dark", "white"),
+        "leverage": ("outcome", "dark"),
+        "double_or_nothing": ("outcome", "dark"),
+    }[kind]
+    role_ratios: dict[str, float] = {}
+    for role in required_roles:
+        reference_count = reference_counts[role]
+        candidate_count = candidate_counts[role]
+        ratio = candidate_count / max(reference_count, 1)
+        role_ratios[role] = ratio
+        if reference_count == 0 or ratio < PROFILE_GAMBA_MIN_MARKER_ROLE_RATIO:
+            raise AssertionError(
+                f"profile gamba {kind} marker {role} occupancy is missing: "
+                f"ratio {ratio:.3f} < {PROFILE_GAMBA_MIN_MARKER_ROLE_RATIO:.3f}"
+            )
+    if kind != "wheel" and candidate_counts["white"] > reference_counts["white"] + 2:
+        raise AssertionError(
+            f"profile gamba {kind} marker has forbidden white-spoke occupancy: "
+            f"{candidate_counts['white']} pixels"
+        )
+    union = reference_cells | candidate_cells
+    shape_iou = len(reference_cells & candidate_cells) / len(union) if union else 1.0
+    if shape_iou < PROFILE_GAMBA_MIN_MARKER_SHAPE_IOU:
+        raise AssertionError(
+            f"profile gamba {kind} marker shape was erased or substituted: "
+            f"IoU {shape_iou:.3f} < {PROFILE_GAMBA_MIN_MARKER_SHAPE_IOU:.3f}"
+        )
+    return {"shape_iou": shape_iou, **role_ratios}
+
+
+def check_profile_gamba(
+    python_path: Path,
+    rust_path: Path,
+    gamba: dict[str, Any] | None = None,
+) -> list[str]:
+    """Compare the live `/profile` Gamba chart by independent authored layers."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != (700, 400) or rust_size != python_size:
+        raise AssertionError(
+            f"profile gamba dimensions differ or are invalid: Python {python_size}, "
+            f"Rust {rust_size}; expected (700, 400)"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(14, 8),
+        margin=0,
+        minimum_grid_iou=PROFILE_GAMBA_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PROFILE_GAMBA_MIN_FOREGROUND_COUNT_RATIO,
+        label="profile gamba",
+    )
+    plot = (60, 88, 674, 310)
+    strip = (60, 346, 640, 389)
+    # The fill colors are intentionally translucent over Discord's background;
+    # a broad distance captures Pillow's alpha-composited pixels and native
+    # integer blending while excluding the unrelated white/grey text layers.
+    layers = {
+        "positive fill": ((75, 120, 80), plot),
+        "negative fill": ((105, 70, 75), plot),
+        "event markers": ((87, 242, 135), plot),
+        "callouts": ((47, 49, 54), plot),
+        "axes": ((185, 187, 190), plot),
+        "stat strip": ((47, 49, 54), strip),
+    }
+    layer_metrics = {
+        label: _compare_gamba_layer(
+            python_pixels,
+            rust_pixels,
+            python_size,
+            label=label,
+            expected=color,
+            region=region,
+        )
+        for label, (color, region) in layers.items()
+    }
+    # Explicit red marker/callout sensitivity is separate from green because a
+    # chart containing only wins can otherwise pass a green-only mask.
+    layer_metrics["red markers/callouts"] = _compare_gamba_layer(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        label="red markers/callouts",
+        expected=(237, 66, 69),
+        region=plot,
+    )
+    marker_metrics = {}
+    if gamba is not None:
+        marker_specs = _gamba_marker_specs(gamba)
+        for kind in ("bet", "wheel", "leverage", "double_or_nothing"):
+            specs = marker_specs.get(kind, [])
+            if not specs:
+                continue
+            marker_metrics[kind] = _compare_gamba_marker_kind(
+                python_pixels,
+                rust_pixels,
+                python_size,
+                kind=kind,
+                specs=specs,
+            )
+    print(
+        f"profile gamba: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"layers={layer_metrics} markers={marker_metrics} python_sha={sha256(python_pixels)} "
+        f"rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > PROFILE_GAMBA_MAX_MAE or rms > PROFILE_GAMBA_MAX_RMS:
+        raise AssertionError(
+            f"profile gamba pixel drift exceeds threshold: MAE {mae:.5f} <= "
+            f"{PROFILE_GAMBA_MAX_MAE:.5f}, RMS {rms:.5f} <= {PROFILE_GAMBA_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -2077,6 +2414,11 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_profile_recent_matches.png",
                 output_dir / "rust_profile_recent_matches.png",
                 row_count=len(fixture["profile"]["recent_matches"]),
+            )
+            check_profile_gamba(
+                output_dir / "python_profile_gamba.png",
+                output_dir / "rust_profile_gamba.png",
+                fixture["gamba"],
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

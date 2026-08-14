@@ -46,6 +46,27 @@
       "dig": -280
     }
   },
+  "gamba": {
+    "username": "Visual Gambler",
+    "degen_score": 73,
+    "degen_title": "House Favorite",
+    "series": [
+      {"event_number": 1, "cumulative": 120, "source": "bet", "outcome": "won", "leverage": 1, "profit": 120},
+      {"event_number": 2, "cumulative": -80, "source": "wheel", "outcome": "lost", "leverage": 1, "profit": -200},
+      {"event_number": 3, "cumulative": 220, "source": "bet", "outcome": "won", "leverage": 3, "profit": 300},
+      {"event_number": 4, "cumulative": -140, "source": "double_or_nothing", "outcome": "lost", "leverage": 1, "profit": -360},
+      {"event_number": 5, "cumulative": -320, "source": "bet", "outcome": "lost", "leverage": 1, "profit": -180},
+      {"event_number": 6, "cumulative": 420, "source": "wheel", "outcome": "won", "leverage": 1, "profit": 740},
+      {"event_number": 7, "cumulative": 180, "source": "bet", "outcome": "neutral", "leverage": 1, "profit": -240},
+      {"event_number": 8, "cumulative": 60, "source": "bet", "outcome": "won", "leverage": 1, "profit": -120}
+    ],
+    "stats": {
+      "total_bets": 6,
+      "win_rate": 0.5,
+      "net_pnl": 60,
+      "roi": 0.12
+    }
+  },
   "rating_history": {
     "username": "Client 47",
     "entries": [

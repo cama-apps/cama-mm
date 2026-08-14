@@ -35,6 +35,7 @@ const ROLE_ORDER: [&str; 9] = [
 const Y_LABEL_MAGNITUDES: [i32; 16] = [
     1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000,
 ];
+const GAMBA_LEGEND_TYPE_MARKER_RADIUS: i32 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rgba(pub [u8; 4]);
@@ -224,6 +225,94 @@ impl Raster {
                         fill
                     },
                 );
+            }
+        }
+    }
+
+    /// Draw a small filled/outlined rounded rectangle for chart labels.
+    ///
+    /// The Python chart uses Pillow's ``rounded_rectangle`` for callouts and
+    /// the stat strip.  Keeping this primitive in the native rasterizer makes
+    /// those surfaces deterministic without introducing a font or graphics
+    /// dependency into the runtime.
+    fn rounded_rect(
+        &mut self,
+        bounds: (i32, i32, i32, i32),
+        radius: i32,
+        fill: Rgba,
+        outline: Option<Rgba>,
+    ) {
+        let (left, top, right, bottom) = bounds;
+        let radius = radius
+            .max(0)
+            .min((right - left).abs() / 2)
+            .min((bottom - top).abs() / 2);
+        self.fill_rect(left + radius, top, right - radius, bottom, fill);
+        self.fill_rect(left, top + radius, right, bottom - radius, fill);
+        for center in [
+            (left + radius, top + radius),
+            (right - radius - 1, top + radius),
+            (left + radius, bottom - radius - 1),
+            (right - radius - 1, bottom - radius - 1),
+        ] {
+            self.circle(center, radius, fill);
+        }
+        if let Some(outline) = outline {
+            self.line((left + radius, top), (right - radius - 1, top), outline, 1);
+            self.line(
+                (left + radius, bottom - 1),
+                (right - radius - 1, bottom - 1),
+                outline,
+                1,
+            );
+            self.line(
+                (left, top + radius),
+                (left, bottom - radius - 1),
+                outline,
+                1,
+            );
+            self.line(
+                (right - 1, top + radius),
+                (right - 1, bottom - radius - 1),
+                outline,
+                1,
+            );
+            let corner_arcs = [
+                (
+                    (left + radius, top + radius),
+                    std::f64::consts::PI,
+                    std::f64::consts::PI * 1.5,
+                ),
+                (
+                    (right - radius - 1, top + radius),
+                    std::f64::consts::PI * 1.5,
+                    std::f64::consts::TAU,
+                ),
+                (
+                    (right - radius - 1, bottom - radius - 1),
+                    0.0,
+                    std::f64::consts::FRAC_PI_2,
+                ),
+                (
+                    (left + radius, bottom - radius - 1),
+                    std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::PI,
+                ),
+            ];
+            for (center, start_angle, end_angle) in corner_arcs {
+                let mut previous = (
+                    center.0 + (f64::from(radius) * start_angle.cos()).round() as i32,
+                    center.1 + (f64::from(radius) * start_angle.sin()).round() as i32,
+                );
+                for step in 1..=8 {
+                    let angle = start_angle + (end_angle - start_angle) * f64::from(step) / 8.0;
+                    let point = (
+                        center.0 + (f64::from(radius) * angle.cos()).round() as i32,
+                        center.1 + (f64::from(radius) * angle.sin()).round() as i32,
+                    );
+                    self.line(previous, point, outline, 1);
+                    previous = point;
+                }
             }
         }
     }
@@ -1241,6 +1330,319 @@ pub fn select_marker_indices(
     Ok(selected)
 }
 
+fn gamba_outcome_color(info: &GambaInfo) -> Rgba {
+    match info.outcome.as_deref() {
+        Some("won") => DISCORD_GREEN,
+        Some("neutral") => DISCORD_GREY,
+        _ => DISCORD_RED,
+    }
+}
+
+fn gamba_star_points(center: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
+    (0..16)
+        .map(|index| {
+            let angle = f64::from(index) * std::f64::consts::PI / 8.0 - std::f64::consts::FRAC_PI_2;
+            let point_radius = if index % 2 == 0 {
+                f64::from(radius)
+            } else {
+                f64::from(radius) * 0.42
+            };
+            (
+                center.0 + (point_radius * angle.cos()) as i32,
+                center.1 + (point_radius * angle.sin()) as i32,
+            )
+        })
+        .collect()
+}
+
+fn draw_gamba_marker(raster: &mut Raster, point: (i32, i32), info: &GambaInfo, color: Rgba) {
+    draw_gamba_marker_with_radius(raster, point, info, color, marker_radius(info));
+}
+
+fn draw_gamba_marker_with_radius(
+    raster: &mut Raster,
+    point: (i32, i32),
+    info: &GambaInfo,
+    color: Rgba,
+    radius: i32,
+) {
+    match info.source.as_str() {
+        "wheel" => {
+            raster.circle_with_outline(point, radius, color, DISCORD_DARKER);
+            let spoke_radius = radius.saturating_sub(2);
+            raster.line(
+                (point.0 - spoke_radius, point.1),
+                (point.0 + spoke_radius, point.1),
+                DISCORD_WHITE,
+                1,
+            );
+            raster.line(
+                (point.0, point.1 - spoke_radius),
+                (point.0, point.1 + spoke_radius),
+                DISCORD_WHITE,
+                1,
+            );
+        }
+        "double_or_nothing" => {
+            let points = gamba_star_points(point, radius);
+            raster.polygon(&points, color);
+            raster.polygon_outline(&points, DISCORD_DARKER);
+        }
+        _ if info.normalized_leverage() > 1 => {
+            let points = [
+                (point.0, point.1 - radius),
+                (point.0 + radius, point.1),
+                (point.0, point.1 + radius),
+                (point.0 - radius, point.1),
+            ];
+            raster.polygon(&points, color);
+            raster.polygon_outline(&points, DISCORD_DARKER);
+        }
+        _ => raster.circle(point, radius, color),
+    }
+}
+
+fn draw_gamba_legend(raster: &mut Raster, left: i32, top: i32, infos: &[GambaInfo]) {
+    let mut cursor_x = left;
+    let group_font = 1;
+    let label_font = 1;
+    let outcome_marker_radius = 4;
+    let group_label = |raster: &mut Raster, cursor_x: &mut i32, label: &str| {
+        raster.text(*cursor_x, top + 1, label, DISCORD_GREY, group_font);
+        *cursor_x += Raster::text_width(label, group_font) + 10;
+    };
+    let text_label = |raster: &mut Raster, cursor_x: &mut i32, label: &str| {
+        raster.text(*cursor_x, top, label, DISCORD_GREY, label_font);
+        *cursor_x += Raster::text_width(label, label_font) + 14;
+    };
+
+    let has_outcome = |outcome: &str| {
+        infos
+            .iter()
+            .any(|info| info.outcome.as_deref() == Some(outcome))
+    };
+    group_label(raster, &mut cursor_x, "OUTCOME");
+    for (outcome, label, color) in [
+        ("won", "Win", DISCORD_GREEN),
+        ("lost", "Loss", DISCORD_RED),
+        ("neutral", "Neutral", DISCORD_GREY),
+    ] {
+        if !has_outcome(outcome) {
+            continue;
+        }
+        raster.circle(
+            (cursor_x + outcome_marker_radius, top + 6),
+            outcome_marker_radius,
+            color,
+        );
+        cursor_x += outcome_marker_radius * 2 + 4;
+        text_label(raster, &mut cursor_x, label);
+    }
+
+    let has_leverage = infos.iter().any(|info| info.normalized_leverage() > 1);
+    let has_don = infos.iter().any(|info| info.source == "double_or_nothing");
+    let has_wheel = infos.iter().any(|info| info.source == "wheel");
+    if has_leverage || has_don || has_wheel {
+        cursor_x += 4;
+        group_label(raster, &mut cursor_x, "TYPE");
+        for (label, info) in [
+            (
+                "Leverage",
+                GambaInfo {
+                    leverage: 2,
+                    ..GambaInfo::default()
+                },
+            ),
+            (
+                "DoN",
+                GambaInfo {
+                    source: "double_or_nothing".to_owned(),
+                    ..GambaInfo::default()
+                },
+            ),
+            (
+                "Wheel",
+                GambaInfo {
+                    source: "wheel".to_owned(),
+                    ..GambaInfo::default()
+                },
+            ),
+        ] {
+            let include = match label {
+                "Leverage" => has_leverage,
+                "DoN" => has_don,
+                _ => has_wheel,
+            };
+            if !include {
+                continue;
+            }
+            draw_gamba_marker_with_radius(
+                raster,
+                (cursor_x + GAMBA_LEGEND_TYPE_MARKER_RADIUS, top + 6),
+                &info,
+                DISCORD_ACCENT,
+                GAMBA_LEGEND_TYPE_MARKER_RADIUS,
+            );
+            cursor_x += GAMBA_LEGEND_TYPE_MARKER_RADIUS * 2 + 4;
+            text_label(raster, &mut cursor_x, label);
+        }
+    }
+}
+
+fn gamba_boxes_overlap(first: (i32, i32, i32, i32), second: (i32, i32, i32, i32)) -> bool {
+    !(first.2 + 3 <= second.0
+        || second.2 + 3 <= first.0
+        || first.3 + 3 <= second.1
+        || second.3 + 3 <= first.1)
+}
+
+struct GambaCalloutPlacement {
+    bounds: (i32, i32, i32, i32),
+    prefer_left: bool,
+    prefer_above: bool,
+}
+
+fn draw_gamba_callout(
+    raster: &mut Raster,
+    point: (i32, i32),
+    text: &str,
+    color: Rgba,
+    placement: GambaCalloutPlacement,
+    occupied: &mut Vec<(i32, i32, i32, i32)>,
+) {
+    let bounds = placement.bounds;
+    let text_width = Raster::text_width(text, 1);
+    let box_width = text_width + 12;
+    let box_height = 15;
+    let horizontal_options = [placement.prefer_left, !placement.prefer_left];
+    let vertical_options = [placement.prefer_above, !placement.prefer_above];
+    let mut placements = Vec::new();
+    for place_above in vertical_options {
+        for place_left in horizontal_options {
+            let raw_x = if place_left {
+                point.0 - box_width - 8
+            } else {
+                point.0 + 8
+            };
+            let raw_y = if place_above {
+                point.1 - box_height - 8
+            } else {
+                point.1 + 8
+            };
+            let box_x = raw_x.max(bounds.0 + 3).min(bounds.2 - box_width - 3);
+            let box_y = raw_y.max(bounds.1 + 3).min(bounds.3 - box_height - 3);
+            placements.push((box_x, box_y, box_x + box_width, box_y + box_height));
+        }
+    }
+    let selected = placements
+        .iter()
+        .copied()
+        .find(|candidate| {
+            !occupied
+                .iter()
+                .any(|used| gamba_boxes_overlap(*candidate, *used))
+        })
+        .unwrap_or(placements[0]);
+    let anchor = (
+        point.0.max(selected.0).min(selected.2),
+        point.1.max(selected.1).min(selected.3),
+    );
+    raster.line(point, anchor, color, 1);
+    raster.rounded_rect(selected, 5, DISCORD_DARKER, Some(DISCORD_GRID));
+    raster.text(selected.0 + 6, selected.1 + 3, text, color, 1);
+    occupied.push(selected);
+}
+
+fn group_decimal_digits(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() + digits.len().saturating_sub(1) / 3);
+    let leading = digits.len() % 3;
+    for (index, character) in digits.chars().enumerate() {
+        if index != 0 && index % 3 == leading {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    grouped
+}
+
+fn format_gamba_count(value: usize) -> String {
+    group_decimal_digits(&value.to_string())
+}
+
+fn format_gamba_signed(value: i64) -> String {
+    let sign = if value >= 0 { '+' } else { '-' };
+    format!(
+        "{sign}{}",
+        group_decimal_digits(&value.unsigned_abs().to_string())
+    )
+}
+
+fn draw_gamba_stat_strip(raster: &mut Raster, event_count: usize, stats: GambaStats) {
+    const LEFT: i32 = 60;
+    const RIGHT: i32 = 640;
+    const TOP: i32 = 346;
+    const BOTTOM: i32 = 389;
+    raster.rounded_rect(
+        (LEFT, TOP, RIGHT, BOTTOM),
+        7,
+        DISCORD_DARKER,
+        Some(DISCORD_GRID),
+    );
+    let metrics = [
+        ("EVENTS", format_gamba_count(event_count), DISCORD_WHITE),
+        ("BETS", format_gamba_count(stats.total_bets), DISCORD_WHITE),
+        (
+            "BET WIN RATE",
+            format!("{:.0}%", stats.win_rate * 100.0),
+            if stats.win_rate >= 0.5 {
+                DISCORD_GREEN
+            } else {
+                DISCORD_RED
+            },
+        ),
+        (
+            "BET P&L",
+            format_gamba_signed(stats.net_pnl),
+            if stats.net_pnl >= 0 {
+                DISCORD_GREEN
+            } else {
+                DISCORD_RED
+            },
+        ),
+        (
+            "BET ROI",
+            format!("{:+.1}%", stats.roi * 100.0),
+            if stats.roi >= 0.0 {
+                DISCORD_GREEN
+            } else {
+                DISCORD_RED
+            },
+        ),
+    ];
+    let column_width = f64::from(RIGHT - LEFT) / metrics.len() as f64;
+    for (index, (label, value, color)) in metrics.into_iter().enumerate() {
+        let center = (f64::from(LEFT) + column_width * (index as f64 + 0.5)).round() as i32;
+        if index != 0 {
+            let divider = (f64::from(LEFT) + column_width * index as f64).round() as i32;
+            raster.line((divider, TOP + 8), (divider, BOTTOM - 8), DISCORD_GRID, 1);
+        }
+        raster.text(
+            center - Raster::text_width(label, 1) / 2,
+            TOP + 5,
+            label,
+            DISCORD_GREY,
+            1,
+        );
+        raster.text(
+            center - Raster::text_width(&value, 1) / 2,
+            TOP + 20,
+            &value,
+            color,
+            1,
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartProjection {
     pub chart_x: i32,
@@ -1405,28 +1807,130 @@ pub fn draw_gamba_chart(
         DISCORD_WHITE,
         2,
     );
-    raster.text(
-        60,
-        40,
-        &format!("Degen Score {degen_score} - {degen_title}"),
-        DISCORD_GREY,
-        1,
-    );
+    let subtitle = if degen_title.is_empty() {
+        format!("Degen Score {degen_score}")
+    } else {
+        format!("Degen Score {degen_score}  ·  {degen_title}")
+    };
+    raster.text(60, 40, &subtitle, DISCORD_GREY, 2);
     if series.is_empty() {
-        raster.text(240, 200, "No betting history", DISCORD_GREY, 2);
+        let message = "No betting history";
+        raster.text(
+            350 - Raster::text_width(message, 2) / 2,
+            200,
+            message,
+            DISCORD_GREY,
+            2,
+        );
         return render(raster);
     }
+    const CHART_X: i32 = 60;
+    const CHART_Y: i32 = 88;
+    const CHART_WIDTH: i32 = 614;
+    const CHART_HEIGHT: i32 = 222;
     let values = series
         .iter()
         .map(|point| point.cumulative as f64)
         .collect::<Vec<_>>();
-    let projection = make_projection(&values, series.len(), (60, 88, 614, 222));
+    let projection = make_projection(
+        &values,
+        series.len(),
+        (CHART_X, CHART_Y, CHART_WIDTH, CHART_HEIGHT),
+    );
     let zero_y = projection.to_pixel(1, 0.0).1;
-    raster.line((60, zero_y), (674, zero_y), DISCORD_GREY, 1);
+    draw_gamba_legend(
+        &mut raster,
+        CHART_X,
+        64,
+        &series
+            .iter()
+            .map(|point| point.info.clone())
+            .collect::<Vec<_>>(),
+    );
+    raster.line(
+        (CHART_X, zero_y),
+        (CHART_X + CHART_WIDTH, zero_y),
+        DISCORD_GREY,
+        1,
+    );
+    raster.text(CHART_X - 25, zero_y - 6, "0", DISCORD_GREY, 1);
+    for (value, y_pos) in select_y_axis_ticks(
+        projection,
+        values.iter().copied().fold(f64::INFINITY, f64::min),
+        values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    ) {
+        raster.line(
+            (CHART_X, y_pos),
+            (CHART_X + CHART_WIDTH, y_pos),
+            DISCORD_GRID,
+            1,
+        );
+        let label = format_compact_axis_value(value);
+        let text_width = Raster::text_width(&label, 1);
+        raster.text(CHART_X - text_width - 8, y_pos - 6, &label, DISCORD_GREY, 1);
+    }
+    let event_numbers = series
+        .iter()
+        .map(|point| point.event_number)
+        .collect::<Vec<_>>();
+    let baseline_y = CHART_Y + CHART_HEIGHT;
+    raster.line(
+        (CHART_X, baseline_y),
+        (CHART_X + CHART_WIDTH, baseline_y),
+        DISCORD_GRID,
+        1,
+    );
+    for value in select_x_axis_ticks(&event_numbers, 5) {
+        let (x_pos, _) = projection.to_pixel(value, 0.0);
+        raster.line(
+            (x_pos, baseline_y),
+            (x_pos, baseline_y + 3),
+            DISCORD_GREY,
+            1,
+        );
+        let label = value.to_string();
+        let text_width = Raster::text_width(&label, 1);
+        raster.text(
+            x_pos - text_width / 2,
+            baseline_y + 6,
+            &label,
+            DISCORD_GREY,
+            1,
+        );
+    }
     let pixels = series
         .iter()
         .map(|point| projection.to_pixel(point.event_number, point.cumulative as f64))
         .collect::<Vec<_>>();
+    if pixels.len() > 1 {
+        let mut positive = vec![(CHART_X, zero_y)];
+        let mut negative = vec![(CHART_X, zero_y)];
+        for (point, pixel) in series.iter().zip(&pixels) {
+            positive.push((
+                pixel.0,
+                if point.cumulative >= 0 {
+                    pixel.1
+                } else {
+                    zero_y
+                },
+            ));
+            negative.push((
+                pixel.0,
+                if point.cumulative <= 0 {
+                    pixel.1
+                } else {
+                    zero_y
+                },
+            ));
+        }
+        positive.push((CHART_X + CHART_WIDTH, zero_y));
+        negative.push((CHART_X + CHART_WIDTH, zero_y));
+        raster.polygon(&positive, DISCORD_GREEN.with_alpha(38));
+        raster.polygon(&negative, DISCORD_RED.with_alpha(38));
+        for pair in pixels.windows(2) {
+            raster.line(pair[0], pair[1], DISCORD_DARKER, 4);
+        }
+    }
     for index in 0..pixels.len().saturating_sub(1) {
         let change = series[index + 1].cumulative - series[index].cumulative;
         let color = if change > 0 {
@@ -1463,57 +1967,84 @@ pub fn draw_gamba_chart(
     )
     .unwrap_or_default();
     for index in selected {
-        let color = match series[index].info.outcome.as_deref() {
-            Some("won") => DISCORD_GREEN,
-            Some("neutral") => DISCORD_GREY,
-            _ => DISCORD_RED,
-        };
-        raster.circle(pixels[index], radii[index], color);
+        draw_gamba_marker(
+            &mut raster,
+            pixels[index],
+            &series[index].info,
+            gamba_outcome_color(&series[index].info),
+        );
     }
-    raster.fill_rect(60, 346, 674, 389, DISCORD_DARKER);
     raster.text(
-        70,
-        357,
-        &format!("EVENTS {}", series.len()),
-        DISCORD_WHITE,
+        CHART_X + 7,
+        CHART_Y + 5,
+        "P&L · SIGNED LOG SCALE",
+        DISCORD_GREY,
         1,
     );
-    raster.text(
-        180,
-        357,
-        &format!("BETS {}", stats.total_bets),
-        DISCORD_WHITE,
-        1,
+
+    let mut occupied = Vec::new();
+    let bounds = (
+        CHART_X,
+        CHART_Y,
+        CHART_X + CHART_WIDTH,
+        CHART_Y + CHART_HEIGHT,
     );
-    raster.text(
-        280,
-        357,
-        &format!("WIN {:.0}%", stats.win_rate * 100.0),
-        DISCORD_GREEN,
-        1,
-    );
-    raster.text(
-        400,
-        357,
-        &format!("P&L {:+}", stats.net_pnl),
-        if stats.net_pnl >= 0 {
+    if values[peak] > 0.0 && peak != series.len() - 1 {
+        draw_gamba_callout(
+            &mut raster,
+            pixels[peak],
+            &format!("Peak {}", format_gamba_signed(series[peak].cumulative)),
+            DISCORD_GREEN,
+            GambaCalloutPlacement {
+                bounds,
+                prefer_left: pixels[peak].0 > CHART_X + CHART_WIDTH * 65 / 100,
+                prefer_above: true,
+            },
+            &mut occupied,
+        );
+    }
+    if values[trough] < 0.0 && trough != series.len() - 1 {
+        draw_gamba_callout(
+            &mut raster,
+            pixels[trough],
+            &format!("Low {}", format_gamba_signed(series[trough].cumulative)),
+            DISCORD_RED,
+            GambaCalloutPlacement {
+                bounds,
+                prefer_left: pixels[trough].0 > CHART_X + CHART_WIDTH * 65 / 100,
+                prefer_above: false,
+            },
+            &mut occupied,
+        );
+    }
+    let current = series.len() - 1;
+    let current_label = if current == peak {
+        "Now · peak"
+    } else if current == trough {
+        "Now · low"
+    } else {
+        "Now"
+    };
+    draw_gamba_callout(
+        &mut raster,
+        pixels[current],
+        &format!(
+            "{current_label} {}",
+            format_gamba_signed(series[current].cumulative)
+        ),
+        if series[current].cumulative >= 0 {
             DISCORD_GREEN
         } else {
             DISCORD_RED
         },
-        1,
-    );
-    raster.text(
-        520,
-        357,
-        &format!("ROI {:+.1}%", stats.roi * 100.0),
-        if stats.roi >= 0.0 {
-            DISCORD_GREEN
-        } else {
-            DISCORD_RED
+        GambaCalloutPlacement {
+            bounds,
+            prefer_left: true,
+            prefer_above: true,
         },
-        1,
+        &mut occupied,
     );
+    draw_gamba_stat_strip(&mut raster, series.len(), stats);
     render(raster)
 }
 

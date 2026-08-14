@@ -13,10 +13,11 @@ use cama_app::blame_luke_media::render_blame_luke;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
-    draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
-    draw_matches_table, draw_prediction_market_chart, draw_rating_distribution_with_median,
-    draw_rating_history_chart, draw_role_graph,
+    AdvantageData, BalancePoint, GambaInfo, GambaPoint, GambaStats, HeroPerformanceEntry, MatchRow,
+    RatingHistoryEntry, draw_advantage_graph, draw_balance_chart, draw_gamba_chart,
+    draw_hero_performance_chart, draw_lane_distribution, draw_matches_table,
+    draw_prediction_market_chart, draw_rating_distribution_with_median, draw_rating_history_chart,
+    draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -44,6 +45,7 @@ struct Fixture {
     terminal_crash: TerminalCrashFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
+    gamba: GambaFixture,
     rating_history: RatingHistoryFixture,
     rating_distribution: RatingDistributionFixture,
     rating_analysis: RatingAnalysisFixture,
@@ -60,6 +62,33 @@ struct BalanceFixture {
     username: String,
     series: Vec<(i32, i64, String)>,
     source_totals: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaFixture {
+    username: String,
+    degen_score: i32,
+    degen_title: String,
+    series: Vec<GambaPointFixture>,
+    stats: GambaStatsFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaPointFixture {
+    event_number: i32,
+    cumulative: i64,
+    source: String,
+    outcome: Option<String>,
+    leverage: i64,
+    profit: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GambaStatsFixture {
+    total_bets: usize,
+    win_rate: f64,
+    net_pnl: i64,
+    roi: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +348,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_balance.png"),
         balance_chart,
+    )?;
+
+    // This is the live `/profile` Gambling attachment boundary.  `/wrapped`
+    // intentionally remains a separate renderer and is not exercised here.
+    let gamba = &fixture.gamba;
+    let gamba_series = gamba
+        .series
+        .iter()
+        .map(|point| GambaPoint {
+            event_number: point.event_number,
+            cumulative: point.cumulative,
+            info: GambaInfo {
+                source: point.source.clone(),
+                outcome: point.outcome.clone(),
+                leverage: point.leverage,
+                profit: point.profit,
+            },
+        })
+        .collect::<Vec<_>>();
+    let gamba_chart = draw_gamba_chart(
+        &gamba.username,
+        gamba.degen_score,
+        &gamba.degen_title,
+        &gamba_series,
+        GambaStats {
+            total_bets: gamba.stats.total_bets,
+            win_rate: gamba.stats.win_rate,
+            net_pnl: gamba.stats.net_pnl,
+            roi: gamba.stats.roi,
+        },
+    )
+    .into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_profile_gamba.png"),
+        gamba_chart,
     )?;
 
     let rating_history = fixture

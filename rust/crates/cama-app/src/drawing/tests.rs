@@ -940,6 +940,205 @@ fn test_wheel_source_info_missing_keys_does_not_raise() {
 }
 
 #[test]
+fn test_gamba_direct_empty_and_one_event_branches_are_safe() {
+    let empty = assert_rgba_png(
+        &draw_gamba_chart("Empty", 0, "", &[], GambaStats::default()),
+        Some((700, 400)),
+    );
+    assert!(empty.contains(DISCORD_GREY));
+
+    let one = [GambaPoint {
+        event_number: 1,
+        cumulative: 125,
+        info: info("double_or_nothing", 1, 125),
+    }];
+    let one = assert_rgba_png(
+        &draw_gamba_chart("One", 7, "Lucky", &one, GambaStats::default()),
+        Some((700, 400)),
+    );
+    assert!(one.contains(DISCORD_GREEN));
+    assert!(one.contains(DISCORD_DARKER));
+}
+
+#[test]
+fn test_gamba_grouped_integer_copy_and_pixels_match_python() {
+    assert_eq!(format_gamba_count(999), "999");
+    assert_eq!(format_gamba_count(1_000), "1,000");
+    assert_eq!(format_gamba_count(1_234_567), "1,234,567");
+    assert_eq!(format_gamba_signed(999), "+999");
+    assert_eq!(format_gamba_signed(1_000), "+1,000");
+    assert_eq!(format_gamba_signed(-12_345), "-12,345");
+    assert_eq!(format_gamba_signed(i64::MIN), "-9,223,372,036,854,775,808");
+
+    let mut grouped = Raster::new(700, 400, DISCORD_BG);
+    draw_gamba_stat_strip(
+        &mut grouped,
+        1_234,
+        GambaStats {
+            total_bets: 1_234,
+            win_rate: 0.5,
+            net_pnl: -5_678,
+            roi: 0.12,
+        },
+    );
+    let grouped = assert_rgba_png(&render(grouped), Some((700, 400)));
+    assert!(
+        grouped.contains_in((225, 371, 230, 374), DISCORD_WHITE),
+        "the grouped BETS copy should render its comma glyph"
+    );
+    assert!(
+        grouped.contains_in((459, 371, 465, 374), DISCORD_RED),
+        "the signed grouped P&L copy should render its comma glyph"
+    );
+
+    let mut ungrouped = Raster::new(700, 400, DISCORD_BG);
+    draw_gamba_stat_strip(
+        &mut ungrouped,
+        999,
+        GambaStats {
+            total_bets: 999,
+            win_rate: 0.5,
+            net_pnl: -999,
+            roi: 0.12,
+        },
+    );
+    assert_ne!(grouped.pixels, decode_png(&render(ungrouped)).pixels);
+}
+
+#[test]
+fn test_rounded_rect_outline_uses_each_corner_quarter_arc() {
+    let mut raster = Raster::new(30, 22, DISCORD_BG);
+    raster.rounded_rect((5, 4, 25, 18), 4, DISCORD_DARKER, Some(DISCORD_WHITE));
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * raster.width + x) * 4;
+        &raster.pixels[offset..offset + 4]
+    };
+    for (x, y) in [(6, 5), (23, 5), (23, 16), (6, 16)] {
+        assert_eq!(
+            pixel(x, y),
+            DISCORD_WHITE.0,
+            "missing corner arc at {x},{y}"
+        );
+    }
+    for (x, y) in [(5, 4), (24, 4), (24, 17), (5, 17)] {
+        assert_eq!(
+            pixel(x, y),
+            DISCORD_BG.0,
+            "rounded outer corner must remain transparent to the fill at {x},{y}"
+        );
+    }
+}
+
+#[test]
+fn test_gamba_star_truncates_like_python_and_legend_radius_is_distinct() {
+    let points = gamba_star_points((10, 10), 6);
+    assert_eq!(points[0], (10, 4));
+    assert_eq!(points[1], (10, 8), "Python int() truncates 10.96 to 10");
+    assert_eq!(points[2], (14, 6));
+    let don = GambaInfo {
+        source: "double_or_nothing".to_owned(),
+        ..GambaInfo::default()
+    };
+    assert_eq!(marker_radius(&don), 6, "live DoN markers retain radius 6");
+    assert_eq!(
+        GAMBA_LEGEND_TYPE_MARKER_RADIUS, 5,
+        "the Python legend uses a uniform type-marker radius of 5"
+    );
+}
+
+#[test]
+fn test_gamba_fixture_keeps_zero_crossing_fills_marker_shapes_callouts_and_stats() {
+    let series = [
+        GambaPoint {
+            event_number: 1,
+            cumulative: 120,
+            info: info("bet", 1, 120),
+        },
+        GambaPoint {
+            event_number: 2,
+            cumulative: -80,
+            info: info("wheel", 1, -200),
+        },
+        GambaPoint {
+            event_number: 3,
+            cumulative: 220,
+            info: info("bet", 3, 300),
+        },
+        GambaPoint {
+            event_number: 4,
+            cumulative: -140,
+            info: info("double_or_nothing", 1, -360),
+        },
+        GambaPoint {
+            event_number: 5,
+            cumulative: -320,
+            info: info("bet", 1, -180),
+        },
+        GambaPoint {
+            event_number: 6,
+            cumulative: 420,
+            info: info("wheel", 1, 740),
+        },
+        GambaPoint {
+            event_number: 7,
+            cumulative: 180,
+            info: GambaInfo {
+                source: "bet".to_owned(),
+                outcome: Some("neutral".to_owned()),
+                leverage: 1,
+                profit: -240,
+            },
+        },
+        GambaPoint {
+            event_number: 8,
+            cumulative: 60,
+            info: info("bet", 1, -120),
+        },
+    ];
+    let image = assert_rgba_png(
+        &draw_gamba_chart(
+            "Visual Gambler",
+            73,
+            "House Favorite",
+            &series,
+            GambaStats {
+                total_bets: 6,
+                win_rate: 0.5,
+                net_pnl: 60,
+                roi: 0.12,
+            },
+        ),
+        Some((700, 400)),
+    );
+    for expected in [
+        DISCORD_GREEN,
+        DISCORD_RED,
+        DISCORD_GREY,
+        DISCORD_GRID,
+        DISCORD_DARKER,
+    ] {
+        assert!(
+            image.contains(expected),
+            "missing Gamba semantic layer {expected:?}"
+        );
+    }
+    let stats_changed = draw_gamba_chart(
+        "Visual Gambler",
+        73,
+        "House Favorite",
+        &series,
+        GambaStats {
+            total_bets: 99,
+            win_rate: 0.1,
+            net_pnl: -123,
+            roi: -0.75,
+        },
+    )
+    .into_inner();
+    assert_ne!(image.pixels, decode_png(&Cursor::new(stats_changed)).pixels);
+}
+
+#[test]
 fn test_shared_axis_changes_keep_balance_chart_rendering() {
     let series = [
         BalancePoint {
