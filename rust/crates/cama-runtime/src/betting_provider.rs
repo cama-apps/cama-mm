@@ -70,13 +70,14 @@ use chrono::{DateTime, FixedOffset, Utc};
 use gif::{Encoder, Frame, Repeat};
 use rusqlite::types::Value as SqlValue;
 use serde_json::json;
+use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::match_provider::{
-    MatchBetSettlementRequest, MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest,
-    MatchRegistrationProvider,
+    MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
+    MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest, MatchRegistrationProvider,
 };
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -163,6 +164,66 @@ struct MatchBettingPostMatchDebriefPort {
     handler: Arc<BettingInteractionHandler>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MatchBigWinSelection {
+    discord_id: i64,
+    payout: i64,
+    flavor: BigWinFlavor,
+}
+
+fn select_match_big_win(
+    participants: &[MatchBetSettlementParticipant],
+) -> Option<MatchBigWinSelection> {
+    // Keep Python's ordered `max(winners, key=payout)` semantics: an equal
+    // payout keeps the first winner, and a refunded top winner blocks the
+    // headline rather than falling through to a lower-payout winner.
+    let top = participants
+        .iter()
+        .filter(|participant| participant.won)
+        .fold(None, |best, participant| match best {
+            None => Some(participant),
+            Some(best) if participant.payout > best.payout => Some(participant),
+            Some(best) => Some(best),
+        })?;
+    if top.payout == 0 || top.refunded {
+        return None;
+    }
+    let win_stake = participants
+        .iter()
+        .filter(|participant| participant.won)
+        .fold(0_i64, |total, participant| {
+            total.saturating_add(participant.amount)
+        });
+    let lose_stake = participants
+        .iter()
+        .filter(|participant| !participant.won)
+        .fold(0_i64, |total, participant| {
+            total.saturating_add(participant.amount)
+        });
+    Some(MatchBigWinSelection {
+        discord_id: top.discord_id,
+        payout: top.payout,
+        flavor: if win_stake != 0 && lose_stake > win_stake {
+            BigWinFlavor::Underdog
+        } else {
+            BigWinFlavor::TopDog
+        },
+    })
+}
+
+fn active_settlement_loser_ids(participants: &[MatchBetSettlementParticipant]) -> Vec<i64> {
+    let mut loser_ids = Vec::new();
+    for participant in participants
+        .iter()
+        .filter(|participant| !participant.won && !participant.refunded)
+    {
+        if !loser_ids.contains(&participant.discord_id) {
+            loser_ids.push(participant.discord_id);
+        }
+    }
+    loser_ids
+}
+
 #[async_trait]
 impl BettingWagerRefreshPort for MatchBettingWagerRefreshPort {
     async fn refresh_wager_message(
@@ -218,23 +279,13 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                 .neon
                 .lock()
                 .map_err(|_| "betting Neon lock poisoned".to_owned())?;
-            if let Some(winner) = request
-                .participants
-                .iter()
-                .filter(|participant| participant.won && !participant.refunded)
-                .max_by_key(|participant| {
-                    (
-                        participant.payout,
-                        std::cmp::Reverse(participant.discord_id),
-                    )
-                })
-            {
+            if let Some(winner) = select_match_big_win(&request.participants) {
                 selected = neon.on_big_win(
                     u64::try_from(winner.discord_id).unwrap_or_default(),
                     Some(u64::try_from(guild_id).unwrap_or_default()),
                     BigWinSource::Match,
                     winner.payout,
-                    BigWinFlavor::BigWin,
+                    winner.flavor,
                 );
             }
             if selected.is_none() {
@@ -267,29 +318,207 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
                 }
             }
         }
+        if selected.is_none() {
+            let loser_ids = active_settlement_loser_ids(&request.participants);
+            let mut degen_scores = Vec::new();
+            for discord_id in loser_ids {
+                let path = self.handler.database_path.clone();
+                let score = sqlite("match degen milestone score", move || {
+                    GamblingStatsService::new(GamblingStatsRepository::new(path))
+                        .calculate_degen_score(discord_id, Some(guild_id))
+                        .map(|score| u8::try_from(score.total.clamp(0, 100)).unwrap_or_default())
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .ok();
+                if let Some(score) = score.filter(|score| *score >= 90) {
+                    degen_scores.push((discord_id, score));
+                }
+            }
+            let mut neon = self
+                .handler
+                .neon
+                .lock()
+                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
+            for (discord_id, score) in degen_scores {
+                selected = neon.on_degen_milestone(
+                    u64::try_from(discord_id).unwrap_or_default(),
+                    Some(u64::try_from(guild_id).unwrap_or_default()),
+                    score,
+                );
+                if selected.is_some() {
+                    break;
+                }
+            }
+        }
         let Some(result) = selected else {
-            let repository = NeonEventRepository::new(&self.handler.database_path);
-            let event_type = event_type.clone();
-            let _ = sqlite("release untriggered settlement Neon event", move || {
-                repository
-                    .release_one_time_event(0, guild_id, &event_type)
-                    .map_err(|error| error.to_string())
-            })
-            .await;
+            warn!(
+                match_id = request.match_id,
+                guild_id, "match settlement Neon claim declined; terminal marker retained"
+            );
             return Ok(());
         };
+        let fired_event_type = format!("match_settlement:fired:{}", request.match_id);
+        let repository = NeonEventRepository::new(&self.handler.database_path);
+        sqlite("mark match settlement Neon decision", move || {
+            repository
+                .persist_one_time_event(
+                    0,
+                    guild_id,
+                    &fired_event_type,
+                    2,
+                    unix_seconds().unwrap_or_default(),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .await?;
         if !self
             .handler
             .emit_neon_result_checked(channel_id, result)
             .await
         {
-            let repository = NeonEventRepository::new(&self.handler.database_path);
-            let _ = sqlite("release failed settlement Neon event", move || {
+            warn!(
+                match_id = request.match_id,
+                guild_id, "match settlement Neon delivery failed; terminal marker retained"
+            );
+        }
+        Ok(())
+    }
+
+    async fn on_match_easter_eggs(&self, request: MatchEasterEggRequest) -> Result<(), String> {
+        let Some(channel_id) = request.channel_id else {
+            return Ok(());
+        };
+        if request.games_milestones.is_empty()
+            && request.win_streak_records.is_empty()
+            && request.rivalries_detected.is_empty()
+        {
+            return Ok(());
+        }
+        let guild_id = request.guild_id;
+        let event_type = format!("match_easter_eggs:{}", request.match_id);
+        let repository = NeonEventRepository::new(&self.handler.database_path);
+        let settlement_fired_event_type = format!("match_settlement:fired:{}", request.match_id);
+        if repository
+            .check_one_time_event(0, guild_id, &settlement_fired_event_type)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+        let claimed = sqlite("claim match Easter-egg Neon event", {
+            let repository = repository.clone();
+            let event_type = event_type.clone();
+            move || {
                 repository
-                    .release_one_time_event(0, guild_id, &event_type)
+                    .claim_one_time_event(
+                        0,
+                        guild_id,
+                        &event_type,
+                        2,
+                        unix_seconds().unwrap_or_default(),
+                    )
                     .map_err(|error| error.to_string())
-            })
-            .await;
+            }
+        })
+        .await?;
+        if !claimed {
+            return Ok(());
+        }
+
+        let now = unix_seconds().unwrap_or_default();
+        let selected = {
+            let mut neon = self
+                .handler
+                .neon
+                .lock()
+                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
+            neon.set_now_seconds(u64::try_from(now.max(0)).unwrap_or_default());
+            let mut selected = None;
+            for milestone in &request.games_milestones {
+                if selected.is_some() {
+                    break;
+                }
+                let Ok(discord_id) = u64::try_from(milestone.discord_id) else {
+                    continue;
+                };
+                selected = neon.on_games_milestone(
+                    discord_id,
+                    u64::try_from(guild_id).ok(),
+                    milestone.games_played,
+                );
+                if selected.is_some() {
+                    break;
+                }
+            }
+            if selected.is_none() {
+                for streak in &request.win_streak_records {
+                    let Ok(discord_id) = u64::try_from(streak.discord_id) else {
+                        continue;
+                    };
+                    selected = neon.on_win_streak_record(
+                        discord_id,
+                        u64::try_from(guild_id).ok(),
+                        streak.current_streak,
+                        streak.previous_best,
+                    );
+                    if selected.is_some() {
+                        break;
+                    }
+                }
+            }
+            if selected.is_none() {
+                for rivalry in &request.rivalries_detected {
+                    let Ok(player1_id) = u64::try_from(rivalry.player1_id) else {
+                        continue;
+                    };
+                    let Ok(player2_id) = u64::try_from(rivalry.player2_id) else {
+                        continue;
+                    };
+                    selected = neon.on_rivalry_detected(
+                        u64::try_from(guild_id).ok(),
+                        player1_id,
+                        player2_id,
+                        rivalry.games_against,
+                        rivalry.winrate_vs,
+                    );
+                    if selected.is_some() {
+                        break;
+                    }
+                }
+            }
+            selected
+        };
+
+        let Some(result) = selected else {
+            warn!(
+                match_id = request.match_id,
+                guild_id, "match Easter-egg Neon claim declined; terminal marker retained"
+            );
+            return Ok(());
+        };
+        let fired_event_type = format!("match_easter_eggs:fired:{}", request.match_id);
+        let repository = NeonEventRepository::new(&self.handler.database_path);
+        sqlite("mark match Easter-egg Neon decision", move || {
+            repository
+                .persist_one_time_event(
+                    0,
+                    guild_id,
+                    &fired_event_type,
+                    2,
+                    unix_seconds().unwrap_or_default(),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        if !self
+            .handler
+            .emit_neon_result_checked(channel_id, result)
+            .await
+        {
+            warn!(
+                match_id = request.match_id,
+                guild_id, "match Easter-egg Neon delivery failed; terminal marker retained"
+            );
         }
         Ok(())
     }
@@ -329,6 +558,17 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         .unwrap_or((None, None));
         let repository = NeonEventRepository::new(&self.handler.database_path);
         let event_type = format!("match_debrief:{}", request.match_id);
+        for fired_event_type in [
+            format!("match_settlement:fired:{}", request.match_id),
+            format!("match_easter_eggs:fired:{}", request.match_id),
+        ] {
+            if repository
+                .check_one_time_event(0, guild_id, &fired_event_type)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(());
+            }
+        }
         let claimed = sqlite("claim match debrief Neon event", {
             let repository = repository.clone();
             let event_type = event_type.clone();
@@ -364,34 +604,30 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
             leverage: request.leverage.max(1),
             ..JopatPostMatchContext::default()
         };
-        let result = self
-            .handler
-            .neon
-            .lock()
-            .map_err(|_| "betting Neon lock poisoned".to_owned())?
-            .on_post_match_debrief(&context);
+        let result = {
+            let mut neon = self
+                .handler
+                .neon
+                .lock()
+                .map_err(|_| "betting Neon lock poisoned".to_owned())?;
+            neon.on_post_match_debrief(&context)
+        };
         if let Some(result) = result {
             if !self
                 .handler
                 .emit_neon_result_checked(channel_id, result)
                 .await
             {
-                let repository = NeonEventRepository::new(&self.handler.database_path);
-                let _ = sqlite("release failed match debrief Neon event", move || {
-                    repository
-                        .release_one_time_event(0, guild_id, &event_type)
-                        .map_err(|error| error.to_string())
-                })
-                .await;
+                warn!(
+                    match_id = request.match_id,
+                    guild_id, "match debrief Neon delivery failed; terminal marker retained"
+                );
             }
         } else {
-            let repository = NeonEventRepository::new(&self.handler.database_path);
-            let _ = sqlite("release untriggered match debrief Neon event", move || {
-                repository
-                    .release_one_time_event(0, guild_id, &event_type)
-                    .map_err(|error| error.to_string())
-            })
-            .await;
+            warn!(
+                match_id = request.match_id,
+                guild_id, "match debrief Neon claim declined; terminal marker retained"
+            );
         }
         Ok(())
     }
@@ -8931,6 +9167,7 @@ fn validate_investment_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cama_app::match_recording::GamesMilestone;
     use cama_db::core_repositories::NewPlayer;
     use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
     use cama_db::schema_manager::initialize_or_migrate;
@@ -9315,27 +9552,337 @@ mod tests {
     }
 
     #[test]
-    fn match_settlement_neon_claim_is_restart_safe_and_releasable() {
+    fn generic_neon_claim_is_restart_safe_and_releasable() {
         let database = NamedTempFile::new().expect("temporary database");
         initialize_or_migrate(database.path()).expect("migrate Neon database");
         let repository = NeonEventRepository::new(database.path());
         assert!(
             repository
-                .claim_one_time_event(0, 42, "match_settlement:7", 2, 100)
+                .claim_one_time_event(0, 42, "generic_neon:7", 2, 100)
                 .expect("first claim")
         );
         assert!(
             !repository
-                .claim_one_time_event(0, 42, "match_settlement:7", 2, 101)
+                .claim_one_time_event(0, 42, "generic_neon:7", 2, 101)
                 .expect("duplicate claim")
         );
         repository
-            .release_one_time_event(0, 42, "match_settlement:7")
+            .release_one_time_event(0, 42, "generic_neon:7")
             .expect("release failed delivery");
         assert!(
             repository
-                .claim_one_time_event(0, 42, "match_settlement:7", 2, 102)
+                .claim_one_time_event(0, 42, "generic_neon:7", 2, 102)
                 .expect("retry claim")
+        );
+    }
+
+    #[test]
+    fn match_hook_decision_markers_are_terminal_after_decline_and_attempt() {
+        let database = NamedTempFile::new().expect("terminal match Neon database");
+        initialize_or_migrate(database.path()).expect("migrate terminal Neon database");
+        let repository = NeonEventRepository::new(database.path());
+
+        for event_type in [
+            "match_settlement:declined",
+            "match_easter_eggs:declined",
+            "match_debrief:declined",
+            "match_settlement:attempted",
+            "match_easter_eggs:attempted",
+            "match_debrief:attempted",
+        ] {
+            assert!(
+                repository
+                    .claim_one_time_event(0, 42, event_type, 2, 100)
+                    .expect("terminal first decision claim")
+            );
+            assert!(
+                !repository
+                    .claim_one_time_event(0, 42, event_type, 2, 101)
+                    .expect("terminal replay decision claim")
+            );
+        }
+    }
+
+    #[test]
+    fn match_big_win_selection_matches_python_stake_flavor_and_top_choice() {
+        let participant =
+            |discord_id, amount, payout, won, refunded| MatchBetSettlementParticipant {
+                discord_id,
+                amount,
+                leverage: 1,
+                balance_after: 0,
+                payout,
+                won,
+                refunded,
+            };
+        let underdog = select_match_big_win(&[
+            participant(1, 100, 300, true, false),
+            participant(2, 100, 300, true, false),
+            participant(3, 250, 0, false, false),
+        ])
+        .expect("underdog top winner");
+        assert_eq!(underdog.discord_id, 1, "Python max keeps the first tie");
+        assert_eq!(underdog.flavor, BigWinFlavor::Underdog);
+
+        let top_dog = select_match_big_win(&[
+            participant(4, 100, 500, true, false),
+            participant(5, 50, 400, false, false),
+        ])
+        .expect("top-dog winner");
+        assert_eq!(top_dog.flavor, BigWinFlavor::TopDog);
+
+        assert!(
+            select_match_big_win(&[
+                participant(6, 100, 500, true, true),
+                participant(7, 500, 400, true, false),
+            ])
+            .is_none(),
+            "a refunded Python top winner blocks fallback"
+        );
+    }
+
+    #[test]
+    fn settlement_degen_candidates_are_only_active_betting_losers() {
+        let participants = vec![MatchBetSettlementParticipant {
+            discord_id: 11,
+            amount: 100,
+            leverage: 1,
+            balance_after: -1,
+            payout: 0,
+            won: false,
+            refunded: false,
+        }];
+        let match_loser_ids = [11, 12];
+        assert_eq!(active_settlement_loser_ids(&participants), vec![11]);
+        assert!(!active_settlement_loser_ids(&participants).contains(&match_loser_ids[1]));
+    }
+
+    #[tokio::test]
+    async fn match_hook_replays_do_not_reroll_declined_or_failed_attempts() {
+        let database = NamedTempFile::new().expect("terminal replay database");
+        initialize_or_migrate(database.path()).expect("migrate terminal replay database");
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("terminal replay configuration");
+        let provider = BettingRegistrationProvider::new(
+            database.path(),
+            &config,
+            Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+        );
+        let port = MatchBettingPostMatchDebriefPort {
+            handler: Arc::clone(&provider.handler),
+        };
+
+        let declined_easter = MatchEasterEggRequest {
+            guild_id: 42,
+            match_id: 100,
+            channel_id: Some(7),
+            games_milestones: vec![GamesMilestone {
+                discord_id: 1,
+                games_played: 10,
+            }],
+            ..MatchEasterEggRequest::default()
+        };
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("declined Neon lock")
+            .queue_rolls([1.0]);
+        port.on_match_easter_eggs(declined_easter.clone())
+            .await
+            .expect("declined Easter-egg attempt");
+        let declined_rolls = provider
+            .handler
+            .neon
+            .lock()
+            .expect("declined Neon replay lock")
+            .rolls
+            .observed_chances()
+            .len();
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("queued declined replay lock")
+            .queue_rolls([0.0]);
+        port.on_match_easter_eggs(declined_easter)
+            .await
+            .expect("declined Easter-egg replay");
+        assert_eq!(
+            provider
+                .handler
+                .neon
+                .lock()
+                .expect("declined Neon final lock")
+                .rolls
+                .observed_chances()
+                .len(),
+            declined_rolls,
+            "a declined Easter-egg decision is terminal and must not reroll"
+        );
+
+        let failed_easter = MatchEasterEggRequest {
+            guild_id: 42,
+            match_id: 101,
+            channel_id: Some(7),
+            games_milestones: vec![GamesMilestone {
+                discord_id: 2,
+                games_played: 10,
+            }],
+            ..MatchEasterEggRequest::default()
+        };
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("failed Easter-egg Neon lock")
+            .queue_rolls([0.0]);
+        port.on_match_easter_eggs(failed_easter.clone())
+            .await
+            .expect("failed Easter-egg delivery attempt");
+        let repository = NeonEventRepository::new(database.path());
+        assert!(
+            repository
+                .check_one_time_event(0, 42, "match_easter_eggs:fired:101")
+                .expect("failed Easter-egg fired marker")
+        );
+        let failed_easter_rolls = provider
+            .handler
+            .neon
+            .lock()
+            .expect("failed Easter-egg replay lock")
+            .rolls
+            .observed_chances()
+            .len();
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("queued failed Easter-egg replay lock")
+            .queue_rolls([0.0]);
+        port.on_match_easter_eggs(failed_easter)
+            .await
+            .expect("failed Easter-egg replay");
+        assert_eq!(
+            provider
+                .handler
+                .neon
+                .lock()
+                .expect("failed Easter-egg final lock")
+                .rolls
+                .observed_chances()
+                .len(),
+            failed_easter_rolls,
+            "an attempted Easter-egg delivery must not duplicate after transport failure"
+        );
+
+        let declined_debrief = MatchPostMatchDebriefRequest {
+            guild_id: 42,
+            match_id: 102,
+            channel_id: Some(7),
+            winner_id: None,
+            loser_id: None,
+            payout: 0,
+            loss: 0,
+            leverage: 1,
+            rating_change: None,
+            expected_win_prob: None,
+        };
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("declined debrief Neon lock")
+            .queue_rolls([1.0]);
+        port.on_post_match_debrief(declined_debrief.clone())
+            .await
+            .expect("declined debrief attempt");
+        let declined_debrief_rolls = provider
+            .handler
+            .neon
+            .lock()
+            .expect("declined debrief replay lock")
+            .rolls
+            .observed_chances()
+            .len();
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("queued declined debrief replay lock")
+            .queue_rolls([0.0]);
+        port.on_post_match_debrief(declined_debrief)
+            .await
+            .expect("declined debrief replay");
+        assert_eq!(
+            provider
+                .handler
+                .neon
+                .lock()
+                .expect("declined debrief final lock")
+                .rolls
+                .observed_chances()
+                .len(),
+            declined_debrief_rolls,
+            "a declined debrief decision is terminal and must not reroll"
+        );
+
+        let failed_debrief = MatchPostMatchDebriefRequest {
+            guild_id: 42,
+            match_id: 103,
+            channel_id: Some(7),
+            winner_id: None,
+            loser_id: None,
+            payout: 800,
+            loss: 0,
+            leverage: 1,
+            rating_change: None,
+            expected_win_prob: None,
+        };
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("failed debrief Neon lock")
+            .queue_rolls([0.0]);
+        port.on_post_match_debrief(failed_debrief.clone())
+            .await
+            .expect("failed debrief delivery attempt");
+        assert!(
+            repository
+                .check_one_time_event(0, 42, "match_debrief:103")
+                .expect("failed debrief terminal marker")
+        );
+        let failed_debrief_rolls = provider
+            .handler
+            .neon
+            .lock()
+            .expect("failed debrief replay lock")
+            .rolls
+            .observed_chances()
+            .len();
+        provider
+            .handler
+            .neon
+            .lock()
+            .expect("queued failed debrief replay lock")
+            .queue_rolls([0.0]);
+        port.on_post_match_debrief(failed_debrief)
+            .await
+            .expect("failed debrief replay");
+        assert_eq!(
+            provider
+                .handler
+                .neon
+                .lock()
+                .expect("failed debrief final lock")
+                .rolls
+                .observed_chances()
+                .len(),
+            failed_debrief_rolls,
+            "an attempted debrief delivery must not duplicate after transport failure"
         );
     }
 

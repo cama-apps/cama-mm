@@ -525,6 +525,45 @@ fn test_post_match_debrief_uses_settlement_facts_and_notable_chance() {
 }
 
 #[test]
+fn test_post_match_debrief_composes_authored_gif_after_text_gate() {
+    let mut service = service();
+    let context = JopatPostMatchContext {
+        loser_name: Some("Alice".to_owned()),
+        loss: 600,
+        leverage: 5,
+        ..JopatPostMatchContext::default()
+    };
+    service.queue_rolls([0.0, 0.0]);
+    let result = service
+        .on_post_match_debrief(&context)
+        .expect("forced themed debrief");
+    assert_eq!(result.layer, 3);
+    assert!(text(&result).contains("JOPA-T"));
+    let gif = result.gif_file.expect("buyback-denied post-match GIF");
+    assert_eq!(gif.kind, "buyback_denied");
+    assert!(gif.frame_durations_ms.len() >= 2);
+    assert!(gif.bytes.len() > 1_000);
+    assert_eq!(service.rolls.observed_chances(), &[0.75, 0.20]);
+}
+
+#[test]
+fn test_rivalry_hook_requires_one_sided_ten_game_record() {
+    let mut service = service();
+    service.queue_rolls([0.0]);
+    let result = service
+        .on_rivalry_detected(Some(456), 123, 124, 10, 80.0)
+        .expect("forced rivalry hook");
+    assert_eq!(result.layer, 2);
+    assert!(text(&result).contains("RIVALRY DETECTED"));
+    assert_eq!(service.rolls.observed_chances(), &[0.01]);
+    assert!(
+        service
+            .on_rivalry_detected(Some(456), 123, 124, 9, 80.0)
+            .is_none()
+    );
+}
+
+#[test]
 fn test_on_degen_milestone_one_time() {
     let mut service = service();
     assert!(service.on_degen_milestone(123, Some(456), 95).is_some());

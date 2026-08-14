@@ -32,6 +32,7 @@ use cama_app::manashop_rework::{
     BuffService, HostileLossRequest as AppHostileLossRequest,
     HostileLossSettlement as AppHostileLossSettlement, ProtectionGateway,
 };
+use cama_app::match_recording::{GamesMilestone, RivalryRecord, WinStreakRecord};
 use cama_app::match_voting_service::{MatchVotingService, MatchVotingServiceError};
 use cama_app::neon_degen::{RatingHistorySnapshot, choose_notable_winner};
 use cama_app::reminders::LobbyKind as ReminderLobbyKind;
@@ -44,8 +45,8 @@ use cama_db::betting_service_repository::{
 };
 use cama_db::core_repositories::{
     CoreGlickoUpdate, CoreMatchRecord, CoreOpenSkillUpdate, MatchPredictionSnapshot, MatchRecord,
-    MatchRepository, NewCoreRatingHistory, NewPlayer, ParticipantStatsUpdate, PlayerRepository,
-    ShuffleInputs, StreakInsertDefaults,
+    MatchRepository, NewCoreRatingHistory, NewPlayer, OrderedMap, ParticipantStatsUpdate,
+    PlayerRepository, ShuffleInputs, StreakInsertDefaults,
 };
 use cama_db::dota_bet_seed_repository::{
     BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
@@ -66,6 +67,7 @@ use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, Pending
 use cama_db::match_voting::{MatchVotingRepository, PendingVoteKey};
 use cama_db::moderation::{ModerationEventType, ModerationRepository};
 use cama_db::package_deal_repository::PackageDealRepository;
+use cama_db::pairings_repository::PairingsRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::shop_runtime::{
@@ -85,7 +87,8 @@ use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
 use cama_domain::rate_limiter::RateLimiter;
 use cama_domain::rating::{
-    CamaRatingSystem, MatchUpdateOptions, RatingConfig, TeamPlayer as GlickoTeamPlayer,
+    CamaRatingSystem, MatchUpdateOptions, RatingConfig, StreakAdjustment,
+    TeamPlayer as GlickoTeamPlayer,
 };
 use cama_domain::region::{
     PlayerRegionInput, region_split_mismatches, resolve_region, summarize_region,
@@ -100,6 +103,7 @@ use chrono::{
     Weekday,
 };
 use rusqlite::types::Value as SqlValue;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -133,6 +137,7 @@ const RATE_LIMIT_WINDOW: u64 = 30;
 const SHUFFLE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const DISCORD_BLUE: u32 = 0x34_98_db;
 const DISCORD_ORANGE: u32 = 0xe6_7e_22;
+const PENDING_MATCH_EASTER_STREAKS_KEY: &str = "_rust_match_easter_streaks";
 
 #[derive(Debug, Error)]
 pub enum MatchProviderBuildError {
@@ -157,6 +162,64 @@ pub struct MatchPostMatchDebriefRequest {
     pub leverage: i64,
     pub rating_change: Option<f64>,
     pub expected_win_prob: Option<f64>,
+}
+
+/// Committed Match-side Neon candidates. Settlement owns the degen/balance
+/// hooks; this adapter receives the remaining candidates so it can preserve
+/// Python's games-milestone, streak-record, rivalry, then fallback ordering
+/// and claim/replay the whole event atomically from the delivery boundary.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MatchEasterEggRequest {
+    pub guild_id: i64,
+    pub match_id: i64,
+    pub channel_id: Option<u64>,
+    pub games_milestones: Vec<GamesMilestone>,
+    pub win_streak_records: Vec<WinStreakRecord>,
+    pub rivalries_detected: Vec<RivalryRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct PersistedWinStreakRecord {
+    discord_id: i64,
+    current_streak: i64,
+    previous_best: i64,
+}
+
+fn persist_easter_streaks_in_state(state: &mut PendingMatchState, records: &[WinStreakRecord]) {
+    let records = records
+        .iter()
+        .map(|record| PersistedWinStreakRecord {
+            discord_id: record.discord_id,
+            current_streak: record.current_streak,
+            previous_best: record.previous_best,
+        })
+        .collect::<Vec<_>>();
+    state.extra.insert(
+        PENDING_MATCH_EASTER_STREAKS_KEY.to_owned(),
+        json!({ "win_streak_records": records }),
+    );
+}
+
+fn persisted_easter_streaks(
+    state: &PendingMatchState,
+) -> Result<Option<Vec<WinStreakRecord>>, String> {
+    let Some(value) = state.extra.get(PENDING_MATCH_EASTER_STREAKS_KEY) else {
+        return Ok(None);
+    };
+    let records = value
+        .get("win_streak_records")
+        .cloned()
+        .ok_or_else(|| "persisted match Easter streak payload is missing records".to_owned())?;
+    let records = serde_json::from_value::<Vec<PersistedWinStreakRecord>>(records)
+        .map_err(|error| format!("invalid persisted match Easter streak payload: {error}"))?
+        .into_iter()
+        .map(|record| WinStreakRecord {
+            discord_id: record.discord_id,
+            current_streak: record.current_streak,
+            previous_best: record.previous_best,
+        })
+        .collect();
+    Ok(Some(records))
 }
 
 /// Settlement facts handed to Betting's Neon observer after Match has
@@ -188,6 +251,10 @@ pub struct MatchBetSettlementRequest {
 #[async_trait]
 pub trait MatchPostMatchDebriefPort: Send + Sync {
     async fn on_bet_settlement(&self, _request: MatchBetSettlementRequest) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn on_match_easter_eggs(&self, _request: MatchEasterEggRequest) -> Result<(), String> {
         Ok(())
     }
 
@@ -1286,6 +1353,7 @@ struct RecordedMatch {
     match_id: i64,
     jc_lines: Vec<String>,
     bet_settlement: Option<MatchBetSettlementRequest>,
+    easter_eggs: MatchEasterEggRequest,
     debrief: Option<MatchPostMatchDebriefRequest>,
 }
 
@@ -1382,8 +1450,12 @@ impl MatchHandler {
             })
             .await
             .map_err(|error| format!("record recovery task failed: {error}"))??;
-            self.emit_post_match_hooks(recorded.bet_settlement, recorded.debrief)
-                .await;
+            self.emit_post_match_hooks(
+                recorded.bet_settlement,
+                Some(recorded.easter_eggs),
+                recorded.debrief,
+            )
+            .await;
             self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
             let repository = self.pending.clone();
             tokio::task::spawn_blocking(move || {
@@ -2040,8 +2112,12 @@ impl MatchHandler {
 
         self.record_pet_match_activity(&pending, recorded.match_id)
             .await;
-        self.emit_post_match_hooks(recorded.bet_settlement.clone(), recorded.debrief.clone())
-            .await;
+        self.emit_post_match_hooks(
+            recorded.bet_settlement.clone(),
+            Some(recorded.easter_eggs.clone()),
+            recorded.debrief.clone(),
+        )
+        .await;
 
         if let Some(thread_id) = pending
             .state
@@ -2341,6 +2417,7 @@ impl MatchHandler {
     async fn emit_post_match_hooks(
         &self,
         settlement: Option<MatchBetSettlementRequest>,
+        easter_eggs: Option<MatchEasterEggRequest>,
         debrief: Option<MatchPostMatchDebriefRequest>,
     ) {
         let Some(port) = self.post_match_debrief.get().cloned() else {
@@ -2350,6 +2427,12 @@ impl MatchHandler {
             let match_id = request.match_id;
             if let Err(error) = port.on_bet_settlement(request).await {
                 warn!(%error, match_id, "post-settlement Neon delivery failed");
+            }
+        }
+        if let Some(request) = easter_eggs {
+            let match_id = request.match_id;
+            if let Err(error) = port.on_match_easter_eggs(request).await {
+                warn!(%error, match_id, "match Easter-egg Neon delivery failed");
             }
         }
         if let Some(request) = debrief {
@@ -2362,7 +2445,7 @@ impl MatchHandler {
 
     #[cfg(test)]
     async fn emit_post_match_debrief(&self, request: Option<MatchPostMatchDebriefRequest>) {
-        self.emit_post_match_hooks(None, request).await;
+        self.emit_post_match_hooks(None, None, request).await;
     }
 
     fn build_bet_settlement_request(
@@ -2467,6 +2550,127 @@ impl MatchHandler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn collect_match_easter_eggs(
+        &self,
+        participant_ids: &[i64],
+        radiant_team_ids: &[i64],
+        dire_team_ids: &[i64],
+        winning_ids: &[i64],
+        streak_data: &BTreeMap<i64, StreakAdjustment>,
+        persisted_streak_records: Option<&[WinStreakRecord]>,
+        guild_id: i64,
+        match_id: i64,
+        channel_id: Option<u64>,
+    ) -> Result<MatchEasterEggRequest, String> {
+        let games_milestones = self
+            .players
+            .get_by_ids(participant_ids, Some(guild_id))
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|player| {
+                let discord_id = player.discord_id?;
+                let total_games = player.wins.saturating_add(player.losses);
+                matches!(total_games, 10 | 50 | 100 | 200 | 500).then_some(GamesMilestone {
+                    discord_id,
+                    games_played: total_games,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let win_streak_records = if let Some(records) = persisted_streak_records {
+            records.to_vec()
+        } else {
+            let mut streak_candidates = OrderedMap::new();
+            for discord_id in winning_ids {
+                let Some(adjustment) = streak_data.get(discord_id) else {
+                    continue;
+                };
+                if adjustment.streak_length >= 5 {
+                    streak_candidates.insert(
+                        *discord_id,
+                        i64::try_from(adjustment.streak_length).unwrap_or(i64::MAX),
+                    );
+                }
+            }
+            let mut records = Vec::new();
+            for (discord_id, current_streak) in streak_candidates.iter() {
+                let previous_best = self
+                    .players
+                    .get_personal_best_win_streak(*discord_id, Some(guild_id))
+                    .map_err(|error| error.to_string())?;
+                if current_streak > &previous_best {
+                    records.push(WinStreakRecord {
+                        discord_id: *discord_id,
+                        current_streak: *current_streak,
+                        previous_best,
+                    });
+                }
+            }
+            records
+        };
+
+        let mut rivalries_detected = Vec::new();
+        match PairingsRepository::new(&self.database_path)
+            .get_pairings_for_players(participant_ids, Some(guild_id))
+        {
+            Ok(pairings) => {
+                for radiant_id in radiant_team_ids {
+                    for dire_id in dire_team_ids {
+                        let key = PairingsRepository::canonical_pair(*radiant_id, *dire_id);
+                        let Some(pairing) = pairings.get(&key) else {
+                            continue;
+                        };
+                        if pairing.games_against < 10 {
+                            continue;
+                        }
+                        let radiant_wins = pairing.queried_player_wins_against(*radiant_id);
+                        let winrate_vs = 100.0 * radiant_wins as f64 / pairing.games_against as f64;
+                        if !(30.0 < winrate_vs && winrate_vs < 70.0) {
+                            rivalries_detected.push(RivalryRecord {
+                                player1_id: *radiant_id,
+                                player2_id: *dire_id,
+                                games_against: pairing.games_against,
+                                winrate_vs,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    guild_id,
+                    "match rivalry lookup failed; preserving non-rivalry Easter eggs"
+                );
+            }
+        }
+
+        Ok(MatchEasterEggRequest {
+            guild_id,
+            match_id,
+            channel_id,
+            games_milestones,
+            win_streak_records,
+            rivalries_detected,
+        })
+    }
+
+    fn apply_easter_streak_records(
+        &self,
+        guild_id: i64,
+        records: &[WinStreakRecord],
+    ) -> Result<(), String> {
+        let mut updates = OrderedMap::new();
+        for record in records {
+            updates.insert(record.discord_id, record.current_streak);
+        }
+        self.players
+            .update_personal_best_win_streaks(&updates, Some(guild_id))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn record_match_blocking(
         &self,
         pending: &PendingMatchRecord,
@@ -2478,6 +2682,7 @@ impl MatchHandler {
             "dire" => 2,
             _ => return Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
         };
+        let persisted_streak_records = persisted_easter_streaks(&pending.state)?;
         let participant_ids = pending
             .state
             .radiant_team_ids
@@ -2977,10 +3182,35 @@ impl MatchHandler {
         )
         .repay_outstanding_match_loans(&participant_ids, Some(pending.guild_id))
         .map_err(|error| error.to_string())?;
+        let easter_eggs = self.collect_match_easter_eggs(
+            &participant_ids,
+            &pending.state.radiant_team_ids,
+            &pending.state.dire_team_ids,
+            winners,
+            &streak_data,
+            persisted_streak_records.as_deref(),
+            pending.guild_id,
+            match_id,
+            debrief_channel_id,
+        )?;
+        let streak_records = easter_eggs.win_streak_records.clone();
+        self.pending
+            .mutate_pending_match(pending.guild_id, pending.pending_match_id, |state| {
+                persist_easter_streaks_in_state(state, &streak_records)
+            })
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "pending match {} disappeared before Easter payload persistence",
+                    pending.pending_match_id
+                )
+            })?;
+        self.apply_easter_streak_records(pending.guild_id, &streak_records)?;
         Ok(RecordedMatch {
             match_id,
             jc_lines,
             bet_settlement: (!bet_settlement.participants.is_empty()).then_some(bet_settlement),
+            easter_eggs,
             debrief,
         })
     }

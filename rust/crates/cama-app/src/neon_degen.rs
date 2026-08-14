@@ -14,6 +14,9 @@ use cama_domain::openskill::CamaOpenSkillSystem;
 use gif::{Encoder, Frame, Repeat};
 
 use crate::dig_neon::{BigWinFlavor, BigWinSource};
+use crate::jopat_match_routing::{
+    ContractGifRenderer, POST_MATCH_GIF_CHANCE, PostMatchGifPort, post_match_gif_theme,
+};
 use crate::jopat_post_match::{
     JopatPostMatchContext, SeededJopatChoice, choose_protocol, render_fallback,
 };
@@ -519,17 +522,17 @@ impl GifAsset {
     }
 }
 
-const NEON_GIF_WIDTH: u16 = 400;
-const NEON_GIF_HEIGHT: u16 = 300;
+pub(crate) const NEON_GIF_WIDTH: u16 = 400;
+pub(crate) const NEON_GIF_HEIGHT: u16 = 300;
 const NEON_GIF_PIXELS: usize = NEON_GIF_WIDTH as usize * NEON_GIF_HEIGHT as usize;
-const COLOR_BLACK: u8 = 0;
-const COLOR_GREEN: u8 = 1;
-const COLOR_CYAN: u8 = 2;
-const COLOR_RED: u8 = 4;
-const COLOR_YELLOW: u8 = 5;
-const COLOR_DIM_GREEN: u8 = 6;
-const COLOR_DIM_CYAN: u8 = 7;
-const COLOR_DARK_RED: u8 = 8;
+pub(crate) const COLOR_BLACK: u8 = 0;
+pub(crate) const COLOR_GREEN: u8 = 1;
+pub(crate) const COLOR_CYAN: u8 = 2;
+pub(crate) const COLOR_RED: u8 = 4;
+pub(crate) const COLOR_YELLOW: u8 = 5;
+pub(crate) const COLOR_DIM_GREEN: u8 = 6;
+pub(crate) const COLOR_DIM_CYAN: u8 = 7;
+pub(crate) const COLOR_DARK_RED: u8 = 8;
 
 // The Python generators draw a CRT-black terminal with a small fixed set of
 // neon accents. Keeping one global palette makes these generated attachments
@@ -541,7 +544,7 @@ const NEON_GIF_PALETTE: &[u8] = &[
 ];
 
 #[derive(Clone, Debug)]
-struct NeonCanvas {
+pub(crate) struct NeonCanvas {
     pixels: Vec<u8>,
 }
 
@@ -552,11 +555,11 @@ impl NeonCanvas {
         }
     }
 
-    fn fill(&mut self, color: u8) {
+    pub(crate) fn fill(&mut self, color: u8) {
         self.pixels.fill(color);
     }
 
-    fn pixel(&mut self, x: i32, y: i32, color: u8) {
+    pub(crate) fn pixel(&mut self, x: i32, y: i32, color: u8) {
         if (0..i32::from(NEON_GIF_WIDTH)).contains(&x)
             && (0..i32::from(NEON_GIF_HEIGHT)).contains(&y)
         {
@@ -564,7 +567,7 @@ impl NeonCanvas {
         }
     }
 
-    fn line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u8) {
+    pub(crate) fn line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u8) {
         let dx = (x1 - x0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
         let dy = -(y1 - y0).abs();
@@ -587,20 +590,20 @@ impl NeonCanvas {
         }
     }
 
-    fn rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
+    pub(crate) fn rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
         self.line(left, top, right, top, color);
         self.line(right, top, right, bottom, color);
         self.line(right, bottom, left, bottom, color);
         self.line(left, bottom, left, top, color);
     }
 
-    fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
+    pub(crate) fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
         for y in top..=bottom {
             self.line(left, y, right, y, color);
         }
     }
 
-    fn text_left(&mut self, text: &str, x: i32, y: i32, color: u8, scale: i32) {
+    pub(crate) fn text_left(&mut self, text: &str, x: i32, y: i32, color: u8, scale: i32) {
         let mut cursor = x;
         for character in text.chars() {
             self.glyph(character, cursor, y, color, scale);
@@ -608,7 +611,7 @@ impl NeonCanvas {
         }
     }
 
-    fn text_centered(&mut self, text: &str, y: i32, color: u8, scale: i32) {
+    pub(crate) fn text_centered(&mut self, text: &str, y: i32, color: u8, scale: i32) {
         let width = text.chars().count() as i32 * 6 * scale;
         self.text_left(
             text,
@@ -619,7 +622,7 @@ impl NeonCanvas {
         );
     }
 
-    fn glyph(&mut self, character: char, left: i32, top: i32, color: u8, scale: i32) {
+    pub(crate) fn glyph(&mut self, character: char, left: i32, top: i32, color: u8, scale: i32) {
         let rows = glyph_rows(character);
         for (row, bits) in rows.iter().copied().enumerate() {
             for column in 0..5 {
@@ -703,7 +706,7 @@ fn scene_seed<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
     hasher.finish()
 }
 
-fn render_neon_animation<F>(
+pub(crate) fn render_neon_animation<F>(
     kind: &'static str,
     durations: &[u32],
     seed: u64,
@@ -1998,7 +2001,10 @@ impl NeonDegenService {
     /// Python-compatible post-match debrief route. Match supplies only
     /// committed, typed facts; this method performs the same base/notable/
     /// extreme chance gate and renders the bounded JOPA-T fallback without
-    /// querying or mutating Match-owned state.
+    /// querying or mutating Match-owned state. When the committed facts match
+    /// one of the authored post-match themes, the existing ContractGifRenderer
+    /// gets a second, independent 20% chance after the text gate, preserving
+    /// the Python ordering while keeping media at the Match provider boundary.
     #[must_use]
     pub fn on_post_match_debrief(&mut self, context: &JopatPostMatchContext) -> Option<NeonResult> {
         if !self.enabled {
@@ -2062,6 +2068,19 @@ impl NeonDegenService {
         let mut choice = SeededJopatChoice::new(seed);
         let protocol = choose_protocol(context, &mut choice);
         let fallback = render_fallback(protocol, context, &mut choice);
+        if let Some(spec) = post_match_gif_theme(context)
+            && self.rolls.roll(POST_MATCH_GIF_CHANCE)
+        {
+            let mut renderer = ContractGifRenderer;
+            if let Ok(gif) = renderer.render(&spec) {
+                return Some(NeonResult {
+                    layer: 3,
+                    text_block: Some(fallback),
+                    gif_file: Some(gif),
+                    footer_text: None,
+                });
+            }
+        }
         Some(NeonResult::text(2, fallback))
     }
 
@@ -2156,6 +2175,37 @@ impl NeonDegenService {
         } else {
             Some(NeonResult::text(2, text))
         }
+    }
+
+    /// Python-compatible one-sided head-to-head hook. Rivalries are evaluated
+    /// after milestone/streak candidates and do not consume the per-player
+    /// cooldown; Match still limits the committed chain to one delivery.
+    #[must_use]
+    pub fn on_rivalry_detected(
+        &mut self,
+        _guild_id: Option<u64>,
+        player1_id: u64,
+        player2_id: u64,
+        games_against: i64,
+        winrate_vs: f64,
+    ) -> Option<NeonResult> {
+        if !self.enabled
+            || games_against < 10
+            || !winrate_vs.is_finite()
+            || (30.0 < winrate_vs && winrate_vs < 70.0)
+            || !self.rolls.roll(0.01)
+        {
+            return None;
+        }
+        Some(NeonResult::text(
+            2,
+            render_rivalry_detected(
+                &client_name(player1_id),
+                &client_name(player2_id),
+                u32::try_from(games_against.max(0)).unwrap_or(u32::MAX),
+                winrate_vs,
+            ),
+        ))
     }
 
     #[must_use]

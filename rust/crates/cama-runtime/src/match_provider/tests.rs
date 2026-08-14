@@ -1200,6 +1200,422 @@ impl MatchPostMatchDebriefPort for MatchDebriefProbe {
     }
 }
 
+#[derive(Default)]
+struct MatchHookOrderProbe {
+    calls: Mutex<Vec<&'static str>>,
+    easter_eggs: Mutex<Vec<MatchEasterEggRequest>>,
+}
+
+#[async_trait]
+impl MatchPostMatchDebriefPort for MatchHookOrderProbe {
+    async fn on_bet_settlement(&self, _request: MatchBetSettlementRequest) -> Result<(), String> {
+        self.calls
+            .lock()
+            .expect("settlement probe")
+            .push("settlement");
+        Ok(())
+    }
+
+    async fn on_match_easter_eggs(&self, request: MatchEasterEggRequest) -> Result<(), String> {
+        self.calls
+            .lock()
+            .expect("easter-egg order probe")
+            .push("easter_eggs");
+        self.easter_eggs
+            .lock()
+            .expect("easter-egg request probe")
+            .push(request);
+        Ok(())
+    }
+
+    async fn on_post_match_debrief(
+        &self,
+        _request: MatchPostMatchDebriefRequest,
+    ) -> Result<(), String> {
+        self.calls.lock().expect("debrief probe").push("debrief");
+        Ok(())
+    }
+}
+
+#[test]
+fn match_easter_egg_collector_uses_exact_python_milestones_and_new_streak_records() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(6, false);
+    let milestone_totals = [10_i64, 50, 100, 200, 500];
+    let connection = Connection::open(fixture.database.path()).expect("open milestone fixture");
+    for (discord_id, total_games) in player_ids[..5].iter().zip(milestone_totals) {
+        connection
+            .execute(
+                "UPDATE players SET wins=?1, losses=0
+                 WHERE guild_id=?2 AND discord_id=?3",
+                params![total_games, GUILD, discord_id],
+            )
+            .expect("seed exact milestone total");
+    }
+    connection
+        .execute(
+            "UPDATE players SET wins=10, losses=1, personal_best_win_streak=4
+             WHERE guild_id=?1 AND discord_id=?2",
+            params![GUILD, player_ids[5]],
+        )
+        .expect("seed non-milestone streak player");
+    connection
+        .execute(
+            "INSERT INTO player_pairings(
+                 guild_id,player1_id,player2_id,games_against,player1_wins_against
+             ) VALUES(?1,?2,?3,10,8)",
+            params![GUILD, player_ids[0], player_ids[1]],
+        )
+        .expect("seed committed rivalry aggregate");
+    drop(connection);
+
+    let streak_data = BTreeMap::from([(
+        player_ids[5],
+        StreakAdjustment {
+            streak_length: 5,
+            multiplier: 1.6,
+        },
+    )]);
+    let request = fixture
+        .provider
+        .handler
+        .collect_match_easter_eggs(
+            &player_ids,
+            &player_ids[..1],
+            &player_ids[1..2],
+            &[player_ids[5]],
+            &streak_data,
+            None,
+            GUILD,
+            92_101,
+            Some(77_001),
+        )
+        .expect("collect production Match Easter eggs");
+
+    assert_eq!(
+        request.games_milestones,
+        player_ids[..5]
+            .iter()
+            .zip(milestone_totals)
+            .map(|(&discord_id, games_played)| GamesMilestone {
+                discord_id,
+                games_played,
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        request.win_streak_records,
+        vec![WinStreakRecord {
+            discord_id: player_ids[5],
+            current_streak: 5,
+            previous_best: 4,
+        }]
+    );
+    assert_eq!(
+        request.rivalries_detected,
+        vec![RivalryRecord {
+            player1_id: player_ids[0],
+            player2_id: player_ids[1],
+            games_against: 10,
+            winrate_vs: 80.0,
+        }]
+    );
+    assert_eq!(
+        PlayerRepository::new(fixture.database.path())
+            .get_by_id(player_ids[5], Some(GUILD))
+            .expect("read pre-commit personal best")
+            .expect("streak player")
+            .personal_best_win_streak,
+        4
+    );
+    fixture
+        .provider
+        .handler
+        .apply_easter_streak_records(GUILD, &request.win_streak_records)
+        .expect("apply committed personal best");
+    assert_eq!(
+        PlayerRepository::new(fixture.database.path())
+            .get_by_id(player_ids[5], Some(GUILD))
+            .expect("read committed personal best")
+            .expect("streak player")
+            .personal_best_win_streak,
+        5
+    );
+}
+
+#[test]
+fn match_easter_egg_collector_keeps_milestones_when_pairing_lookup_fails() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(2, false);
+    Connection::open(fixture.database.path())
+        .expect("open fail-soft pairing fixture")
+        .execute(
+            "UPDATE players SET wins=10, losses=0
+             WHERE guild_id=?1 AND discord_id IN (?2,?3)",
+            params![GUILD, player_ids[0], player_ids[1]],
+        )
+        .expect("seed milestone players");
+    Connection::open(fixture.database.path())
+        .expect("reopen fail-soft pairing fixture")
+        .execute_batch("DROP TABLE player_pairings")
+        .expect("remove pairing table to force lookup failure");
+
+    let request = fixture
+        .provider
+        .handler
+        .collect_match_easter_eggs(
+            &player_ids,
+            &player_ids[..1],
+            &player_ids[1..2],
+            &[],
+            &BTreeMap::new(),
+            None,
+            GUILD,
+            92_103,
+            Some(77_001),
+        )
+        .expect("pairing failure must not fail committed match presentation");
+    assert_eq!(request.games_milestones.len(), 2);
+    assert!(request.win_streak_records.is_empty());
+    assert!(request.rivalries_detected.is_empty());
+}
+
+#[test]
+fn committed_easter_streak_payload_survives_crash_retry_after_best_update() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let winner = pending.state.radiant_team_ids[0];
+    let streak_data = BTreeMap::from([(
+        winner,
+        StreakAdjustment {
+            streak_length: 5,
+            multiplier: 1.6,
+        },
+    )]);
+    let first = fixture
+        .provider
+        .handler
+        .collect_match_easter_eggs(
+            &pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            &pending.state.radiant_team_ids,
+            &pending.state.dire_team_ids,
+            &[winner],
+            &streak_data,
+            None,
+            GUILD,
+            92_104,
+            Some(77_001),
+        )
+        .expect("first committed Easter payload");
+    assert_eq!(first.win_streak_records.len(), 1);
+    assert_eq!(first.win_streak_records[0].previous_best, 0);
+    fixture
+        .provider
+        .handler
+        .pending
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            persist_easter_streaks_in_state(state, &first.win_streak_records);
+        })
+        .expect("persist committed Easter payload")
+        .expect("pending row for committed Easter payload");
+    fixture
+        .provider
+        .handler
+        .apply_easter_streak_records(GUILD, &first.win_streak_records)
+        .expect("apply first committed personal best");
+
+    let retry_pending = PendingMatchRepository::new(fixture.database.path())
+        .pending_match(GUILD, pending.pending_match_id)
+        .expect("reload pending match")
+        .expect("pending retry row");
+    let persisted = persisted_easter_streaks(&retry_pending.state)
+        .expect("decode committed Easter payload")
+        .expect("streak payload");
+    let retry = fixture
+        .provider
+        .handler
+        .collect_match_easter_eggs(
+            &retry_pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            &retry_pending.state.radiant_team_ids,
+            &retry_pending.state.dire_team_ids,
+            &[winner],
+            &streak_data,
+            Some(&persisted),
+            GUILD,
+            92_104,
+            Some(77_001),
+        )
+        .expect("reconstruct Easter payload after crash");
+    assert_eq!(retry.win_streak_records, first.win_streak_records);
+    assert_eq!(retry.win_streak_records[0].previous_best, 0);
+}
+
+#[test]
+fn easter_streak_persistence_failure_leaves_personal_best_unmutated() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let winner = pending.state.radiant_team_ids[0];
+    let streak_data = BTreeMap::from([(
+        winner,
+        StreakAdjustment {
+            streak_length: 5,
+            multiplier: 1.6,
+        },
+    )]);
+    let first = fixture
+        .provider
+        .handler
+        .collect_match_easter_eggs(
+            &pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            &pending.state.radiant_team_ids,
+            &pending.state.dire_team_ids,
+            &[winner],
+            &streak_data,
+            None,
+            GUILD,
+            92_105,
+            Some(77_001),
+        )
+        .expect("compute streak payload before forced persistence failure");
+    assert_eq!(first.win_streak_records[0].previous_best, 0);
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .delete_pending_match(GUILD, pending.pending_match_id)
+            .expect("delete pending row to force persistence failure")
+    );
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+                persist_easter_streaks_in_state(state, &first.win_streak_records);
+            })
+            .expect("forced persistence operation")
+            .is_none()
+    );
+    assert_eq!(
+        PlayerRepository::new(fixture.database.path())
+            .get_personal_best_win_streak(winner, Some(GUILD))
+            .expect("read untouched personal best"),
+        0
+    );
+}
+
+#[test]
+fn persisted_easter_streak_payload_survives_best_update_failure() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let winner = pending.state.radiant_team_ids[0];
+    let records = vec![WinStreakRecord {
+        discord_id: winner,
+        current_streak: 5,
+        previous_best: 0,
+    }];
+    fixture
+        .provider
+        .handler
+        .pending
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            persist_easter_streaks_in_state(state, &records);
+        })
+        .expect("persist streak payload before forced update failure")
+        .expect("pending row for forced update failure");
+    Connection::open(fixture.database.path())
+        .expect("open forced update failure database")
+        .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE players;")
+        .expect("remove player table to force update failure");
+    assert!(
+        fixture
+            .provider
+            .handler
+            .apply_easter_streak_records(GUILD, &records)
+            .is_err()
+    );
+    let retry_pending = PendingMatchRepository::new(fixture.database.path())
+        .pending_match(GUILD, pending.pending_match_id)
+        .expect("reload payload after update failure")
+        .expect("pending payload retained");
+    assert_eq!(
+        persisted_easter_streaks(&retry_pending.state)
+            .expect("decode retained payload")
+            .expect("retained streak records"),
+        records
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_match_hooks_deliver_settlement_then_easter_eggs_then_debrief() {
+    let fixture = MatchRuntimeFixture::new();
+    let probe = Arc::new(MatchHookOrderProbe::default());
+    fixture
+        .provider
+        .attach_post_match_debrief(Arc::clone(&probe) as Arc<dyn MatchPostMatchDebriefPort>)
+        .expect("attach match hook order probe");
+    fixture
+        .provider
+        .handler
+        .emit_post_match_hooks(
+            Some(MatchBetSettlementRequest {
+                guild_id: GUILD,
+                match_id: 92_102,
+                channel_id: Some(77_001),
+                participants: Vec::new(),
+            }),
+            Some(MatchEasterEggRequest {
+                guild_id: GUILD,
+                match_id: 92_102,
+                channel_id: Some(77_001),
+                games_milestones: vec![GamesMilestone {
+                    discord_id: WINNER,
+                    games_played: 10,
+                }],
+                win_streak_records: vec![WinStreakRecord {
+                    discord_id: SKIMMER,
+                    current_streak: 5,
+                    previous_best: 4,
+                }],
+                rivalries_detected: vec![RivalryRecord {
+                    player1_id: WINNER,
+                    player2_id: SKIMMER,
+                    games_against: 10,
+                    winrate_vs: 80.0,
+                }],
+            }),
+            Some(MatchPostMatchDebriefRequest {
+                guild_id: GUILD,
+                match_id: 92_102,
+                channel_id: Some(77_001),
+                winner_id: Some(WINNER),
+                loser_id: Some(SKIMMER),
+                payout: 0,
+                loss: 0,
+                leverage: 1,
+                rating_change: None,
+                expected_win_prob: None,
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        probe.calls.lock().expect("hook order calls").as_slice(),
+        ["settlement", "easter_eggs", "debrief"]
+    );
+    let requests = probe.easter_eggs.lock().expect("hook request calls");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].games_milestones[0].games_played, 10);
+    assert_eq!(requests[0].win_streak_records[0].current_streak, 5);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn post_match_debrief_reads_rating_history_and_preserves_openskill_gain() {
     let fixture = MatchRuntimeFixture::new();
@@ -1788,7 +2204,7 @@ async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_
             },
         )
         .expect("read committed policy effects");
-    assert_eq!(policy_before, (2, 1, 10, 5, 10, 10));
+    assert_eq!(policy_before, (2, 1, 11, 6, 10, 10));
     drop(connection);
 
     let context = ReadyRecoveryContext::new(
