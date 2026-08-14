@@ -91,6 +91,25 @@ impl Fixture {
         connection.last_insert_rowid()
     }
 
+    fn seed_legacy_event_dig_action(&self, event_id: &str) -> i64 {
+        let connection = self.connection();
+        connection
+            .execute(
+                "INSERT INTO dig_actions (
+                     guild_id, actor_id, target_id, action_type, depth_before,
+                     depth_after, jc_delta, detail, created_at
+                 ) VALUES (?1, ?2, NULL, 'dig', 24, 24, 0, ?3, ?4)",
+                params![
+                    GUILD,
+                    ACTOR,
+                    serde_json::json!({"event": event_id}).to_string(),
+                    NOW - 1
+                ],
+            )
+            .expect("seed legacy event Dig action");
+        connection.last_insert_rowid()
+    }
+
     fn balance(&self, discord_id: i64) -> i64 {
         self.connection()
             .query_row(
@@ -211,10 +230,10 @@ fn test_positive_event_reward_is_scaled_once_and_audited() {
         .expect("positive event reward");
     let resolution = outcome.resolution.as_ref().expect("typed resolution");
     assert!(outcome.success && outcome.applied_now);
-    assert_eq!(resolution.economy_gross_jc, 3);
+    assert_eq!(resolution.economy_gross_jc, 4);
     assert_eq!(
         resolution.jc,
-        cama_domain::dig_economy::scale_positive_dig_jc(3)
+        cama_domain::dig_economy::scale_positive_dig_jc(4)
     );
     assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
     let detail: String = fixture
@@ -226,7 +245,7 @@ fn test_positive_event_reward_is_scaled_once_and_audited() {
         )
         .expect("event audit detail");
     let value: serde_json::Value = serde_json::from_str(&detail).expect("event detail JSON");
-    assert_eq!(value["gross_jc"], 3);
+    assert_eq!(value["gross_jc"], 4);
     assert_eq!(value["reward_multiplier"], 0.65);
     assert_eq!(value["jc"], resolution.jc);
     let retry = service
@@ -241,7 +260,7 @@ fn test_positive_event_reward_is_scaled_once_and_audited() {
 }
 
 #[test]
-fn test_legacy_event_reward_is_scaled_once_and_audited() {
+fn test_economy_event_reward_is_scaled_once_and_audited() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 50, 0);
     let event_date =
@@ -282,6 +301,89 @@ fn test_legacy_event_reward_is_scaled_once_and_audited() {
         .as_ref()
         .expect("typed legacy resolution");
     assert!(outcome.success && outcome.applied_now);
+    assert_eq!(resolution.economy_gross_jc, 4);
+    assert_eq!(
+        resolution.jc,
+        cama_domain::dig_economy::scale_positive_dig_jc(8)
+    );
+    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
+    let detail: String = fixture
+        .connection()
+        .query_row(
+            "SELECT detail FROM dig_actions WHERE id=?1",
+            params![outcome.action_id.expect("legacy event action")],
+            |row| row.get(0),
+        )
+        .expect("legacy event audit detail");
+    let value: serde_json::Value = serde_json::from_str(&detail).expect("legacy detail JSON");
+    assert_eq!(value["gross_jc"], 4);
+    assert_eq!(value["reward_multiplier"], 0.65);
+    assert_eq!(value["jc"], resolution.jc);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+// tests/test_dig_reward_policy.py::test_legacy_event_reward_is_scaled_once_and_audited
+#[test]
+fn test_legacy_event_reward_is_scaled_once_and_audited() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 24, 0);
+    let dig_action_id = fixture.seed_legacy_event_dig_action("legacy_reward_policy_event");
+    let event_date =
+        cama_domain::game_date::game_date_for_timestamp(NOW as f64).expect("event date");
+    EconomyEventRepository::new(fixture.database.path())
+        .activate_event_atomic(
+            Some(GUILD),
+            &EventDraft {
+                event_date,
+                name: "Double legacy reward".to_owned(),
+                hero: "Earthshaker".to_owned(),
+                direction: EventDirection::Neutral,
+                severity: 1,
+                target_effect_jc: 0,
+                forecast_flow_jc: 0,
+                expected_effect_jc: 0,
+                monetary_stock_before: 0,
+                effects: EventEffects {
+                    reward_multiplier: 2.0,
+                    ..EventEffects::default()
+                },
+                announcement: "Double legacy reward".to_owned(),
+                starts_at: NOW - 60,
+                ends_at: NOW + 60,
+                created_at: NOW - 60,
+            },
+        )
+        .expect("persist doubling economy event");
+    let mut config = DigRuntimeConfig::default();
+    config.economy_event.enabled = true;
+    let service = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
+    let catalog = DigLegacyEventCatalog::from_json_str(
+        &serde_json::json!([{
+            "id": "legacy_reward_policy_event",
+            "name": "Legacy Reward Policy Event",
+            "outcomes": {
+                "inspect": {
+                    "message": "A compact reward.",
+                    "jc": 15,
+                    "advance": 0
+                }
+            }
+        }])
+        .to_string(),
+    )
+    .expect("parse legacy EVENT_POOL shape");
+    let request = DigEventActionRequest {
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        dig_action_id,
+        choice: "inspect",
+        now: NOW,
+    };
+    let outcome = service
+        .resolve_action_event_with_legacy_catalog(request, &catalog)
+        .expect("legacy event reward");
+    let resolution = outcome.resolution.as_ref().expect("legacy resolution");
+    assert!(outcome.success && outcome.applied_now);
     assert_eq!(resolution.economy_gross_jc, 15);
     assert_eq!(
         resolution.jc,
@@ -300,7 +402,88 @@ fn test_legacy_event_reward_is_scaled_once_and_audited() {
     assert_eq!(value["gross_jc"], 15);
     assert_eq!(value["reward_multiplier"], 0.65);
     assert_eq!(value["jc"], resolution.jc);
+    let retry = service
+        .resolve_action_event_with_legacy_catalog(request, &catalog)
+        .expect("legacy event retry");
+    assert!(!retry.applied_now);
+    assert_eq!(retry.action_id, outcome.action_id);
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn legacy_catalog_dispatches_ranges_clamps_at_boss_and_retries_idempotently() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 24, 0);
+    let action_id = fixture.seed_legacy_event_dig_action("legacy_range_event");
+    let catalog = DigLegacyEventCatalog::from_json_str(
+        &serde_json::json!([{
+            "id": "legacy_range_event",
+            "name": "Legacy Range Event",
+            "outcomes": {
+                "inspect": {
+                    "message": "The old catalog still speaks.",
+                    "jc": [10, 12],
+                    "depth": [3, 9]
+                }
+            }
+        }])
+        .to_string(),
+    )
+    .expect("legacy catalog parse");
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        catalog.event("legacy_range_event").unwrap().outcomes["inspect"].jc,
+        DigLegacyIntegerRange {
+            minimum: 10,
+            maximum: 12
+        }
+    );
+
+    let service = fixture.service();
+    let request = DigEventActionRequest {
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        dig_action_id: action_id,
+        choice: "inspect",
+        now: NOW,
+    };
+    let first = service
+        .resolve_action_event_with_legacy_catalog(request, &catalog)
+        .expect("legacy catalog dispatch");
+    let resolution = first.resolution.as_ref().expect("legacy resolution");
+    assert!(first.success && first.applied_now);
+    assert!(resolution.economy_gross_jc >= 10 && resolution.economy_gross_jc <= 12);
+    assert_eq!(resolution.advance, 0);
+    assert!(resolution.boss_encounter);
+    assert_eq!(first.depth_before, 24);
+    assert_eq!(first.depth_after, 24);
+    assert_eq!(
+        fixture.balance(ACTOR),
+        100 + first.resolution.as_ref().unwrap().jc
+    );
+
+    let retry = service
+        .resolve_action_event_with_legacy_catalog(request, &catalog)
+        .expect("legacy catalog retry");
+    assert!(retry.success && !retry.applied_now);
+    assert_eq!(retry.action_id, first.action_id);
+    assert_eq!(retry.balance_after, first.balance_after);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn legacy_catalog_rejects_malformed_range_and_missing_outcomes() {
+    let malformed = serde_json::json!([{
+        "id": "bad_range",
+        "name": "Bad Range",
+        "outcomes": {"inspect": {"jc": [4], "message": "nope"}}
+    }]);
+    let error = DigLegacyEventCatalog::from_json(&malformed).expect_err("malformed range");
+    assert!(error.contains("range must contain two integers"));
+
+    let missing = serde_json::json!([{"id": "missing_outcomes", "name": "Missing"}]);
+    let error = DigLegacyEventCatalog::from_json(&missing).expect_err("missing outcomes");
+    assert!(error.contains("outcomes object"));
 }
 
 #[test]

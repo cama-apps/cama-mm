@@ -517,16 +517,43 @@ fn audit_event_positive_reward_scales_once_and_is_auditable() {
 }
 
 #[test]
-fn audit_legacy_event_shape_is_rejected_until_catalog_adapter_exists() {
-    let mut repository = InMemoryLootRepository::new();
-    repository.register_player(ACTOR, GUILD, 100);
-    repository.create_tunnel(ACTOR, GUILD);
-    let mut service = DigLootService::new(repository, ScriptedLootEntropy::new([0.0], []));
-    let result = service.resolve_event(ACTOR, GUILD, "legacy_reward_policy_event", "inspect");
-    assert!(!result.success);
-    assert_eq!(result.error.as_deref(), Some("Unknown event."));
-    // Python still accepts the legacy `outcomes` shape and applies economy
-    // adjustment before positive scaling; Rust has no legacy adapter.
+fn audit_legacy_event_shape_adapter_settles_migrated_sqlite() {
+    let fixture = Fixture::new();
+    fixture.seed_player(ACTOR, 100);
+    fixture.seed_tunnel(ACTOR, 10);
+    let result = fixture
+        .service()
+        .resolve_legacy_event(dig_event_runtime_reward_under_test::DigLegacyEventRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            event_id: "legacy_reward_policy_event",
+            event_name: "Legacy Reward Policy Event",
+            choice: "inspect",
+            message: "A compact reward.",
+            advance: 0,
+            jc: 15,
+            event_key: "legacy-reward-policy:audit",
+            now: NOW,
+        })
+        .expect("legacy event adapter");
+    let resolution = result.resolution.expect("legacy resolution");
+    assert!(result.success && result.applied_now);
+    assert_eq!(resolution.economy_gross_jc, 15);
+    assert_eq!(resolution.jc, scale_positive_dig_jc(15));
+    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
+    let detail: Value = fixture
+        .connection()
+        .query_row(
+            "SELECT detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='event'
+              ORDER BY id DESC LIMIT 1",
+            params![ACTOR, GUILD],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|raw| serde_json::from_str(&raw).expect("legacy detail JSON"))
+        .expect("legacy audit");
+    assert_eq!(detail["gross_jc"], 15);
+    assert_eq!(detail["reward_multiplier"], 0.65);
 }
 
 #[test]

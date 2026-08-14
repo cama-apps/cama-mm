@@ -25,8 +25,8 @@ use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::pet_repository::PetRepository;
 use cama_domain::dig_economy::{
-    WagerMultiplier, WinChance, effective_wager_multiplier, scale_positive_dig_jc,
-    settled_wager_multiplier,
+    DIG_POSITIVE_JC_MULTIPLIER, WagerMultiplier, WinChance, effective_wager_multiplier,
+    scale_positive_dig_jc, settled_wager_multiplier,
 };
 use cama_domain::dig_gear::{
     CombatStats as GearCombatStats, GEAR_BOSS_DROP_RATE, GEAR_MAX_DURABILITY, GearLoadout,
@@ -1987,6 +1987,21 @@ pub struct DigPinnacleResolved {
     pub wager: i64,
     pub win_chance: f64,
     pub jc_delta: i64,
+    /// Net positive payout after bankruptcy and vanity sinks. This mirrors
+    /// Python's result["payout"] while jc_delta remains the durable balance
+    /// delta used by the settlement receipt.
+    pub payout: i64,
+    /// Wager profit after the daily economy event, before bankruptcy/vanity
+    /// sinks. Python exposes this separately from the base reward fields.
+    pub wager_payout: i64,
+    /// Daily-economy-adjusted authored pinnacle base reward, before the
+    /// positive Dig reward multiplier is applied.
+    pub gross_jc: i64,
+    /// Positive Dig scaling applied to gross_jc, before wager profit and
+    /// post-reward sinks are combined.
+    pub scaled_base_jc: i64,
+    /// Positive Dig reward multiplier used for scaled_base_jc.
+    pub reward_multiplier: f64,
     pub gross_payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
@@ -3505,6 +3520,10 @@ impl DigBossRuntimeService {
             let mut phase_event_id = None;
             let mut relic_drop = None;
             let mut gross_payout = 0;
+            let mut gross_jc = 0;
+            let mut scaled_base_jc = 0;
+            let mut wager_payout = 0;
+            let mut payout = 0;
             let mut bankruptcy_penalty = 0;
             let mut vanity_tax = 0;
             let mut jc_delta = 0;
@@ -3593,6 +3612,9 @@ impl DigBossRuntimeService {
                 let event_wager =
                     economy_event.adjust_reward(GuildId(request.guild_id), wager_profit);
                 gross_payout = gross_base.saturating_add(event_wager);
+                gross_jc = gross_base;
+                scaled_base_jc = scaled_base;
+                wager_payout = event_wager;
                 let adjustment = profit_policy.apply_penalty(
                     request.player_key(),
                     scaled_base.saturating_add(event_wager),
@@ -3600,6 +3622,7 @@ impl DigBossRuntimeService {
                 bankruptcy_penalty = adjustment.penalty_applied;
                 vanity_tax = adjustment.vanity_tax;
                 jc_delta = adjustment.penalized;
+                payout = jc_delta;
                 proposed.balance = expected.balance.saturating_add(jc_delta);
                 proposed.depth = i64::from(PINNACLE_DEPTH);
                 proposed.max_depth = proposed.max_depth.max(i64::from(PINNACLE_DEPTH));
@@ -3677,7 +3700,12 @@ impl DigBossRuntimeService {
                 "won":input.won,
                 "rounds":input.round_log.iter().map(round_record_json).collect::<Vec<_>>(),
                 "boss_hp_remaining":input.ending_boss_hp.max(0),
+                "jc_delta":jc_delta,
+                "gross_jc":gross_jc,
                 "gross_payout":gross_payout,
+                "scaled_base_jc":scaled_base_jc,
+                "wager_payout":wager_payout,
+                "reward_multiplier":DIG_POSITIVE_JC_MULTIPLIER,
                 "bankruptcy_penalty":bankruptcy_penalty,
                 "vanity_tax":vanity_tax,
                 "starting_boss_hp":input.starting_boss_hp,
@@ -3728,6 +3756,15 @@ impl DigBossRuntimeService {
                         wager: input.wager,
                         win_chance: input.win_chance,
                         jc_delta,
+                        payout,
+                        wager_payout,
+                        gross_jc,
+                        scaled_base_jc,
+                        reward_multiplier: if input.won && input.phase == 3 {
+                            DIG_POSITIVE_JC_MULTIPLIER
+                        } else {
+                            0.0
+                        },
                         gross_payout,
                         bankruptcy_penalty,
                         vanity_tax,

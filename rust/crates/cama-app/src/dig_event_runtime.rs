@@ -6,7 +6,7 @@
 //! modifier -> splash -> actor -> chain -> quest ordering, and returns the
 //! entire typed result needed to render or recover the interaction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cama_db::dig_event_runtime::{
@@ -34,7 +34,7 @@ use crate::dig_loot::{
     CANONICAL_EVENT_CHAIN_CHANCE, CanonicalEventPolicy, CanonicalEventPresentation,
     CanonicalEventResolution, CanonicalEventResolutionRequest, CanonicalEventRollContext,
     CanonicalEventRolls, CanonicalQuestFinale, CanonicalQuestFinaleOutcome, CanonicalQuestProgress,
-    CanonicalReward, CanonicalSplash, LootEntropy, SeededLootEntropy,
+    CanonicalReward, CanonicalSplash, EventComplexity, LootEntropy, SeededLootEntropy,
     advance_canonical_quest_on_desperate_success, artifact_catalog, canonical_chain_event,
     canonical_eligible_events, canonical_eligible_quest_event_ids, canonical_event,
     canonical_event_needs_cruel_echo_roll, canonical_event_presentation, canonical_quest_for_event,
@@ -208,6 +208,239 @@ pub struct DigEventActionRequest<'a> {
     pub guild_id: i64,
     pub dig_action_id: i64,
     pub choice: &'a str,
+    pub now: i64,
+}
+
+/// A Python legacy integer field. `EVENT_POOL` historically accepted either a
+/// scalar or an inclusive two-element range for `jc` and `depth`/`advance`.
+/// The parser keeps that distinction so scalar fields do not consume entropy,
+/// while ranges use the same inclusive sampling semantics as Python's
+/// `random.randint`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigLegacyIntegerRange {
+    pub minimum: i64,
+    pub maximum: i64,
+}
+
+impl DigLegacyIntegerRange {
+    #[must_use]
+    pub const fn scalar(value: i64) -> Self {
+        Self {
+            minimum: value,
+            maximum: value,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_scalar(self) -> bool {
+        self.minimum == self.maximum
+    }
+
+    fn sample(self, entropy: &mut impl LootEntropy) -> i64 {
+        if self.is_scalar() {
+            self.minimum
+        } else {
+            entropy.advance(self.minimum, self.maximum)
+        }
+    }
+
+    fn parse(value: Option<&Value>, field: &str) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::scalar(0));
+        };
+        if let Some(number) = value.as_i64() {
+            return Ok(Self::scalar(number));
+        }
+        let Some(values) = value.as_array() else {
+            return Err(format!(
+                "legacy event {field} must be an integer or [min, max]"
+            ));
+        };
+        if values.len() != 2 {
+            return Err(format!(
+                "legacy event {field} range must contain two integers"
+            ));
+        }
+        let minimum = values[0]
+            .as_i64()
+            .ok_or_else(|| format!("legacy event {field} range minimum must be an integer"))?;
+        let maximum = values[1]
+            .as_i64()
+            .ok_or_else(|| format!("legacy event {field} range maximum must be an integer"))?;
+        if minimum > maximum {
+            return Err(format!(
+                "legacy event {field} range minimum cannot exceed maximum"
+            ));
+        }
+        Ok(Self { minimum, maximum })
+    }
+}
+
+/// One typed outcome from a pre-catalog `EVENT_POOL` event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigLegacyEventOutcome {
+    pub message: String,
+    pub jc: DigLegacyIntegerRange,
+    pub advance: DigLegacyIntegerRange,
+}
+
+/// One typed legacy `EVENT_POOL` event. These rows are intentionally separate
+/// from [`CanonicalEventDef`]: the generated catalog contains no legacy
+/// `outcomes` rows, but a migration/import boundary can still resolve one
+/// without reintroducing an untyped JSON path into actor settlement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigLegacyEventDef {
+    pub id: String,
+    pub name: String,
+    pub outcomes: BTreeMap<String, DigLegacyEventOutcome>,
+}
+
+/// Owned, validated adapter for a Python `EVENT_POOL` JSON snapshot.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DigLegacyEventCatalog {
+    events: BTreeMap<String, DigLegacyEventDef>,
+}
+
+impl DigLegacyEventCatalog {
+    /// Parse an `EVENT_POOL` array, or a wrapper object containing `events`,
+    /// `event_pool`, or `EVENT_POOL`. A wrapper is useful when the snapshot is
+    /// transported alongside catalog metadata.
+    pub fn from_json_str(raw: &str) -> Result<Self, String> {
+        let value = serde_json::from_str::<Value>(raw)
+            .map_err(|error| format!("invalid legacy event catalog JSON: {error}"))?;
+        Self::from_json(&value)
+    }
+
+    pub fn from_json(value: &Value) -> Result<Self, String> {
+        let rows = match value {
+            Value::Array(rows) => rows,
+            Value::Object(object) => ["events", "event_pool", "EVENT_POOL"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_array))
+                .ok_or_else(|| {
+                    "legacy event catalog must be an EVENT_POOL array or wrapper".to_owned()
+                })?,
+            _ => return Err("legacy event catalog must be an array".to_owned()),
+        };
+        let mut events = BTreeMap::new();
+        for row in rows {
+            let event = parse_legacy_event(row)?;
+            if events.insert(event.id.clone(), event).is_some() {
+                return Err("legacy event catalog contains duplicate event ids".to_owned());
+            }
+        }
+        Ok(Self { events })
+    }
+
+    #[must_use]
+    pub fn event(&self, event_id: &str) -> Option<&DigLegacyEventDef> {
+        self.events.get(event_id)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+fn parse_legacy_event(value: &Value) -> Result<DigLegacyEventDef, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "legacy EVENT_POOL entries must be objects".to_owned())?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "legacy event id must be a non-empty string".to_owned())?
+        .to_owned();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Unknown Event")
+        .to_owned();
+    let outcomes = object
+        .get("outcomes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("legacy event {id} must contain an outcomes object"))?;
+    let mut typed_outcomes = BTreeMap::new();
+    for (choice, payload) in outcomes {
+        if choice.trim().is_empty() {
+            return Err(format!("legacy event {id} contains an empty choice"));
+        }
+        let payload = payload
+            .as_object()
+            .ok_or_else(|| format!("legacy event {id} outcome {choice} must be an object"))?;
+        let message = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Nothing happened.")
+            .to_owned();
+        // Python's legacy resolver called this field `depth`; a few imported
+        // snapshots used the newer application spelling `advance`. Prefer the
+        // explicit advance key when both are present, while accepting either.
+        let advance = DigLegacyIntegerRange::parse(
+            payload.get("advance").or_else(|| payload.get("depth")),
+            "advance",
+        )?;
+        let jc = DigLegacyIntegerRange::parse(payload.get("jc"), "jc")?;
+        if typed_outcomes
+            .insert(
+                choice.clone(),
+                DigLegacyEventOutcome {
+                    message,
+                    jc,
+                    advance,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "legacy event {id} contains duplicate choice {choice}"
+            ));
+        }
+    }
+    Ok(DigLegacyEventDef {
+        id,
+        name,
+        outcomes: typed_outcomes,
+    })
+}
+
+/// Request for the migration-only catalog dispatch path. The catalog owns the
+/// event name, message, and scalar/range fields; the caller supplies only the
+/// actor, choice, and durable interaction identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigLegacyCatalogRequest<'a> {
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub event_id: &'a str,
+    pub choice: &'a str,
+    pub event_key: &'a str,
+    pub now: i64,
+}
+
+/// Authored payload for a pre-catalog event row.  Python historically allowed
+/// `EVENT_POOL` entries with an `outcomes` map instead of the newer typed
+/// `safe_option`/`risky_option` shape.  This scalar request remains available
+/// to callers that have already performed the legacy parse; new boundaries
+/// should prefer [`DigLegacyEventCatalog`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigLegacyEventRequest<'a> {
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub event_id: &'a str,
+    pub event_name: &'a str,
+    pub choice: &'a str,
+    pub message: &'a str,
+    pub advance: i64,
+    pub jc: i64,
+    pub event_key: &'a str,
     pub now: i64,
 }
 
@@ -473,6 +706,58 @@ impl DigEventRuntimeService {
         })
     }
 
+    /// Resolve a pending event through an explicitly supplied legacy catalog.
+    /// This is the production migration/import boundary for an old
+    /// `EVENT_POOL` snapshot. Canonical generated events continue through
+    /// [`Self::resolve_action_event`]; only an event id absent from that
+    /// catalog is admitted to the legacy parser.
+    pub fn resolve_action_event_with_legacy_catalog(
+        &self,
+        request: DigEventActionRequest<'_>,
+        catalog: &DigLegacyEventCatalog,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let Some(pending) = repository.pending_event(
+            request.dig_action_id,
+            request.discord_id,
+            Some(request.guild_id),
+        )?
+        else {
+            return Ok(DigEventRuntimeOutcome::blocked(
+                "This Dig event expired or belongs to another player.",
+            ));
+        };
+        if event_view_expired(pending.created_at, request.now) {
+            return Ok(DigEventRuntimeOutcome::blocked(
+                "This Dig event expired or belongs to another player.",
+            ));
+        }
+        if canonical_event(&pending.event_id).is_some() {
+            let event_key = format!("dig-action:{}", pending.action_id);
+            return self.resolve_event(DigRuntimeEventRequest {
+                discord_id: request.discord_id,
+                guild_id: request.guild_id,
+                event_id: &pending.event_id,
+                choice: request.choice,
+                event_key: &event_key,
+                now: request.now,
+                chained: false,
+            });
+        }
+        let event_key = format!("dig-action:{}", pending.action_id);
+        self.resolve_legacy_event_from_catalog(
+            catalog,
+            DigLegacyCatalogRequest {
+                discord_id: request.discord_id,
+                guild_id: request.guild_id,
+                event_id: &pending.event_id,
+                choice: request.choice,
+                event_key: &event_key,
+                now: request.now,
+            },
+        )
+    }
+
     pub fn resolve_event(
         &self,
         request: DigRuntimeEventRequest<'_>,
@@ -683,6 +968,208 @@ impl DigEventRuntimeService {
             chain_event,
             quest_finale,
         })
+    }
+
+    /// Settle one legacy `outcomes`-shape event supplied by the runtime
+    /// catalog adapter.  The payload is intentionally typed at this boundary:
+    /// the provider may parse old JSON, but it cannot bypass the same actor
+    /// snapshot, economy-before-positive-scale ordering, CAS settlement, or
+    /// durable event-key idempotency used by canonical events.
+    pub fn resolve_legacy_event(
+        &self,
+        request: DigLegacyEventRequest<'_>,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        if request.event_id.trim().is_empty()
+            || request.event_name.trim().is_empty()
+            || request.choice.trim().is_empty()
+        {
+            return Ok(DigEventRuntimeOutcome::blocked("Invalid legacy event."));
+        }
+        if request.event_key.trim().is_empty() {
+            return Ok(DigEventRuntimeOutcome::blocked(
+                "This event interaction is missing its durable identity.",
+            ));
+        }
+        let key = DigEventActorKey {
+            discord_id: request.discord_id,
+            guild_id: Some(request.guild_id),
+        };
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let Some(snapshot) = repository.actor_snapshot_for_event(key)? else {
+            return Ok(DigEventRuntimeOutcome::blocked("You don't have a tunnel."));
+        };
+        self.resolve_legacy_event_values(request, repository, snapshot)
+    }
+
+    /// Resolve one event from an owned legacy catalog. Range draws are seeded
+    /// from the durable event key and actor identity, so a retry samples the
+    /// same authored result before the repository's idempotency receipt is
+    /// consulted.
+    pub fn resolve_legacy_event_from_catalog(
+        &self,
+        catalog: &DigLegacyEventCatalog,
+        request: DigLegacyCatalogRequest<'_>,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let event = catalog
+            .event(request.event_id)
+            .ok_or_else(|| DigEventRuntimeError::Policy("Unknown legacy event.".to_owned()))?;
+        let outcome = event.outcomes.get(request.choice).ok_or_else(|| {
+            DigEventRuntimeError::Policy(format!("Invalid choice: {}", request.choice))
+        })?;
+        let mut entropy = SeededLootEntropy::new(legacy_event_seed(request));
+        let jc = outcome.jc.sample(&mut entropy);
+        let advance = outcome.advance.sample(&mut entropy);
+        self.resolve_legacy_event(DigLegacyEventRequest {
+            discord_id: request.discord_id,
+            guild_id: request.guild_id,
+            event_id: &event.id,
+            event_name: &event.name,
+            choice: request.choice,
+            message: &outcome.message,
+            advance,
+            jc,
+            event_key: request.event_key,
+            now: request.now,
+        })
+    }
+
+    /// Parse and resolve one legacy catalog snapshot in one call. Deployment
+    /// code can use this while importing a historical JSON pool, without
+    /// exposing an untyped `Value` to the actor settlement API.
+    pub fn resolve_legacy_event_json(
+        &self,
+        catalog_json: &str,
+        request: DigLegacyCatalogRequest<'_>,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let catalog = DigLegacyEventCatalog::from_json_str(catalog_json)
+            .map_err(DigEventRuntimeError::Policy)?;
+        self.resolve_legacy_event_from_catalog(&catalog, request)
+    }
+
+    fn resolve_legacy_event_values(
+        &self,
+        request: DigLegacyEventRequest<'_>,
+        repository: DigEventRuntimeRepository,
+        snapshot: DigEventActorSnapshot,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let gross_jc =
+            scale_minigame_jc_delta(request.jc as f64, self.config.minigame_jc_delta_scale);
+        let final_jc = self.final_legacy_event_jc(request.guild_id, gross_jc, request.now);
+        let mut advance = request.advance;
+        let mut boss_encounter = false;
+        if advance > 0
+            && let Some(boundary) = next_boss_boundary(&snapshot.boss_progress_json)
+            && snapshot.depth.saturating_add(advance) >= boundary
+        {
+            advance = boundary
+                .saturating_sub(1)
+                .saturating_sub(snapshot.depth)
+                .max(0);
+            boss_encounter = true;
+        }
+        let resolution = CanonicalEventResolution {
+            event_id: request.event_id.to_owned(),
+            event_name: request.event_name.to_owned(),
+            choice: request.choice.to_owned(),
+            complexity: EventComplexity::Choice,
+            descriptions: vec![request.message.to_owned()],
+            steps: Vec::new(),
+            boon_options: Vec::new(),
+            ascii_art: None,
+            social: false,
+            succeeded: true,
+            message: request.message.to_owned(),
+            advance,
+            jc: final_jc,
+            cave_in: false,
+            streak_loss: 0,
+            streak_days_after: None,
+            curse: None,
+            persisted_curse: None,
+            buff: None,
+            black_wax_seal_spent: false,
+            active_curse_remaining_after: None,
+            curse_cleared: false,
+            gear_reward_pool: Vec::new(),
+            consumable_reward_pool: Vec::new(),
+            artifact_reward_pool: Vec::new(),
+            splash: None,
+            guild_modifier_on_success: None,
+            quest_id: None,
+            quest_step: None,
+            next_event_id: None,
+            chained_event_id: None,
+            reward: None,
+            duplicate_gear_reward: false,
+            splash_payout_ratio: None,
+            economy_gross_jc: request.jc,
+            cruel_echoes: false,
+            boss_encounter,
+            random_plan: Default::default(),
+        };
+        let detail = event_detail(&resolution, None);
+        let expected = snapshot.clone();
+        let depth_after = expected.depth.saturating_add(advance).max(0);
+        let settlement = repository.settle_actor_atomic_for_event(AtomicDigEventSettlement {
+            expected: &expected,
+            event_key: request.event_key,
+            event_id: request.event_id,
+            choice: request.choice,
+            depth_after,
+            streak_days_after: expected.streak_days,
+            buff_mutation: EventJsonMutation::Preserve,
+            curse_mutation: EventJsonMutation::Preserve,
+            balance_delta: resolution.jc,
+            reward: None,
+            inventory_capacity: EVENT_INVENTORY_CAPACITY,
+            detail_json: &detail,
+            created_at: request.now,
+        })?;
+        let receipt = match settlement {
+            DigEventSettlementOutcome::Applied(receipt) => receipt,
+            DigEventSettlementOutcome::Conflict => {
+                return Ok(DigEventRuntimeOutcome::blocked(
+                    "Your tunnel changed while this event was resolving. Try the choice again.",
+                ));
+            }
+            DigEventSettlementOutcome::MissingTunnel => {
+                return Ok(DigEventRuntimeOutcome::blocked("You don't have a tunnel."));
+            }
+            DigEventSettlementOutcome::MissingPlayer => {
+                return Ok(DigEventRuntimeOutcome::blocked(
+                    "You need to register first. Use /player register.",
+                ));
+            }
+        };
+        Ok(DigEventRuntimeOutcome {
+            success: true,
+            error: None,
+            resolution: Some(resolution),
+            depth_before: receipt.depth_before,
+            depth_after: receipt.depth_after,
+            balance_after: receipt.balance_after,
+            action_id: Some(receipt.action_id),
+            reward_row_id: receipt.reward_row_id,
+            applied_now: receipt.applied_now,
+            splash: None,
+            guild_modifier: None,
+            chain_event: None,
+            quest_finale: None,
+        })
+    }
+
+    fn final_legacy_event_jc(&self, guild_id: i64, gross_jc: i64, now: i64) -> i64 {
+        if gross_jc <= 0 {
+            // Python's legacy path structurally scales a loss but does not
+            // apply the deflationary event multiplier used by newer typed
+            // events.
+            return gross_jc;
+        }
+        let economy = SqliteEconomyEventService::new(&self.path, self.config.economy_event.clone());
+        let adjusted = economy
+            .adjust_reward_at(guild_id, gross_jc, now)
+            .unwrap_or(gross_jc);
+        scale_positive_dig_jc(adjusted)
     }
 
     fn final_event_jc(&self, guild_id: i64, authored: i64, now: i64) -> i64 {
@@ -1358,6 +1845,21 @@ fn resolution_as_outcome(
 }
 
 fn event_seed(request: DigRuntimeEventRequest<'_>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in request
+        .event_key
+        .bytes()
+        .chain(request.event_id.bytes())
+        .chain(request.choice.bytes())
+        .chain(request.discord_id.to_le_bytes())
+        .chain(request.guild_id.to_le_bytes())
+    {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in request
         .event_key

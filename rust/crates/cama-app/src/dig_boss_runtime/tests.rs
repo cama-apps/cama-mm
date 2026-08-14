@@ -1,4 +1,7 @@
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+use cama_db::economy_event_repository::{
+    EconomyEventRepository, EventDirection, EventDraft, EventEffects,
+};
 use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -2595,6 +2598,114 @@ fn pinnacle_final_victory_fuses_reward_relic_status_and_audit() {
             .expect("audit count"),
         1
     );
+}
+
+// tests/test_dig_reward_policy.py::test_pinnacle_reward_applies_edict_to_base_and_wager_profit
+#[test]
+fn pinnacle_reward_applies_economy_event_to_base_and_wager_profit() {
+    let database = fixture();
+    set_pinnacle(&database, 3, "phase2_defeated", None);
+    let now = 1_700_000_000;
+    let event_date = game_date_for_timestamp(now as f64).expect("pinnacle event date");
+    EconomyEventRepository::new(database.path())
+        .activate_event_atomic(
+            Some(GUILD),
+            &EventDraft {
+                event_date,
+                name: "Double pinnacle rewards".to_owned(),
+                hero: "Earthshaker".to_owned(),
+                direction: EventDirection::Neutral,
+                severity: 1,
+                target_effect_jc: 0,
+                forecast_flow_jc: 0,
+                expected_effect_jc: 0,
+                monetary_stock_before: 0,
+                effects: EventEffects {
+                    reward_multiplier: 2.0,
+                    ..EventEffects::default()
+                },
+                announcement: "Double pinnacle rewards".to_owned(),
+                starts_at: now - 60,
+                ends_at: now + 60,
+                created_at: now - 60,
+            },
+        )
+        .expect("persist reward edict");
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = true;
+    let runtime = DigBossRuntimeService::sqlite(config);
+    let wager = 200;
+    let win_chance = 0.5;
+    let raw_wager_profit = pinnacle_wager_profit(wager, RiskTier::Cautious, win_chance)
+        .expect("authored wager profit");
+    let result = runtime
+        .settle_pinnacle(
+            pinnacle_request(now),
+            PinnacleSettlementInput {
+                boss_id: "forgotten_king".to_owned(),
+                phase: 3,
+                risk_tier: RiskTier::Cautious,
+                wager,
+                won: true,
+                ending_boss_hp: 0,
+                boss_hp_max: 8,
+                starting_boss_hp: 8,
+                win_chance,
+                attempts: 1,
+                round_log: Vec::new(),
+                gear_wear: GearWearResult::default(),
+                boss_preparation: None,
+                warding_salts_blocked: false,
+            },
+            &mut SequenceEntropy::new(Vec::new(), vec![0, 0], Vec::new()),
+        )
+        .expect("pinnacle edict settlement");
+    let expected_gross_base = 1_000;
+    let expected_scaled_base = scale_positive_dig_jc(expected_gross_base);
+    let expected_event_wager = raw_wager_profit * 2;
+    let expected_gross_payout = expected_gross_base + expected_event_wager;
+    let expected_jc = expected_scaled_base + expected_event_wager;
+    assert_eq!(result.outcome.gross_jc, expected_gross_base);
+    assert_eq!(result.outcome.scaled_base_jc, expected_scaled_base);
+    assert_eq!(result.outcome.wager_payout, expected_event_wager);
+    assert_eq!(result.outcome.gross_payout, expected_gross_payout);
+    assert_eq!(result.outcome.payout, expected_jc);
+    assert_eq!(result.outcome.jc_delta, expected_jc);
+    assert_eq!(
+        result.outcome.reward_multiplier,
+        cama_domain::dig_economy::DIG_POSITIVE_JC_MULTIPLIER
+    );
+    assert_eq!(result.outcome.bankruptcy_penalty, 0);
+    assert_eq!(result.outcome.vanity_tax, 0);
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("inspect pinnacle edict balance")
+            .query_row(
+                "SELECT jopacoin_balance FROM players
+                  WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("pinnacle balance"),
+        100 + expected_jc
+    );
+    let detail: String = Connection::open(database.path())
+        .expect("inspect pinnacle edict audit")
+        .query_row(
+            "SELECT detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='pinnacle_fight'
+              ORDER BY id DESC LIMIT 1",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("pinnacle audit detail");
+    let detail = serde_json::from_str::<Value>(&detail).expect("pinnacle detail JSON");
+    assert_eq!(detail["jc_delta"], expected_jc);
+    assert_eq!(detail["gross_jc"], expected_gross_base);
+    assert_eq!(detail["scaled_base_jc"], expected_scaled_base);
+    assert_eq!(detail["wager_payout"], expected_event_wager);
+    assert_eq!(detail["gross_payout"], expected_gross_payout);
+    assert_eq!(detail["reward_multiplier"], 0.65);
 }
 
 // tests/test_dig_pinnacle_combat.py::test_paused_pinnacle_duel_persists_pet_assist
