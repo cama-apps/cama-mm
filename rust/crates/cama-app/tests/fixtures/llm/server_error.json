@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "server_error",
+    "code": "service_unavailable",
+    "message": "Synthetic provider outage."
+  }
+}
