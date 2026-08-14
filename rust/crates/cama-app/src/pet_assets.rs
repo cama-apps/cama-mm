@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use cama_domain::pet::{PetMood, PetStage};
 use cama_domain::pet_evolution::{PetCalling, PetInstinct};
 use flate2::read::ZlibDecoder;
+use gif::{ColorOutput, DecodeOptions};
 
 pub const CARD_WIDTH: usize = 512;
 pub const CARD_HEIGHT: usize = 288;
@@ -237,18 +238,46 @@ impl RasterImage {
         }
     }
 
-    fn resized_nearest(&self, width: usize, height: usize) -> Self {
-        let mut output = Self::new(width, height, Rgba::TRANSPARENT);
-        if self.width == 0 || self.height == 0 {
-            return output;
+    fn resized_lanczos(&self, width: usize, height: usize) -> Self {
+        if self.width == width && self.height == height {
+            return self.clone();
         }
-        for y in 0..height {
-            for x in 0..width {
-                let source_x = x * self.width / width;
-                let source_y = y * self.height / height;
-                let source = (source_y * self.width + source_x) * 4;
+        if width == 0 || height == 0 || self.width == 0 || self.height == 0 {
+            return Self::new(width, height, Rgba::TRANSPARENT);
+        }
+        let x_weights = lanczos_weights(self.width, width);
+        let y_weights = lanczos_weights(self.height, height);
+        let mut output = Self::new(width, height, Rgba::TRANSPARENT);
+        for (y, y_weights_for_pixel) in y_weights.iter().enumerate() {
+            for (x, x_weights_for_pixel) in x_weights.iter().enumerate() {
+                let mut channels = [0.0_f64; 4];
+                let mut total_weight = 0.0_f64;
+                for &(source_y, y_weight) in y_weights_for_pixel {
+                    for &(source_x, x_weight) in x_weights_for_pixel {
+                        let weight = x_weight * y_weight;
+                        let source = (source_y * self.width + source_x) * 4;
+                        let alpha = f64::from(self.pixels[source + 3]) / 255.0;
+                        for (channel, value) in channels[..3].iter_mut().enumerate() {
+                            *value += f64::from(self.pixels[source + channel]) * alpha * weight;
+                        }
+                        channels[3] += f64::from(self.pixels[source + 3]) * weight;
+                        total_weight += weight;
+                    }
+                }
                 let target = (y * width + x) * 4;
-                output.pixels[target..target + 4].copy_from_slice(&self.pixels[source..source + 4]);
+                if total_weight.abs() > f64::EPSILON {
+                    let alpha = channels[3] / total_weight;
+                    let alpha_byte = round_channel(alpha);
+                    output.pixels[target + 3] = alpha_byte;
+                    if alpha_byte != 0 {
+                        for (channel, value) in channels[..3].iter().enumerate() {
+                            output.pixels[target + channel] =
+                                round_channel(*value / total_weight * 255.0 / alpha);
+                        }
+                    } else {
+                        output.pixels[target..target + 3].fill(0);
+                    }
+                }
             }
         }
         output
@@ -1034,9 +1063,17 @@ impl AuthoredPetAssets for FilesystemPetAssets {
             let Ok(bytes) = fs::read(path) else {
                 continue;
             };
-            let decoded = (extension == "png")
-                .then(|| decode_png_raster(&bytes))
-                .flatten();
+            let Ok(byte_len) = u64::try_from(bytes.len()) else {
+                continue;
+            };
+            if byte_len > MAX_AUTHORED_ASSET_BYTES {
+                continue;
+            }
+            let decoded = match extension {
+                "gif" => decode_gif_raster(&bytes),
+                "png" => decode_png_raster(&bytes),
+                _ => None,
+            };
             return Some(AuthoredAsset {
                 bytes,
                 decoded,
@@ -1807,6 +1844,11 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
         left: &PetRenderRequest<'_>,
         right: &PetRenderRequest<'_>,
     ) -> PreparedPetFile {
+        // The native brawl attachment contract is a fixed 1024x288 canvas.
+        // Python's _compose_versus instead keeps authored card dimensions
+        // intrinsic, so non-512x288 authored cards remain a known cross-
+        // runtime difference; the filtered resize below only removes the
+        // native renderer's nearest-neighbor artifact within this contract.
         let overlay = self.authored.load("versus_overlay");
         let overlay_token = overlay
             .as_ref()
@@ -1831,7 +1873,7 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
             canvas.overlay(&right_image, CARD_WIDTH as i32, 0, true);
             if let Some(mut decoded) = overlay.and_then(|asset| asset.decoded) {
                 if decoded.width != VERSUS_WIDTH || decoded.height != CARD_HEIGHT {
-                    decoded = decoded.resized_nearest(VERSUS_WIDTH, CARD_HEIGHT);
+                    decoded = decoded.resized_lanczos(VERSUS_WIDTH, CARD_HEIGHT);
                 }
                 canvas.overlay(&decoded, 0, 0, false);
             } else {
@@ -1869,10 +1911,14 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
                 .load(&base_name)
                 .and_then(|asset| asset.decoded)
         {
+            // Python passes this authored image through unchanged before
+            // _compose_versus. Rust's fixed-card brawl contract normalizes it
+            // here, using Pillow-compatible filtering rather than nearest
+            // neighbor. Current shipped authored cards are all 512x288.
             return if decoded.width == CARD_WIDTH && decoded.height == CARD_HEIGHT {
                 decoded
             } else {
-                decoded.resized_nearest(CARD_WIDTH, CARD_HEIGHT)
+                decoded.resized_lanczos(CARD_WIDTH, CARD_HEIGHT)
             };
         }
         self.renderer.render(request)
@@ -2033,6 +2079,123 @@ pub fn decode_png_raster(bytes: &[u8]) -> Option<RasterImage> {
         height,
         pixels,
     })
+}
+
+/// Decode the first frame of a GIF into the logical canvas used by Pillow's
+/// `Image.open(...).convert("RGBA")`. The authored bytes remain untouched for
+/// direct egg/altar delivery; this raster is only used when a caller needs to
+/// engrave or compose the asset.
+#[must_use]
+pub fn decode_gif_raster(bytes: &[u8]) -> Option<RasterImage> {
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::RGBA);
+    // Reject an out-of-canvas frame from its descriptor before gif allocates
+    // the decoded pixel buffer. The caller still gets a fail-soft `None` for
+    // malformed authored input.
+    options.check_frame_consistency(true);
+    let mut decoder = options.read_info(Cursor::new(bytes)).ok()?;
+    let width = usize::from(decoder.width());
+    let height = usize::from(decoder.height());
+    if width == 0
+        || height == 0
+        || width
+            .checked_mul(height)
+            .is_none_or(|pixels| pixels > MAX_AUTHORED_PIXELS)
+    {
+        return None;
+    }
+    let background_index = decoder.bg_color();
+    let background_rgb = background_index.and_then(|index| {
+        let palette = decoder.global_palette()?;
+        let start = index.checked_mul(3)?;
+        Some((
+            *palette.get(start)?,
+            *palette.get(start + 1)?,
+            *palette.get(start + 2)?,
+        ))
+    });
+    let frame = decoder.read_next_frame().ok()??;
+    let frame_width = usize::from(frame.width);
+    let frame_height = usize::from(frame.height);
+    let left = usize::from(frame.left);
+    let top = usize::from(frame.top);
+    if left
+        .checked_add(frame_width)
+        .is_none_or(|right| right > width)
+        || top
+            .checked_add(frame_height)
+            .is_none_or(|bottom| bottom > height)
+        || frame_width
+            .checked_mul(frame_height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .is_none_or(|length| length != frame.buffer.len())
+    {
+        return None;
+    }
+
+    let background = background_rgb.map_or(Rgba::TRANSPARENT, |(red, green, blue)| {
+        // A transparency index belongs to the frame's local palette when one
+        // is present; it must not be compared numerically with the logical
+        // screen's global background index.
+        let transparent = frame.palette.is_none()
+            && background_index
+                .and_then(|index| u8::try_from(index).ok())
+                .is_some_and(|index| frame.transparent == Some(index));
+        Rgba(red, green, blue, if transparent { 0 } else { u8::MAX })
+    });
+    let mut image = RasterImage::new(width, height, background);
+    for y in 0..frame_height {
+        for x in 0..frame_width {
+            let source = (y * frame_width + x) * 4;
+            if frame.buffer[source + 3] == 0 {
+                continue;
+            }
+            let target = ((top + y) * width + left + x) * 4;
+            image.pixels[target..target + 4].copy_from_slice(&frame.buffer[source..source + 4]);
+        }
+    }
+    Some(image)
+}
+
+fn round_channel(value: f64) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+fn lanczos_weights(source_size: usize, target_size: usize) -> Vec<Vec<(usize, f64)>> {
+    let scale = source_size as f64 / target_size as f64;
+    let filter_scale = scale.max(1.0);
+    let support = 3.0 * filter_scale;
+    (0..target_size)
+        .map(|target| {
+            let center = (target as f64 + 0.5) * scale - 0.5;
+            let first = (center - support).floor() as isize;
+            let last = (center + support).ceil() as isize;
+            let mut weights = Vec::new();
+            for source in first..=last {
+                let distance = (center - source as f64) / filter_scale;
+                let weight = lanczos_kernel(distance);
+                if weight == 0.0 {
+                    continue;
+                }
+                if source < 0 || source >= source_size as isize {
+                    continue;
+                }
+                weights.push((source as usize, weight));
+            }
+            weights
+        })
+        .collect()
+}
+
+fn lanczos_kernel(value: f64) -> f64 {
+    if value.abs() < f64::EPSILON {
+        return 1.0;
+    }
+    if value.abs() >= 3.0 {
+        return 0.0;
+    }
+    let pi_value = std::f64::consts::PI * value;
+    (pi_value.sin() / pi_value) * ((pi_value / 3.0).sin() / (pi_value / 3.0))
 }
 
 fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {

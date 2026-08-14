@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use cama_domain::pet::{PetMood, PetStage, SPECIES};
 use cama_domain::pet_evolution::{PetCalling, PetInstinct};
+use gif::{Encoder, Frame, Repeat};
 
 use super::*;
 
@@ -29,6 +30,28 @@ fn assert_valid_card(image: &RasterImage) {
     assert_eq!((info.width, info.height), (CARD_WIDTH, CARD_HEIGHT));
     assert_eq!(info.color_type, 6);
     assert_eq!(image.pixels.len(), CARD_WIDTH * CARD_HEIGHT * 4);
+}
+
+fn solid_gif(width: u16, height: u16, colors: &[[u8; 4]]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let palette = [0_u8, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+        let mut encoder = Encoder::new(&mut bytes, width, height, &palette).expect("GIF encoder");
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .expect("GIF repeat extension");
+        for (index, color) in colors.iter().enumerate() {
+            let mut pixels = vec![0_u8; usize::from(width) * usize::from(height) * 4];
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.copy_from_slice(color);
+            }
+            let mut frame = Frame::from_rgba_speed(width, height, &mut pixels, 1);
+            frame.delay = u16::try_from(index + 1).expect("test GIF delay");
+            frame.dispose = gif::DisposalMethod::Keep;
+            encoder.write_frame(&frame).expect("GIF frame");
+        }
+    }
+    bytes
 }
 
 #[derive(Clone, Default)]
@@ -451,6 +474,158 @@ mod test_pet_asset_loader {
             Some(Rgba(255, 0, 0, 255))
         );
     }
+
+    #[test]
+    fn authored_gif_cards_preserve_raw_delivery_and_decode_first_frame_for_composition() {
+        let animated = solid_gif(64, 64, &[[255, 0, 0, 255], [0, 255, 0, 255]]);
+        let first_frame = decode_gif_raster(&animated).expect("first GIF frame");
+        let direct_assets = MemoryAssets::default();
+        direct_assets.insert(
+            "egg",
+            AuthoredAsset {
+                bytes: animated.clone(),
+                decoded: Some(first_frame.clone()),
+                extension: "gif".to_owned(),
+            },
+        );
+        direct_assets.insert(
+            "altar",
+            AuthoredAsset {
+                bytes: animated.clone(),
+                decoded: Some(first_frame),
+                extension: "gif".to_owned(),
+            },
+        );
+        let mut direct_loader = PetAssetLoader::new(direct_assets, ProceduralPetRenderer);
+        let egg = direct_loader.get_egg_card(4);
+        let altar = direct_loader.get_altar_card("Fluffy", 4);
+        assert_eq!(egg.filename, "pet_egg.gif");
+        assert_eq!(egg.bytes(), animated);
+        assert_eq!(altar.filename, "pet_altar.gif");
+        assert_eq!(altar.bytes(), animated);
+
+        let tombstone_assets = MemoryAssets::default();
+        tombstone_assets.insert(
+            "tombstone",
+            AuthoredAsset {
+                bytes: animated.clone(),
+                decoded: Some(decode_gif_raster(&animated).expect("first GIF frame")),
+                extension: "gif".to_owned(),
+            },
+        );
+        let mut tombstone_loader = PetAssetLoader::new(tombstone_assets, ProceduralPetRenderer);
+        let tombstone = tombstone_loader.get_tombstone_card("Fluffy", 4);
+        let engraved = decode_png_raster(tombstone.bytes()).expect("engraved GIF first frame PNG");
+        assert_eq!(tombstone.filename, "pet_tombstone.gif");
+        assert_eq!(engraved.pixel(0, 0), Some(Rgba(255, 0, 0, 255)));
+    }
+
+    #[test]
+    fn native_fixed_versus_contract_uses_filtered_resampling_for_non_native_cards() {
+        // Python preserves intrinsic authored card sizes in _compose_versus;
+        // this test records Rust's existing fixed 1024x288 brawl contract.
+        let assets = MemoryAssets::default();
+        let mut left = RasterImage::new(2, 1, Rgba(0, 0, 0, 255));
+        left.pixels[4..8].copy_from_slice(&[255, 255, 255, 255]);
+        assets.insert("common_cama_adult_happy", AuthoredAsset::png(left));
+        assets.insert(
+            "rama_baby_happy",
+            AuthoredAsset::png(RasterImage::solid_card(Rgba(20, 30, 40, 255))),
+        );
+        let mut loader = PetAssetLoader::new(assets, ProceduralPetRenderer);
+        let file = loader.get_versus_card(
+            &request("common_cama", PetStage::Adult, PetMood::Happy, 3),
+            &request("rama", PetStage::Baby, PetMood::Happy, 7),
+        );
+        let image = decode_stored_png(file.bytes());
+        assert_eq!((image.width, image.height), (VERSUS_WIDTH, CARD_HEIGHT));
+        assert!(
+            (0..CARD_WIDTH).any(|x| {
+                let pixel = image.pixel(x, CARD_HEIGHT / 2).expect("left card pixel");
+                pixel.0 > 0 && pixel.0 < 255
+            }),
+            "Lanczos composition should retain intermediate edge samples"
+        );
+    }
+
+    #[test]
+    fn native_versus_overlay_uses_pillow_filtered_resampling() {
+        let assets = MemoryAssets::default();
+        let mut overlay = RasterImage::new(2, 1, Rgba(0, 0, 0, 255));
+        overlay.pixels[4..8].copy_from_slice(&[255, 255, 255, 255]);
+        assets.insert("versus_overlay", AuthoredAsset::png(overlay));
+        let mut loader = PetAssetLoader::new(assets, ProceduralPetRenderer);
+        let file = loader.get_versus_card(
+            &request("common_cama", PetStage::Adult, PetMood::Happy, 3),
+            &request("rama", PetStage::Baby, PetMood::Happy, 7),
+        );
+        let image = decode_stored_png(file.bytes());
+        assert_eq!((image.width, image.height), (VERSUS_WIDTH, CARD_HEIGHT));
+        assert!(
+            (0..VERSUS_WIDTH).any(|x| {
+                let pixel = image.pixel(x, 0).expect("overlay pixel");
+                pixel.0 > 0 && pixel.0 < 255
+            }),
+            "overlay resize should retain filtered edge samples"
+        );
+    }
+
+    #[test]
+    fn lanczos_samples_match_pillow_for_a_rgba_edge_fixture() {
+        let mut source = RasterImage::new(2, 1, Rgba(0, 0, 0, 255));
+        source.pixels[4..8].copy_from_slice(&[255, 255, 255, 255]);
+        let resized = source.resized_lanczos(8, 1);
+        let samples = (0..8)
+            .map(|x| resized.pixel(x, 0).expect("resized sample").0)
+            .collect::<Vec<_>>();
+        assert_eq!(samples, [0, 0, 28, 93, 162, 227, 255, 255]);
+    }
+
+    #[test]
+    fn lanczos_rgba_samples_match_pillow_alpha_association() {
+        let mut source = RasterImage::new(2, 1, Rgba(255, 0, 0, 255));
+        source.pixels[4..8].copy_from_slice(&[0, 0, 0, 0]);
+        let resized = source.resized_lanczos(8, 1);
+        let samples = (0..8)
+            .map(|x| resized.pixel(x, 0).expect("resized RGBA sample"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            [
+                Rgba(255, 0, 0, 255),
+                Rgba(255, 0, 0, 255),
+                Rgba(255, 0, 0, 227),
+                Rgba(255, 0, 0, 162),
+                Rgba(255, 0, 0, 93),
+                Rgba(255, 0, 0, 28),
+                Rgba(0, 0, 0, 0),
+                Rgba(0, 0, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn lanczos_rgba_samples_do_not_leak_transparent_rgb_channels() {
+        let mut source = RasterImage::new(2, 1, Rgba(255, 0, 0, 0));
+        source.pixels[4..8].copy_from_slice(&[0, 0, 255, 255]);
+        let resized = source.resized_lanczos(8, 1);
+        let samples = (0..8)
+            .map(|x| resized.pixel(x, 0).expect("resized RGBA sample"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            [
+                Rgba(0, 0, 0, 0),
+                Rgba(0, 0, 0, 0),
+                Rgba(0, 0, 255, 28),
+                Rgba(0, 0, 255, 93),
+                Rgba(0, 0, 255, 162),
+                Rgba(0, 0, 255, 227),
+                Rgba(0, 0, 255, 255),
+                Rgba(0, 0, 255, 255),
+            ]
+        );
+    }
 }
 
 mod test_filesystem_pet_assets {
@@ -504,9 +679,172 @@ mod test_filesystem_pet_assets {
     }
 
     #[test]
+    fn static_gif_decodes_to_its_logical_rgba_canvas() {
+        // Matches PIL.Image.open(BytesIO(gif)).convert("RGBA") for a
+        // single-frame authored override.
+        let gif = solid_gif(3, 2, &[[24, 48, 96, 255]]);
+        let image = decode_gif_raster(&gif).expect("static GIF raster");
+        assert_eq!((image.width, image.height), (3, 2));
+        assert_eq!(image.pixel(0, 0), Some(Rgba(24, 48, 96, 255)));
+        assert_eq!(image.pixel(2, 1), Some(Rgba(24, 48, 96, 255)));
+    }
+
+    #[test]
+    fn gif_decoder_preserves_transparent_logical_background_and_offsets() {
+        // Pillow exposes the logical canvas, not only the frame rectangle,
+        // and leaves the transparent GIF background transparent.
+        let mut bytes = Vec::new();
+        {
+            let palette: [u8; 0] = [];
+            let mut encoder = Encoder::new(&mut bytes, 3, 2, &palette).expect("GIF encoder");
+            let mut pixels = vec![
+                255_u8, 0, 0, 255, 0, 0, 0, 0, // red, transparent
+                0, 0, 0, 0, 0, 0, 0, 0, // transparent, transparent
+            ];
+            let mut frame = Frame::from_rgba_speed(2, 2, &mut pixels, 1);
+            frame.left = 1;
+            frame.top = 0;
+            encoder.write_frame(&frame).expect("GIF offset frame");
+        }
+        // gif::Encoder emits a padded black table even for an empty palette;
+        // remove that table to model a GIF with no global palette, whose
+        // logical background is transparent.
+        bytes[10] &= 0x7f;
+        bytes.drain(13..19);
+        let image = decode_gif_raster(&bytes).expect("offset GIF raster");
+        assert_eq!((image.width, image.height), (3, 2));
+        assert_eq!(image.pixel(1, 0), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(image.pixel(0, 0), Some(Rgba(0, 0, 0, 0)));
+        assert_eq!(image.pixel(2, 1), Some(Rgba(0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn gif_decoder_honors_nontransparent_global_background_around_offset_frame() {
+        // This mirrors Pillow's logical-canvas result when the GIF screen
+        // descriptor selects an opaque global background color.
+        let mut bytes = Vec::new();
+        {
+            let palette = [
+                0_u8, 0, 0, // background index 0
+                24, 48, 96, // background index 1
+                255, 0, 0, // unused global color
+            ];
+            let mut encoder = Encoder::new(&mut bytes, 3, 2, &palette).expect("GIF encoder");
+            let mut pixels = vec![255_u8, 0, 0, 255];
+            let mut frame = Frame::from_rgba_speed(1, 1, &mut pixels, 1);
+            frame.left = 1;
+            encoder.write_frame(&frame).expect("GIF offset frame");
+        }
+        // gif::Encoder writes background index zero; use index one to model
+        // an authored GIF with an opaque logical-screen background.
+        bytes[11] = 1;
+        let image = decode_gif_raster(&bytes).expect("opaque-background GIF raster");
+        assert_eq!(image.pixel(0, 0), Some(Rgba(24, 48, 96, 255)));
+        assert_eq!(image.pixel(1, 0), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(image.pixel(2, 1), Some(Rgba(24, 48, 96, 255)));
+    }
+
+    #[test]
+    fn gif_decoder_honors_opaque_background_when_gce_disables_transparency() {
+        let mut bytes = Vec::new();
+        {
+            let palette = [0_u8, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+            let mut encoder = Encoder::new(&mut bytes, 3, 2, &palette).expect("GIF encoder");
+            let mut pixels = vec![
+                255_u8, 0, 0, 255, 0, 0, 0, 0, // red, transparent
+                0, 0, 0, 0, 0, 0, 0, 0, // transparent, transparent
+            ];
+            let mut frame = Frame::from_rgba_speed(2, 2, &mut pixels, 1);
+            frame.left = 1;
+            encoder.write_frame(&frame).expect("GIF offset frame");
+        }
+        // The fixture's GCE is 0x05 (disposal + transparency). Clearing the
+        // transparency bit models the same offset frame with an opaque GIF
+        // background, as Pillow exposes from this wire representation.
+        assert_eq!(bytes[25..29], [0x21, 0xf9, 0x04, 0x05]);
+        bytes[28] = 0x04;
+        let image = decode_gif_raster(&bytes).expect("opaque-background GIF raster");
+        assert_eq!(image.pixel(0, 0), Some(Rgba(0, 0, 0, 255)));
+        assert_eq!(image.pixel(1, 0), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(image.pixel(2, 1), Some(Rgba(0, 0, 0, 255)));
+    }
+
+    #[test]
+    fn gif_decoder_transparent_frame_pixels_preserve_opaque_screen_background() {
+        let mut bytes = Vec::new();
+        {
+            let palette = [
+                0_u8, 0, 0, // global index 0
+                24, 48, 96, // global background index 1
+                255, 0, 0, // global index 2
+            ];
+            let mut encoder = Encoder::new(&mut bytes, 3, 2, &palette).expect("GIF encoder");
+            let mut pixels = vec![
+                255_u8, 0, 0, 255, 0, 0, 0, 0, // red, transparent
+                0, 0, 0, 0, 0, 0, 0, 0, // transparent, transparent
+            ];
+            let mut frame = Frame::from_rgba_speed(2, 2, &mut pixels, 1);
+            frame.left = 1;
+            encoder.write_frame(&frame).expect("GIF offset frame");
+        }
+        bytes[11] = 1;
+        let image = decode_gif_raster(&bytes).expect("transparent-frame GIF raster");
+        assert_eq!(image.pixel(0, 0), Some(Rgba(24, 48, 96, 255)));
+        assert_eq!(image.pixel(1, 0), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(image.pixel(2, 0), Some(Rgba(24, 48, 96, 255)));
+        assert_eq!(image.pixel(2, 1), Some(Rgba(24, 48, 96, 255)));
+    }
+
+    #[test]
+    fn gif_decoder_does_not_apply_global_background_transparency_to_local_palette() {
+        // Pillow's Image.open(...).convert("RGBA") keeps the opaque logical
+        // screen background here. Frame transparency index 0 belongs to the
+        // local palette, even though the global background index is also 0.
+        let mut bytes = Vec::new();
+        {
+            let global_palette = [
+                24_u8, 48, 96, // global background index 0
+                255, 0, 0, // global index 1
+                0, 0, 0, // global index 2
+                0, 0, 0, // global index 3 (table size padding)
+            ];
+            let mut encoder = Encoder::new(&mut bytes, 3, 2, &global_palette).expect("GIF encoder");
+            let mut frame =
+                Frame::from_palette_pixels(1, 1, vec![0_u8], vec![255, 0, 0, 0, 255, 0], Some(0));
+            frame.left = 1;
+            encoder.write_frame(&frame).expect("local-palette frame");
+        }
+        bytes[11] = 0;
+        let image = decode_gif_raster(&bytes).expect("local-palette GIF raster");
+        let expected = Rgba(24, 48, 96, 255);
+        assert_eq!(image.pixel(0, 0), Some(expected));
+        assert_eq!(image.pixel(1, 0), Some(expected));
+        assert_eq!(image.pixel(2, 1), Some(expected));
+    }
+
+    #[test]
+    fn gif_decoder_rejects_malformed_or_out_of_bounds_frames_without_panicking() {
+        let mut oversized = solid_gif(2, 2, &[[255, 0, 0, 255]]);
+        let descriptor = oversized
+            .iter()
+            .position(|byte| *byte == 0x2c)
+            .expect("GIF image descriptor");
+        oversized[descriptor + 5..descriptor + 7].copy_from_slice(&u16::MAX.to_le_bytes());
+        let oversized_result = std::panic::catch_unwind(|| decode_gif_raster(&oversized));
+        assert!(oversized_result.is_ok(), "descriptor must not panic");
+        assert_eq!(oversized_result.expect("panic result"), None);
+
+        let malformed = b"GIF89a";
+        let malformed_result = std::panic::catch_unwind(|| decode_gif_raster(malformed));
+        assert!(malformed_result.is_ok(), "malformed GIF must not panic");
+        assert_eq!(malformed_result.expect("panic result"), None);
+    }
+
+    #[test]
     fn gif_override_precedes_png_and_file_limit_is_enforced() {
         let directory = tempfile::tempdir().expect("temporary asset directory");
-        std::fs::write(directory.path().join("egg.gif"), b"GIF89a").expect("write gif override");
+        let gif = solid_gif(4, 4, &[[255, 0, 0, 255], [0, 255, 0, 255]]);
+        std::fs::write(directory.path().join("egg.gif"), &gif).expect("write gif override");
         std::fs::write(
             directory.path().join("egg.png"),
             render_egg_card(3).encode_png(),
@@ -516,8 +854,14 @@ mod test_filesystem_pet_assets {
             .load("egg")
             .expect("load authored override");
         assert_eq!(asset.extension, "gif");
-        assert_eq!(asset.bytes, b"GIF89a");
-        assert!(asset.decoded.is_none());
+        assert_eq!(asset.bytes, gif);
+        assert_eq!(
+            asset
+                .decoded
+                .as_ref()
+                .map(|image| (image.width, image.height)),
+            Some((4, 4))
+        );
     }
 }
 
