@@ -41,7 +41,9 @@ use cama_app::dig_flavor::{
 use cama_app::dig_inventory::DigInventoryService;
 use cama_app::dig_media_runtime::DigMediaRuntime;
 use cama_app::dig_miner_runtime::{DigMinerProfile, DigMinerRuntimeService};
-use cama_app::dig_neon::{DigNeonCooldownPort, DigNeonService, RelicFound, SeededDigNeonRandom};
+use cama_app::dig_neon::{
+    BossVictory, DigNeonCooldownPort, DigNeonService, RelicFound, SeededDigNeonRandom,
+};
 use cama_app::dig_prestige_runtime::{
     DigPrestigePreview, DigPrestigeRequest, DigPrestigeResult, DigPrestigeRuntimeService,
 };
@@ -142,6 +144,16 @@ enum DigEventDeliveryFailure {
 enum DigNeonPost {
     Cave { block_loss: i64 },
     Relic { name: String, rarity: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DigBossNeonVictory {
+    boss_name: String,
+    boundary: i64,
+    layer_name: String,
+    jc_delta: i64,
+    gear_drop: bool,
+    trophy_relic_drop: bool,
 }
 
 /// Whether a nonce-addressed Discord send was definitely rejected or may
@@ -449,6 +461,7 @@ impl DigRegistrationProvider {
         );
         neon.set_enabled(config.values.neon_degen_enabled);
         neon.set_dig_llm_enabled(config.values.dig_llm_enabled);
+        neon.set_dig_chance(config.values.neon_dig_chance);
         let flavor_data = Arc::new(SqliteDigFlavorDataAdapter::new(&path));
         let ai_available = ai_service.is_some();
         let flavor_ai: Arc<dyn DigFlavorAiPort> = ai_service.map_or_else(
@@ -1795,12 +1808,16 @@ impl DigInteractionHandler {
             if boss_resume_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }
+            let action_id = result.action_id;
+            let neon_victory = boss_resume_neon_victory(&result);
             let next_phase = boss_resume_has_next_phase(&result);
             let media = Arc::clone(&self.state.media);
             responder
                 .followup(blocking(move || Ok(boss_resume_response(&result, &media))).await?)
                 .await
                 .map_err(|error| error.to_string())?;
+            self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+                .await;
             if next_phase {
                 responder
                     .followup(
@@ -2571,14 +2588,19 @@ impl DigInteractionHandler {
                 if boss_start_is_resolved(&result) {
                     self.reconcile_resolved_boss(user_id, guild_id, now).await;
                 }
+                let action_id = result.action_id;
+                let neon_victory = boss_start_neon_victory(&result);
                 let media = Arc::clone(&self.state.media);
                 let response =
                     blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media)))
                         .await?;
-                return responder
+                responder
                     .followup(response)
                     .await
-                    .map_err(|error| error.to_string());
+                    .map_err(|error| error.to_string())?;
+                self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+                    .await;
+                return Ok(());
             }
             let mut risk =
                 InteractionTextInput::short("risk_tier", "Risk Tier (cautious / bold / reckless)");
@@ -2649,6 +2671,8 @@ impl DigInteractionHandler {
             if boss_resume_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }
+            let action_id = result.action_id;
+            let neon_victory = boss_resume_neon_victory(&result);
             let next_phase = boss_resume_has_next_phase(&result);
             let media = Arc::clone(&self.state.media);
             let response = blocking(move || Ok(boss_resume_response(&result, &media))).await?;
@@ -2656,6 +2680,8 @@ impl DigInteractionHandler {
                 .followup(response)
                 .await
                 .map_err(|error| error.to_string())?;
+            self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+                .await;
             if next_phase {
                 responder
                     .followup(
@@ -2768,6 +2794,7 @@ impl DigInteractionHandler {
             custom_id,
             user_id,
             guild_id,
+            channel_id,
             fields,
             ..
         } = request
@@ -2783,6 +2810,7 @@ impl DigInteractionHandler {
             .await;
         };
         let guild_id = signed_id(guild_id, "guild")?;
+        let channel_id = channel_id.map(|id| signed_id(id, "channel")).transpose()?;
         let (raw_owner, wager_allowed) =
             if let Some(raw) = custom_id.strip_prefix("dig:boss:wager:") {
                 (Some(raw), true)
@@ -2856,6 +2884,8 @@ impl DigInteractionHandler {
             if boss_start_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }
+            let action_id = result.action_id;
+            let neon_victory = boss_start_neon_victory(&result);
             let next_phase = boss_start_has_next_phase(&result);
             let media = Arc::clone(&self.state.media);
             let response =
@@ -2865,6 +2895,8 @@ impl DigInteractionHandler {
                 .followup(response)
                 .await
                 .map_err(|error| error.to_string())?;
+            self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+                .await;
             if next_phase {
                 responder
                     .followup(
@@ -4043,6 +4075,88 @@ impl DigInteractionHandler {
             warn!(action_id, %error, "Dig Neon delivery failed");
             // `String` errors may arrive after Discord accepted the message;
             // retain the claim to make retries at-most-once.
+        }
+    }
+
+    async fn post_boss_neon(
+        &self,
+        action_id: Option<i64>,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        victory: Option<DigBossNeonVictory>,
+    ) {
+        let Some(action_id) = action_id else {
+            return;
+        };
+        let Some(channel_id) = channel_id else {
+            return;
+        };
+        let Some(victory) = victory else {
+            return;
+        };
+        let Ok(discord_id) = u64::try_from(user_id) else {
+            return;
+        };
+        let Ok(guild_id_u64) = u64::try_from(guild_id) else {
+            return;
+        };
+        let event_type = format!("dig:{action_id}:boss_neon");
+        let path = self.state.database_path.clone();
+        let boundary = victory.boundary;
+        let claimed = blocking(move || {
+            NeonEventRepository::new(path)
+                .claim_one_time_event(user_id, guild_id, &event_type, boundary, unix_now())
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        if !matches!(claimed, Ok(true)) {
+            if let Err(error) = claimed {
+                warn!(action_id, %error, "Dig boss Neon claim failed");
+            }
+            return;
+        }
+
+        let state = Arc::clone(&self.state);
+        let neon_result = blocking(move || {
+            let mut neon = state
+                .neon
+                .lock()
+                .map_err(|_| "Dig Neon lock poisoned".to_owned())?;
+            let result = neon.on_dig_boss_victory(
+                discord_id,
+                Some(guild_id_u64),
+                BossVictory {
+                    boss_name: &victory.boss_name,
+                    boundary: victory.boundary,
+                    layer_name: &victory.layer_name,
+                    jc_delta: victory.jc_delta,
+                    gear_drop: victory.gear_drop,
+                    trophy_relic_drop: victory.trophy_relic_drop,
+                },
+            );
+            Ok(result)
+        })
+        .await;
+        let neon_result = match neon_result {
+            Ok(Some(result)) => result,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(action_id, %error, "Dig boss Neon hook failed");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .state
+            .discord
+            .dig_send_temporary(
+                channel_id,
+                dig_neon_response(neon_result),
+                Duration::from_secs(60),
+            )
+            .await
+        {
+            warn!(action_id, %error, "Dig boss Neon delivery failed");
         }
     }
 
@@ -6322,6 +6436,80 @@ fn boss_start_has_next_phase(result: &DigBossCallResult<DigBossStartOutcome>) ->
 
 fn boss_start_is_resolved(result: &DigBossCallResult<DigBossStartOutcome>) -> bool {
     !matches!(&result.outcome, DigBossStartOutcome::Paused(_))
+}
+
+fn boss_start_neon_victory(
+    result: &DigBossCallResult<DigBossStartOutcome>,
+) -> Option<DigBossNeonVictory> {
+    result.action_id?;
+    match &result.outcome {
+        DigBossStartOutcome::Paused(_) => None,
+        DigBossStartOutcome::RegularResolved(resolved)
+            if resolved.won && resolved.phase_transition.is_none() =>
+        {
+            Some(DigBossNeonVictory {
+                boss_name: cama_app::dig_bosses::boss_by_id(&resolved.boss_id)
+                    .map_or_else(|| resolved.boss_id.clone(), |boss| boss.name.to_owned()),
+                boundary: i64::from(resolved.boundary),
+                layer_name: layer_at(i64::from(resolved.boundary)).name.to_owned(),
+                // `jc_delta` is the committed net payout after economy,
+                // bankruptcy, and vanity sinks—the Rust counterpart to
+                // Python's resolved `payout` field.
+                jc_delta: resolved.jc_delta,
+                gear_drop: result.gear_drop.is_some(),
+                // `prestige_relic_drop` is a separate Pinnacle/relic reward,
+                // not the Python trophy-relic boost signal.
+                trophy_relic_drop: false,
+            })
+        }
+        DigBossStartOutcome::PinnacleResolved(resolved)
+            if resolved.won && resolved.phase == 3 && resolved.next_phase == 0 =>
+        {
+            Some(DigBossNeonVictory {
+                boss_name: resolved.boss_name.clone(),
+                boundary: i64::from(PINNACLE_DEPTH),
+                layer_name: layer_at(i64::from(PINNACLE_DEPTH)).name.to_owned(),
+                jc_delta: resolved.jc_delta,
+                gear_drop: result.gear_drop.is_some(),
+                trophy_relic_drop: false,
+            })
+        }
+        DigBossStartOutcome::RegularResolved(_) | DigBossStartOutcome::PinnacleResolved(_) => None,
+    }
+}
+
+fn boss_resume_neon_victory(
+    result: &DigBossCallResult<DigBossResolvedOutcome>,
+) -> Option<DigBossNeonVictory> {
+    result.action_id?;
+    match &result.outcome {
+        DigBossResolvedOutcome::Regular(resolved)
+            if resolved.won && resolved.phase_transition.is_none() =>
+        {
+            Some(DigBossNeonVictory {
+                boss_name: cama_app::dig_bosses::boss_by_id(&resolved.boss_id)
+                    .map_or_else(|| resolved.boss_id.clone(), |boss| boss.name.to_owned()),
+                boundary: i64::from(resolved.boundary),
+                layer_name: layer_at(i64::from(resolved.boundary)).name.to_owned(),
+                jc_delta: resolved.jc_delta,
+                gear_drop: result.gear_drop.is_some(),
+                trophy_relic_drop: false,
+            })
+        }
+        DigBossResolvedOutcome::Pinnacle(resolved)
+            if resolved.won && resolved.phase == 3 && resolved.next_phase == 0 =>
+        {
+            Some(DigBossNeonVictory {
+                boss_name: resolved.boss_name.clone(),
+                boundary: i64::from(PINNACLE_DEPTH),
+                layer_name: layer_at(i64::from(PINNACLE_DEPTH)).name.to_owned(),
+                jc_delta: resolved.jc_delta,
+                gear_drop: result.gear_drop.is_some(),
+                trophy_relic_drop: false,
+            })
+        }
+        DigBossResolvedOutcome::Regular(_) | DigBossResolvedOutcome::Pinnacle(_) => None,
+    }
 }
 
 fn boss_resume_has_next_phase(result: &DigBossCallResult<DigBossResolvedOutcome>) -> bool {
@@ -9004,8 +9192,8 @@ mod tests {
 
     use super::dig_options;
     use super::{
-        DigAbandonViewAdmission, DigBonusDispatchPort, DigChannelSnapshot, DigDiscordPort,
-        DigEventPendingDeliveryQuery, DigPrestigeViewAdmission, DigPublicHistory,
+        DigAbandonViewAdmission, DigBonusDispatchPort, DigBossNeonVictory, DigChannelSnapshot,
+        DigDiscordPort, DigEventPendingDeliveryQuery, DigPrestigeViewAdmission, DigPublicHistory,
         DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
         DigRuntimeBloodPactSnapshot, JOPACOIN_EMOTE,
     };
@@ -9104,6 +9292,196 @@ mod tests {
             ..pending
         };
         assert!(super::boss_resume_is_resolved(&committed));
+    }
+
+    fn boss_call_result<T>(
+        outcome: T,
+        action_id: Option<i64>,
+    ) -> cama_app::dig_boss_runtime::DigBossRuntimeResult<T> {
+        cama_app::dig_boss_runtime::DigBossRuntimeResult {
+            outcome,
+            action_id,
+            abandoned_action_id: None,
+            abandoned_wager_forfeit: 0,
+            abandoned_gear_wear: Default::default(),
+            gear_drop: None,
+            prestige_relic_drop: None,
+            broken_gear: Vec::new(),
+            warnings: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    fn pinnacle_boss_projection_fixture(
+        won: bool,
+        phase: u8,
+        next_phase: u8,
+    ) -> cama_app::dig_boss_runtime::DigPinnacleResolved {
+        cama_app::dig_boss_runtime::DigPinnacleResolved {
+            won,
+            boss_id: "forgotten_king".to_owned(),
+            boss_name: "The Crowned Hunger".to_owned(),
+            phase,
+            next_phase,
+            risk_tier: cama_app::boss_duel::RiskTier::Bold,
+            wager: 10,
+            win_chance: 0.60,
+            jc_delta: if won { 500 } else { -10 },
+            payout: if won { 500 } else { 0 },
+            wager_payout: if won { 500 } else { 0 },
+            gross_jc: 500,
+            scaled_base_jc: 500,
+            reward_multiplier: 1.0,
+            gross_payout: if won { 500 } else { 0 },
+            bankruptcy_penalty: 0,
+            vanity_tax: 0,
+            new_depth: if won { 350 } else { 340 },
+            boss_hp_remaining: if won { 0 } else { 50 },
+            boss_hp_max: 100,
+            knockback: if won { 0 } else { 10 },
+            round_log: Vec::new(),
+            gear_wear: Default::default(),
+            phase_event_id: None,
+            relic_drop: None,
+            rescue_line_used: false,
+            warding_salts_blocked: false,
+        }
+    }
+
+    #[test]
+    fn boss_neon_start_and_resume_emit_only_terminal_regular_wins() {
+        let terminal = regular_boss_projection_fixture(true);
+        let start = super::boss_start_neon_victory(&boss_call_result(
+            cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+                terminal.clone(),
+            )),
+            Some(101),
+        ))
+        .expect("terminal start victory");
+        assert_eq!(start.boss_name, "Grothak the Unbreakable");
+        assert_eq!(start.boundary, 100);
+        assert_eq!(start.jc_delta, terminal.jc_delta);
+
+        let resume = super::boss_resume_neon_victory(&boss_call_result(
+            cama_app::dig_boss_runtime::DigBossResolvedOutcome::Regular(Box::new(terminal)),
+            Some(102),
+        ));
+        assert!(
+            resume.is_some(),
+            "legacy and namespaced resume use the same gate"
+        );
+
+        let mut phase_only = regular_boss_projection_fixture(true);
+        phase_only.phase_transition = Some(cama_app::dig_bosses::BossStatus::PhaseOneDefeated);
+        assert!(
+            super::boss_start_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+                    phase_only.clone(),
+                )),
+                Some(103),
+            ))
+            .is_none()
+        );
+        assert!(
+            super::boss_resume_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossResolvedOutcome::Regular(Box::new(phase_only)),
+                Some(104),
+            ))
+            .is_none()
+        );
+
+        let loss = regular_boss_projection_fixture(false);
+        assert!(
+            super::boss_start_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(loss)),
+                Some(105),
+            ))
+            .is_none()
+        );
+        assert!(
+            super::boss_resume_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossResolvedOutcome::Regular(Box::new(
+                    regular_boss_projection_fixture(false),
+                )),
+                Some(106),
+            ))
+            .is_none()
+        );
+        assert!(
+            super::boss_start_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+                    regular_boss_projection_fixture(true),
+                )),
+                None,
+            ))
+            .is_none(),
+            "uncommitted outcomes cannot emit"
+        );
+    }
+
+    #[test]
+    fn boss_neon_prestige_relic_does_not_masquerade_as_trophy_boost() {
+        let mut result = boss_call_result(
+            cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+                regular_boss_projection_fixture(true),
+            )),
+            Some(107),
+        );
+        result.prestige_relic_drop = Some(cama_app::dig_boss_runtime::DigBossPrestigeRelicDrop {
+            database_id: 7,
+            artifact_id: "pinnacle_relic".to_owned(),
+            name: "Pinnacle Relic".to_owned(),
+            rarity: "legendary".to_owned(),
+        });
+        let victory = super::boss_start_neon_victory(&result).expect("terminal victory");
+        assert!(!victory.trophy_relic_drop);
+    }
+
+    #[test]
+    fn boss_neon_pinnacle_gate_selects_terminal_mode_only() {
+        let terminal = pinnacle_boss_projection_fixture(true, 3, 0);
+        let start = super::boss_start_neon_victory(&boss_call_result(
+            cama_app::dig_boss_runtime::DigBossStartOutcome::PinnacleResolved(Box::new(
+                terminal.clone(),
+            )),
+            Some(201),
+        ))
+        .expect("terminal Pinnacle start victory");
+        assert_eq!(
+            start.boundary,
+            i64::from(cama_app::dig_bosses::PINNACLE_DEPTH)
+        );
+        assert_eq!(start.boss_name, "The Crowned Hunger");
+
+        let resume = super::boss_resume_neon_victory(&boss_call_result(
+            cama_app::dig_boss_runtime::DigBossResolvedOutcome::Pinnacle(Box::new(terminal)),
+            Some(202),
+        ));
+        assert!(
+            resume.is_some(),
+            "terminal Pinnacle resume uses pinnacle(false)"
+        );
+
+        assert!(
+            super::boss_start_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossStartOutcome::PinnacleResolved(Box::new(
+                    pinnacle_boss_projection_fixture(true, 2, 3),
+                )),
+                Some(203),
+            ))
+            .is_none(),
+            "phase-only Pinnacle progress must not emit"
+        );
+        assert!(
+            super::boss_resume_neon_victory(&boss_call_result(
+                cama_app::dig_boss_runtime::DigBossResolvedOutcome::Pinnacle(Box::new(
+                    pinnacle_boss_projection_fixture(false, 3, 3),
+                )),
+                Some(204),
+            ))
+            .is_none(),
+            "Pinnacle losses must not emit"
+        );
     }
 
     // tests/test_dig_reminder_command.py::test_run_dig_reuses_registration_check_and_embedded_notice
@@ -9746,6 +10124,7 @@ mod tests {
 
     struct TestDiscord {
         public: StdMutex<Vec<InteractionResponse>>,
+        temporary: StdMutex<Vec<(i64, Duration, InteractionResponse)>>,
         reactions: StdMutex<Vec<(i64, u64, String)>>,
         public_history: StdMutex<Vec<DigPublicHistoryMessage>>,
         message_channels: StdMutex<BTreeMap<u64, i64>>,
@@ -9756,12 +10135,14 @@ mod tests {
         reject_un_nonnced_public_send: StdMutex<bool>,
         gamba: bool,
         avatar_url: Option<String>,
+        lifecycle: Option<Arc<StdMutex<Vec<&'static str>>>>,
     }
 
     impl Default for TestDiscord {
         fn default() -> Self {
             Self {
                 public: StdMutex::new(Vec::new()),
+                temporary: StdMutex::new(Vec::new()),
                 reactions: StdMutex::new(Vec::new()),
                 public_history: StdMutex::new(Vec::new()),
                 message_channels: StdMutex::new(BTreeMap::new()),
@@ -9772,6 +10153,7 @@ mod tests {
                 reject_un_nonnced_public_send: StdMutex::new(false),
                 gamba: true,
                 avatar_url: None,
+                lifecycle: None,
             }
         }
     }
@@ -9806,6 +10188,18 @@ mod tests {
                 .reject_un_nonnced_public_send
                 .lock()
                 .expect("un-nonced send fault") = true;
+        }
+
+        fn allow_un_nonnced_public_send(&self) {
+            *self
+                .reject_un_nonnced_public_send
+                .lock()
+                .expect("un-nonced send fault") = false;
+        }
+
+        fn with_lifecycle(mut self, lifecycle: Arc<StdMutex<Vec<&'static str>>>) -> Self {
+            self.lifecycle = Some(lifecycle);
+            self
         }
     }
 
@@ -9856,6 +10250,26 @@ mod tests {
             }
             self.public.lock().expect("public responses").push(response);
             Ok(())
+        }
+
+        async fn dig_send_temporary(
+            &self,
+            channel_id: i64,
+            response: InteractionResponse,
+            delete_after: Duration,
+        ) -> Result<(), String> {
+            let result = self.dig_send_public(channel_id, response.clone()).await;
+            if result.is_ok() {
+                if let Some(lifecycle) = &self.lifecycle {
+                    lifecycle.lock().expect("lifecycle log").push("temporary");
+                }
+                self.temporary.lock().expect("temporary responses").push((
+                    channel_id,
+                    delete_after,
+                    response,
+                ));
+            }
+            result
         }
 
         async fn dig_send_public_once(
@@ -10004,6 +10418,16 @@ mod tests {
         message_edits: StdMutex<Vec<(InteractionMessageReceipt, InteractionResponse)>>,
         autocompletes: StdMutex<Vec<Vec<CommandOptionChoice>>>,
         modals: StdMutex<Vec<InteractionModal>>,
+        lifecycle: Option<Arc<StdMutex<Vec<&'static str>>>>,
+    }
+
+    impl TestResponder {
+        fn with_lifecycle(lifecycle: Arc<StdMutex<Vec<&'static str>>>) -> Self {
+            Self {
+                lifecycle: Some(lifecycle),
+                ..Self::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -10026,6 +10450,9 @@ mod tests {
             response: InteractionResponse,
         ) -> Result<(), InteractionResponseError> {
             self.followups.lock().expect("followups").push(response);
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.lock().expect("lifecycle log").push("followup");
+            }
             Ok(())
         }
 
@@ -10212,6 +10639,17 @@ mod tests {
             _ => None,
         })
         .expect("provider test config")
+    }
+
+    fn neon_config(chance: &str) -> ApplicationConfig {
+        ApplicationConfig::from_lookup(|name| match name {
+            "DISCORD_BOT_TOKEN" => Some("dig-provider-test-token".to_owned()),
+            "NEON_DEGEN_ENABLED" => Some("true".to_owned()),
+            "DIG_LLM_ENABLED" => Some("false".to_owned()),
+            "NEON_DIG_CHANCE" => Some(chance.to_owned()),
+            _ => None,
+        })
+        .expect("Neon provider test config")
     }
 
     fn fixture() -> (NamedTempFile, DigRegistrationProvider, Arc<TestDiscord>) {
@@ -12951,6 +13389,332 @@ mod tests {
         assert_eq!(media.format, cama_app::dig_assets::MediaFormat::Gif);
         assert_eq!((media.width, media.height), (320, 180));
         assert_eq!(media.frame_count, 30);
+    }
+
+    #[tokio::test]
+    async fn boss_neon_live_transport_is_time_limited_and_idempotent() {
+        let lifecycle = Arc::new(StdMutex::new(Vec::new()));
+        let discord = Arc::new(TestDiscord::default().with_lifecycle(Arc::clone(&lifecycle)));
+        let (database, provider, discord) =
+            fixture_with_discord_and_config(discord, neon_config("0.30"));
+        {
+            let mut neon = provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("Neon service lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+
+        // The real provider transport path is used here; the primary result
+        // follow-up is accepted before the best-effort temporary Neon hook.
+        let responder = TestResponder::with_lifecycle(Arc::clone(&lifecycle));
+        responder
+            .followup(InteractionResponse::message("primary boss result"))
+            .await
+            .expect("primary follow-up");
+        provider
+            .handler
+            .post_boss_neon(
+                Some(8801),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(DigBossNeonVictory {
+                    boss_name: "Grothak".to_owned(),
+                    boundary: 100,
+                    layer_name: "Stone".to_owned(),
+                    jc_delta: 500,
+                    gear_drop: false,
+                    trophy_relic_drop: false,
+                }),
+            )
+            .await;
+        assert_eq!(
+            *lifecycle.lock().expect("lifecycle log"),
+            vec!["followup", "temporary"]
+        );
+        {
+            let temporary = discord.temporary.lock().expect("temporary Neon sends");
+            assert_eq!(temporary.len(), 1);
+            assert_eq!(temporary[0].0, CHANNEL as i64);
+            assert_eq!(temporary[0].1, Duration::from_secs(60));
+            assert_eq!(temporary[0].2.attachments.len(), 1);
+        }
+
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(
+                USER as i64 + 1,
+                "dig-pinnacle-neon-miner",
+                Some(GUILD as i64),
+            ))
+            .expect("register Pinnacle Neon miner");
+        {
+            let mut neon = provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("Pinnacle Neon lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+        provider
+            .handler
+            .post_boss_neon(
+                Some(8804),
+                USER as i64 + 1,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(DigBossNeonVictory {
+                    boss_name: "The Crowned Hunger".to_owned(),
+                    boundary: cama_app::dig_bosses::PINNACLE_DEPTH.into(),
+                    layer_name: "The Pinnacle".to_owned(),
+                    jc_delta: 500,
+                    gear_drop: false,
+                    trophy_relic_drop: false,
+                }),
+            )
+            .await;
+        {
+            let temporary = discord.temporary.lock().expect("Pinnacle temporary send");
+            assert_eq!(temporary.len(), 2);
+            let pinnacle_media =
+                cama_app::dig_assets::inspect_media(&temporary[1].2.attachments[0].bytes)
+                    .expect("Pinnacle Neon GIF");
+            assert_eq!((pinnacle_media.width, pinnacle_media.height), (320, 180));
+        }
+
+        // A retry of the same resolved action is suppressed by the durable
+        // one-time claim, even though the provider process is still alive.
+        provider
+            .handler
+            .post_boss_neon(
+                Some(8801),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(DigBossNeonVictory {
+                    boss_name: "Grothak".to_owned(),
+                    boundary: 100,
+                    layer_name: "Stone".to_owned(),
+                    jc_delta: 500,
+                    gear_drop: false,
+                    trophy_relic_drop: false,
+                }),
+            )
+            .await;
+        assert_eq!(
+            discord
+                .temporary
+                .lock()
+                .expect("duplicate Neon sends")
+                .len(),
+            2
+        );
+        assert_eq!(
+            Connection::open(database.path())
+                .expect("Neon claim database")
+                .query_row(
+                    "SELECT COUNT(*) FROM neon_events
+                     WHERE discord_id=?1 AND guild_id=?2 AND event_type=?3",
+                    params![USER as i64, GUILD as i64, "dig:8801:boss_neon"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("boss Neon claim"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn boss_neon_miss_and_delivery_failure_remain_terminal() {
+        let discord = Arc::new(TestDiscord::default());
+        let (_database, provider, discord) =
+            fixture_with_discord_and_config(discord, neon_config("0.0"));
+        {
+            let mut neon = provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("Neon service lock");
+            *neon.random_mut() =
+                cama_app::dig_neon::SeededDigNeonRandom::new(0x1234_5678_9abc_def0);
+        }
+        let victory = DigBossNeonVictory {
+            boss_name: "Grothak".to_owned(),
+            boundary: 100,
+            layer_name: "Stone".to_owned(),
+            jc_delta: 500,
+            gear_drop: false,
+            trophy_relic_drop: false,
+        };
+        provider
+            .handler
+            .post_boss_neon(
+                Some(8802),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(victory.clone()),
+            )
+            .await;
+        assert!(discord.temporary.lock().expect("miss sends").is_empty());
+        {
+            let mut neon = provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("Neon service lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+        provider
+            .handler
+            .post_boss_neon(
+                Some(8802),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(victory.clone()),
+            )
+            .await;
+        assert!(
+            discord
+                .temporary
+                .lock()
+                .expect("miss retry sends")
+                .is_empty(),
+            "miss claim prevents a retry reroll"
+        );
+
+        let failed_discord = Arc::new(TestDiscord::default());
+        failed_discord.reject_un_nonnced_public_send();
+        let (failed_database, failed_provider, failed_discord) =
+            fixture_with_discord_and_config(failed_discord, neon_config("0.30"));
+        {
+            let mut neon = failed_provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("failed Neon service lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+        failed_provider
+            .handler
+            .post_boss_neon(
+                Some(8803),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(victory.clone()),
+            )
+            .await;
+        failed_discord.allow_un_nonnced_public_send();
+        failed_provider
+            .handler
+            .post_boss_neon(
+                Some(8803),
+                USER as i64,
+                GUILD as i64,
+                Some(CHANNEL as i64),
+                Some(victory),
+            )
+            .await;
+        assert!(
+            failed_discord
+                .temporary
+                .lock()
+                .expect("failed retry sends")
+                .is_empty(),
+            "delivery failure remains at-most-once"
+        );
+        assert_eq!(
+            Connection::open(failed_database.path())
+                .expect("failed Neon claim database")
+                .query_row(
+                    "SELECT COUNT(*) FROM neon_events
+                     WHERE discord_id=?1 AND guild_id=?2 AND event_type=?3",
+                    params![USER as i64, GUILD as i64, "dig:8803:boss_neon"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("failed boss Neon claim"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn boss_modal_and_resume_live_path_sends_neon_after_primary_result() {
+        let lifecycle = Arc::new(StdMutex::new(Vec::new()));
+        let discord = Arc::new(TestDiscord::default().with_lifecycle(Arc::clone(&lifecycle)));
+        let (database, provider, discord) =
+            fixture_with_discord_and_config(discord, neon_config("0.30"));
+        Connection::open(database.path())
+            .expect("live boss fixture DB")
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+                  boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+                 VALUES (?1,?2,24,24,0,?3,0,0,50,5,'Live Neon Boss')",
+                params![
+                    USER as i64,
+                    GUILD as i64,
+                    r#"{"25":{"boss_id":"grothak","status":"active"}}"#,
+                ],
+            )
+            .expect("live boss tunnel");
+        fastrand::seed(1);
+        {
+            let mut neon = provider.handler.state.neon.lock().expect("live Neon lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+
+        let mut response = Arc::new(TestResponder::with_lifecycle(Arc::clone(&lifecycle)));
+        provider
+            .handler
+            .handle(
+                modal_request(
+                    format!("dig:boss:wager:{USER}:{GUILD}"),
+                    [("risk_tier", "cautious"), ("wager", "0")],
+                ),
+                response.clone(),
+            )
+            .await
+            .expect("live boss modal path");
+
+        // Resolve any authored mechanic prompt through its actual namespaced
+        // component route. A terminal result is the only result allowed to
+        // reach the Neon side effect.
+        for _ in 0..4 {
+            let next = response
+                .followups
+                .lock()
+                .expect("boss followups")
+                .iter()
+                .flat_map(|followup| &followup.components)
+                .flat_map(|row| &row.buttons)
+                .find(|button| button.custom_id.starts_with("dig:boss:duel:"))
+                .map(|button| button.custom_id.clone());
+            let Some(next) = next else {
+                break;
+            };
+            response = Arc::new(TestResponder::with_lifecycle(Arc::clone(&lifecycle)));
+            provider
+                .handler
+                .handle(component_request(next, Vec::new()), response.clone())
+                .await
+                .expect("live boss resume path");
+        }
+
+        let temporary = discord.temporary.lock().expect("live boss Neon sends");
+        assert_eq!(temporary.len(), 1, "only terminal win emits Neon");
+        assert_eq!(temporary[0].1, Duration::from_secs(60));
+        assert_eq!(temporary[0].2.attachments.len(), 1);
+        let log = lifecycle.lock().expect("live lifecycle ordering");
+        let primary = log.iter().position(|event| *event == "followup");
+        let neon = log.iter().position(|event| *event == "temporary");
+        assert!(primary.is_some_and(|index| neon.is_some_and(|neon| index < neon)));
     }
 
     #[test]

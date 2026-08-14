@@ -303,6 +303,143 @@ fn test_boss_victory_skipped_on_roll_miss() {
 }
 
 #[test]
+fn test_dig_chance_defaults_to_authored_probability() {
+    let mut service = service(false);
+    assert_eq!(service.dig_chance(), NEON_DIG_CHANCE);
+    assert!(
+        service
+            .on_dig_boss_victory(1, Some(0), boss_event())
+            .is_none()
+    );
+    let observed = service.random().observed_chances();
+    assert_eq!(
+        observed.first().copied(),
+        Some(scaled_chance(100.0, 0.12, 0.30, 350.0))
+    );
+}
+
+#[test]
+fn test_dig_chance_override_controls_ordinary_event_rolls() {
+    let mut service = service(false);
+    service.set_dig_chance(0.41);
+    assert_eq!(service.dig_chance(), 0.41);
+    assert!(
+        service
+            .on_dig_boss_victory(1, Some(0), boss_event())
+            .is_none()
+    );
+    let observed = service.random().observed_chances();
+    assert_eq!(
+        observed.first().copied(),
+        Some(scaled_chance(100.0, 0.41, 0.30, 350.0))
+    );
+}
+
+#[test]
+fn test_dig_chance_retains_raw_nonfinite_values() {
+    let mut service = service(true);
+    service.set_dig_chance(-0.01);
+    assert_eq!(service.dig_chance(), -0.01);
+    service.set_dig_chance(1.01);
+    assert_eq!(service.dig_chance(), 1.01);
+    service.set_dig_chance(f64::NAN);
+    assert!(service.dig_chance().is_nan());
+    service.set_dig_chance(f64::INFINITY);
+    assert!(service.dig_chance().is_infinite());
+    assert!(service.dig_chance().is_sign_positive());
+    service.set_dig_chance(f64::NEG_INFINITY);
+    assert!(service.dig_chance().is_infinite());
+    assert!(service.dig_chance().is_sign_negative());
+}
+
+#[test]
+fn test_dig_chance_out_of_range_values_preserve_python_roll_behavior() {
+    let mut observed_low = service(false);
+    observed_low.set_dig_chance(-0.1);
+    assert!(
+        observed_low
+            .on_dig_relic_found(
+                1,
+                Some(0),
+                RelicFound {
+                    relic_name: "Rare Shard",
+                    rarity: "rare",
+                    layer_name: "Stone",
+                },
+            )
+            .is_none()
+    );
+    assert_eq!(
+        observed_low.random().observed_chances().first(),
+        Some(&-0.1)
+    );
+
+    let mut observed_high = service(false);
+    observed_high.set_dig_chance(1.2);
+    assert!(
+        observed_high
+            .on_dig_relic_found(
+                1,
+                Some(0),
+                RelicFound {
+                    relic_name: "Rare Shard",
+                    rarity: "rare",
+                    layer_name: "Stone",
+                },
+            )
+            .is_none()
+    );
+    assert_eq!(
+        observed_high.random().observed_chances().first(),
+        Some(&1.2)
+    );
+
+    let mut low = DigNeonService::new(
+        SeededDigNeonRandom::new(1),
+        MemoryDigNeonCooldown::default(),
+    );
+    low.set_dig_chance(-0.1);
+    assert!(
+        low.on_dig_relic_found(
+            1,
+            Some(0),
+            RelicFound {
+                relic_name: "Rare Shard",
+                rarity: "rare",
+                layer_name: "Stone",
+            },
+        )
+        .is_none()
+    );
+
+    let mut high = DigNeonService::new(
+        SeededDigNeonRandom::new(1),
+        MemoryDigNeonCooldown::default(),
+    );
+    high.set_dig_chance(1.2);
+    assert!(
+        high.on_dig_relic_found(
+            1,
+            Some(0),
+            RelicFound {
+                relic_name: "Rare Shard",
+                rarity: "rare",
+                layer_name: "Stone",
+            },
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn test_seeded_roll_matches_python_nonfinite_probability_comparisons() {
+    let mut random = SeededDigNeonRandom::new(1);
+    assert!(!random.roll(f64::NAN));
+    assert!(random.roll(f64::INFINITY));
+    assert!(!random.roll(f64::NEG_INFINITY));
+}
+
+#[test]
 fn test_disabled_returns_none() {
     let mut service = service(true);
     service.set_enabled(false);

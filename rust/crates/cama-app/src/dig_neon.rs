@@ -156,7 +156,13 @@ impl SeededDigNeonRandom {
 
 impl DigNeonRandomPort for SeededDigNeonRandom {
     fn roll(&mut self, chance: f64) -> bool {
-        self.sample() < chance.clamp(0.0, 1.0)
+        if chance.is_nan() || chance <= 0.0 {
+            return false;
+        }
+        if chance >= 1.0 {
+            return true;
+        }
+        self.sample() < chance
     }
 
     fn choose_index(&mut self, option_count: usize) -> usize {
@@ -981,6 +987,7 @@ where
     enabled: bool,
     dig_llm_enabled: bool,
     ai_enabled: bool,
+    dig_chance: f64,
     random: R,
     cooldown: C,
     renderer: Arc<dyn DigNeonRenderPort>,
@@ -998,6 +1005,7 @@ where
             enabled: true,
             dig_llm_enabled: true,
             ai_enabled: true,
+            dig_chance: NEON_DIG_CHANCE,
             random,
             cooldown,
             renderer: Arc::new(ContractDigNeonRenderer),
@@ -1027,6 +1035,21 @@ where
 
     pub fn set_ai_enabled(&mut self, enabled: bool) {
         self.ai_enabled = enabled;
+    }
+
+    /// Set the base probability used by ordinary Dig Neon events.
+    ///
+    /// Retain the parsed Python configuration value verbatim. The random
+    /// port applies Python's comparison semantics for values outside the
+    /// probability interval, including infinities and NaN. Pinnacle and
+    /// prestige remain their separate authored 0.95 rolls.
+    pub fn set_dig_chance(&mut self, chance: f64) {
+        self.dig_chance = chance;
+    }
+
+    #[must_use]
+    pub const fn dig_chance(&self) -> f64 {
+        self.dig_chance
     }
 
     #[must_use]
@@ -1110,7 +1133,7 @@ where
                 "has reached the Pinnacle, the floor of the world".to_owned(),
             )
         } else {
-            let mut chance = scaled_chance(event.boundary as f64, NEON_DIG_CHANCE, 0.30, 350.0);
+            let mut chance = scaled_chance(event.boundary as f64, self.dig_chance, 0.30, 350.0);
             if event.gear_drop || event.trophy_relic_drop {
                 chance = (chance + 0.10).min(0.45);
             }
@@ -1163,7 +1186,7 @@ where
                 format!("has unearthed the legendary {}", event.relic_name),
             )
         } else if rarity == "rare" {
-            if !self.random.roll(NEON_DIG_CHANCE) {
+            if !self.random.roll(self.dig_chance) {
                 return None;
             }
             (
@@ -1202,7 +1225,7 @@ where
         if lost <= 0 || !self.cooldown.is_ready(discord_id, guild_id) {
             return None;
         }
-        let chance = scaled_chance(lost as f64, NEON_DIG_CHANCE, 0.40, 40.0);
+        let chance = scaled_chance(lost as f64, self.dig_chance, 0.40, 40.0);
         if !self.random.roll(chance) {
             return None;
         }

@@ -804,6 +804,18 @@ mod tests {
     }
 
     #[test]
+    fn neon_dig_chance_defaults_and_overrides_are_preserved() {
+        let default_config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(default_config.values.neon_dig_chance, 0.12);
+
+        let override_config = parse(&[("DISCORD_BOT_TOKEN", "token"), ("NEON_DIG_CHANCE", "0.27")]);
+        assert_eq!(override_config.values.neon_dig_chance, 0.27);
+
+        let raw_config = parse(&[("DISCORD_BOT_TOKEN", "token"), ("NEON_DIG_CHANCE", "nan")]);
+        assert!(raw_config.values.neon_dig_chance.is_nan());
+    }
+
+    #[test]
     fn python_fail_soft_parsing_and_clamps_are_exact() {
         let config = parse(&[
             ("DISCORD_BOT_TOKEN", "discord-secret"),
