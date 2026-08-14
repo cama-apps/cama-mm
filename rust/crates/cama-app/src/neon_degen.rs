@@ -5,11 +5,13 @@
 //! Python trigger, privacy, persistence, and upload policies without starting a
 //! second bot process or becoming a second schema owner.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
+use gif::{Encoder, Frame, Repeat};
 
 use crate::dig_neon::{BigWinFlavor, BigWinSource};
 use crate::jopat_post_match::{
@@ -475,31 +477,38 @@ pub struct GifAsset {
 }
 
 impl GifAsset {
-    fn one_frame(kind: &'static str) -> Self {
-        // Standards-compliant transparent 1x1 GIF89a placeholder. The real
-        // renderer is an adapter concern; the service still enforces type,
-        // signature, and Discord's byte limit before delivery.
-        const MINIMAL_GIF: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
-        Self {
-            kind,
-            bytes: MINIMAL_GIF.to_vec(),
-            frame_durations_ms: vec![100],
-            shared_palette: true,
-        }
-    }
-
     #[must_use]
     pub fn terminal_crash() -> Self {
         let mut durations = vec![120; 10];
         durations.extend(vec![145; 46]);
         durations.push(230);
         durations.push(60_000);
-        Self {
-            kind: "terminal_crash",
-            bytes: Self::one_frame("terminal_crash").bytes,
-            frame_durations_ms: durations,
-            shared_palette: true,
-        }
+        render_neon_animation("terminal_crash", &durations, 0x7e7e, |frame, canvas| {
+            if frame < 10 {
+                canvas.text_centered("JOPA-T/v3.7", 70, COLOR_GREEN, 2);
+                canvas.text_centered("SYSTEM FAILURE", 120, COLOR_RED, 2);
+                canvas.text_centered("RECONCILING...", 170, COLOR_YELLOW, 1);
+            } else if frame < 56 {
+                canvas.text_centered(
+                    if frame.is_multiple_of(3) {
+                        "KERNEL PANIC"
+                    } else if frame.is_multiple_of(2) {
+                        "FATAL ERROR"
+                    } else {
+                        "TERMINAL UNRESPONSIVE"
+                    },
+                    120,
+                    COLOR_RED,
+                    2,
+                );
+                canvas.text_centered("BANKRUPTCY PROTOCOL", 165, COLOR_YELLOW, 1);
+            } else {
+                canvas.text_left("> JOPA-T/v3.7 REBOOTING...", 20, 45, COLOR_GREEN, 1);
+                canvas.text_left("> LEDGER INTEGRITY... OK", 20, 75, COLOR_DIM_GREEN, 1);
+                canvas.text_left("> SYSTEM ENDURES.", 20, 120, COLOR_GREEN, 1);
+                canvas.text_left("> IT ALWAYS DOES.", 20, 145, COLOR_DIM_GREEN, 1);
+            }
+        })
     }
 
     #[must_use]
@@ -510,39 +519,738 @@ impl GifAsset {
     }
 }
 
-#[must_use]
-pub fn create_void_welcome_gif() -> GifAsset {
-    GifAsset::one_frame("void_welcome")
+const NEON_GIF_WIDTH: u16 = 400;
+const NEON_GIF_HEIGHT: u16 = 300;
+const NEON_GIF_PIXELS: usize = NEON_GIF_WIDTH as usize * NEON_GIF_HEIGHT as usize;
+const COLOR_BLACK: u8 = 0;
+const COLOR_GREEN: u8 = 1;
+const COLOR_CYAN: u8 = 2;
+const COLOR_RED: u8 = 4;
+const COLOR_YELLOW: u8 = 5;
+const COLOR_DIM_GREEN: u8 = 6;
+const COLOR_DIM_CYAN: u8 = 7;
+const COLOR_DARK_RED: u8 = 8;
+
+// The Python generators draw a CRT-black terminal with a small fixed set of
+// neon accents. Keeping one global palette makes these generated attachments
+// seekable and compact, while still allowing the authored scenes to vary with
+// every user/economy input.
+const NEON_GIF_PALETTE: &[u8] = &[
+    10, 10, 15, 0, 255, 65, 0, 255, 255, 255, 0, 128, 255, 30, 30, 255, 220, 0, 0, 120, 30, 0, 100,
+    100, 80, 0, 0,
+];
+
+#[derive(Clone, Debug)]
+struct NeonCanvas {
+    pixels: Vec<u8>,
+}
+
+impl NeonCanvas {
+    fn new() -> Self {
+        Self {
+            pixels: vec![COLOR_BLACK; NEON_GIF_PIXELS],
+        }
+    }
+
+    fn fill(&mut self, color: u8) {
+        self.pixels.fill(color);
+    }
+
+    fn pixel(&mut self, x: i32, y: i32, color: u8) {
+        if (0..i32::from(NEON_GIF_WIDTH)).contains(&x)
+            && (0..i32::from(NEON_GIF_HEIGHT)).contains(&y)
+        {
+            self.pixels[y as usize * usize::from(NEON_GIF_WIDTH) + x as usize] = color;
+        }
+    }
+
+    fn line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u8) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut error = dx + dy;
+        loop {
+            self.pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let twice = 2 * error;
+            if twice >= dy {
+                error += dy;
+                x0 += sx;
+            }
+            if twice <= dx {
+                error += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    fn rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
+        self.line(left, top, right, top, color);
+        self.line(right, top, right, bottom, color);
+        self.line(right, bottom, left, bottom, color);
+        self.line(left, bottom, left, top, color);
+    }
+
+    fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
+        for y in top..=bottom {
+            self.line(left, y, right, y, color);
+        }
+    }
+
+    fn text_left(&mut self, text: &str, x: i32, y: i32, color: u8, scale: i32) {
+        let mut cursor = x;
+        for character in text.chars() {
+            self.glyph(character, cursor, y, color, scale);
+            cursor += 6 * scale;
+        }
+    }
+
+    fn text_centered(&mut self, text: &str, y: i32, color: u8, scale: i32) {
+        let width = text.chars().count() as i32 * 6 * scale;
+        self.text_left(
+            text,
+            (i32::from(NEON_GIF_WIDTH) - width) / 2,
+            y,
+            color,
+            scale,
+        );
+    }
+
+    fn glyph(&mut self, character: char, left: i32, top: i32, color: u8, scale: i32) {
+        let rows = glyph_rows(character);
+        for (row, bits) in rows.iter().copied().enumerate() {
+            for column in 0..5 {
+                if bits & (1 << (4 - column)) != 0 {
+                    self.fill_rect(
+                        left + column * scale,
+                        top + row as i32 * scale,
+                        left + (column + 1) * scale - 1,
+                        top + (row as i32 + 1) * scale - 1,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn glyph_rows(character: char) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+        'C' => [0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F],
+        'D' => [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        'G' => [0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F],
+        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'I' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F],
+        'J' => [0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E],
+        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+        'S' => [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
+        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        '3' => [0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E],
+        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        '5' => [0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E],
+        '6' => [0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E],
+        ':' => [0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        '/' => [0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0x00],
+        '#' => [0x0A, 0x1F, 0x0A, 0x0A, 0x1F, 0x0A, 0x00],
+        '!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04],
+        '?' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        _ => [0; 7],
+    }
+}
+
+fn score_color(score: i64) -> u8 {
+    if score < 60 {
+        COLOR_GREEN
+    } else if score < 80 {
+        COLOR_YELLOW
+    } else {
+        COLOR_RED
+    }
+}
+
+fn scene_seed<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn render_neon_animation<F>(
+    kind: &'static str,
+    durations: &[u32],
+    seed: u64,
+    mut draw: F,
+) -> GifAsset
+where
+    F: FnMut(usize, &mut NeonCanvas),
+{
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = Encoder::new(
+            &mut bytes,
+            NEON_GIF_WIDTH,
+            NEON_GIF_HEIGHT,
+            NEON_GIF_PALETTE,
+        )
+        .expect("fixed Neon palette is valid");
+        encoder
+            .set_repeat(Repeat::Finite(1))
+            .expect("Neon GIF repeat marker is valid");
+        for (index, duration_ms) in durations.iter().copied().enumerate() {
+            let mut canvas = NeonCanvas::new();
+            draw(index, &mut canvas);
+            // Deterministic phosphor speckles make otherwise identical scene
+            // phases visibly animate without adding a second palette.
+            if index % 3 == 0 {
+                let mut state = seed.wrapping_add(index as u64 * 0x9e37_79b9);
+                for _ in 0..8 {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    canvas.pixel(
+                        (state % 390 + 5) as i32,
+                        ((state >> 16) % 280 + 10) as i32,
+                        COLOR_DIM_GREEN,
+                    );
+                }
+            }
+            let mut frame = Frame {
+                width: NEON_GIF_WIDTH,
+                height: NEON_GIF_HEIGHT,
+                delay: u16::try_from(duration_ms / 10).expect("Neon GIF delay fits centiseconds"),
+                buffer: Cow::Owned(canvas.pixels),
+                ..Frame::default()
+            };
+            frame.dispose = gif::DisposalMethod::Keep;
+            encoder
+                .write_frame(&frame)
+                .expect("Neon GIF frame is valid");
+        }
+    }
+    GifAsset {
+        kind,
+        bytes,
+        frame_durations_ms: durations.to_vec(),
+        shared_palette: true,
+    }
 }
 
 #[must_use]
-pub fn create_debt_collector_gif() -> GifAsset {
-    GifAsset::one_frame("debt_collector")
+pub fn create_void_welcome_gif(name: &str) -> GifAsset {
+    let mut durations = vec![150; 10];
+    durations.extend([400; 8]);
+    durations.extend([200; 14]);
+    durations.push(60_000);
+    render_neon_animation(
+        "void_welcome",
+        &durations,
+        scene_seed(name),
+        |frame, canvas| {
+            if frame < 10 {
+                canvas.text_left("> _", 20, 140, COLOR_DIM_GREEN, 2);
+                return;
+            }
+            if frame < 18 {
+                let lines = [
+                    "> INITIALIZING...",
+                    "> NEW CLIENT DETECTED",
+                    &format!("> IDENTITY: {name}"),
+                    "> FIRST BANKRUPTCY RECORDED",
+                    "> Welcome to the void.",
+                    "> The system sees you now.",
+                    "> There is no going back.",
+                ];
+                for (index, line) in lines.iter().enumerate().take(frame - 9) {
+                    canvas.text_left(line, 20, 30 + index as i32 * 20, COLOR_DIM_GREEN, 1);
+                }
+                return;
+            }
+            canvas.text_left("> new client accepted", 20, 30, COLOR_DIM_GREEN, 1);
+            canvas.text_left(&format!("> identity: {name}"), 20, 50, COLOR_CYAN, 1);
+            canvas.text_centered("DEBTOR #1", 210, COLOR_GREEN, 3);
+            canvas.text_centered("CLASSIFICATION: FRESH", 250, COLOR_DIM_GREEN, 1);
+            if frame.is_multiple_of(2) {
+                canvas.rect(18, 18, 382, 282, COLOR_DIM_GREEN);
+            }
+        },
+    )
 }
 
 #[must_use]
-pub fn create_freefall_gif() -> GifAsset {
-    GifAsset::one_frame("freefall")
+pub fn create_debt_collector_gif(name: &str, debt: i64) -> GifAsset {
+    let durations = (0..40)
+        .map(|frame| if frame == 39 { 60_000 } else { 80 })
+        .collect::<Vec<_>>();
+    render_neon_animation(
+        "debt_collector",
+        &durations,
+        scene_seed(&(name, debt)),
+        |frame, canvas| {
+            let scan_y = (frame as i32 * 300 / 40).min(299);
+            canvas.line(0, scan_y, 399, scan_y, COLOR_RED);
+            canvas.line(
+                0,
+                (scan_y - 2).max(0),
+                399,
+                (scan_y - 2).max(0),
+                COLOR_DARK_RED,
+            );
+            if scan_y > 40 {
+                canvas.text_centered("DEBT COLLECTION", 30, COLOR_RED, 2);
+            }
+            if scan_y > 70 {
+                canvas.text_centered("==============================", 55, COLOR_RED, 1);
+            }
+            if scan_y > 100 {
+                canvas.text_left(&format!("DEBTOR: {name}"), 20, 85, COLOR_RED, 1);
+            }
+            if scan_y > 130 {
+                canvas.text_left(&format!("AMOUNT: {debt} JC"), 20, 105, COLOR_RED, 1);
+            }
+            if scan_y > 160 {
+                canvas.text_left("STATUS: MAXIMUM DEBT", 20, 125, COLOR_RED, 1);
+            }
+            if scan_y > 190 {
+                canvas.text_left("ACTION: GARNISHMENT", 20, 145, COLOR_RED, 1);
+            }
+            if scan_y > 245 {
+                canvas.text_centered("ALL WINNINGS SEIZED", 200, COLOR_YELLOW, 2);
+            }
+        },
+    )
 }
 
 #[must_use]
-pub fn create_degen_certificate_gif() -> GifAsset {
-    GifAsset::one_frame("degen_certificate")
+pub fn create_freefall_gif(name: &str, start_balance: i64, end_balance: i64) -> GifAsset {
+    let durations = (0..45)
+        .map(|frame| {
+            if frame == 44 {
+                60_000
+            } else {
+                let nominal = 60 + frame as u32 * 80 / 44;
+                (nominal / 10) * 10
+            }
+        })
+        .collect::<Vec<_>>();
+    render_neon_animation(
+        "freefall",
+        &durations,
+        scene_seed(&(name, start_balance, end_balance)),
+        |frame, canvas| {
+            let progress = frame as i64 * 1_000 / 44;
+            let current = start_balance + (end_balance - start_balance) * progress / 1_000;
+            canvas.text_centered("BALANCE UPDATE", 15, COLOR_RED, 1);
+            canvas.text_left(&format!("CLIENT: {name}"), 20, 40, COLOR_DIM_GREEN, 1);
+            let color = if progress < 500 {
+                COLOR_GREEN
+            } else {
+                COLOR_RED
+            };
+            canvas.text_centered(&current.to_string(), 120, color, 4);
+            canvas.text_centered("JC", 175, COLOR_DIM_GREEN, 2);
+            for trail in 1..=frame.min(8) {
+                let value = start_balance
+                    + (end_balance - start_balance) * (progress - trail as i64 * 20).max(0) / 1_000;
+                canvas.text_centered(
+                    &value.to_string(),
+                    175 + trail as i32 * 18,
+                    COLOR_DARK_RED,
+                    1,
+                );
+            }
+            if progress > 800 {
+                let status = if end_balance == 0 {
+                    "FINAL: ZERO"
+                } else {
+                    "FINAL: DEBT"
+                };
+                canvas.text_centered(status, 260, COLOR_RED, 1);
+            }
+        },
+    )
 }
 
 #[must_use]
-pub fn create_don_coin_flip_gif() -> GifAsset {
-    GifAsset::one_frame("don_coin_flip")
+pub fn create_degen_certificate_gif(name: &str, score: i64) -> GifAsset {
+    let mut durations = vec![60; 25];
+    durations.extend([200; 9]);
+    durations.push(60_000);
+    render_neon_animation(
+        "degen_certificate",
+        &durations,
+        scene_seed(&(name, score)),
+        |frame, canvas| {
+            if frame < 20 {
+                let shown = score.saturating_mul(frame as i64) / 19;
+                canvas.text_centered("DEGEN SCORE ANALYSIS", 20, COLOR_DIM_GREEN, 1);
+                canvas.text_centered(&format!("SUBJECT: {name}"), 45, COLOR_DIM_CYAN, 1);
+                canvas.text_centered(&shown.to_string(), 100, score_color(shown), 5);
+                canvas.text_centered("/ 100", 160, COLOR_DIM_GREEN, 1);
+                canvas.rect(60, 205, 340 - 60, 220, COLOR_DIM_GREEN);
+                canvas.fill_rect(
+                    61,
+                    206,
+                    61 + (278 * shown.clamp(0, 100) / 100) as i32,
+                    219,
+                    score_color(shown),
+                );
+            } else if frame < 25 {
+                canvas.fill(if frame.is_multiple_of(2) {
+                    COLOR_RED
+                } else {
+                    COLOR_DARK_RED
+                });
+                canvas.text_centered("ACHIEVEMENT", 120, COLOR_YELLOW, 3);
+            } else {
+                canvas.rect(10, 10, 389, 289, COLOR_YELLOW);
+                canvas.rect(15, 15, 384, 284, COLOR_DIM_GREEN);
+                canvas.text_centered("ACHIEVEMENT UNLOCKED", 30, COLOR_YELLOW, 2);
+                canvas.text_centered("LEGENDARY DEGEN", 85, COLOR_RED, 2);
+                canvas.text_centered(&format!("SCORE: {score}"), 125, COLOR_YELLOW, 1);
+                canvas.text_centered(&format!("CERTIFIED TO: {name}"), 160, COLOR_CYAN, 1);
+                canvas.text_centered("FINANCIAL RUIN", 230, COLOR_GREEN, 1);
+            }
+        },
+    )
 }
 
 #[must_use]
-pub fn create_market_crash_gif() -> GifAsset {
-    GifAsset::one_frame("market_crash")
+pub fn create_don_coin_flip_gif(name: &str, balance_lost: i64) -> GifAsset {
+    let mut durations = vec![60; 15];
+    durations.extend((0..15).map(|frame| 100 + frame * 30));
+    durations.extend((0..20).map(|frame| {
+        if frame == 19 {
+            60_000
+        } else {
+            let nominal = 80 + frame * 60 / 19;
+            (nominal / 10) * 10
+        }
+    }));
+    render_neon_animation(
+        "don_coin_flip",
+        &durations,
+        scene_seed(&(name, balance_lost)),
+        |frame, canvas| {
+            canvas.text_centered("DOUBLE OR NOTHING", 15, COLOR_YELLOW, 1);
+            canvas.text_left(&format!("CLIENT: {name}"), 20, 40, COLOR_DIM_GREEN, 1);
+            canvas.text_left(
+                &format!("AT RISK: {balance_lost} JC"),
+                20,
+                58,
+                COLOR_YELLOW,
+                1,
+            );
+            if frame < 15 {
+                let width = ((frame as i32 * 8) % 120 - 60).abs().max(10);
+                canvas.rect(200 - width / 2, 105, 200 + width / 2, 155, COLOR_YELLOW);
+                canvas.text_centered(
+                    if frame.is_multiple_of(2) {
+                        "DOUBLE"
+                    } else {
+                        "NOTHING"
+                    },
+                    118,
+                    if frame.is_multiple_of(2) {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_RED
+                    },
+                    2,
+                );
+            } else if frame < 30 {
+                canvas.text_centered("NOTHING", 118, COLOR_RED, 2);
+                canvas.text_centered(
+                    if frame < 27 {
+                        "CALCULATING..."
+                    } else {
+                        "RESULT:"
+                    },
+                    170,
+                    COLOR_YELLOW,
+                    1,
+                );
+            } else {
+                let progress = (frame - 30) as i64 * 1_000 / 19;
+                let current = balance_lost.saturating_mul(1_000 - progress) / 1_000;
+                canvas.text_centered("RESULT: NOTHING", 45, COLOR_RED, 1);
+                canvas.text_centered(&current.to_string(), 115, COLOR_RED, 4);
+                canvas.text_centered("JC", 170, COLOR_DIM_GREEN, 1);
+                if frame == 49 {
+                    canvas.text_centered("BALANCE: 0 JC", 245, COLOR_RED, 1);
+                }
+            }
+        },
+    )
 }
 
 #[must_use]
-pub fn create_bomb_pot_gif() -> GifAsset {
-    GifAsset::one_frame("bomb_pot")
+pub fn create_market_crash_gif(
+    total_pool: i64,
+    outcome: &str,
+    winners: u32,
+    losers: u32,
+) -> GifAsset {
+    let mut durations = vec![100; 15];
+    durations.extend([80; 15]);
+    durations.extend([200; 14]);
+    durations.push(60_000);
+    render_neon_animation(
+        "market_crash",
+        &durations,
+        scene_seed(&(total_pool, outcome, winners, losers)),
+        |frame, canvas| {
+            if frame < 30 {
+                let crash = frame >= 15;
+                let progress = (frame % 15) as i32;
+                let peak_x = 280;
+                let end_x = if crash { 370 } else { 40 + progress * 20 };
+                let end_y = if crash {
+                    210 - progress * 8
+                } else {
+                    190 - progress * 6
+                };
+                canvas.text_centered(
+                    "PREDICTION MARKET",
+                    10,
+                    if crash { COLOR_RED } else { COLOR_GREEN },
+                    1,
+                );
+                canvas.text_centered(&format!("POOL: {total_pool} JC"), 32, COLOR_DIM_GREEN, 1);
+                canvas.line(40, 220, 370, 220, COLOR_DIM_GREEN);
+                canvas.line(40, 80, 40, 220, COLOR_DIM_GREEN);
+                canvas.line(
+                    40,
+                    220,
+                    peak_x,
+                    100,
+                    if crash { COLOR_RED } else { COLOR_GREEN },
+                );
+                canvas.line(
+                    peak_x,
+                    100,
+                    end_x,
+                    end_y,
+                    if crash { COLOR_RED } else { COLOR_GREEN },
+                );
+                canvas.text_left(
+                    if crash {
+                        "STATUS: SETTLING"
+                    } else {
+                        "STATUS: ACTIVE"
+                    },
+                    20,
+                    235,
+                    COLOR_YELLOW,
+                    1,
+                );
+                if crash && frame.is_multiple_of(2) {
+                    canvas.text_centered("MARKET CRASH", 130, COLOR_RED, 2);
+                }
+            } else {
+                canvas.text_centered("MARKET SETTLED", 20, COLOR_YELLOW, 2);
+                canvas.text_centered(
+                    &format!("OUTCOME: {}", outcome.to_ascii_uppercase()),
+                    75,
+                    COLOR_YELLOW,
+                    1,
+                );
+                canvas.text_centered(&format!("TOTAL POOL: {total_pool} JC"), 105, COLOR_RED, 1);
+                canvas.text_left(&format!("WINNERS: {winners}"), 60, 145, COLOR_GREEN, 1);
+                canvas.text_left(&format!("LOSERS: {losers}"), 60, 170, COLOR_RED, 1);
+                canvas.text_centered("WEALTH REDISTRIBUTED", 220, COLOR_GREEN, 1);
+            }
+        },
+    )
+}
+
+#[must_use]
+pub fn create_bomb_pot_gif(pool: i64, contributors: i64) -> GifAsset {
+    let mut durations = vec![100; 15];
+    durations.extend([60; 10]);
+    durations.extend([200; 14]);
+    durations.push(60_000);
+    render_neon_animation(
+        "bomb_pot",
+        &durations,
+        scene_seed(&(pool, contributors)),
+        |frame, canvas| {
+            if frame < 15 {
+                let countdown = 15 - frame;
+                canvas.text_centered("BOMB POT", 20, COLOR_RED, 2);
+                canvas.text_centered("MANDATORY CONTRIBUTION", 50, COLOR_YELLOW, 1);
+                canvas.text_centered(
+                    &countdown.to_string(),
+                    105,
+                    if countdown > 5 {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_RED
+                    },
+                    5,
+                );
+                canvas.text_centered(
+                    &format!("POOL: {} JC", pool * frame as i64 / 14),
+                    175,
+                    COLOR_DIM_GREEN,
+                    1,
+                );
+                canvas.text_centered(
+                    &format!("CONTRIBUTORS: {contributors}"),
+                    200,
+                    COLOR_DIM_GREEN,
+                    1,
+                );
+            } else if frame < 25 {
+                canvas.fill(if frame.is_multiple_of(2) {
+                    COLOR_RED
+                } else {
+                    COLOR_YELLOW
+                });
+                canvas.text_centered("DETONATED", 120, COLOR_RED, 2);
+                if frame > 18 {
+                    canvas.text_centered(&format!("POOL: {pool} JC"), 170, COLOR_YELLOW, 2);
+                }
+            } else {
+                canvas.text_centered("BOMB POT COMPLETE", 25, COLOR_RED, 2);
+                canvas.text_centered(&format!("POOL: {pool} JC"), 110, COLOR_YELLOW, 2);
+                canvas.text_centered(
+                    &format!("CONTRIBUTORS: {contributors}"),
+                    155,
+                    COLOR_DIM_GREEN,
+                    1,
+                );
+                canvas.text_centered("CONSENT: NOT REQUIRED", 215, COLOR_RED, 1);
+                canvas.text_centered("ESCAPE: IMPOSSIBLE", 240, COLOR_RED, 1);
+            }
+        },
+    )
+}
+
+/// Native counterpart of Python's `create_streak_record_gif`. The three
+/// authored phases are kept explicit (count-up, record flash, certificate)
+/// so the media contract remains seekable instead of collapsing to a static
+/// fallback when the runtime has no font/image provider.
+#[must_use]
+pub fn create_streak_record_gif(name: &str, streak: i64) -> GifAsset {
+    let mut durations = vec![60; 20];
+    durations.extend([80; 10]);
+    durations.extend([200; 14]);
+    durations.push(60_000);
+    render_neon_animation(
+        "streak_record",
+        &durations,
+        scene_seed(&(name, streak)),
+        |frame, canvas| {
+            if frame < 20 {
+                let shown = streak.saturating_mul(frame as i64) / 19;
+                canvas.text_centered("WIN STREAK", 20, COLOR_GREEN, 2);
+                canvas.text_centered(&format!("SUBJECT: {name}"), 50, COLOR_DIM_GREEN, 1);
+                canvas.text_centered(&shown.to_string(), 95, COLOR_GREEN, 5);
+                canvas.rect(60, 205, 340, 220, COLOR_DIM_GREEN);
+                canvas.fill_rect(61, 206, 61 + (278 * frame as i32 / 19), 219, COLOR_GREEN);
+            } else if frame < 30 {
+                let flash = (150 - (frame - 20) * 15).clamp(0, 255);
+                canvas.fill(if flash > 75 {
+                    COLOR_DARK_RED
+                } else {
+                    COLOR_BLACK
+                });
+                canvas.text_centered("PERSONAL RECORD", 25, COLOR_YELLOW, 2);
+                canvas.text_centered(&streak.to_string(), 95, COLOR_GREEN, 5);
+                canvas.text_centered("CONSECUTIVE WINS", 175, COLOR_GREEN, 1);
+                for sparkle in 0..(5 + (frame - 20).min(7)) {
+                    let x = 35 + ((sparkle * 53 + frame * 17) % 330) as i32;
+                    let y = 35 + ((sparkle * 29 + frame * 11) % 190) as i32;
+                    canvas.pixel(
+                        x,
+                        y,
+                        if sparkle.is_multiple_of(2) {
+                            COLOR_CYAN
+                        } else {
+                            COLOR_YELLOW
+                        },
+                    );
+                }
+            } else {
+                canvas.rect(10, 10, 389, 289, COLOR_GREEN);
+                canvas.text_centered("ANOMALY DETECTED", 30, COLOR_GREEN, 2);
+                canvas.text_centered(&format!("WIN X{streak}"), 115, COLOR_GREEN, 2);
+                canvas.text_centered("STATUS: UNPRECEDENTED", 155, COLOR_YELLOW, 1);
+                canvas.text_centered(&format!("SUBJECT: {name}"), 195, COLOR_DIM_CYAN, 1);
+                canvas.text_centered("THE ALGORITHM ADJUSTS", 245, COLOR_DIM_GREEN, 1);
+            }
+        },
+    )
+}
+
+/// Render the bounded text receipt used by the games-milestone hook.
+#[must_use]
+pub fn render_games_milestone(name: &str, total_games: i64) -> String {
+    let tier = match total_games {
+        10 => "BRONZE",
+        50 => "SILVER",
+        100 => "GOLD",
+        200 => "DIAMOND",
+        _ => "LEGENDARY",
+    };
+    terminal_lines(&[
+        "GAMES MILESTONE".into(),
+        "====================================".into(),
+        format!("Subject: {name}"),
+        format!("Games completed: {total_games}"),
+        format!("Classification: {tier}"),
+        "====================================".into(),
+        "Milestone achieved.".into(),
+        "Status: NOTED".into(),
+        "You cannot leave.".into(),
+        "None of them ever leave.".into(),
+    ])
+}
+
+/// Render the bounded text receipt used by the personal win-streak hook.
+#[must_use]
+pub fn render_win_streak_record(name: &str, streak: i64) -> String {
+    terminal_lines(&[
+        "ANOMALY DETECTED".into(),
+        "====================================".into(),
+        format!("Subject: {name}"),
+        format!("Pattern: WIN x{streak}"),
+        "Status: UNPRECEDENTED".into(),
+        "====================================".into(),
+        "PERSONAL_RECORD_BROKEN".into(),
+        format!("New streak: {streak}"),
+        "Classification: HOT".into(),
+        "The algorithm adjusts.".into(),
+        "The system takes notice.".into(),
+    ])
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -943,7 +1651,11 @@ impl NeonDegenService {
                     gif_file: None,
                     footer_text: None,
                 }
-                .with_gif(create_freefall_gif()),
+                .with_gif(create_freefall_gif(
+                    &client_name(discord_id),
+                    prior_balance.unwrap_or(100),
+                    new_balance,
+                )),
             );
         }
         None
@@ -1044,7 +1756,10 @@ impl NeonDegenService {
         let debt = new_balance.saturating_abs();
         let text = render_debt_collector(&client_name(discord_id), debt);
         if leverage >= 5 && new_balance <= -self.max_debt && self.rolls.roll(0.30) {
-            return Some(NeonResult::text(3, text).with_gif(create_debt_collector_gif()));
+            return Some(
+                NeonResult::text(3, text)
+                    .with_gif(create_debt_collector_gif(&client_name(discord_id), debt)),
+            );
         }
         let _ = amount;
         Some(NeonResult::text(2, text))
@@ -1084,7 +1799,7 @@ impl NeonDegenService {
         let text = render_bankruptcy_filing(&client_name(discord_id), debt_cleared, filing_number);
         self.set_cooldown(discord_id, guild_id);
         let result = if filing_number == 1 {
-            NeonResult::text(3, text).with_gif(create_void_welcome_gif())
+            NeonResult::text(3, text).with_gif(create_void_welcome_gif(&client_name(discord_id)))
         } else if filing_number >= 3 {
             NeonResult::text(3, text).with_gif(GifAsset::terminal_crash())
         } else {
@@ -1374,8 +2089,73 @@ impl NeonDegenService {
                     "Classification: LEGENDARY".into(),
                 ]),
             )
-            .with_gif(create_degen_certificate_gif()),
+            .with_gif(create_degen_certificate_gif(
+                &client_name(discord_id),
+                i64::from(degen_score),
+            )),
         )
+    }
+
+    /// Python-compatible games milestone hook. The match recorder supplies
+    /// committed totals; this service owns only the exact milestone set,
+    /// cooldown/chance gate, and the 100+ animated certificate promotion.
+    #[must_use]
+    pub fn on_games_milestone(
+        &mut self,
+        discord_id: u64,
+        guild_id: Option<u64>,
+        total_games: i64,
+    ) -> Option<NeonResult> {
+        if !self.enabled
+            || !matches!(total_games, 10 | 50 | 100 | 200 | 500)
+            || !self.check_cooldown(discord_id, guild_id)
+            || !self.rolls.roll(0.10)
+        {
+            return None;
+        }
+        self.set_cooldown(discord_id, guild_id);
+        let name = client_name(discord_id);
+        let text = render_games_milestone(&name, total_games);
+        if total_games >= 100 {
+            Some(
+                NeonResult::text(3, text)
+                    .with_gif(create_degen_certificate_gif(&name, total_games)),
+            )
+        } else {
+            Some(NeonResult::text(2, text))
+        }
+    }
+
+    /// Python-compatible personal win-streak record hook. Match recording
+    /// performs the durable previous-best update and passes both values here;
+    /// a GIF is selected only for an 8+ streak, matching the Python layer
+    /// split and its 20% chance gate.
+    #[must_use]
+    pub fn on_win_streak_record(
+        &mut self,
+        discord_id: u64,
+        guild_id: Option<u64>,
+        current_streak: i64,
+        previous_best: i64,
+    ) -> Option<NeonResult> {
+        if !self.enabled
+            || current_streak < 5
+            || current_streak <= previous_best
+            || !self.check_cooldown(discord_id, guild_id)
+            || !self.rolls.roll(0.20)
+        {
+            return None;
+        }
+        self.set_cooldown(discord_id, guild_id);
+        let name = client_name(discord_id);
+        let text = render_win_streak_record(&name, current_streak);
+        if current_streak >= 8 {
+            Some(
+                NeonResult::text(3, text).with_gif(create_streak_record_gif(&name, current_streak)),
+            )
+        } else {
+            Some(NeonResult::text(2, text))
+        }
     }
 
     #[must_use]
@@ -1395,7 +2175,7 @@ impl NeonDegenService {
             NeonResult::text(1, render_don_win(&name, final_balance))
         } else if balance_at_risk > 100 && self.rolls.roll(0.18) {
             NeonResult::text(3, render_don_loss_box(&name, balance_at_risk))
-                .with_gif(create_don_coin_flip_gif())
+                .with_gif(create_don_coin_flip_gif(&name, balance_at_risk))
         } else if balance_at_risk > 50 && self.rolls.roll(0.80) {
             NeonResult::text(2, render_don_loss_box(&name, balance_at_risk))
         } else {
@@ -1459,7 +2239,7 @@ impl NeonDegenService {
         }
         Some(
             NeonResult::text(3, render_bomb_pot(pool_amount, contributor_count))
-                .with_gif(create_bomb_pot_gif()),
+                .with_gif(create_bomb_pot_gif(pool_amount, contributor_count)),
         )
     }
 
@@ -1544,7 +2324,12 @@ impl NeonDegenService {
                         loser_count,
                     ),
                 )
-                .with_gif(create_market_crash_gif()),
+                .with_gif(create_market_crash_gif(
+                    total_pool,
+                    outcome,
+                    winner_count,
+                    loser_count,
+                )),
             );
         }
         if total_pool >= 200 && self.rolls.roll(0.70) {

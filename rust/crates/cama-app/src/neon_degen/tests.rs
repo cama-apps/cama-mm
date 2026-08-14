@@ -1,4 +1,7 @@
+use std::io::Cursor;
 use std::sync::Arc;
+
+use gif::{ColorOutput, DecodeOptions};
 
 use super::*;
 
@@ -536,7 +539,7 @@ fn test_neon_result_dataclass_defaults() {
     assert!(result.gif_file.is_none());
     assert!(result.footer_text.is_none());
 
-    let result = NeonResult::text(3, "text").with_gif(create_void_welcome_gif());
+    let result = NeonResult::text(3, "text").with_gif(create_void_welcome_gif("TestUser"));
     assert_eq!(result.layer, 3);
     assert!(result.gif_file.is_some());
 }
@@ -743,33 +746,175 @@ macro_rules! gif_upload_test {
     };
 }
 
+fn decoded_neon_gif(asset: &GifAsset) -> (Vec<Vec<u8>>, Vec<u32>) {
+    let mut options = DecodeOptions::new();
+    options.set_color_output(ColorOutput::Indexed);
+    let mut decoder = options
+        .read_info(Cursor::new(&asset.bytes))
+        .expect("decode native Neon GIF");
+    assert_eq!((decoder.width(), decoder.height()), (400, 300));
+    assert!(
+        decoder
+            .global_palette()
+            .is_some_and(|palette| palette.starts_with(NEON_GIF_PALETTE))
+    );
+    let mut frames = Vec::new();
+    let mut durations = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().expect("read native Neon frame") {
+        assert!(
+            frame.palette.is_none(),
+            "Neon frames share the global palette"
+        );
+        frames.push(frame.buffer.to_vec());
+        durations.push(u32::from(frame.delay) * 10);
+    }
+    (frames, durations)
+}
+
+#[test]
+fn native_neon_gifs_are_animated_seekable_and_parameterized() {
+    let assets = [
+        create_void_welcome_gif("Alice"),
+        create_debt_collector_gif("Alice", 500),
+        create_freefall_gif("Alice", 200, 0),
+        create_degen_certificate_gif("Alice", 95),
+        create_don_coin_flip_gif("Alice", 200),
+        create_market_crash_gif(1_000, "no", 5, 10),
+        create_bomb_pot_gif(1_000, 10),
+    ];
+    for asset in &assets {
+        let (frames, durations) = decoded_neon_gif(asset);
+        assert!(
+            frames.len() >= 30,
+            "{} should have authored animation phases",
+            asset.kind
+        );
+        assert_eq!(frames.len(), asset.frame_durations_ms.len());
+        assert_eq!(durations, asset.frame_durations_ms);
+        assert!(frames.windows(2).any(|pair| pair[0] != pair[1]));
+        assert_eq!(durations.last(), Some(&60_000));
+        assert!(
+            asset
+                .bytes
+                .windows(11)
+                .any(|window| window == b"NETSCAPE2.0")
+        );
+    }
+
+    assert_ne!(
+        create_void_welcome_gif("Alice").bytes,
+        create_void_welcome_gif("Bob").bytes
+    );
+    assert_ne!(
+        create_debt_collector_gif("Alice", 500).bytes,
+        create_debt_collector_gif("Alice", 900).bytes
+    );
+    assert_ne!(
+        create_freefall_gif("Alice", 200, 0).bytes,
+        create_freefall_gif("Alice", 400, 0).bytes
+    );
+    assert_ne!(
+        create_degen_certificate_gif("Alice", 95).bytes,
+        create_degen_certificate_gif("Alice", 99).bytes
+    );
+    assert_ne!(
+        create_don_coin_flip_gif("Alice", 200).bytes,
+        create_don_coin_flip_gif("Alice", 300).bytes
+    );
+    assert_ne!(
+        create_market_crash_gif(1_000, "no", 5, 10).bytes,
+        create_market_crash_gif(2_000, "yes", 5, 10).bytes
+    );
+    assert_ne!(
+        create_bomb_pot_gif(1_000, 10).bytes,
+        create_bomb_pot_gif(2_000, 10).bytes
+    );
+    let streak = create_streak_record_gif("Alice", 12);
+    let (frames, durations) = decoded_neon_gif(&streak);
+    assert_eq!(frames.len(), 45);
+    assert_eq!(durations, streak.frame_durations_ms);
+    assert_eq!(durations.last(), Some(&60_000));
+    assert_ne!(
+        create_streak_record_gif("Alice", 12).bytes,
+        create_streak_record_gif("Alice", 13).bytes
+    );
+}
+
+#[test]
+fn games_milestone_uses_exact_python_set_and_gif_promotion() {
+    let mut neon = service();
+    neon.queue_rolls([0.0]);
+    assert_eq!(neon.on_games_milestone(1, Some(2), 9), None);
+    neon.queue_rolls([0.0]);
+    let small = neon
+        .on_games_milestone(1, Some(2), 50)
+        .expect("50-game milestone");
+    assert_eq!(small.layer, 2);
+    assert!(small.gif_file.is_none());
+
+    let mut neon = service();
+    neon.queue_rolls([0.0]);
+    let large = neon
+        .on_games_milestone(1, Some(2), 100)
+        .expect("100-game milestone");
+    assert_eq!(large.layer, 3);
+    assert_eq!(
+        large.gif_file.as_ref().map(|gif| gif.kind),
+        Some("degen_certificate")
+    );
+}
+
+#[test]
+fn win_streak_record_requires_new_record_and_promotes_eight_plus() {
+    let mut neon = service();
+    neon.queue_rolls([0.0]);
+    assert!(neon.on_win_streak_record(1, Some(2), 5, 5).is_none());
+    neon.queue_rolls([0.0]);
+    let ordinary = neon
+        .on_win_streak_record(1, Some(2), 7, 5)
+        .expect("new seven-win record");
+    assert_eq!(ordinary.layer, 2);
+    assert!(ordinary.gif_file.is_none());
+
+    let mut neon = service();
+    neon.queue_rolls([0.0]);
+    let extreme = neon
+        .on_win_streak_record(1, Some(2), 8, 4)
+        .expect("new eight-win record");
+    assert_eq!(extreme.layer, 3);
+    assert_eq!(
+        extreme.gif_file.as_ref().map(|gif| gif.kind),
+        Some("streak_record")
+    );
+}
+
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_void_welcome,
-    create_void_welcome_gif()
+    create_void_welcome_gif("TestUser")
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_debt_collector,
-    create_debt_collector_gif()
+    create_debt_collector_gif("TestUser", 500)
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_freefall,
-    create_freefall_gif()
+    create_freefall_gif("TestUser", 200, 0)
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_degen_certificate,
-    create_degen_certificate_gif()
+    create_degen_certificate_gif("TestUser", 95)
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_don_coin_flip,
-    create_don_coin_flip_gif()
+    create_don_coin_flip_gif("TestUser", 200)
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_market_crash,
-    create_market_crash_gif()
+    create_market_crash_gif(1_000, "no", 5, 10)
 );
 gif_upload_test!(
     test_neon_gif_generates_under_4mb_bomb_pot,
-    create_bomb_pot_gif()
+    create_bomb_pot_gif(1_000, 10)
 );
 
 #[test]
