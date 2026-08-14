@@ -202,6 +202,23 @@ CAMA_PARITY_PYTHON=.venv/bin/python \
 This is development evidence only; it does not close the cutover readiness
 gate or replace the broader repository and rollback coverage requirements.
 
+The narrower A/B evidence runner uses two independent copies and completes the
+retained-Python write subprocess before running the Rust writes on the second
+copy. It compares stable, schema-aware projections for guild configuration,
+Dig inventory/route state, and Survey delivery (including normalized row
+deltas and source immutability), rather than SQLite file bytes:
+
+```bash
+CAMA_PARITY_PYTHON=.venv/bin/python \
+  python scripts/production_snapshot_ab_delta.py \
+  /path/to/cama_shuffle.db --report /tmp/cama-snapshot-ab-delta.json
+```
+
+This bounded current-schema representative passes as development evidence. The
+`production_snapshot_replay` gate remains open until old-schema coverage, all
+repository families, and complete retained-Python rollback/readback
+transitions are covered.
+
 The explicit confirmation is intentional: this smoke writes reserved negative
 sentinels through fourteen shared repository families: guild configuration,
 economy-event policy, low-priority state, soft avoids, package deals, tips,
