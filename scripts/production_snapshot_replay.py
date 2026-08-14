@@ -31,6 +31,18 @@ REPORT_FORMAT_VERSION = 1
 OUTPUT_LIMIT = 12_000
 DEFAULT_TIMEOUT_SECONDS = 900
 SMOKE_GUILD_ID = -8_888_888_888_888_888_888
+DIG_SMOKE_PLAYER_ID = -8_888_888_888_888_888_870
+DIG_SMOKE_ITEM_TYPE = "hard_hat"
+DIG_SMOKE_ROUTE_STATE = '{"route_id":"shored_passage","status":"active"}'
+SURVEY_SMOKE_GUILD_ID = 9_000_000_000_000_001
+SURVEY_SMOKE_USER_ID = 9_000_000_000_000_002
+SURVEY_SMOKE_TITLE = "Rust disposable Survey recovery smoke"
+SURVEY_SMOKE_PROMPT = (
+    "Can the Rust recovery worker deliver this clone-only sentinel?"
+)
+SURVEY_SMOKE_CHANNEL_ID = 8_000_000_000_000_001
+SURVEY_SMOKE_MESSAGE_ID = 8_000_000_000_000_002
+PYTHON_RETAINED_READ_FORMAT = "python-guild-config-dig-survey-repository-v2"
 VOLATILE_TIME_COLUMN_SUFFIXES = ("_at", "_date", "_time", "_timestamp")
 VOLATILE_TIME_COLUMN_NAMES = frozenset(
     {
@@ -75,6 +87,69 @@ EXPECTED_SURVEY_SMOKE_DELTAS = {
     "survey_recipients": 1,
     "surveys": 1,
 }
+
+
+def expected_retained_python_read() -> dict[str, Any]:
+    """Return the normalized, non-time-dependent Python read contract.
+
+    Auto-incremented IDs and timestamps are intentionally absent.  The
+    subprocess read below validates their relationships through the retained
+    repositories, while this contract records the stable fields that prove
+    the Rust writes are visible to the production Python APIs.
+    """
+
+    return {
+        "guild_config": {
+            "guild_id": SMOKE_GUILD_ID,
+            "league_id": 777,
+            "auto_enrich_matches": 0,
+            "ai_features_enabled": 1,
+        },
+        "dig": {
+            "inventory": {
+                "row_count": 1,
+                "discord_id": DIG_SMOKE_PLAYER_ID,
+                "guild_id": SMOKE_GUILD_ID,
+                "item_type": DIG_SMOKE_ITEM_TYPE,
+                "queued": True,
+            },
+            "tunnel": {
+                "discord_id": DIG_SMOKE_PLAYER_ID,
+                "guild_id": SMOKE_GUILD_ID,
+                "depth": 100,
+                "route_state": DIG_SMOKE_ROUTE_STATE,
+            },
+        },
+        "survey": {
+            "survey": {
+                "guild_id": SURVEY_SMOKE_GUILD_ID,
+                "title": SURVEY_SMOKE_TITLE,
+                "status": "open",
+                "target_type": "member",
+                "registered_only": False,
+            },
+            "question": {
+                "position": 1,
+                "prompt": SURVEY_SMOKE_PROMPT,
+                "question_type": "nps",
+                "required": True,
+            },
+            "recipient": {
+                "guild_id": SURVEY_SMOKE_GUILD_ID,
+                "discord_id": SURVEY_SMOKE_USER_ID,
+                "delivery_status": "sent",
+                "attempt_count": 1,
+                "dm_channel_id": SURVEY_SMOKE_CHANNEL_ID,
+                "dm_message_id": SURVEY_SMOKE_MESSAGE_ID,
+                "ui_channel_id": SURVEY_SMOKE_CHANNEL_ID,
+                "ui_message_id": SURVEY_SMOKE_MESSAGE_ID,
+                "current_question_is_first": True,
+                "in_review": False,
+                "submitted": False,
+                "answer_count": 0,
+            },
+        },
+    }
 
 
 class StepFailure(RuntimeError):
@@ -345,6 +420,28 @@ def _parse_key_values(output: str) -> dict[str, str]:
     return values
 
 
+def _parse_retained_python_read(output: str) -> dict[str, Any]:
+    """Parse and validate the normalized retained Python read."""
+
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"retained Python repository read was not JSON: {output}"
+        ) from error
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"retained Python repository read was not an object: {value!r}"
+        )
+    expected = expected_retained_python_read()
+    if value != expected:
+        raise RuntimeError(
+            "retained Python repository read mismatch: "
+            f"expected {expected!r}, found {value!r}"
+        )
+    return value
+
+
 def _python_executable(argument: str | None, root: Path) -> str:
     value = argument or os.environ.get("CAMA_PARITY_PYTHON")
     if value is None:
@@ -429,7 +526,8 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "steps": [],
         "python_post_rust_read": {
             "status": "not_run",
-            "format": "python-guild-config-repository-v1",
+            "format": PYTHON_RETAINED_READ_FORMAT,
+            "expected": expected_retained_python_read(),
             "value": None,
         },
         "python_bridge": {
@@ -457,11 +555,16 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         python = _python_executable(arguments.python, root)
         cargo = arguments.cargo
         backup_helper = root / "scripts" / "sqlite_backup.py"
+        retained_read_script = root / "scripts" / "retained_python_snapshot_read.py"
         runtime_manifest = root / "rust" / "Cargo.toml"
         if not backup_helper.is_file():
             raise FileNotFoundError(f"backup helper does not exist: {backup_helper}")
         if not runtime_manifest.is_file():
             raise FileNotFoundError(f"Rust manifest does not exist: {runtime_manifest}")
+        if not retained_read_script.is_file():
+            raise FileNotFoundError(
+                f"retained Python read helper does not exist: {retained_read_script}"
+            )
 
         with tempfile.TemporaryDirectory(prefix="cama-rust-snapshot-replay-") as work:
             work_path = Path(work)
@@ -647,46 +750,39 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             # The retained bridge is a serial 13-family fixture gate and
             # expects its own seeded IDs. A real development snapshot does
             # not necessarily contain those rows (and auto-increment IDs can
-            # differ), so the snapshot replay reads the Rust smoke's reserved
-            # guild sentinel through the actual retained Python repository.
-            python_read_code = "\n".join(
-                (
-                    "import json, sys",
-                    "from repositories.guild_config_repository import GuildConfigRepository",
-                    f"row = GuildConfigRepository(sys.argv[1]).get_config({SMOKE_GUILD_ID})",
-                    "expected = {'guild_id': "
-                    f"{SMOKE_GUILD_ID}, 'league_id': 777, "
-                    "'auto_enrich_matches': 0, 'ai_features_enabled': 1}",
-                    "if row is None or any(",
-                    "    row.get(key) != value",
-                    "    for key, value in expected.items()",
-                    "):",
-                    "    raise RuntimeError(",
-                    "        f'Python guild-config read mismatch: {row!r}'",
-                    "    )",
-                    "print(",
-                    "    json.dumps(",
-                    "        {key: row.get(key) for key in expected}, sort_keys=True",
-                    "    )",
-                    ")",
-                )
-            )
-            python_read = run_step(
-                "python_post_rust_repository_read",
-                [python, "-c", python_read_code, str(copy)],
-                cwd=root,
-                timeout_seconds=arguments.timeout_seconds,
-                report=report,
-            )
+            # differ), so this replay reads the Rust smoke sentinels through
+            # the actual retained Python repository/domain APIs.
             try:
-                python_value = json.loads(python_read["stdout"])
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    f"retained Python repository read was not JSON: {python_read['stdout']}"
-                ) from error
+                python_read = run_step(
+                    "python_post_rust_retained_repository_read",
+                    [python, str(retained_read_script), str(copy)],
+                    cwd=root,
+                    timeout_seconds=arguments.timeout_seconds,
+                    report=report,
+                )
+            except StepFailure as failure:
+                step = failure.step
+                detail = str(
+                    step.get("error")
+                    or step.get("stderr")
+                    or step.get("stdout")
+                    or failure
+                )
+                report["python_post_rust_read"].update(
+                    {"status": "failed", "error": detail}
+                )
+                raise
+            try:
+                python_value = _parse_retained_python_read(python_read["stdout"])
+            except RuntimeError as error:
+                report["python_post_rust_read"].update(
+                    {"status": "failed", "error": str(error)}
+                )
+                raise
             report["python_post_rust_read"] = {
                 "status": "passed",
-                "format": "python-guild-config-repository-v1",
+                "format": PYTHON_RETAINED_READ_FORMAT,
+                "expected": expected_retained_python_read(),
                 "value": python_value,
             }
 

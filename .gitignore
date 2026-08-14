@@ -191,6 +191,7 @@ fix_wins_losses.py
 scripts/*
 !scripts/deploy-runtime
 !scripts/post-deploy-verify
+!scripts/retained_python_snapshot_read.py
 !scripts/runtime-compose
 !scripts/runtime-entrypoint
 !scripts/sqlite_backup.py
