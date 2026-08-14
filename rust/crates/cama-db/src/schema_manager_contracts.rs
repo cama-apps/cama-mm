@@ -13,8 +13,9 @@ use cama_domain::rating::CamaRatingSystem;
 use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
-const REQUIRED_TABLES: [&str; 15] = [
+const REQUIRED_TABLES: [&str; 16] = [
     "bets",
+    "draft_financial_effects",
     "draft_finalization_jobs",
     "economy_ledger_context",
     "economy_ledger_entries",
@@ -38,7 +39,7 @@ const RETIRED_TABLES: [&str; 4] = [
     "wheel_wars",
 ];
 
-const REQUIRED_MIGRATIONS: [&str; 15] = [
+const REQUIRED_MIGRATIONS: [&str; 16] = [
     "add_base_rating_delta_multiplier_to_rating_history",
     "add_lobby_enabled_to_reminder_preferences",
     "add_low_priority_gain_multiplier_to_rating_history",
@@ -48,6 +49,7 @@ const REQUIRED_MIGRATIONS: [&str; 15] = [
     "cap_package_deal_games_remaining",
     "cap_soft_avoid_games_remaining",
     "create_economy_ledger_tables",
+    "create_draft_financial_effects",
     "create_draft_finalization_jobs",
     "create_lobby_target_subscriptions",
     "create_wrapped_enrichment_facts",
@@ -79,7 +81,8 @@ const REQUIRED_COLUMNS: [(&str, &str); 20] = [
     ("match_predictions", "dire_rd"),
 ];
 
-const REQUIRED_INDEXES: [&str; 2] = [
+const REQUIRED_INDEXES: [&str; 3] = [
+    "idx_draft_financial_effects_completion",
     "idx_draft_finalization_jobs_incomplete",
     "idx_reminder_prefs_lobby",
 ];

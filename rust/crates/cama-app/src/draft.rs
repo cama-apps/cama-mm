@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub use cama_db::draft_financial_setup::{
+    DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DraftFinancialEffectIntent, DraftFinancialEffectKind,
+    DraftFinancialIntentStatus, DraftFinancialSetupPlan, DraftFinancialSetupPolicy,
+    DraftInvestmentSnapshot, DraftWealthSnapshot,
+};
+
 pub const DRAFT_POOL_SIZE: usize = 10;
 pub const DRAFT_TOTAL_PICKS: usize = 8;
 pub const BUTTON_LABEL_MAX_LENGTH: usize = 80;
@@ -579,6 +585,8 @@ pub struct DraftFinalizationPlan {
     pub origin: DraftFinalizationDeliveryPlan,
     pub thread_embed: DraftFinalizationDeliveryPlan,
     pub thread_ping: DraftFinalizationDeliveryPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub financial_setup: Option<DraftFinancialSetupPlan>,
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -614,7 +622,7 @@ impl DraftFinalizationPlan {
             extensions: BTreeMap::new(),
         };
         let plan = Self {
-            schema_version: DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION,
+            schema_version: cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION,
             completion_key: completion_key.clone(),
             guild_id,
             session_id,
@@ -629,6 +637,7 @@ impl DraftFinalizationPlan {
             origin: delivery("origin", origin_channel_id, None),
             thread_embed: delivery("thread-embed", thread_id, None),
             thread_ping: delivery("thread-ping", thread_id, None),
+            financial_setup: None,
             extensions: BTreeMap::new(),
         };
         plan.validate(pending_payload_json)?;
@@ -646,7 +655,11 @@ impl DraftFinalizationPlan {
     }
 
     fn validate_structure(&self) -> Result<(), DraftPersistenceError> {
-        if self.schema_version != DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION
+                | DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION
+        ) {
             return Err(DraftPersistenceError::InvalidEnvelope {
                 message: format!(
                     "unsupported Draft finalization plan version {}",
@@ -676,6 +689,33 @@ impl DraftFinalizationPlan {
             return Err(DraftPersistenceError::InvalidEnvelope {
                 message: "Draft finalization timestamps are inconsistent".to_owned(),
             });
+        }
+        match self.schema_version {
+            cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION => {
+                if self.financial_setup.is_some() {
+                    return Err(DraftPersistenceError::InvalidEnvelope {
+                        message: "legacy Draft finalization plan contains financial setup"
+                            .to_owned(),
+                    });
+                }
+            }
+            DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION => {
+                let financial = self.financial_setup.as_ref().ok_or_else(|| {
+                    DraftPersistenceError::InvalidEnvelope {
+                        message: "Draft finalization plan v2 is missing financial setup".to_owned(),
+                    }
+                })?;
+                financial
+                    .validate_for_identity(
+                        self.guild_id,
+                        self.session_id,
+                        financial.pending_match_id,
+                    )
+                    .map_err(|error| DraftPersistenceError::InvalidEnvelope {
+                        message: error.to_string(),
+                    })?;
+            }
+            _ => unreachable!("validated Draft finalization plan version"),
         }
         for (name, delivery) in [
             ("source", &self.source),
@@ -725,6 +765,151 @@ impl DraftFinalizationPlan {
             })?;
         plan.validate_structure()?;
         Ok(plan)
+    }
+}
+
+/// Schema-v2 request expanded by SQLite into a complete immutable financial
+/// plan inside the pending-link writer transaction.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct DraftFinalizationPlanSeed {
+    pub schema_version: u64,
+    pub completion_key: String,
+    pub guild_id: i64,
+    pub session_id: u64,
+    pub pending_payload_sha256: String,
+    pub started_at: i64,
+    pub shuffle_timestamp: i64,
+    pub bet_lock_until: i64,
+    pub is_bomb_pot: bool,
+    pub lobby_kind: LobbyKind,
+    pub source: DraftFinalizationDeliveryPlan,
+    pub lobby: DraftFinalizationDeliveryPlan,
+    pub origin: DraftFinalizationDeliveryPlan,
+    pub thread_embed: DraftFinalizationDeliveryPlan,
+    pub thread_ping: DraftFinalizationDeliveryPlan,
+    pub financial_setup: DraftFinancialSetupPolicy,
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl DraftFinalizationPlanSeed {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        guild_id: i64,
+        session_id: u64,
+        pending_payload_json: &str,
+        started_at: i64,
+        shuffle_timestamp: i64,
+        bet_lock_until: i64,
+        is_bomb_pot: bool,
+        lobby_kind: LobbyKind,
+        source_channel_id: Option<i64>,
+        source_message_id: Option<i64>,
+        lobby_channel_id: Option<i64>,
+        origin_channel_id: Option<i64>,
+        thread_id: Option<i64>,
+        financial_setup: DraftFinancialSetupPolicy,
+    ) -> Result<Self, DraftPersistenceError> {
+        let legacy = DraftFinalizationPlan::new(
+            guild_id,
+            session_id,
+            pending_payload_json,
+            started_at,
+            shuffle_timestamp,
+            bet_lock_until,
+            is_bomb_pot,
+            lobby_kind,
+            source_channel_id,
+            source_message_id,
+            lobby_channel_id,
+            origin_channel_id,
+            thread_id,
+        )?;
+        let seed = Self {
+            schema_version: DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION,
+            completion_key: legacy.completion_key,
+            guild_id,
+            session_id,
+            pending_payload_sha256: legacy.pending_payload_sha256,
+            started_at,
+            shuffle_timestamp,
+            bet_lock_until,
+            is_bomb_pot,
+            lobby_kind,
+            source: legacy.source,
+            lobby: legacy.lobby,
+            origin: legacy.origin,
+            thread_embed: legacy.thread_embed,
+            thread_ping: legacy.thread_ping,
+            financial_setup,
+            extensions: BTreeMap::new(),
+        };
+        seed.validate(pending_payload_json)?;
+        Ok(seed)
+    }
+
+    pub fn validate(&self, pending_payload_json: &str) -> Result<(), DraftPersistenceError> {
+        if self.schema_version != DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "unsupported Draft finalization plan-seed version {}",
+                    self.schema_version
+                ),
+            });
+        }
+        let structural = DraftFinalizationPlan {
+            schema_version: cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION,
+            completion_key: self.completion_key.clone(),
+            guild_id: self.guild_id,
+            session_id: self.session_id,
+            pending_payload_sha256: self.pending_payload_sha256.clone(),
+            started_at: self.started_at,
+            shuffle_timestamp: self.shuffle_timestamp,
+            bet_lock_until: self.bet_lock_until,
+            is_bomb_pot: self.is_bomb_pot,
+            lobby_kind: self.lobby_kind,
+            source: self.source.clone(),
+            lobby: self.lobby.clone(),
+            origin: self.origin.clone(),
+            thread_embed: self.thread_embed.clone(),
+            thread_ping: self.thread_ping.clone(),
+            financial_setup: None,
+            extensions: self.extensions.clone(),
+        };
+        structural.validate(pending_payload_json)?;
+        self.financial_setup
+            .validate()
+            .map_err(|error| DraftPersistenceError::InvalidEnvelope {
+                message: error.to_string(),
+            })
+    }
+
+    pub fn to_json(&self, pending_payload_json: &str) -> Result<String, DraftPersistenceError> {
+        self.validate(pending_payload_json)?;
+        serde_json::to_string(self).map_err(|error| DraftPersistenceError::Serialization {
+            message: error.to_string(),
+        })
+    }
+
+    pub fn from_json(raw: &str) -> Result<Self, DraftPersistenceError> {
+        let seed: Self =
+            serde_json::from_str(raw).map_err(|error| DraftPersistenceError::Serialization {
+                message: error.to_string(),
+            })?;
+        if seed.schema_version != DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "unsupported Draft finalization plan-seed version {}",
+                    seed.schema_version
+                ),
+            });
+        }
+        seed.financial_setup.validate().map_err(|error| {
+            DraftPersistenceError::InvalidEnvelope {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(seed)
     }
 }
 
@@ -962,6 +1147,29 @@ pub trait DraftStatePersistencePort: Send + Sync {
         })
     }
 
+    /// Atomically link a pending match and expand a schema-v2 financial seed
+    /// from the same SQLite writer snapshot.
+    fn link_finalizing_pending_match_v2(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+        plan_seed_json: &str,
+    ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
+        let _ = (
+            expected_session_id,
+            expected_revision,
+            pending_payload_json,
+            plan_seed_json,
+        );
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft financial plan linking is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
     /// Load the exact pending-match JSON already named by a finalizing Draft.
     /// Implementations must preserve the stored bytes so idempotent retries do
     /// not discard forward-compatible pending-match fields.
@@ -1165,6 +1373,43 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
                     .map_err(|error| error.to_string())
             },
         )?;
+        Ok(DraftPendingMatchLink {
+            envelope: Self::decode(linked.draft)?,
+            completion_key: linked.completion_key,
+            pending_match_id: linked.pending_match_id,
+            pending_payload_json: linked.pending_payload_json,
+            plan_json: linked.job.plan_json,
+            pending_created: linked.pending_created,
+            job_created: linked.job_created,
+        })
+    }
+
+    fn link_finalizing_pending_match_v2(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+        plan_seed_json: &str,
+    ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
+        let seed = DraftFinalizationPlanSeed::from_json(plan_seed_json)?;
+        seed.validate(pending_payload_json)?;
+        let linked = self
+            .finalization
+            .link_pending_match_with_financial_plan_validated(
+                guild_id,
+                expected_session_id,
+                expected_revision,
+                pending_payload_json,
+                plan_seed_json,
+                |raw| {
+                    DraftStateEnvelope::from_json(raw)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            )?;
+        let plan = DraftFinalizationPlan::from_json(&linked.job.plan_json)?;
+        plan.validate(pending_payload_json)?;
         Ok(DraftPendingMatchLink {
             envelope: Self::decode(linked.draft)?,
             completion_key: linked.completion_key,
@@ -3824,6 +4069,175 @@ mod tests {
                 400,
             )
             .expect("terminal completion is idempotent");
+    }
+
+    #[test]
+    fn sqlite_adapter_v2_link_returns_the_frozen_financial_plan() {
+        let fixture = NamedTempFile::new().expect("create v2 typed-link fixture");
+        cama_db::schema_manager::initialize_or_migrate(fixture.path())
+            .expect("initialize v2 typed-link fixture");
+        let connection = Connection::open(fixture.path()).expect("open v2 typed-link fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("disable unrelated legacy foreign-key mismatch for fixture setup");
+        for discord_id in 1_i64..=10 {
+            connection
+                .execute(
+                    "INSERT INTO players(
+                         discord_id,guild_id,discord_username,jopacoin_balance
+                     ) VALUES (?1,?2,?3,100)",
+                    rusqlite::params![discord_id, TEST_GUILD_ID, format!("player-{discord_id}")],
+                )
+                .expect("insert v2 financial player");
+        }
+        drop(connection);
+
+        let persistence = SqliteDraftStatePersistence::new(fixture.path());
+        let mut state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::Open, 0);
+        state.phase = DraftPhase::Complete;
+        let mut envelope = state.to_snapshot().envelope(1);
+        envelope.finalizing = true;
+        envelope.deadline_at = None;
+        let created = persistence
+            .create_envelope(&envelope)
+            .expect("create v2 fenced envelope");
+        let pending_payload = json!({
+            "radiant_team_ids": [1, 2, 3, 4, 5],
+            "dire_team_ids": [6, 7, 8, 9, 10],
+            "shuffle_timestamp": 1_700_000_000_i64,
+            "bet_lock_until": 1_700_000_600_i64,
+            "betting_mode": "pool",
+            "is_bomb_pot": false,
+            "lobby_kind": "open",
+            "future_pending": {"keep": true}
+        })
+        .to_string();
+        let policy = DraftFinancialSetupPolicy {
+            schema_version: cama_db::draft_financial_setup::DRAFT_FINANCIAL_SETUP_PLAN_VERSION,
+            game_date: "2026-08-14".to_owned(),
+            betting_mode: "pool".to_owned(),
+            seed_max_amount: 0,
+            first_game_daily_amount: 0,
+            auto_blind_enabled: true,
+            normal_blind_threshold: 0,
+            normal_blind_percentage_bits: format!("{:016x}", 0.1_f64.to_bits()),
+            bomb_blind_percentage_bits: format!("{:016x}", 0.15_f64.to_bits()),
+            bomb_ante: 10,
+            max_debt: 100,
+            spectator_enabled: false,
+            spectator_total_count: 0,
+            spectator_top_count: 0,
+            spectator_base_percentage_bits: format!("{:016x}", 0.01_f64.to_bits()),
+            spectator_top_percentage_bits: format!("{:016x}", 0.02_f64.to_bits()),
+            extensions: BTreeMap::from([("future_policy".to_owned(), json!("keep"))]),
+        };
+        let mut seed = DraftFinalizationPlanSeed::new(
+            TEST_GUILD_ID,
+            created.session_id,
+            &pending_payload,
+            1_700_000_000,
+            1_700_000_000,
+            1_700_000_600,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+            policy,
+        )
+        .expect("build v2 plan seed");
+        seed.extensions
+            .insert("future_plan".to_owned(), json!({"keep": [1, 2, 3]}));
+        let seed_json = seed.to_json(&pending_payload).expect("encode v2 plan seed");
+        let linked = persistence
+            .link_finalizing_pending_match_v2(
+                TEST_GUILD_ID,
+                created.session_id,
+                created.revision,
+                &pending_payload,
+                &seed_json,
+            )
+            .expect("atomically link v2 financial plan");
+        let plan = DraftFinalizationPlan::from_json(&linked.plan_json)
+            .expect("decode complete frozen v2 plan");
+        plan.validate(&pending_payload)
+            .expect("validate complete frozen v2 plan");
+        assert_eq!(plan.schema_version, DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION);
+        assert_eq!(plan.extensions["future_plan"], json!({"keep": [1, 2, 3]}));
+        let financial = plan
+            .financial_setup
+            .as_ref()
+            .expect("frozen financial setup");
+        assert_eq!(financial.pending_match_id, linked.pending_match_id);
+        assert_eq!(financial.policy.extensions["future_policy"], json!("keep"));
+        assert_eq!(
+            financial.effects[0].effect_kind,
+            DraftFinancialEffectKind::Seed
+        );
+        assert_eq!(
+            financial.effects[1].effect_kind,
+            DraftFinancialEffectKind::Blind
+        );
+        assert_eq!(financial.effects[1].intended["amount"], json!(10));
+
+        let legacy = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            created.session_id,
+            &pending_payload,
+            1_700_000_000,
+            1_700_000_000,
+            1_700_000_600,
+            false,
+            LobbyKind::Open,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build legacy delivery-only plan");
+        assert_eq!(
+            legacy.schema_version,
+            cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION
+        );
+        assert!(legacy.financial_setup.is_none());
+
+        let mut missing_financial = serde_json::to_value(&plan).expect("encode frozen v2 plan");
+        missing_financial
+            .as_object_mut()
+            .expect("v2 plan object")
+            .remove("financial_setup");
+        assert!(matches!(
+            DraftFinalizationPlan::from_json(&missing_financial.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+        let mut mismatched_identity =
+            serde_json::to_value(&plan).expect("encode v2 identity fixture");
+        let old_prefix = format!("draft:{TEST_GUILD_ID}:{}", created.session_id);
+        let new_prefix = format!("draft:{}:{}", TEST_GUILD_ID + 1, created.session_id);
+        for effect in mismatched_identity["financial_setup"]["effects"]
+            .as_array_mut()
+            .expect("v2 financial effects")
+        {
+            effect["intended"]["guild_id"] = json!(TEST_GUILD_ID + 1);
+            let key = effect["effect_key"]
+                .as_str()
+                .expect("v2 effect key")
+                .replacen(&old_prefix, &new_prefix, 1);
+            effect["effect_key"] = json!(key);
+        }
+        serde_json::from_value::<DraftFinancialSetupPlan>(
+            mismatched_identity["financial_setup"].clone(),
+        )
+        .expect("decode internally consistent mismatched financial plan")
+        .validate()
+        .expect("nested validation alone cannot see the top-level identity");
+        assert!(matches!(
+            DraftFinalizationPlan::from_json(&mismatched_identity.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
     }
 
     #[test]

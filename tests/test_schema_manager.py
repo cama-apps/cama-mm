@@ -146,6 +146,90 @@ def test_draft_finalization_jobs_migration_is_additive_and_constrained(repo_db_p
     assert progress_json == "{}"
 
 
+def test_draft_financial_effects_migration_is_additive_and_constrained(repo_db_path):
+    with sqlite3.connect(repo_db_path) as conn:
+        columns = {
+            row[1]: (row[2], row[3])
+            for row in conn.execute("PRAGMA table_info(draft_financial_effects)")
+        }
+        indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(draft_financial_effects)")
+        }
+        migration = conn.execute(
+            "SELECT 1 FROM schema_migrations "
+            "WHERE name='create_draft_financial_effects'"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO pending_matches(guild_id,payload,completion_key) "
+            "VALUES (42,'{}','draft:42:1')"
+        )
+        pending_match_id = conn.execute(
+            "SELECT pending_match_id FROM pending_matches "
+            "WHERE completion_key='draft:42:1'"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO draft_finalization_jobs(
+                completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+            ) VALUES (?,?,?,?,?,?)
+            """,
+            ("draft:42:1", 42, 1, pending_match_id, "linked", '{"schema_version":1}'),
+        )
+        conn.execute(
+            """
+            INSERT INTO draft_financial_effects(
+                effect_key,completion_key,guild_id,session_id,pending_match_id,
+                effect_kind,ordinal,plan_sha256,intended_json,status,receipt_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "draft:42:1:seed:1",
+                "draft:42:1",
+                42,
+                1,
+                pending_match_id,
+                "seed",
+                0,
+                "0" * 64,
+                '{"reserved":0}',
+                "applied",
+                '{"reserved":0}',
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO draft_financial_effects(
+                    effect_key,completion_key,guild_id,session_id,pending_match_id,
+                    effect_kind,ordinal,plan_sha256,intended_json,status,receipt_json
+                ) VALUES ('bad','draft:42:1',42,1,?,'blind',1,?,'[]','applied','{}')
+                """,
+                (pending_match_id, "0" * 64),
+            )
+
+    assert {
+        "effect_key",
+        "completion_key",
+        "guild_id",
+        "session_id",
+        "pending_match_id",
+        "effect_kind",
+        "ordinal",
+        "plan_sha256",
+        "intended_json",
+        "status",
+        "receipt_json",
+        "created_at",
+        "updated_at",
+    } == set(columns)
+    assert columns["effect_key"] == ("TEXT", 1)
+    assert columns["intended_json"] == ("TEXT", 1)
+    assert columns["receipt_json"] == ("TEXT", 1)
+    assert "idx_draft_financial_effects_completion" in indexes
+    assert migration == (1,)
+
+
 def test_schema_manager_drops_retired_tables(tmp_path):
     """One initialize drops every retired legacy table.
 

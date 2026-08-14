@@ -60,6 +60,7 @@ pub mod dota_bet_seed_repository;
 #[path = "dota_streak.rs"]
 pub mod dota_streak_repository;
 pub mod draft_finalization;
+pub mod draft_financial_setup;
 pub mod draft_state;
 #[path = "duel.rs"]
 pub mod duel_repository;
@@ -166,6 +167,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "dig_gear",
     "dig_inventory",
     "double_or_nothing_spins",
+    "draft_financial_effects",
     "draft_finalization_jobs",
     "duel_challenges",
     "economy_daily_events",
@@ -456,6 +458,8 @@ mod tests {
                 CREATE TABLE dig_gear (id INTEGER PRIMARY KEY);
                 CREATE TABLE dig_inventory (id INTEGER PRIMARY KEY);
                 CREATE TABLE double_or_nothing_spins (id INTEGER PRIMARY KEY);
+                CREATE TABLE draft_financial_effects (effect_key TEXT PRIMARY KEY);
+                CREATE TABLE draft_finalization_jobs (completion_key TEXT PRIMARY KEY);
                 CREATE TABLE duel_challenges (id INTEGER PRIMARY KEY);
                 CREATE TABLE app_kv (id INTEGER PRIMARY KEY);
                 CREATE TABLE bankruptcy_state (id INTEGER PRIMARY KEY);

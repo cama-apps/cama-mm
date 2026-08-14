@@ -16,7 +16,10 @@ use crate::draft_state::{DRAFT_STATE_ENVELOPE_VERSION, DRAFT_STATE_KEY, DraftSta
 use crate::open_runtime_connection;
 
 /// Current immutable Draft-finalization plan schema.
-pub const DRAFT_FINALIZATION_PLAN_VERSION: u64 = 1;
+pub const DRAFT_FINALIZATION_PLAN_VERSION: u64 = 2;
+/// Legacy delivery-only plan schema. It remains readable but cannot execute
+/// durable financial setup.
+pub const DRAFT_FINALIZATION_LEGACY_PLAN_VERSION: u64 = 1;
 /// First recovery stage installed atomically with the pending-match link.
 pub const DRAFT_FINALIZATION_INITIAL_STAGE: &str = "linked";
 /// Terminal stage excluded by [`DraftFinalizationRepository::load_incomplete_jobs`].
@@ -135,6 +138,12 @@ pub struct DraftFinalizationRepository {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum PlanRequest<'a> {
+    Frozen(&'a str),
+    FinancialSeed(&'a str),
+}
+
 impl DraftFinalizationRepository {
     #[must_use]
     pub fn new(path: impl AsRef<Path>) -> Self {
@@ -184,9 +193,67 @@ impl DraftFinalizationRepository {
     where
         F: FnOnce(&str) -> Result<(), String>,
     {
+        self.link_pending_match_internal(
+            guild_id,
+            expected_session_id,
+            expected_revision,
+            pending_payload_json,
+            PlanRequest::Frozen(plan_json),
+            validate_draft_envelope,
+        )
+    }
+
+    /// Atomically expand a schema-v2 policy seed from the same writer snapshot
+    /// that creates and links the pending match. The returned job contains the
+    /// complete frozen plan, not the seed supplied by the caller.
+    pub fn link_pending_match_with_financial_plan_validated<F>(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+        plan_seed_json: &str,
+        validate_draft_envelope: F,
+    ) -> Result<DraftFinalizationRecord, DraftFinalizationError>
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
+        self.link_pending_match_internal(
+            guild_id,
+            expected_session_id,
+            expected_revision,
+            pending_payload_json,
+            PlanRequest::FinancialSeed(plan_seed_json),
+            validate_draft_envelope,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn link_pending_match_internal<F>(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+        plan_request: PlanRequest<'_>,
+        validate_draft_envelope: F,
+    ) -> Result<DraftFinalizationRecord, DraftFinalizationError>
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
         let completion_key = draft_completion_key(guild_id, expected_session_id);
         validate_pending_payload(pending_payload_json)?;
-        validate_plan_json(plan_json, guild_id, expected_session_id, &completion_key)?;
+        match plan_request {
+            PlanRequest::Frozen(plan_json) => {
+                validate_plan_json(plan_json, guild_id, expected_session_id, &completion_key)?;
+            }
+            PlanRequest::FinancialSeed(plan_seed_json) => validate_plan_seed_json(
+                plan_seed_json,
+                guild_id,
+                expected_session_id,
+                &completion_key,
+            )?,
+        }
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current_json = transaction
@@ -229,13 +296,20 @@ impl DraftFinalizationRepository {
                         });
                     }
                     ensure_same_pending_payload(guild_id, &linked.payload, pending_payload_json)?;
-                    let job = require_matching_finalization_job(
+                    let job = require_matching_finalization_job_request(
                         &transaction,
                         &completion_key,
                         guild_id,
                         expected_session_id,
                         linked_id,
-                        plan_json,
+                        plan_request,
+                    )?;
+                    ensure_plan_pending_hash(&job.plan_json, &linked.payload)?;
+                    ensure_plan_financial_identity(
+                        &job.plan_json,
+                        guild_id,
+                        expected_session_id,
+                        linked_id,
                     )?;
                     let draft = envelope.record(current_json)?;
                     transaction.commit()?;
@@ -281,6 +355,21 @@ impl DraftFinalizationRepository {
         )?;
         let pending_match_id = transaction.last_insert_rowid();
         let persisted_payload = pending_payload_json.to_owned();
+        let frozen_plan_json = match plan_request {
+            PlanRequest::Frozen(plan_json) => plan_json.to_owned(),
+            PlanRequest::FinancialSeed(plan_seed_json) => {
+                crate::draft_financial_setup::freeze_finalization_plan_json(
+                    &transaction,
+                    &completion_key,
+                    guild_id,
+                    expected_session_id,
+                    pending_match_id,
+                    pending_payload_json,
+                    plan_seed_json,
+                )
+                .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?
+            }
+        };
 
         let next_revision =
             envelope
@@ -311,7 +400,7 @@ impl DraftFinalizationRepository {
             expected_session_id,
             pending_match_id,
             pending_payload_json,
-            plan_json,
+            &frozen_plan_json,
         )?;
         let draft = envelope.record(updated_json)?;
         transaction.commit()?;
@@ -888,7 +977,10 @@ fn validate_plan_json(
     let value = parse_json_object(raw, DraftFinalizationError::InvalidPlan)?;
     let object = value.as_object().expect("object parser returns an object");
     let schema_version = object.get("schema_version").and_then(Value::as_u64);
-    if schema_version != Some(DRAFT_FINALIZATION_PLAN_VERSION) {
+    if !matches!(
+        schema_version,
+        Some(DRAFT_FINALIZATION_LEGACY_PLAN_VERSION) | Some(DRAFT_FINALIZATION_PLAN_VERSION)
+    ) {
         return Err(DraftFinalizationError::InvalidPlan(format!(
             "unsupported schema_version {schema_version:?}"
         )));
@@ -908,6 +1000,76 @@ fn validate_plan_json(
             "session_id does not match the Draft identity".to_owned(),
         ));
     }
+    let payload_hash = object
+        .get("pending_payload_sha256")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if payload_hash.len() != 64
+        || !payload_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DraftFinalizationError::InvalidPlan(
+            "pending_payload_sha256 must be a lowercase SHA-256 digest".to_owned(),
+        ));
+    }
+    match schema_version {
+        Some(DRAFT_FINALIZATION_LEGACY_PLAN_VERSION) => {
+            if object.contains_key("financial_setup") {
+                return Err(DraftFinalizationError::InvalidPlan(
+                    "legacy plan must not contain financial_setup".to_owned(),
+                ));
+            }
+        }
+        Some(DRAFT_FINALIZATION_PLAN_VERSION) => {
+            let financial = object.get("financial_setup").cloned().ok_or_else(|| {
+                DraftFinalizationError::InvalidPlan(
+                    "schema-v2 plan is missing financial_setup".to_owned(),
+                )
+            })?;
+            let plan: crate::draft_financial_setup::DraftFinancialSetupPlan =
+                serde_json::from_value(financial)
+                    .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+            plan.validate()
+                .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+        }
+        _ => unreachable!("validated plan version"),
+    }
+    Ok(())
+}
+
+fn validate_plan_seed_json(
+    raw: &str,
+    guild_id: i64,
+    session_id: u64,
+    completion_key: &str,
+) -> Result<(), DraftFinalizationError> {
+    let value = parse_json_object(raw, DraftFinalizationError::InvalidPlan)?;
+    let object = value.as_object().expect("object parser returns an object");
+    if object.get("schema_version").and_then(Value::as_u64) != Some(DRAFT_FINALIZATION_PLAN_VERSION)
+    {
+        return Err(DraftFinalizationError::InvalidPlan(
+            "financial plan seed must use schema version 2".to_owned(),
+        ));
+    }
+    if object.get("completion_key").and_then(Value::as_str) != Some(completion_key)
+        || object.get("guild_id").and_then(Value::as_i64) != Some(guild_id)
+        || object.get("session_id").and_then(Value::as_u64) != Some(session_id)
+    {
+        return Err(DraftFinalizationError::InvalidPlan(
+            "financial plan seed identity does not match the Draft".to_owned(),
+        ));
+    }
+    let policy: crate::draft_financial_setup::DraftFinancialSetupPolicy =
+        serde_json::from_value(object.get("financial_setup").cloned().ok_or_else(|| {
+            DraftFinalizationError::InvalidPlan(
+                "financial plan seed is missing its policy".to_owned(),
+            )
+        })?)
+        .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+    policy
+        .validate()
+        .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
     let payload_hash = object
         .get("pending_payload_sha256")
         .and_then(Value::as_str)
@@ -966,6 +1128,9 @@ fn ensure_finalization_job(
     plan_json: &str,
 ) -> Result<(DraftFinalizationJob, bool), DraftFinalizationError> {
     let session_id_sql = job_integer(guild_id, "session_id", session_id)?;
+    validate_plan_json(plan_json, guild_id, session_id, completion_key)?;
+    ensure_plan_pending_hash(plan_json, pending_payload_json)?;
+    ensure_plan_financial_identity(plan_json, guild_id, session_id, pending_match_id)?;
     if let Some(job) = job_by_completion_key(transaction, completion_key)? {
         if job.guild_id != guild_id
             || job.session_id != session_id
@@ -1000,7 +1165,6 @@ fn ensure_finalization_job(
             reason: "Draft session or pending match belongs to another finalization job".to_owned(),
         });
     }
-    ensure_plan_pending_hash(plan_json, pending_payload_json)?;
     transaction.execute(
         "INSERT INTO draft_finalization_jobs(
              completion_key,guild_id,session_id,pending_match_id,revision,stage,
@@ -1018,13 +1182,13 @@ fn ensure_finalization_job(
     Ok((require_job(transaction, completion_key)?, true))
 }
 
-fn require_matching_finalization_job(
+fn require_matching_finalization_job_request(
     transaction: &Transaction<'_>,
     completion_key: &str,
     guild_id: i64,
     session_id: u64,
     pending_match_id: i64,
-    plan_json: &str,
+    plan_request: PlanRequest<'_>,
 ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
     let job = require_job(transaction, completion_key)?;
     if job.guild_id != guild_id
@@ -1036,13 +1200,47 @@ fn require_matching_finalization_job(
             reason: "completion key identifies a different finalization job".to_owned(),
         });
     }
-    if job.plan_json != plan_json {
+    let matches = match plan_request {
+        PlanRequest::Frozen(plan_json) => job.plan_json == plan_json,
+        PlanRequest::FinancialSeed(plan_seed_json) => {
+            frozen_plan_matches_seed(&job.plan_json, plan_seed_json)?
+        }
+    };
+    if !matches {
         return Err(DraftFinalizationError::Conflict {
             guild_id,
             reason: "completion key was retried with a different finalization plan".to_owned(),
         });
     }
     Ok(job)
+}
+
+fn frozen_plan_matches_seed(
+    frozen_plan_json: &str,
+    plan_seed_json: &str,
+) -> Result<bool, DraftFinalizationError> {
+    let mut frozen = parse_json_object(frozen_plan_json, DraftFinalizationError::InvalidPlan)?;
+    let seed = parse_json_object(plan_seed_json, DraftFinalizationError::InvalidPlan)?;
+    let frozen_object = frozen
+        .as_object_mut()
+        .expect("object parser returns object");
+    let financial: crate::draft_financial_setup::DraftFinancialSetupPlan = serde_json::from_value(
+        frozen_object
+            .get("financial_setup")
+            .cloned()
+            .ok_or_else(|| {
+                DraftFinalizationError::InvalidPlan(
+                    "frozen plan is missing financial_setup".to_owned(),
+                )
+            })?,
+    )
+    .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+    frozen_object.insert(
+        "financial_setup".to_owned(),
+        serde_json::to_value(financial.policy)
+            .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?,
+    );
+    Ok(frozen == seed)
 }
 
 fn ensure_plan_pending_hash(
@@ -1062,6 +1260,28 @@ fn ensure_plan_pending_hash(
             "pending_payload_sha256 does not match the exact initial pending payload".to_owned(),
         ))
     }
+}
+
+fn ensure_plan_financial_identity(
+    plan_json: &str,
+    guild_id: i64,
+    session_id: u64,
+    pending_match_id: i64,
+) -> Result<(), DraftFinalizationError> {
+    let plan = parse_json_object(plan_json, DraftFinalizationError::InvalidPlan)?;
+    if plan.get("schema_version").and_then(Value::as_u64) == Some(DRAFT_FINALIZATION_PLAN_VERSION) {
+        let financial: crate::draft_financial_setup::DraftFinancialSetupPlan =
+            serde_json::from_value(plan.get("financial_setup").cloned().ok_or_else(|| {
+                DraftFinalizationError::InvalidPlan(
+                    "schema-v2 plan is missing financial_setup".to_owned(),
+                )
+            })?)
+            .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+        financial
+            .validate_for_identity(guild_id, session_id, pending_match_id)
+            .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn require_job(
@@ -1216,6 +1436,7 @@ fn raw_pending_from_row(row: &rusqlite::Row<'_>) -> Result<RawPendingMatch, rusq
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1260,7 +1481,7 @@ mod tests {
 
     fn plan(guild_id: i64, session_id: u64, payload: &str) -> String {
         json!({
-            "schema_version": DRAFT_FINALIZATION_PLAN_VERSION,
+            "schema_version": DRAFT_FINALIZATION_LEGACY_PLAN_VERSION,
             "completion_key": draft_completion_key(guild_id, session_id),
             "guild_id": guild_id,
             "session_id": session_id,
@@ -1268,6 +1489,290 @@ mod tests {
             "future_plan": {"preserved": true}
         })
         .to_string()
+    }
+
+    fn financial_policy() -> crate::draft_financial_setup::DraftFinancialSetupPolicy {
+        crate::draft_financial_setup::DraftFinancialSetupPolicy {
+            schema_version: crate::draft_financial_setup::DRAFT_FINANCIAL_SETUP_PLAN_VERSION,
+            game_date: "2026-08-14".to_owned(),
+            betting_mode: "pool".to_owned(),
+            seed_max_amount: 100,
+            first_game_daily_amount: 0,
+            auto_blind_enabled: true,
+            normal_blind_threshold: 50,
+            normal_blind_percentage_bits: format!("{:016x}", 0.1_f64.to_bits()),
+            bomb_blind_percentage_bits: format!("{:016x}", 0.15_f64.to_bits()),
+            bomb_ante: 10,
+            max_debt: 500,
+            spectator_enabled: true,
+            spectator_total_count: 2,
+            spectator_top_count: 1,
+            spectator_base_percentage_bits: format!("{:016x}", 0.01_f64.to_bits()),
+            spectator_top_percentage_bits: format!("{:016x}", 0.02_f64.to_bits()),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn plan_seed(guild_id: i64, session_id: u64, payload: &str) -> String {
+        json!({
+            "schema_version": DRAFT_FINALIZATION_PLAN_VERSION,
+            "completion_key": draft_completion_key(guild_id, session_id),
+            "guild_id": guild_id,
+            "session_id": session_id,
+            "pending_payload_sha256": pending_payload_sha256(payload),
+            "started_at": 1_700_000_000,
+            "shuffle_timestamp": 1_700_000_000,
+            "bet_lock_until": 1_700_000_600,
+            "is_bomb_pot": false,
+            "financial_setup": financial_policy(),
+            "future_plan": {"preserved": true}
+        })
+        .to_string()
+    }
+
+    fn insert_financial_players(connection: &Connection) {
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("disable unrelated legacy foreign-key mismatch for fixture setup");
+        for discord_id in 1_i64..=13 {
+            let balance = match discord_id {
+                1 => 55,
+                11 => 1_000,
+                12 => 900,
+                13 => 800,
+                _ => 100,
+            };
+            connection
+                .execute(
+                    "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+                     VALUES (?1,42,?2,?3)",
+                    params![discord_id, format!("player-{discord_id}"), balance],
+                )
+                .expect("insert financial player");
+        }
+        connection
+            .execute(
+                "INSERT INTO autobet_investments(
+                     guild_id,investor_id,target_id,direction,percentage
+                 ) VALUES (42,11,1,'long',10)",
+                [],
+            )
+            .expect("insert frozen investment");
+    }
+
+    #[test]
+    fn v2_link_freezes_financial_intents_in_atomic_writer_snapshot() {
+        let file = fixture();
+        let drafts = DraftStateRepository::new(file.path());
+        let repository = DraftFinalizationRepository::new(file.path());
+        let draft = fenced(&drafts, 42);
+        let connection = Connection::open(file.path()).expect("open v2 fixture");
+        insert_financial_players(&connection);
+        connection
+            .execute(
+                "INSERT INTO nonprofit_fund(
+                     guild_id,total_collected,next_match_pot,
+                     first_game_open_pool,first_game_lowskill_pool
+                 ) VALUES (42,200,0,0,0)
+                 ON CONFLICT(guild_id) DO UPDATE SET total_collected=200",
+                [],
+            )
+            .expect("seed nonprofit fund");
+        drop(connection);
+        let payload = json!({
+            "radiant_team_ids": [1,2,3,4,5],
+            "dire_team_ids": [6,7,8,9,10],
+            "shuffle_timestamp": 1_700_000_000_i64,
+            "bet_lock_until": 1_700_000_600_i64,
+            "betting_mode": "pool",
+            "is_bomb_pot": false,
+            "lobby_kind": "open"
+        })
+        .to_string();
+        let seed = plan_seed(42, draft.session_id, &payload);
+
+        let linked = repository
+            .link_pending_match_with_financial_plan_validated(
+                42,
+                draft.session_id,
+                draft.revision,
+                &payload,
+                &seed,
+                |_| Ok(()),
+            )
+            .expect("link v2 financial plan");
+        let frozen_raw = linked.job.plan_json.clone();
+        let frozen: Value = serde_json::from_str(&frozen_raw).expect("decode frozen plan");
+        assert_eq!(frozen["schema_version"], json!(2));
+        assert_eq!(frozen["future_plan"], json!({"preserved": true}));
+        assert_eq!(
+            frozen["financial_setup"]["pending_match_id"],
+            json!(linked.pending_match_id)
+        );
+        assert_eq!(
+            frozen["financial_setup"]["investment_positions"][0]["starting_balance"],
+            json!(1_000)
+        );
+        assert_eq!(
+            frozen["financial_setup"]["wealth_snapshot"]
+                .as_array()
+                .expect("wealth array")
+                .len(),
+            13
+        );
+        let effects = frozen["financial_setup"]["effects"]
+            .as_array()
+            .expect("effects array");
+        assert_eq!(effects[0]["effect_kind"], json!("seed"));
+        assert_eq!(effects[1]["effect_kind"], json!("blind"));
+        assert_eq!(effects[1]["intended"]["amount"], json!(6));
+        assert!(effects.iter().any(|effect| {
+            effect["effect_kind"] == json!("investment")
+                && effect["intended"]["target_id"] == json!(1)
+        }));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect["effect_kind"] == json!("spectator"))
+        );
+
+        let connection = Connection::open(file.path()).expect("reopen v2 fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("disable unrelated legacy foreign-key mismatch for fixture mutation");
+        connection
+            .execute(
+                "UPDATE players SET jopacoin_balance=1 WHERE guild_id=42",
+                [],
+            )
+            .expect("mutate balances after link");
+        connection
+            .execute("DELETE FROM autobet_investments WHERE guild_id=42", [])
+            .expect("mutate investments after link");
+        connection
+            .execute(
+                "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+                 VALUES (99,42,'late-player',999999)",
+                [],
+            )
+            .expect("add late wealthy player");
+        drop(connection);
+
+        let retried = repository
+            .link_pending_match_with_financial_plan_validated(
+                42,
+                draft.session_id,
+                linked.draft.revision,
+                &payload,
+                &seed,
+                |_| Ok(()),
+            )
+            .expect("retry v2 link from frozen plan");
+        assert!(!retried.pending_created);
+        assert!(!retried.job_created);
+        assert_eq!(retried.job.plan_json, frozen_raw);
+    }
+
+    #[test]
+    fn v2_planner_failure_rolls_back_and_policy_mismatch_fails_closed() {
+        let file = fixture();
+        let drafts = DraftStateRepository::new(file.path());
+        let repository = DraftFinalizationRepository::new(file.path());
+        let draft = fenced(&drafts, 42);
+        let connection = Connection::open(file.path()).expect("open v2 rollback fixture");
+        insert_financial_players(&connection);
+        drop(connection);
+        let malformed_payload = json!({
+            "dire_team_ids": [6,7,8,9,10],
+            "shuffle_timestamp": 1_700_000_000_i64,
+            "betting_mode": "pool",
+            "is_bomb_pot": false,
+            "lobby_kind": "open"
+        })
+        .to_string();
+        let malformed_seed = plan_seed(42, draft.session_id, &malformed_payload);
+        assert!(matches!(
+            repository.link_pending_match_with_financial_plan_validated(
+                42,
+                draft.session_id,
+                draft.revision,
+                &malformed_payload,
+                &malformed_seed,
+                |_| Ok(()),
+            ),
+            Err(DraftFinalizationError::InvalidPlan(_))
+        ));
+        let connection = Connection::open(file.path()).expect("inspect v2 rollback fixture");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count rolled-back pending rows"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count rolled-back jobs"),
+            0
+        );
+        drop(connection);
+        let unchanged = drafts
+            .load(42)
+            .expect("reload rolled-back Draft")
+            .expect("rolled-back Draft remains active");
+        assert_eq!(unchanged.revision, draft.revision);
+        assert_eq!(
+            serde_json::from_str::<Value>(&unchanged.envelope_json)
+                .expect("decode rolled-back envelope")["pending_match_id"],
+            Value::Null
+        );
+
+        let payload = json!({
+            "radiant_team_ids": [1,2,3,4,5],
+            "dire_team_ids": [6,7,8,9,10],
+            "shuffle_timestamp": 1_700_000_000_i64,
+            "bet_lock_until": 1_700_000_600_i64,
+            "betting_mode": "pool",
+            "is_bomb_pot": false,
+            "lobby_kind": "open"
+        })
+        .to_string();
+        let seed = plan_seed(42, draft.session_id, &payload);
+        let linked = repository
+            .link_pending_match_with_financial_plan_validated(
+                42,
+                draft.session_id,
+                draft.revision,
+                &payload,
+                &seed,
+                |_| Ok(()),
+            )
+            .expect("link valid v2 plan after rollback");
+        let original_plan = linked.job.plan_json.clone();
+        let mut changed_seed: Value = serde_json::from_str(&seed).expect("decode v2 seed");
+        changed_seed["financial_setup"]["seed_max_amount"] = json!(999);
+        assert!(matches!(
+            repository.link_pending_match_with_financial_plan_validated(
+                42,
+                draft.session_id,
+                linked.draft.revision,
+                &payload,
+                &changed_seed.to_string(),
+                |_| Ok(()),
+            ),
+            Err(DraftFinalizationError::Conflict { .. })
+        ));
+        assert_eq!(
+            repository
+                .job(&linked.completion_key)
+                .expect("reload v2 job after mismatch")
+                .expect("v2 job remains")
+                .plan_json,
+            original_plan
+        );
     }
 
     #[test]

@@ -226,3 +226,4 @@ create_match_correction_claims
 create_manashop_purchase_lifecycle
 add_pending_match_completion_key
 create_draft_finalization_jobs
+create_draft_financial_effects

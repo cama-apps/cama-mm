@@ -304,6 +304,35 @@ CREATE TABLE duel_challenges (
                 CHECK (challenger_id != recipient_id)
             );
 
+-- table: draft_financial_effects
+CREATE TABLE draft_financial_effects (
+                effect_key TEXT PRIMARY KEY NOT NULL,
+                completion_key TEXT NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL,
+                effect_kind TEXT NOT NULL
+                    CHECK(effect_kind IN ('seed', 'blind', 'investment', 'spectator')),
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                plan_sha256 TEXT NOT NULL
+                    CHECK(
+                        length(plan_sha256) = 64
+                        AND plan_sha256 NOT GLOB '*[^0-9a-f]*'
+                    ),
+                intended_json TEXT NOT NULL
+                    CHECK(json_valid(intended_json) AND json_type(intended_json) = 'object'),
+                status TEXT NOT NULL CHECK(status IN ('applied', 'skipped')),
+                receipt_json TEXT NOT NULL
+                    CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(completion_key, effect_kind, ordinal),
+                FOREIGN KEY(completion_key)
+                    REFERENCES draft_finalization_jobs(completion_key),
+                FOREIGN KEY(pending_match_id)
+                    REFERENCES pending_matches(pending_match_id)
+            );
+
 -- table: draft_finalization_jobs
 CREATE TABLE draft_finalization_jobs (
                 completion_key TEXT PRIMARY KEY NOT NULL,
@@ -1687,6 +1716,11 @@ CREATE INDEX idx_duel_recipient_history ON duel_challenges(guild_id, recipient_i
 -- index: idx_draft_finalization_jobs_incomplete
 CREATE INDEX idx_draft_finalization_jobs_incomplete
             ON draft_finalization_jobs(stage, lease_until, updated_at)
+            ;
+
+-- index: idx_draft_financial_effects_completion
+CREATE INDEX idx_draft_financial_effects_completion
+            ON draft_financial_effects(completion_key, ordinal)
             ;
 
 -- index: idx_economy_events_active
