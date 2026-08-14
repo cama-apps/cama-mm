@@ -972,6 +972,67 @@ struct SerenityHandler {
     guild_ids: Arc<RwLock<BTreeSet<u64>>>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct GlobalCommandSyncOutcome {
+    command_count: usize,
+    synchronized: bool,
+    error: Option<String>,
+}
+
+impl GlobalCommandSyncOutcome {
+    fn lifecycle_event(&self, component_route_count: usize) -> LifecycleEvent {
+        LifecycleEvent::CommandsRegistered {
+            command_count: self.command_count,
+            component_route_count,
+            synchronized: self.synchronized,
+        }
+    }
+}
+
+impl SerenityHandler {
+    /// Apply the complete composed command tree only after the cutover gate
+    /// has been enabled.  Keeping the HTTP operation and its lifecycle result
+    /// together prevents a failed Discord REST request from being reported as
+    /// a synchronized command tree.
+    async fn synchronize_global_commands(&self, http: &Http) -> GlobalCommandSyncOutcome {
+        let commands = self
+            .registry
+            .commands()
+            .map(create_command)
+            .collect::<Vec<_>>();
+        let command_count = commands.len();
+        let (synchronized, error) = if !self.registry.global_command_sync_enabled() {
+            info!(
+                command_count,
+                "global command synchronization disabled until the complete command tree is wired"
+            );
+            (false, None)
+        } else if commands.is_empty() {
+            error!(
+                "no Rust command providers registered; preserving Discord's existing global command tree"
+            );
+            (
+                false,
+                Some("refusing to synchronize an empty command tree".to_owned()),
+            )
+        } else {
+            match Command::set_global_commands(http, commands).await {
+                Ok(_) => (true, None),
+                Err(error) => {
+                    let message = error.to_string();
+                    error!(%message, "failed to synchronize global Discord commands");
+                    (false, Some(message))
+                }
+            }
+        };
+        GlobalCommandSyncOutcome {
+            command_count,
+            synchronized,
+            error,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SerenityGuildMemberPageSource {
     http: Arc<Http>,
@@ -1020,48 +1081,23 @@ impl EventHandler for SerenityHandler {
         self.run_ready_recovery(context.http.clone(), guild_ids.into_iter().collect())
             .await;
 
-        let commands = self
-            .registry
-            .commands()
-            .map(create_command)
-            .collect::<Vec<_>>();
-        let command_count = commands.len();
         // Never erase the Python command tree if a development build connects
-        // before every Rust command provider has been wired.
-        let synchronized = if !self.registry.global_command_sync_enabled() {
-            info!(
-                command_count,
-                "global command synchronization disabled until the complete command tree is wired"
-            );
-            false
-        } else if commands.is_empty() {
-            error!(
-                "no Rust command providers registered; preserving Discord's existing global command tree"
-            );
-            false
-        } else {
-            match Command::set_global_commands(&context.http, commands).await {
-                Ok(_) => true,
-                Err(error) => {
-                    error!(%error, "failed to synchronize global Discord commands");
-                    false
-                }
-            }
-        };
+        // before every Rust command provider has been wired.  The result is
+        // emitted only after the REST operation has completed, so a rejected
+        // request cannot be reported as synchronized.
+        let command_sync = self.synchronize_global_commands(&context.http).await;
         let _ = self.events.send(LifecycleEvent::Ready {
             bot_user_id: ready.user.id.get(),
             guild_count: ready.guilds.len(),
         });
-        let _ = self.events.send(LifecycleEvent::CommandsRegistered {
-            command_count,
-            component_route_count: self.registry.component_routes().len(),
-            synchronized,
-        });
+        let _ = self
+            .events
+            .send(command_sync.lifecycle_event(self.registry.component_routes().len()));
         info!(
             bot_user_id = ready.user.id.get(),
             guild_count = ready.guilds.len(),
-            command_count,
-            synchronized,
+            command_count = command_sync.command_count,
+            synchronized = command_sync.synchronized,
             "Discord gateway ready"
         );
     }
@@ -4117,12 +4153,152 @@ const fn dig_public_send_failure_kind(status: Option<u16>) -> DigPublicSendFailu
 mod tests {
     use super::*;
     use crate::gateway::GatewayIntentProfile;
-    use crate::registration::InteractionButton;
+    use crate::registration::{
+        CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionButton,
+        InteractionHandlerError, InteractionRequest, InteractionResponder, Registry,
+        RegistryBuilder,
+    };
+    use async_trait::async_trait;
     use serenity::all::{ApplicationId, Message};
     use serenity::http::HttpBuilder;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread::JoinHandle;
+
+    struct WireTestHandler;
+
+    struct CapturedCommandRequest {
+        request_line: String,
+        body: Vec<u8>,
+    }
+
+    struct CommandWireFixture {
+        proxy: String,
+        requests: mpsc::Receiver<CapturedCommandRequest>,
+        server: JoinHandle<()>,
+    }
+
+    #[async_trait]
+    impl InteractionHandler for WireTestHandler {
+        async fn handle(
+            &self,
+            _request: InteractionRequest,
+            _responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), InteractionHandlerError> {
+            Ok(())
+        }
+    }
+
+    fn command_registry(global_sync_enabled: bool) -> Arc<Registry> {
+        let mut builder = RegistryBuilder::default();
+        builder
+            .command(CommandSpec {
+                name: "health".to_owned(),
+                description: "Runtime health".to_owned(),
+                options: vec![
+                    CommandOptionSpec::new(
+                        "mode",
+                        "Health response mode",
+                        CommandOptionKind::String,
+                    )
+                    .required(true),
+                ],
+                handler: Arc::new(WireTestHandler),
+            })
+            .expect("register wire-test command");
+        if global_sync_enabled {
+            builder.enable_global_command_sync();
+        }
+        Arc::new(builder.build())
+    }
+
+    fn wire_test_handler(registry: Arc<Registry>) -> SerenityHandler {
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        SerenityHandler {
+            registry,
+            events,
+            observers: GatewayEventObservers::default(),
+            global_interaction_hooks: None,
+            raw_reaction_observers: RawReactionObservers::default(),
+            discord_transport: None,
+            bot_user_id: AtomicU64::new(0),
+            guild_ids: Arc::new(RwLock::new(BTreeSet::new())),
+        }
+    }
+
+    fn command_wire_fixture(status: u16, response_body: &'static str) -> CommandWireFixture {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local Discord command proxy");
+        let proxy = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("local Discord command proxy address")
+        );
+        let (sender, receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept Discord command synchronization request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("read Discord command request");
+                assert!(read > 0, "command proxy received an incomplete request");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .expect("command synchronization content length");
+            while request.len() < header_end + content_length {
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("read command synchronization body");
+                assert!(read > 0, "command proxy received a truncated request body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request_line = headers
+                .lines()
+                .next()
+                .expect("command synchronization request line")
+                .to_owned();
+            sender
+                .send(CapturedCommandRequest {
+                    request_line,
+                    body: request[header_end..header_end + content_length].to_vec(),
+                })
+                .expect("deliver captured command request");
+
+            let reason = match status {
+                200 => "OK",
+                500 => "Internal Server Error",
+                _ => "Fixture Response",
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len(),
+            )
+            .expect("write command proxy response");
+        });
+        CommandWireFixture {
+            proxy,
+            requests: receiver,
+            server,
+        }
+    }
 
     #[test]
     fn python_profile_maps_to_default_plus_exact_privileged_intents() {
@@ -4138,6 +4314,147 @@ mod tests {
             GatewayIntents::privileged()
         );
         assert_eq!(actual.bits(), expected.bits());
+    }
+
+    #[tokio::test]
+    async fn ready_sync_serializes_the_enabled_composed_registry_over_discord_wire() {
+        let fixture = command_wire_fixture(200, "[]");
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(fixture.proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let handler = wire_test_handler(command_registry(true));
+
+        let outcome = handler.synchronize_global_commands(&http).await;
+        let request = fixture
+            .requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("enabled command sync reaches the Discord proxy");
+        fixture.server.join().expect("command proxy completes");
+
+        assert_eq!(outcome.command_count, 1);
+        assert!(outcome.synchronized);
+        assert_eq!(outcome.error, None);
+        assert_eq!(
+            request.request_line,
+            "PUT /api/v10/applications/42/commands HTTP/1.1"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("serialized command tree is JSON");
+        assert_eq!(payload.as_array().map(Vec::len), Some(1));
+        assert_eq!(payload[0]["name"], "health");
+        assert_eq!(payload[0]["description"], "Runtime health");
+        assert_eq!(payload[0]["options"][0]["name"], "mode");
+        assert_eq!(
+            payload[0]["options"][0]["description"],
+            "Health response mode"
+        );
+        assert_eq!(payload[0]["options"][0]["type"], 3);
+        assert_eq!(payload[0]["options"][0]["required"], true);
+        assert_eq!(
+            outcome,
+            GlobalCommandSyncOutcome {
+                command_count: 1,
+                synchronized: true,
+                error: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_sync_disabled_preserves_discord_without_issuing_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind disabled command-sync proxy");
+        listener
+            .set_nonblocking(true)
+            .expect("make disabled command-sync proxy nonblocking");
+        let proxy = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("disabled command-sync proxy address")
+        );
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let handler = wire_test_handler(command_registry(false));
+
+        let outcome = handler.synchronize_global_commands(&http).await;
+
+        assert_eq!(
+            outcome,
+            GlobalCommandSyncOutcome {
+                command_count: 1,
+                synchronized: false,
+                error: None,
+            }
+        );
+        assert_eq!(
+            handler
+                .synchronize_global_commands(&http)
+                .await
+                .lifecycle_event(0),
+            LifecycleEvent::CommandsRegistered {
+                command_count: 1,
+                component_route_count: 0,
+                synchronized: false,
+            }
+        );
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[tokio::test]
+    async fn ready_sync_rest_failure_reports_unsynchronized_lifecycle_outcome() {
+        let fixture = command_wire_fixture(
+            500,
+            r#"{"message":"fixture command REST rejection","code":50000}"#,
+        );
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(fixture.proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let handler = wire_test_handler(command_registry(true));
+
+        let outcome = handler.synchronize_global_commands(&http).await;
+        let request = fixture
+            .requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed command sync reaches the Discord proxy");
+        fixture
+            .server
+            .join()
+            .expect("failed command proxy completes");
+
+        assert_eq!(
+            request.request_line,
+            "PUT /api/v10/applications/42/commands HTTP/1.1"
+        );
+        assert!(
+            !request.body.is_empty(),
+            "failed request still carried command schemas"
+        );
+        assert_eq!(outcome.command_count, 1);
+        assert!(!outcome.synchronized);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("fixture command REST rejection"))
+        );
+        assert_eq!(
+            outcome.lifecycle_event(0),
+            LifecycleEvent::CommandsRegistered {
+                command_count: 1,
+                component_route_count: 0,
+                synchronized: false,
+            }
+        );
     }
 
     #[test]
