@@ -6227,7 +6227,11 @@ where
         let forced_event_consumed = request.forced_event && event_id.is_some();
         let detail = serde_json::json!({
             "cave_in": outcome.cave_in,
-            "block_loss": outcome.cave_in.then_some(depth_before - outcome.depth_after),
+            // Keep the audit field aligned with Python: this is the ordinary
+            // rolled loss, while catastrophic milestone loss belongs to the
+            // nested cave-in detail. The final depth delta can be smaller
+            // when the milestone rollback is less than the ordinary roll.
+            "block_loss": outcome.cave_in.then_some(cave_loss),
             "cave_in_detail": cave_in_detail_value.clone(),
             "event": event_id.clone(),
             "artifact": artifact_id.clone(),
@@ -6980,7 +6984,9 @@ mod tests {
     use cama_db::loan_repository::LoanRepository;
     use cama_db::manashop_rework_repository::{BuffData, GrantBuffRequest, ManashopRepository};
     use cama_db::schema_manager::initialize_or_migrate;
+    use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, CAVE_IN_CATASTROPHIC_PCT_BY_BAND};
     use cama_domain::dig_economy::scale_positive_dig_jc;
+    use cama_domain::dig_gear::ARMOR_TIERS;
     use cama_domain::pet::DIG_WORK_UNITS_PER_BLOCK;
     use rusqlite::{Connection, params};
     use serde_json::Value;
@@ -9265,69 +9271,642 @@ mod tests {
         );
     }
 
-    fn cave_gear(durability: i64) -> super::DigRuntimeGear {
-        super::DigRuntimeGear {
-            id: 1,
-            slot: "armor".to_owned(),
-            tier: 1,
-            durability,
-            equipped: true,
-            acquired_at: 1,
-            source: "test".to_owned(),
-            item_id: None,
-        }
-    }
-
     #[test]
     fn test_broken_gear_is_not_an_applicable_gear_nick_target() {
-        let mut gear = vec![cave_gear(0)];
-        assert!(super::apply_cave_in_gear_ticks(&mut gear, 1).is_empty());
-        assert_eq!(gear[0].durability, 0);
+        let actor = 62_021;
+        let guild = 62_022;
+        let seed_now = 1_900_091_000;
+        let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, false);
+        let database = NamedTempFile::new().expect("broken-gear cave database");
+        seed_live_cave_in_fixture(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            roll.now,
+            180,
+            0,
+            Some(0),
+            None,
+        );
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("broken-gear cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("broken-gear cave detail"),
+        )
+        .expect("broken-gear cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert!(matches!(
+            detail.get("type").and_then(Value::as_str),
+            Some("stun" | "injury" | "medical_bill")
+        ));
+        assert!(detail.get("gear_broken").is_none());
+        assert_eq!(detail["block_loss"], roll.block_loss);
+        assert_eq!(outcome.depth_after, 180 - roll.block_loss);
+
+        let connection = Connection::open(database.path()).expect("reload broken-gear cave");
+        let gear = connection
+            .query_row(
+                "SELECT durability,equipped FROM dig_gear
+                 WHERE discord_id=?1 AND guild_id=?2 AND slot='armor'",
+                params![actor, guild],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("persisted broken gear");
+        assert_eq!(gear, (0, 1));
+        assert_eq!(
+            latest_dig_detail(&database, actor, guild)["block_loss"],
+            roll.block_loss
+        );
     }
 
     #[test]
     fn test_gear_nick_reports_newly_broken_piece() {
-        let mut gear = vec![cave_gear(1)];
-        let broken = super::apply_cave_in_gear_ticks(&mut gear, 1);
-        assert_eq!(broken, vec![cama_domain::dig_gear::ARMOR_TIERS[1].name]);
-        assert_eq!(gear[0].durability, 0);
+        let actor = 62_001;
+        let guild = 62_002;
+        let seed_now = 1_900_090_000;
+        let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, true);
+        let database = NamedTempFile::new().expect("gear-nick cave database");
+        seed_live_cave_in_fixture(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            roll.now,
+            180,
+            0,
+            Some(1),
+            None,
+        );
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("gear-nick cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("gear-nick cave detail"),
+        )
+        .expect("gear-nick cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert_eq!(detail["type"], "gear_nick");
+        assert_eq!(detail["block_loss"], roll.block_loss);
+        assert_eq!(
+            detail["gear_broken"],
+            serde_json::json!([ARMOR_TIERS[1].name])
+        );
+        assert_eq!(outcome.depth_after, 180 - roll.block_loss);
+        assert_eq!(outcome.jc_earned, 0);
+        assert_eq!(outcome.balance_after, 10_000);
+
+        let action = latest_dig_detail(&database, actor, guild);
+        assert_eq!(action["block_loss"], roll.block_loss);
+        assert_eq!(action["cave_in_detail"]["block_loss"], roll.block_loss);
+        let connection = Connection::open(database.path()).expect("reload gear-nick cave");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT durability,equipped FROM dig_gear
+                     WHERE discord_id=?1 AND guild_id=?2 AND slot='armor'",
+                    params![actor, guild],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("persisted gear-nick gear"),
+            (0, 1)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM economy_ledger_entries
+                     WHERE account_id=?1 AND guild_id=?2 AND source='dig'",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("gear-nick ledger count"),
+            0
+        );
     }
 
     #[test]
     fn test_catastrophic_cave_in_reports_newly_broken_piece() {
-        let mut gear = vec![cave_gear(3)];
-        let broken = super::apply_cave_in_gear_ticks(&mut gear, 3);
-        assert_eq!(broken, vec![cama_domain::dig_gear::ARMOR_TIERS[1].name]);
-        assert_eq!(gear[0].durability, 0);
+        let actor = 62_011;
+        let guild = 62_012;
+        let seed_now = 1_900_090_500;
+        let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(true), None, false);
+        let database = NamedTempFile::new().expect("catastrophic gear cave database");
+        seed_live_cave_in_fixture(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            roll.now,
+            180,
+            0,
+            Some(1),
+            None,
+        );
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("catastrophic gear cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("catastrophic gear cave detail"),
+        )
+        .expect("catastrophic gear cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert_eq!(detail["type"], "catastrophic");
+        assert_eq!(detail["depth_after"], 175);
+        assert_eq!(detail["block_loss"], roll.block_loss);
+        assert_eq!(detail["insurance_saved"], false);
+        assert_eq!(
+            detail["gear_broken"],
+            serde_json::json!([ARMOR_TIERS[1].name])
+        );
+        let jc_lost = detail["jc_lost"].as_i64().expect("catastrophic JC loss");
+        assert!((50..=200).contains(&jc_lost));
+        assert!(
+            !detail["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("{jc_lost}")
+        );
+
+        let action = latest_dig_detail(&database, actor, guild);
+        assert_eq!(action["block_loss"], roll.block_loss);
+        assert_eq!(action["cave_in_detail"]["block_loss"], roll.block_loss);
+        let connection = Connection::open(database.path()).expect("reload catastrophic gear cave");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jc_delta FROM dig_actions
+                     WHERE actor_id=?1 AND guild_id=?2 ORDER BY id DESC LIMIT 1",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("catastrophic action delta"),
+            -jc_lost
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT durability,equipped FROM dig_gear
+                     WHERE discord_id=?1 AND guild_id=?2 AND slot='armor'",
+                    params![actor, guild],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("persisted catastrophic gear"),
+            (0, 1)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jopacoin_balance FROM players
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("catastrophic balance"),
+            10_000 - jc_lost
+        );
+        let ledger = connection
+            .query_row(
+                "SELECT delta,source,reason FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2 AND source='dig'",
+                params![actor, guild],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("catastrophic ledger");
+        assert_eq!(ledger, (-jc_lost, "dig".to_owned(), "dig debit".to_owned()));
     }
 
     #[test]
     fn test_force_cave_in_at_deep() {
-        assert_eq!(
-            cama_domain::dig_cave_in::cave_in_band(180),
-            cama_domain::dig_cave_in::CaveInBand::Deep
+        let actor = 62_031;
+        let guild = 62_032;
+        let seed_now = 1_900_091_500;
+        let roll = find_live_cave_roll(actor, guild, seed_now, 180, None, None, false);
+        let database = NamedTempFile::new().expect("deep cave database");
+        seed_live_cave_in_fixture(
+            &database, actor, guild, seed_now, roll.now, 180, 100, None, None,
         );
-        let (minimum, maximum) = cama_domain::dig_cave_in::CAVE_IN_BLOCK_LOSS_RANGES
-            [cama_domain::dig_cave_in::CaveInBand::Deep];
-        assert_eq!((minimum, maximum), (12, 25));
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("deep cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome.cave_in_detail.as_deref().expect("deep cave detail"),
+        )
+        .expect("deep cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert!(matches!(
+            detail.get("type").and_then(Value::as_str),
+            Some(
+                "stun"
+                    | "injury"
+                    | "medical_bill"
+                    | "gear_nick"
+                    | "spilled_satchel"
+                    | "snuffed_light"
+                    | "cracked_hat"
+                    | "catastrophic"
+            )
+        ));
+        assert_eq!(detail["block_loss"], roll.block_loss);
+        assert!((12..=25).contains(&detail["block_loss"].as_i64().unwrap_or_default()));
+        let expected_depth = if roll.catastrophic {
+            175
+        } else {
+            180 - roll.block_loss
+        };
+        assert_eq!(outcome.depth_after, expected_depth);
+        let action = latest_dig_detail(&database, actor, guild);
+        assert_eq!(action["block_loss"], roll.block_loss);
+        assert_eq!(action["cave_in_detail"]["block_loss"], roll.block_loss);
     }
 
     #[test]
     fn test_catastrophic_overrides_to_milestone() {
-        let (depth_after, insurance_saved, block_loss) =
-            super::catastrophic_cave_in_depth(240, 12, None, false);
-        assert_eq!(depth_after, 225);
-        assert!(!insurance_saved);
-        assert_eq!(block_loss, 15);
+        let actor = 62_041;
+        let guild = 62_042;
+        let seed_now = 1_900_092_000;
+        // Require a raw loss below the 15-block milestone rollback so this
+        // test catches an audit field that accidentally records final depth
+        // delta instead of Python's ordinary rolled loss.
+        let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), Some(15), false);
+        let database = NamedTempFile::new().expect("milestone cave database");
+        seed_live_cave_in_fixture(
+            &database, actor, guild, seed_now, roll.now, 240, 100, None, None,
+        );
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("milestone cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("milestone cave detail"),
+        )
+        .expect("milestone cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert_eq!(detail["type"], "catastrophic");
+        assert_eq!(detail["depth_after"], 225);
+        assert_eq!(detail["block_loss"], 15);
+        assert_eq!(detail["insurance_saved"], false);
+        let jc_lost = detail["jc_lost"].as_i64().expect("milestone JC loss");
+        assert!((50..=200).contains(&jc_lost));
+        assert_eq!(outcome.depth_after, 225);
+
+        let action = latest_dig_detail(&database, actor, guild);
+        assert_eq!(action["block_loss"], roll.block_loss);
+        assert_eq!(action["cave_in_detail"]["block_loss"], 15);
+        let connection = Connection::open(database.path()).expect("reload milestone cave");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jc_delta FROM dig_actions
+                     WHERE actor_id=?1 AND guild_id=?2 ORDER BY id DESC LIMIT 1",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("milestone action delta"),
+            -jc_lost
+        );
+        let persisted = connection
+            .query_row(
+                "SELECT depth,temp_buffs,cavein_free_streak,injury_state
+                 FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .expect("persisted milestone cave");
+        assert_eq!(persisted.0, 225);
+        assert_eq!(persisted.1, None);
+        assert_eq!(persisted.2, 0);
+        let injury = persisted.3.expect("persisted catastrophic injury");
+        assert_eq!(
+            serde_json::from_str::<Value>(&injury).expect("injury JSON")["type"],
+            "slower_cooldown"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jopacoin_balance FROM players
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("milestone balance"),
+            10_000 - jc_lost
+        );
+        let ledger = connection
+            .query_row(
+                "SELECT delta,source,reason FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2 AND source='dig'",
+                params![actor, guild],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("milestone ledger");
+        assert_eq!(ledger, (-jc_lost, "dig".to_owned(), "dig debit".to_owned()));
     }
 
     #[test]
     fn test_insurance_protects_catastrophic_depth() {
-        let (depth_after, insurance_saved, block_loss) =
-            super::catastrophic_cave_in_depth(240, 12, None, true);
-        assert_eq!(depth_after, 228);
-        assert!(insurance_saved);
-        assert_eq!(block_loss, 12);
+        let actor = 62_051;
+        let guild = 62_052;
+        let seed_now = 1_900_092_500;
+        let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), None, false);
+        let database = NamedTempFile::new().expect("insured cave database");
+        let insured_until = roll.now + 86_400;
+        seed_live_cave_in_fixture(
+            &database,
+            actor,
+            guild,
+            seed_now,
+            roll.now,
+            240,
+            100,
+            None,
+            Some(insured_until),
+        );
+
+        let outcome = DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: roll.now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("insured cave Dig");
+        let detail = serde_json::from_str::<Value>(
+            outcome
+                .cave_in_detail
+                .as_deref()
+                .expect("insured cave detail"),
+        )
+        .expect("insured cave detail JSON");
+        assert!(outcome.success && outcome.cave_in);
+        assert_eq!(detail["type"], "catastrophic");
+        assert_eq!(detail["insurance_saved"], true);
+        assert_eq!(detail["depth_after"], 240 - roll.block_loss);
+        assert_eq!(detail["block_loss"], roll.block_loss);
+        let jc_lost = detail["jc_lost"].as_i64().expect("insured JC loss");
+        assert!((50..=200).contains(&jc_lost));
+        assert_eq!(outcome.depth_after, 240 - roll.block_loss);
+
+        let action = latest_dig_detail(&database, actor, guild);
+        assert_eq!(action["block_loss"], roll.block_loss);
+        assert_eq!(action["cave_in_detail"]["block_loss"], roll.block_loss);
+        let connection = Connection::open(database.path()).expect("reload insured cave");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jc_delta FROM dig_actions
+                     WHERE actor_id=?1 AND guild_id=?2 ORDER BY id DESC LIMIT 1",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("insured action delta"),
+            -jc_lost
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT depth,insured_until,cavein_free_streak
+                     FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("persisted insured cave"),
+            (240 - roll.block_loss, Some(insured_until), 0)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jopacoin_balance FROM players
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![actor, guild],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("insured balance"),
+            10_000 - jc_lost
+        );
+        let ledger = connection
+            .query_row(
+                "SELECT delta,source,reason FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2 AND source='dig'",
+                params![actor, guild],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("insured ledger");
+        assert_eq!(ledger, (-jc_lost, "dig".to_owned(), "dig debit".to_owned()));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct LiveCaveRoll {
+        now: i64,
+        block_loss: i64,
+        catastrophic: bool,
+    }
+
+    fn find_live_cave_roll(
+        discord_id: i64,
+        guild_id: i64,
+        start: i64,
+        depth: i64,
+        required_catastrophic: Option<bool>,
+        maximum_block_loss: Option<i64>,
+        require_gear_nick: bool,
+    ) -> LiveCaveRoll {
+        let layer = super::layer_at(depth);
+        let band = cama_domain::dig_cave_in::cave_in_band(depth);
+        let (minimum, maximum) = CAVE_IN_BLOCK_LOSS_RANGES[band];
+        let catastrophic_probability = CAVE_IN_CATASTROPHIC_PCT_BY_BAND[band];
+        for now in start..start.saturating_add(100_000) {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(DigRuntimeRequest {
+                discord_id,
+                guild_id,
+                now,
+                paid: false,
+                forced_event: false,
+            }));
+            // The fixture has no hazard modifier and starts at luminosity 0
+            // or 100, so a <.05 first draw is safely inside either live cave
+            // probability while keeping the search independent of weather.
+            if entropy.unit() >= 0.05 {
+                continue;
+            }
+            let _advance = entropy.advance(layer.advance_range.0, layer.advance_range.1);
+            let block_loss = entropy.advance(i64::from(minimum), i64::from(maximum));
+            let catastrophic = entropy.unit() < catastrophic_probability;
+            if required_catastrophic.is_some_and(|required| required != catastrophic) {
+                continue;
+            }
+            if maximum_block_loss.is_some_and(|maximum| block_loss >= maximum) {
+                continue;
+            }
+            if require_gear_nick {
+                // With one durable armor piece, no inventory, zero luminosity,
+                // and no hat charges, the deep filtered weight is 80 and the
+                // Gear Nick interval is 66..=80.
+                if catastrophic || !matches!(entropy.advance(1, 80), 66..=80) {
+                    continue;
+                }
+            }
+            return LiveCaveRoll {
+                now,
+                block_loss,
+                catastrophic,
+            };
+        }
+        panic!(
+            "no deterministic live cave roll for depth {depth} and requirements \
+             catastrophic={required_catastrophic:?}, max_loss={maximum_block_loss:?}, \
+             gear_nick={require_gear_nick}"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_live_cave_in_fixture(
+        database: &NamedTempFile,
+        discord_id: i64,
+        guild_id: i64,
+        seed_now: i64,
+        dig_now: i64,
+        depth: i64,
+        luminosity: i64,
+        gear_durability: Option<i64>,
+        insured_until: Option<i64>,
+    ) {
+        seed_live_runtime_tunnel(
+            database,
+            discord_id,
+            guild_id,
+            seed_now,
+            depth,
+            1,
+            Some(seed_now - 7_200),
+        );
+        let connection = Connection::open(database.path()).expect("live cave fixture connection");
+        connection
+            .execute(
+                "UPDATE players SET jopacoin_balance=10000
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, guild_id],
+            )
+            .expect("seed live cave balance");
+        connection
+            .execute(
+                "UPDATE tunnels SET boss_progress=?1,luminosity=?2,pickaxe_tier=1,
+                    hard_hat_charges=0,grappling_hook_charges=0,reinforced_until=0,
+                    route_state=NULL,temp_buffs=NULL,temp_curses=NULL,mutations='[]',
+                    prestige_perks='[]',insured_until=?3
+                 WHERE discord_id=?4 AND guild_id=?5",
+                params![
+                    r#"{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":"defeated"}"#,
+                    luminosity,
+                    insured_until,
+                    discord_id,
+                    guild_id,
+                ],
+            )
+            .expect("seed live cave tunnel");
+        if let Some(durability) = gear_durability {
+            connection
+                .execute(
+                    "INSERT INTO dig_gear(
+                         discord_id,guild_id,slot,tier,durability,equipped,
+                         acquired_at,source,item_id
+                     ) VALUES(?1,?2,'armor',1,?3,1,?4,'cave-test',NULL)",
+                    params![discord_id, guild_id, durability, seed_now],
+                )
+                .expect("seed live cave gear");
+        }
+        drop(connection);
+        let today = game_date_for_timestamp(dig_now as f64).expect("live cave date");
+        let weather = if depth >= 201 {
+            "time_dilation"
+        } else {
+            "spore_bloom"
+        };
+        seed_two_weather_rows(
+            database,
+            guild_id,
+            &today,
+            super::layer_at(depth).name,
+            weather,
+        );
     }
 
     fn seed_live_runtime_tunnel(
