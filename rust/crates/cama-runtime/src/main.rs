@@ -92,6 +92,11 @@ fn initialize_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_ansi(false)
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
         .try_init();
 }
 
@@ -962,6 +967,8 @@ async fn run_serve() -> ExitCode {
         production_ai_service.clone(),
     );
     info!(
+        runtime = "rust",
+        git_sha = %env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
         db_path = %config.db_path.display(),
         registered_commands = registry.commands().len(),
         required_cutover_items = inventory::required_count(),
@@ -1045,7 +1052,9 @@ fn run_health_check(path: PathBuf, maximum_age: Duration) -> ExitCode {
     match check_health(&path, maximum_age) {
         Ok(report) => {
             println!(
-                "healthy=true status={:?} heartbeat_age_ms={} migrations={}/{} pid={}",
+                "healthy=true runtime={} revision={} status={:?} heartbeat_age_ms={} migrations={}/{} pid={}",
+                report.snapshot.runtime,
+                report.snapshot.git_sha,
                 report.snapshot.status,
                 report.heartbeat_age.as_millis(),
                 report.snapshot.applied_migrations,

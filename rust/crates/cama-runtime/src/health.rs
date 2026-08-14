@@ -21,7 +21,8 @@ use crate::gateway::LifecycleEvent;
 
 pub const DEFAULT_MAX_HEARTBEAT_AGE: Duration = Duration::from_secs(90);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const HEALTH_FORMAT_VERSION: u32 = 4;
+const HEALTH_FORMAT_VERSION: u32 = 5;
+const RUNTIME_NAME: &str = "rust";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +39,8 @@ pub enum HealthStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HealthSnapshot {
     pub format_version: u32,
+    pub runtime: String,
+    pub git_sha: String,
     pub pid: u32,
     pub database_path: PathBuf,
     pub status: HealthStatus,
@@ -63,6 +66,8 @@ impl HealthSnapshot {
     fn starting(database_path: PathBuf) -> Result<Self, HealthError> {
         Ok(Self {
             format_version: HEALTH_FORMAT_VERSION,
+            runtime: RUNTIME_NAME.to_owned(),
+            git_sha: deployment_revision(),
             pid: std::process::id(),
             database_path,
             status: HealthStatus::Starting,
@@ -88,6 +93,8 @@ impl HealthSnapshot {
     #[must_use]
     pub fn is_healthy(&self) -> bool {
         self.format_version == HEALTH_FORMAT_VERSION
+            && self.runtime == RUNTIME_NAME
+            && !self.git_sha.trim().is_empty()
             && self.status == HealthStatus::Ready
             && self.database_ready
             && self.gateway_ready
@@ -389,6 +396,20 @@ pub fn check_health(
     database_path: &Path,
     maximum_age: Duration,
 ) -> Result<HealthCheckReport, HealthError> {
+    check_health_for_deployment(
+        database_path,
+        maximum_age,
+        RUNTIME_NAME,
+        &deployment_revision(),
+    )
+}
+
+fn check_health_for_deployment(
+    database_path: &Path,
+    maximum_age: Duration,
+    expected_runtime: &str,
+    expected_revision: &str,
+) -> Result<HealthCheckReport, HealthError> {
     let database_path = absolute_path(database_path)?;
     let path = health_path(&database_path);
     let bytes = fs::read(&path).map_err(|source| HealthError::Read { path, source })?;
@@ -398,6 +419,14 @@ pub fn check_health(
         return Err(HealthError::DatabaseMismatch {
             expected: database_path,
             actual: snapshot.database_path,
+        });
+    }
+    if snapshot.runtime != expected_runtime || snapshot.git_sha != expected_revision {
+        return Err(HealthError::DeploymentMismatch {
+            expected_runtime: expected_runtime.to_owned(),
+            actual_runtime: snapshot.runtime,
+            expected_revision: expected_revision.to_owned(),
+            actual_revision: snapshot.git_sha,
         });
     }
     if !snapshot.is_healthy() {
@@ -434,6 +463,14 @@ pub fn check_health(
         snapshot,
         heartbeat_age,
     })
+}
+
+fn deployment_revision() -> String {
+    std::env::var("GIT_SHA")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 #[must_use]
@@ -556,6 +593,15 @@ pub enum HealthError {
     InvalidState(serde_json::Error),
     #[error("health state belongs to {actual:?}, expected {expected:?}")]
     DatabaseMismatch { expected: PathBuf, actual: PathBuf },
+    #[error(
+        "health state belongs to runtime {actual_runtime:?} revision {actual_revision:?}, expected runtime {expected_runtime:?} revision {expected_revision:?}"
+    )]
+    DeploymentMismatch {
+        expected_runtime: String,
+        actual_runtime: String,
+        expected_revision: String,
+        actual_revision: String,
+    },
     #[error("runtime health is {status:?}: {detail}")]
     Unhealthy {
         status: HealthStatus,
@@ -922,6 +968,52 @@ mod tests {
         let report = check_health(&database, Duration::from_secs(1)).expect("healthy runtime");
         assert!(report.snapshot.is_healthy());
         assert!(report.heartbeat_age <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn health_probe_rejects_a_marker_from_another_runtime_or_revision() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("cama.db");
+        create_ledger(&database, 2);
+        let reporter = HealthReporter::initialize(&database).expect("health reporter");
+        let mut snapshot = reporter.snapshot.clone();
+        admitted(&mut snapshot);
+        register_workers(&mut snapshot, &[]);
+        snapshot
+            .apply(LifecycleEvent::Ready {
+                bot_user_id: 7,
+                guild_count: 1,
+            })
+            .expect("ready event");
+        synchronize_commands(&mut snapshot);
+        persist_snapshot(reporter.path(), &snapshot).expect("persist ready state");
+
+        assert!(matches!(
+            check_health_for_deployment(
+                &database,
+                Duration::from_secs(1),
+                "python",
+                &snapshot.git_sha,
+            ),
+            Err(HealthError::DeploymentMismatch {
+                expected_runtime,
+                actual_runtime,
+                ..
+            }) if expected_runtime == "python" && actual_runtime == "rust"
+        ));
+        assert!(matches!(
+            check_health_for_deployment(
+                &database,
+                Duration::from_secs(1),
+                "rust",
+                "different-revision",
+            ),
+            Err(HealthError::DeploymentMismatch {
+                expected_revision,
+                actual_revision,
+                ..
+            }) if expected_revision == "different-revision" && actual_revision == snapshot.git_sha
+        ));
     }
 
     #[test]
