@@ -166,6 +166,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "dig_gear",
     "dig_inventory",
     "double_or_nothing_spins",
+    "draft_finalization_jobs",
     "duel_challenges",
     "economy_daily_events",
     "economy_daily_snapshots",

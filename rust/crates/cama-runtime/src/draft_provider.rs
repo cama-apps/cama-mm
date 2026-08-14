@@ -17,10 +17,10 @@ use cama_app::betting_service::{
     AutomaticSpectatorConfig, WealthSnapshot, plan_automatic_spectator_bets,
 };
 use cama_app::draft::{
-    DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed, DraftEmbedField, DraftPhase,
-    DraftState, DraftStateEnvelope, DraftStateManager, DraftStatePersistencePort,
-    LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS, PlayerPoolEntry,
-    SqliteDraftStatePersistence,
+    DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed, DraftEmbedField,
+    DraftFinalizationPlan, DraftPhase, DraftState, DraftStateEnvelope, DraftStateManager,
+    DraftStatePersistencePort, LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS,
+    PlayerPoolEntry, SqliteDraftStatePersistence,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::autobet_investments::AutobetInvestmentRepository;
@@ -1014,6 +1014,44 @@ impl DraftHandler {
         Ok(deleted)
     }
 
+    async fn complete_persisted_finalization(
+        &self,
+        state: &DraftState,
+        pending_match_id: i64,
+    ) -> Result<(), String> {
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(());
+        };
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        let key = (guild_id, session_id);
+        let current = lock_recover(&self.persisted_envelopes)
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("draft persistence session {session_id} is not hydrated"))?;
+        if !current.finalizing || current.pending_match_id != Some(pending_match_id) {
+            return Err(
+                "draft finalization envelope is not linked to the pending match".to_owned(),
+            );
+        }
+        let expected_draft_revision = current.revision;
+        let now = unix_now();
+        spawn_blocking(move || {
+            persistence.complete_finalization_job(
+                guild_id,
+                session_id,
+                pending_match_id,
+                expected_draft_revision,
+                now,
+            )
+        })
+        .await
+        .map_err(|error| format!("draft finalization completion task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        lock_recover(&self.persisted_envelopes).remove(&key);
+        Ok(())
+    }
+
     /// Fence a created pending match before removing the process-local draft.
     /// Hydration intentionally skips this marker until a complete
     /// reconciliation protocol exists, so a crash cannot replay Discord
@@ -1068,6 +1106,9 @@ impl DraftHandler {
         &self,
         state: &DraftState,
         pending_state: &PendingMatchState,
+        lobby_channel_id: Option<u64>,
+        origin_channel_id: Option<u64>,
+        thread_id: Option<u64>,
     ) -> Result<PendingMatchRecord, String> {
         let persistence = self
             .persistence
@@ -1083,18 +1124,55 @@ impl DraftHandler {
                     state.session_id
                 )
             })?;
-        let pending_payload_json = if let Some(pending_match_id) = current.pending_match_id {
-            let persistence = Arc::clone(&persistence);
+        let (pending_payload_json, plan_json) = if let Some(pending_match_id) =
+            current.pending_match_id
+        {
+            let pending_persistence = Arc::clone(&persistence);
             let guild_id = state.guild_id;
             let session_id = state.session_id;
-            spawn_blocking(move || {
-                persistence.linked_pending_payload(guild_id, session_id, pending_match_id)
+            let pending_payload_json = spawn_blocking(move || {
+                pending_persistence.linked_pending_payload(guild_id, session_id, pending_match_id)
             })
             .await
             .map_err(|error| format!("draft raw pending-load task failed: {error}"))?
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            let plan_persistence = Arc::clone(&persistence);
+            let plan_json = spawn_blocking(move || {
+                plan_persistence.linked_finalization_plan(guild_id, session_id, pending_match_id)
+            })
+            .await
+            .map_err(|error| format!("draft raw finalization-plan load task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+            (pending_payload_json, plan_json)
         } else {
-            serde_json::to_string(pending_state).map_err(|error| error.to_string())?
+            let pending_payload_json =
+                serde_json::to_string(pending_state).map_err(|error| error.to_string())?;
+            let shuffle_timestamp = pending_state
+                .shuffle_timestamp
+                .ok_or_else(|| "Draft pending match has no shuffle timestamp".to_owned())?;
+            let bet_lock_until = pending_state
+                .bet_lock_until
+                .ok_or_else(|| "Draft pending match has no bet-lock timestamp".to_owned())?;
+            let plan = DraftFinalizationPlan::new(
+                state.guild_id,
+                state.session_id,
+                &pending_payload_json,
+                shuffle_timestamp,
+                shuffle_timestamp,
+                bet_lock_until,
+                pending_state.is_bomb_pot,
+                state.lobby_kind,
+                state.draft_channel_id,
+                state.draft_message_id,
+                signed_destination_id(lobby_channel_id, "lobby channel")?,
+                signed_destination_id(origin_channel_id, "origin channel")?,
+                signed_destination_id(thread_id, "lobby thread")?,
+            )
+            .map_err(|error| error.to_string())?;
+            let plan_json = plan
+                .to_json(&pending_payload_json)
+                .map_err(|error| error.to_string())?;
+            (pending_payload_json, plan_json)
         };
         let expected_revision = current.revision;
         let guild_id = state.guild_id;
@@ -1105,6 +1183,7 @@ impl DraftHandler {
                 session_id,
                 expected_revision,
                 &pending_payload_json,
+                &plan_json,
             )
         })
         .await
@@ -2353,7 +2432,15 @@ impl DraftHandler {
         }
         let pending = if self.persistence.is_some() {
             match self
-                .link_finalizing_pending_match(&state, &pending_state)
+                .link_finalizing_pending_match(
+                    &state,
+                    &pending_state,
+                    snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.lobby_channel_id),
+                    origin_channel_id,
+                    thread_id,
+                )
                 .await
             {
                 Ok(pending) => pending,
@@ -2549,9 +2636,8 @@ impl DraftHandler {
         // completion deadlocks on the same open-lobby mutex.
         drop(_operation_guard);
         let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
-        if let Err(error) = self.delete_persisted(&state).await {
-            warn!(%error, guild_id, pending_match_id = pending.pending_match_id, "completed draft durable cleanup failed");
-        }
+        self.complete_persisted_finalization(&state, pending.pending_match_id)
+            .await?;
         Ok(())
     }
 
@@ -4415,6 +4501,10 @@ fn unix_now() -> i64 {
 
 fn signed_id(id: u64, kind: &str) -> Result<i64, String> {
     i64::try_from(id).map_err(|_| format!("Discord {kind} ID exceeds SQLite range"))
+}
+
+fn signed_destination_id(id: Option<u64>, kind: &str) -> Result<Option<i64>, String> {
+    id.map(|id| signed_id(id, kind)).transpose()
 }
 
 fn to_i64(id: u64) -> Result<i64, String> {

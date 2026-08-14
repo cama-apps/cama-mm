@@ -637,6 +637,68 @@ fn state_for_draft() -> DraftState {
     state
 }
 
+async fn persistent_completion_fixture() -> (
+    NamedTempFile,
+    DraftRegistrationProvider,
+    Arc<DraftStateManager>,
+    Arc<SqliteDraftStatePersistence>,
+    Arc<StdMutex<DraftState>>,
+    DraftState,
+) {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        "AUTO_SPECTATOR_BET_ENABLED" => Some("false".to_owned()),
+        "FIRST_GAME_POOL_DAILY_AMOUNT" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("persistent completion config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Complete;
+    state.current_pick_index = DRAFT_TOTAL_PICKS;
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8, 10];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(55);
+    let persisted = persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create durable completion draft");
+    let state = persisted.state.clone().into_state();
+    let handle = drafts
+        .restore_draft(state.clone())
+        .expect("restore durable completion draft");
+    assert!(lobbies.reserve_players(
+        42,
+        AppLobbyKind::Open,
+        &state.player_pool_ids.iter().copied().collect()
+    ));
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("persistent completion provider");
+    lock_recover(&provider.handler.persisted_envelopes).insert((42, state.session_id), persisted);
+    lock_recover(&provider.handler.draft_messages).insert(
+        (42, state.session_id),
+        DiscordMessageReceipt {
+            channel_id: 777,
+            message_id: 55,
+            jump_url: "https://discord.test/channels/42/777/55".to_owned(),
+        },
+    );
+    (database, provider, drafts, persistence, handle, state)
+}
+
 #[test]
 fn provider_recreation_hydrates_state_phase_message_and_deadline() {
     let database = NamedTempFile::new().expect("draft database");
@@ -1350,7 +1412,7 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
 
     let first = provider
         .handler
-        .link_finalizing_pending_match(&state, &pending_state)
+        .link_finalizing_pending_match(&state, &pending_state, Some(700), Some(701), Some(702))
         .await
         .expect("first atomic pending link");
     let connection = Connection::open(database.path()).expect("open linked pending database");
@@ -1361,6 +1423,32 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
             |row| row.get::<_, String>(0),
         )
         .expect("load linked pending payload");
+    let raw_plan = connection
+        .query_row(
+            "SELECT plan_json FROM draft_finalization_jobs WHERE pending_match_id=?1",
+            [first.pending_match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("load linked finalization plan");
+    let typed_plan = DraftFinalizationPlan::from_json(&raw_plan).expect("decode typed plan");
+    assert_eq!(typed_plan.started_at, 1_700_000_000);
+    assert_eq!(typed_plan.shuffle_timestamp, 1_700_000_000);
+    assert_eq!(
+        typed_plan.bet_lock_until,
+        1_700_000_000 + provider.handler.config.bet_lock_seconds
+    );
+    assert!(!typed_plan.is_bomb_pot);
+    assert_eq!(typed_plan.lobby.channel_id, Some(700));
+    assert_eq!(typed_plan.origin.channel_id, Some(701));
+    assert_eq!(typed_plan.thread_embed.channel_id, Some(702));
+    assert_eq!(typed_plan.source.channel_id, state.draft_channel_id);
+    assert_eq!(typed_plan.source.message_id, state.draft_message_id);
+    let mut future_plan: serde_json::Value =
+        serde_json::from_str(&raw_plan).expect("decode linked plan JSON");
+    future_plan["future_plan_field"] = serde_json::json!({"preserve": true});
+    future_plan["source"]["future_delivery_field"] = serde_json::json!(7);
+    let future_plan_raw =
+        serde_json::to_string_pretty(&future_plan).expect("encode forward-compatible plan");
     let mut future_payload: serde_json::Value =
         serde_json::from_str(&raw_payload).expect("decode linked pending payload");
     future_payload["future_pending_field"] = serde_json::json!({"preserve": true});
@@ -1372,10 +1460,16 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
             rusqlite::params![future_raw, first.pending_match_id],
         )
         .expect("install forward-compatible pending payload");
+    connection
+        .execute(
+            "UPDATE draft_finalization_jobs SET plan_json=?1 WHERE pending_match_id=?2",
+            rusqlite::params![future_plan_raw, first.pending_match_id],
+        )
+        .expect("install forward-compatible finalization plan");
     drop(connection);
     let retried = provider
         .handler
-        .link_finalizing_pending_match(&state, &pending_state)
+        .link_finalizing_pending_match(&state, &pending_state, Some(700), Some(701), Some(702))
         .await
         .expect("retry atomic pending link");
     assert_eq!(retried.pending_match_id, first.pending_match_id);
@@ -1416,6 +1510,196 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
         )
         .expect("reload preserved pending payload");
     assert_eq!(preserved_raw, future_raw);
+    let preserved_plan = Connection::open(database.path())
+        .expect("reopen database for plan")
+        .query_row(
+            "SELECT plan_json FROM draft_finalization_jobs WHERE pending_match_id=?1",
+            [first.pending_match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("reload preserved finalization plan");
+    assert_eq!(preserved_plan, future_plan_raw);
+}
+
+#[tokio::test]
+async fn persistent_completion_atomically_marks_terminal_and_deletes_envelope() {
+    let (database, provider, drafts, persistence, handle, state) =
+        persistent_completion_fixture().await;
+    provider
+        .handler
+        .complete_owned(
+            42,
+            handle,
+            state.clone(),
+            Arc::new(TestResponder::default()),
+            true,
+        )
+        .await
+        .expect("complete persisted draft");
+
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
+    let finalization =
+        cama_db::draft_finalization::DraftFinalizationRepository::new(database.path());
+    let job = finalization
+        .job(&completion_key)
+        .expect("load terminal job")
+        .expect("terminal job");
+    assert_eq!(
+        job.stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+    );
+    assert!(
+        finalization
+            .load_incomplete_jobs()
+            .expect("load incomplete jobs")
+            .is_empty()
+    );
+    assert!(
+        persistence
+            .load_all()
+            .expect("load Draft envelopes")
+            .is_empty()
+    );
+    assert!(!drafts.has_active_draft(Some(42)));
+}
+
+#[tokio::test]
+async fn terminal_job_cas_failure_retains_linked_job_and_envelope() {
+    let (database, provider, _drafts, persistence, handle, state) =
+        persistent_completion_fixture().await;
+    Connection::open(database.path())
+        .expect("open terminal-failure fixture")
+        .execute_batch(
+            "CREATE TRIGGER fail_draft_job_completion
+             BEFORE UPDATE OF stage ON draft_finalization_jobs
+             WHEN NEW.stage = 'complete'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated terminal job CAS failure');
+             END;",
+        )
+        .expect("install terminal-failure trigger");
+
+    let error = provider
+        .handler
+        .complete_owned(
+            42,
+            handle,
+            state.clone(),
+            Arc::new(TestResponder::default()),
+            true,
+        )
+        .await
+        .expect_err("terminal job CAS must fail");
+    assert!(error.contains("simulated terminal job CAS failure"));
+
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
+    let finalization =
+        cama_db::draft_finalization::DraftFinalizationRepository::new(database.path());
+    let job = finalization
+        .job(&completion_key)
+        .expect("load retained job")
+        .expect("retained job");
+    assert_eq!(
+        job.stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
+    );
+    assert_eq!(
+        finalization
+            .load_incomplete_jobs()
+            .expect("load retained incomplete jobs"),
+        vec![job.clone()]
+    );
+    let envelopes = persistence.load_all().expect("load retained envelope");
+    assert_eq!(envelopes.len(), 1);
+    assert!(envelopes[0].finalizing);
+    assert_eq!(envelopes[0].pending_match_id, Some(job.pending_match_id));
+}
+
+#[tokio::test]
+async fn pre_job_finalizing_row_is_left_for_explicit_manual_recovery() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("legacy finalization config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Complete;
+    state.current_pick_index = DRAFT_TOTAL_PICKS;
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8, 10];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.finalizing = true;
+    let created = persistence
+        .create_envelope(&requested)
+        .expect("create pre-job fenced envelope");
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, created.session_id);
+    let connection = Connection::open(database.path()).expect("open pre-job fixture");
+    connection
+        .execute(
+            "INSERT INTO pending_matches(guild_id,payload,completion_key,updated_at)
+             VALUES(42,'{}',?1,CURRENT_TIMESTAMP)",
+            [&completion_key],
+        )
+        .expect("insert pre-job pending match");
+    let pending_match_id = connection.last_insert_rowid();
+    drop(connection);
+    let mut linked_envelope = created;
+    linked_envelope.pending_match_id = Some(pending_match_id);
+    let linked_envelope = persistence
+        .replace_envelope_if_revision(
+            42,
+            linked_envelope.session_id,
+            linked_envelope.revision,
+            &linked_envelope,
+        )
+        .expect("link pre-job envelope");
+    let state = linked_envelope.state.clone().into_state();
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        drafts,
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("pre-job provider");
+    lock_recover(&provider.handler.persisted_envelopes)
+        .insert((42, state.session_id), linked_envelope.clone());
+    let pending_state = db_pending_state(&state, 100, 300, false).expect("pending state");
+
+    let error = provider
+        .handler
+        .link_finalizing_pending_match(&state, &pending_state, None, None, None)
+        .await
+        .expect_err("pre-job row must not receive a reconstructed plan");
+    assert!(error.contains("finalization job") && error.contains("does not exist"));
+    assert_eq!(
+        persistence.load_all().expect("reload pre-job envelope"),
+        vec![linked_envelope]
+    );
+    let connection = Connection::open(database.path()).expect("reopen pre-job fixture");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count absent jobs"),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count retained pending matches"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1611,6 +1895,15 @@ async fn nonpersistent_final_pick_defer_failure_keeps_legacy_timeout_cleanup() {
     tokio::time::advance(Duration::from_secs(DRAFTING_TIMEOUT_SECONDS + 1)).await;
     tokio::task::yield_now().await;
     assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("open nonpersistent database")
+            .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count nonpersistent finalization jobs"),
+        0
+    );
     assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
     lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
 }

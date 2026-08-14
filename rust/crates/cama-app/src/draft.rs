@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use cama_domain::player::Player;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const DRAFT_POOL_SIZE: usize = 10;
@@ -19,6 +20,8 @@ pub const DRAFT_TOTAL_PICKS: usize = 8;
 pub const BUTTON_LABEL_MAX_LENGTH: usize = 80;
 pub const PRE_DRAFT_TIMEOUT_SECONDS: u64 = 300;
 pub const DRAFTING_TIMEOUT_SECONDS: u64 = 600;
+pub const DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION: u64 =
+    cama_db::draft_finalization::DRAFT_FINALIZATION_PLAN_VERSION;
 
 pub const DRAFT_COMMANDS: [&str; 4] = ["start", "restart", "sampleinprogress", "samplecomplete"];
 pub const ADMIN_FAKE_PLAYER_ARGUMENTS: [&str; 4] = [
@@ -544,6 +547,193 @@ impl DraftStateEnvelope {
     }
 }
 
+/// One immutable Discord destination and its deterministic recovery identity.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct DraftFinalizationDeliveryPlan {
+    pub delivery_key: String,
+    pub channel_id: Option<i64>,
+    pub message_id: Option<i64>,
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+/// Immutable inputs needed by a future finalization recovery worker.
+///
+/// The plan is committed in the same transaction as the pending match and
+/// Draft-envelope link. Unknown fields round-trip through `extensions` so an
+/// older process cannot silently erase a newer recovery contract.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct DraftFinalizationPlan {
+    pub schema_version: u64,
+    pub completion_key: String,
+    pub guild_id: i64,
+    pub session_id: u64,
+    pub pending_payload_sha256: String,
+    pub started_at: i64,
+    pub shuffle_timestamp: i64,
+    pub bet_lock_until: i64,
+    pub is_bomb_pot: bool,
+    pub lobby_kind: LobbyKind,
+    pub source: DraftFinalizationDeliveryPlan,
+    pub lobby: DraftFinalizationDeliveryPlan,
+    pub origin: DraftFinalizationDeliveryPlan,
+    pub thread_embed: DraftFinalizationDeliveryPlan,
+    pub thread_ping: DraftFinalizationDeliveryPlan,
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl DraftFinalizationPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        guild_id: i64,
+        session_id: u64,
+        pending_payload_json: &str,
+        started_at: i64,
+        shuffle_timestamp: i64,
+        bet_lock_until: i64,
+        is_bomb_pot: bool,
+        lobby_kind: LobbyKind,
+        source_channel_id: Option<i64>,
+        source_message_id: Option<i64>,
+        lobby_channel_id: Option<i64>,
+        origin_channel_id: Option<i64>,
+        thread_id: Option<i64>,
+    ) -> Result<Self, DraftPersistenceError> {
+        let completion_key = format!("draft:{guild_id}:{session_id}");
+        // Match the live publisher's source suppression and channel
+        // deduplication so recovery never creates a copy that normal
+        // completion would have skipped.
+        let lobby_channel_id = lobby_channel_id.filter(|id| Some(*id) != source_channel_id);
+        let origin_channel_id = origin_channel_id
+            .filter(|id| Some(*id) != source_channel_id && Some(*id) != lobby_channel_id);
+        let delivery = |name: &str, channel_id, message_id| DraftFinalizationDeliveryPlan {
+            delivery_key: format!("{completion_key}:{name}"),
+            channel_id,
+            message_id,
+            extensions: BTreeMap::new(),
+        };
+        let plan = Self {
+            schema_version: DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION,
+            completion_key: completion_key.clone(),
+            guild_id,
+            session_id,
+            pending_payload_sha256: draft_pending_payload_sha256(pending_payload_json),
+            started_at,
+            shuffle_timestamp,
+            bet_lock_until,
+            is_bomb_pot,
+            lobby_kind,
+            source: delivery("source", source_channel_id, source_message_id),
+            lobby: delivery("lobby", lobby_channel_id, None),
+            origin: delivery("origin", origin_channel_id, None),
+            thread_embed: delivery("thread-embed", thread_id, None),
+            thread_ping: delivery("thread-ping", thread_id, None),
+            extensions: BTreeMap::new(),
+        };
+        plan.validate(pending_payload_json)?;
+        Ok(plan)
+    }
+
+    pub fn validate(&self, pending_payload_json: &str) -> Result<(), DraftPersistenceError> {
+        self.validate_structure()?;
+        if self.pending_payload_sha256 != draft_pending_payload_sha256(pending_payload_json) {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization pending payload hash does not match".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_structure(&self) -> Result<(), DraftPersistenceError> {
+        if self.schema_version != DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: format!(
+                    "unsupported Draft finalization plan version {}",
+                    self.schema_version
+                ),
+            });
+        }
+        let expected_key = format!("draft:{}:{}", self.guild_id, self.session_id);
+        if self.completion_key != expected_key {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization completion key does not match its identity".to_owned(),
+            });
+        }
+        if self.pending_payload_sha256.len() != 64
+            || !self
+                .pending_payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization pending payload hash is not lowercase SHA-256"
+                    .to_owned(),
+            });
+        }
+        if self.started_at != self.shuffle_timestamp || self.bet_lock_until < self.shuffle_timestamp
+        {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization timestamps are inconsistent".to_owned(),
+            });
+        }
+        for (name, delivery) in [
+            ("source", &self.source),
+            ("lobby", &self.lobby),
+            ("origin", &self.origin),
+            ("thread-embed", &self.thread_embed),
+            ("thread-ping", &self.thread_ping),
+        ] {
+            if delivery.delivery_key != format!("{}:{name}", self.completion_key) {
+                return Err(DraftPersistenceError::InvalidEnvelope {
+                    message: format!("Draft finalization {name} delivery key is not deterministic"),
+                });
+            }
+            if delivery.message_id.is_some() && delivery.channel_id.is_none() {
+                return Err(DraftPersistenceError::InvalidEnvelope {
+                    message: format!("Draft finalization {name} message has no channel"),
+                });
+            }
+        }
+        if self.lobby.channel_id.is_some() && self.lobby.channel_id == self.source.channel_id {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization lobby destination duplicates the source".to_owned(),
+            });
+        }
+        if self.origin.channel_id.is_some()
+            && (self.origin.channel_id == self.source.channel_id
+                || self.origin.channel_id == self.lobby.channel_id)
+        {
+            return Err(DraftPersistenceError::InvalidEnvelope {
+                message: "Draft finalization origin destination is duplicated".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn to_json(&self, pending_payload_json: &str) -> Result<String, DraftPersistenceError> {
+        self.validate(pending_payload_json)?;
+        serde_json::to_string(self).map_err(|error| DraftPersistenceError::Serialization {
+            message: error.to_string(),
+        })
+    }
+
+    pub fn from_json(raw: &str) -> Result<Self, DraftPersistenceError> {
+        let plan: Self =
+            serde_json::from_str(raw).map_err(|error| DraftPersistenceError::Serialization {
+                message: error.to_string(),
+            })?;
+        plan.validate_structure()?;
+        Ok(plan)
+    }
+}
+
+#[must_use]
+pub fn draft_pending_payload_sha256(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Errors crossing the draft persistence port.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DraftPersistenceError {
@@ -640,7 +830,50 @@ impl From<cama_db::draft_finalization::DraftFinalizationError> for DraftPersiste
             },
             DatabaseError::InvalidDraftEnvelope(message) => Self::InvalidEnvelope { message },
             DatabaseError::InvalidPendingPayload(message) => Self::Serialization { message },
+            DatabaseError::InvalidPlan(message) | DatabaseError::InvalidProgress(message) => {
+                Self::Serialization { message }
+            }
             DatabaseError::Conflict { guild_id, reason } => Self::Conflict { guild_id, reason },
+            DatabaseError::JobNotFound { completion_key } => Self::Backend {
+                message: format!("draft finalization job {completion_key} does not exist"),
+            },
+            DatabaseError::StaleJobRevision {
+                completion_key,
+                expected,
+                actual,
+            } => Self::Backend {
+                message: format!(
+                    "draft finalization job revision is stale for {completion_key}: expected {expected}, found {actual}"
+                ),
+            },
+            DatabaseError::StaleJobStage {
+                completion_key,
+                expected,
+                actual,
+            } => Self::Backend {
+                message: format!(
+                    "draft finalization job stage is stale for {completion_key}: expected {expected}, found {actual}"
+                ),
+            },
+            DatabaseError::LeaseHeld {
+                completion_key,
+                owner,
+                lease_until,
+            } => Self::Backend {
+                message: format!(
+                    "draft finalization job {completion_key} is leased by {owner} until {lease_until}"
+                ),
+            },
+            DatabaseError::LeaseLost {
+                completion_key,
+                expected_owner,
+                actual_owner,
+                lease_until,
+            } => Self::Backend {
+                message: format!(
+                    "draft finalization job {completion_key} lease is not held by {expected_owner}: current owner {actual_owner:?}, lease until {lease_until:?}"
+                ),
+            },
             DatabaseError::Sqlite(error) => Self::Backend {
                 message: error.to_string(),
             },
@@ -656,7 +889,9 @@ pub struct DraftPendingMatchLink {
     pub completion_key: String,
     pub pending_match_id: i64,
     pub pending_payload_json: String,
+    pub plan_json: String,
     pub pending_created: bool,
+    pub job_created: bool,
 }
 
 /// Persistence boundary shared by the Draft runtime and recovery observers.
@@ -712,8 +947,14 @@ pub trait DraftStatePersistencePort: Send + Sync {
         expected_session_id: u64,
         expected_revision: u64,
         pending_payload_json: &str,
+        plan_json: &str,
     ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
-        let _ = (expected_session_id, expected_revision, pending_payload_json);
+        let _ = (
+            expected_session_id,
+            expected_revision,
+            pending_payload_json,
+            plan_json,
+        );
         Err(DraftPersistenceError::Backend {
             message: format!(
                 "draft finalization linking is not supported for guild {guild_id} by this persistence port"
@@ -734,6 +975,40 @@ pub trait DraftStatePersistencePort: Send + Sync {
         Err(DraftPersistenceError::Backend {
             message: format!(
                 "raw pending-match recovery is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
+    /// Load the exact immutable plan attached to a linked finalization job.
+    fn linked_finalization_plan(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<String, DraftPersistenceError> {
+        let _ = (session_id, pending_match_id);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "raw Draft finalization plan recovery is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
+    /// Mark the linked finalization job terminal after the live provider has
+    /// completed every required downstream operation. Implementations must
+    /// lease and CAS the job so a stale worker cannot hide recoverable work.
+    fn complete_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_draft_revision: u64,
+        now: i64,
+    ) -> Result<(), DraftPersistenceError> {
+        let _ = (session_id, pending_match_id, expected_draft_revision, now);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft finalization completion is not supported for guild {guild_id} by this persistence port"
             ),
         })
     }
@@ -875,12 +1150,15 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         expected_session_id: u64,
         expected_revision: u64,
         pending_payload_json: &str,
+        plan_json: &str,
     ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
+        DraftFinalizationPlan::from_json(plan_json)?;
         let linked = self.finalization.link_pending_match_validated(
             guild_id,
             expected_session_id,
             expected_revision,
             pending_payload_json,
+            plan_json,
             |raw| {
                 DraftStateEnvelope::from_json(raw)
                     .map(|_| ())
@@ -892,7 +1170,9 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
             completion_key: linked.completion_key,
             pending_match_id: linked.pending_match_id,
             pending_payload_json: linked.pending_payload_json,
+            plan_json: linked.job.plan_json,
             pending_created: linked.pending_created,
+            job_created: linked.job_created,
         })
     }
 
@@ -905,6 +1185,96 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         self.finalization
             .linked_pending_payload(guild_id, session_id, pending_match_id)
             .map_err(Into::into)
+    }
+
+    fn linked_finalization_plan(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<String, DraftPersistenceError> {
+        // A finalizing envelope created before the job-table migration has no
+        // immutable destination snapshot. JobNotFound is intentionally
+        // surfaced for manual recovery instead of fabricating a lossy plan.
+        self.finalization
+            .linked_plan_json(guild_id, session_id, pending_match_id)
+            .map_err(Into::into)
+    }
+
+    fn complete_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_draft_revision: u64,
+        now: i64,
+    ) -> Result<(), DraftPersistenceError> {
+        use cama_db::draft_finalization::{
+            DRAFT_FINALIZATION_COMPLETE_STAGE, DRAFT_FINALIZATION_INITIAL_STAGE,
+            DraftFinalizationError, draft_completion_key,
+        };
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Err(DraftFinalizationError::JobNotFound { completion_key }.into());
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft finalization job identity does not match completion".to_owned(),
+            });
+        }
+        if job.stage == DRAFT_FINALIZATION_COMPLETE_STAGE {
+            return Ok(());
+        }
+        if job.stage != DRAFT_FINALIZATION_INITIAL_STAGE {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: format!(
+                    "Draft finalization job is at unexpected stage {}",
+                    job.stage
+                ),
+            });
+        }
+        let lease_owner = format!("draft-live:{guild_id}:{session_id}");
+        let lease_until = now
+            .checked_add(60)
+            .ok_or_else(|| DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft finalization lease deadline overflowed".to_owned(),
+            })?;
+        let claimed = self.finalization.claim_job_lease(
+            &job.completion_key,
+            job.revision,
+            &lease_owner,
+            now,
+            lease_until,
+        )?;
+        let completed = self.finalization.complete_job_and_delete_draft(
+            &job.completion_key,
+            claimed.revision,
+            &lease_owner,
+            now,
+            guild_id,
+            session_id,
+            pending_match_id,
+            expected_draft_revision,
+            DRAFT_FINALIZATION_INITIAL_STAGE,
+        )?;
+        if completed.guild_id != guild_id
+            || completed.session_id != session_id
+            || completed.pending_match_id != pending_match_id
+            || completed.stage != DRAFT_FINALIZATION_COMPLETE_STAGE
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft finalization completion returned the wrong job".to_owned(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -3219,6 +3589,244 @@ mod tests {
     }
 
     #[test]
+    fn finalization_plan_freezes_hash_timestamps_destinations_and_delivery_keys() {
+        let pending_payload = "{\n  \"future_pending\": true\n}";
+        let plan = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            9,
+            pending_payload,
+            1_700_000_000,
+            1_700_000_000,
+            1_700_000_600,
+            true,
+            LobbyKind::LowSkill,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+        )
+        .expect("build finalization plan");
+        assert_eq!(plan.completion_key, format!("draft:{TEST_GUILD_ID}:9"));
+        assert_eq!(
+            plan.pending_payload_sha256,
+            draft_pending_payload_sha256(pending_payload)
+        );
+        assert_eq!(plan.started_at, 1_700_000_000);
+        assert_eq!(plan.shuffle_timestamp, 1_700_000_000);
+        assert_eq!(plan.bet_lock_until, 1_700_000_600);
+        assert!(plan.is_bomb_pot);
+        assert_eq!(plan.lobby_kind, LobbyKind::LowSkill);
+        assert_eq!(plan.source.channel_id, Some(10));
+        assert_eq!(plan.source.message_id, Some(20));
+        assert_eq!(plan.lobby.channel_id, Some(30));
+        assert_eq!(plan.origin.channel_id, Some(40));
+        assert_eq!(plan.thread_embed.channel_id, Some(50));
+        assert_eq!(plan.thread_ping.channel_id, Some(50));
+        for (name, delivery) in [
+            ("source", &plan.source),
+            ("lobby", &plan.lobby),
+            ("origin", &plan.origin),
+            ("thread-embed", &plan.thread_embed),
+            ("thread-ping", &plan.thread_ping),
+        ] {
+            assert_eq!(
+                delivery.delivery_key,
+                format!("draft:{TEST_GUILD_ID}:9:{name}")
+            );
+        }
+
+        let mut raw: serde_json::Value = serde_json::from_str(
+            &plan
+                .to_json(pending_payload)
+                .expect("encode finalization plan"),
+        )
+        .expect("decode finalization plan JSON");
+        raw["future_plan"] = json!({"keep": [1, 2, 3]});
+        raw["source"]["future_delivery"] = json!("preserved");
+        let decoded = DraftFinalizationPlan::from_json(&raw.to_string())
+            .expect("decode forward-compatible plan");
+        let reencoded: serde_json::Value = serde_json::from_str(
+            &decoded
+                .to_json(pending_payload)
+                .expect("reencode forward-compatible plan"),
+        )
+        .expect("decode reencoded plan");
+        assert_eq!(reencoded["future_plan"], json!({"keep": [1, 2, 3]}));
+        assert_eq!(reencoded["source"]["future_delivery"], json!("preserved"));
+        assert!(matches!(
+            decoded.to_json("{\"different\":true}"),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+    }
+
+    #[test]
+    fn finalization_plan_matches_live_destination_suppression_and_deduplication() {
+        let source_only = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            9,
+            "{}",
+            100,
+            100,
+            200,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(10),
+            Some(10),
+            None,
+        )
+        .expect("build source-suppressed plan");
+        assert_eq!(source_only.source.channel_id, Some(10));
+        assert_eq!(source_only.lobby.channel_id, None);
+        assert_eq!(source_only.origin.channel_id, None);
+
+        let deduplicated = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            9,
+            "{}",
+            100,
+            100,
+            200,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(30),
+            None,
+        )
+        .expect("build destination-deduplicated plan");
+        assert_eq!(deduplicated.lobby.channel_id, Some(30));
+        assert_eq!(deduplicated.origin.channel_id, None);
+
+        let distinct_origin = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            9,
+            "{}",
+            100,
+            100,
+            200,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(10),
+            Some(40),
+            None,
+        )
+        .expect("build distinct-origin plan");
+        assert_eq!(distinct_origin.lobby.channel_id, None);
+        assert_eq!(distinct_origin.origin.channel_id, Some(40));
+
+        let mut invalid: serde_json::Value =
+            serde_json::to_value(&deduplicated).expect("encode destination-deduplicated plan");
+        invalid["lobby"]["channel_id"] = json!(10);
+        assert!(matches!(
+            DraftFinalizationPlan::from_json(&invalid.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+        invalid["lobby"]["channel_id"] = json!(30);
+        invalid["origin"]["channel_id"] = json!(30);
+        assert!(matches!(
+            DraftFinalizationPlan::from_json(&invalid.to_string()),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+    }
+
+    #[test]
+    fn sqlite_adapter_atomically_links_and_recovers_the_exact_typed_plan() {
+        let fixture = NamedTempFile::new().expect("create typed-link fixture");
+        cama_db::schema_manager::initialize_or_migrate(fixture.path())
+            .expect("initialize typed-link fixture");
+        let persistence = SqliteDraftStatePersistence::new(fixture.path());
+        let mut state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::Open, 0);
+        state.phase = DraftPhase::Complete;
+        let mut envelope = state.to_snapshot().envelope(1);
+        envelope.finalizing = true;
+        envelope.deadline_at = None;
+        let created = persistence
+            .create_envelope(&envelope)
+            .expect("create fenced envelope");
+        let pending_payload = "{\"future_pending\":{\"keep\":true}}";
+        let plan = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            created.session_id,
+            pending_payload,
+            100,
+            100,
+            200,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+        )
+        .expect("build typed plan")
+        .to_json(pending_payload)
+        .expect("encode typed plan");
+        let linked = persistence
+            .link_finalizing_pending_match(
+                TEST_GUILD_ID,
+                created.session_id,
+                created.revision,
+                pending_payload,
+                &plan,
+            )
+            .expect("link typed plan");
+        assert!(linked.pending_created);
+        assert!(linked.job_created);
+        assert_eq!(linked.plan_json, plan);
+        assert_eq!(
+            persistence
+                .linked_finalization_plan(
+                    TEST_GUILD_ID,
+                    created.session_id,
+                    linked.pending_match_id,
+                )
+                .expect("reload exact typed plan"),
+            plan
+        );
+        persistence
+            .complete_finalization_job(
+                TEST_GUILD_ID,
+                created.session_id,
+                linked.pending_match_id,
+                linked.envelope.revision,
+                300,
+            )
+            .expect("lease and complete linked finalization job");
+        let finalization =
+            cama_db::draft_finalization::DraftFinalizationRepository::new(fixture.path());
+        let job = finalization
+            .job(&linked.completion_key)
+            .expect("load completed job")
+            .expect("completed job");
+        assert_eq!(
+            job.stage,
+            cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+        );
+        assert!(
+            finalization
+                .load_incomplete_jobs()
+                .expect("load incomplete jobs")
+                .is_empty()
+        );
+        persistence
+            .complete_finalization_job(
+                TEST_GUILD_ID,
+                created.session_id,
+                linked.pending_match_id,
+                linked.envelope.revision,
+                400,
+            )
+            .expect("terminal completion is idempotent");
+    }
+
+    #[test]
     fn atomic_pending_link_rejects_typed_envelope_before_committing() {
         let fixture = NamedTempFile::new().expect("create malformed-link fixture");
         cama_db::schema_manager::initialize_or_migrate(fixture.path())
@@ -3252,8 +3860,26 @@ mod tests {
         drop(connection);
 
         let persistence = SqliteDraftStatePersistence::new(fixture.path());
+        let plan = DraftFinalizationPlan::new(
+            TEST_GUILD_ID,
+            9,
+            "{}",
+            100,
+            100,
+            200,
+            false,
+            LobbyKind::Open,
+            Some(10),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+        )
+        .expect("build finalization plan")
+        .to_json("{}")
+        .expect("encode finalization plan");
         assert!(matches!(
-            persistence.link_finalizing_pending_match(TEST_GUILD_ID, 9, 1, "{}"),
+            persistence.link_finalizing_pending_match(TEST_GUILD_ID, 9, 1, "{}", &plan),
             Err(DraftPersistenceError::InvalidEnvelope { .. })
         ));
         let connection = Connection::open(fixture.path()).expect("reopen malformed-link fixture");

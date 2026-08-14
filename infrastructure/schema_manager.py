@@ -870,6 +870,10 @@ class SchemaManager:
                 "add_pending_match_completion_key",
                 self._migration_add_pending_match_completion_key,
             ),
+            (
+                "create_draft_finalization_jobs",
+                self._migration_create_draft_finalization_jobs,
+            ),
         ]
 
     # --- Migrations ---
@@ -4195,6 +4199,41 @@ class SchemaManager:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_matches_completion_key
             ON pending_matches(completion_key)
             WHERE completion_key IS NOT NULL
+            """
+        )
+
+    def _migration_create_draft_finalization_jobs(self, cursor) -> None:
+        """Create the durable progress ledger for Draft finalization recovery."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_finalization_jobs (
+                completion_key TEXT PRIMARY KEY NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                stage TEXT NOT NULL CHECK(length(stage) > 0),
+                plan_json TEXT NOT NULL
+                    CHECK(json_valid(plan_json) AND json_type(plan_json) = 'object'),
+                progress_json TEXT NOT NULL DEFAULT '{}'
+                    CHECK(json_valid(progress_json) AND json_type(progress_json) = 'object'),
+                lease_owner TEXT,
+                lease_until INTEGER,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (lease_owner IS NULL AND lease_until IS NULL)
+                    OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL)
+                ),
+                UNIQUE(guild_id, session_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_draft_finalization_jobs_incomplete
+            ON draft_finalization_jobs(stage, lease_until, updated_at)
             """
         )
 

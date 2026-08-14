@@ -304,6 +304,30 @@ CREATE TABLE duel_challenges (
                 CHECK (challenger_id != recipient_id)
             );
 
+-- table: draft_finalization_jobs
+CREATE TABLE draft_finalization_jobs (
+                completion_key TEXT PRIMARY KEY NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                stage TEXT NOT NULL CHECK(length(stage) > 0),
+                plan_json TEXT NOT NULL
+                    CHECK(json_valid(plan_json) AND json_type(plan_json) = 'object'),
+                progress_json TEXT NOT NULL DEFAULT '{}'
+                    CHECK(json_valid(progress_json) AND json_type(progress_json) = 'object'),
+                lease_owner TEXT,
+                lease_until INTEGER,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (lease_owner IS NULL AND lease_until IS NULL)
+                    OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL)
+                ),
+                UNIQUE(guild_id, session_id)
+            );
+
 -- table: economy_daily_events
 CREATE TABLE economy_daily_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1659,6 +1683,11 @@ CREATE INDEX idx_duel_guild_status ON duel_challenges(guild_id, status, created_
 
 -- index: idx_duel_recipient_history
 CREATE INDEX idx_duel_recipient_history ON duel_challenges(guild_id, recipient_id, created_at DESC);
+
+-- index: idx_draft_finalization_jobs_incomplete
+CREATE INDEX idx_draft_finalization_jobs_incomplete
+            ON draft_finalization_jobs(stage, lease_until, updated_at)
+            ;
 
 -- index: idx_economy_events_active
 CREATE INDEX idx_economy_events_active
