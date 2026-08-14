@@ -4,6 +4,9 @@ mod application_config {
 mod discord_transport {
     pub use cama_runtime::discord_transport::*;
 }
+mod gateway_events {
+    pub use cama_runtime::gateway_events::*;
+}
 mod lobby_provider {
     pub use cama_runtime::lobby_provider::*;
 }

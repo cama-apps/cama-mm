@@ -3502,6 +3502,109 @@ impl DiscordTransport for SerenityDiscordTransport {
         })
     }
 
+    async fn send_message_with_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, String> {
+        let context = self.context()?;
+        let channel_id = ChannelId::new(channel_id);
+        let response = apply_discord_mentions(message.response.clone(), &message);
+        let sent = channel_id
+            .send_message(
+                (&context.cache, context.http.as_ref()),
+                channel_response(response)
+                    .nonce(Nonce::String(delivery_key.to_owned()))
+                    .enforce_nonce(true),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(DiscordMessageReceipt {
+            channel_id: channel_id.get(),
+            message_id: sent.id.get(),
+            jump_url: sent.link(),
+        })
+    }
+
+    async fn find_message_by_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        after_unix_seconds: i64,
+        limit: usize,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if limit == 0 {
+            return Ok(None);
+        }
+        let context = self.context()?;
+        let channel_id = ChannelId::new(channel_id);
+        let bot_user_id = context
+            .http
+            .get_current_user()
+            .await
+            .map_err(|error| error.to_string())?
+            .id
+            .get();
+        let bounded_limit = limit.min(500);
+        let mut before = None;
+        let mut inspected = 0usize;
+        let mut reached_history_boundary = false;
+        while inspected < bounded_limit {
+            let page_limit = (bounded_limit - inspected).min(100) as u8;
+            let mut request = GetMessages::new().limit(page_limit);
+            if let Some(message_id) = before {
+                request = request.before(message_id);
+            }
+            let page = channel_id
+                .messages(&context.http, request)
+                .await
+                .map_err(|error| error.to_string())?;
+            if page.is_empty() {
+                reached_history_boundary = true;
+                break;
+            }
+            inspected = inspected.saturating_add(page.len());
+            let page_complete = page.len() == page_limit as usize;
+            let oldest_before_cutoff = page
+                .last()
+                .is_some_and(|message| message.timestamp.unix_timestamp() < after_unix_seconds);
+            for message in &page {
+                if message.timestamp.unix_timestamp() < after_unix_seconds
+                    || message.author.id.get() != bot_user_id
+                {
+                    continue;
+                }
+                let nonce_matches = message.nonce.as_ref().is_some_and(|nonce| match nonce {
+                    Nonce::String(value) => value == delivery_key,
+                    Nonce::Number(value) => value.to_string() == delivery_key,
+                });
+                if nonce_matches {
+                    return Ok(Some(DiscordMessageReceipt {
+                        channel_id: message.channel_id.get(),
+                        message_id: message.id.get(),
+                        jump_url: message.link(),
+                    }));
+                }
+            }
+            if oldest_before_cutoff {
+                reached_history_boundary = true;
+                break;
+            }
+            if !page_complete {
+                reached_history_boundary = true;
+                break;
+            }
+            before = page.last().map(|message| message.id);
+        }
+        if !reached_history_boundary && inspected >= bounded_limit {
+            return Err(format!(
+                "Discord delivery history search reached its {bounded_limit}-message bound before the recovery time boundary"
+            ));
+        }
+        Ok(None)
+    }
+
     async fn send_thread_reply(
         &self,
         thread_id: u64,

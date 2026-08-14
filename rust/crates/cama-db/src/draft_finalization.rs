@@ -12,6 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::draft_financial_execution::DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE;
 use crate::draft_state::{DRAFT_STATE_ENVELOPE_VERSION, DRAFT_STATE_KEY, DraftStateRecord};
 use crate::open_runtime_connection;
 
@@ -24,6 +25,10 @@ pub const DRAFT_FINALIZATION_LEGACY_PLAN_VERSION: u64 = 1;
 pub const DRAFT_FINALIZATION_INITIAL_STAGE: &str = "linked";
 /// Terminal stage excluded by [`DraftFinalizationRepository::load_incomplete_jobs`].
 pub const DRAFT_FINALIZATION_COMPLETE_STAGE: &str = "complete";
+/// Stage reached after every Discord delivery has been reconciled and before
+/// the terminal job/envelope CAS.  Keeping this distinct from financial setup
+/// lets a restart resume publication without replaying ledger effects.
+pub const DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE: &str = "published";
 
 /// Deterministic idempotency identity for one Draft completion.
 #[must_use]
@@ -478,6 +483,49 @@ impl DraftFinalizationRepository {
         now: i64,
         lease_until: i64,
     ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
+        self.claim_job_lease_checked(
+            completion_key,
+            expected_revision,
+            owner,
+            now,
+            lease_until,
+            None,
+        )
+    }
+
+    /// Claim a lease while asserting the complete guild/session/pending
+    /// identity inside the same SQLite transaction as the revision CAS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_job_lease_for_identity(
+        &self,
+        completion_key: &str,
+        expected_revision: u64,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
+        self.claim_job_lease_checked(
+            completion_key,
+            expected_revision,
+            owner,
+            now,
+            lease_until,
+            Some((guild_id, session_id, pending_match_id)),
+        )
+    }
+
+    fn claim_job_lease_checked(
+        &self,
+        completion_key: &str,
+        expected_revision: u64,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+        expected_identity: Option<(i64, u64, i64)>,
+    ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
         let owner = owner.trim();
         if owner.is_empty() {
             return Err(DraftFinalizationError::Conflict {
@@ -494,6 +542,16 @@ impl DraftFinalizationRepository {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = require_job(&transaction, completion_key)?;
+        if let Some((guild_id, session_id, pending_match_id)) = expected_identity
+            && (current.guild_id != guild_id
+                || current.session_id != session_id
+                || current.pending_match_id != pending_match_id)
+        {
+            return Err(DraftFinalizationError::Conflict {
+                guild_id,
+                reason: "draft finalization lease identity does not match job".to_owned(),
+            });
+        }
         ensure_job_revision(&current, expected_revision)?;
         if current.stage == DRAFT_FINALIZATION_COMPLETE_STAGE {
             return Err(DraftFinalizationError::Conflict {
@@ -555,6 +613,58 @@ impl DraftFinalizationRepository {
         lease_owner: &str,
         now: i64,
     ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
+        self.advance_job_stage_checked(
+            completion_key,
+            expected_revision,
+            expected_stage,
+            next_stage,
+            progress_patch_json,
+            lease_owner,
+            now,
+            None,
+        )
+    }
+
+    /// Advance a job while asserting the full completion identity inside the
+    /// same SQLite stage/revision CAS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_job_stage_for_identity(
+        &self,
+        completion_key: &str,
+        expected_revision: u64,
+        expected_stage: &str,
+        next_stage: &str,
+        progress_patch_json: &str,
+        lease_owner: &str,
+        now: i64,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
+        self.advance_job_stage_checked(
+            completion_key,
+            expected_revision,
+            expected_stage,
+            next_stage,
+            progress_patch_json,
+            lease_owner,
+            now,
+            Some((guild_id, session_id, pending_match_id)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_job_stage_checked(
+        &self,
+        completion_key: &str,
+        expected_revision: u64,
+        expected_stage: &str,
+        next_stage: &str,
+        progress_patch_json: &str,
+        lease_owner: &str,
+        now: i64,
+        expected_identity: Option<(i64, u64, i64)>,
+    ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
         if expected_stage.is_empty() || next_stage.is_empty() {
             return Err(DraftFinalizationError::InvalidProgress(
                 "job stages must not be empty".to_owned(),
@@ -570,6 +680,16 @@ impl DraftFinalizationRepository {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = require_job(&transaction, completion_key)?;
+        if let Some((guild_id, session_id, pending_match_id)) = expected_identity
+            && (current.guild_id != guild_id
+                || current.session_id != session_id
+                || current.pending_match_id != pending_match_id)
+        {
+            return Err(DraftFinalizationError::Conflict {
+                guild_id,
+                reason: "draft finalization stage identity does not match job".to_owned(),
+            });
+        }
         ensure_job_revision(&current, expected_revision)?;
         if current.stage != expected_stage {
             return Err(DraftFinalizationError::StaleJobStage {
@@ -589,6 +709,14 @@ impl DraftFinalizationRepository {
                 actual_owner: current.lease_owner,
                 lease_until: current.lease_until,
             });
+        }
+        let valid_transition = expected_stage == next_stage
+            || (expected_stage == DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE
+                && next_stage == DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE);
+        if !valid_transition {
+            return Err(DraftFinalizationError::InvalidProgress(format!(
+                "invalid draft finalization stage transition {expected_stage} -> {next_stage}"
+            )));
         }
         let mut progress = parse_json_object(
             &current.progress_json,
@@ -645,10 +773,9 @@ impl DraftFinalizationRepository {
         expected_draft_revision: u64,
         expected_job_stage: &str,
     ) -> Result<DraftFinalizationJob, DraftFinalizationError> {
-        if expected_job_stage.is_empty() || expected_job_stage == DRAFT_FINALIZATION_COMPLETE_STAGE
-        {
+        if expected_job_stage != DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
             return Err(DraftFinalizationError::InvalidProgress(
-                "terminal completion requires a nonterminal expected stage".to_owned(),
+                "terminal completion requires the published stage".to_owned(),
             ));
         }
         let mut connection = open_runtime_connection(&self.path)?;
@@ -804,15 +931,11 @@ impl DraftFinalizationRepository {
                 guild_id,
                 reason: format!("linked pending match {pending_match_id} does not exist"),
             })?;
-        if pending
-            .completion_key
-            .as_deref()
-            .is_some_and(|key| key != completion_key)
-        {
+        if pending.completion_key.as_deref() != Some(completion_key.as_str()) {
             return Err(DraftFinalizationError::Conflict {
                 guild_id,
                 reason: format!(
-                    "linked pending match {pending_match_id} belongs to another completion"
+                    "linked pending match {pending_match_id} is not owned by this completion"
                 ),
             });
         }
@@ -2299,25 +2422,47 @@ mod tests {
                 &plan(42, draft.session_id, "{}"),
             )
             .expect("link terminal job");
-        let claimed = repository
+        let _claimed = repository
             .claim_job_lease(&linked.completion_key, 1, "worker-a", 100, 200)
             .expect("claim terminal job");
+        Connection::open(file.path())
+            .expect("open terminal publication fixture")
+            .execute(
+                "UPDATE draft_finalization_jobs SET stage='setup_complete' WHERE completion_key=?1",
+                [&linked.completion_key],
+            )
+            .expect("simulate financial executor stage");
+        let setup_job = repository
+            .job(&linked.completion_key)
+            .expect("reload terminal setup stage")
+            .expect("terminal setup job");
+        let published = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                setup_job.revision,
+                DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                "worker-a",
+                101,
+            )
+            .expect("advance terminal publication stage");
 
         let completed = repository
             .complete_job_and_delete_draft(
                 &linked.completion_key,
-                claimed.revision,
+                published.revision,
                 "worker-a",
-                101,
+                102,
                 42,
                 draft.session_id,
                 linked.pending_match_id,
                 linked.draft.revision,
-                DRAFT_FINALIZATION_INITIAL_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
             )
             .expect("commit terminal job and envelope delete");
         assert_eq!(completed.stage, DRAFT_FINALIZATION_COMPLETE_STAGE);
-        assert_eq!(completed.revision, 3);
+        assert_eq!(completed.revision, 4);
         assert_eq!(completed.lease_owner, None);
         assert_eq!(completed.lease_until, None);
         assert_eq!(drafts.load(42).expect("load deleted Draft"), None);
@@ -2344,9 +2489,31 @@ mod tests {
                 &plan(42, draft.session_id, "{}"),
             )
             .expect("link rollback job");
-        let claimed = repository
+        let _claimed = repository
             .claim_job_lease(&linked.completion_key, 1, "worker-a", 100, 200)
             .expect("claim rollback job");
+        Connection::open(file.path())
+            .expect("open rollback publication fixture")
+            .execute(
+                "UPDATE draft_finalization_jobs SET stage='setup_complete' WHERE completion_key=?1",
+                [&linked.completion_key],
+            )
+            .expect("simulate rollback financial executor stage");
+        let setup_job = repository
+            .job(&linked.completion_key)
+            .expect("reload rollback setup stage")
+            .expect("rollback setup job");
+        let published = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                setup_job.revision,
+                DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                "worker-a",
+                101,
+            )
+            .expect("advance rollback publication stage");
         Connection::open(file.path())
             .expect("open terminal rollback fixture")
             .execute_batch(
@@ -2362,14 +2529,14 @@ mod tests {
         assert!(matches!(
             repository.complete_job_and_delete_draft(
                 &linked.completion_key,
-                claimed.revision,
+                published.revision,
                 "worker-a",
-                101,
+                102,
                 42,
                 draft.session_id,
                 linked.pending_match_id,
                 linked.draft.revision,
-                DRAFT_FINALIZATION_INITIAL_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
             ),
             Err(DraftFinalizationError::Sqlite(_))
         ));
@@ -2378,7 +2545,7 @@ mod tests {
                 .job(&linked.completion_key)
                 .expect("reload rolled-back job")
                 .expect("rolled-back job"),
-            claimed
+            published
         );
         assert_eq!(
             drafts.load(42).expect("reload retained Draft"),
@@ -2401,22 +2568,44 @@ mod tests {
                 &plan(42, draft.session_id, "{}"),
             )
             .expect("link stale-owner job");
-        let claimed = repository
+        let _claimed = repository
             .claim_job_lease(&linked.completion_key, 1, "worker-a", 100, 200)
             .expect("claim stale-owner job");
+        Connection::open(file.path())
+            .expect("open stale-owner publication fixture")
+            .execute(
+                "UPDATE draft_finalization_jobs SET stage='setup_complete' WHERE completion_key=?1",
+                [&linked.completion_key],
+            )
+            .expect("simulate stale-owner financial executor stage");
+        let setup_job = repository
+            .job(&linked.completion_key)
+            .expect("reload stale-owner setup stage")
+            .expect("stale-owner setup job");
+        let published = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                setup_job.revision,
+                DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                "worker-a",
+                101,
+            )
+            .expect("advance stale-owner publication stage");
 
         for (owner, now) in [("worker-b", 101), ("worker-a", 200)] {
             assert!(matches!(
                 repository.complete_job_and_delete_draft(
                     &linked.completion_key,
-                    claimed.revision,
+                    published.revision,
                     owner,
                     now,
                     42,
                     draft.session_id,
                     linked.pending_match_id,
                     linked.draft.revision,
-                    DRAFT_FINALIZATION_INITIAL_STAGE,
+                    DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
                 ),
                 Err(DraftFinalizationError::LeaseLost { .. })
             ));
@@ -2426,7 +2615,7 @@ mod tests {
                 .job(&linked.completion_key)
                 .expect("reload uncompleted job")
                 .expect("uncompleted job"),
-            claimed
+            published
         );
         assert_eq!(
             drafts.load(42).expect("reload undeleted Draft"),
@@ -2481,26 +2670,65 @@ mod tests {
         let claimed = repository
             .claim_job_lease(&linked.completion_key, 1, "worker-a", 100, 500)
             .expect("claim progress job");
-        let advanced = repository
-            .advance_job_stage(
+        assert!(matches!(
+            repository.advance_job_stage(
                 &linked.completion_key,
                 claimed.revision,
                 DRAFT_FINALIZATION_INITIAL_STAGE,
                 "setup_complete",
+                "{}",
+                "worker-a",
+                101,
+            ),
+            Err(DraftFinalizationError::InvalidProgress(_))
+        ));
+        let progressed = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                claimed.revision,
+                DRAFT_FINALIZATION_INITIAL_STAGE,
+                DRAFT_FINALIZATION_INITIAL_STAGE,
                 r#"{"future":{"change":"new","added":2},"known":true}"#,
                 "worker-a",
                 101,
             )
-            .expect("advance setup stage");
-        assert_eq!(advanced.revision, 3);
-        assert_eq!(advanced.stage, "setup_complete");
+            .expect("advance linked progress");
+        assert_eq!(progressed.revision, 3);
+        assert_eq!(progressed.stage, DRAFT_FINALIZATION_INITIAL_STAGE);
         let progress: Value =
-            serde_json::from_str(&advanced.progress_json).expect("decode merged progress");
+            serde_json::from_str(&progressed.progress_json).expect("decode merged progress");
         assert_eq!(progress["future"]["keep"], json!(1));
         assert_eq!(progress["future"]["change"], json!("new"));
         assert_eq!(progress["future"]["added"], json!(2));
         assert_eq!(progress["untouched"], json!([1, 2]));
         assert_eq!(progress["known"], json!(true));
+        Connection::open(file.path())
+            .expect("open executor-stage fixture")
+            .execute(
+                "UPDATE draft_finalization_jobs SET stage='setup_complete' WHERE completion_key=?1",
+                [&linked.completion_key],
+            )
+            .expect("simulate financial executor stage");
+        let setup_job = repository
+            .job(&linked.completion_key)
+            .expect("reload executor stage")
+            .expect("executor stage job");
+        let advanced = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                setup_job.revision,
+                "setup_complete",
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                "worker-a",
+                101,
+            )
+            .expect("advance publication stage");
+        assert_eq!(advanced.revision, 4);
+        assert_eq!(
+            advanced.stage,
+            DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE
+        );
         assert!(matches!(
             repository.advance_job_stage(
                 &linked.completion_key,
@@ -2529,7 +2757,7 @@ mod tests {
             repository.advance_job_stage(
                 &linked.completion_key,
                 advanced.revision,
-                "setup_complete",
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
                 DRAFT_FINALIZATION_COMPLETE_STAGE,
                 "{}",
                 "worker-a",
@@ -2547,10 +2775,10 @@ mod tests {
                 draft.session_id,
                 linked.pending_match_id,
                 linked.draft.revision,
-                "setup_complete",
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
             )
             .expect("atomically complete progressed job");
-        assert_eq!(completed.revision, 4);
+        assert_eq!(completed.revision, 5);
         assert!(
             repository
                 .load_incomplete_jobs()
@@ -2602,7 +2830,7 @@ mod tests {
                 &linked.completion_key,
                 first.revision,
                 DRAFT_FINALIZATION_INITIAL_STAGE,
-                "setup_complete",
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
                 "{}",
                 "worker-a",
                 200,
@@ -2636,6 +2864,43 @@ mod tests {
             ),
             Err(DraftFinalizationError::StaleJobRevision { .. })
         ));
+    }
+
+    #[test]
+    fn foreign_pending_identity_does_not_consume_lease_or_revision() {
+        let file = fixture();
+        let drafts = DraftStateRepository::new(file.path());
+        let repository = DraftFinalizationRepository::new(file.path());
+        let draft = fenced(&drafts, 42);
+        let linked = repository
+            .link_pending_match(
+                42,
+                draft.session_id,
+                draft.revision,
+                "{}",
+                &plan(42, draft.session_id, "{}"),
+            )
+            .expect("link identity fixture");
+        assert!(matches!(
+            repository.claim_job_lease_for_identity(
+                &linked.completion_key,
+                1,
+                "worker-a",
+                100,
+                200,
+                42,
+                draft.session_id,
+                linked.pending_match_id + 1,
+            ),
+            Err(DraftFinalizationError::Conflict { .. })
+        ));
+        let unchanged = repository
+            .job(&linked.completion_key)
+            .expect("reload identity fixture")
+            .expect("identity job");
+        assert_eq!(unchanged.revision, 1);
+        assert_eq!(unchanged.lease_owner, None);
+        assert_eq!(unchanged.lease_until, None);
     }
 
     #[test]

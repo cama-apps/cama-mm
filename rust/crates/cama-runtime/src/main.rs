@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cama_app::ai_http::production_ai_service_from_settings;
-use cama_app::draft::DraftStateManager;
+use cama_app::draft::{DraftStateManager, SqliteDraftStatePersistence};
 use cama_app::service_container::ServiceContainer;
 use cama_db::audit_database;
 use cama_runtime::gateway::{GatewayError, GatewaySession};
@@ -705,7 +705,10 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
         Arc::new(match_provider.clone()),
         registration_provider.draft_neon_observer(),
-    ) {
+    )
+    .and_then(|provider| {
+        provider.with_persistence(Arc::new(SqliteDraftStatePersistence::new(&config.db_path)))
+    }) {
         Ok(provider) => provider,
         Err(error) => {
             error!(%error, "draft runtime construction refused startup");
@@ -895,6 +898,7 @@ async fn run_serve() -> ExitCode {
         trivia_provider.gateway_observer(),
         dig_provider.gateway_observer(),
         survey_provider.gateway_observer(),
+        draft_provider.gateway_observer(),
     ]);
     let raw_reaction_observers =
         RawReactionObservers::new(vec![lobby_provider.raw_reaction_observer()]);

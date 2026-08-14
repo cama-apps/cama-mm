@@ -470,6 +470,18 @@ impl MatchRegistrationProvider {
         self.handler.schedule_betting_reminders(&pending, true);
         Ok(())
     }
+
+    /// Rebuild the generation-owned reminder tasks after Draft publication
+    /// recovery without replaying the immediate subscriber notification. The
+    /// durable Draft job records the completion marker only after this
+    /// synchronous cancel/replace operation returns.
+    pub fn schedule_draft_betting_reminders_recovery(
+        &self,
+        pending: PendingMatchRecord,
+    ) -> Result<(), String> {
+        self.handler.schedule_betting_reminders(&pending, false);
+        Ok(())
+    }
 }
 
 /// Build Match's live betting-flavor adapter over the same SQLite player,

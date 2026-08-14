@@ -8,13 +8,15 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_domain::player::Player;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub use cama_db::draft_finalization::DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE;
 pub use cama_db::draft_financial_execution::{
     DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE, DraftFinancialSetupRun,
 };
@@ -40,6 +42,23 @@ pub const PRE_DRAFT_TIMEOUT_SECONDS: u64 = 300;
 pub const DRAFTING_TIMEOUT_SECONDS: u64 = 600;
 pub const DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION: u64 =
     cama_db::draft_finalization::DRAFT_FINALIZATION_PLAN_VERSION;
+
+/// Return the lease owner used by this process for durable Draft finalization.
+///
+/// Guild/session identity alone is not a sufficient lease owner: a restarted
+/// process may otherwise look like the worker that crashed.  The process
+/// nonce is generated once and is included in every owner string.
+#[must_use]
+pub fn draft_finalization_process_owner(guild_id: i64, session_id: u64) -> String {
+    static PROCESS_NONCE: OnceLock<String> = OnceLock::new();
+    let nonce = PROCESS_NONCE.get_or_init(|| {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        format!("{}-{timestamp:x}", std::process::id())
+    });
+    format!("draft-live:{nonce}:{guild_id}:{session_id}")
+}
 
 pub const DRAFT_COMMANDS: [&str; 4] = ["start", "restart", "sampleinprogress", "samplecomplete"];
 pub const ADMIN_FAKE_PLAYER_ARGUMENTS: [&str; 4] = [
@@ -1091,6 +1110,22 @@ pub struct DraftPendingMatchLink {
     pub job_created: bool,
 }
 
+/// Durable finalization-job identity and progress used by the runtime
+/// publication reconciler.  The SQLite repository owns leasing and CAS;
+/// application code owns the forward-compatible progress JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftFinalizationJobSnapshot {
+    pub completion_key: String,
+    pub guild_id: i64,
+    pub session_id: u64,
+    pub pending_match_id: i64,
+    pub revision: u64,
+    pub stage: String,
+    pub progress_json: String,
+    pub lease_owner: Option<String>,
+    pub lease_until: Option<i64>,
+}
+
 /// Persistence boundary shared by the Draft runtime and recovery observers.
 pub trait DraftStatePersistencePort: Send + Sync {
     /// Load all active durable draft envelopes.
@@ -1245,6 +1280,81 @@ pub trait DraftStatePersistencePort: Send + Sync {
             message: format!(
                 "Draft financial setup is not supported for guild {guild_id} by this persistence port"
             ),
+        })
+    }
+
+    /// Load the durable publication job without mutating its lease.  Older
+    /// persistence adapters may omit publication recovery and retain the
+    /// source-compatible default error.
+    fn finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<Option<DraftFinalizationJobSnapshot>, DraftPersistenceError> {
+        let _ = (session_id, pending_match_id);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft finalization job recovery is not supported for guild {guild_id}"
+            ),
+        })
+    }
+
+    /// Claim or renew the publication worker lease under a revision CAS.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_revision: u64,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<DraftFinalizationJobSnapshot, DraftPersistenceError> {
+        let _ = (
+            session_id,
+            pending_match_id,
+            expected_revision,
+            owner,
+            now,
+            lease_until,
+        );
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft finalization job leasing is not supported for guild {guild_id}"
+            ),
+        })
+    }
+
+    /// Persist one idempotent publication receipt (or any forward-compatible
+    /// recovery marker) under a leased stage/revision CAS.  The stage may be
+    /// unchanged when only progress advances.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_revision: u64,
+        expected_stage: &str,
+        next_stage: &str,
+        progress_patch_json: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<DraftFinalizationJobSnapshot, DraftPersistenceError> {
+        let _ = (
+            session_id,
+            pending_match_id,
+            expected_revision,
+            expected_stage,
+            next_stage,
+            progress_patch_json,
+            owner,
+            now,
+        );
+        Err(DraftPersistenceError::Backend {
+            message: format!("Draft finalization progress is not supported for guild {guild_id}"),
         })
     }
 
@@ -1560,19 +1670,22 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
                 ),
             });
         }
-        let lease_owner = format!("draft-live:{guild_id}:{session_id}");
+        let lease_owner = draft_finalization_process_owner(guild_id, session_id);
         let lease_until = now
             .checked_add(60)
             .ok_or_else(|| DraftPersistenceError::Conflict {
                 guild_id,
                 reason: "Draft financial setup lease deadline overflowed".to_owned(),
             })?;
-        let claimed = self.finalization.claim_job_lease(
+        let claimed = self.finalization.claim_job_lease_for_identity(
             &job.completion_key,
             job.revision,
             &lease_owner,
             now,
             lease_until,
+            guild_id,
+            session_id,
+            pending_match_id,
         )?;
         self.finalization
             .run_leased_financial_setup(&job.completion_key, claimed.revision, &lease_owner, now)
@@ -1593,6 +1706,163 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
                     message: other.to_string(),
                 },
             })
+    }
+
+    fn finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<Option<DraftFinalizationJobSnapshot>, DraftPersistenceError> {
+        use cama_db::draft_finalization::draft_completion_key;
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Ok(None);
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft finalization job identity does not match recovery row".to_owned(),
+            });
+        }
+        Ok(Some(DraftFinalizationJobSnapshot {
+            completion_key: job.completion_key,
+            guild_id: job.guild_id,
+            session_id: job.session_id,
+            pending_match_id: job.pending_match_id,
+            revision: job.revision,
+            stage: job.stage,
+            progress_json: job.progress_json,
+            lease_owner: job.lease_owner,
+            lease_until: job.lease_until,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_revision: u64,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<DraftFinalizationJobSnapshot, DraftPersistenceError> {
+        use cama_db::draft_finalization::{DraftFinalizationError, draft_completion_key};
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Err(DraftFinalizationError::JobNotFound { completion_key }.into());
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft finalization lease identity does not match recovery row".to_owned(),
+            });
+        }
+        let claimed = self.finalization.claim_job_lease_for_identity(
+            &completion_key,
+            expected_revision,
+            owner,
+            now,
+            lease_until,
+            guild_id,
+            session_id,
+            pending_match_id,
+        )?;
+        if claimed.guild_id != guild_id
+            || claimed.session_id != session_id
+            || claimed.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "claimed Draft finalization job identity does not match recovery row"
+                    .to_owned(),
+            });
+        }
+        Ok(DraftFinalizationJobSnapshot {
+            completion_key: claimed.completion_key,
+            guild_id: claimed.guild_id,
+            session_id: claimed.session_id,
+            pending_match_id: claimed.pending_match_id,
+            revision: claimed.revision,
+            stage: claimed.stage,
+            progress_json: claimed.progress_json,
+            lease_owner: claimed.lease_owner,
+            lease_until: claimed.lease_until,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_finalization_job(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        expected_revision: u64,
+        expected_stage: &str,
+        next_stage: &str,
+        progress_patch_json: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<DraftFinalizationJobSnapshot, DraftPersistenceError> {
+        use cama_db::draft_finalization::{DraftFinalizationError, draft_completion_key};
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Err(DraftFinalizationError::JobNotFound { completion_key }.into());
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "advanced Draft finalization job identity does not match recovery row"
+                    .to_owned(),
+            });
+        }
+        let advanced = self.finalization.advance_job_stage_for_identity(
+            &completion_key,
+            expected_revision,
+            expected_stage,
+            next_stage,
+            progress_patch_json,
+            owner,
+            now,
+            guild_id,
+            session_id,
+            pending_match_id,
+        )?;
+        if advanced.guild_id != guild_id
+            || advanced.session_id != session_id
+            || advanced.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "advanced Draft finalization job identity does not match recovery row"
+                    .to_owned(),
+            });
+        }
+        Ok(DraftFinalizationJobSnapshot {
+            completion_key: advanced.completion_key,
+            guild_id: advanced.guild_id,
+            session_id: advanced.session_id,
+            pending_match_id: advanced.pending_match_id,
+            revision: advanced.revision,
+            stage: advanced.stage,
+            progress_json: advanced.progress_json,
+            lease_owner: advanced.lease_owner,
+            lease_until: advanced.lease_until,
+        })
     }
 
     fn complete_finalization_job(
@@ -1623,28 +1893,31 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         if job.stage == DRAFT_FINALIZATION_COMPLETE_STAGE {
             return Ok(());
         }
-        if job.stage != DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE {
+        if job.stage != cama_db::draft_finalization::DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
             return Err(DraftPersistenceError::Conflict {
                 guild_id,
                 reason: format!(
-                    "Draft finalization job is at unexpected stage {}",
+                    "Draft finalization job must be published before terminal completion; found {}",
                     job.stage
                 ),
             });
         }
-        let lease_owner = format!("draft-live:{guild_id}:{session_id}");
+        let lease_owner = draft_finalization_process_owner(guild_id, session_id);
         let lease_until = now
             .checked_add(60)
             .ok_or_else(|| DraftPersistenceError::Conflict {
                 guild_id,
                 reason: "Draft finalization lease deadline overflowed".to_owned(),
             })?;
-        let claimed = self.finalization.claim_job_lease(
+        let claimed = self.finalization.claim_job_lease_for_identity(
             &job.completion_key,
             job.revision,
             &lease_owner,
             now,
             lease_until,
+            guild_id,
+            session_id,
+            pending_match_id,
         )?;
         let completed = self.finalization.complete_job_and_delete_draft(
             &job.completion_key,
@@ -1655,7 +1928,7 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
             session_id,
             pending_match_id,
             expected_draft_revision,
-            DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+            job.stage.as_str(),
         )?;
         if completed.guild_id != guild_id
             || completed.session_id != session_id
@@ -4394,6 +4667,28 @@ mod tests {
             )
             .expect("run frozen financial setup");
         assert!(!setup.replayed);
+        let setup_job = persistence
+            .finalization_job(TEST_GUILD_ID, created.session_id, linked.pending_match_id)
+            .expect("load setup-complete job")
+            .expect("setup-complete job");
+        let owner = draft_finalization_process_owner(TEST_GUILD_ID, created.session_id);
+        let published = persistence
+            .advance_finalization_job(
+                TEST_GUILD_ID,
+                created.session_id,
+                linked.pending_match_id,
+                setup_job.revision,
+                DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                &owner,
+                1_700_000_101,
+            )
+            .expect("advance publication stage");
+        assert_eq!(
+            published.stage,
+            DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE
+        );
         persistence
             .complete_finalization_job(
                 TEST_GUILD_ID,
@@ -4402,7 +4697,7 @@ mod tests {
                 linked.envelope.revision,
                 1_700_000_101,
             )
-            .expect("complete setup-complete finalization");
+            .expect("complete published finalization");
         assert!(
             persistence
                 .load_all()

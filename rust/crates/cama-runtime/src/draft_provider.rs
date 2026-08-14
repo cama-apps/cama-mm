@@ -17,11 +17,13 @@ use cama_app::betting_service::{
     AutomaticSpectatorConfig, WealthSnapshot, plan_automatic_spectator_bets,
 };
 use cama_app::draft::{
+    DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE, DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
     DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed,
-    DraftEmbedField, DraftFinalizationPlan, DraftFinalizationPlanSeed, DraftFinancialSetupPolicy,
-    DraftFinancialSetupStage, DraftPhase, DraftState, DraftStateEnvelope, DraftStateManager,
-    DraftStatePersistencePort, LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS,
-    PlayerPoolEntry, SqliteDraftStatePersistence,
+    DraftEmbedField, DraftFinalizationJobSnapshot, DraftFinalizationPlan,
+    DraftFinalizationPlanSeed, DraftFinancialSetupPolicy, DraftFinancialSetupStage, DraftPhase,
+    DraftState, DraftStateEnvelope, DraftStateManager, DraftStatePersistencePort,
+    LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS, PlayerPoolEntry,
+    SqliteDraftStatePersistence, draft_finalization_process_owner,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::autobet_investments::AutobetInvestmentRepository;
@@ -43,6 +45,9 @@ use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordMessageReceipt, DiscordTransport};
+use crate::gateway_events::{
+    GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
+};
 use crate::lobby_provider::{MatchLobbyPort, MatchLobbySnapshot};
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
@@ -58,6 +63,7 @@ const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAFT_COMPONENT_PREFIX: &str = "draft";
 const COMPLETION_ERROR_WITHOUT_MATCH: &str = "⚠️ Draft complete but encountered an error during match setup. Use `/draft start` to try again.";
+const DRAFT_FINALIZATION_LEASE_SECONDS: i64 = 120;
 
 fn same_database_path(left: &Path, right: &Path) -> bool {
     left == right
@@ -87,6 +93,17 @@ pub enum DraftProviderBuildError {
 #[async_trait]
 pub trait DraftReminderScheduler: Send + Sync {
     async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String>;
+
+    /// Rebuild durable timer state after a restart without replaying the
+    /// immediate subscriber notification that belongs to the original
+    /// publication attempt.  Adapters that cannot separate those effects
+    /// retain the source-compatible behavior as a conservative fallback.
+    async fn schedule_betting_reminders_recovery(
+        &self,
+        pending: PendingMatchRecord,
+    ) -> Result<(), String> {
+        self.schedule_betting_reminders(pending).await
+    }
 }
 
 struct NoopDraftReminderScheduler;
@@ -102,6 +119,13 @@ impl DraftReminderScheduler for NoopDraftReminderScheduler {
 impl DraftReminderScheduler for MatchRegistrationProvider {
     async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String> {
         self.schedule_draft_betting_reminders(pending)
+    }
+
+    async fn schedule_betting_reminders_recovery(
+        &self,
+        pending: PendingMatchRecord,
+    ) -> Result<(), String> {
+        self.schedule_draft_betting_reminders_recovery(pending)
     }
 }
 
@@ -209,6 +233,7 @@ struct CompletionMessageContext<'a> {
     pending_match_id: i64,
     state: &'a DraftState,
     published: &'a [(u64, DiscordMessageReceipt)],
+    thread_receipt: Option<&'a DiscordMessageReceipt>,
     lobby_channel_id: Option<u64>,
     origin_channel_id: Option<u64>,
     draft_receipt: Option<&'a DiscordMessageReceipt>,
@@ -312,6 +337,7 @@ impl DraftRegistrationProvider {
         }
         let handler = Arc::new(DraftHandler {
             config: DraftConfig::from_application(config),
+            database_path: path.clone(),
             players: PlayerRepository::new(&path),
             pending: PendingMatchRepository::new(&path),
             seeds: DotaBetSeedRepository::new(&path),
@@ -331,6 +357,54 @@ impl DraftRegistrationProvider {
             draft_operation_locks: Arc::new(Mutex::new(BTreeMap::new())),
         });
         Ok(Self { handler })
+    }
+
+    /// Attach the canonical SQLite persistence adapter to a provider that was
+    /// composed with the source-compatible constructor.  Keeping this as a
+    /// consuming step lets older tests and embedders retain `persistence=None`
+    /// while production can make the durable boundary explicit at composition.
+    pub fn with_sqlite_persistence(
+        self,
+        persistence_database_path: impl AsRef<Path>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        let persistence_database_path = persistence_database_path.as_ref();
+        if !same_database_path(&self.handler.database_path, persistence_database_path) {
+            return Err(DraftProviderBuildError::Database(
+                "draft persistence and pending matches must share one SQLite database".to_owned(),
+            ));
+        }
+        self.with_persistence(Arc::new(SqliteDraftStatePersistence::new(
+            persistence_database_path,
+        )))
+    }
+
+    /// Attach an already-constructed durable persistence port.  Production
+    /// composition uses this to make the canonical SQLite path visible at
+    /// the process boundary; tests may inject an in-memory/failing adapter.
+    pub fn with_persistence(
+        self,
+        persistence: Arc<dyn DraftStatePersistencePort>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        let mut handler = Arc::try_unwrap(self.handler).map_err(|_| {
+            DraftProviderBuildError::Database(
+                "draft persistence must be attached before the provider is cloned".to_owned(),
+            )
+        })?;
+        handler.persistence = Some(persistence);
+        Ok(Self {
+            handler: Arc::new(handler),
+        })
+    }
+
+    /// Register the Draft READY/resume recovery observer.  Serenity attaches
+    /// its HTTP/cache context before invoking this observer, so hydration can
+    /// safely repaint durable component views and restore their timeout owner.
+    #[must_use]
+    pub fn gateway_observer(&self) -> Arc<dyn GatewayEventObserver> {
+        Arc::new(DraftGatewayObserver {
+            provider: self.clone(),
+            ready_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     /// Build a provider with SQLite-backed draft persistence and the default
@@ -377,6 +451,53 @@ impl DraftRegistrationProvider {
         self.handler
             .resume_finalizing_financial_setup(guild_id)
             .await
+    }
+
+    /// Reconcile every durable finalization row after a process restart.
+    /// Financial effects are resumed from their immutable job stage, Discord
+    /// deliveries use the plan's deterministic nonce, and the final envelope
+    /// deletion is a leased revision/stage CAS.
+    pub async fn recover_finalizing(&self) -> Result<usize, String> {
+        let Some(persistence) = self.handler.persistence.clone() else {
+            return Ok(0);
+        };
+        let envelopes = spawn_blocking(move || persistence.load_all())
+            .await
+            .map_err(|error| format!("draft finalization load task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        let mut recovered = 0usize;
+        let mut failures = Vec::new();
+        for envelope in envelopes {
+            if !envelope.finalizing && envelope.pending_match_id.is_none() {
+                continue;
+            }
+            let guild_id = envelope.guild_id;
+            let session_id = envelope.session_id;
+            let kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
+            let draft_operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
+            let _draft_operation_guard = draft_operation_lock.lock().await;
+            let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, kind);
+            let _lobby_operation_guard = lobby_operation_lock.lock().await;
+            let result = if envelope.finalizing && envelope.pending_match_id.is_none() {
+                self.handler
+                    .recover_unlinked_finalization_envelope(envelope, &draft_operation_lock)
+                    .await
+            } else {
+                self.handler.recover_finalizing_envelope(envelope).await
+            };
+            match result {
+                Ok(()) => recovered = recovered.saturating_add(1),
+                Err(error) => failures.push(format!("guild {guild_id}: {error}")),
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "Draft finalization recovery failed for {} row(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
+        }
+        Ok(recovered)
     }
 
     /// Hydrate active, non-finalizing drafts from the configured persistence
@@ -457,6 +578,19 @@ impl DraftRegistrationProvider {
                     session_id,
                     &operation_lock,
                 );
+                if live_same_session && (envelope.finalizing || envelope.pending_match_id.is_some())
+                {
+                    // A same-process completion may still own the live
+                    // Draft while READY fires. Leave that state intact; the
+                    // READY observer invokes the durable recovery worker
+                    // immediately after hydration and its terminal CAS owns
+                    // the eventual local cleanup.
+                    warn!(
+                        guild_id,
+                        session_id, "live finalizing Draft retained for READY recovery"
+                    );
+                    continue;
+                }
                 if live_same_session {
                     return Err(format!(
                         "live draft session {session_id} now requires finalization recovery"
@@ -631,6 +765,7 @@ impl DraftConfig {
 
 struct DraftHandler {
     config: DraftConfig,
+    database_path: std::path::PathBuf,
     players: PlayerRepository,
     pending: PendingMatchRepository,
     seeds: DotaBetSeedRepository,
@@ -654,6 +789,50 @@ struct DraftHandler {
 struct LinkedDraftFinalization {
     pending: PendingMatchRecord,
     plan: DraftFinalizationPlan,
+}
+
+struct DraftGatewayObserver {
+    provider: DraftRegistrationProvider,
+    ready_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[async_trait]
+impl GatewayEventObserver for DraftGatewayObserver {
+    fn name(&self) -> &'static str {
+        "draft-state-recovery"
+    }
+
+    async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+        let _ready_guard = self.ready_lock.lock().await;
+        let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
+        match self.provider.hydrate().await {
+            Ok(_restored) => {
+                if let Err(error) = self.provider.recover_finalizing().await {
+                    for guild_id in context.guild_ids() {
+                        report.failures.push(ReadyRecoveryFailure {
+                            guild_id: *guild_id,
+                            message: error.clone(),
+                        });
+                    }
+                    return report;
+                }
+                // Hydration loads the single canonical database and filters
+                // rows by their guild IDs internally.  A successful pass is
+                // therefore a successful recovery attempt for every guild in
+                // this gateway snapshot, even when a guild has no draft row.
+                report.guilds_refreshed = context.guild_ids().len();
+            }
+            Err(error) => {
+                for guild_id in context.guild_ids() {
+                    report.failures.push(ReadyRecoveryFailure {
+                        guild_id: *guild_id,
+                        message: error.clone(),
+                    });
+                }
+            }
+        }
+        report
+    }
 }
 
 #[async_trait]
@@ -1168,8 +1347,26 @@ impl DraftHandler {
             if plan.schema_version != cama_app::draft::DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
                 return Err("linked Draft finalization plan is not schema v2".to_owned());
             }
-            plan.validate(&pending_payload_json)
-                .map_err(|error| error.to_string())?;
+            let guild_id = state.guild_id;
+            let session_id = state.session_id;
+            let stage_loader = Arc::clone(&persistence);
+            let stage = spawn_blocking(move || {
+                stage_loader.finalizing_financial_setup_stage(
+                    guild_id,
+                    session_id,
+                    pending_match_id,
+                )
+            })
+            .await
+            .map_err(|error| format!("draft finalization stage load task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+            if stage == DraftFinancialSetupStage::Linked {
+                // The plan hash is immutable at the link boundary.  The
+                // financial executor deliberately mutates the pending row,
+                // so a retry after setup must validate only identity below.
+                plan.validate(&pending_payload_json)
+                    .map_err(|error| error.to_string())?;
+            }
             if plan
                 .financial_setup
                 .as_ref()
@@ -1402,6 +1599,801 @@ impl DraftHandler {
             .pending_match(guild_id, pending_match_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("linked pending match {pending_match_id} disappeared"))
+    }
+
+    async fn recover_finalizing_envelope(
+        &self,
+        envelope: DraftStateEnvelope,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = envelope.guild_id;
+        let session_id = envelope.session_id;
+        let pending_match_id = envelope
+            .pending_match_id
+            .filter(|_| envelope.finalizing)
+            .ok_or_else(|| {
+                format!(
+                    "draft guild {guild_id} has recovery metadata without a finalizing pending match"
+                )
+            })?;
+        let pending_payload_loader = Arc::clone(&persistence);
+        let pending_payload_json = spawn_blocking(move || {
+            pending_payload_loader.linked_pending_payload(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft recovery pending-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let plan_loader = Arc::clone(&persistence);
+        let plan_json = spawn_blocking(move || {
+            plan_loader.linked_finalization_plan(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft recovery plan-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let plan = DraftFinalizationPlan::from_json(&plan_json)
+            .map_err(|error| format!("Draft recovery plan is invalid: {error}"))?;
+        if plan.schema_version != cama_app::draft::DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+            return Err("linked Draft finalization plan is not schema v2".to_owned());
+        }
+        if plan
+            .financial_setup
+            .as_ref()
+            .map(|financial| financial.pending_match_id)
+            != Some(pending_match_id)
+        {
+            return Err("linked Draft financial plan names another pending match".to_owned());
+        }
+        let state = envelope.state.clone().into_state();
+        let job_loader = Arc::clone(&persistence);
+        let mut job = spawn_blocking(move || {
+            job_loader.finalization_job(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft recovery job-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "linked Draft finalization job is missing".to_owned())?;
+        if job.stage == cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE {
+            return Err("linked Draft envelope still exists beside a terminal job".to_owned());
+        }
+
+        if job.stage == cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE {
+            // The immutable plan hashes the payload at the link boundary.
+            // Financial setup intentionally mutates that pending row, so a
+            // post-setup restart must validate identity/stage without
+            // comparing the evolved payload to the original hash again.
+            plan.validate(&pending_payload_json)
+                .map_err(|error| format!("Draft recovery pending payload is invalid: {error}"))?;
+            self.run_persisted_financial_setup(&state, pending_match_id)
+                .await?;
+            let job_loader = Arc::clone(&persistence);
+            job = spawn_blocking(move || {
+                job_loader.finalization_job(guild_id, session_id, pending_match_id)
+            })
+            .await
+            .map_err(|error| format!("Draft recovery setup reload task failed: {error}"))?
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Draft finalization job disappeared after financial setup".to_owned())?;
+        }
+        if !matches!(
+            job.stage.as_str(),
+            cama_app::draft::DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE
+                | DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE
+        ) {
+            return Err(format!(
+                "Draft finalization job is at unexpected recovery stage {}",
+                job.stage
+            ));
+        }
+
+        let owner = draft_finalization_process_owner(guild_id, session_id);
+        let now = unix_now();
+        if job.lease_owner.as_deref() != Some(owner.as_str())
+            || job.lease_until.is_none_or(|until| until <= now)
+        {
+            let claim_persistence = Arc::clone(&persistence);
+            let claim_owner = owner.clone();
+            let lease_until = now
+                .checked_add(DRAFT_FINALIZATION_LEASE_SECONDS)
+                .ok_or_else(|| "Draft finalization recovery lease overflowed".to_owned())?;
+            job = spawn_blocking(move || {
+                claim_persistence.claim_finalization_job(
+                    guild_id,
+                    session_id,
+                    pending_match_id,
+                    job.revision,
+                    &claim_owner,
+                    now,
+                    lease_until,
+                )
+            })
+            .await
+            .map_err(|error| format!("Draft recovery lease task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        }
+
+        let pending = self
+            .pending
+            .pending_match(guild_id, pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("linked pending match {pending_match_id} disappeared"))?;
+        self.reconcile_finalizing_lobby(&state).await;
+        if job.stage == DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
+            self.schedule_persisted_betting_reminders(&mut job, &owner, pending.clone(), true)
+                .await?;
+            self.complete_recovered_finalization(&state, pending_match_id, envelope.revision)
+                .await?;
+            return Ok(());
+        }
+
+        let embed = completion_embed(&state, &pending);
+        let source_receipt = self
+            .reconcile_source_delivery(&mut job, &owner, &plan, &state, &embed)
+            .await?;
+        let lobby_receipt = self
+            .reconcile_channel_delivery(
+                &mut job,
+                &owner,
+                &plan.lobby,
+                &embed,
+                "lobby",
+                plan.started_at,
+            )
+            .await?;
+        let origin_receipt = self
+            .reconcile_channel_delivery(
+                &mut job,
+                &owner,
+                &plan.origin,
+                &embed,
+                "origin",
+                plan.started_at,
+            )
+            .await?;
+        let (thread_embed_receipt, thread_ping_receipt) = self
+            .reconcile_thread_deliveries(&mut job, &owner, &plan, &state, &embed)
+            .await?;
+
+        let mut published = Vec::new();
+        if let Some(receipt) = lobby_receipt.as_ref() {
+            published.push((receipt.channel_id, receipt.clone()));
+        }
+        if let Some(receipt) = origin_receipt.as_ref() {
+            published.push((receipt.channel_id, receipt.clone()));
+        }
+        self.store_completion_message_info(CompletionMessageContext {
+            guild_id,
+            pending_match_id,
+            state: &state,
+            published: &published,
+            thread_receipt: thread_embed_receipt.as_ref(),
+            lobby_channel_id: plan.lobby.channel_id.and_then(|id| u64::try_from(id).ok()),
+            origin_channel_id: plan.origin.channel_id.and_then(|id| u64::try_from(id).ok()),
+            draft_receipt: source_receipt.as_ref(),
+        })?;
+        let _ = thread_ping_receipt;
+        self.schedule_persisted_betting_reminders(&mut job, &owner, pending.clone(), true)
+            .await?;
+        let completion_persistence = Arc::clone(&persistence);
+        let completed_job = spawn_blocking(move || {
+            completion_persistence.advance_finalization_job(
+                guild_id,
+                session_id,
+                pending_match_id,
+                job.revision,
+                &job.stage,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                &json!({"publication": {"completed_at": unix_now()}}).to_string(),
+                &owner,
+                unix_now(),
+            )
+        })
+        .await
+        .map_err(|error| format!("Draft publication stage task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if completed_job.stage != DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
+            return Err("Draft publication stage CAS returned the wrong stage".to_owned());
+        }
+        self.complete_recovered_finalization(&state, pending_match_id, envelope.revision)
+            .await
+    }
+
+    /// A final-pick callback can persist the Complete fence before its
+    /// interaction defer succeeds, leaving no pending-match identity.  The
+    /// exact durable player/captain state is sufficient to remove that final
+    /// pick and safely reopen the interactive draft; this avoids a permanent
+    /// manual-only recovery window without inventing financial timestamps.
+    async fn recover_unlinked_finalization_envelope(
+        &self,
+        envelope: DraftStateEnvelope,
+        operation_lock: &Arc<tokio::sync::Mutex<()>>,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = envelope.guild_id;
+        let session_id = envelope.session_id;
+        let restored = rollback_final_pick_state(envelope.state.as_state())?;
+        let mut requested = envelope.clone();
+        requested.active = true;
+        requested.finalizing = false;
+        requested.pending_match_id = None;
+        requested.deadline_at = Some(
+            unix_now()
+                .checked_add(DRAFTING_TIMEOUT_SECONDS as i64)
+                .ok_or_else(|| "Draft recovery deadline overflowed".to_owned())?,
+        );
+        requested.state = restored.to_snapshot();
+        let expected_revision = envelope.revision;
+        let returned = spawn_blocking(move || {
+            persistence.replace_envelope_if_revision(
+                guild_id,
+                session_id,
+                expected_revision,
+                &requested,
+            )
+        })
+        .await
+        .map_err(|error| format!("Draft unlinked-fence rollback task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let key = (guild_id, session_id);
+        if let Some(handle) = self.drafts.get_state(Some(guild_id)) {
+            if lock_state(&handle).session_id == session_id {
+                *lock_state(&handle) = restored.clone();
+            } else {
+                self.reserve_and_restore_hydrated_state(&restored, operation_lock)?;
+            }
+        } else {
+            self.reserve_and_restore_hydrated_state(&restored, operation_lock)?;
+        }
+        lock_recover(&self.persisted_envelopes).insert(key, returned);
+        self.restore_hydrated_receipt(&restored);
+        if let Err(error) = self.republish_hydrated_view(&restored).await {
+            warn!(%error, guild_id, session_id, "reopened Draft view repaint failed after final-pick rollback");
+        }
+        self.schedule_timeout(guild_id, session_id, DRAFTING_TIMEOUT_SECONDS);
+        Ok(())
+    }
+
+    async fn reconcile_finalizing_lobby(&self, state: &DraftState) {
+        let kind = to_runtime_kind(state.lobby_kind);
+        let matched = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if let Err(error) = self
+            .lobbies
+            .evict_from_other_lobby(state.guild_id, kind, &matched)
+            .await
+        {
+            warn!(%error, guild_id = state.guild_id, "Draft recovery sibling-lobby eviction failed");
+        }
+        if let Err(error) = self.lobbies.reset_after_shuffle(state.guild_id, kind).await {
+            warn!(%error, guild_id = state.guild_id, "Draft recovery lobby reset failed");
+        }
+        self.lobbies.release_players(
+            state.guild_id,
+            kind,
+            &state.player_pool_ids.iter().copied().collect(),
+        );
+    }
+
+    /// Publish a persistence-backed completion through the durable receipt
+    /// ledger. Normal command completion uses this same path as READY
+    /// recovery, so a failed lobby/origin/thread operation is returned to the
+    /// caller and the terminal Draft CAS remains retryable.
+    async fn publish_persisted_completion(
+        &self,
+        state: &DraftState,
+        pending: &PendingMatchRecord,
+        plan: &DraftFinalizationPlan,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        let pending_match_id = pending.pending_match_id;
+        let job_loader = Arc::clone(&persistence);
+        let mut job = spawn_blocking(move || {
+            job_loader.finalization_job(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft publication job-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Draft finalization publication job is missing".to_owned())?;
+        if job.stage == DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
+            return Ok(());
+        }
+        if job.stage != DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE {
+            return Err(format!(
+                "Draft finalization publication started at unexpected stage {}",
+                job.stage
+            ));
+        }
+        let owner = draft_finalization_process_owner(guild_id, session_id);
+        let now = unix_now();
+        if job.lease_owner.as_deref() != Some(owner.as_str())
+            || job.lease_until.is_none_or(|until| until <= now)
+        {
+            let claim_persistence = Arc::clone(&persistence);
+            let claim_owner = owner.clone();
+            let lease_until = now
+                .checked_add(DRAFT_FINALIZATION_LEASE_SECONDS)
+                .ok_or_else(|| "Draft publication lease overflowed".to_owned())?;
+            job = spawn_blocking(move || {
+                claim_persistence.claim_finalization_job(
+                    guild_id,
+                    session_id,
+                    pending_match_id,
+                    job.revision,
+                    &claim_owner,
+                    now,
+                    lease_until,
+                )
+            })
+            .await
+            .map_err(|error| format!("Draft publication lease task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        }
+        let embed = completion_embed(state, pending);
+        let source_receipt = self
+            .reconcile_source_delivery(&mut job, &owner, plan, state, &embed)
+            .await?;
+        let lobby_receipt = self
+            .reconcile_channel_delivery(
+                &mut job,
+                &owner,
+                &plan.lobby,
+                &embed,
+                "lobby",
+                plan.started_at,
+            )
+            .await?;
+        let origin_receipt = self
+            .reconcile_channel_delivery(
+                &mut job,
+                &owner,
+                &plan.origin,
+                &embed,
+                "origin",
+                plan.started_at,
+            )
+            .await?;
+        let (thread_embed_receipt, _thread_ping_receipt) = self
+            .reconcile_thread_deliveries(&mut job, &owner, plan, state, &embed)
+            .await?;
+        let published = lobby_receipt
+            .into_iter()
+            .chain(origin_receipt)
+            .map(|receipt| (receipt.channel_id, receipt))
+            .collect::<Vec<_>>();
+        self.store_completion_message_info(CompletionMessageContext {
+            guild_id,
+            pending_match_id,
+            state,
+            published: &published,
+            thread_receipt: thread_embed_receipt.as_ref(),
+            lobby_channel_id: plan.lobby.channel_id.and_then(|id| u64::try_from(id).ok()),
+            origin_channel_id: plan.origin.channel_id.and_then(|id| u64::try_from(id).ok()),
+            draft_receipt: source_receipt.as_ref(),
+        })?;
+        self.schedule_persisted_betting_reminders(&mut job, &owner, pending.clone(), false)
+            .await?;
+        let completion_persistence = Arc::clone(&persistence);
+        let completed_job = spawn_blocking(move || {
+            completion_persistence.advance_finalization_job(
+                guild_id,
+                session_id,
+                pending_match_id,
+                job.revision,
+                &job.stage,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                &json!({"publication": {"completed_at": unix_now()}}).to_string(),
+                &owner,
+                unix_now(),
+            )
+        })
+        .await
+        .map_err(|error| format!("Draft publication stage task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if completed_job.stage != DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
+            return Err("Draft publication stage CAS returned the wrong stage".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn schedule_persisted_betting_reminders(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        pending: PendingMatchRecord,
+        recovery: bool,
+    ) -> Result<(), String> {
+        let progress: Value = serde_json::from_str(&job.progress_json)
+            .map_err(|error| format!("Draft reminder progress is invalid: {error}"))?;
+        let reminder_marker = progress
+            .get("reminders")
+            .and_then(Value::as_object)
+            .and_then(|reminders| reminders.get("scheduled"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if recovery {
+            self.reminders
+                .schedule_betting_reminders_recovery(pending)
+                .await
+                .map_err(|error| {
+                    format!("Draft recovery betting reminder scheduling failed: {error}")
+                })?;
+            if reminder_marker {
+                return Ok(());
+            }
+            self.persist_progress(job, owner, &json!({"reminders": {"scheduled": true}}))
+                .await?;
+            return Ok(());
+        }
+        if reminder_marker {
+            return Ok(());
+        }
+        {
+            self.reminders
+                .schedule_betting_reminders(pending)
+                .await
+                .map_err(|error| format!("Draft betting reminder scheduling failed: {error}"))?;
+        }
+        self.persist_progress(job, owner, &json!({"reminders": {"scheduled": true}}))
+            .await
+    }
+
+    async fn complete_recovered_finalization(
+        &self,
+        state: &DraftState,
+        pending_match_id: i64,
+        expected_draft_revision: u64,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        spawn_blocking(move || {
+            persistence.complete_finalization_job(
+                guild_id,
+                session_id,
+                pending_match_id,
+                expected_draft_revision,
+                unix_now(),
+            )
+        })
+        .await
+        .map_err(|error| format!("Draft recovery terminal task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if let Some(handle) = self.drafts.get_state(Some(guild_id)) {
+            let live_state = lock_state(&handle).clone();
+            if live_state.session_id == session_id {
+                self.finish_draft_without_match(&handle, &live_state);
+            }
+        }
+        lock_recover(&self.draft_messages).remove(&(guild_id, session_id));
+        self.cancel_timeout(guild_id);
+        self.remove_draft_operation_lock(guild_id, session_id);
+        lock_recover(&self.persisted_envelopes).remove(&(guild_id, session_id));
+        Ok(())
+    }
+
+    async fn reconcile_source_delivery(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        plan: &DraftFinalizationPlan,
+        state: &DraftState,
+        embed: &InteractionEmbed,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if let Some(delivery) = persisted_delivery(&job.progress_json, "source") {
+            return Ok(delivery);
+        }
+        let receipt = match (
+            plan.source.channel_id.and_then(|id| u64::try_from(id).ok()),
+            plan.source.message_id.and_then(|id| u64::try_from(id).ok()),
+        ) {
+            (Some(channel_id), Some(message_id)) => {
+                self.discord
+                    .fetch_message(channel_id, message_id)
+                    .await?
+                    .ok_or_else(|| {
+                        format!(
+                            "Discord source message {channel_id}/{message_id} disappeared before recovery"
+                        )
+                    })?;
+                self.discord
+                    .edit_message(
+                        channel_id,
+                        message_id,
+                        DiscordMessage::default_mentions(
+                            InteractionResponse::message("").embed(embed.clone()),
+                        ),
+                    )
+                    .await?;
+                Some(DiscordMessageReceipt {
+                    channel_id,
+                    message_id,
+                    jump_url: discord_jump_url(state.guild_id, channel_id, message_id),
+                })
+            }
+            _ => None,
+        };
+        self.persist_delivery(job, owner, "source", receipt.clone())
+            .await?;
+        Ok(receipt)
+    }
+
+    async fn reconcile_channel_delivery(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        delivery: &cama_app::draft::DraftFinalizationDeliveryPlan,
+        embed: &InteractionEmbed,
+        name: &str,
+        after_unix_seconds: i64,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if let Some(receipt) = persisted_delivery(&job.progress_json, name) {
+            return Ok(receipt);
+        }
+        let Some(channel_id) = delivery.channel_id.and_then(|id| u64::try_from(id).ok()) else {
+            self.persist_delivery(job, owner, name, None).await?;
+            return Ok(None);
+        };
+        let message =
+            DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed.clone()));
+        let receipt = if let Some(message_id) =
+            delivery.message_id.and_then(|id| u64::try_from(id).ok())
+        {
+            self.discord
+                .fetch_message(channel_id, message_id)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "Discord {name} message {channel_id}/{message_id} disappeared before recovery"
+                    )
+                })?;
+            self.discord
+                .edit_message(channel_id, message_id, message)
+                .await?;
+            DiscordMessageReceipt {
+                channel_id,
+                message_id,
+                jump_url: discord_jump_url(0, channel_id, message_id),
+            }
+        } else if let Some(receipt) = self
+            .discord
+            .find_message_by_delivery_key(
+                channel_id,
+                &delivery.delivery_key,
+                after_unix_seconds,
+                500,
+            )
+            .await?
+        {
+            receipt
+        } else {
+            match self
+                .discord
+                .send_message_with_delivery_key(channel_id, &delivery.delivery_key, message)
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(send_error) => self
+                    .discord
+                    .find_message_by_delivery_key(
+                        channel_id,
+                        &delivery.delivery_key,
+                        after_unix_seconds,
+                        500,
+                    )
+                    .await?
+                    .ok_or(send_error)?,
+            }
+        };
+        self.persist_delivery(job, owner, name, Some(receipt.clone()))
+            .await?;
+        Ok(Some(receipt))
+    }
+
+    async fn reconcile_thread_deliveries(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        plan: &DraftFinalizationPlan,
+        state: &DraftState,
+        embed: &InteractionEmbed,
+    ) -> Result<(Option<DiscordMessageReceipt>, Option<DiscordMessageReceipt>), String> {
+        let Some(thread_id) = plan
+            .thread_embed
+            .channel_id
+            .and_then(|id| u64::try_from(id).ok())
+        else {
+            self.persist_delivery(job, owner, "thread-embed", None)
+                .await?;
+            self.persist_delivery(job, owner, "thread-ping", None)
+                .await?;
+            return Ok((None, None));
+        };
+        let name = format!(
+            "🔒 {} Draft Complete - Awaiting Results",
+            to_runtime_kind(state.lobby_kind).label()
+        );
+        self.discord
+            .edit_thread(thread_id, &name, false, false)
+            .await?;
+        let embed_receipt = self
+            .reconcile_channel_delivery(
+                job,
+                owner,
+                &plan.thread_embed,
+                embed,
+                "thread-embed",
+                plan.started_at,
+            )
+            .await?;
+        let mentions = state
+            .radiant_player_ids
+            .iter()
+            .chain(&state.dire_player_ids)
+            .copied()
+            .filter(|id| *id > 0)
+            .filter_map(|id| u64::try_from(id).ok())
+            .collect::<Vec<_>>();
+        let content = mentions
+            .iter()
+            .map(|id| format!("<@{id}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ping_receipt = if content.is_empty() {
+            self.persist_delivery(job, owner, "thread-ping", None)
+                .await?;
+            None
+        } else {
+            if let Some(receipt) = persisted_delivery(&job.progress_json, "thread-ping") {
+                receipt
+            } else {
+                let message = DiscordMessage::mentioning(
+                    InteractionResponse::message(format!(
+                        "{content}\nPlayers, please take your starting positions!"
+                    )),
+                    mentions.iter().copied().collect(),
+                );
+                let receipt = if let Some(message_id) = plan
+                    .thread_ping
+                    .message_id
+                    .and_then(|id| u64::try_from(id).ok())
+                {
+                    self.discord
+                    .fetch_message(thread_id, message_id)
+                    .await?
+                    .ok_or_else(|| {
+                        format!(
+                            "Discord thread-ping message {thread_id}/{message_id} disappeared before recovery"
+                        )
+                    })?;
+                    self.discord
+                        .edit_message(thread_id, message_id, message)
+                        .await?;
+                    DiscordMessageReceipt {
+                        channel_id: thread_id,
+                        message_id,
+                        jump_url: discord_jump_url(0, thread_id, message_id),
+                    }
+                } else if let Some(receipt) = self
+                    .discord
+                    .find_message_by_delivery_key(
+                        thread_id,
+                        &plan.thread_ping.delivery_key,
+                        plan.started_at,
+                        500,
+                    )
+                    .await?
+                {
+                    receipt
+                } else {
+                    match self
+                        .discord
+                        .send_message_with_delivery_key(
+                            thread_id,
+                            &plan.thread_ping.delivery_key,
+                            message,
+                        )
+                        .await
+                    {
+                        Ok(receipt) => receipt,
+                        Err(send_error) => self
+                            .discord
+                            .find_message_by_delivery_key(
+                                thread_id,
+                                &plan.thread_ping.delivery_key,
+                                plan.started_at,
+                                500,
+                            )
+                            .await?
+                            .ok_or(send_error)?,
+                    }
+                };
+                self.persist_delivery(job, owner, "thread-ping", Some(receipt.clone()))
+                    .await?;
+                Some(receipt)
+            }
+        };
+        self.discord
+            .edit_thread(thread_id, &name, false, true)
+            .await?;
+        Ok((embed_receipt, ping_receipt))
+    }
+
+    async fn persist_delivery(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        name: &str,
+        receipt: Option<DiscordMessageReceipt>,
+    ) -> Result<(), String> {
+        let patch = if let Some(receipt) = receipt {
+            json!({
+                "deliveries": {
+                    name: {
+                        "channel_id": receipt.channel_id,
+                        "message_id": receipt.message_id,
+                        "jump_url": receipt.jump_url,
+                    }
+                }
+            })
+        } else {
+            json!({"deliveries": {name: {"skipped": true}}})
+        };
+        self.persist_progress(job, owner, &patch).await
+    }
+
+    async fn persist_progress(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        patch: &Value,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = job.guild_id;
+        let session_id = job.session_id;
+        let pending_match_id = job.pending_match_id;
+        let expected_revision = job.revision;
+        let expected_stage = job.stage.clone();
+        let owner = owner.to_owned();
+        let now = unix_now();
+        let patch_json = patch.to_string();
+        let advanced = spawn_blocking(move || {
+            persistence.advance_finalization_job(
+                guild_id,
+                session_id,
+                pending_match_id,
+                expected_revision,
+                &expected_stage,
+                &expected_stage,
+                &patch_json,
+                &owner,
+                now,
+            )
+        })
+        .await
+        .map_err(|error| format!("Draft delivery progress task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        *job = advanced;
+        Ok(())
     }
 
     async fn send_neon_followup(
@@ -2639,6 +3631,7 @@ impl DraftHandler {
             warn!(%error, guild_id, session_id = state.session_id, "draft finalization fence failed before pending match creation");
             return completion_response(&responder, None, error, deferred).await;
         }
+        let mut finalization_plan = None;
         let (pending, effective_is_bomb_pot) = if self.persistence.is_some() {
             let linked = match self
                 .link_finalizing_pending_match(
@@ -2659,6 +3652,7 @@ impl DraftHandler {
                 }
             };
             let pending_match_id = linked.pending.pending_match_id;
+            finalization_plan = Some(linked.plan.clone());
             if let Err(error) = self
                 .run_persisted_financial_setup(&state, pending_match_id)
                 .await
@@ -2821,6 +3815,18 @@ impl DraftHandler {
             )
             .await;
         }
+        if let Some(plan) = finalization_plan.as_ref() {
+            self.publish_persisted_completion(&state, &pending, plan)
+                .await?;
+            // The refresh helper acquires both lobby operation locks itself.
+            // Do not hold the source-scope guard while calling it or a
+            // successful completion deadlocks on the same open-lobby mutex.
+            drop(_operation_guard);
+            let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
+            self.complete_persisted_finalization(&state, pending.pending_match_id)
+                .await?;
+            return Ok(());
+        }
         let destinations = [
             snapshot
                 .as_ref()
@@ -2839,9 +3845,25 @@ impl DraftHandler {
         if let [first, second] = destinations.as_slice() {
             // Python publishes distinct lobby/origin copies with one gather,
             // so a slow or failed channel cannot serialize the other copy.
+            let first_key = finalization_plan.as_ref().and_then(|plan| {
+                (plan.lobby.channel_id == i64::try_from(*first).ok())
+                    .then_some(plan.lobby.delivery_key.as_str())
+                    .or_else(|| {
+                        (plan.origin.channel_id == i64::try_from(*first).ok())
+                            .then_some(plan.origin.delivery_key.as_str())
+                    })
+            });
+            let second_key = finalization_plan.as_ref().and_then(|plan| {
+                (plan.lobby.channel_id == i64::try_from(*second).ok())
+                    .then_some(plan.lobby.delivery_key.as_str())
+                    .or_else(|| {
+                        (plan.origin.channel_id == i64::try_from(*second).ok())
+                            .then_some(plan.origin.delivery_key.as_str())
+                    })
+            });
             let (first_result, second_result) = tokio::join!(
-                self.send_completion_copy(*first, embed.clone()),
-                self.send_completion_copy(*second, embed.clone()),
+                self.send_completion_copy(*first, embed.clone(), first_key),
+                self.send_completion_copy(*second, embed.clone(), second_key),
             );
             if let Ok(receipt) = first_result {
                 published.push((*first, receipt));
@@ -2849,16 +3871,29 @@ impl DraftHandler {
             if let Ok(receipt) = second_result {
                 published.push((*second, receipt));
             }
-        } else if let Some(channel_id) = destinations.first().copied()
-            && let Ok(receipt) = self.send_completion_copy(channel_id, embed.clone()).await
-        {
-            published.push((channel_id, receipt));
+        } else if let Some(channel_id) = destinations.first().copied() {
+            let delivery_key = finalization_plan.as_ref().and_then(|plan| {
+                [
+                    (&plan.lobby, &plan.lobby.delivery_key),
+                    (&plan.origin, &plan.origin.delivery_key),
+                ]
+                .into_iter()
+                .find(|(delivery, _)| delivery.channel_id == i64::try_from(channel_id).ok())
+                .map(|(_, key)| key.as_str())
+            });
+            if let Ok(receipt) = self
+                .send_completion_copy(channel_id, embed.clone(), delivery_key)
+                .await
+            {
+                published.push((channel_id, receipt));
+            }
         }
         self.store_completion_message_info(CompletionMessageContext {
             guild_id,
             pending_match_id: pending.pending_match_id,
             state: &state,
             published: &published,
+            thread_receipt: None,
             lobby_channel_id: snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.lobby_channel_id),
@@ -2866,8 +3901,14 @@ impl DraftHandler {
             draft_receipt: draft_receipt.as_ref(),
         })?;
         if let Some(thread_id) = thread_id {
-            self.publish_thread(thread_id, &state, &embed, pending.pending_match_id)
-                .await;
+            self.publish_thread(
+                thread_id,
+                &state,
+                &embed,
+                pending.pending_match_id,
+                finalization_plan.as_ref(),
+            )
+            .await;
         }
         if let Err(error) = self.schedule_betting_reminders(pending.clone()).await {
             warn!(%error, pending_match_id = pending.pending_match_id, "draft betting reminder scheduling failed");
@@ -2886,13 +3927,17 @@ impl DraftHandler {
         &self,
         channel_id: u64,
         embed: InteractionEmbed,
+        delivery_key: Option<&str>,
     ) -> Result<DiscordMessageReceipt, String> {
-        self.discord
-            .send_message(
-                channel_id,
-                DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed)),
-            )
-            .await
+        let message =
+            DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed));
+        if let Some(delivery_key) = delivery_key {
+            self.discord
+                .send_message_with_delivery_key(channel_id, delivery_key, message)
+                .await
+        } else {
+            self.discord.send_message(channel_id, message).await
+        }
     }
 
     async fn reserve_seed_and_bets(
@@ -3400,6 +4445,7 @@ impl DraftHandler {
             pending_match_id,
             state,
             published,
+            thread_receipt,
             lobby_channel_id,
             origin_channel_id,
             draft_receipt,
@@ -3447,6 +4493,10 @@ impl DraftHandler {
                     pending.cmd_shuffle_channel_id = i64::try_from(channel_id).ok();
                     pending.cmd_shuffle_message_id = i64::try_from(receipt.message_id).ok();
                 }
+                if let Some(receipt) = thread_receipt {
+                    pending.thread_shuffle_thread_id = i64::try_from(receipt.channel_id).ok();
+                    pending.thread_shuffle_message_id = i64::try_from(receipt.message_id).ok();
+                }
             })
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -3458,6 +4508,7 @@ impl DraftHandler {
         state: &DraftState,
         embed: &InteractionEmbed,
         pending_match_id: i64,
+        plan: Option<&DraftFinalizationPlan>,
     ) {
         let kind = to_runtime_kind(state.lobby_kind);
         let name = format!("🔒 {} Draft Complete - Awaiting Results", kind.label());
@@ -3465,15 +4516,20 @@ impl DraftHandler {
         // Python starts both before waiting, then locks only after publication.
         let rename = self.discord.edit_thread(thread_id, &name, false, false);
         let post = async {
-            let receipt = self
-                .discord
-                .send_message(
-                    thread_id,
-                    DiscordMessage::default_mentions(
-                        InteractionResponse::message("").embed(embed.clone()),
-                    ),
-                )
-                .await?;
+            let embed_message = DiscordMessage::default_mentions(
+                InteractionResponse::message("").embed(embed.clone()),
+            );
+            let receipt = if let Some(plan) = plan {
+                self.discord
+                    .send_message_with_delivery_key(
+                        thread_id,
+                        &plan.thread_embed.delivery_key,
+                        embed_message,
+                    )
+                    .await?
+            } else {
+                self.discord.send_message(thread_id, embed_message).await?
+            };
             let mentions = state
                 .radiant_player_ids
                 .iter()
@@ -3488,17 +4544,23 @@ impl DraftHandler {
                 .collect::<Vec<_>>()
                 .join(" ");
             if !content.is_empty() {
-                self.discord
-                    .send_message(
-                        thread_id,
-                        DiscordMessage::mentioning(
-                            InteractionResponse::message(format!(
-                                "{content}\nPlayers, please take your starting positions!"
-                            )),
-                            mentions.into_iter().collect(),
-                        ),
-                    )
-                    .await?;
+                let ping_message = DiscordMessage::mentioning(
+                    InteractionResponse::message(format!(
+                        "{content}\nPlayers, please take your starting positions!"
+                    )),
+                    mentions.into_iter().collect(),
+                );
+                if let Some(plan) = plan {
+                    self.discord
+                        .send_message_with_delivery_key(
+                            thread_id,
+                            &plan.thread_ping.delivery_key,
+                            ping_message,
+                        )
+                        .await?;
+                } else {
+                    self.discord.send_message(thread_id, ping_message).await?;
+                }
             }
             self.pending
                 .mutate_pending_match(state.guild_id, pending_match_id, |pending| {
@@ -4594,6 +5656,39 @@ fn db_pending_state(
     })
 }
 
+fn rollback_final_pick_state(state: &DraftState) -> Result<DraftState, String> {
+    if state.phase != DraftPhase::Complete || state.current_pick_index < DRAFT_TOTAL_PICKS {
+        return Err("unlinked Draft finalization row is not a completed final pick".to_owned());
+    }
+    let first_captain = state
+        .current_round_first_captain_id
+        .ok_or_else(|| "completed Draft has no final-round captain identity".to_owned())?;
+    let previous_pick_index = state.current_pick_index.saturating_sub(1);
+    let picker = if previous_pick_index.is_multiple_of(2) {
+        Some(first_captain)
+    } else if state.captain1_id == Some(first_captain) {
+        state.captain2_id
+    } else {
+        state.captain1_id
+    };
+    let picker =
+        picker.ok_or_else(|| "completed Draft has no opposing final-round captain".to_owned())?;
+    let mut restored = state.clone();
+    let team = if restored.radiant_captain_id == Some(picker) {
+        &mut restored.radiant_player_ids
+    } else if restored.dire_captain_id == Some(picker) {
+        &mut restored.dire_player_ids
+    } else {
+        return Err("completed Draft final picker is not assigned to a team".to_owned());
+    };
+    team.pop().ok_or_else(|| {
+        "completed Draft final picker has no selected player to roll back".to_owned()
+    })?;
+    restored.current_pick_index = previous_pick_index;
+    restored.phase = DraftPhase::Drafting;
+    Ok(restored)
+}
+
 fn assign_captains(state: &mut DraftState, chooser: i64, other: i64, side: Side) {
     match side {
         Side::Radiant => {
@@ -4742,6 +5837,40 @@ fn unix_now() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+fn discord_jump_url(guild_id: i64, channel_id: u64, message_id: u64) -> String {
+    format!(
+        "https://discord.com/channels/{}/{channel_id}/{message_id}",
+        guild_id.max(0)
+    )
+}
+
+/// Decode one durable delivery marker. `Some(None)` means the destination was
+/// intentionally absent/skipped; `None` means the crash boundary occurred
+/// before its progress CAS and the delivery must be retried by nonce.
+fn persisted_delivery(progress_json: &str, name: &str) -> Option<Option<DiscordMessageReceipt>> {
+    let value: Value = serde_json::from_str(progress_json).ok()?;
+    let delivery = value.get("deliveries")?.get(name)?;
+    if delivery
+        .get("skipped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(None);
+    }
+    let channel_id = delivery.get("channel_id")?.as_u64()?;
+    let message_id = delivery.get("message_id")?.as_u64()?;
+    let jump_url = delivery
+        .get("jump_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Some(Some(DiscordMessageReceipt {
+        channel_id,
+        message_id,
+        jump_url,
+    }))
 }
 
 fn signed_id(id: u64, kind: &str) -> Result<i64, String> {

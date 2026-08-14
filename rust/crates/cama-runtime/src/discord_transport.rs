@@ -186,6 +186,37 @@ pub trait DiscordTransport: Send + Sync {
         message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String>;
 
+    /// Send one durable outbox delivery under a deterministic Discord nonce.
+    ///
+    /// The default preserves source compatibility for older transports, but
+    /// production adapters that can express Discord's nonce/enforce-nonce
+    /// contract should override it.  Draft finalization recovery uses this
+    /// boundary for every message whose receipt is not known before a crash.
+    async fn send_message_with_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, String> {
+        let _ = delivery_key;
+        self.send_message(channel_id, message).await
+    }
+
+    /// Find a bot-authored message carrying the exact delivery nonce.  This
+    /// is the recovery fallback for an ambiguous send: Discord may have
+    /// accepted a nonce-bearing request even when the HTTP response or the
+    /// following progress CAS was lost.  Implementations must bound both the
+    /// history window and page count; a missing result is safe to resend.
+    async fn find_message_by_delivery_key(
+        &self,
+        _channel_id: u64,
+        _delivery_key: &str,
+        _after_unix_seconds: i64,
+        _limit: usize,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        Ok(None)
+    }
+
     /// Send a message as an inline reply to an existing message in a thread.
     /// The default keeps older transports source-compatible while preserving
     /// delivery if they cannot express Discord's reply reference.
