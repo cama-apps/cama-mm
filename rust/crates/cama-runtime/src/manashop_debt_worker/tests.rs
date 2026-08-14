@@ -171,6 +171,53 @@ async fn run_catches_up_immediately_then_cancels_cleanly_during_hourly_sleep() {
 }
 
 #[tokio::test]
+async fn cancelled_settlement_worker_restart_does_not_duplicate_durable_debit() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 1_100);
+    let due = fixture.debt(USER, NOW);
+    let clock_calls = Arc::new(AtomicUsize::new(0));
+    let worker = test_worker(
+        &fixture.path,
+        Arc::clone(&clock_calls),
+        MANASHOP_DEBT_WAKE_INTERVAL,
+    );
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let task = tokio::spawn(async move { worker.run(WorkerContext::new(shutdown_receiver)).await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture.triggered(due) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("startup settlement before cancellation");
+    shutdown_sender
+        .send(true)
+        .expect("cancel settlement worker after durable commit");
+    task.await
+        .expect("worker task did not panic")
+        .expect("clean worker cancellation");
+
+    let restarted = test_worker(
+        &fixture.path,
+        Arc::clone(&clock_calls),
+        MANASHOP_DEBT_WAKE_INTERVAL,
+    );
+    let retry = restarted
+        .settle_once()
+        .await
+        .expect("restart settlement wake");
+
+    assert!(retry.is_empty());
+    assert_eq!(fixture.player_balance(USER), 400);
+    assert!(fixture.triggered(due));
+    assert_eq!(clock_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn shutdown_requested_before_start_is_clean_and_skips_sqlite() {
     let fixture = Fixture::migrated();
     let clock_calls = Arc::new(AtomicUsize::new(0));
