@@ -3127,7 +3127,12 @@ fn outbound_response(
     message: &cama_app::pet_brawl_commands::OutboundMessage,
     ephemeral: bool,
 ) -> InteractionResponse {
-    let mut response = InteractionResponse::message(message.content.clone().unwrap_or_default());
+    // Pet challenge updates mirror discord.py's `Message.edit` calls: the
+    // challenge's versus image remains attached unless a later result
+    // explicitly supplies replacement art. The transport still defaults to
+    // explicit clearing for every other response family.
+    let mut response = InteractionResponse::message(message.content.clone().unwrap_or_default())
+        .preserve_attachments();
     if ephemeral || message.ephemeral {
         response = response.ephemeral();
     }
@@ -3949,7 +3954,9 @@ mod tests {
         DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
         DiscordMessageSnapshot, DiscordTransport,
     };
-    use crate::registration::{InteractionMessageDelivery, InteractionResponseError};
+    use crate::registration::{
+        InteractionAttachmentPolicy, InteractionMessageDelivery, InteractionResponseError,
+    };
     use crate::reminder_provider::ReminderRegistrationProvider;
     use crate::serenity_transport::SerenityDiscordTransport;
 
@@ -4323,6 +4330,65 @@ mod tests {
             edits[0].0.delivery,
             InteractionMessageDelivery::InteractionFollowup
         );
+        assert_preserves_existing_attachments(&edits[0].1);
+    }
+
+    #[tokio::test]
+    async fn live_pet_brawl_decline_edit_preserves_existing_versus_image() {
+        let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+        let initial = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(brawl_command(RECIPIENT, 0), initial.clone())
+            .await
+            .expect("challenge delivery");
+        assert_eq!(
+            initial.followups.lock().expect("challenge followup")[0]
+                .attachments
+                .len(),
+            1,
+            "challenge starts with the versus image"
+        );
+
+        let decline = initial.first_button_id().replace(":accept", ":decline");
+        let click = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(component_as(decline, RECIPIENT), click.clone())
+            .await
+            .expect("decline challenge");
+        let updates = click.updates.lock().expect("decline updates");
+        assert_eq!(updates.len(), 1);
+        assert_preserves_existing_attachments(&updates[0]);
+    }
+
+    #[tokio::test]
+    async fn live_pet_brawl_withdraw_edit_preserves_existing_versus_image() {
+        let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+        let initial = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(brawl_command(RECIPIENT, 0), initial.clone())
+            .await
+            .expect("challenge delivery");
+        assert_eq!(
+            initial.followups.lock().expect("challenge followup")[0]
+                .attachments
+                .len(),
+            1,
+            "challenge starts with the versus image"
+        );
+
+        let withdraw = initial.first_button_id().replace(":accept", ":withdraw");
+        let click = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(component_as(withdraw, OWNER), click.clone())
+            .await
+            .expect("withdraw challenge");
+        let updates = click.updates.lock().expect("withdraw updates");
+        assert_eq!(updates.len(), 1);
+        assert_preserves_existing_attachments(&updates[0]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4334,6 +4400,13 @@ mod tests {
             .handle(brawl_command(RECIPIENT, 0), initial.clone())
             .await
             .expect("challenge delivery");
+        assert_eq!(
+            initial.followups.lock().expect("challenge followup")[0]
+                .attachments
+                .len(),
+            1,
+            "challenge starts with the versus image"
+        );
         let challenge_id = brawl_id_from_button(&initial.first_button_id());
         provider
             .handler
@@ -4360,6 +4433,7 @@ mod tests {
             edits[0].1.embeds[0].title.as_deref(),
             Some("🌾 Challenge expired")
         );
+        assert_preserves_existing_attachments(&edits[0].1);
     }
 
     #[tokio::test]
@@ -4371,15 +4445,28 @@ mod tests {
             .handle(brawl_command(RECIPIENT, 0), initial.clone())
             .await
             .expect("challenge delivery");
+        assert_eq!(
+            initial.followups.lock().expect("challenge followup")[0]
+                .attachments
+                .len(),
+            1,
+            "challenge starts with the versus image"
+        );
         let accept = initial.first_button_id();
+        let accept_click = Arc::new(TestResponder::new(false));
         provider
             .handler
             .handle(
                 component_as(accept.clone(), RECIPIENT),
-                Arc::new(TestResponder::new(false)),
+                accept_click.clone(),
             )
             .await
             .expect("battle start");
+        {
+            let accept_updates = accept_click.updates.lock().expect("accept updates");
+            assert_eq!(accept_updates.len(), 1);
+            assert_preserves_existing_attachments(&accept_updates[0]);
+        }
         let battle_id = initial
             .followups
             .lock()
@@ -4837,6 +4924,15 @@ mod tests {
             member_permissions: None,
             values: Vec::new(),
         }
+    }
+
+    fn assert_preserves_existing_attachments(response: &InteractionResponse) {
+        assert_eq!(
+            response.attachment_policy,
+            InteractionAttachmentPolicy::Preserve,
+            "pet-brawl edits must omit attachments when no replacement art is supplied"
+        );
+        assert!(response.attachments.is_empty());
     }
 
     fn brawl_id_from_button(custom_id: &str) -> i64 {

@@ -214,7 +214,26 @@ pub struct InteractionResponse {
     pub allowed_mentions: InteractionAllowedMentions,
     pub embeds: Vec<InteractionEmbed>,
     pub attachments: Vec<InteractionAttachment>,
+    /// Controls what an edit means when `attachments` is empty.
+    ///
+    /// [`InteractionAttachmentPolicy::Auto`] retains the historical transport
+    /// behavior: component-only edits omit the attachment field, while other
+    /// edits with no attachments serialize an empty list and clear uploads.
+    /// Callers can override either side explicitly with `Clear` or `Preserve`.
+    pub attachment_policy: InteractionAttachmentPolicy,
     pub components: Vec<InteractionActionRow>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InteractionAttachmentPolicy {
+    /// Preserve uploads for component-only edits and clear them for other
+    /// empty-attachment edits, matching the transport's historical behavior.
+    #[default]
+    Auto,
+    /// Serialize an empty attachment list on edits, clearing existing files.
+    Clear,
+    /// Omit the attachment field when no replacement files are supplied.
+    Preserve,
 }
 
 impl InteractionResponse {
@@ -226,6 +245,7 @@ impl InteractionResponse {
             allowed_mentions: InteractionAllowedMentions::Default,
             embeds: Vec::new(),
             attachments: Vec::new(),
+            attachment_policy: InteractionAttachmentPolicy::Auto,
             components: Vec::new(),
         }
     }
@@ -259,6 +279,23 @@ impl InteractionResponse {
     #[must_use]
     pub fn attachment(mut self, attachment: InteractionAttachment) -> Self {
         self.attachments.push(attachment);
+        self
+    }
+
+    /// Preserve existing Discord uploads when this response is used as an
+    /// edit and no replacement attachments are supplied.
+    #[must_use]
+    pub const fn preserve_attachments(mut self) -> Self {
+        self.attachment_policy = InteractionAttachmentPolicy::Preserve;
+        self
+    }
+
+    /// Explicitly clear existing Discord uploads when this response is used
+    /// as an edit.
+    #[must_use]
+    pub fn clear_attachments(mut self) -> Self {
+        self.attachment_policy = InteractionAttachmentPolicy::Clear;
+        self.attachments.clear();
         self
     }
 

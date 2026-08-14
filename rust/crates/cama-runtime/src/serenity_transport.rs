@@ -67,10 +67,11 @@ use crate::raw_reactions::{
 };
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionActionRow,
-    InteractionAllowedMentions, InteractionAttachment, InteractionButtonStyle, InteractionEmbed,
-    InteractionHandler, InteractionMessageDelivery, InteractionMessageReceipt, InteractionModal,
-    InteractionOption, InteractionRequest, InteractionResponder, InteractionResponse,
-    InteractionResponseError, InteractionTextInputStyle, InteractionValue, Registry,
+    InteractionAllowedMentions, InteractionAttachment, InteractionAttachmentPolicy,
+    InteractionButtonStyle, InteractionEmbed, InteractionHandler, InteractionMessageDelivery,
+    InteractionMessageReceipt, InteractionModal, InteractionOption, InteractionRequest,
+    InteractionResponder, InteractionResponse, InteractionResponseError, InteractionTextInputStyle,
+    InteractionValue, Registry,
 };
 use crate::shop_provider::ShopDiscordPort;
 use crate::survey_provider::{
@@ -1826,6 +1827,18 @@ impl InteractionResponder for CommandResponder {
                     .await
                     .map(drop)
                     .map_err(response_error)
+                } else if preserve_empty_attachments(&response) {
+                    let payload = attachment_preserving_message(response);
+                    self.http
+                        .edit_followup_message(
+                            &self.interaction.token,
+                            message_id,
+                            &payload,
+                            Vec::new(),
+                        )
+                        .await
+                        .map(drop)
+                        .map_err(response_error)
                 } else {
                     self.interaction
                         .edit_followup(&self.http, message_id, edit_followup_message(response))
@@ -1973,13 +1986,25 @@ impl InteractionResponder for ComponentResponder {
     }
 
     async fn update(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
-        let result = self
-            .interaction
-            .create_response(
-                &self.http,
-                CreateInteractionResponse::UpdateMessage(response_message(response)),
-            )
-            .await
+        let result =
+            if preserve_empty_attachments(&response) || is_component_only_edit(&response) {
+                let payload = attachment_preserving_interaction_callback(response);
+                self.http
+                    .create_interaction_response(
+                        self.interaction.id,
+                        &self.interaction.token,
+                        &payload,
+                        Vec::new(),
+                    )
+                    .await
+            } else {
+                self.interaction
+                    .create_response(
+                        &self.http,
+                        CreateInteractionResponse::UpdateMessage(response_message(response)),
+                    )
+                    .await
+            }
             .map_err(response_error);
         if result.is_ok() {
             self.acknowledged.store(true, Ordering::Release);
@@ -2019,6 +2044,18 @@ impl InteractionResponder for ComponentResponder {
                     .await
                     .map(drop)
                     .map_err(response_error)
+                } else if preserve_empty_attachments(&response) {
+                    let payload = attachment_preserving_message(response);
+                    self.http
+                        .edit_followup_message(
+                            &self.interaction.token,
+                            message_id,
+                            &payload,
+                            Vec::new(),
+                        )
+                        .await
+                        .map(drop)
+                        .map_err(response_error)
                 } else {
                     self.interaction
                         .edit_followup(&self.http, message_id, edit_followup_message(response))
@@ -2175,6 +2212,7 @@ fn initial_response(response: InteractionResponse) -> CreateInteractionResponse 
 
 fn response_message(response: InteractionResponse) -> CreateInteractionResponseMessage {
     let component_only = is_component_only_edit(&response);
+    let include_attachments = include_response_attachments(&response);
     let mut message = CreateInteractionResponseMessage::new().ephemeral(response.ephemeral);
     if !response.content.is_empty() {
         message = message.content(response.content);
@@ -2183,14 +2221,16 @@ fn response_message(response: InteractionResponse) -> CreateInteractionResponseM
         message = message.allowed_mentions(allowed_mentions);
     }
     if !component_only {
-        message = message
-            .embeds(response.embeds.iter().map(serenity_embed).collect())
-            .files(response.attachments.iter().map(serenity_attachment));
+        message = message.embeds(response.embeds.iter().map(serenity_embed).collect());
+        if include_attachments {
+            message = message.files(response.attachments.iter().map(serenity_attachment));
+        }
     }
     message.components(serenity_components(&response.components))
 }
 
 fn followup_response(response: InteractionResponse) -> CreateInteractionResponseFollowup {
+    let include_attachments = include_response_attachments(&response);
     let mut message = CreateInteractionResponseFollowup::new().ephemeral(response.ephemeral);
     if !response.content.is_empty() {
         message = message.content(response.content);
@@ -2198,10 +2238,51 @@ fn followup_response(response: InteractionResponse) -> CreateInteractionResponse
     if let Some(allowed_mentions) = serenity_allowed_mentions(&response.allowed_mentions) {
         message = message.allowed_mentions(allowed_mentions);
     }
-    message
-        .embeds(response.embeds.iter().map(serenity_embed).collect())
-        .files(response.attachments.iter().map(serenity_attachment))
-        .components(serenity_components(&response.components))
+    message = message.embeds(response.embeds.iter().map(serenity_embed).collect());
+    if include_attachments {
+        message = message.files(response.attachments.iter().map(serenity_attachment));
+    }
+    message.components(serenity_components(&response.components))
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentPreservingInteractionMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embeds: Option<Vec<CreateEmbed>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_mentions: Option<CreateAllowedMentions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    components: Option<Vec<CreateActionRow>>,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentPreservingInteractionCallback {
+    #[serde(rename = "type")]
+    response_type: u8,
+    data: AttachmentPreservingInteractionMessage,
+}
+
+fn attachment_preserving_message(
+    response: InteractionResponse,
+) -> AttachmentPreservingInteractionMessage {
+    let component_only = is_component_only_edit(&response);
+    AttachmentPreservingInteractionMessage {
+        content: (!response.content.is_empty()).then_some(response.content),
+        embeds: (!component_only).then_some(response.embeds.iter().map(serenity_embed).collect()),
+        allowed_mentions: serenity_allowed_mentions(&response.allowed_mentions),
+        components: Some(serenity_components(&response.components)),
+    }
+}
+
+fn attachment_preserving_interaction_callback(
+    response: InteractionResponse,
+) -> AttachmentPreservingInteractionCallback {
+    AttachmentPreservingInteractionCallback {
+        response_type: 7,
+        data: attachment_preserving_message(response),
+    }
 }
 
 fn edit_followup_message(response: InteractionResponse) -> CreateInteractionResponseFollowup {
@@ -2260,22 +2341,27 @@ async fn edit_component_only_followup(
 
 fn edit_receipt_channel_message(response: InteractionResponse) -> EditMessage {
     let component_only = is_component_only_edit(&response);
+    let preserve_content = response.content.is_empty() && preserve_empty_attachments(&response);
     let message = DiscordMessage::default_mentions(response);
     edit_channel_response(if component_only {
         message.preserving_body()
+    } else if preserve_content {
+        message.preserving_content()
     } else {
         message
     })
 }
 
 fn is_component_only_edit(response: &InteractionResponse) -> bool {
-    response.content.is_empty()
+    response.attachment_policy != InteractionAttachmentPolicy::Clear
+        && response.content.is_empty()
         && response.embeds.is_empty()
         && response.attachments.is_empty()
         && !response.components.is_empty()
 }
 
 fn channel_response(response: InteractionResponse) -> CreateMessage {
+    let include_attachments = include_response_attachments(&response);
     let mut message = CreateMessage::new();
     if !response.content.is_empty() {
         message = message.content(response.content);
@@ -2283,23 +2369,27 @@ fn channel_response(response: InteractionResponse) -> CreateMessage {
     if let Some(allowed_mentions) = serenity_allowed_mentions(&response.allowed_mentions) {
         message = message.allowed_mentions(allowed_mentions);
     }
-    message
-        .embeds(response.embeds.iter().map(serenity_embed).collect())
-        .files(response.attachments.iter().map(serenity_attachment))
-        .components(serenity_components(&response.components))
+    message = message.embeds(response.embeds.iter().map(serenity_embed).collect());
+    if include_attachments {
+        message = message.files(response.attachments.iter().map(serenity_attachment));
+    }
+    message.components(serenity_components(&response.components))
 }
 
 fn edit_response(response: InteractionResponse) -> EditInteractionResponse {
-    let attachments = response
-        .attachments
-        .iter()
-        .map(serenity_attachment)
-        .fold(EditAttachments::new(), EditAttachments::add);
+    let include_attachments = include_response_attachments(&response);
     let mut edit = EditInteractionResponse::new()
         .content(response.content)
         .embeds(response.embeds.iter().map(serenity_embed).collect())
-        .attachments(attachments)
         .components(serenity_components(&response.components));
+    if include_attachments {
+        let attachments = response
+            .attachments
+            .iter()
+            .map(serenity_attachment)
+            .fold(EditAttachments::new(), EditAttachments::add);
+        edit = edit.attachments(attachments);
+    }
     if let Some(allowed_mentions) = serenity_allowed_mentions(&response.allowed_mentions) {
         edit = edit.allowed_mentions(allowed_mentions);
     }
@@ -2314,6 +2404,16 @@ fn serenity_allowed_mentions(policy: &InteractionAllowedMentions) -> Option<Crea
             Some(CreateAllowedMentions::new().users(user_ids.iter().copied()))
         }
     }
+}
+
+fn include_response_attachments(response: &InteractionResponse) -> bool {
+    !response.attachments.is_empty()
+        || response.attachment_policy != InteractionAttachmentPolicy::Preserve
+}
+
+fn preserve_empty_attachments(response: &InteractionResponse) -> bool {
+    response.attachments.is_empty()
+        && response.attachment_policy == InteractionAttachmentPolicy::Preserve
 }
 
 fn serenity_embed(embed: &InteractionEmbed) -> CreateEmbed {
@@ -2418,17 +2518,19 @@ fn discord_reaction_type(emoji: &DiscordEmoji) -> ReactionType {
 }
 
 fn edit_channel_response(message: DiscordMessage) -> EditMessage {
+    let include_attachments = include_response_attachments(&message.response);
     let response = message.response;
     let mut edit = EditMessage::new().components(serenity_components(&response.components));
     if message.content_mode != crate::discord_transport::DiscordMessageContentMode::PreserveBody {
-        let attachments = response
-            .attachments
-            .iter()
-            .map(serenity_attachment)
-            .fold(EditAttachments::new(), EditAttachments::add);
-        edit = edit
-            .embeds(response.embeds.iter().map(serenity_embed).collect())
-            .attachments(attachments);
+        edit = edit.embeds(response.embeds.iter().map(serenity_embed).collect());
+        if include_attachments {
+            let attachments = response
+                .attachments
+                .iter()
+                .map(serenity_attachment)
+                .fold(EditAttachments::new(), EditAttachments::add);
+            edit = edit.attachments(attachments);
+        }
     }
     if message.content_mode == crate::discord_transport::DiscordMessageContentMode::Replace {
         edit = edit.content(response.content);
@@ -4631,37 +4733,177 @@ mod tests {
     }
 
     #[test]
-    fn component_only_edit_omits_attachments_to_preserve_existing_upload() {
-        let preserving = DiscordMessage::silent(InteractionResponse::message("").action_row(
-            InteractionActionRow::buttons(vec![InteractionButton::new(
-                "wheel:keep",
-                "Keep result",
-            )]),
-        ))
-        .preserving_body();
-        let serialized = serde_json::to_value(edit_channel_response(preserving))
-            .expect("serialize component-only edit");
+    fn auto_component_only_channel_edit_preserves_existing_body_and_uploads() {
+        let response =
+            InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
+                InteractionButton::new("wheel:keep", "Keep result"),
+            ]));
+        assert_eq!(
+            response.attachment_policy,
+            InteractionAttachmentPolicy::Auto
+        );
+        assert!(is_component_only_edit(&response));
+
+        let serialized = serde_json::to_value(edit_receipt_channel_message(response))
+            .expect("serialize automatic component-only channel edit");
+        assert!(serialized.get("content").is_none());
+        assert!(serialized.get("embeds").is_none());
         assert!(serialized.get("attachments").is_none());
+        assert_eq!(
+            serialized["components"][0]["components"][0]["custom_id"],
+            "wheel:keep"
+        );
     }
 
     #[test]
-    fn component_only_followup_edit_omits_serenity_empty_attachment_list() {
+    fn channel_fallback_preserve_replaces_view_without_clearing_content_or_attachments() {
+        let response = InteractionResponse::message("")
+            .embed(InteractionEmbed::titled("Challenge declined"))
+            .action_row(InteractionActionRow::buttons(vec![InteractionButton::new(
+                "pet:brawl:7:closed",
+                "Closed",
+            )]))
+            .preserve_attachments();
+        let serialized = serde_json::to_value(edit_receipt_channel_message(response))
+            .expect("serialize attachment-preserving channel fallback edit");
+
+        assert!(serialized.get("content").is_none());
+        assert!(serialized.get("attachments").is_none());
+        assert_eq!(serialized["embeds"][0]["title"], "Challenge declined");
+        assert_eq!(
+            serialized["components"][0]["components"][0]["custom_id"],
+            "pet:brawl:7:closed"
+        );
+    }
+
+    #[test]
+    fn component_only_explicit_clear_serializes_empty_attachments() {
+        let response = InteractionResponse::message("")
+            .action_row(InteractionActionRow::buttons(vec![InteractionButton::new(
+                "pet:brawl:7:closed",
+                "Closed",
+            )]))
+            .clear_attachments();
+
+        assert!(!is_component_only_edit(&response));
+        let update = serde_json::to_value(CreateInteractionResponse::UpdateMessage(
+            response_message(response.clone()),
+        ))
+        .expect("serialize component update clear");
+        assert_eq!(update["data"]["attachments"], serde_json::json!([]));
+        for serialized in [
+            serde_json::to_value(edit_response(response.clone()))
+                .expect("serialize original response clear"),
+            serde_json::to_value(edit_followup_message(response.clone()))
+                .expect("serialize followup response clear"),
+            serde_json::to_value(edit_receipt_channel_message(response))
+                .expect("serialize channel fallback clear"),
+        ] {
+            assert_eq!(serialized["attachments"], serde_json::json!([]));
+            assert_eq!(
+                serialized["components"][0]["components"][0]["custom_id"],
+                "pet:brawl:7:closed"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_component_only_followup_uses_attachment_omitting_raw_payload() {
         let response =
             InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
                 InteractionButton::new("wheel:keep", "Keep result"),
             ]));
 
+        assert_eq!(
+            response.attachment_policy,
+            InteractionAttachmentPolicy::Auto
+        );
+        assert!(is_component_only_edit(&response));
+
         let regular_builder = serde_json::to_value(edit_followup_message(response.clone()))
             .expect("serialize Serenity followup edit");
         assert_eq!(regular_builder["attachments"], serde_json::json!([]));
 
-        let preserving = serde_json::to_value(component_only_interaction_edit(response))
+        let preserving = serde_json::to_value(component_only_interaction_edit(response.clone()))
             .expect("serialize attachment-preserving followup edit");
         assert!(preserving.get("attachments").is_none());
         assert_eq!(
             preserving["components"][0]["components"][0]["custom_id"],
             "wheel:keep"
         );
+
+        let update = serde_json::to_value(attachment_preserving_interaction_callback(response))
+            .expect("serialize automatic component update");
+        assert!(update["data"].get("attachments").is_none());
+        assert!(update["data"].get("embeds").is_none());
+    }
+
+    #[test]
+    fn normal_followup_edit_can_omit_attachments_to_preserve_existing_upload() {
+        let response = InteractionResponse::message("settled")
+            .embed(InteractionEmbed::titled("Challenge declined"))
+            .action_row(InteractionActionRow::buttons(vec![InteractionButton::new(
+                "pet:brawl:7:accept",
+                "Accept",
+            )]))
+            .with_user_mentions(vec![77])
+            .preserve_attachments();
+        let serialized = serde_json::to_value(attachment_preserving_message(response))
+            .expect("serialize attachment-preserving normal followup edit");
+
+        assert_eq!(serialized["content"], "settled");
+        assert_eq!(serialized["embeds"][0]["title"], "Challenge declined");
+        assert_eq!(
+            serialized["components"][0]["components"][0]["custom_id"],
+            "pet:brawl:7:accept"
+        );
+        assert_eq!(
+            serialized["allowed_mentions"]["users"],
+            serde_json::json!(["77"])
+        );
+        assert!(serialized.get("attachments").is_none());
+        assert!(serialized.get("flags").is_none());
+    }
+
+    #[test]
+    fn normal_followup_edit_retains_explicit_clear_semantics() {
+        let serialized = serde_json::to_value(edit_followup_message(
+            InteractionResponse::message("replace body")
+                .embed(InteractionEmbed::titled("Clear media"))
+                .clear_attachments(),
+        ))
+        .expect("serialize explicit attachment clear");
+
+        assert_eq!(serialized["attachments"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn component_update_preserve_payload_omits_attachments_and_flags() {
+        let response = InteractionResponse::message("")
+            .embed(InteractionEmbed::titled("Challenge declined"))
+            .preserve_attachments();
+        let serialized = serde_json::to_value(attachment_preserving_interaction_callback(response))
+            .expect("serialize attachment-preserving component update");
+
+        assert_eq!(serialized["type"], 7);
+        assert_eq!(
+            serialized["data"]["embeds"][0]["title"],
+            "Challenge declined"
+        );
+        assert_eq!(serialized["data"]["components"], serde_json::json!([]));
+        assert!(serialized["data"].get("attachments").is_none());
+        assert!(serialized["data"].get("flags").is_none());
+
+        let component_only = serde_json::to_value(attachment_preserving_interaction_callback(
+            InteractionResponse::message("")
+                .action_row(InteractionActionRow::buttons(vec![InteractionButton::new(
+                    "pet:brawl:7:accept",
+                    "Accept",
+                )]))
+                .preserve_attachments(),
+        ))
+        .expect("serialize component-only preserve update");
+        assert!(component_only["data"].get("embeds").is_none());
     }
 
     #[tokio::test]
@@ -4819,11 +5061,15 @@ mod tests {
     }
 
     #[test]
-    fn followup_edit_without_components_intentionally_clears_media() {
-        let serialized = serde_json::to_value(edit_followup_message(InteractionResponse::message(
-            "timeout complete",
-        )))
-        .expect("serialize intentional media clear");
+    fn auto_non_component_followup_edit_retains_historical_media_clear() {
+        let response = InteractionResponse::message("timeout complete");
+        assert_eq!(
+            response.attachment_policy,
+            InteractionAttachmentPolicy::Auto
+        );
+        assert!(!is_component_only_edit(&response));
+        let serialized = serde_json::to_value(edit_followup_message(response))
+            .expect("serialize automatic non-component media clear");
 
         assert_eq!(serialized["embeds"], serde_json::json!([]));
         assert_eq!(serialized["attachments"], serde_json::json!([]));
