@@ -42,15 +42,16 @@ use cama_app::dig_prestige_runtime::{
 };
 use cama_app::dig_routes::{parse_route_state, route_by_id};
 use cama_app::dig_runtime::{
-    DigAdminMutationOutcome, DigRuntimeConfig, DigRuntimeDeliveryContext, DigRuntimeDeliveryPart,
-    DigRuntimeDeliverySnapshot, DigRuntimeExecution, DigRuntimeFinalizeDelivery,
-    DigRuntimeFlavorSnapshot, DigRuntimeFlexData, DigRuntimeMarkDelivered,
-    DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind,
-    DigWeatherEffects,
+    DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeConfig,
+    DigRuntimeDeliveryContext, DigRuntimeDeliveryPart, DigRuntimeDeliverySnapshot,
+    DigRuntimeExecution, DigRuntimeFinalizeDelivery, DigRuntimeFlavorSnapshot, DigRuntimeFlexData,
+    DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel,
+    DigRuntimeRenderKind, DigRuntimeSettleBloodPact, DigWeatherEffects,
 };
 use cama_app::dig_service::{PICKAXE_TIERS, layer_at};
 use cama_app::dig_social_runtime::DigSocialRuntimeService;
 use cama_app::economy_event_service::EconomyEventConfig;
+use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
@@ -269,18 +270,20 @@ impl DigRegistrationProvider {
     pub fn production(
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
+        vanity_tax: Arc<PersistentVanityTaxService>,
         discord: Arc<dyn DigDiscordPort>,
         reminder_hooks: Option<ReminderHooks>,
         ai_service: Option<Arc<AIService>>,
     ) -> Result<Self, DigProviderBuildError> {
         let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig::production()));
-        Self::with_media_and_ai(
+        Self::with_media_ai_and_vanity(
             database_path,
             config,
             discord,
             reminder_hooks,
             media,
             ai_service,
+            Some(vanity_tax),
         )
     }
 
@@ -313,9 +316,9 @@ impl DigRegistrationProvider {
             .expect("admitted Dig schema in provider test")
     }
 
-    /// Compose the hidden production candidate with the shared AI service.
-    /// `None` remains a fully durable terminal-skip path rather than leaving
-    /// the mechanical delivery permanently pending.
+    /// Compose a test provider with an explicit AI service and no gateway
+    /// vanity-tax state. Production must use [`Self::production`].
+    #[cfg(test)]
     #[must_use = "inspect the provider admission result"]
     pub fn with_media_and_ai(
         database_path: impl AsRef<Path>,
@@ -324,6 +327,26 @@ impl DigRegistrationProvider {
         reminder_hooks: Option<ReminderHooks>,
         media: Arc<DigMediaRuntime>,
         ai_service: Option<Arc<AIService>>,
+    ) -> Result<Self, DigProviderBuildError> {
+        Self::with_media_ai_and_vanity(
+            database_path,
+            config,
+            discord,
+            reminder_hooks,
+            media,
+            ai_service,
+            None,
+        )
+    }
+
+    fn with_media_ai_and_vanity(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        discord: Arc<dyn DigDiscordPort>,
+        reminder_hooks: Option<ReminderHooks>,
+        media: Arc<DigMediaRuntime>,
+        ai_service: Option<Arc<AIService>>,
+        vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     ) -> Result<Self, DigProviderBuildError> {
         let path = database_path.as_ref().to_path_buf();
         let audit = cama_db::schema_manager_contracts::audit_existing_schema(&path)
@@ -393,6 +416,7 @@ impl DigRegistrationProvider {
                     media,
                     flavor,
                     flavor_data,
+                    vanity_tax,
                     neon: Mutex::new(neon),
                     view_nonce: format!("{:016x}", fastrand::u64(..)),
                     abandon_views: Mutex::new(BTreeMap::new()),
@@ -518,6 +542,10 @@ struct DigRuntimeState {
     media: Arc<DigMediaRuntime>,
     flavor: Arc<DigFlavorService>,
     flavor_data: Arc<SqliteDigFlavorDataAdapter>,
+    /// Always present for the fail-closed production constructor. Test-only
+    /// constructors keep an explicit no-tax path so policy fixtures remain
+    /// independent from gateway membership refresh state.
+    vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
     view_nonce: String,
     abandon_views: Mutex<BTreeMap<String, DigAbandonViewState>>,
@@ -528,6 +556,33 @@ struct DigRuntimeState {
     route_views: Mutex<BTreeMap<String, DigRouteViewState>>,
     rate_limits: Mutex<BTreeMap<DigRateKey, DigRateHits>>,
     force_events: Mutex<BTreeSet<(i64, i64)>>,
+}
+
+fn configured_dig_runtime(
+    path: PathBuf,
+    config: DigRuntimeConfig,
+    vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+) -> cama_app::dig_runtime::DigRuntimeService {
+    let service = cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(path, config);
+    if let Some(vanity_tax) = vanity_tax {
+        service.with_vanity_tax(vanity_tax)
+    } else {
+        service
+    }
+}
+
+fn configured_boss_runtime(
+    path: PathBuf,
+    pet_hunger_decay_per_day: i64,
+    vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+) -> DigBossRuntimeService {
+    let service =
+        DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, pet_hunger_decay_per_day));
+    if let Some(vanity_tax) = vanity_tax {
+        service.with_vanity_tax(vanity_tax)
+    } else {
+        service
+    }
 }
 
 struct UnavailableDigFlavorAi;
@@ -3055,8 +3110,9 @@ impl DigInteractionHandler {
     ) -> Result<DigBossEncounterInfo, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .encounter(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3091,8 +3147,9 @@ impl DigInteractionHandler {
     ) -> Result<DigBossCallResult<DigBossStartOutcome>, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .start(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3134,8 +3191,9 @@ impl DigInteractionHandler {
     ) -> Result<DigBossCallResult<DigBossResolvedOutcome>, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .resume(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3158,8 +3216,9 @@ impl DigInteractionHandler {
     ) -> Result<DigBossCallResult<DigBossScoutOutcome>, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .scout(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3181,8 +3240,9 @@ impl DigInteractionHandler {
     ) -> Result<DigBossCallResult<DigBossRetreatOutcome>, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .retreat(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3205,8 +3265,9 @@ impl DigInteractionHandler {
     ) -> Result<cama_app::dig_boss_runtime::DigBossCheerOutcome, String> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, decay))
+            configured_boss_runtime(path, decay, vanity_tax)
                 .cheer(cheerer_id, target_id, guild_id, now)
                 .map_err(|error| error.to_string())
         })
@@ -3541,9 +3602,9 @@ impl DigInteractionHandler {
     ) -> Result<DigRuntimeExecution, String> {
         let path = self.state.database_path.clone();
         let config = self.state.dig_config.clone();
+        let vanity_tax = self.state.vanity_tax.clone();
         blocking(move || {
-            let service =
-                cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(&path, config);
+            let service = configured_dig_runtime(path, config, vanity_tax);
             let outcome = service
                 .dig_with_delivery(
                     cama_app::dig_runtime::DigRuntimeRequest {
@@ -3635,12 +3696,40 @@ impl DigInteractionHandler {
         .await
     }
 
+    async fn settle_blood_pact_delivery(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+    ) -> Result<DigRuntimeDeliverySnapshot, String> {
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        let vanity_tax = self.state.vanity_tax.clone();
+        let request = DigRuntimeSettleBloodPact {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            occurred_at: delivery.committed_at,
+        };
+        blocking(move || {
+            configured_dig_runtime(path, config, vanity_tax)
+                .settle_blood_pact_delivery(request)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     async fn prepare_delivery(
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> Result<DigRuntimeDeliverySnapshot, String> {
+        // Blood Pact is a post-commit economy effect and must become terminal
+        // before flavor freezes user-visible copy. Its stable repository key
+        // makes this safe across a crash between the effect and this outbox
+        // projection update.
+        let delivery = self.settle_blood_pact_delivery(delivery).await?;
+        if !delivery.blood_pact.is_terminal() {
+            return Err("Dig Blood Pact phase remains pending; delivery is blocked".to_owned());
+        }
         if delivery.flavor.is_terminal() {
-            return Ok(delivery.clone());
+            return Ok(delivery);
         }
         let boss_info = if delivery.render.kind == DigRuntimeRenderKind::Boss {
             Some(
@@ -3652,7 +3741,7 @@ impl DigInteractionHandler {
         };
         let flavor = Arc::clone(&self.state.flavor);
         let flavor_data = Arc::clone(&self.state.flavor_data);
-        let mut flavor_outcome = dig_delivery_flavor_outcome(delivery, boss_info.as_ref());
+        let mut flavor_outcome = dig_delivery_flavor_outcome(&delivery, boss_info.as_ref());
         let discord_id = delivery.discord_id;
         let guild_id = delivery.guild_id;
         let action_id = delivery.action_id;
@@ -6811,8 +6900,28 @@ fn dig_delivery_responses(
             None,
         );
     }
+    let projected = dig_blood_pact_projected_outcome(delivery);
+    let description = if matches!(
+        render.kind,
+        DigRuntimeRenderKind::Normal | DigRuntimeRenderKind::Event
+    ) && matches!(
+        delivery.blood_pact,
+        DigRuntimeBloodPactSnapshot::Applied { skimmed } if skimmed > 0
+    ) {
+        format!(
+            "**{}** reached **{}** blocks in **{}**.\nAdvanced **{}** blocks and earned **{}** JC. Balance: **{}** JC.",
+            delivery.context.display_name,
+            projected.depth_after,
+            render.layer_name,
+            projected.advance,
+            projected.jc_earned,
+            projected.balance_after,
+        )
+    } else {
+        render.description.clone()
+    };
     let mut embed = InteractionEmbed::titled(render.title.clone())
-        .description(render.description.clone())
+        .description(description)
         .color(render.layer_color)
         .field("Depth", render.depth_transition.clone(), true)
         .field("Layer", render.layer_name.clone(), true);
@@ -6887,8 +6996,8 @@ fn dig_delivery_flavor_outcome(
     delivery: &DigRuntimeDeliverySnapshot,
     boss: Option<&DigBossEncounterInfo>,
 ) -> DigFlavorOutcome {
-    let event = delivery
-        .outcome
+    let outcome = dig_blood_pact_projected_outcome(delivery);
+    let event = outcome
         .event_id
         .as_deref()
         .and_then(cama_app::dig_loot::canonical_event)
@@ -6897,7 +7006,7 @@ fn dig_delivery_flavor_outcome(
             name: event.name.clone(),
             description: event.descriptions.first().cloned().unwrap_or_default(),
         });
-    let artifact = delivery.outcome.artifact_id.as_deref().map(|artifact_id| {
+    let artifact = outcome.artifact_id.as_deref().map(|artifact_id| {
         let name = cama_app::dig_loot::artifact_catalog()
             .into_iter()
             .find(|artifact| artifact.id == artifact_id)
@@ -6909,14 +7018,14 @@ fn dig_delivery_flavor_outcome(
     });
     DigFlavorOutcome {
         dig_action_id: Some(delivery.action_id),
-        success: delivery.outcome.success,
-        dig_consumed: Some(delivery.outcome.success),
+        success: outcome.success,
+        dig_consumed: Some(outcome.success),
         boss_pending: boss.is_some(),
-        advance: delivery.outcome.advance,
-        jc_earned: delivery.outcome.jc_earned,
-        depth_before: delivery.outcome.depth_before,
-        depth_after: delivery.outcome.depth_after,
-        cave_in: delivery.outcome.cave_in,
+        advance: outcome.advance,
+        jc_earned: outcome.jc_earned,
+        depth_before: outcome.depth_before,
+        depth_after: outcome.depth_after,
+        cave_in: outcome.cave_in,
         event,
         boss_encounter: boss.is_some(),
         boss_info: boss.map(|boss| BossFlavorInfo {
@@ -6925,6 +7034,18 @@ fn dig_delivery_flavor_outcome(
         artifact,
         ..DigFlavorOutcome::default()
     }
+}
+
+fn dig_blood_pact_projected_outcome(
+    delivery: &DigRuntimeDeliverySnapshot,
+) -> cama_app::dig_runtime::DigRuntimeOutcome {
+    let mut outcome = delivery.outcome.clone();
+    if let DigRuntimeBloodPactSnapshot::Applied { skimmed } = delivery.blood_pact {
+        let skimmed = skimmed.max(0).min(outcome.jc_earned.max(0));
+        outcome.jc_earned = outcome.jc_earned.saturating_sub(skimmed);
+        outcome.balance_after = outcome.balance_after.saturating_sub(skimmed);
+    }
+    outcome
 }
 
 fn dig_runtime_flavor_snapshot(receipt: FlavorDeliveryReceipt) -> DigRuntimeFlavorSnapshot {
@@ -7987,6 +8108,7 @@ mod tests {
     use cama_app::dig_media_runtime::DigMediaRuntime;
     use cama_app::dig_runtime::{DEFAULT_DIG_ASSET_ROOT, DigRuntimeService};
     use cama_app::dig_runtime::{DigRuntimeConfig, DigRuntimeOutcome};
+    use cama_app::service_container::{ServiceContainer, ServiceContainerOptions, VanityMember};
     use cama_db::core_repositories::{NewPlayer, PlayerRepository};
     use cama_db::schema_manager::initialize_or_migrate;
     use rusqlite::{Connection, params};
@@ -7996,7 +8118,7 @@ mod tests {
     use super::{
         DigAbandonViewAdmission, DigChannelSnapshot, DigDiscordPort, DigPrestigeViewAdmission,
         DigPublicHistory, DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
-        JOPACOIN_EMOTE,
+        DigRuntimeBloodPactSnapshot, JOPACOIN_EMOTE,
     };
     use crate::application_config::ApplicationConfig;
     use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
@@ -8011,13 +8133,39 @@ mod tests {
     const GUILD: u64 = 77_002;
     const CHANNEL: u64 = 77_003;
 
+    fn persistent_vanity_tax(
+        database_path: impl AsRef<std::path::Path>,
+    ) -> Arc<cama_app::service_container::PersistentVanityTaxService> {
+        persistent_vanity_tax_with_rate(database_path, 0.10)
+    }
+
+    fn persistent_vanity_tax_with_rate(
+        database_path: impl AsRef<std::path::Path>,
+        rate: f64,
+    ) -> Arc<cama_app::service_container::PersistentVanityTaxService> {
+        let options = ServiceContainerOptions {
+            vanity_tax_rate: rate,
+            ..ServiceContainerOptions::default()
+        };
+        let mut container = ServiceContainer::new(database_path, options);
+        container.initialize();
+        Arc::clone(
+            &container
+                .components()
+                .expect("vanity-tax service components")
+                .vanity_tax_service,
+        )
+    }
+
     #[test]
     fn production_constructor_owns_media_and_fails_closed_on_schema_admission() {
         let admitted = NamedTempFile::new().expect("admitted provider database");
         initialize_or_migrate(admitted.path()).expect("admit canonical schema");
+        let vanity_tax = persistent_vanity_tax(admitted.path());
         let provider = DigRegistrationProvider::production(
             admitted.path(),
             &config(),
+            Arc::clone(&vanity_tax),
             Arc::new(TestDiscord::default()),
             None,
             None,
@@ -8032,6 +8180,7 @@ mod tests {
         let result = DigRegistrationProvider::production(
             missing_directory.path().join("not-created.db"),
             &config(),
+            vanity_tax,
             Arc::new(TestDiscord::default()),
             None,
             None,
@@ -8092,6 +8241,202 @@ mod tests {
         assert_eq!(delivery.context.channel_id, CHANNEL as i64);
         assert_eq!(delivery.context.display_name, "Dig Test Miner");
         assert!(!delivery.render.description.is_empty());
+    }
+
+    #[tokio::test]
+    async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
+        let (database, base, discord) = fixture();
+        let now = 1_900_210_029;
+        Connection::open(database.path())
+            .expect("vanity provider database")
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,last_dig_at,luminosity,
+                  boss_progress)
+                 VALUES (?1,?2,276,276,1,?3,100,?4)",
+                params![
+                    USER as i64,
+                    GUILD as i64,
+                    now - 7_200,
+                    r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"},"100":{"status":"defeated"},"150":{"status":"defeated"},"200":{"status":"defeated"},"275":{"status":"defeated"}}"#,
+                ],
+            )
+            .expect("normal Dig tunnel");
+        let vanity_tax = persistent_vanity_tax_with_rate(database.path(), 1.0);
+        vanity_tax
+            .refresh_guild(
+                GUILD as i64,
+                &[VanityMember {
+                    discord_id: USER as i64,
+                    nickname: None,
+                }],
+            )
+            .expect("refresh taxable Dig member");
+        let provider = DigRegistrationProvider::with_media_ai_and_vanity(
+            database.path(),
+            &config(),
+            discord,
+            None,
+            Arc::clone(&base.handler.state.media),
+            None,
+            Some(vanity_tax),
+        )
+        .expect("provider with shared vanity tax");
+        let execution = provider
+            .handler
+            .run_dig(
+                USER as i64,
+                GUILD as i64,
+                now,
+                false,
+                false,
+                cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                    0xdec0_de01,
+                    CHANNEL as i64,
+                    "Taxed Dig Miner",
+                    None,
+                ),
+            )
+            .await
+            .expect("taxed normal Dig");
+        assert!(execution.outcome.success);
+        assert!(!execution.outcome.cave_in);
+        assert!(
+            execution.outcome.vanity_tax > 0,
+            "production Dig outcome was not taxed: {:?}",
+            execution.outcome
+        );
+        let connection = Connection::open(database.path()).expect("inspect vanity-tax ledger");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM economy_ledger_entries
+                     WHERE account_id=?1 AND guild_id=?2 AND source='vanity_tax'",
+                    params![USER as i64, GUILD as i64],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("provider vanity-tax ledger count"),
+            1,
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_settles_blood_pact_before_flavor_and_projects_net_copy() {
+        let (database, provider, _discord) = fixture();
+        let now = 1_900_210_029;
+        let skimmer = 77_004_i64;
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(
+                skimmer,
+                "blood-pact-holder",
+                Some(GUILD as i64),
+            ))
+            .expect("Blood Pact holder");
+        let connection = Connection::open(database.path()).expect("Blood Pact provider database");
+        connection
+            .execute(
+                "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,last_dig_at,luminosity,
+                  boss_progress)
+                 VALUES (?1,?2,76,76,1,?3,100,?4)",
+                params![
+                    USER as i64,
+                    GUILD as i64,
+                    now - 7_200,
+                    r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                ],
+            )
+            .expect("Blood Pact normal Dig tunnel");
+        connection
+            .execute(
+                "INSERT INTO manashop_buffs(
+                     discord_id,guild_id,buff_type,target_id,granted_at,expires_at,
+                     triggered,data
+                 ) VALUES(?1,?2,'blood_pact',?3,?4,?5,0,?6)",
+                params![
+                    skimmer,
+                    GUILD as i64,
+                    USER as i64,
+                    now - 1,
+                    now + 86_400,
+                    serde_json::json!({
+                        "skimmed_total": 0,
+                        "cap": 100,
+                        "skim_rate": 1.0,
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("active Blood Pact");
+        drop(connection);
+
+        let execution = provider
+            .handler
+            .run_dig(
+                USER as i64,
+                GUILD as i64,
+                now,
+                false,
+                false,
+                cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                    0xdec0_de02,
+                    CHANNEL as i64,
+                    "Pacted Dig Miner",
+                    None,
+                ),
+            )
+            .await
+            .expect("committed Blood Pact Dig");
+        let gross = execution.outcome.jc_earned;
+        assert!(gross > 0);
+        let pending = execution.delivery.expect("pending Blood Pact delivery");
+        assert_eq!(pending.blood_pact, DigRuntimeBloodPactSnapshot::Pending);
+
+        let settled = provider
+            .handler
+            .prepare_delivery(&pending)
+            .await
+            .expect("settle Blood Pact before flavor");
+        let skimmed = match settled.blood_pact {
+            DigRuntimeBloodPactSnapshot::Applied { skimmed } => skimmed,
+            ref other => panic!("expected applied Blood Pact, got {other:?}"),
+        };
+        assert!(skimmed > 0);
+        assert!(settled.flavor.is_terminal());
+        assert_eq!(
+            settled.outcome.jc_earned, gross,
+            "immutable outcome changed"
+        );
+        let projected = super::dig_blood_pact_projected_outcome(&settled);
+        assert_eq!(projected.jc_earned, gross - skimmed);
+        assert_eq!(
+            projected.balance_after,
+            settled.outcome.balance_after - skimmed
+        );
+        let (response, event) = super::dig_delivery_responses(
+            &settled,
+            &provider.handler.state.media,
+            &provider.handler.state.view_nonce,
+        );
+        assert!(event.is_none());
+        let description = response.embeds[0]
+            .description
+            .as_deref()
+            .expect("Blood Pact delivery description");
+        assert!(description.contains(&format!("earned **{}** JC", gross - skimmed)));
+        assert!(!description.contains(&format!("earned **{gross}** JC")));
+        let connection = Connection::open(database.path()).expect("inspect Blood Pact delivery");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM hostile_loss_events
+                     WHERE guild_id=?1 AND victim_id=?2",
+                    params![GUILD as i64, USER as i64],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("Blood Pact hostile-loss event count"),
+            1,
+        );
     }
 
     // tests/test_dig_reminder_command.py::test_schedule_dig_reminder_is_noop_without_service
