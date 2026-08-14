@@ -890,6 +890,48 @@ impl DraftStateManager {
         Ok(state)
     }
 
+    /// Restore a durable draft whose session identity was allocated by the
+    /// database.
+    ///
+    /// Runtime hydration must not call [`Self::create_draft`] and then swap
+    /// identities: component callbacks can observe the manager between those
+    /// operations.  Inserting the complete state atomically keeps the
+    /// database-owned session, phase, message ids, and deadline-associated
+    /// state together from the first gateway callback.
+    pub fn restore_draft(&self, state: DraftState) -> Result<DraftHandle, DraftError> {
+        let guild_id = state.guild_id;
+        if state.session_id == 0 {
+            return Err(DraftError::new(
+                "A restored draft must have a database-allocated session.",
+            ));
+        }
+        let mut states = lock_recover(&self.states);
+        if states.contains_key(&guild_id) {
+            return Err(DraftError::new(
+                "A draft is already in progress for this server.",
+            ));
+        }
+
+        // Keep process-local allocations above any restored identity before
+        // publishing the handle in `states`; another guild can otherwise
+        // allocate an older session in the small hydration window.
+        let mut next = self.next_session_id.load(AtomicOrdering::Relaxed);
+        while next < state.session_id {
+            match self.next_session_id.compare_exchange_weak(
+                next,
+                state.session_id,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => next = observed,
+            }
+        }
+        let handle = Arc::new(Mutex::new(state.clone()));
+        states.insert(guild_id, Arc::clone(&handle));
+        Ok(handle)
+    }
+
     pub fn clear_state(
         &self,
         guild_id: Option<i64>,

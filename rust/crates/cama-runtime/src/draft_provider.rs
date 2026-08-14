@@ -18,8 +18,9 @@ use cama_app::betting_service::{
 };
 use cama_app::draft::{
     DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed, DraftEmbedField, DraftPhase,
-    DraftState, DraftStateManager, LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS,
-    PlayerPoolEntry,
+    DraftState, DraftStateEnvelope, DraftStateManager, DraftStatePersistencePort,
+    LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS, PlayerPoolEntry,
+    SqliteDraftStatePersistence,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::autobet_investments::AutobetInvestmentRepository;
@@ -36,7 +37,7 @@ use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::player::Player;
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
@@ -169,6 +170,31 @@ pub struct DraftRegistrationProvider {
     handler: Arc<DraftHandler>,
 }
 
+type DraftOperationLocks = Arc<Mutex<BTreeMap<(i64, u64), Arc<tokio::sync::Mutex<()>>>>>;
+
+fn cleanup_unused_draft_operation_lock_entry(
+    locks: &DraftOperationLocks,
+    drafts: &DraftStateManager,
+    guild_id: i64,
+    session_id: u64,
+    operation_lock: &Arc<tokio::sync::Mutex<()>>,
+) {
+    let active_same_session = drafts
+        .get_state(Some(guild_id))
+        .is_some_and(|state| lock_state(&state).session_id == session_id);
+    if active_same_session {
+        return;
+    }
+    let mut locks = lock_recover(locks);
+    let removable = locks
+        .get(&(guild_id, session_id))
+        .is_some_and(|stored| Arc::ptr_eq(stored, operation_lock))
+        && Arc::strong_count(operation_lock) == 2;
+    if removable {
+        locks.remove(&(guild_id, session_id));
+    }
+}
+
 struct CompletionMessageContext<'a> {
     guild_id: i64,
     pending_match_id: i64,
@@ -233,6 +259,36 @@ impl DraftRegistrationProvider {
         reminders: Arc<dyn DraftReminderScheduler>,
         neon: Arc<dyn DraftNeonObserver>,
     ) -> Result<Self, DraftProviderBuildError> {
+        Self::new_with_reminder_scheduler_and_neon_and_persistence(
+            database_path,
+            config,
+            lobbies,
+            drafts,
+            discord,
+            reminders,
+            neon,
+            None,
+        )
+    }
+
+    /// Build a provider with an optional durable draft-state port.
+    ///
+    /// Existing constructors intentionally pass `None` so source-compatible
+    /// unit fixtures can continue to create process-local drafts. Production
+    /// composition should pass [`SqliteDraftStatePersistence`] (or another
+    /// implementation) here and call [`Self::hydrate`] before registering
+    /// gateway routes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_reminder_scheduler_and_neon_and_persistence(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        lobbies: MatchLobbyPort,
+        drafts: Arc<DraftStateManager>,
+        discord: Arc<dyn DiscordTransport>,
+        reminders: Arc<dyn DraftReminderScheduler>,
+        neon: Arc<dyn DraftNeonObserver>,
+        persistence: Option<Arc<dyn DraftStatePersistencePort>>,
+    ) -> Result<Self, DraftProviderBuildError> {
         if config.values.lobby_ready_threshold <= 0 {
             return Err(DraftProviderBuildError::ReadyThreshold);
         }
@@ -261,8 +317,214 @@ impl DraftRegistrationProvider {
             draft_messages: Arc::new(Mutex::new(BTreeMap::new())),
             timeout_tasks: Mutex::new(BTreeMap::new()),
             completing: Mutex::new(BTreeSet::new()),
+            persistence,
+            persisted_envelopes: Arc::new(Mutex::new(BTreeMap::new())),
+            draft_operation_locks: Arc::new(Mutex::new(BTreeMap::new())),
         });
         Ok(Self { handler })
+    }
+
+    /// Build a provider with SQLite-backed draft persistence and the default
+    /// reminder/Neon adapters.  The caller still owns startup hydration.
+    pub fn new_with_persistence(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        lobbies: MatchLobbyPort,
+        drafts: Arc<DraftStateManager>,
+        discord: Arc<dyn DiscordTransport>,
+        persistence_database_path: impl AsRef<Path>,
+    ) -> Result<Self, DraftProviderBuildError> {
+        Self::new_with_reminder_scheduler_and_neon_and_persistence(
+            database_path,
+            config,
+            lobbies,
+            drafts,
+            discord,
+            Arc::new(NoopDraftReminderScheduler),
+            Arc::new(NoopDraftNeonObserver),
+            Some(Arc::new(SqliteDraftStatePersistence::new(
+                persistence_database_path,
+            ))),
+        )
+    }
+
+    /// Hydrate active, non-finalizing drafts from the configured persistence
+    /// port and restore their timeout ownership.
+    ///
+    /// Finalization recovery is deliberately not attempted here.  A row with
+    /// `finalizing` or `pending_match_id` requires an idempotent pending-match
+    /// reconciliation protocol before it can safely be published or cleared.
+    pub async fn hydrate(&self) -> Result<usize, String> {
+        let Some(persistence) = self.handler.persistence.clone() else {
+            return Ok(0);
+        };
+        let envelopes = spawn_blocking(move || persistence.load_all())
+            .await
+            .map_err(|error| format!("draft state load task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        let mut restored = 0usize;
+        for envelope in envelopes {
+            let guild_id = envelope.guild_id;
+            let session_id = envelope.session_id;
+            let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
+            let operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
+            let _operation_guard = operation_lock.lock().await;
+            let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, initial_kind);
+            let _lobby_operation_guard = lobby_operation_lock.lock().await;
+            let envelope = match self.handler.reload_durable_envelope(guild_id).await {
+                Ok(Some(envelope)) => envelope,
+                Ok(None) => {
+                    let live_same_session = self
+                        .handler
+                        .drafts
+                        .get_state(Some(guild_id))
+                        .is_some_and(|state| lock_state(&state).session_id == session_id);
+                    self.handler.cleanup_unused_draft_operation_lock(
+                        guild_id,
+                        session_id,
+                        &operation_lock,
+                    );
+                    if live_same_session {
+                        return Err(format!(
+                            "live draft session {session_id} has no durable recovery row"
+                        ));
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.handler.cleanup_unused_draft_operation_lock(
+                        guild_id,
+                        session_id,
+                        &operation_lock,
+                    );
+                    return Err(error);
+                }
+            };
+            if envelope.session_id != session_id {
+                self.handler.cleanup_unused_draft_operation_lock(
+                    guild_id,
+                    session_id,
+                    &operation_lock,
+                );
+                return Err(format!(
+                    "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
+                    envelope.session_id
+                ));
+            }
+            if !envelope.active
+                || envelope.finalizing
+                || envelope.pending_match_id.is_some()
+                || envelope.state.as_state().phase == DraftPhase::Complete
+            {
+                let live_same_session = self
+                    .handler
+                    .drafts
+                    .get_state(Some(guild_id))
+                    .is_some_and(|state| lock_state(&state).session_id == session_id);
+                self.handler.cleanup_unused_draft_operation_lock(
+                    guild_id,
+                    session_id,
+                    &operation_lock,
+                );
+                if live_same_session {
+                    return Err(format!(
+                        "live draft session {session_id} now requires finalization recovery"
+                    ));
+                }
+                // TODO(draft-persistence): implement idempotent pending-match
+                // finalization recovery before hydrating these rows.
+                warn!(
+                    guild_id,
+                    session_id,
+                    finalizing = envelope.finalizing,
+                    pending_match_id = ?envelope.pending_match_id,
+                    "skipping draft row that requires finalization recovery"
+                );
+                continue;
+            }
+            let state = envelope.state.clone().into_state();
+            let kind = to_runtime_kind(state.lobby_kind);
+            if kind != initial_kind {
+                self.handler.cleanup_unused_draft_operation_lock(
+                    guild_id,
+                    session_id,
+                    &operation_lock,
+                );
+                return Err(format!(
+                    "draft guild {guild_id} changed lobby scope during hydration"
+                ));
+            }
+            let existing = self.handler.drafts.get_state(Some(guild_id));
+            let (handle, live_state, active_envelope, freshly_restored) = if let Some(existing) =
+                existing
+            {
+                let existing_session = lock_state(&existing).session_id;
+                if existing_session != session_id {
+                    self.handler.cleanup_unused_draft_operation_lock(
+                        guild_id,
+                        session_id,
+                        &operation_lock,
+                    );
+                    return Err(format!(
+                        "draft guild {guild_id} already has session {existing_session}, refusing to hydrate stale session {session_id}"
+                    ));
+                }
+                let Some(cached) = lock_recover(&self.handler.persisted_envelopes)
+                    .get(&(guild_id, session_id))
+                    .cloned()
+                else {
+                    return Err(format!(
+                        "draft session {session_id} is live without a hydrated CAS envelope"
+                    ));
+                };
+                if envelope != cached {
+                    return Err(format!(
+                        "draft session {session_id} durable envelope does not match the live CAS cache: cached revision {}, durable revision {}",
+                        cached.revision, envelope.revision
+                    ));
+                }
+                // Repeated READY is strictly idempotent from the already-live
+                // state. Never overwrite an in-flight or freshly committed
+                // mutation with the load snapshot.
+                let live_state = lock_state(&existing).clone();
+                if live_state.to_snapshot() != cached.state {
+                    return Err(format!(
+                        "draft session {session_id} live state does not match its CAS cache"
+                    ));
+                }
+                (existing, live_state, cached, false)
+            } else {
+                let handle = self
+                    .handler
+                    .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
+                lock_recover(&self.handler.persisted_envelopes)
+                    .insert((guild_id, session_id), envelope.clone());
+                (handle, state.clone(), envelope, true)
+            };
+            self.handler.restore_hydrated_receipt(&live_state);
+            if let Err(error) = self.handler.republish_hydrated_view(&live_state).await {
+                if freshly_restored {
+                    self.handler
+                        .unwind_fresh_hydration(&handle, &live_state, &operation_lock);
+                }
+                return Err(format!(
+                    "draft recovery repaint failed for guild {guild_id}, session {session_id}: {error}"
+                ));
+            }
+            let seconds = active_envelope
+                .deadline_at
+                .map(|deadline| deadline.saturating_sub(unix_now()).max(1) as u64)
+                .unwrap_or_else(|| {
+                    if lock_state(&handle).phase == DraftPhase::Drafting {
+                        DRAFTING_TIMEOUT_SECONDS
+                    } else {
+                        PRE_DRAFT_TIMEOUT_SECONDS
+                    }
+                });
+            self.handler.schedule_timeout(guild_id, session_id, seconds);
+            restored += 1;
+        }
+        Ok(restored)
     }
 
     /// Expose the shared manager for composition and readiness diagnostics.
@@ -352,6 +614,9 @@ struct DraftHandler {
     draft_messages: Arc<Mutex<BTreeMap<(i64, u64), DiscordMessageReceipt>>>,
     timeout_tasks: Mutex<BTreeMap<i64, JoinHandle<()>>>,
     completing: Mutex<BTreeSet<(i64, u64)>>,
+    persistence: Option<Arc<dyn DraftStatePersistencePort>>,
+    persisted_envelopes: Arc<Mutex<BTreeMap<(i64, u64), DraftStateEnvelope>>>,
+    draft_operation_locks: DraftOperationLocks,
 }
 
 #[async_trait]
@@ -420,6 +685,361 @@ impl InteractionHandler for DraftHandler {
 }
 
 impl DraftHandler {
+    fn draft_operation_lock(&self, guild_id: i64, session_id: u64) -> Arc<tokio::sync::Mutex<()>> {
+        lock_recover(&self.draft_operation_locks)
+            .entry((guild_id, session_id))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn remove_draft_operation_lock(&self, guild_id: i64, session_id: u64) {
+        lock_recover(&self.draft_operation_locks).remove(&(guild_id, session_id));
+    }
+
+    /// Drop an operation-lock entry only when it no longer protects a live
+    /// session and no other callback has already cloned that same lock.
+    fn cleanup_unused_draft_operation_lock(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        operation_lock: &Arc<tokio::sync::Mutex<()>>,
+    ) {
+        cleanup_unused_draft_operation_lock_entry(
+            &self.draft_operation_locks,
+            &self.drafts,
+            guild_id,
+            session_id,
+            operation_lock,
+        );
+    }
+
+    async fn reload_durable_envelope(
+        &self,
+        guild_id: i64,
+    ) -> Result<Option<DraftStateEnvelope>, String> {
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(None);
+        };
+        spawn_blocking(move || persistence.load_all())
+            .await
+            .map_err(|error| format!("draft state reload task failed: {error}"))?
+            .map_err(|error| error.to_string())
+            .map(|envelopes| {
+                envelopes
+                    .into_iter()
+                    .find(|envelope| envelope.guild_id == guild_id)
+            })
+    }
+
+    /// Reserve a recovered draft's pool and publish its handle as one logical
+    /// startup step. The caller holds both the draft-session and lobby-scope
+    /// operation locks. If manager insertion loses a race, unwind the newly
+    /// acquired reservation before returning the error.
+    fn reserve_and_restore_hydrated_state(
+        &self,
+        state: &DraftState,
+        operation_lock: &Arc<tokio::sync::Mutex<()>>,
+    ) -> Result<Arc<Mutex<DraftState>>, String> {
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        let kind = to_runtime_kind(state.lobby_kind);
+        let player_ids = state
+            .player_pool_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let reserved = if player_ids.is_empty() {
+            false
+        } else if self.lobbies.reserve_players(guild_id, kind, &player_ids) {
+            true
+        } else {
+            self.cleanup_unused_draft_operation_lock(guild_id, session_id, operation_lock);
+            return Err(format!(
+                "could not re-reserve hydrated draft players for guild {guild_id}"
+            ));
+        };
+        match self.drafts.restore_draft(state.clone()) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                if reserved {
+                    self.lobbies.release_players(guild_id, kind, &player_ids);
+                }
+                self.cleanup_unused_draft_operation_lock(guild_id, session_id, operation_lock);
+                Err(format!("could not restore draft {guild_id}: {error}"))
+            }
+        }
+    }
+
+    /// Undo only process-local effects of a failed first hydration.  The
+    /// durable row is intentionally retained so READY can retry recovery.
+    fn unwind_fresh_hydration(
+        &self,
+        handle: &Arc<Mutex<DraftState>>,
+        state: &DraftState,
+        operation_lock: &Arc<tokio::sync::Mutex<()>>,
+    ) {
+        let key = (state.guild_id, state.session_id);
+        self.cancel_timeout(state.guild_id);
+        lock_recover(&self.draft_messages).remove(&key);
+        lock_recover(&self.persisted_envelopes).remove(&key);
+        self.drafts.clear_state(Some(state.guild_id), Some(handle));
+        let player_ids = state
+            .player_pool_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !player_ids.is_empty() {
+            self.lobbies.release_players(
+                state.guild_id,
+                to_runtime_kind(state.lobby_kind),
+                &player_ids,
+            );
+        }
+        self.cleanup_unused_draft_operation_lock(state.guild_id, state.session_id, operation_lock);
+    }
+
+    fn restore_hydrated_receipt(&self, state: &DraftState) {
+        let key = (state.guild_id, state.session_id);
+        let ids = (
+            state.draft_channel_id.and_then(|id| u64::try_from(id).ok()),
+            state.draft_message_id.and_then(|id| u64::try_from(id).ok()),
+        );
+        if let (Some(channel_id), Some(message_id)) = ids {
+            lock_recover(&self.draft_messages).insert(
+                key,
+                DiscordMessageReceipt {
+                    channel_id,
+                    message_id,
+                    jump_url: format!(
+                        "https://discord.com/channels/{}/{channel_id}/{message_id}",
+                        state.guild_id
+                    ),
+                },
+            );
+        } else {
+            lock_recover(&self.draft_messages).remove(&key);
+        }
+    }
+
+    /// Repaint a recovered source message from durable state.  Message ids
+    /// are part of the authoritative snapshot; the receipt cache is rebuilt
+    /// by [`DraftRegistrationProvider::hydrate`] so normal completion cleanup
+    /// still knows which source message to remove.
+    async fn republish_hydrated_view(&self, state: &DraftState) -> Result<(), String> {
+        let (Some(channel_id), Some(message_id)) = (state.draft_channel_id, state.draft_message_id)
+        else {
+            return Err("durable draft has no source message identity".to_owned());
+        };
+        let (Ok(channel_id), Ok(message_id)) = (to_u64(channel_id), to_u64(message_id)) else {
+            return Err("durable draft has an invalid Discord message identity".to_owned());
+        };
+        let response = match state.phase {
+            DraftPhase::WinnerChoice => InteractionResponse::message("")
+                .embed(opening_embed(state, "Recovered after restart"))
+                .action_rows(pre_choice_view(
+                    state.session_id,
+                    state.coinflip_winner_id.unwrap_or_default(),
+                    false,
+                    true,
+                )),
+            DraftPhase::WinnerSideChoice => {
+                choice_embed(state, "Choose Your Side", "Pick Radiant or Dire.").action_rows(
+                    pre_choice_view(
+                        state.session_id,
+                        state.coinflip_winner_id.unwrap_or_default(),
+                        true,
+                        false,
+                    ),
+                )
+            }
+            DraftPhase::WinnerHeroChoice => choice_embed(
+                state,
+                "Choose Hero Pick Order",
+                "Pick First or Second hero pick (in-game).",
+            )
+            .action_rows(pre_choice_view(
+                state.session_id,
+                other_captain(state, state.coinflip_winner_id.unwrap_or_default())
+                    .unwrap_or_default(),
+                false,
+                false,
+            )),
+            DraftPhase::LoserChoice => {
+                let loser = other_captain(state, state.coinflip_winner_id.unwrap_or_default())
+                    .unwrap_or_default();
+                let side_choice = state.winner_choice_type.as_deref() == Some("hero_pick");
+                (if side_choice {
+                    choice_embed(state, "Choose Your Side", "Pick Radiant or Dire.")
+                } else {
+                    choice_embed(
+                        state,
+                        "Choose Hero Pick Order",
+                        "Pick First or Second hero pick (in-game).",
+                    )
+                })
+                .action_rows(pre_choice_view(
+                    state.session_id,
+                    loser,
+                    side_choice,
+                    false,
+                ))
+            }
+            DraftPhase::Drafting => InteractionResponse::message("")
+                .embed(live_embed(state))
+                .action_rows(drafting_view(state)),
+            DraftPhase::Complete => {
+                return Err("completed draft requires finalization recovery".to_owned());
+            }
+            DraftPhase::Coinflip => {
+                return Err("pre-publication draft requires startup recovery".to_owned());
+            }
+        };
+        self.discord
+            .edit_message(channel_id, message_id, DiscordMessage::silent(response))
+            .await
+            .map_err(|error| format!("Discord source edit failed: {error}"))
+    }
+
+    /// Create the durable row before any component-bearing Discord message is
+    /// published.  SQLite owns the session identity; the returned snapshot is
+    /// adopted by the manager before the first custom id is rendered.
+    async fn persist_create(
+        &self,
+        handle: &Arc<Mutex<DraftState>>,
+        deadline_at: Option<i64>,
+    ) -> Result<DraftStateEnvelope, String> {
+        let snapshot = lock_state(handle).clone();
+        let mut requested = snapshot.to_snapshot().envelope(1);
+        requested.deadline_at = deadline_at;
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(requested);
+        };
+        let returned = spawn_blocking(move || persistence.create_envelope(&requested))
+            .await
+            .map_err(|error| format!("draft persistence create task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        if returned.guild_id != snapshot.guild_id {
+            return Err("draft persistence returned the wrong guild".to_owned());
+        }
+        *lock_state(handle) = returned.state.clone().into_state();
+        lock_recover(&self.persisted_envelopes)
+            .insert((returned.guild_id, returned.session_id), returned.clone());
+        Ok(returned)
+    }
+
+    fn cached_deadline(&self, state: &DraftState) -> Option<i64> {
+        lock_recover(&self.persisted_envelopes)
+            .get(&(state.guild_id, state.session_id))
+            .and_then(|envelope| envelope.deadline_at)
+    }
+
+    /// CAS a state transition before its corresponding gateway publication.
+    /// On failure the process-local state is rolled back so a backend outage
+    /// cannot make callbacks observe a transition that was never durable.
+    async fn persist_transition(
+        &self,
+        handle: &Arc<Mutex<DraftState>>,
+        previous: DraftState,
+        next: DraftState,
+        deadline_at: Option<i64>,
+        finalizing: bool,
+    ) -> Result<(), String> {
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(());
+        };
+        let key = (next.guild_id, next.session_id);
+        let Some(current) = lock_recover(&self.persisted_envelopes).get(&key).cloned() else {
+            *lock_state(handle) = previous;
+            return Err(format!(
+                "draft persistence session {} is not hydrated",
+                next.session_id
+            ));
+        };
+        let mut requested = current.clone();
+        requested.deadline_at = deadline_at;
+        requested.finalizing = finalizing;
+        requested.pending_match_id = None;
+        requested.state = next.to_snapshot();
+        let expected_revision = current.revision;
+        let returned = spawn_blocking(move || {
+            persistence.replace_envelope_if_revision(key.0, key.1, expected_revision, &requested)
+        })
+        .await
+        .map_err(|error| format!("draft persistence replace task failed: {error}"))
+        .and_then(|result| result.map_err(|error| error.to_string()));
+        match returned {
+            Ok(returned) => {
+                lock_recover(&self.persisted_envelopes).insert(key, returned);
+                Ok(())
+            }
+            Err(error) => {
+                *lock_state(handle) = previous;
+                Err(error)
+            }
+        }
+    }
+
+    async fn delete_persisted(&self, state: &DraftState) -> Result<bool, String> {
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(true);
+        };
+        let key = (state.guild_id, state.session_id);
+        let Some(current) = lock_recover(&self.persisted_envelopes).get(&key).cloned() else {
+            return Ok(false);
+        };
+        let expected_revision = current.revision;
+        let deleted =
+            spawn_blocking(move || persistence.delete_if_revision(key.0, key.1, expected_revision))
+                .await
+                .map_err(|error| format!("draft persistence delete task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        if deleted {
+            lock_recover(&self.persisted_envelopes).remove(&key);
+        }
+        Ok(deleted)
+    }
+
+    /// Fence a created pending match before removing the process-local draft.
+    /// Hydration intentionally skips this marker until a complete
+    /// reconciliation protocol exists, so a crash cannot replay Discord
+    /// publication as if the draft were still interactive.
+    async fn mark_finalizing(
+        &self,
+        state: &DraftState,
+        pending_match_id: Option<i64>,
+    ) -> Result<(), String> {
+        let Some(persistence) = self.persistence.clone() else {
+            return Ok(());
+        };
+        let key = (state.guild_id, state.session_id);
+        let Some(current) = lock_recover(&self.persisted_envelopes).get(&key).cloned() else {
+            return Err(format!(
+                "draft persistence session {} is not hydrated",
+                state.session_id
+            ));
+        };
+        if current.finalizing
+            && current.pending_match_id == pending_match_id
+            && current.state.as_state() == state
+        {
+            return Ok(());
+        }
+        let mut requested = current;
+        requested.state = state.to_snapshot();
+        requested.deadline_at = None;
+        requested.finalizing = true;
+        requested.pending_match_id = pending_match_id;
+        let expected_revision = requested.revision;
+        let returned = spawn_blocking(move || {
+            persistence.replace_envelope_if_revision(key.0, key.1, expected_revision, &requested)
+        })
+        .await
+        .map_err(|error| format!("draft finalization marker task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        lock_recover(&self.persisted_envelopes).insert(key, returned);
+        Ok(())
+    }
+
     async fn send_neon_followup(
         &self,
         responder: &Arc<dyn InteractionResponder>,
@@ -705,7 +1325,6 @@ impl DraftHandler {
                 return followup_ephemeral(&responder, &format!("❌ {error}")).await;
             }
         };
-        let session_id = lock_state(&state).session_id;
         let setup_result = self
             .finish_start(
                 context,
@@ -720,11 +1339,24 @@ impl DraftHandler {
             )
             .await;
         if let Err(error) = setup_result {
+            let state_snapshot = lock_state(&state).clone();
+            let session_id = state_snapshot.session_id;
+            if let Err(cleanup_error) = self.delete_persisted(&state_snapshot).await {
+                warn!(%cleanup_error, guild_id, session_id, "draft start persistence cleanup failed");
+            }
             lock_recover(&self.draft_messages).remove(&(guild_id, session_id));
             self.drafts.clear_state(Some(guild_id), Some(&state));
-            let state_snapshot = lock_state(&state).clone();
+            self.remove_draft_operation_lock(guild_id, session_id);
             self.lobbies.release_players(guild_id, kind, &selected);
             if let Some(message_id) = state_snapshot.captain_ping_message_id
+                && let Some(channel_id) = state_snapshot.draft_channel_id
+            {
+                let _ = self
+                    .discord
+                    .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
+                    .await;
+            }
+            if let Some(message_id) = state_snapshot.draft_message_id
                 && let Some(channel_id) = state_snapshot.draft_channel_id
             {
                 let _ = self
@@ -735,6 +1367,7 @@ impl DraftHandler {
             delete_followup(&responder, progress).await;
             return Err(error);
         }
+        let session_id = lock_state(&state).session_id;
         self.schedule_timeout(guild_id, session_id, PRE_DRAFT_TIMEOUT_SECONDS);
         Ok(())
     }
@@ -763,7 +1396,7 @@ impl DraftHandler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .coinflip(captain_pair.captain1_id, captain_pair.captain2_id);
-        let (session_id, opening) = {
+        let opening = {
             let mut current = lock_state(&state);
             current.player_pool_ids = pool.selected_ids.clone();
             current.excluded_player_ids = pool.excluded_ids.clone();
@@ -797,11 +1430,19 @@ impl DraftHandler {
                 .collect();
             current.coinflip_winner_id = Some(coinflip_winner);
             current.phase = DraftPhase::WinnerChoice;
-            (
-                current.session_id,
-                opening_embed(&current, &context.user_display_name),
-            )
+            opening_embed(&current, &context.user_display_name)
         };
+
+        // Persist the complete setup before deleting the progress response or
+        // publishing a component-bearing Discord message.  The database may
+        // replace the process-local session id here.
+        let created = self
+            .persist_create(
+                &state,
+                Some(unix_now().saturating_add(PRE_DRAFT_TIMEOUT_SECONDS as i64)),
+            )
+            .await?;
+        let session_id = created.session_id;
 
         delete_followup(&responder, progress).await;
         let ping = self
@@ -823,7 +1464,30 @@ impl DraftHandler {
             )
             .await;
         if let Ok(receipt) = ping {
-            lock_state(&state).captain_ping_message_id = Some(to_i64(receipt.message_id)?);
+            let previous = lock_state(&state).clone();
+            let mut next = previous.clone();
+            let receipt_id = match to_i64(receipt.message_id) {
+                Ok(id) => id,
+                Err(error) => {
+                    let _ = self
+                        .discord
+                        .delete_message(receipt.channel_id, receipt.message_id)
+                        .await;
+                    return Err(error);
+                }
+            };
+            next.captain_ping_message_id = Some(receipt_id);
+            *lock_state(&state) = next.clone();
+            if let Err(error) = self
+                .persist_transition(&state, previous, next, created.deadline_at, false)
+                .await
+            {
+                let _ = self
+                    .discord
+                    .delete_message(receipt.channel_id, receipt.message_id)
+                    .await;
+                return Err(error);
+            }
         }
         let opening_view = pre_choice_view(session_id, coinflip_winner, false, true);
         let opening_receipt = self
@@ -838,12 +1502,31 @@ impl DraftHandler {
             )
             .await
             .map_err(|error| format!("draft opening message failed: {error}"))?;
+        let previous = lock_state(&state).clone();
+        let mut next = previous.clone();
+        let opening_message_id = match to_i64(opening_receipt.message_id) {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = self
+                    .discord
+                    .delete_message(opening_receipt.channel_id, opening_receipt.message_id)
+                    .await;
+                return Err(error);
+            }
+        };
+        next.draft_message_id = Some(opening_message_id);
+        *lock_state(&state) = next.clone();
+        if let Err(error) = self
+            .persist_transition(&state, previous, next.clone(), created.deadline_at, false)
+            .await
         {
-            let mut current = lock_state(&state);
-            current.draft_message_id = Some(to_i64(opening_receipt.message_id)?);
-            lock_recover(&self.draft_messages)
-                .insert((current.guild_id, session_id), opening_receipt);
+            let _ = self
+                .discord
+                .delete_message(opening_receipt.channel_id, opening_receipt.message_id)
+                .await;
+            return Err(error);
         }
+        lock_recover(&self.draft_messages).insert((next.guild_id, session_id), opening_receipt);
 
         let loser_id = if coinflip_winner == captain_pair.captain1_id {
             captain_pair.captain2_id
@@ -878,8 +1561,18 @@ impl DraftHandler {
         let Some(handle) = self.drafts.get_state(Some(guild_id)) else {
             return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
-        let snapshot = lock_state(&handle).clone();
-        let kind = to_runtime_kind(snapshot.lobby_kind);
+        let initial = lock_state(&handle).clone();
+        let kind = to_runtime_kind(initial.lobby_kind);
+        let draft_operation_lock = self.draft_operation_lock(guild_id, initial.session_id);
+        let Ok(_draft_operation_guard) =
+            tokio::time::timeout(OPERATION_LOCK_TIMEOUT, draft_operation_lock.lock()).await
+        else {
+            return respond_ephemeral(
+                &responder,
+                "A draft is already being processed. Please wait.",
+            )
+            .await;
+        };
         let kind_lock = self.lobbies.operation_lock(guild_id, kind);
         let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, kind_lock.lock()).await
         else {
@@ -893,6 +1586,14 @@ impl DraftHandler {
             return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
         if !Arc::ptr_eq(&current, &handle) {
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
+        }
+        let snapshot = lock_state(&current).clone();
+        if snapshot.session_id != initial.session_id {
             return respond_ephemeral(
                 &responder,
                 "❌ This draft is no longer active — use the controls on the current draft.",
@@ -917,7 +1618,28 @@ impl DraftHandler {
             )
             .await;
         }
+        if self.persistence.is_some() {
+            match self.delete_persisted(&snapshot).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return respond_ephemeral(
+                        &responder,
+                        "❌ This draft is no longer active — use the controls on the current draft.",
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(%error, guild_id, session_id = snapshot.session_id, "draft restart persistence cleanup failed");
+                    return respond_ephemeral(
+                        &responder,
+                        "⚠️ Draft restart could not be saved. Please try again.",
+                    )
+                    .await;
+                }
+            }
+        }
         self.drafts.clear_state(Some(guild_id), Some(&handle));
+        self.remove_draft_operation_lock(guild_id, snapshot.session_id);
         lock_recover(&self.draft_messages).remove(&(guild_id, snapshot.session_id));
         self.lobbies.release_players(
             guild_id,
@@ -964,6 +1686,17 @@ impl DraftHandler {
             .await;
         };
         let session = lock_state(&handle).session_id;
+        if self.persistence.is_some() && component.session_id.is_none() {
+            // Legacy ids have no durable session fence and may be replayed
+            // after a restart.  Keep them accepted by the in-memory fixture
+            // path, but reject them once the production persistence port is
+            // installed.
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft control is no longer valid — use the controls on the current draft.",
+            )
+            .await;
+        }
         if component
             .session_id
             .is_some_and(|expected| expected != session)
@@ -983,6 +1716,33 @@ impl DraftHandler {
         };
         if !participant {
             return respond_ephemeral(&responder, "❌ You are not part of this draft.").await;
+        }
+        let operation_lock = self.draft_operation_lock(guild_id, session);
+        let Ok(_operation_guard) =
+            tokio::time::timeout(OPERATION_LOCK_TIMEOUT, operation_lock.lock()).await
+        else {
+            self.cleanup_unused_draft_operation_lock(guild_id, session, &operation_lock);
+            return respond_ephemeral(
+                &responder,
+                "A draft action is already being processed. Please wait.",
+            )
+            .await;
+        };
+        let Some(current) = self.drafts.get_state(Some(guild_id)) else {
+            self.cleanup_unused_draft_operation_lock(guild_id, session, &operation_lock);
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
+        };
+        if !Arc::ptr_eq(&current, &handle) || lock_state(&current).session_id != session {
+            self.cleanup_unused_draft_operation_lock(guild_id, session, &operation_lock);
+            return respond_ephemeral(
+                &responder,
+                "❌ This draft is no longer active — use the controls on the current draft.",
+            )
+            .await;
         }
         match component.action {
             DraftComponent::ChoiceSide => {
@@ -1049,6 +1809,15 @@ impl DraftHandler {
                 ping,
             )
         };
+        let next = lock_state(&handle).clone();
+        self.persist_transition(
+            &handle,
+            initial,
+            next,
+            Some(unix_now().saturating_add(PRE_DRAFT_TIMEOUT_SECONDS as i64)),
+            false,
+        )
+        .await?;
         if let Some((channel_id, message_id)) = ping {
             let _ = self
                 .discord
@@ -1102,6 +1871,15 @@ impl DraftHandler {
                 ping,
             )
         };
+        let next = lock_state(&handle).clone();
+        self.persist_transition(
+            &handle,
+            initial,
+            next,
+            Some(unix_now().saturating_add(PRE_DRAFT_TIMEOUT_SECONDS as i64)),
+            false,
+        )
+        .await?;
         if let Some((channel_id, message_id)) = ping {
             let _ = self
                 .discord
@@ -1124,6 +1902,7 @@ impl DraftHandler {
         side: Side,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let previous = lock_state(&handle).clone();
         let result: Result<(InteractionResponse, Option<u64>), &'static str> = {
             let mut state = lock_state(&handle);
             let is_winner = state.phase == DraftPhase::WinnerSideChoice;
@@ -1181,6 +1960,20 @@ impl DraftHandler {
             Ok(result) => result,
             Err(message) => return respond_ephemeral(responder, message).await,
         };
+        let next = lock_state(&handle).clone();
+        let timeout = if drafting_session.is_some() {
+            DRAFTING_TIMEOUT_SECONDS
+        } else {
+            PRE_DRAFT_TIMEOUT_SECONDS
+        };
+        self.persist_transition(
+            &handle,
+            previous,
+            next,
+            Some(unix_now().saturating_add(timeout as i64)),
+            false,
+        )
+        .await?;
         if let Some(session) = drafting_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
@@ -1201,6 +1994,7 @@ impl DraftHandler {
         order: HeroOrder,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let previous = lock_state(&handle).clone();
         let result: Result<(InteractionResponse, Option<u64>), &'static str> = {
             let mut state = lock_state(&handle);
             let winner_choice = state.phase == DraftPhase::WinnerHeroChoice;
@@ -1251,6 +2045,20 @@ impl DraftHandler {
             Ok(result) => result,
             Err(message) => return respond_ephemeral(responder, message).await,
         };
+        let next = lock_state(&handle).clone();
+        let timeout = if drafting_session.is_some() {
+            DRAFTING_TIMEOUT_SECONDS
+        } else {
+            PRE_DRAFT_TIMEOUT_SECONDS
+        };
+        self.persist_transition(
+            &handle,
+            previous,
+            next,
+            Some(unix_now().saturating_add(timeout as i64)),
+            false,
+        )
+        .await?;
         if let Some(session) = drafting_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
@@ -1272,6 +2080,7 @@ impl DraftHandler {
         _user_name: String,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let previous = lock_state(&handle).clone();
         let outcome = {
             let mut state = lock_state(&handle);
             if state.phase != DraftPhase::Drafting {
@@ -1291,7 +2100,26 @@ impl DraftHandler {
         let Ok((complete, session, state_snapshot)) = outcome else {
             return respond_ephemeral(responder, outcome.unwrap_err()).await;
         };
+        self.persist_transition(
+            &handle,
+            previous,
+            state_snapshot.clone(),
+            if complete {
+                None
+            } else {
+                Some(unix_now().saturating_add(DRAFTING_TIMEOUT_SECONDS as i64))
+            },
+            complete,
+        )
+        .await?;
         if complete {
+            // The final-pick CAS has fenced this row for recovery.  Disarm
+            // the interactive drafting timeout before any fallible Discord
+            // defer so it cannot delete the fenced row while publication is
+            // awaiting explicit finalization recovery.
+            if self.persistence.is_some() {
+                self.cancel_timeout(guild_id);
+            }
             responder
                 .defer(false)
                 .await
@@ -1319,6 +2147,7 @@ impl DraftHandler {
         side: Option<Side>,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let previous = lock_state(&handle).clone();
         let outcome = {
             let mut state = lock_state(&handle);
             if state.phase != DraftPhase::Drafting {
@@ -1339,6 +2168,14 @@ impl DraftHandler {
         let Ok((message, snapshot)) = outcome else {
             return respond_ephemeral(responder, outcome.unwrap_err()).await;
         };
+        self.persist_transition(
+            &handle,
+            previous,
+            snapshot.clone(),
+            self.cached_deadline(&snapshot),
+            false,
+        )
+        .await?;
         let response = InteractionResponse::message(message).ephemeral();
         responder
             .respond(response)
@@ -1422,6 +2259,10 @@ impl DraftHandler {
         let is_bomb_pot = fastrand::f64() < self.config.bomb_pot_chance;
         let pending_state =
             db_pending_state(&state, now, self.config.bet_lock_seconds, is_bomb_pot)?;
+        if let Err(error) = self.mark_finalizing(&state, None).await {
+            warn!(%error, guild_id, session_id = state.session_id, "draft finalization fence failed before pending match creation");
+            return completion_response(&responder, None, error, deferred).await;
+        }
         let pending = match self
             .pending
             .create_pending_match(guild_id, &pending_state)
@@ -1429,10 +2270,26 @@ impl DraftHandler {
         {
             Ok(pending) => pending,
             Err(error) => {
+                if let Err(cleanup_error) = self.delete_persisted(&state).await {
+                    warn!(%cleanup_error, guild_id, "failed to delete failed draft finalization fence");
+                }
                 self.finish_draft_without_match(&handle, &state);
                 return completion_response(&responder, None, error, deferred).await;
             }
         };
+        if let Err(error) = self
+            .mark_finalizing(&state, Some(pending.pending_match_id))
+            .await
+        {
+            warn!(%error, guild_id, pending_match_id = pending.pending_match_id, "draft finalization fence could not record pending match");
+            return completion_response(
+                &responder,
+                Some(pending.pending_match_id),
+                error,
+                deferred,
+            )
+            .await;
+        }
         if let Err(error) =
             self.pending
                 .mutate_pending_match(guild_id, pending.pending_match_id, |state| {
@@ -1517,9 +2374,12 @@ impl DraftHandler {
             warn!(%error, "draft lobby reset failed after pending match creation");
         }
         self.cancel_timeout(guild_id);
-        let draft_receipt =
-            lock_recover(&self.draft_messages).remove(&(guild_id, state.session_id));
+        let draft_receipt = lock_recover(&self.draft_messages)
+            .get(&(guild_id, state.session_id))
+            .cloned();
+        lock_recover(&self.draft_messages).remove(&(guild_id, state.session_id));
         self.drafts.clear_state(Some(guild_id), Some(&handle));
+        self.remove_draft_operation_lock(guild_id, state.session_id);
         self.lobbies.release_players(
             guild_id,
             kind,
@@ -1601,6 +2461,9 @@ impl DraftHandler {
         // completion deadlocks on the same open-lobby mutex.
         drop(_operation_guard);
         let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
+        if let Err(error) = self.delete_persisted(&state).await {
+            warn!(%error, guild_id, pending_match_id = pending.pending_match_id, "completed draft durable cleanup failed");
+        }
         Ok(())
     }
 
@@ -2105,6 +2968,7 @@ impl DraftHandler {
         self.cancel_timeout(state.guild_id);
         lock_recover(&self.draft_messages).remove(&(state.guild_id, state.session_id));
         self.drafts.clear_state(Some(state.guild_id), Some(handle));
+        self.remove_draft_operation_lock(state.guild_id, state.session_id);
         self.lobbies.release_players(
             state.guild_id,
             to_runtime_kind(state.lobby_kind),
@@ -2253,6 +3117,9 @@ impl DraftHandler {
         self.cancel_timeout(guild_id);
         let drafts = Arc::clone(&self.drafts);
         let draft_messages = Arc::clone(&self.draft_messages);
+        let persistence = self.persistence.clone();
+        let persisted_envelopes = Arc::clone(&self.persisted_envelopes);
+        let draft_operation_locks = Arc::clone(&self.draft_operation_locks);
         let discord = Arc::clone(&self.discord);
         let lobbies = self.lobbies.clone();
         let handle = tokio::spawn(async move {
@@ -2264,14 +3131,68 @@ impl DraftHandler {
             if snapshot.session_id != session_id {
                 return;
             }
+            let draft_operation_lock = lock_recover(&draft_operation_locks)
+                .entry((guild_id, session_id))
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            // Components hold this fence across their CAS and Discord
+            // publication.  Acquire it before the lobby lock so completion
+            // (which takes the reverse order) cannot deadlock at expiry.
+            let _draft_operation_guard = draft_operation_lock.lock().await;
             let kind = to_runtime_kind(snapshot.lobby_kind);
             let operation_lock = lobbies.operation_lock(guild_id, kind);
             let _operation_guard = operation_lock.lock().await;
             let Some(current) = drafts.get_state(Some(guild_id)) else {
+                cleanup_unused_draft_operation_lock_entry(
+                    &draft_operation_locks,
+                    &drafts,
+                    guild_id,
+                    session_id,
+                    &draft_operation_lock,
+                );
                 return;
             };
             if !Arc::ptr_eq(&current, &state) || lock_state(&current).session_id != session_id {
+                cleanup_unused_draft_operation_lock_entry(
+                    &draft_operation_locks,
+                    &drafts,
+                    guild_id,
+                    session_id,
+                    &draft_operation_lock,
+                );
                 return;
+            }
+            if let Some(persistence) = persistence {
+                let key = (guild_id, session_id);
+                let Some(envelope) = lock_recover(&persisted_envelopes).get(&key).cloned() else {
+                    warn!(
+                        guild_id,
+                        session_id, "draft timeout has no durable session fence"
+                    );
+                    return;
+                };
+                let expected_revision = envelope.revision;
+                let deleted = match spawn_blocking(move || {
+                    persistence.delete_if_revision(key.0, key.1, expected_revision)
+                })
+                .await
+                {
+                    Ok(Ok(deleted)) => deleted,
+                    Ok(Err(error)) => {
+                        warn!(%error, guild_id, session_id, "draft timeout persistence cleanup failed");
+                        return;
+                    }
+                    Err(error) => {
+                        warn!(%error, guild_id, session_id, "draft timeout persistence task failed");
+                        return;
+                    }
+                };
+                if !deleted {
+                    // A replacement session won the CAS race.  Never clear
+                    // local state or publish a timeout for that replacement.
+                    return;
+                }
+                lock_recover(&persisted_envelopes).remove(&key);
             }
             lock_recover(&draft_messages).remove(&(guild_id, session_id));
             drafts.clear_state(Some(guild_id), Some(&state));
@@ -2304,6 +3225,13 @@ impl DraftHandler {
                     )
                     .await;
             }
+            cleanup_unused_draft_operation_lock_entry(
+                &draft_operation_locks,
+                &drafts,
+                guild_id,
+                session_id,
+                &draft_operation_lock,
+            );
         });
         lock_recover(&self.timeout_tasks).insert(guild_id, handle);
     }

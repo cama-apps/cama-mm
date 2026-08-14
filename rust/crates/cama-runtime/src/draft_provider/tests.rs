@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
-use cama_app::draft::{DRAFT_POOL_SIZE, DRAFT_TOTAL_PICKS};
+use cama_app::draft::{
+    DRAFT_POOL_SIZE, DRAFT_TOTAL_PICKS, DraftPhase, DraftStatePersistencePort,
+    SqliteDraftStatePersistence,
+};
 use cama_db::autobet_investments::AutobetInvestmentRepository;
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::schema_manager::initialize_or_migrate;
@@ -36,6 +39,7 @@ struct TestResponder {
     updates: StdMutex<Vec<InteractionResponse>>,
     original_edits: StdMutex<Vec<InteractionResponse>>,
     defers: StdMutex<Vec<bool>>,
+    fail_defer: bool,
     fail_original_edit: bool,
 }
 
@@ -47,6 +51,9 @@ impl InteractionResponder for TestResponder {
     }
 
     async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        if self.fail_defer {
+            return Err(InteractionResponseError::new("simulated defer failure"));
+        }
         self.defers.lock().expect("defers").push(ephemeral);
         Ok(())
     }
@@ -88,6 +95,7 @@ struct NullDiscord {
     block_completion_sends: AtomicBool,
     completion_sends_started: AtomicUsize,
     completion_send_gate: Semaphore,
+    fail_edits: AtomicBool,
 }
 
 impl Default for NullDiscord {
@@ -99,6 +107,7 @@ impl Default for NullDiscord {
             block_completion_sends: AtomicBool::new(false),
             completion_sends_started: AtomicUsize::new(0),
             completion_send_gate: Semaphore::new(0),
+            fail_edits: AtomicBool::new(false),
         }
     }
 }
@@ -140,6 +149,9 @@ impl DiscordTransport for NullDiscord {
         message_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
+        if self.fail_edits.load(Ordering::Acquire) {
+            return Err("simulated Discord edit failure".to_owned());
+        }
         self.edited
             .lock()
             .expect("edited")
@@ -623,6 +635,935 @@ fn state_for_draft() -> DraftState {
         );
     }
     state
+}
+
+#[test]
+fn provider_recreation_hydrates_state_phase_message_and_deadline() {
+    let database = NamedTempFile::new().expect("draft database");
+    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    // Hydration must re-reserve a live lobby.  This fixture deliberately has
+    // no player pool so it isolates restart state/message/deadline recovery.
+    state.player_pool_ids.clear();
+    state.phase = DraftPhase::WinnerSideChoice;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let deadline = unix_now().saturating_add(120);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.deadline_at = Some(deadline);
+    let persisted = persistence
+        .create_envelope(&requested)
+        .expect("create durable draft");
+
+    let drafts = Arc::new(DraftStateManager::default());
+    let discord = Arc::new(NullDiscord::default());
+    let lobby = LobbyRegistrationProvider::new(
+        database.path(),
+        LobbyRuntimeConfig {
+            lobby_channel_id: Some(700),
+            low_skill_lobby_channel_id: Some(701),
+            admin_user_ids: BTreeSet::from([9001]),
+            ready_threshold: 10,
+            max_players: 20,
+            first_game_pool_daily_amount: 0,
+        },
+        Arc::clone(&drafts),
+        discord.clone(),
+    )
+    .expect("lobby provider");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobby.match_lobby_port(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    assert_eq!(block_on(provider.hydrate()).expect("hydrate draft"), 1);
+    let restored = drafts.get_state(Some(42)).expect("restored state");
+    let restored = restored.lock().expect("restored state lock").clone();
+    assert_eq!(restored.session_id, persisted.session_id);
+    assert_eq!(restored.phase, DraftPhase::WinnerSideChoice);
+    assert_eq!(restored.draft_channel_id, Some(777));
+    assert_eq!(restored.draft_message_id, Some(1234));
+    let loaded = persistence.load_all().expect("load durable draft");
+    assert_eq!(loaded[0].deadline_at, Some(deadline));
+    assert!(
+        discord
+            .edited
+            .lock()
+            .expect("edited messages")
+            .iter()
+            .any(|(_, message_id, _)| *message_id == 1234)
+    );
+
+    // Repeated READY/hydration is idempotent for the same durable session.
+    assert_eq!(block_on(provider.hydrate()).expect("rehydrate draft"), 1);
+    assert_eq!(
+        drafts
+            .get_state(Some(42))
+            .expect("rehydrated state")
+            .lock()
+            .expect("rehydrated state lock")
+            .session_id,
+        persisted.session_id
+    );
+
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let legacy = Arc::new(TestResponder::default());
+    block_on(handler.handle(
+        InteractionRequest::Component {
+            interaction_id: 91,
+            custom_id: "draft_choice_side".to_owned(),
+            user_id: 1,
+            user_display_name: "Captain".to_owned(),
+            guild_id: Some(42),
+            channel_id: Some(777),
+            member_permissions: None,
+            values: Vec::new(),
+        },
+        legacy.clone(),
+    ))
+    .expect("legacy callback response");
+    assert!(
+        legacy.responses.lock().expect("legacy response")[0]
+            .content
+            .contains("current draft")
+    );
+
+    // Two callbacks for the same durable session serialize the local
+    // transition and CAS. The second callback observes the first callback's
+    // committed phase and cannot clobber it.
+    let first = Arc::new(TestResponder::default());
+    let second = Arc::new(TestResponder::default());
+    let first_request = InteractionRequest::Component {
+        interaction_id: 92,
+        custom_id: format!("draft:{}:side:radiant", persisted.session_id),
+        user_id: 1,
+        user_display_name: "Captain".to_owned(),
+        guild_id: Some(42),
+        channel_id: Some(777),
+        member_permissions: None,
+        values: Vec::new(),
+    };
+    let second_request = InteractionRequest::Component {
+        interaction_id: 93,
+        custom_id: format!("draft:{}:side:dire", persisted.session_id),
+        user_id: 1,
+        user_display_name: "Captain".to_owned(),
+        guild_id: Some(42),
+        channel_id: Some(777),
+        member_permissions: None,
+        values: Vec::new(),
+    };
+    let (first_result, second_result) = block_on(async {
+        tokio::join!(
+            handler.handle(first_request, first.clone()),
+            handler.handle(second_request, second.clone()),
+        )
+    });
+    first_result.expect("first concurrent callback");
+    second_result.expect("second concurrent callback");
+    let final_state = drafts.get_state(Some(42)).expect("final concurrent state");
+    assert_eq!(
+        final_state.lock().expect("final state lock").phase,
+        DraftPhase::LoserChoice
+    );
+    assert_eq!(
+        persistence.load_all().expect("load CAS state")[0].revision,
+        2
+    );
+
+    discord.fail_edits.store(true, Ordering::Release);
+    let repaint_error = block_on(provider.hydrate()).expect_err("repaint must fail recovery");
+    assert!(repaint_error.contains("simulated Discord edit failure"));
+    assert!(drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        persistence
+            .load_all()
+            .expect("durable state retained")
+            .len(),
+        1
+    );
+    assert!(
+        provider
+            .handler
+            .persisted_envelopes
+            .lock()
+            .expect("persisted envelopes")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        provider
+            .handler
+            .draft_messages
+            .lock()
+            .expect("draft messages")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        provider
+            .handler
+            .draft_operation_locks
+            .lock()
+            .expect("draft operation locks")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        provider
+            .handler
+            .timeout_tasks
+            .lock()
+            .expect("timeout tasks")
+            .contains_key(&42)
+    );
+    discord.fail_edits.store(false, Ordering::Release);
+
+    {
+        let handle = drafts.get_state(Some(42)).expect("live state");
+        let mut live = handle.lock().expect("live state lock");
+        live.draft_channel_id = None;
+        live.draft_message_id = None;
+    }
+    let live_mismatch_error = block_on(provider.hydrate())
+        .expect_err("repeated hydration must reject a changed live state");
+    assert!(live_mismatch_error.contains("live state does not match its CAS cache"));
+    assert!(
+        provider
+            .handler
+            .draft_messages
+            .lock()
+            .expect("draft messages")
+            .contains_key(&(42, persisted.session_id))
+    );
+}
+
+#[tokio::test]
+async fn hydration_reserves_nonempty_pool_and_repeated_ready_keeps_live_reservation() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::WinnerSideChoice;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.deadline_at = Some(unix_now().saturating_add(120));
+    let persisted = persistence
+        .create_envelope(&requested)
+        .expect("create durable draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence),
+    )
+    .expect("draft provider");
+
+    assert_eq!(provider.hydrate().await.expect("first hydration"), 1);
+    let player_ids = (1..=10).collect::<BTreeSet<_>>();
+    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert_eq!(provider.hydrate().await.expect("repeated hydration"), 1);
+    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert_eq!(
+        drafts
+            .get_state(Some(42))
+            .expect("live hydrated draft")
+            .lock()
+            .expect("live hydrated draft lock")
+            .session_id,
+        persisted.session_id
+    );
+    discord.fail_edits.store(true, Ordering::Release);
+    let error = provider
+        .hydrate()
+        .await
+        .expect_err("repeated repaint failure must be reported");
+    assert!(error.contains("simulated Discord edit failure"));
+    assert!(drafts.has_active_draft(Some(42)));
+    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+}
+
+#[tokio::test]
+async fn initial_hydration_repaint_failure_unwinds_runtime_resources_but_retains_row() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::WinnerSideChoice;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let persisted = persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create durable draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    discord.fail_edits.store(true, Ordering::Release);
+    let error = provider
+        .hydrate()
+        .await
+        .expect_err("initial repaint must fail recovery");
+    assert!(error.contains("simulated Discord edit failure"));
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        persistence.load_all().expect("durable row retained").len(),
+        1
+    );
+    assert!(
+        !provider
+            .handler
+            .persisted_envelopes
+            .lock()
+            .expect("persisted envelopes")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        !provider
+            .handler
+            .draft_messages
+            .lock()
+            .expect("draft messages")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        !provider
+            .handler
+            .timeout_tasks
+            .lock()
+            .expect("timeout tasks")
+            .contains_key(&42)
+    );
+    assert!(
+        !provider
+            .handler
+            .draft_operation_locks
+            .lock()
+            .expect("draft operation locks")
+            .contains_key(&(42, persisted.session_id))
+    );
+    let player_ids = (1..=10).collect::<BTreeSet<_>>();
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
+
+    discord.fail_edits.store(false, Ordering::Release);
+    assert_eq!(provider.hydrate().await.expect("retry hydration"), 1);
+}
+
+#[tokio::test]
+async fn initial_hydration_missing_source_unwinds_runtime_resources_but_retains_row() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::WinnerSideChoice;
+    let persisted = persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create durable draft without source identity");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    let error = provider
+        .hydrate()
+        .await
+        .expect_err("missing source must fail recovery");
+    assert!(error.contains("no source message identity"));
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        persistence.load_all().expect("durable row retained").len(),
+        1
+    );
+    assert!(
+        !provider
+            .handler
+            .persisted_envelopes
+            .lock()
+            .expect("persisted envelopes")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        !provider
+            .handler
+            .draft_messages
+            .lock()
+            .expect("draft messages")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert!(
+        !provider
+            .handler
+            .timeout_tasks
+            .lock()
+            .expect("timeout tasks")
+            .contains_key(&42)
+    );
+    assert!(
+        !provider
+            .handler
+            .draft_operation_locks
+            .lock()
+            .expect("draft operation locks")
+            .contains_key(&(42, persisted.session_id))
+    );
+    let player_ids = (1..=10).collect::<BTreeSet<_>>();
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
+}
+
+#[tokio::test]
+async fn hydration_stale_loaded_session_cleans_its_unused_operation_lock() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut durable_state = state_for_draft();
+    durable_state.player_pool_ids.clear();
+    durable_state.phase = DraftPhase::WinnerSideChoice;
+    durable_state.draft_channel_id = Some(777);
+    durable_state.draft_message_id = Some(1234);
+    let persisted = persistence
+        .create_envelope(&durable_state.to_snapshot().envelope(1))
+        .expect("create durable draft");
+    let competing = DraftState::with_session(
+        42,
+        DraftLobbyKind::Open,
+        persisted.session_id.saturating_add(1),
+    );
+    drafts
+        .restore_draft(competing)
+        .expect("install competing live session");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    let error = provider
+        .hydrate()
+        .await
+        .expect_err("stale durable session must fail closed");
+    assert!(error.contains("refusing to hydrate stale session"));
+    assert!(
+        !provider
+            .handler
+            .draft_operation_locks
+            .lock()
+            .expect("draft operation locks")
+            .contains_key(&(42, persisted.session_id))
+    );
+    assert_eq!(
+        persistence.load_all().expect("durable row retained").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn component_cas_loser_rolls_back_local_state_without_discord_publication() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::WinnerSideChoice;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let persisted = persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create durable draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    provider.hydrate().await.expect("hydrate draft");
+    let before = drafts
+        .get_state(Some(42))
+        .expect("live draft")
+        .lock()
+        .expect("live draft lock")
+        .clone();
+
+    let mut external = persisted.clone();
+    external.application_metadata.insert(
+        "cas_winner".to_owned(),
+        serde_json::Value::String("external writer".to_owned()),
+    );
+    let durable_winner = persistence
+        .replace_envelope_if_revision(
+            persisted.guild_id,
+            persisted.session_id,
+            persisted.revision,
+            &external,
+        )
+        .expect("external CAS winner");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let responder = Arc::new(TestResponder::default());
+    let error = handler
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 95,
+                custom_id: format!("draft:{}:side:radiant", persisted.session_id),
+                user_id: 1,
+                user_display_name: "Captain".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(777),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await
+        .expect_err("stale provider CAS must lose");
+    assert!(error.to_string().contains("revision"));
+    assert_eq!(
+        drafts
+            .get_state(Some(42))
+            .expect("live draft after CAS loss")
+            .lock()
+            .expect("live draft lock after CAS loss")
+            .clone(),
+        before
+    );
+    assert_eq!(
+        persistence.load_all().expect("durable CAS winner")[0],
+        durable_winner
+    );
+    assert!(responder.updates.lock().expect("updates").is_empty());
+    let mismatch = provider
+        .hydrate()
+        .await
+        .expect_err("repeated hydration must reject stale cache revision");
+    assert!(mismatch.contains("durable envelope does not match"));
+}
+
+#[tokio::test]
+async fn final_pick_persists_recovery_fence_before_completion_side_effects() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Drafting;
+    state.current_pick_index = 7;
+    state.current_round_first_captain_id = Some(1);
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.deadline_at = Some(unix_now().saturating_add(120));
+    let persisted = persistence
+        .create_envelope(&requested)
+        .expect("create durable final-pick draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    provider.hydrate().await.expect("hydrate final-pick draft");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let lobby_lock = lobbies.operation_lock(42, AppLobbyKind::Open);
+    let lobby_guard = lobby_lock.lock().await;
+    let responder = Arc::new(TestResponder::default());
+    let task = tokio::spawn({
+        let responder = responder.clone();
+        async move {
+            handler
+                .handle(
+                    InteractionRequest::Component {
+                        interaction_id: 94,
+                        custom_id: format!("draft:{}:pick:10", persisted.session_id),
+                        user_id: 2,
+                        user_display_name: "Captain".to_owned(),
+                        guild_id: Some(42),
+                        channel_id: Some(777),
+                        member_permissions: None,
+                        values: Vec::new(),
+                    },
+                    responder,
+                )
+                .await
+        }
+    });
+
+    let mut fenced = None;
+    for _ in 0..100 {
+        let rows = persistence.load_all().expect("load final-pick fence");
+        if let Some(envelope) = rows.into_iter().next()
+            && envelope.finalizing
+            && envelope.state.as_state().phase == DraftPhase::Complete
+        {
+            fenced = Some(envelope);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let fenced = fenced.expect("final pick recovery fence");
+    assert_eq!(fenced.pending_match_id, None);
+    drop(lobby_guard);
+    task.await
+        .expect("final-pick callback task")
+        .expect("final-pick callback");
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pick_defer_failure_retains_fenced_row_for_uncomposed_recovery() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Drafting;
+    state.current_pick_index = 7;
+    state.current_round_first_captain_id = Some(1);
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let persisted = persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create durable final-pick draft");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+    provider.hydrate().await.expect("hydrate final-pick draft");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let responder = Arc::new(TestResponder {
+        fail_defer: true,
+        ..TestResponder::default()
+    });
+
+    let error = handler
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 96,
+                custom_id: format!("draft:{}:pick:10", persisted.session_id),
+                user_id: 2,
+                user_display_name: "Captain".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(777),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder,
+        )
+        .await
+        .expect_err("defer failure must stop completion");
+    assert!(error.to_string().contains("simulated defer failure"));
+    tokio::time::advance(Duration::from_secs(DRAFTING_TIMEOUT_SECONDS + 1)).await;
+    tokio::task::yield_now().await;
+    let fenced = persistence.load_all().expect("load fenced row");
+    assert_eq!(fenced.len(), 1);
+    assert!(fenced[0].finalizing);
+    assert_eq!(fenced[0].pending_match_id, None);
+    assert_eq!(fenced[0].state.as_state().phase, DraftPhase::Complete);
+    assert_eq!(
+        drafts
+            .get_state(Some(42))
+            .expect("fenced live state")
+            .lock()
+            .expect("fenced live state lock")
+            .phase,
+        DraftPhase::Complete
+    );
+    let recovery_error = provider
+        .hydrate()
+        .await
+        .expect_err("finalizing row recovery remains deliberately uncomposed");
+    assert!(recovery_error.contains("requires finalization recovery"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn nonpersistent_final_pick_defer_failure_keeps_legacy_timeout_cleanup() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let provider = DraftRegistrationProvider::new(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+    )
+    .expect("draft provider");
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Drafting;
+    state.current_pick_index = 7;
+    state.current_round_first_captain_id = Some(1);
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let player_ids = state
+        .player_pool_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    drafts
+        .restore_draft(state.clone())
+        .expect("restore process-local draft");
+    provider
+        .handler
+        .schedule_timeout(42, state.session_id, DRAFTING_TIMEOUT_SECONDS);
+    tokio::task::yield_now().await;
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let handler = builder
+        .build()
+        .component_handler("draft")
+        .expect("component handler");
+    let responder = Arc::new(TestResponder {
+        fail_defer: true,
+        ..TestResponder::default()
+    });
+
+    let error = handler
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 97,
+                custom_id: format!("draft:{}:pick:10", state.session_id),
+                user_id: 2,
+                user_display_name: "Captain".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(777),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder,
+        )
+        .await
+        .expect_err("defer failure must stop completion");
+    assert!(error.to_string().contains("simulated defer failure"));
+    assert_eq!(
+        drafts
+            .get_state(Some(42))
+            .expect("complete state before legacy timeout")
+            .lock()
+            .expect("complete state lock")
+            .phase,
+        DraftPhase::Complete
+    );
+
+    tokio::time::advance(Duration::from_secs(DRAFTING_TIMEOUT_SECONDS + 1)).await;
+    tokio::task::yield_now().await;
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
+}
+
+#[tokio::test]
+async fn hydration_restore_failure_releases_new_reservation_and_session_lock() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let provider = DraftRegistrationProvider::new(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+    )
+    .expect("draft provider");
+    drafts
+        .create_draft(Some(42), DraftLobbyKind::Open)
+        .expect("competing manager state");
+    let mut state = state_for_draft();
+    state.session_id = 99;
+    let session_lock = provider.handler.draft_operation_lock(42, 99);
+    let _session_guard = session_lock.lock().await;
+    let lobby_lock = lobbies.operation_lock(42, AppLobbyKind::Open);
+    let _lobby_guard = lobby_lock.lock().await;
+
+    let error = provider
+        .handler
+        .reserve_and_restore_hydrated_state(&state, &session_lock)
+        .expect_err("manager restore must lose the race");
+    assert!(error.contains("already in progress"));
+    assert!(
+        !provider
+            .handler
+            .draft_operation_locks
+            .lock()
+            .expect("draft operation locks")
+            .contains_key(&(42, 99))
+    );
+    let player_ids = (1..=10).collect::<BTreeSet<_>>();
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
+}
+
+#[test]
+fn hydration_skips_unfenced_complete_state_for_recovery() {
+    let database = NamedTempFile::new().expect("draft database");
+    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.player_pool_ids.clear();
+    state.phase = DraftPhase::Complete;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create legacy complete draft");
+    let drafts = Arc::new(DraftStateManager::default());
+    let discord = Arc::new(NullDiscord::default());
+    let lobby = LobbyRegistrationProvider::new(
+        database.path(),
+        LobbyRuntimeConfig {
+            lobby_channel_id: Some(700),
+            low_skill_lobby_channel_id: Some(701),
+            admin_user_ids: BTreeSet::new(),
+            ready_threshold: 10,
+            max_players: 20,
+            first_game_pool_daily_amount: 0,
+        },
+        Arc::clone(&drafts),
+        discord.clone(),
+    )
+    .expect("lobby provider");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobby.match_lobby_port(),
+        Arc::clone(&drafts),
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    assert_eq!(block_on(provider.hydrate()).expect("skip complete row"), 0);
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        persistence.load_all().expect("complete row retained").len(),
+        1
+    );
 }
 
 fn seed_players(path: &std::path::Path, guild_id: i64, ids: &[i64], balance: i64) {
