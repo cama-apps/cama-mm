@@ -866,6 +866,10 @@ class SchemaManager:
                 "create_manashop_purchase_lifecycle",
                 self._migration_create_manashop_purchase_lifecycle,
             ),
+            (
+                "add_pending_match_completion_key",
+                self._migration_add_pending_match_completion_key,
+            ),
         ]
 
     # --- Migrations ---
@@ -4180,6 +4184,17 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_manashop_purchase_lookup
             ON manashop_purchases(discord_id, guild_id, item_id, used_date, status)
+            """
+        )
+
+    def _migration_add_pending_match_completion_key(self, cursor) -> None:
+        """Add the idempotency key used by atomic Draft finalization."""
+        self._add_column_if_not_exists(cursor, "pending_matches", "completion_key", "TEXT")
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_matches_completion_key
+            ON pending_matches(completion_key)
+            WHERE completion_key IS NOT NULL
             """
         )
 

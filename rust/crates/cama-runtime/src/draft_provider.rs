@@ -58,6 +58,14 @@ const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAFT_COMPONENT_PREFIX: &str = "draft";
 const COMPLETION_ERROR_WITHOUT_MATCH: &str = "⚠️ Draft complete but encountered an error during match setup. Use `/draft start` to try again.";
 
+fn same_database_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (left.canonicalize(), right.canonicalize()),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
 /// Runtime-facing build failures are configuration or construction errors;
 /// ordinary command failures remain user-visible interaction responses.
 #[derive(Debug, Error)]
@@ -334,6 +342,13 @@ impl DraftRegistrationProvider {
         discord: Arc<dyn DiscordTransport>,
         persistence_database_path: impl AsRef<Path>,
     ) -> Result<Self, DraftProviderBuildError> {
+        let database_path = database_path.as_ref();
+        let persistence_database_path = persistence_database_path.as_ref();
+        if !same_database_path(database_path, persistence_database_path) {
+            return Err(DraftProviderBuildError::Database(
+                "draft persistence and pending matches must share one SQLite database".to_owned(),
+            ));
+        }
         Self::new_with_reminder_scheduler_and_neon_and_persistence(
             database_path,
             config,
@@ -1024,6 +1039,15 @@ impl DraftHandler {
         {
             return Ok(());
         }
+        if pending_match_id.is_none()
+            && current.finalizing
+            && current.pending_match_id.is_some()
+            && current.state.as_state() == state
+        {
+            // A retry that has already crossed the atomic pending-link seam
+            // must never clear the recovered match identity.
+            return Ok(());
+        }
         let mut requested = current;
         requested.state = state.to_snapshot();
         requested.deadline_at = None;
@@ -1038,6 +1062,70 @@ impl DraftHandler {
         .map_err(|error| error.to_string())?;
         lock_recover(&self.persisted_envelopes).insert(key, returned);
         Ok(())
+    }
+
+    async fn link_finalizing_pending_match(
+        &self,
+        state: &DraftState,
+        pending_state: &PendingMatchState,
+    ) -> Result<PendingMatchRecord, String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let key = (state.guild_id, state.session_id);
+        let current = lock_recover(&self.persisted_envelopes)
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "draft persistence session {} is not hydrated",
+                    state.session_id
+                )
+            })?;
+        let pending_payload_json = if let Some(pending_match_id) = current.pending_match_id {
+            let persistence = Arc::clone(&persistence);
+            let guild_id = state.guild_id;
+            let session_id = state.session_id;
+            spawn_blocking(move || {
+                persistence.linked_pending_payload(guild_id, session_id, pending_match_id)
+            })
+            .await
+            .map_err(|error| format!("draft raw pending-load task failed: {error}"))?
+            .map_err(|error| error.to_string())?
+        } else {
+            serde_json::to_string(pending_state).map_err(|error| error.to_string())?
+        };
+        let expected_revision = current.revision;
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        let linked = spawn_blocking(move || {
+            persistence.link_finalizing_pending_match(
+                guild_id,
+                session_id,
+                expected_revision,
+                &pending_payload_json,
+            )
+        })
+        .await
+        .map_err(|error| format!("draft pending-link task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if linked.envelope.guild_id != state.guild_id
+            || linked.envelope.session_id != state.session_id
+            || linked.envelope.pending_match_id != Some(linked.pending_match_id)
+        {
+            return Err("draft pending-link result does not match the active session".to_owned());
+        }
+        lock_recover(&self.persisted_envelopes).insert(key, linked.envelope);
+        self.pending
+            .pending_match(state.guild_id, linked.pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "atomically linked pending match {} could not be reloaded",
+                    linked.pending_match_id
+                )
+            })
     }
 
     async fn send_neon_followup(
@@ -2263,33 +2351,33 @@ impl DraftHandler {
             warn!(%error, guild_id, session_id = state.session_id, "draft finalization fence failed before pending match creation");
             return completion_response(&responder, None, error, deferred).await;
         }
-        let pending = match self
-            .pending
-            .create_pending_match(guild_id, &pending_state)
-            .map_err(|error| error.to_string())
-        {
-            Ok(pending) => pending,
-            Err(error) => {
-                if let Err(cleanup_error) = self.delete_persisted(&state).await {
-                    warn!(%cleanup_error, guild_id, "failed to delete failed draft finalization fence");
+        let pending = if self.persistence.is_some() {
+            match self
+                .link_finalizing_pending_match(&state, &pending_state)
+                .await
+            {
+                Ok(pending) => pending,
+                Err(error) => {
+                    warn!(%error, guild_id, session_id = state.session_id, "atomic draft pending-match link failed");
+                    return completion_response(&responder, None, error, deferred).await;
                 }
-                self.finish_draft_without_match(&handle, &state);
-                return completion_response(&responder, None, error, deferred).await;
+            }
+        } else {
+            match self
+                .pending
+                .create_pending_match(guild_id, &pending_state)
+                .map_err(|error| error.to_string())
+            {
+                Ok(pending) => pending,
+                Err(error) => {
+                    if let Err(cleanup_error) = self.delete_persisted(&state).await {
+                        warn!(%cleanup_error, guild_id, "failed to delete failed draft finalization fence");
+                    }
+                    self.finish_draft_without_match(&handle, &state);
+                    return completion_response(&responder, None, error, deferred).await;
+                }
             }
         };
-        if let Err(error) = self
-            .mark_finalizing(&state, Some(pending.pending_match_id))
-            .await
-        {
-            warn!(%error, guild_id, pending_match_id = pending.pending_match_id, "draft finalization fence could not record pending match");
-            return completion_response(
-                &responder,
-                Some(pending.pending_match_id),
-                error,
-                deferred,
-            )
-            .await;
-        }
         if let Err(error) =
             self.pending
                 .mutate_pending_match(guild_id, pending.pending_match_id, |state| {

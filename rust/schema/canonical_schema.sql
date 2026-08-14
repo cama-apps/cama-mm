@@ -924,7 +924,8 @@ CREATE TABLE pending_matches (
                 guild_id INTEGER NOT NULL,
                 payload TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completion_key TEXT
             );
 
 -- table: pet_accessories
@@ -1840,6 +1841,9 @@ CREATE INDEX idx_package_deals_partner ON package_deals(guild_id, partner_discor
 
 -- index: idx_pending_matches_guild
 CREATE INDEX idx_pending_matches_guild ON pending_matches(guild_id);
+
+-- index: idx_pending_matches_completion_key
+CREATE UNIQUE INDEX idx_pending_matches_completion_key ON pending_matches(completion_key) WHERE completion_key IS NOT NULL;
 
 -- index: idx_pet_brawls_open
 CREATE INDEX idx_pet_brawls_open ON pet_brawls(guild_id, status) WHERE status IN ('pending', 'active');

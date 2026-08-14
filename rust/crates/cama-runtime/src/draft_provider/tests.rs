@@ -1297,6 +1297,153 @@ async fn final_pick_persists_recovery_fence_before_completion_side_effects() {
         .expect("final-pick callback");
 }
 
+#[tokio::test]
+async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("0".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Complete;
+    state.current_pick_index = DRAFT_TOTAL_PICKS;
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8, 10];
+    state.radiant_hero_pick_order = Some(1);
+    state.dire_hero_pick_order = Some(2);
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    let mut requested = state.to_snapshot().envelope(1);
+    requested.finalizing = true;
+    requested.deadline_at = None;
+    let persisted = persistence
+        .create_envelope(&requested)
+        .expect("create fenced draft");
+    let state = persisted.state.clone().into_state();
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobbies,
+        drafts,
+        discord,
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence),
+    )
+    .expect("draft provider");
+    provider
+        .handler
+        .persisted_envelopes
+        .lock()
+        .expect("persisted envelopes")
+        .insert((42, state.session_id), persisted);
+    let pending_state = db_pending_state(
+        &state,
+        1_700_000_000,
+        provider.handler.config.bet_lock_seconds,
+        false,
+    )
+    .expect("pending state");
+
+    let first = provider
+        .handler
+        .link_finalizing_pending_match(&state, &pending_state)
+        .await
+        .expect("first atomic pending link");
+    let connection = Connection::open(database.path()).expect("open linked pending database");
+    let raw_payload = connection
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE pending_match_id=?1",
+            [first.pending_match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("load linked pending payload");
+    let mut future_payload: serde_json::Value =
+        serde_json::from_str(&raw_payload).expect("decode linked pending payload");
+    future_payload["future_pending_field"] = serde_json::json!({"preserve": true});
+    let future_raw = serde_json::to_string_pretty(&future_payload)
+        .expect("encode forward-compatible pending payload");
+    connection
+        .execute(
+            "UPDATE pending_matches SET payload=?1 WHERE pending_match_id=?2",
+            rusqlite::params![future_raw, first.pending_match_id],
+        )
+        .expect("install forward-compatible pending payload");
+    drop(connection);
+    let retried = provider
+        .handler
+        .link_finalizing_pending_match(&state, &pending_state)
+        .await
+        .expect("retry atomic pending link");
+    assert_eq!(retried.pending_match_id, first.pending_match_id);
+    assert_eq!(
+        provider
+            .handler
+            .pending
+            .pending_matches(42)
+            .expect("pending matches")
+            .len(),
+        1
+    );
+    let cached = provider
+        .handler
+        .persisted_envelopes
+        .lock()
+        .expect("persisted envelopes")
+        .get(&(42, state.session_id))
+        .cloned()
+        .expect("linked envelope");
+    assert_eq!(cached.pending_match_id, Some(first.pending_match_id));
+    assert_eq!(cached.revision, 2);
+    let completion_key = Connection::open(database.path())
+        .expect("open database")
+        .query_row(
+            "SELECT completion_key FROM pending_matches WHERE pending_match_id=?1",
+            [first.pending_match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("completion key");
+    assert_eq!(completion_key, format!("draft:42:{}", state.session_id));
+    let preserved_raw = Connection::open(database.path())
+        .expect("reopen database")
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE pending_match_id=?1",
+            [first.pending_match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("reload preserved pending payload");
+    assert_eq!(preserved_raw, future_raw);
+}
+
+#[tokio::test]
+async fn sqlite_persistence_constructor_rejects_split_pending_database() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let separate_persistence = NamedTempFile::new().expect("create separate persistence database");
+    cama_db::schema_manager::initialize_or_migrate(separate_persistence.path())
+        .expect("migrate separate persistence database");
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+
+    assert!(matches!(
+        DraftRegistrationProvider::new_with_persistence(
+            database.path(),
+            &config,
+            lobbies,
+            drafts,
+            discord,
+            separate_persistence.path(),
+        ),
+        Err(DraftProviderBuildError::Database(message))
+            if message.contains("must share one SQLite database")
+    ));
+}
+
 #[tokio::test(start_paused = true)]
 async fn final_pick_defer_failure_retains_fenced_row_for_uncomposed_recovery() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;

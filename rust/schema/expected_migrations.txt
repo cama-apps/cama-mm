@@ -224,3 +224,4 @@ create_autobet_investments
 add_autobet_attribution_to_bets
 create_match_correction_claims
 create_manashop_purchase_lifecycle
+add_pending_match_completion_key

@@ -615,10 +615,51 @@ impl From<cama_db::draft_state::DraftStateRepositoryError> for DraftPersistenceE
     }
 }
 
-/// Persistence boundary needed by the future gateway/runtime owner.
-///
-/// Runtime/provider/READY code is intentionally not coupled to this trait in
-/// the first persistence tranche.
+impl From<cama_db::draft_finalization::DraftFinalizationError> for DraftPersistenceError {
+    fn from(error: cama_db::draft_finalization::DraftFinalizationError) -> Self {
+        use cama_db::draft_finalization::DraftFinalizationError as DatabaseError;
+        match error {
+            DatabaseError::NotFound { guild_id } => Self::NotFound { guild_id },
+            DatabaseError::StaleRevision {
+                guild_id,
+                expected,
+                actual,
+            } => Self::StaleRevision {
+                guild_id,
+                expected,
+                actual,
+            },
+            DatabaseError::StaleSession {
+                guild_id,
+                expected,
+                actual,
+            } => Self::StaleSession {
+                guild_id,
+                expected,
+                actual,
+            },
+            DatabaseError::InvalidDraftEnvelope(message) => Self::InvalidEnvelope { message },
+            DatabaseError::InvalidPendingPayload(message) => Self::Serialization { message },
+            DatabaseError::Conflict { guild_id, reason } => Self::Conflict { guild_id, reason },
+            DatabaseError::Sqlite(error) => Self::Backend {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+/// Result of atomically finding or creating a Draft's pending match and
+/// linking it into the durable finalization envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftPendingMatchLink {
+    pub envelope: DraftStateEnvelope,
+    pub completion_key: String,
+    pub pending_match_id: i64,
+    pub pending_payload_json: String,
+    pub pending_created: bool,
+}
+
+/// Persistence boundary shared by the Draft runtime and recovery observers.
 pub trait DraftStatePersistencePort: Send + Sync {
     /// Load all active durable draft envelopes.
     fn load_all(&self) -> Result<Vec<DraftStateEnvelope>, DraftPersistenceError>;
@@ -662,6 +703,40 @@ pub trait DraftStatePersistencePort: Send + Sync {
         expected_session_id: u64,
         expected_revision: u64,
     ) -> Result<bool, DraftPersistenceError>;
+
+    /// Atomically create or recover the pending match for a fenced Complete
+    /// Draft and write its identity back to the durable envelope.
+    fn link_finalizing_pending_match(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+    ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
+        let _ = (expected_session_id, expected_revision, pending_payload_json);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "draft finalization linking is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
+    /// Load the exact pending-match JSON already named by a finalizing Draft.
+    /// Implementations must preserve the stored bytes so idempotent retries do
+    /// not discard forward-compatible pending-match fields.
+    fn linked_pending_payload(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<String, DraftPersistenceError> {
+        let _ = (session_id, pending_match_id);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "raw pending-match recovery is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
 }
 
 /// Short compatibility alias for callers that refer to the boundary as the
@@ -675,6 +750,7 @@ pub use DraftStatePersistencePort as DraftPersistencePort;
 #[derive(Clone, Debug)]
 pub struct SqliteDraftStatePersistence {
     repository: cama_db::draft_state::DraftStateRepository,
+    finalization: cama_db::draft_finalization::DraftFinalizationRepository,
 }
 
 /// Short compatibility alias for the SQLite draft persistence adapter.
@@ -684,8 +760,10 @@ impl SqliteDraftStatePersistence {
     /// Build an adapter for an already migrated database.
     #[must_use]
     pub fn new(path: impl AsRef<std::path::Path>) -> Self {
+        let path = path.as_ref();
         Self {
             repository: cama_db::draft_state::DraftStateRepository::new(path),
+            finalization: cama_db::draft_finalization::DraftFinalizationRepository::new(path),
         }
     }
 
@@ -789,6 +867,44 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         Ok(self
             .repository
             .delete_if_revision(guild_id, expected_session_id, expected_revision)?)
+    }
+
+    fn link_finalizing_pending_match(
+        &self,
+        guild_id: i64,
+        expected_session_id: u64,
+        expected_revision: u64,
+        pending_payload_json: &str,
+    ) -> Result<DraftPendingMatchLink, DraftPersistenceError> {
+        let linked = self.finalization.link_pending_match_validated(
+            guild_id,
+            expected_session_id,
+            expected_revision,
+            pending_payload_json,
+            |raw| {
+                DraftStateEnvelope::from_json(raw)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        )?;
+        Ok(DraftPendingMatchLink {
+            envelope: Self::decode(linked.draft)?,
+            completion_key: linked.completion_key,
+            pending_match_id: linked.pending_match_id,
+            pending_payload_json: linked.pending_payload_json,
+            pending_created: linked.pending_created,
+        })
+    }
+
+    fn linked_pending_payload(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<String, DraftPersistenceError> {
+        self.finalization
+            .linked_pending_payload(guild_id, session_id, pending_match_id)
+            .map_err(Into::into)
     }
 }
 
@@ -3100,6 +3216,54 @@ mod tests {
             persistence.load_all(),
             Err(DraftPersistenceError::InvalidEnvelope { .. })
         ));
+    }
+
+    #[test]
+    fn atomic_pending_link_rejects_typed_envelope_before_committing() {
+        let fixture = NamedTempFile::new().expect("create malformed-link fixture");
+        cama_db::schema_manager::initialize_or_migrate(fixture.path())
+            .expect("initialize malformed-link fixture");
+        let malformed = json!({
+            "schema_version": DRAFT_STATE_SCHEMA_VERSION,
+            "guild_id": TEST_GUILD_ID,
+            "session_id": 9,
+            "revision": 1,
+            "active": true,
+            "finalizing": true,
+            "pending_match_id": null,
+            "state": {
+                "guild_id": TEST_GUILD_ID,
+                "session_id": 9,
+                "phase": "complete"
+            }
+        })
+        .to_string();
+        let connection = Connection::open(fixture.path()).expect("open malformed-link fixture");
+        connection
+            .execute(
+                "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,?2,?3)",
+                rusqlite::params![
+                    TEST_GUILD_ID,
+                    cama_db::draft_state::DRAFT_STATE_KEY,
+                    malformed
+                ],
+            )
+            .expect("insert malformed finalization envelope");
+        drop(connection);
+
+        let persistence = SqliteDraftStatePersistence::new(fixture.path());
+        assert!(matches!(
+            persistence.link_finalizing_pending_match(TEST_GUILD_ID, 9, 1, "{}"),
+            Err(DraftPersistenceError::InvalidEnvelope { .. })
+        ));
+        let connection = Connection::open(fixture.path()).expect("reopen malformed-link fixture");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count pending matches"),
+            0
+        );
     }
 
     #[test]
