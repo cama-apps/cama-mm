@@ -323,6 +323,199 @@ async fn unknown_pager_after_restart_is_acknowledged_and_disabled() {
     );
 }
 
+#[tokio::test]
+async fn recreated_provider_ready_recovers_once_and_rejects_stale_routes_without_mutation() {
+    let (directory, path, provider, discord, registry) = fixture();
+    let repository = db::SurveyRepository::new(&path);
+    let survey = open_survey(&repository, &[44]);
+    let question = repository.get_questions(22, survey.survey_id).unwrap()[0].clone();
+
+    // Exercise the production delivery path before the process boundary.  It
+    // commits the stable nonce and real DM identity to the current schema.
+    assert_eq!(provider.state.recover(None).await.unwrap(), 1);
+    assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    assert_eq!(discord.sent.lock().unwrap()[0].1, policy::delivery_nonce(1));
+    let delivery_edit_count = discord.edits.lock().unwrap().len();
+    assert_eq!(delivery_edit_count, 1);
+
+    // Model a response mutation that committed immediately before restart,
+    // while the terminal Discord edit/finalization did not. READY must recover
+    // this durable boundary exactly once.
+    repository
+        .save_answer(
+            survey.survey_id,
+            44,
+            question.question_id,
+            db::SurveyAnswer::Numeric(10),
+        )
+        .unwrap();
+    assert!(repository.submit_response(survey.survey_id, 44).unwrap());
+    let committed = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert!(committed.recipient.submitted_at.is_some());
+    assert!(!committed.recipient.controls_finalized);
+
+    // Retain IDs from an ephemeral pager that existed before restart. The new
+    // provider must not accidentally revive this in-memory route.
+    let old_pager_responder = Arc::new(RecordingResponder::default());
+    let old_pager = provider
+        .state
+        .register_pager(
+            9,
+            vec![
+                policy::Embed {
+                    title: "Page 1".to_owned(),
+                    description: String::new(),
+                    fields: Vec::new(),
+                    footer: None,
+                },
+                policy::Embed {
+                    title: "Page 2".to_owned(),
+                    description: String::new(),
+                    fields: Vec::new(),
+                    footer: None,
+                },
+            ],
+            old_pager_responder,
+        )
+        .unwrap();
+    provider.state.arm_initial_pager_timeout(&old_pager).await;
+    let old_controls = pager_controls(&old_pager).await;
+
+    drop(old_pager);
+    drop(registry);
+    drop(provider);
+
+    let restarted = SurveyRegistrationProvider::new_with_results_timeout(
+        &path,
+        discord.clone(),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    let mut builder = RegistryBuilder::default();
+    restarted.register(&mut builder).unwrap();
+    let restarted_registry = builder.build();
+
+    let first_ready = restarted
+        .gateway_observer()
+        .ready_recovery(ready_context())
+        .await;
+    assert!(first_ready.failures.is_empty());
+    assert_eq!(first_ready.guilds_refreshed, 1);
+    assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        discord.edits.lock().unwrap().len(),
+        delivery_edit_count + 1,
+        "first READY performs the one deferred terminal edit"
+    );
+    let recovered = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert!(recovered.recipient.controls_finalized);
+
+    let second_ready = restarted
+        .gateway_observer()
+        .ready_recovery(ready_context())
+        .await;
+    assert!(second_ready.failures.is_empty());
+    assert_eq!(second_ready.guilds_refreshed, 1);
+    assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        discord.edits.lock().unwrap().len(),
+        delivery_edit_count + 1,
+        "repeat READY neither resends nor re-edits finalized controls"
+    );
+    let stable = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stable, recovered);
+
+    // A pre-restart pager ID is acknowledged with both controls disabled. It
+    // cannot page a newly-created report or touch the durable response.
+    let stale_pager = Arc::new(RecordingResponder::default());
+    restarted_registry
+        .component_handler(&old_controls.next_custom_id)
+        .unwrap()
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 20,
+                custom_id: old_controls.next_custom_id,
+                user_id: 9,
+                user_display_name: "Admin".to_owned(),
+                guild_id: Some(22),
+                channel_id: Some(33),
+                member_permissions: Some(ADMINISTRATOR_PERMISSION),
+                values: Vec::new(),
+            },
+            stale_pager.clone(),
+        )
+        .await
+        .unwrap();
+    {
+        let pager_updates = stale_pager.updates.lock().unwrap();
+        assert_eq!(pager_updates.len(), 1);
+        assert!(
+            pager_updates[0].components[0]
+                .buttons
+                .iter()
+                .all(|button| button.disabled)
+        );
+    }
+
+    // A stale question control from the now-submitted response receives one
+    // private acknowledgement. The repository rejects it before an answer,
+    // response edit, DM send, or recovery edit can be duplicated.
+    let stale_response = Arc::new(RecordingResponder::default());
+    restarted_registry
+        .component_handler(&format!(
+            "survey:{}:question:{}:score",
+            survey.survey_id, question.question_id
+        ))
+        .unwrap()
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 21,
+                custom_id: format!(
+                    "survey:{}:question:{}:score",
+                    survey.survey_id, question.question_id
+                ),
+                user_id: 44,
+                user_display_name: "Respondent".to_owned(),
+                guild_id: None,
+                channel_id: Some(6_044),
+                member_permissions: None,
+                values: vec!["1".to_owned()],
+            },
+            stale_response.clone(),
+        )
+        .await
+        .unwrap();
+    {
+        let stale_messages = stale_response.responses.lock().unwrap();
+        assert_eq!(stale_messages.len(), 1);
+        assert!(stale_messages[0].ephemeral);
+        assert!(stale_messages[0].content.contains("already been submitted"));
+    }
+    assert!(stale_response.original_edits.lock().unwrap().is_empty());
+    assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    assert_eq!(discord.edits.lock().unwrap().len(), delivery_edit_count + 1);
+    assert_eq!(
+        repository
+            .get_response_session(survey.survey_id, 44)
+            .unwrap()
+            .unwrap(),
+        stable
+    );
+
+    drop(restarted_registry);
+    drop(restarted);
+    drop(directory);
+}
+
 #[tokio::test(start_paused = true)]
 async fn pager_not_found_is_terminal_and_retires_through_the_previous_token() {
     let (_directory, provider, initial, pager) = pager_fixture(Duration::from_secs(600));
