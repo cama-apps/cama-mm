@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -6,8 +7,13 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::schema_manager::initialize_or_migrate;
 
 const TEST_GUILD_ID: i64 = 123;
+
+fn empty_database() -> NamedTempFile {
+    NamedTempFile::new().expect("create disposable database")
+}
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -57,6 +63,204 @@ fn query_f64(file: &NamedTempFile, sql: &str) -> f64 {
         .expect("query f64")
 }
 
+fn table_column_contract(
+    connection: &Connection,
+    table: &str,
+) -> Vec<(String, String, bool, Option<String>, i64)> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .expect("prepare table contract");
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .expect("read table contract")
+        .collect::<Result<_, _>>()
+        .expect("collect table contract")
+}
+
+fn index_contract(connection: &Connection, table: &str) -> Vec<(bool, Vec<String>)> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA index_list({table})"))
+        .expect("prepare index contract");
+    let indexes: Vec<(String, bool)> = statement
+        .query_map([], |row| Ok((row.get(1)?, row.get::<_, i64>(2)? != 0)))
+        .expect("read index contract")
+        .collect::<Result<_, _>>()
+        .expect("collect index contract");
+
+    let mut contract = indexes
+        .into_iter()
+        .map(|(name, unique)| {
+            let mut columns_statement = connection
+                .prepare(&format!("PRAGMA index_info({name})"))
+                .expect("prepare index columns");
+            let columns = columns_statement
+                .query_map([], |row| row.get(2))
+                .expect("read index columns")
+                .collect::<Result<_, _>>()
+                .expect("collect index columns");
+            (unique, columns)
+        })
+        .collect::<Vec<(bool, Vec<String>)>>();
+    contract.sort();
+    contract
+}
+
+fn index_names(connection: &Connection, table: &str) -> BTreeSet<String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA index_list({table})"))
+        .expect("prepare index names");
+    statement
+        .query_map([], |row| row.get(1))
+        .expect("read index names")
+        .collect::<Result<_, _>>()
+        .expect("collect index names")
+}
+
+fn foreign_key_contract(connection: &Connection, table: &str) -> Vec<(String, String, String)> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA foreign_key_list({table})"))
+        .expect("prepare foreign-key contract");
+    let mut contract = statement
+        .query_map([], |row| Ok((row.get(3)?, row.get(2)?, row.get(4)?)))
+        .expect("read foreign-key contract")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect foreign-key contract");
+    contract.sort();
+    contract
+}
+
+fn seed_legacy_draft_parents(connection: &Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE pending_matches (
+                 pending_match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 guild_id INTEGER NOT NULL,
+                 payload TEXT NOT NULL,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 completion_key TEXT
+             );
+             INSERT INTO pending_matches(
+                 pending_match_id,guild_id,payload,completion_key
+             ) VALUES (7,42,'{}','draft:42:1');
+             CREATE TABLE draft_legacy_marker(marker TEXT NOT NULL);
+             INSERT INTO draft_legacy_marker(marker) VALUES ('preserve me');",
+        )
+        .expect("seed legacy Draft parents");
+}
+
+fn expected_finalization_columns() -> Vec<(String, String, bool, Option<String>, i64)> {
+    vec![
+        (
+            "completion_key".to_owned(),
+            "TEXT".to_owned(),
+            true,
+            None,
+            1,
+        ),
+        ("guild_id".to_owned(), "INTEGER".to_owned(), true, None, 0),
+        ("session_id".to_owned(), "INTEGER".to_owned(), true, None, 0),
+        (
+            "pending_match_id".to_owned(),
+            "INTEGER".to_owned(),
+            true,
+            None,
+            0,
+        ),
+        (
+            "revision".to_owned(),
+            "INTEGER".to_owned(),
+            true,
+            Some("1".to_owned()),
+            0,
+        ),
+        ("stage".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("plan_json".to_owned(), "TEXT".to_owned(), true, None, 0),
+        (
+            "progress_json".to_owned(),
+            "TEXT".to_owned(),
+            true,
+            Some("'{}'".to_owned()),
+            0,
+        ),
+        ("lease_owner".to_owned(), "TEXT".to_owned(), false, None, 0),
+        (
+            "lease_until".to_owned(),
+            "INTEGER".to_owned(),
+            false,
+            None,
+            0,
+        ),
+        ("last_error".to_owned(), "TEXT".to_owned(), false, None, 0),
+        (
+            "created_at".to_owned(),
+            "TIMESTAMP".to_owned(),
+            true,
+            Some("CURRENT_TIMESTAMP".to_owned()),
+            0,
+        ),
+        (
+            "updated_at".to_owned(),
+            "TIMESTAMP".to_owned(),
+            true,
+            Some("CURRENT_TIMESTAMP".to_owned()),
+            0,
+        ),
+        ("legacy_note".to_owned(), "TEXT".to_owned(), false, None, 0),
+    ]
+}
+
+fn expected_financial_effect_columns() -> Vec<(String, String, bool, Option<String>, i64)> {
+    vec![
+        ("effect_key".to_owned(), "TEXT".to_owned(), true, None, 1),
+        (
+            "completion_key".to_owned(),
+            "TEXT".to_owned(),
+            true,
+            None,
+            0,
+        ),
+        ("guild_id".to_owned(), "INTEGER".to_owned(), true, None, 0),
+        ("session_id".to_owned(), "INTEGER".to_owned(), true, None, 0),
+        (
+            "pending_match_id".to_owned(),
+            "INTEGER".to_owned(),
+            true,
+            None,
+            0,
+        ),
+        ("effect_kind".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("ordinal".to_owned(), "INTEGER".to_owned(), true, None, 0),
+        ("plan_sha256".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("intended_json".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("status".to_owned(), "TEXT".to_owned(), true, None, 0),
+        ("receipt_json".to_owned(), "TEXT".to_owned(), true, None, 0),
+        (
+            "created_at".to_owned(),
+            "TIMESTAMP".to_owned(),
+            true,
+            Some("CURRENT_TIMESTAMP".to_owned()),
+            0,
+        ),
+        (
+            "updated_at".to_owned(),
+            "TIMESTAMP".to_owned(),
+            true,
+            Some("CURRENT_TIMESTAMP".to_owned()),
+            0,
+        ),
+        ("legacy_note".to_owned(), "TEXT".to_owned(), false, None, 0),
+    ]
+}
+
 #[test]
 fn test_schema_manager_initializes_tables() {
     let audit = audit_existing_schema(base_fixture().path()).expect("audit Python schema");
@@ -78,6 +282,500 @@ fn test_schema_manager_initializes_tables() {
         )
         .expect("read lobby default");
     assert_eq!(lobby_enabled, 0);
+}
+
+#[test]
+fn test_draft_finalization_jobs_migration_is_additive_and_constrained() {
+    let file = empty_database();
+    {
+        let connection = Connection::open(file.path()).expect("open legacy Draft fixture");
+        seed_legacy_draft_parents(&connection);
+        connection
+            .execute_batch(
+                "CREATE TABLE draft_finalization_jobs (
+                     completion_key TEXT PRIMARY KEY NOT NULL,
+                     guild_id INTEGER NOT NULL,
+                     session_id INTEGER NOT NULL,
+                     pending_match_id INTEGER NOT NULL,
+                     stage TEXT NOT NULL,
+                     plan_json TEXT NOT NULL,
+                     legacy_note TEXT
+                 );
+                 INSERT INTO draft_finalization_jobs(
+                     completion_key,guild_id,session_id,pending_match_id,
+                     stage,plan_json,legacy_note
+                 ) VALUES (
+                     'draft:42:1',42,1,7,'linked','{\"future\":true}','retain me'
+                 );",
+            )
+            .expect("seed legacy finalization job");
+    }
+
+    let report = initialize_or_migrate(file.path()).expect("migrate Draft finalization jobs");
+    assert!(
+        report
+            .rebuilt_tables
+            .contains(&"draft_finalization_jobs".to_owned()),
+        "legacy target table must be rebuilt additively: {report:?}"
+    );
+    assert!(
+        report
+            .newly_applied
+            .contains(&"create_draft_finalization_jobs".to_owned())
+    );
+
+    let connection = Connection::open(file.path()).expect("open migrated finalization jobs");
+    assert_eq!(
+        table_column_contract(&connection, "draft_finalization_jobs"),
+        expected_finalization_columns()
+    );
+    assert_eq!(
+        foreign_key_contract(&connection, "draft_finalization_jobs"),
+        Vec::<(String, String, String)>::new()
+    );
+    let mut expected_indexes = vec![
+        (
+            false,
+            vec![
+                "stage".to_owned(),
+                "lease_until".to_owned(),
+                "updated_at".to_owned(),
+            ],
+        ),
+        (true, vec!["completion_key".to_owned()]),
+        (true, vec!["pending_match_id".to_owned()]),
+        (true, vec!["guild_id".to_owned(), "session_id".to_owned()]),
+    ];
+    expected_indexes.sort();
+    assert_eq!(
+        index_contract(&connection, "draft_finalization_jobs"),
+        expected_indexes
+    );
+    assert!(
+        index_names(&connection, "draft_finalization_jobs")
+            .contains("idx_draft_finalization_jobs_incomplete")
+    );
+
+    let preserved: (String, String, i64, String, String, Option<String>) = connection
+        .query_row(
+            "SELECT completion_key,stage,revision,plan_json,progress_json,legacy_note
+             FROM draft_finalization_jobs WHERE completion_key='draft:42:1'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("read preserved finalization job");
+    assert_eq!(
+        preserved,
+        (
+            "draft:42:1".to_owned(),
+            "linked".to_owned(),
+            1,
+            r#"{"future":true}"#.to_owned(),
+            "{}".to_owned(),
+            Some("retain me".to_owned()),
+        )
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT marker FROM draft_legacy_marker", [], |row| row
+                .get::<_, String>(
+                0
+            ),)
+            .expect("read unrelated legacy marker"),
+        "preserve me"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT payload FROM pending_matches WHERE pending_match_id=7",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read preserved pending match"),
+        "{}"
+    );
+
+    connection
+        .execute(
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                "draft:42:2",
+                42_i64,
+                2_i64,
+                8_i64,
+                "linked",
+                r#"{"schema":1}"#
+            ],
+        )
+        .expect("insert valid finalization job");
+    let defaults: (i64, String, String, String, String) = connection
+        .query_row(
+            "SELECT revision,progress_json,created_at,updated_at,stage
+             FROM draft_finalization_jobs WHERE completion_key='draft:42:2'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read finalization defaults");
+    assert_eq!(defaults.0, 1);
+    assert_eq!(defaults.1, "{}");
+    assert!(!defaults.2.is_empty());
+    assert!(!defaults.3.is_empty());
+    assert_eq!(defaults.4, "linked");
+
+    for (label, sql) in [
+        (
+            "session check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES ('bad-session',42,0,9,'linked','{}')",
+        ),
+        (
+            "revision check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,revision,stage,plan_json
+             ) VALUES ('bad-revision',42,3,10,0,'linked','{}')",
+        ),
+        (
+            "stage check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES ('bad-stage',42,4,11,'','{}')",
+        ),
+        (
+            "plan object check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES ('bad-plan',42,5,12,'linked','[]')",
+        ),
+        (
+            "lease pair check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json,lease_owner
+             ) VALUES ('bad-lease',42,6,13,'linked','{}','worker-1')",
+        ),
+        (
+            "duplicate pending-match check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES ('duplicate-pending',42,7,8,'linked','{}')",
+        ),
+        (
+            "duplicate guild-session check",
+            "INSERT INTO draft_finalization_jobs(
+                 completion_key,guild_id,session_id,pending_match_id,stage,plan_json
+             ) VALUES ('duplicate-session',42,2,14,'linked','{}')",
+        ),
+    ] {
+        assert!(
+            connection.execute(sql, []).is_err(),
+            "{label} must reject invalid row"
+        );
+    }
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO draft_finalization_jobs(
+                     completion_key,guild_id,session_id,pending_match_id,stage,plan_json,
+                     lease_owner,lease_until
+                 ) VALUES ('leased',42,8,15,'linked','{}','worker-1',12345)",
+                [],
+            )
+            .is_ok(),
+        "paired lease values must be accepted"
+    );
+
+    let second = initialize_or_migrate(file.path()).expect("repeat finalization migration");
+    assert!(
+        second.was_current(),
+        "repeat migration should be current: {second:?}"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .expect("count finalization jobs"),
+        3
+    );
+    let migrations = migration_ledger_snapshot(file.path()).expect("read migration ledger");
+    assert!(migrations.names.contains("create_draft_finalization_jobs"));
+}
+
+#[test]
+fn test_draft_financial_effects_migration_is_additive_and_constrained() {
+    let file = empty_database();
+    {
+        let connection = Connection::open(file.path()).expect("open legacy Draft fixture");
+        seed_legacy_draft_parents(&connection);
+        connection
+            .execute_batch(
+                "CREATE TABLE draft_finalization_jobs (
+                     completion_key TEXT PRIMARY KEY NOT NULL,
+                     guild_id INTEGER NOT NULL,
+                     session_id INTEGER NOT NULL,
+                     pending_match_id INTEGER NOT NULL,
+                     stage TEXT NOT NULL,
+                     plan_json TEXT NOT NULL,
+                     legacy_note TEXT
+                 );
+                 INSERT INTO draft_finalization_jobs(
+                     completion_key,guild_id,session_id,pending_match_id,
+                     stage,plan_json,legacy_note
+                 ) VALUES (
+                     'draft:42:1',42,1,7,'linked','{\"schema_version\":1}','retain job'
+                 );
+                 CREATE TABLE draft_financial_effects (
+                     effect_key TEXT PRIMARY KEY NOT NULL,
+                     completion_key TEXT NOT NULL,
+                     guild_id INTEGER NOT NULL,
+                     session_id INTEGER NOT NULL,
+                     pending_match_id INTEGER NOT NULL,
+                     effect_kind TEXT NOT NULL,
+                     ordinal INTEGER NOT NULL,
+                     plan_sha256 TEXT NOT NULL,
+                     intended_json TEXT NOT NULL,
+                     status TEXT NOT NULL,
+                     receipt_json TEXT NOT NULL,
+                     legacy_note TEXT
+                 );
+                 INSERT INTO draft_financial_effects(
+                     effect_key,completion_key,guild_id,session_id,pending_match_id,
+                     effect_kind,ordinal,plan_sha256,intended_json,status,receipt_json,
+                     legacy_note
+                 ) VALUES (
+                     'draft:42:1:seed:0','draft:42:1',42,1,7,
+                     'seed',0,
+                     '0000000000000000000000000000000000000000000000000000000000000000',
+                     '{\"reserved\":0}','applied','{\"reserved\":0}','retain effect'
+                 );",
+            )
+            .expect("seed legacy financial effect");
+    }
+
+    let report = initialize_or_migrate(file.path()).expect("migrate Draft financial effects");
+    assert!(
+        report
+            .rebuilt_tables
+            .contains(&"draft_financial_effects".to_owned()),
+        "legacy target table must be rebuilt additively: {report:?}"
+    );
+    assert!(
+        report
+            .newly_applied
+            .contains(&"create_draft_financial_effects".to_owned())
+    );
+
+    let connection = Connection::open(file.path()).expect("open migrated financial effects");
+    assert_eq!(
+        table_column_contract(&connection, "draft_financial_effects"),
+        expected_financial_effect_columns()
+    );
+    assert_eq!(
+        foreign_key_contract(&connection, "draft_financial_effects"),
+        vec![
+            (
+                "completion_key".to_owned(),
+                "draft_finalization_jobs".to_owned(),
+                "completion_key".to_owned(),
+            ),
+            (
+                "pending_match_id".to_owned(),
+                "pending_matches".to_owned(),
+                "pending_match_id".to_owned(),
+            ),
+        ]
+    );
+    let mut expected_indexes = vec![
+        (
+            false,
+            vec!["completion_key".to_owned(), "ordinal".to_owned()],
+        ),
+        (true, vec!["effect_key".to_owned()]),
+        (
+            true,
+            vec![
+                "completion_key".to_owned(),
+                "effect_kind".to_owned(),
+                "ordinal".to_owned(),
+            ],
+        ),
+    ];
+    expected_indexes.sort();
+    assert_eq!(
+        index_contract(&connection, "draft_financial_effects"),
+        expected_indexes
+    );
+    assert!(
+        index_names(&connection, "draft_financial_effects")
+            .contains("idx_draft_financial_effects_completion")
+    );
+
+    let preserved: (String, String, String, Option<String>) = connection
+        .query_row(
+            "SELECT effect_key,intended_json,receipt_json,legacy_note
+             FROM draft_financial_effects WHERE effect_key='draft:42:1:seed:0'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read preserved financial effect");
+    assert_eq!(
+        preserved,
+        (
+            "draft:42:1:seed:0".to_owned(),
+            r#"{"reserved":0}"#.to_owned(),
+            r#"{"reserved":0}"#.to_owned(),
+            Some("retain effect".to_owned()),
+        )
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT completion_key,legacy_note FROM draft_finalization_jobs",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .expect("read preserved parent job"),
+        ("draft:42:1".to_owned(), Some("retain job".to_owned()))
+    );
+
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .expect("enable foreign keys for constraint checks");
+    connection
+        .execute(
+            "INSERT INTO draft_financial_effects(
+                 effect_key,completion_key,guild_id,session_id,pending_match_id,
+                 effect_kind,ordinal,plan_sha256,intended_json,status,receipt_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                "draft:42:1:blind:1",
+                "draft:42:1",
+                42_i64,
+                1_i64,
+                7_i64,
+                "blind",
+                1_i64,
+                "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                r#"{"amount":1}"#,
+                "skipped",
+                r#"{"amount":1}"#,
+            ],
+        )
+        .expect("insert valid financial effect");
+    let defaults: (String, String) = connection
+        .query_row(
+            "SELECT created_at,updated_at FROM draft_financial_effects
+             WHERE effect_key='draft:42:1:blind:1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read financial-effect defaults");
+    assert!(!defaults.0.is_empty());
+    assert!(!defaults.1.is_empty());
+
+    let invalid_rows = [
+        (
+            "session check",
+            "'bad-session','draft:42:1',42,0,7,'seed',2,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+        (
+            "effect-kind check",
+            "'bad-kind','draft:42:1',42,1,7,'other',3,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+        (
+            "ordinal check",
+            "'bad-ordinal','draft:42:1',42,1,7,'seed',-1,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+        (
+            "hash length check",
+            "'bad-hash-length','draft:42:1',42,1,7,'seed',4,'abc','{}','applied','{}'",
+        ),
+        (
+            "hash alphabet check",
+            "'bad-hash-alphabet','draft:42:1',42,1,7,'seed',5,
+             '000000000000000000000000000000000000000000000000000000000000000G','{}','applied','{}'",
+        ),
+        (
+            "intended object check",
+            "'bad-intended','draft:42:1',42,1,7,'seed',6,
+             '0000000000000000000000000000000000000000000000000000000000000000','[]','applied','{}'",
+        ),
+        (
+            "status check",
+            "'bad-status','draft:42:1',42,1,7,'seed',7,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','pending','{}'",
+        ),
+        (
+            "receipt object check",
+            "'bad-receipt','draft:42:1',42,1,7,'seed',8,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','[]'",
+        ),
+        (
+            "duplicate effect identity check",
+            "'bad-duplicate','draft:42:1',42,1,7,'blind',1,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+        (
+            "completion foreign key check",
+            "'bad-completion','missing',42,1,7,'seed',9,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+        (
+            "pending-match foreign key check",
+            "'bad-pending','draft:42:1',42,1,999,'seed',10,
+             '0000000000000000000000000000000000000000000000000000000000000000','{}','applied','{}'",
+        ),
+    ];
+    for (label, values) in invalid_rows {
+        let sql = format!(
+            "INSERT INTO draft_financial_effects(
+                 effect_key,completion_key,guild_id,session_id,pending_match_id,
+                 effect_kind,ordinal,plan_sha256,intended_json,status,receipt_json
+             ) VALUES ({values})"
+        );
+        assert!(
+            connection.execute(&sql, []).is_err(),
+            "{label} must reject invalid row"
+        );
+    }
+
+    let second = initialize_or_migrate(file.path()).expect("repeat financial-effects migration");
+    assert!(
+        second.was_current(),
+        "repeat migration should be current: {second:?}"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_financial_effects", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .expect("count financial effects"),
+        2
+    );
+    let migrations = migration_ledger_snapshot(file.path()).expect("read migration ledger");
+    assert!(migrations.names.contains("create_draft_financial_effects"));
 }
 
 #[test]
