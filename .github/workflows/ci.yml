@@ -175,6 +175,9 @@ jobs:
       - name: Verify fail-closed same-service runtime selector
         run: ./scripts/test-runtime-selector
 
+      - name: Rehearse offline backup and deploy handoff
+        run: ./scripts/test-operational-rehearsal
+
       - name: Create and exercise Python-migrated Rust smoke database
         run: |
           mkdir -p "$RUNNER_TEMP/cama-rust-smoke"

@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Run the bounded, offline operational rehearsal for the deploy contract.
+
+This deliberately exercises the checked-in backup helper rather than
+reimplementing its copy logic.  It keeps a production-shaped SQLite source
+connection open in WAL mode while the helper runs, then proves that the
+verified backup is immutable and cannot be overwritten.  The deploy workflow
+checks are intentionally textual: this rehearsal never needs Docker, SSH,
+Discord credentials, or the repository's development database.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+BACKUP = ROOT / "scripts" / "sqlite_backup.py"
+DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def run_backup(source: Path, destination: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(BACKUP), str(source), str(destination)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def create_wal_source(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.executescript(
+        """
+        CREATE TABLE schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+        CREATE TABLE rehearsal_state (
+            id INTEGER PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    connection.executemany(
+        "INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)",
+        [(f"migration_{index}", "2026-08-13T00:00:00Z") for index in range(4)],
+    )
+    connection.execute(
+        "INSERT INTO rehearsal_state(id, value) VALUES (1, 'before-deploy')"
+    )
+    connection.commit()
+    return connection
+
+
+def assert_backup_contract() -> None:
+    with tempfile.TemporaryDirectory(prefix="cama-operational-rehearsal-") as raw_dir:
+        directory = Path(raw_dir)
+        source_path = directory / "cama_shuffle.db"
+        backup_path = directory / "backups" / "predeploy.db"
+        source = create_wal_source(source_path)
+        try:
+            wal_path = Path(f"{source_path}-wal")
+            assert wal_path.exists(), "source fixture must contain uncheckpointed WAL data"
+
+            first = run_backup(source_path, backup_path)
+            assert first.returncode == 0, first.stderr
+            metadata_path = Path(f"{backup_path}.json")
+            assert backup_path.is_file() and backup_path.stat().st_size > 0
+            assert metadata_path.is_file() and metadata_path.stat().st_size > 0
+
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert metadata["format_version"] == 1
+            assert metadata["quick_check"] == "ok"
+            assert metadata["source"] == str(source_path.resolve())
+            assert metadata["backup"] == str(backup_path.resolve())
+            assert metadata["schema_migration_count"] == 4
+            assert metadata["size_bytes"] == backup_path.stat().st_size
+            assert metadata["sha256"] == digest(backup_path)
+
+            with sqlite3.connect(backup_path) as backup:
+                assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+                assert backup.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (4,)
+                assert backup.execute("SELECT value FROM rehearsal_state").fetchone() == (
+                    "before-deploy",
+                )
+
+            backup_bytes = backup_path.read_bytes()
+            metadata_bytes = metadata_path.read_bytes()
+            backup_digest = digest(backup_path)
+
+            # Keep the source writer open and mutate the source after the
+            # backup.  The copied snapshot must remain the pre-deploy view.
+            source.execute(
+                "INSERT INTO rehearsal_state(id, value) VALUES (2, 'after-deploy-write')"
+            )
+            source.commit()
+            assert source.execute("SELECT COUNT(*) FROM rehearsal_state").fetchone() == (2,)
+            assert backup_path.read_bytes() == backup_bytes
+            assert metadata_path.read_bytes() == metadata_bytes
+            assert digest(backup_path) == backup_digest
+            with sqlite3.connect(backup_path) as backup:
+                assert backup.execute("SELECT COUNT(*) FROM rehearsal_state").fetchone() == (1,)
+
+            # A second invocation against the same destination must fail
+            # closed and must not alter either artifact.
+            second = run_backup(source_path, backup_path)
+            assert second.returncode != 0
+            assert "refusing to overwrite backup" in second.stderr
+            assert backup_path.read_bytes() == backup_bytes
+            assert metadata_path.read_bytes() == metadata_bytes
+        finally:
+            source.close()
+
+
+def assert_deploy_workflow_handoff() -> None:
+    workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+    required_fragments = (
+        'BOT_RUNTIME_SELECTION: ${{ vars.BOT_RUNTIME }}',
+        'RUST_CUTOVER_CANDIDATE_SELECTION: ${{ vars.RUST_CUTOVER_CANDIDATE }}',
+        'envs: BOT_RUNTIME_SELECTION,RUST_CUTOVER_CANDIDATE_SELECTION',
+        'DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"',
+        'git checkout --force "$DEPLOY_SHA"',
+        'BOT_RUNTIME="$BOT_RUNTIME_SELECTION"',
+        'export BOT_RUNTIME',
+        'RUST_CUTOVER_CANDIDATE=true',
+        'export RUST_CUTOVER_CANDIDATE',
+        'GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime',
+    )
+    missing = [fragment for fragment in required_fragments if fragment not in workflow]
+    assert not missing, f"deploy workflow handoff changed; missing: {missing!r}"
+
+
+def main() -> int:
+    assert BACKUP.is_file(), BACKUP
+    assert DEPLOY_WORKFLOW.is_file(), DEPLOY_WORKFLOW
+    assert_backup_contract()
+    assert_deploy_workflow_handoff()
+    print("operational rehearsal passed (WAL backup, immutable snapshot, no-overwrite, deploy handoff)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (AssertionError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
+        print(f"operational rehearsal failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

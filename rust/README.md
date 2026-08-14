@@ -201,6 +201,11 @@ gate, Python→Rust→Python SQLite interoperability, builds of both production
 images, a Python import smoke, and a Rust preflight against a freshly
 Python-migrated database. Setting the repository variable
 `RUST_CUTOVER_CANDIDATE=true` enables `--require-complete` as a hard CI gate.
+The Rust job also runs `scripts/test-operational-rehearsal`, which uses only a
+temporary WAL-mode SQLite source to exercise the real online-backup helper,
+verify backup metadata and immutability, reject destination overwrite, and
+check the deploy workflow's exact SHA/runtime handoff. It does not touch the
+development database or require Docker, SSH, or Discord credentials.
 
 The default Compose graph still starts only the Python `bot`. All deployments
 now go through a checked same-service selector; leaving `BOT_RUNTIME` unset is
