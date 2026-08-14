@@ -65,6 +65,13 @@ jobs:
       - name: Test Rust
         run: cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
 
+      - name: Test pinned Dotabase production adapters
+        run: |
+          dotabase_path=$(uv run --locked python -c 'import importlib.util,pathlib; spec=importlib.util.find_spec("dotabase"); assert spec and spec.origin; print(pathlib.Path(spec.origin).with_name("dotabase.db"))')
+          test -r "$dotabase_path"
+          CAMA_DOTABASE_TEST_PATH="$dotabase_path" cargo test --locked --manifest-path rust/Cargo.toml -p cama-app --lib dotabase_sqlite::tests::pinned_dotabase_asset_loads_through_the_production_adapter -- --ignored --test-threads=1
+          CAMA_DOTABASE_TEST_PATH="$dotabase_path" cargo test --locked --manifest-path rust/Cargo.toml -p cama-runtime --lib trivia_provider::tests::pinned_catalog_constructs_the_full_production_provider -- --ignored --test-threads=1
+
       - name: Compare representative Python and Rust visuals
         run: >-
           uv run --locked python scripts/visual_equivalence.py
