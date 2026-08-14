@@ -1,6 +1,6 @@
 # Required operational cutover gates. Status is `open` or `complete`; the third field records the missing proof or completed evidence.
 backup_rollback_rehearsal	complete	The CI rehearsal backs up a live-WAL disposable current-schema database with the production helper, verifies SQLite/metadata/hash immutability, forces an unhealthy Rust start, and restores the retained Python image; explicit Python and Rust-only redeploy paths use the same service.
-container_health_smoke	open	Add startup health, Discord/DB write smoke, failure detection, and automatic rollback checks for the Rust runtime image.
+container_health_smoke	open	CI now proves built-image startup health, a typed loopback interaction plus committed app_kv write, stopped-state failure detection, and automatic retained-Python rollback; the sole residual is a concrete Serenity/Discord HTTP write and health proof in an isolated staging guild without Python running.
 database_migration_and_interop	open	Implement Rust-owned clean/existing database migrations, then complete every repository adapter and A/B delta test on old and current schema snapshots with Python stopped.
 discord_gateway_and_commands	open	Make cama-rust serve the live gateway as sole runtime and prove command schemas, interaction timing, visibility, mentions, components, attachments, and errors with Python stopped.
 external_service_recordings	open	Replay recorded OpenDota, Dotabase, Steam asset, and LLM provider success/failure/fallback contracts without live CI network.

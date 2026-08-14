@@ -217,22 +217,23 @@ gate, Python→Rust→Python SQLite interoperability, builds of both production
 images, a Python import smoke, and a Rust preflight against a freshly
 Python-migrated database. Setting the repository variable
 `RUST_CUTOVER_CANDIDATE=true` enables `--require-complete` as a hard CI gate.
-The Rust job also runs `scripts/test-operational-rehearsal`, which uses only a
-temporary WAL-mode SQLite source to exercise the real online-backup helper,
-verify backup metadata and immutability, reject destination overwrite, and
-check the deploy workflow's exact SHA/runtime handoff. It then runs the real
-deploy script in a temporary root against a recording Docker/Compose shim to
-prove fail-closed guards, unhealthy-Rust rollback, explicit Python restoration,
-and a Python-free Rust redeploy. It does not touch the development database or
-require Docker, SSH, network access, or Discord credentials.
-
-The image smoke also starts `cama-rust health-smoke` against a disposable
-Python-migrated database with Docker networking disabled. This runs the real
-runtime supervisor and health reporter with a loopback gateway, commits and
-reads one `app_kv` write, then verifies that the health probe rejects the
-stopped marker. The loopback command-registration event is only a transport
-seam; it is not evidence of a live Discord REST write or a production gateway
-session, so `container_health_smoke` remains open until those are recorded.
+The Rust job also runs `scripts/test-operational-rehearsal` with the built Rust
+image. It starts `cama-rust health-smoke` against a disposable Python-migrated
+database with Docker networking disabled. The real runtime supervisor and
+health reporter dispatch one registered command through a recording Discord
+responder, commit and read its `app_kv` write, and prove that the health probe
+rejects the stopped marker. The same rehearsal uses a temporary WAL-mode SQLite
+source to exercise the real online-backup helper, verify backup metadata and
+immutability, reject destination overwrite, and check the deploy workflow's
+exact SHA/runtime handoff. It then runs the real deploy script in a temporary
+root against the recording Docker/Compose shim to force an unhealthy Rust
+candidate and prove automatic restoration of the retained Python image. The
+local form omits `--rust-health-image` and therefore needs no Docker; neither
+form touches the development database or needs SSH, external network access,
+or Discord credentials. The recording responder exercises the typed interaction
+boundary, not Serenity's HTTP transport or a live gateway. The
+`container_health_smoke` gate therefore remains open only for an isolated
+staging-guild Discord write and health proof with Python stopped.
 
 For a Rust service already running through the composed `bot` service, the
 black-box post-deploy verifier checks the selected runtime and revision, UID

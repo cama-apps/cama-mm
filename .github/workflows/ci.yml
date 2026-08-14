@@ -182,8 +182,8 @@ jobs:
       - name: Verify fail-closed same-service runtime selector
         run: ./scripts/test-runtime-selector
 
-      - name: Rehearse offline backup, selector, and rollback
-        run: ./scripts/test-operational-rehearsal
+      - name: Rehearse container health, backup, selector, and rollback
+        run: ./scripts/test-operational-rehearsal --rust-health-image cama-rust:ci
 
       - name: Create and exercise Python-migrated Rust smoke database
         run: |
@@ -191,38 +191,17 @@ jobs:
           uv run --locked python -c 'import sys; from database import Database; database = Database(sys.argv[1]); database.close()' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
           cargo run --locked --manifest-path rust/Cargo.toml -p cama-db --example guild_config_snapshot_smoke -- "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db" --disposable-copy
           # SQLite needs a writable directory for WAL lock sidecars even though
-          # cama-rust's ordinary db-check opens the main database read-only;
-          # health-smoke intentionally exercises one current-schema write.
+          # cama-rust opens the main database with SQLITE_OPEN_READ_ONLY.
           chmod a+rwx "$RUNNER_TEMP/cama-rust-smoke"
           chmod a+rw "$RUNNER_TEMP/cama-rust-smoke"/*
           chmod a-w "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
 
-      - name: Smoke Rust runtime image with loopback gateway and fail-closed health probe
+      - name: Preflight Rust runtime image against the exercised database
         run: |
           docker run --rm \
             --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
             cama-rust:ci \
             db-check --db-path /app/data/cama_shuffle.db
-
-          docker inspect --format '{{json .Config.Healthcheck.Test}}' cama-rust:ci \
-            | grep -F '"health-check"'
-
-          chmod a+rw "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
-          docker run --rm \
-            --network none \
-            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
-            cama-rust:ci \
-            health-smoke --db-path /app/data/cama_shuffle.db
-
-          uv run --locked python -c "import sqlite3,sys; db=sys.argv[1]; value=sqlite3.connect(db).execute(\"SELECT value FROM app_kv WHERE guild_id=0 AND key='__rust_health_smoke__'\").fetchone(); assert value == ('loopback-discord-write',), value" "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
-          set +e
-          docker run --rm \
-            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
-            cama-rust:ci \
-            health-check --db-path /app/data/cama_shuffle.db --max-age-seconds 90
-          stopped_status=$?
-          set -e
-          test "$stopped_status" -ne 0
 
   # Enabling this repository variable turns both the parity ledger and the
   # required operational-readiness manifest into a hard deployment gate,

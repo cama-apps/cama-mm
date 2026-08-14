@@ -6,13 +6,15 @@ reimplementing its copy logic.  It keeps a production-shaped SQLite source
 connection open in WAL mode while the helper runs, then proves that the
 verified backup is immutable and cannot be overwritten.  The deploy workflow
 handoff is checked textually, while byte-identical copies of the deploy scripts
-run in a temporary root against a recording Docker/Compose shim.  The rehearsal
-never needs live Docker, SSH, network access, Discord credentials, or the
-repository's development database.
+run in a temporary root against a recording Docker/Compose shim.  CI also passes
+the built Rust image for a network-disabled container smoke; the local default
+needs no Docker.  Neither mode needs SSH, network access, Discord credentials,
+or the repository's development database.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -39,6 +41,8 @@ EXPECTED_MIGRATION_COUNT = sum(
     .splitlines()
 )
 MINIMUM_PRODUCTION_TABLE_COUNT = 80
+HEALTH_SMOKE_KEY = "__rust_health_smoke__"
+HEALTH_SMOKE_VALUE = "loopback-discord-write"
 
 
 def project_python_command(*arguments: str) -> list[str]:
@@ -374,6 +378,113 @@ def create_wal_source(path: Path) -> sqlite3.Connection:
     assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
     connection.execute("PRAGMA wal_autocheckpoint=0")
     return connection
+
+
+def assert_container_health_image(image: str) -> None:
+    """Exercise the built Rust image with no network or Discord credential."""
+
+    assert image and not image.isspace(), "Rust health image must not be empty"
+    with tempfile.TemporaryDirectory(prefix="cama-container-health-rehearsal-") as raw_dir:
+        directory = Path(raw_dir)
+        database_path = directory / "cama_shuffle.db"
+        create_current_schema_database(database_path)
+        directory.chmod(0o777)
+        for path in directory.iterdir():
+            path.chmod(0o666)
+
+        healthcheck = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .Config.Healthcheck.Test}}",
+                image,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert healthcheck.returncode == 0, healthcheck.stderr or healthcheck.stdout
+        assert '"CMD"' in healthcheck.stdout
+        assert '"/usr/local/bin/cama-rust"' in healthcheck.stdout
+        assert '"health-check"' in healthcheck.stdout
+        assert '"--max-age-seconds"' in healthcheck.stdout
+        assert '"90"' in healthcheck.stdout
+
+        volume = f"{directory}:/app/data"
+        smoke = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                volume,
+                image,
+                "health-smoke",
+                "--db-path",
+                "/app/data/cama_shuffle.db",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert smoke.returncode == 0, smoke.stderr or smoke.stdout
+        assert (
+            "health_smoke=passed gateway=loopback "
+            "discord_write=interaction_response database_write=app_kv"
+            in smoke.stdout
+        )
+
+        with sqlite3.connect(database_path) as connection:
+            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
+            assert connection.execute(
+                "SELECT value FROM app_kv WHERE guild_id=0 AND key=?",
+                (HEALTH_SMOKE_KEY,),
+            ).fetchone() == (HEALTH_SMOKE_VALUE,)
+
+        marker_path = Path(f"{database_path}.rust-health.json")
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert marker["status"] == "stopped"
+        assert marker["database_ready"] is True
+        assert marker["commands_registered"] is True
+        assert marker["command_tree_synchronized"] is True
+        assert marker["worker_registration_complete"] is True
+        assert marker["expected_workers"] == []
+        assert marker["failed_workers"] == []
+        assert marker["last_error"] is None
+
+        stopped = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                volume,
+                image,
+                "health-check",
+                "--db-path",
+                "/app/data/cama_shuffle.db",
+                "--max-age-seconds",
+                "90",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert stopped.returncode != 0
+        assert "unhealthy:" in stopped.stderr
+        assert "Stopped" in stopped.stderr
 
 
 def assert_backup_contract() -> None:
@@ -1156,20 +1267,50 @@ def assert_deploy_runtime_rehearsal() -> None:
         assert state["log_calls"] == 1
 
 
+def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rust-health-image",
+        help=(
+            "built Rust image to exercise with Docker networking disabled; "
+            "CI supplies cama-rust:ci"
+        ),
+    )
+    return parser.parse_args(arguments)
+
+
+def assert_argument_contract() -> None:
+    assert parse_args([]).rust_health_image is None
+    assert (
+        parse_args(["--rust-health-image", "cama-rust:test"]).rust_health_image
+        == "cama-rust:test"
+    )
+
+
 def main() -> int:
+    assert_argument_contract()
+    arguments = parse_args()
     assert BACKUP.is_file(), BACKUP
     assert DEPLOY.is_file(), DEPLOY
     assert RUNTIME_COMPOSE.is_file(), RUNTIME_COMPOSE
     assert POST_DEPLOY_VERIFY.is_file(), POST_DEPLOY_VERIFY
     assert DEPLOY_WORKFLOW.is_file(), DEPLOY_WORKFLOW
     assert READINESS.is_file(), READINESS
+    if arguments.rust_health_image:
+        assert_container_health_image(arguments.rust_health_image)
     assert_backup_contract()
     assert_deploy_workflow_handoff()
     assert_deploy_runtime_rehearsal()
-    print(
-        "operational rehearsal passed "
-        "(WAL backup, fail-closed guards, rollback, Python restore, Rust-only deploy)"
-    )
+    evidence = [
+        "WAL backup",
+        "fail-closed guards",
+        "rollback",
+        "Python restore",
+        "Rust-only deploy",
+    ]
+    if arguments.rust_health_image:
+        evidence[:0] = ["container health", "typed interaction/DB smoke"]
+    print(f"operational rehearsal passed ({', '.join(evidence)})")
     return 0
 
 

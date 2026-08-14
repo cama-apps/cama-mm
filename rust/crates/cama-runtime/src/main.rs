@@ -5,7 +5,7 @@ mod herogrid_provider;
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,22 +17,25 @@ use cama_runtime::gateway::{GatewayError, GatewaySession};
 use cama_runtime::inventory;
 use cama_runtime::match_provider::production_betting_flavor;
 use cama_runtime::process_lock::ProcessLock;
+use cama_runtime::registration::InteractionResponseError;
 use cama_runtime::{
     AdminMatchCorrectionRuntime, AdminRegistrationProvider, AdminRuntimePorts,
     AdvancedStatsRegistrationProvider, ApplicationConfig, AskRegistrationProvider,
-    BlameLukeRegistrationProvider, CompletedDatabaseAdmission, DatabaseAdmission, DigBonusRuntime,
-    DigRegistrationProvider, DiscordToken, DotaInfoRegistrationProvider, DraftRegistrationProvider,
-    DuelRegistrationProvider, EnrichmentRegistrationProvider, GatewayEventObservers,
-    GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks, HealthReporter,
-    InfoRegistrationProvider, LifecycleEvent, LobbyRegistrationProvider, LobbyRuntimeConfig,
-    MafiaRegistrationProvider, ManaRegistrationProvider, MatchRegistrationProvider,
-    PetRegistrationProvider, PlayerRegistrationProvider, PlayerTriviaRegistrationProvider,
-    PredictionRegistrationProvider, PredictionRuntimePorts, ProfileRegistrationProvider,
-    RatingAnalysisRegistrationProvider, RawReactionObservers, RegistryBuilder,
-    ReminderRegistrationProvider, Runtime, RuntimeConfig, ScoutRegistrationProvider,
-    SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider, SqliteDatabaseAdmission,
-    SurveyRegistrationProvider, TaxRegistrationProvider, TriviaRegistrationProvider, UsageMonitor,
-    VanityTaxGatewayObserver, WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
+    BlameLukeRegistrationProvider, CommandSpec, CompletedDatabaseAdmission, DatabaseAdmission,
+    DigBonusRuntime, DigRegistrationProvider, DiscordToken, DotaInfoRegistrationProvider,
+    DraftRegistrationProvider, DuelRegistrationProvider, EnrichmentRegistrationProvider,
+    GatewayEventObservers, GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks,
+    HealthReporter, InfoRegistrationProvider, InteractionAllowedMentions, InteractionHandler,
+    InteractionHandlerError, InteractionRequest, InteractionResponder, InteractionResponse,
+    LifecycleEvent, LobbyRegistrationProvider, LobbyRuntimeConfig, MafiaRegistrationProvider,
+    ManaRegistrationProvider, MatchRegistrationProvider, PetRegistrationProvider,
+    PlayerRegistrationProvider, PlayerTriviaRegistrationProvider, PredictionRegistrationProvider,
+    PredictionRuntimePorts, ProfileRegistrationProvider, RatingAnalysisRegistrationProvider,
+    RawReactionObservers, RegistryBuilder, ReminderRegistrationProvider, Runtime, RuntimeConfig,
+    ScoutRegistrationProvider, SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider,
+    SqliteDatabaseAdmission, SurveyRegistrationProvider, TaxRegistrationProvider,
+    TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
+    WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
     duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
     manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec,
     prediction_refresh_worker_spec, validate_production_registry,
@@ -219,16 +222,117 @@ fn parse_health_smoke(mut args: impl Iterator<Item = String>) -> Result<Command,
     })
 }
 
+const HEALTH_SMOKE_COMMAND: &str = "health-smoke";
+const HEALTH_SMOKE_RESPONSE: &str = "health-smoke Discord response recorded";
+
+#[derive(Debug)]
+struct HealthSmokeCommand {
+    database_path: PathBuf,
+}
+
+#[async_trait]
+impl InteractionHandler for HealthSmokeCommand {
+    async fn handle(
+        &self,
+        request: InteractionRequest,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        if request.root_name() != HEALTH_SMOKE_COMMAND {
+            return Err(InteractionHandlerError::Handler(format!(
+                "unexpected health-smoke command {:?}",
+                request.root_name()
+            )));
+        }
+        let path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = Connection::open(&path)
+                .map_err(|error| format!("health-smoke database write open failed: {error}"))?;
+            connection
+                .execute(
+                    "INSERT INTO app_kv (guild_id, key, value)
+                     VALUES (0, '__rust_health_smoke__', 'loopback-discord-write')
+                     ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
+                    [],
+                )
+                .map_err(|error| format!("health-smoke database write failed: {error}"))?;
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|error| {
+            InteractionHandlerError::Handler(format!(
+                "health-smoke database write task failed: {error}"
+            ))
+        })??;
+        responder
+            .respond(
+                InteractionResponse::message(HEALTH_SMOKE_RESPONSE)
+                    .ephemeral()
+                    .without_mentions(),
+            )
+            .await
+            .map_err(|error| InteractionHandlerError::Handler(error.to_string()))
+    }
+}
+
+#[derive(Debug, Default)]
+struct HealthSmokeResponder {
+    response: Mutex<Option<InteractionResponse>>,
+}
+
+impl HealthSmokeResponder {
+    fn recorded_response(&self) -> Result<InteractionResponse, GatewayError> {
+        self.response
+            .lock()
+            .map_err(|_| GatewayError::Fatal("health-smoke response lock poisoned".to_owned()))?
+            .clone()
+            .ok_or_else(|| {
+                GatewayError::Fatal("health-smoke command produced no Discord response".to_owned())
+            })
+    }
+}
+
+#[async_trait]
+impl InteractionResponder for HealthSmokeResponder {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        let mut recorded = self
+            .response
+            .lock()
+            .map_err(|_| InteractionResponseError::new("health-smoke response lock poisoned"))?;
+        if recorded.is_some() {
+            return Err(InteractionResponseError::new(
+                "health-smoke command responded more than once",
+            ));
+        }
+        *recorded = Some(response);
+        Ok(())
+    }
+
+    async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
+        Err(InteractionResponseError::new(
+            "health-smoke command unexpectedly deferred",
+        ))
+    }
+
+    async fn followup(
+        &self,
+        _response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        Err(InteractionResponseError::new(
+            "health-smoke command unexpectedly sent a follow-up",
+        ))
+    }
+}
+
 /// A network-free gateway used only by the image-level health smoke.
 ///
 /// This drives the same lifecycle and health reporter as `serve`, but never
 /// constructs a Serenity client or opens a Discord socket. The command-tree
-/// registration event is the loopback Discord seam; the accompanying `app_kv`
-/// transaction proves that a current-schema runtime write is possible while
-/// the process is healthy.
+/// registration and typed interaction response are the loopback Discord seam;
+/// the command's accompanying `app_kv` transaction proves that a
+/// current-schema runtime write is possible while the process is healthy.
 #[derive(Debug)]
 struct HealthSmokeGateway {
-    database_path: PathBuf,
+    responder: Arc<HealthSmokeResponder>,
 }
 
 #[async_trait]
@@ -237,15 +341,9 @@ impl GatewayTransport for HealthSmokeGateway {
         &mut self,
         session: GatewaySession,
     ) -> Result<GatewaySessionEnd, GatewayError> {
-        let command_count = session.registry.commands().len();
         let _ = session.events.send(LifecycleEvent::Ready {
             bot_user_id: 0,
             guild_count: 0,
-        });
-        let _ = session.events.send(LifecycleEvent::CommandsRegistered {
-            command_count,
-            component_route_count: session.registry.component_routes().len(),
-            synchronized: true,
         });
         let _ = session
             .events
@@ -254,28 +352,46 @@ impl GatewayTransport for HealthSmokeGateway {
                 connected: true,
                 stage: "loopback".to_owned(),
             });
-
-        let path = self.database_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = Connection::open(&path).map_err(|error| {
-                GatewayError::Fatal(format!("health-smoke database write open failed: {error}"))
+        let handler = session
+            .registry
+            .command_handler(HEALTH_SMOKE_COMMAND)
+            .ok_or_else(|| {
+                GatewayError::Fatal("health-smoke command is not registered".to_owned())
             })?;
-            connection
-                .execute(
-                    "INSERT INTO app_kv (guild_id, key, value)
-                     VALUES (0, '__rust_health_smoke__', 'loopback-discord-write')
-                     ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
-                    [],
-                )
-                .map_err(|error| {
-                    GatewayError::Fatal(format!("health-smoke database write failed: {error}"))
-                })?;
-            Ok::<(), GatewayError>(())
-        })
-        .await
-        .map_err(|error| {
-            GatewayError::Fatal(format!("health-smoke write task failed: {error}"))
-        })??;
+        handler
+            .handle(
+                InteractionRequest::Command {
+                    interaction_id: 1,
+                    name: HEALTH_SMOKE_COMMAND.to_owned(),
+                    user_id: 1,
+                    user_display_name: "health-smoke".to_owned(),
+                    guild_id: Some(1),
+                    channel_id: Some(1),
+                    member_permissions: None,
+                    options: Vec::new(),
+                },
+                self.responder.clone(),
+            )
+            .await
+            .map_err(|error| GatewayError::Fatal(error.to_string()))?;
+        let response = self.responder.recorded_response()?;
+        if response.content != HEALTH_SMOKE_RESPONSE
+            || !response.ephemeral
+            || response.allowed_mentions != InteractionAllowedMentions::None
+            || !response.embeds.is_empty()
+            || !response.attachments.is_empty()
+            || !response.components.is_empty()
+        {
+            return Err(GatewayError::Fatal(
+                "health-smoke Discord response did not preserve its typed contract".to_owned(),
+            ));
+        }
+        let command_count = session.registry.commands().len();
+        let _ = session.events.send(LifecycleEvent::CommandsRegistered {
+            command_count,
+            component_route_count: session.registry.component_routes().len(),
+            synchronized: command_count == 1,
+        });
 
         let mut shutdown = session.shutdown;
         loop {
@@ -293,7 +409,9 @@ async fn run_health_smoke(path: PathBuf) -> ExitCode {
     let result = run_health_smoke_inner(path).await;
     match result {
         Ok(()) => {
-            println!("health_smoke=passed gateway=loopback database_write=app_kv");
+            println!(
+                "health_smoke=passed gateway=loopback discord_write=interaction_response database_write=app_kv"
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -321,11 +439,23 @@ async fn run_health_smoke_inner(path: PathBuf) -> Result<(), String> {
         reconnect_max: Duration::ZERO,
         rust_cutover_candidate: false,
     };
+    let mut registry = RegistryBuilder::default();
+    registry
+        .command(CommandSpec {
+            name: HEALTH_SMOKE_COMMAND.to_owned(),
+            description: "Verify the loopback Discord and database write seams".to_owned(),
+            options: Vec::new(),
+            handler: Arc::new(HealthSmokeCommand {
+                database_path: database_path.clone(),
+            }),
+        })
+        .map_err(|error| format!("could not register health-smoke command: {error}"))?;
+    let responder = Arc::new(HealthSmokeResponder::default());
     let runtime = Runtime::new(
         config,
-        RegistryBuilder::default().build(),
+        registry.build(),
         HealthSmokeGateway {
-            database_path: database_path.clone(),
+            responder: Arc::clone(&responder),
         },
         SqliteDatabaseAdmission::default(),
     );
