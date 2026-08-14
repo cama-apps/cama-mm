@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use cama_db::bankruptcy_repository::BankruptcyRepository;
+use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventActorSnapshot, DigEventQuestSnapshot, DigEventRuntimeRepository,
 };
@@ -557,6 +558,8 @@ pub enum DigRuntimeStoreError {
     Pet(String),
     #[error("the previewed Overgrowth charge changed before Dig settlement")]
     OvergrowthConflict,
+    #[error("Dig Blood Pact settlement failed: {0}")]
+    BloodPact(String),
 }
 
 /// The only persistence seam used by the Dig application workflow.
@@ -788,6 +791,18 @@ pub trait DigRuntimeStore: Send + Sync {
     fn finalize_delivery(
         &self,
         _request: DigRuntimeFinalizeDelivery,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        Err(DigRuntimeStoreError::StateConflict)
+    }
+
+    /// Settle the durable post-Dig Blood Pact effect before the delivery
+    /// caller finalizes flavor or renders the message.  SQLite owns the
+    /// exact-once repository boundary; lightweight stores leave the snapshot
+    /// unchanged because they have no durable hostile-loss ledger.
+    fn settle_blood_pact_delivery(
+        &self,
+        _request: DigRuntimeSettleBloodPact,
+        _minigame_jc_delta_scale: f64,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
         Err(DigRuntimeStoreError::StateConflict)
     }
@@ -2176,7 +2191,8 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             };
             let delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
                 .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-            if delivery.main_delivered_at.is_none()
+            if !delivery.blood_pact.is_terminal()
+                || delivery.main_delivered_at.is_none()
                 || (delivery.render.kind.requires_event_part()
                     && delivery.event_delivered_at.is_none())
             {
@@ -2331,6 +2347,136 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         }
         transaction.commit()?;
         Ok(delivery)
+    }
+
+    fn settle_blood_pact_delivery(
+        &self,
+        request: DigRuntimeSettleBloodPact,
+        minigame_jc_delta_scale: f64,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        // Read the pending immutable projection before opening the effect
+        // transaction.  The Blood Pact repository opens its own
+        // BEGIN IMMEDIATE transaction; holding a SQLite write transaction
+        // here would turn the exact-once boundary into a lock inversion.
+        let pending = {
+            let connection = self.connection()?;
+            let detail = connection
+                .query_row(
+                    "SELECT detail FROM dig_actions WHERE id=?1",
+                    params![request.action_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+                .ok_or(DigRuntimeStoreError::StateConflict)?;
+            let value = serde_json::from_str::<Value>(&detail)
+                .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+            let raw = value
+                .get("delivery")
+                .cloned()
+                .ok_or(DigRuntimeStoreError::StateConflict)?;
+            let delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
+                .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+            if delivery.action_id != request.action_id || delivery.source_key != request.source_key
+            {
+                return Err(DigRuntimeStoreError::StateConflict);
+            }
+            delivery
+        };
+
+        if pending.blood_pact.is_terminal() {
+            return Ok(pending);
+        }
+
+        let state = if pending.outcome.cave_in || pending.outcome.jc_earned <= 0 {
+            DigRuntimeBloodPactSnapshot::Skipped
+        } else {
+            let event_key = format!(
+                "dig-blood-pact:{}:{}",
+                pending.action_id, pending.discord_id
+            );
+            let mana_date = game_date_for_timestamp(request.occurred_at as f64)
+                .map_err(|error| DigRuntimeStoreError::BloodPact(error.to_string()))?;
+            let mut settlement_request = DigBloodPactSettlementRequest::with_default_scale(
+                pending.discord_id,
+                pending.guild_id,
+                pending.outcome.jc_earned,
+                event_key,
+                request.occurred_at,
+                mana_date,
+            );
+            settlement_request.minigame_jc_delta_scale = minigame_jc_delta_scale;
+            let settlement = DigBloodPactRepository::new(&self.path)
+                .settle(&settlement_request)
+                .map_err(|error| DigRuntimeStoreError::BloodPact(error.to_string()))?;
+            if settlement.event.is_some() {
+                DigRuntimeBloodPactSnapshot::Applied {
+                    skimmed: settlement.applied_amount,
+                }
+            } else {
+                DigRuntimeBloodPactSnapshot::Skipped
+            }
+        };
+
+        // The repository effect and this projection update are intentionally
+        // separate transactions.  If the process stops between them, the
+        // stable hostile-loss event key makes the next call a duplicate-safe
+        // reconciliation and then records the terminal state.  Reloading the
+        // row also prevents a stale flavor/render update from being clobbered.
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = transaction
+            .query_row(
+                "SELECT detail FROM dig_actions WHERE id=?1",
+                params![request.action_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut value = serde_json::from_str::<Value>(&detail)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+        let current_raw = value
+            .get("delivery")
+            .cloned()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let current = serde_json::from_value::<DigRuntimeDeliverySnapshot>(current_raw)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        if current.action_id != request.action_id || current.source_key != request.source_key {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        if current.blood_pact.is_terminal() {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        if current.outcome.jc_earned != pending.outcome.jc_earned
+            || current.outcome.cave_in != pending.outcome.cave_in
+        {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        let delivery_value = value
+            .get_mut("delivery")
+            .and_then(Value::as_object_mut)
+            .ok_or(DigRuntimeStoreError::InvalidJson("delivery"))?;
+        delivery_value.insert(
+            "blood_pact".to_owned(),
+            serde_json::to_value(&state)
+                .map_err(|_| DigRuntimeStoreError::InvalidJson("blood_pact"))?,
+        );
+        let changed = transaction.execute(
+            "UPDATE dig_actions SET detail=?1 WHERE id=?2",
+            params![value.to_string(), request.action_id],
+        )?;
+        if changed != 1 {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        let updated_delivery = value
+            .get("delivery")
+            .cloned()
+            .ok_or(DigRuntimeStoreError::InvalidJson("delivery"))?;
+        transaction.commit()?;
+        serde_json::from_value(updated_delivery)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))
     }
 }
 
@@ -3015,6 +3161,38 @@ impl DigRuntimeFlavorSnapshot {
     }
 }
 
+/// Durable state for the post-Dig Blood Pact effect.
+///
+/// This state lives inside the immutable delivery projection rather than in a
+/// second queue table.  `Pending` is the crash window between the committed
+/// Dig action and the post-commit effect; once the repository boundary has
+/// returned, the state is terminal and retries only reconcile the projection.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DigRuntimeBloodPactSnapshot {
+    #[default]
+    Pending,
+    Applied {
+        skimmed: i64,
+    },
+    Skipped,
+}
+
+impl DigRuntimeBloodPactSnapshot {
+    #[must_use]
+    pub const fn for_outcome(outcome: &DigRuntimeOutcome) -> Self {
+        if outcome.cave_in || outcome.jc_earned <= 0 {
+            Self::Skipped
+        } else {
+            Self::Pending
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Applied { .. } | Self::Skipped)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DigRuntimeDeliverySnapshot {
     pub action_id: i64,
@@ -3026,6 +3204,10 @@ pub struct DigRuntimeDeliverySnapshot {
     pub outcome: DigRuntimeOutcome,
     pub render: DigRuntimeRenderSnapshot,
     pub flavor: DigRuntimeFlavorSnapshot,
+    /// Durable post-commit economy effect.  The serde default keeps delivery
+    /// rows written before Blood Pact admission recoverable as `Pending`.
+    #[serde(default)]
+    pub blood_pact: DigRuntimeBloodPactSnapshot,
     pub main_delivered_at: Option<i64>,
     pub event_delivered_at: Option<i64>,
 }
@@ -3080,6 +3262,17 @@ pub struct DigRuntimeFinalizeDelivery {
     pub source_key: String,
     pub flavor: DigRuntimeFlavorSnapshot,
     pub boss: Option<DigRuntimeBossRenderSnapshot>,
+}
+
+/// Request to settle the durable post-Dig Blood Pact effect for one delivery.
+/// The delivery row, rather than the caller, supplies the actor, guild, and
+/// original immutable earning.  `occurred_at` is retained so retries use the
+/// same protection/mana date inputs while reconstructing the effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigRuntimeSettleBloodPact {
+    pub action_id: i64,
+    pub source_key: String,
+    pub occurred_at: i64,
 }
 
 /// Typed read models used by the Discord transport.  Keeping these beside
@@ -4475,6 +4668,17 @@ where
         request: DigRuntimeFinalizeDelivery,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
         self.store.finalize_delivery(request)
+    }
+
+    /// Settle the durable Blood Pact effect for a committed delivery.  Callers
+    /// should invoke this immediately after loading a pending delivery and
+    /// before asking the flavor service to finalize/render it.
+    pub fn settle_blood_pact_delivery(
+        &self,
+        request: DigRuntimeSettleBloodPact,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        self.store
+            .settle_blood_pact_delivery(request, self.config.minigame_jc_delta_scale)
     }
 
     pub fn dig(
@@ -6472,6 +6676,7 @@ fn build_delivery_snapshot(
         // disabled that service records a durable terminal `Skipped` receipt;
         // omitting the pending phase would lose the audited flavor boundary.
         flavor: DigRuntimeFlavorSnapshot::Pending,
+        blood_pact: DigRuntimeBloodPactSnapshot::for_outcome(outcome),
         main_delivered_at: None,
         event_delivered_at: None,
     })
@@ -6763,6 +6968,7 @@ impl DigRuntimeStore for InMemoryDigRuntimeStore {
 #[cfg(test)]
 mod tests {
     use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+    use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
     use cama_db::dig_event_runtime::{
         DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
     };
@@ -6784,12 +6990,12 @@ mod tests {
     use crate::economy_event_service::EconomyEventConfig;
 
     use super::{
-        DigAdminMutationOutcome, DigRuntimeCommit, DigRuntimeConfig, DigRuntimeDeliveryContext,
-        DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart, DigRuntimeMarkDelivered,
-        DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRequest,
-        DigRuntimeService, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
-        DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
-        proportional_mana_yield_tax, scale_dig_minigame_jc,
+        DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeCommit, DigRuntimeConfig,
+        DigRuntimeDeliveryContext, DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart,
+        DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel,
+        DigRuntimeRequest, DigRuntimeService, DigRuntimeSettleBloodPact, DigRuntimeSnapshot,
+        DigRuntimeStore, DigRuntimeStoreError, DigRuntimeVersion, InMemoryDigRuntimeStore,
+        SqliteDigRuntimeStore, proportional_mana_yield_tax, scale_dig_minigame_jc,
     };
     use crate::vanity_tax_service::{VanityMember, VanityTaxService};
     use cama_domain::game_date::game_date_for_timestamp;
@@ -7078,6 +7284,14 @@ mod tests {
         let delivery = execution.delivery.expect("delivery snapshot");
         assert_eq!(delivery.source_key, format!("dig:{}", delivery.action_id));
         assert_eq!(delivery.context.display_name, "Delivery Miner");
+        let settled = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                occurred_at: 1_700_000_000,
+            })
+            .expect("settle delivery economy effects");
+        assert!(settled.blood_pact.is_terminal());
         assert_eq!(
             service
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
@@ -7109,6 +7323,215 @@ mod tests {
                 .expect("pending after main")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sqlite_blood_pact_delivery_applies_once_and_persists_terminal_state() {
+        let (database, service, execution, now) = live_blood_pact_delivery_fixture();
+        let delivery = execution.delivery.expect("Blood Pact delivery");
+        let request = DigRuntimeSettleBloodPact {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            occurred_at: now,
+        };
+        let settled = service
+            .settle_blood_pact_delivery(request.clone())
+            .expect("apply Blood Pact delivery");
+        let skimmed = match settled.blood_pact {
+            DigRuntimeBloodPactSnapshot::Applied { skimmed } => skimmed,
+            other => panic!("expected applied Blood Pact state, got {other:?}"),
+        };
+        assert!(skimmed > 0);
+
+        let replay = service
+            .settle_blood_pact_delivery(request)
+            .expect("terminal Blood Pact replay");
+        assert_eq!(
+            replay.blood_pact,
+            DigRuntimeBloodPactSnapshot::Applied { skimmed }
+        );
+        let connection = Connection::open(database.path()).expect("inspect Blood Pact action");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM hostile_loss_events
+                     WHERE guild_id=?1 AND victim_id=?2 AND event_key=?3",
+                    params![
+                        settled.guild_id,
+                        settled.discord_id,
+                        format!(
+                            "dig-blood-pact:{}:{}",
+                            settled.action_id, settled.discord_id
+                        ),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("Blood Pact event count"),
+            1
+        );
+        let detail: String = connection
+            .query_row(
+                "SELECT detail FROM dig_actions WHERE id=?1",
+                params![settled.action_id],
+                |row| row.get(0),
+            )
+            .expect("Blood Pact detail");
+        let detail = serde_json::from_str::<Value>(&detail).expect("Blood Pact detail JSON");
+        assert_eq!(
+            detail["delivery"]["blood_pact"],
+            serde_json::json!({"Applied": {"skimmed": skimmed}})
+        );
+        assert_eq!(
+            detail["delivery"]["outcome"]["jc_earned"],
+            serde_json::json!(settled.outcome.jc_earned)
+        );
+    }
+
+    #[test]
+    fn sqlite_blood_pact_delivery_reconciles_after_effect_before_snapshot() {
+        let (database, service, execution, now) = live_blood_pact_delivery_fixture();
+        let delivery = execution.delivery.expect("Blood Pact delivery");
+        let event_key = format!(
+            "dig-blood-pact:{}:{}",
+            delivery.action_id, delivery.discord_id
+        );
+        let mana_date = game_date_for_timestamp(now as f64).expect("Blood Pact game date");
+        let mut settlement_request = DigBloodPactSettlementRequest::with_default_scale(
+            delivery.discord_id,
+            delivery.guild_id,
+            delivery.outcome.jc_earned,
+            event_key.clone(),
+            now,
+            mana_date,
+        );
+        settlement_request.minigame_jc_delta_scale = 1.0;
+        let first = DigBloodPactRepository::new(database.path())
+            .settle(&settlement_request)
+            .expect("simulate committed Blood Pact effect");
+        assert!(!first.duplicate);
+        let reconciled = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                occurred_at: now,
+            })
+            .expect("reconcile Blood Pact snapshot after crash");
+        assert_eq!(
+            reconciled.blood_pact,
+            DigRuntimeBloodPactSnapshot::Applied {
+                skimmed: first.applied_amount,
+            }
+        );
+        let replay = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key,
+                occurred_at: now,
+            })
+            .expect("replay reconciled Blood Pact snapshot");
+        assert_eq!(replay.blood_pact, reconciled.blood_pact);
+        assert_eq!(first.event_key, event_key);
+    }
+
+    #[test]
+    fn sqlite_blood_pact_delivery_skips_cave_reward() {
+        let database = NamedTempFile::new().expect("Blood Pact cave database");
+        let actor = 61_111;
+        let guild = 61_113;
+        let start = 1_900_121_000;
+        seed_live_runtime_tunnel(&database, actor, guild, start, 76, 1, Some(start - 7_200));
+        Connection::open(database.path())
+            .expect("Blood Pact cave progress connection")
+            .execute(
+                "UPDATE tunnels SET boss_progress=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![
+                    r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed cave defeated bosses");
+        let now = find_cave_dig_time(actor, guild, start);
+        let service = DigRuntimeService::sqlite(database.path());
+        let execution = service
+            .dig_with_delivery(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now,
+                    paid: false,
+                    forced_event: false,
+                },
+                DigRuntimeDeliveryContext::new(61_114, 61_115, "Cave Miner", None),
+            )
+            .expect("cave Dig delivery");
+        assert!(execution.outcome.cave_in);
+        assert_eq!(execution.outcome.jc_earned, 0);
+        let delivery = execution.delivery.expect("cave delivery");
+        assert_eq!(delivery.blood_pact, DigRuntimeBloodPactSnapshot::Skipped);
+        let settled = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key,
+                occurred_at: now,
+            })
+            .expect("skip cave Blood Pact");
+        assert_eq!(settled.blood_pact, DigRuntimeBloodPactSnapshot::Skipped);
+        assert_eq!(
+            Connection::open(database.path())
+                .expect("inspect cave Blood Pact events")
+                .query_row("SELECT COUNT(*) FROM hostile_loss_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("hostile event count"),
+            0
+        );
+    }
+
+    #[test]
+    fn sqlite_blood_pact_changed_earning_retry_is_rejected() {
+        let (database, service, execution, now) = live_blood_pact_delivery_fixture();
+        let delivery = execution.delivery.expect("Blood Pact delivery");
+        let settled = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                occurred_at: now,
+            })
+            .expect("initial Blood Pact settlement");
+        assert!(matches!(
+            settled.blood_pact,
+            DigRuntimeBloodPactSnapshot::Applied { .. }
+        ));
+        let connection = Connection::open(database.path()).expect("mutate Blood Pact detail");
+        let detail: String = connection
+            .query_row(
+                "SELECT detail FROM dig_actions WHERE id=?1",
+                params![delivery.action_id],
+                |row| row.get(0),
+            )
+            .expect("read Blood Pact detail");
+        let mut value = serde_json::from_str::<Value>(&detail).expect("parse Blood Pact detail");
+        value["delivery"]["blood_pact"] = serde_json::json!("Pending");
+        value["delivery"]["outcome"]["jc_earned"] =
+            serde_json::json!(delivery.outcome.jc_earned + 1);
+        connection
+            .execute(
+                "UPDATE dig_actions SET detail=?1 WHERE id=?2",
+                params![value.to_string(), delivery.action_id],
+            )
+            .expect("mutate Blood Pact detail");
+        drop(connection);
+        let error = service
+            .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key,
+                occurred_at: now,
+            })
+            .expect_err("changed Blood Pact earning must fail closed");
+        assert!(matches!(error, DigRuntimeStoreError::BloodPact(_)));
+        assert!(error.to_string().contains("different payload"));
     }
 
     #[test]
@@ -8306,6 +8729,83 @@ mod tests {
                 params![depth, luminosity],
             )
             .expect("seed tunnel");
+    }
+
+    fn live_blood_pact_delivery_fixture() -> (
+        NamedTempFile,
+        DigRuntimeService<SqliteDigRuntimeStore>,
+        super::DigRuntimeExecution,
+        i64,
+    ) {
+        let database = NamedTempFile::new().expect("Blood Pact delivery database");
+        let actor = 61_101;
+        let skimmer = 61_102;
+        let guild = 61_103;
+        let start = 1_900_120_000;
+        seed_live_runtime_tunnel(&database, actor, guild, start, 76, 1, Some(start - 7_200));
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(skimmer, "blood-pact-skimmer", Some(guild)))
+            .expect("seed Blood Pact skimmer");
+        let now = find_non_cave_dig_time_with_jc(actor, guild, start, 76, 3);
+        Connection::open(database.path())
+            .expect("Blood Pact fixture connection")
+            .execute(
+                "UPDATE tunnels SET boss_progress=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![
+                    r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed defeated Blood Pact bosses");
+        Connection::open(database.path())
+            .expect("Blood Pact buff connection")
+            .execute(
+                "INSERT INTO manashop_buffs(
+                     discord_id,guild_id,buff_type,target_id,granted_at,expires_at,
+                     triggered,data
+                 ) VALUES(?1,?2,'blood_pact',?3,?4,?5,0,?6)",
+                params![
+                    skimmer,
+                    guild,
+                    actor,
+                    now - 1,
+                    now + 86_400,
+                    serde_json::json!({
+                        "skimmed_total": 0,
+                        "cap": 100,
+                        "skim_rate": 1.0,
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("seed Blood Pact buff");
+        let service = DigRuntimeService::sqlite(database.path());
+        let execution = service
+            .dig_with_delivery(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now,
+                    paid: false,
+                    forced_event: false,
+                },
+                DigRuntimeDeliveryContext::new(61_104, 61_105, "Blood Pact Miner", None),
+            )
+            .expect("Blood Pact delivery Dig");
+        assert!(execution.outcome.success);
+        assert!(!execution.outcome.cave_in);
+        assert!(execution.outcome.jc_earned > 0);
+        assert_eq!(
+            execution
+                .delivery
+                .as_ref()
+                .expect("Blood Pact delivery")
+                .blood_pact,
+            DigRuntimeBloodPactSnapshot::Pending
+        );
+        (database, service, execution, now)
     }
 
     #[test]
