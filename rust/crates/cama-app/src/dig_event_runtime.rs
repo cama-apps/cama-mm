@@ -1625,10 +1625,21 @@ impl DigEventRuntimeService {
         splash: &CanonicalSplash,
         victim_ids: Vec<i64>,
     ) -> Result<SplashExecution, DigEventRuntimeError> {
-        let amount = scale_deflationary_minigame_jc_delta(
-            strengthen_dig_event_penalty(splash.penalty_jc) as f64,
-            self.config.minigame_jc_delta_scale,
-        );
+        // Steal transfers the authored amount to the digger; only burn mode
+        // applies the deflationary event penalty multiplier.  Python keeps
+        // these two hostile modes distinct (`steal` deliberately bypasses
+        // `strengthen_dig_event_penalty`).
+        let amount = if splash.mode == "steal" {
+            scale_minigame_jc_delta(
+                splash.penalty_jc as f64,
+                self.config.minigame_jc_delta_scale,
+            )
+        } else {
+            scale_deflationary_minigame_jc_delta(
+                strengthen_dig_event_penalty(splash.penalty_jc) as f64,
+                self.config.minigame_jc_delta_scale,
+            )
+        };
         if amount <= 0 {
             return Ok(SplashExecution::empty(splash, &resolution.event_name));
         }
