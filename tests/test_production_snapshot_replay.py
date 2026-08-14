@@ -1,4 +1,4 @@
-"""Focused contracts for retained Python reads on disposable snapshots."""
+"""Focused contracts for optional retained-Python snapshot diagnostics."""
 
 from __future__ import annotations
 
@@ -146,6 +146,10 @@ def test_snapshot_parser_accepts_only_the_normalized_contract():
     expected = replay.expected_retained_python_read()
 
     assert replay._parse_retained_python_read(json.dumps(expected)) == expected
+
+    replay_source = Path(replay.__file__).read_text(encoding="utf-8")
+    assert "python_post_rust_retained_repository_read" not in replay_source
+    assert "retained_read_script" not in replay_source
 
     malformed = json.loads(json.dumps(expected))
     malformed["dig"]["tunnel"]["route_state"] = "{}"

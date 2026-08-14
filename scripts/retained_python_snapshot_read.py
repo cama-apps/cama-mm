@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Read Rust snapshot sentinels through retained production Python APIs.
+"""Optionally read Rust snapshot sentinels through retained Python APIs.
 
-This helper intentionally does not open SQLite itself.  It is run only against
-the disposable copy created by ``production_snapshot_replay.py`` and emits a
-normalized JSON contract that omits timestamps and auto-incremented IDs.
+This diagnostic intentionally does not open SQLite itself. It may be run
+against a disposable copy when retained-Python differential evidence is
+useful, but it is not invoked by ``production_snapshot_replay.py`` and cannot
+affect the one-way replay result.
 """
 
 from __future__ import annotations

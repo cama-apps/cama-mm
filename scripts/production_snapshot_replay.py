@@ -2,12 +2,10 @@
 """Replay a production-shaped SQLite snapshot without touching its source.
 
 The source is opened read-only and copied with the existing online-backup
-helper.  Every migration, Rust preflight, repository smoke, and retained
-Python read runs against the disposable copy.  The disposable copy also
-exercises the durable Survey recovery path so a current production-shaped
-database proves both repository and recovery writes.  A JSON report is
-printed even when a step fails so this rehearsal is evidence rather than a
-cutover claim.
+helper. Python migrates only the disposable copy, then Rust runs the preflight,
+repository smoke, and durable Survey recovery path. This one-way rehearsal
+does not read Rust writes back through Python. A JSON report is printed even
+when a step fails so this rehearsal is evidence rather than a cutover claim.
 """
 
 from __future__ import annotations
@@ -42,7 +40,6 @@ SURVEY_SMOKE_PROMPT = (
 )
 SURVEY_SMOKE_CHANNEL_ID = 8_000_000_000_000_001
 SURVEY_SMOKE_MESSAGE_ID = 8_000_000_000_000_002
-PYTHON_RETAINED_READ_FORMAT = "python-guild-config-dig-survey-repository-v2"
 VOLATILE_TIME_COLUMN_SUFFIXES = ("_at", "_date", "_time", "_timestamp")
 VOLATILE_TIME_COLUMN_NAMES = frozenset(
     {
@@ -90,12 +87,12 @@ EXPECTED_SURVEY_SMOKE_DELTAS = {
 
 
 def expected_retained_python_read() -> dict[str, Any]:
-    """Return the normalized, non-time-dependent Python read contract.
+    """Return the optional retained-Python diagnostic contract.
 
     Auto-incremented IDs and timestamps are intentionally absent.  The
-    subprocess read below validates their relationships through the retained
-    repositories, while this contract records the stable fields that prove
-    the Rust writes are visible to the production Python APIs.
+    standalone diagnostic validates their relationships through the retained
+    repositories. The one-way replay does not invoke this diagnostic or make
+    readiness depend on Rust-to-Python readback.
     """
 
     return {
@@ -421,7 +418,7 @@ def _parse_key_values(output: str) -> dict[str, str]:
 
 
 def _parse_retained_python_read(output: str) -> dict[str, Any]:
-    """Parse and validate the normalized retained Python read."""
+    """Parse the optional retained-Python diagnostic contract."""
 
     try:
         value = json.loads(output)
@@ -524,19 +521,6 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "after_rust": None,
         },
         "steps": [],
-        "python_post_rust_read": {
-            "status": "not_run",
-            "format": PYTHON_RETAINED_READ_FORMAT,
-            "expected": expected_retained_python_read(),
-            "value": None,
-        },
-        "python_bridge": {
-            "status": "not_run",
-            "reason": (
-                "the retained 13-family bridge requires its own seeded fixture; "
-                "the snapshot replay uses the smoke sentinel through the Python repository"
-            ),
-        },
         "survey_recovery": {
             "status": "not_run",
             "expected_table_deltas": EXPECTED_SURVEY_SMOKE_DELTAS,
@@ -555,16 +539,11 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         python = _python_executable(arguments.python, root)
         cargo = arguments.cargo
         backup_helper = root / "scripts" / "sqlite_backup.py"
-        retained_read_script = root / "scripts" / "retained_python_snapshot_read.py"
         runtime_manifest = root / "rust" / "Cargo.toml"
         if not backup_helper.is_file():
             raise FileNotFoundError(f"backup helper does not exist: {backup_helper}")
         if not runtime_manifest.is_file():
             raise FileNotFoundError(f"Rust manifest does not exist: {runtime_manifest}")
-        if not retained_read_script.is_file():
-            raise FileNotFoundError(
-                f"retained Python read helper does not exist: {retained_read_script}"
-            )
 
         with tempfile.TemporaryDirectory(prefix="cama-rust-snapshot-replay-") as work:
             work_path = Path(work)
@@ -746,45 +725,6 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 )
             report["survey_recovery"]["status"] = "passed"
             report["disposable_copy"]["after_rust"] = inspect_database(copy)
-
-            # The retained bridge is a serial 13-family fixture gate and
-            # expects its own seeded IDs. A real development snapshot does
-            # not necessarily contain those rows (and auto-increment IDs can
-            # differ), so this replay reads the Rust smoke sentinels through
-            # the actual retained Python repository/domain APIs.
-            try:
-                python_read = run_step(
-                    "python_post_rust_retained_repository_read",
-                    [python, str(retained_read_script), str(copy)],
-                    cwd=root,
-                    timeout_seconds=arguments.timeout_seconds,
-                    report=report,
-                )
-            except StepFailure as failure:
-                step = failure.step
-                detail = str(
-                    step.get("error")
-                    or step.get("stderr")
-                    or step.get("stdout")
-                    or failure
-                )
-                report["python_post_rust_read"].update(
-                    {"status": "failed", "error": detail}
-                )
-                raise
-            try:
-                python_value = _parse_retained_python_read(python_read["stdout"])
-            except RuntimeError as error:
-                report["python_post_rust_read"].update(
-                    {"status": "failed", "error": str(error)}
-                )
-                raise
-            report["python_post_rust_read"] = {
-                "status": "passed",
-                "format": PYTHON_RETAINED_READ_FORMAT,
-                "expected": expected_retained_python_read(),
-                "value": python_value,
-            }
 
             report["status"] = "passed"
     except (OSError, RuntimeError, sqlite3.Error, StepFailure, ValueError) as error:

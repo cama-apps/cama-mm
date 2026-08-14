@@ -193,11 +193,14 @@ cargo run --locked --manifest-path rust/Cargo.toml -p cama-db \
   "$CAMA_RUST_SNAPSHOT_DIR/cama_shuffle.db" --disposable-copy
 ```
 
-The same bounded rehearsal is available as a machine-readable, fail-closed
-runner. It keeps the clone in a temporary directory, records source
-immutability before and after, runs Python migration, Rust `db-check`, the
-fourteen-family repository smoke, and retained Python reads, then prints a
-normalized JSON report (use a new `--report` path to retain it):
+The same bounded one-way rehearsal is available as a machine-readable,
+fail-closed runner. It keeps the clone in a temporary directory, records
+source immutability before and after, runs Python migration on the clone, Rust
+`db-check`, the fourteen-family repository smoke, and Survey recovery smoke,
+then prints a normalized JSON report (use a new `--report` path to retain it).
+The clone is Python-era SQLite storage: Python only migrates that copy, and
+Rust is the only post-migration reader/writer. It does not perform
+Rust-to-Python readback:
 
 ```bash
 CAMA_PARITY_PYTHON=.venv/bin/python \
@@ -209,11 +212,12 @@ This is development evidence only; it does not close the cutover readiness
 gate or replace the broader repository and backup-rollback rehearsal
 requirements.
 
-The narrower A/B evidence runner uses two independent copies and completes the
-retained-Python write subprocess before running the Rust writes on the second
-copy. It compares stable, schema-aware projections for guild configuration,
-Dig inventory/route state, and Survey delivery (including normalized row
-deltas and source immutability), rather than SQLite file bytes:
+The narrower A/B evidence runner uses two independent copies: it completes the
+retained-Python repository writes only on the Python copy, and runs the Rust
+writes only on the second copy. It compares stable, schema-aware projections
+for guild configuration, Dig inventory/route state, and Survey delivery
+(including normalized row deltas and source immutability), rather than SQLite
+file bytes:
 
 ```bash
 CAMA_PARITY_PYTHON=.venv/bin/python \
@@ -223,9 +227,14 @@ CAMA_PARITY_PYTHON=.venv/bin/python \
 
 This bounded current-schema representative passes as development evidence. The
 `production_snapshot_replay` gate remains open until old-schema coverage and all
-repository families are covered. Retained-Python reads remain useful
-differential evidence, but are not a post-cutover readiness residual; the
-`backup_rollback_rehearsal` gate carries the tested rollback proof.
+repository families are covered. Retained-Python reads remain optional
+differential evidence only; the one-way replay does not require them. The
+`backup_rollback_rehearsal` gate carries the tested rollback proof through the
+verified database backup and retained Python-image restoration path.
+
+The parity command's separate Python-to-Rust migration bridge covers thirteen
+repository families. The Rust snapshot smoke below covers fourteen, so the
+family counts intentionally differ between those two checks.
 
 The explicit confirmation is intentional: this smoke writes reserved negative
 sentinels through fourteen shared repository families: guild configuration,
