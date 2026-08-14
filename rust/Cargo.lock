@@ -2234,6 +2234,8 @@ dependencies = [
  "cama-db",
  "cama-domain",
  "cama-runtime",
+ "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 

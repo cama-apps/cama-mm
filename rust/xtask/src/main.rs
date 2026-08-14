@@ -9,6 +9,12 @@ use std::process::{Command, ExitCode, Output, Stdio};
 
 #[cfg(test)]
 mod architecture_tests;
+#[cfg(test)]
+pub(crate) mod production_snapshot_ab_delta;
+#[cfg(test)]
+pub(crate) mod production_snapshot_replay;
+#[cfg(test)]
+pub(crate) mod snapshot_contract_support;
 
 const PYTHON_MIGRATIONS_SCRIPT: &str = "from infrastructure.schema_manager import SchemaManager; print('\\n'.join(name for name, _ in SchemaManager(':memory:')._get_migrations()))";
 

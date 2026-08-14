@@ -12,5 +12,9 @@ cama-domain = { path = "../crates/cama-domain" }
 cama-runtime = { path = "../crates/cama-runtime" }
 tempfile.workspace = true
 
+[dev-dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
