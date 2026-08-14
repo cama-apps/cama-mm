@@ -661,7 +661,6 @@ impl GifAsset {
 
 pub(crate) const NEON_GIF_WIDTH: u16 = 400;
 pub(crate) const NEON_GIF_HEIGHT: u16 = 300;
-const NEON_GIF_PIXELS: usize = NEON_GIF_WIDTH as usize * NEON_GIF_HEIGHT as usize;
 pub(crate) const COLOR_BLACK: u8 = 0;
 pub(crate) const COLOR_GREEN: u8 = 1;
 pub(crate) const COLOR_CYAN: u8 = 2;
@@ -683,13 +682,21 @@ const NEON_GIF_PALETTE: &[u8] = &[
 
 #[derive(Clone, Debug)]
 pub(crate) struct NeonCanvas {
+    width: u16,
+    height: u16,
     pixels: Vec<u8>,
 }
 
 impl NeonCanvas {
     fn new() -> Self {
+        Self::with_size(NEON_GIF_WIDTH, NEON_GIF_HEIGHT)
+    }
+
+    pub(crate) fn with_size(width: u16, height: u16) -> Self {
         Self {
-            pixels: vec![COLOR_BLACK; NEON_GIF_PIXELS],
+            width,
+            height,
+            pixels: vec![COLOR_BLACK; usize::from(width) * usize::from(height)],
         }
     }
 
@@ -698,10 +705,8 @@ impl NeonCanvas {
     }
 
     pub(crate) fn pixel(&mut self, x: i32, y: i32, color: u8) {
-        if (0..i32::from(NEON_GIF_WIDTH)).contains(&x)
-            && (0..i32::from(NEON_GIF_HEIGHT)).contains(&y)
-        {
-            self.pixels[y as usize * usize::from(NEON_GIF_WIDTH) + x as usize] = color;
+        if (0..i32::from(self.width)).contains(&x) && (0..i32::from(self.height)).contains(&y) {
+            self.pixels[y as usize * usize::from(self.width) + x as usize] = color;
         }
     }
 
@@ -735,6 +740,18 @@ impl NeonCanvas {
         self.line(left, bottom, left, top, color);
     }
 
+    pub(crate) fn circle(&mut self, center_x: i32, center_y: i32, radius: i32, color: u8) {
+        let radius = radius.max(0);
+        let squared = radius.saturating_mul(radius);
+        for y in -radius..=radius {
+            for x in -radius..=radius {
+                if x.saturating_mul(x).saturating_add(y.saturating_mul(y)) <= squared {
+                    self.pixel(center_x + x, center_y + y, color);
+                }
+            }
+        }
+    }
+
     pub(crate) fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: u8) {
         for y in top..=bottom {
             self.line(left, y, right, y, color);
@@ -751,13 +768,7 @@ impl NeonCanvas {
 
     pub(crate) fn text_centered(&mut self, text: &str, y: i32, color: u8, scale: i32) {
         let width = text.chars().count() as i32 * 6 * scale;
-        self.text_left(
-            text,
-            (i32::from(NEON_GIF_WIDTH) - width) / 2,
-            y,
-            color,
-            scale,
-        );
+        self.text_left(text, (i32::from(self.width) - width) / 2, y, color, scale);
     }
 
     pub(crate) fn glyph(&mut self, character: char, left: i32, top: i32, color: u8, scale: i32) {
@@ -894,6 +905,54 @@ where
             encoder
                 .write_frame(&frame)
                 .expect("Neon GIF frame is valid");
+        }
+    }
+    GifAsset {
+        kind,
+        bytes,
+        frame_durations_ms: durations.to_vec(),
+        shared_palette: true,
+    }
+}
+
+/// Render an indexed GIF using the same deterministic canvas as the terminal
+/// Neon family, but with an authored attachment size/palette.  Dig's quiet
+/// dungeon animations are a separate production family from the 400x300
+/// terminal chrome, so keeping this seam explicit prevents the two live
+/// contracts from silently sharing dimensions or palette assumptions.
+pub(crate) fn render_sized_neon_animation<F>(
+    kind: &'static str,
+    width: u16,
+    height: u16,
+    palette: &[u8],
+    durations: &[u32],
+    mut draw: F,
+) -> GifAsset
+where
+    F: FnMut(usize, &mut NeonCanvas),
+{
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut bytes, width, height, palette)
+            .expect("fixed sized Neon palette is valid");
+        encoder
+            .set_repeat(Repeat::Finite(1))
+            .expect("sized Neon GIF repeat marker is valid");
+        for (index, duration_ms) in durations.iter().copied().enumerate() {
+            let mut canvas = NeonCanvas::with_size(width, height);
+            draw(index, &mut canvas);
+            let mut frame = Frame {
+                width,
+                height,
+                delay: u16::try_from(duration_ms / 10)
+                    .expect("sized Neon GIF delay fits centiseconds"),
+                buffer: Cow::Owned(canvas.pixels),
+                ..Frame::default()
+            };
+            frame.dispose = gif::DisposalMethod::Keep;
+            encoder
+                .write_frame(&frame)
+                .expect("sized Neon GIF frame is valid");
         }
     }
     GifAsset {

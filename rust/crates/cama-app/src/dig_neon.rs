@@ -14,7 +14,7 @@ use crate::neon_bigwin_media::render_big_win;
 use crate::neon_degen::{
     COLOR_BLACK, COLOR_CYAN, COLOR_DARK_RED, COLOR_DIM_CYAN, COLOR_DIM_GREEN, COLOR_GREEN,
     COLOR_RED, COLOR_YELLOW, GifAsset, NEON_GIF_HEIGHT, NEON_GIF_WIDTH, NeonCanvas, NeonResult,
-    ansi_block, render_don_win, render_neon_animation,
+    ansi_block, render_don_win, render_neon_animation, render_sized_neon_animation,
 };
 
 pub const NEON_DIG_CHANCE: f64 = 0.12;
@@ -530,6 +530,198 @@ pub fn animate_cave_in(layer_name: &str, depth_before: i64, depth_after: i64) ->
     })
 }
 
+// The Python Dig prestige/Pinnacle renderer is a deliberately quiet 320x180
+// dungeon attachment, rather than one of the 400x300 terminal animations.
+// Keep its palette local to this family so changing the terminal palette does
+// not silently change the live `/dig` prestige attachment.
+const DIG_PINNACLE_WIDTH: u16 = 320;
+const DIG_PINNACLE_HEIGHT: u16 = 180;
+const DIG_PINNACLE_BG_TERMINAL: u8 = 0;
+const DIG_PINNACLE_BG_PRESTIGE_START: u8 = 1;
+const DIG_PINNACLE_GLOW_START: u8 = 17;
+const DIG_PINNACLE_PRESTIGE_GLOW_START: u8 = 41;
+const DIG_PINNACLE_PRESTIGE_TITLE: u8 = 25;
+const DIG_PINNACLE_TERMINAL_TITLE: u8 = 26;
+const DIG_PINNACLE_PRESTIGE_SUBTITLE: u8 = 27;
+const DIG_PINNACLE_TERMINAL_SUBTITLE: u8 = 28;
+const DIG_PINNACLE_PLAYER: u8 = 29;
+const DIG_PINNACLE_PICKAXE: u8 = 30;
+const DIG_PINNACLE_PRESTIGE_TITLE_DIM: u8 = 31;
+const DIG_PINNACLE_TERMINAL_TITLE_DIM: u8 = 32;
+const DIG_PINNACLE_PRESTIGE_SUBTITLE_DIM: u8 = 33;
+const DIG_PINNACLE_TERMINAL_SUBTITLE_DIM: u8 = 34;
+const DIG_PINNACLE_PRESTIGE_TITLE_MID: u8 = 35;
+const DIG_PINNACLE_TERMINAL_TITLE_MID: u8 = 36;
+const DIG_PINNACLE_PRESTIGE_SUBTITLE_MID: u8 = 37;
+const DIG_PINNACLE_TERMINAL_SUBTITLE_MID: u8 = 38;
+const DIG_PINNACLE_PICKAXE_HEAD: u8 = 39;
+const DIG_PINNACLE_PLAYER_EYE: u8 = 40;
+
+const DIG_PINNACLE_PALETTE: &[u8] = &[
+    // terminal background
+    6, 5, 9, // prestige backgrounds: Python's int(10 + 60*t), clamped into 16 bands
+    10, 6, 0, 14, 10, 0, 18, 14, 0, 22, 18, 2, 26, 22, 6, 30, 26, 10, 34, 30, 14, 38, 34, 18, 42,
+    38, 22, 46, 42, 26, 50, 46, 30, 54, 50, 34, 58, 54, 38, 62, 58, 42, 66, 62, 46, 70, 66, 50,
+    // terminal glow bands, from outer/dim to inner/bright
+    12, 9, 10, 16, 12, 12, 24, 16, 14, 32, 23, 16, 45, 32, 20, 67, 47, 26, 91, 64, 33, 111, 76,
+    39, // titles, subtitles, player, and pickaxe
+    255, 240, 200, 235, 195, 140, 204, 192, 160, 188, 156, 112, 255, 255, 100, 180, 180, 180,
+    // staged title/subtitle colors for Python's zero-to-full alpha ramp
+    60, 50, 32, 55, 45, 32, 50, 45, 35, 45, 38, 28, 160, 145, 100, 150, 120, 80, 120, 110, 90, 110,
+    90, 65, // distinct 200,200,200 point and black eye pixels
+    200, 200, 200, 0, 0, 0,
+    // prestige glow bands: the authored prestige background is already
+    // brighter, so the foreground threshold is reached farther out.
+    70, 66, 50, 76, 72, 53, 84, 78, 57, 100, 92, 66, 118, 108, 75, 140, 128, 87, 165, 150, 103, 190,
+    170, 115,
+];
+
+fn dig_pinnacle_ease(linear_progress: f64) -> f64 {
+    let progress = linear_progress.clamp(0.0, 1.0);
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DigPinnacleTextStage {
+    Hidden,
+    Dim,
+    Mid,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DigPinnaclePhaseState {
+    linear_progress: f64,
+    progress: f64,
+    player_top: i32,
+    glow_center_y: i32,
+    title_stage: DigPinnacleTextStage,
+    subtitle_stage: DigPinnacleTextStage,
+}
+
+fn dig_pinnacle_text_stage(progress: f64) -> DigPinnacleTextStage {
+    let alpha = ((progress - 0.45) / 0.55).clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        DigPinnacleTextStage::Hidden
+    } else if alpha < 0.34 {
+        DigPinnacleTextStage::Dim
+    } else if alpha < 0.78 {
+        DigPinnacleTextStage::Mid
+    } else {
+        DigPinnacleTextStage::Full
+    }
+}
+
+fn dig_pinnacle_phase_state(
+    frame: usize,
+    frame_count: usize,
+    prestige: bool,
+) -> DigPinnaclePhaseState {
+    let linear_progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
+    let progress = dig_pinnacle_ease(linear_progress);
+    let player_top = if prestige {
+        i32::from(DIG_PINNACLE_HEIGHT / 2)
+            - (i32::from(DIG_PINNACLE_HEIGHT / 3) as f64 * progress) as i32
+    } else {
+        i32::from(DIG_PINNACLE_HEIGHT / 3)
+            + (i32::from(DIG_PINNACLE_HEIGHT / 3) as f64 * progress) as i32
+    };
+    let glow_center_y = if prestige {
+        i32::from(DIG_PINNACLE_HEIGHT / 2)
+    } else {
+        i32::from(DIG_PINNACLE_HEIGHT / 2) + 10
+    };
+    let text_stage = dig_pinnacle_text_stage(progress);
+    DigPinnaclePhaseState {
+        linear_progress,
+        progress,
+        player_top,
+        glow_center_y,
+        title_stage: text_stage,
+        subtitle_stage: text_stage,
+    }
+}
+
+fn staged_text_color(progress: f64, full: u8, middle: u8, dim: u8) -> Option<u8> {
+    match dig_pinnacle_text_stage(progress) {
+        DigPinnacleTextStage::Hidden => None,
+        DigPinnacleTextStage::Dim => Some(dim),
+        DigPinnacleTextStage::Mid => Some(middle),
+        DigPinnacleTextStage::Full => Some(full),
+    }
+}
+
+fn dig_pinnacle_glow_band_count(progress: f64) -> usize {
+    if progress <= 0.0 {
+        0
+    } else {
+        (progress * 8.0).ceil() as usize
+    }
+    .min(8)
+}
+
+fn draw_dig_pinnacle_glow(
+    canvas: &mut NeonCanvas,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    progress: f64,
+    prestige: bool,
+) {
+    let radius = radius.max(0);
+    let active_bands = dig_pinnacle_glow_band_count(progress);
+    let color_start = if prestige {
+        DIG_PINNACLE_PRESTIGE_GLOW_START
+    } else {
+        DIG_PINNACLE_GLOW_START
+    };
+    for band in (0..active_bands.min(8)).rev() {
+        let band_radius = radius.saturating_mul((band + 1) as i32) / 8;
+        let color = color_start + u8::try_from(7 - band).unwrap_or(0);
+        canvas.circle(center_x, center_y, band_radius, color);
+    }
+}
+
+fn draw_dig_pinnacle_player(canvas: &mut NeonCanvas, center_x: i32, top: i32) {
+    let left = center_x - 16;
+    // Exact alpha mask of Python's authored 16x16 sprite, enlarged with
+    // nearest-neighbour 2x2 blocks. `K` is the opaque black eye pixel and
+    // `g` is the one-pixel pickaxe; the source point at (14,2) has its own
+    // 200,200,200 color while the diagonal shaft is 180,180,180.
+    const MASK: [&str; 16] = [
+        "................",
+        "......PPPP......",
+        ".....PPPPPP...g.",
+        "....PPPPPPPP..g.",
+        "....PPKPPKPP.g..",
+        "....PPPPPPPPg...",
+        "....PPPPPPPg....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        ".....PPPPPP.....",
+        "................",
+    ];
+    for (source_y, row) in MASK.iter().enumerate() {
+        for (source_x, marker) in row.chars().enumerate() {
+            let color = match marker {
+                'P' => DIG_PINNACLE_PLAYER,
+                'K' => DIG_PINNACLE_PLAYER_EYE,
+                'g' if source_y == 2 && source_x == 14 => DIG_PINNACLE_PICKAXE_HEAD,
+                'g' => DIG_PINNACLE_PICKAXE,
+                _ => continue,
+            };
+            let x = left + i32::try_from(source_x * 2).unwrap_or(0);
+            let y = top + i32::try_from(source_y * 2).unwrap_or(0);
+            canvas.fill_rect(x, y, x + 1, y + 1, color);
+        }
+    }
+}
+
 #[must_use]
 pub fn animate_pinnacle(prestige: bool) -> GifAsset {
     let kind = if prestige {
@@ -537,47 +729,95 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
     } else {
         "dig_pinnacle"
     };
-    let durations = dig_durations(30, 90, 130);
+    // The final hold is intentionally part of the live Python attachment
+    // contract. Pillow may coalesce the first duplicate logical frame when
+    // decoding, but the authored timeline is 17x90ms + 12x130ms + 60s.
+    let mut durations = vec![90; 17];
+    durations.extend([130; 12]);
+    durations.push(DIG_ANIMATION_HOLD_MS);
     let frame_count = durations.len();
-    let seed = dig_scene_seed(&[kind]);
-    render_neon_animation(kind, &durations, seed, move |frame, canvas| {
-        let progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
-        canvas.fill(COLOR_BLACK);
-        let accent = if prestige { COLOR_YELLOW } else { COLOR_RED };
-        let highlight = if prestige { COLOR_CYAN } else { COLOR_YELLOW };
-        draw_dig_frame_grid(canvas, COLOR_DIM_GREEN, accent, frame);
-        let center_y = if prestige {
-            150 - (progress * 85.0) as i32
-        } else {
-            82 + (progress * 85.0) as i32
-        };
-        draw_dig_player(canvas, 188, center_y, highlight);
-        let radius = 20 + (progress * 105.0) as i32;
-        canvas.rect(
-            200 - radius,
-            center_y - radius,
-            200 + radius,
-            center_y + radius,
-            accent,
-        );
-        canvas.text_centered(
-            if prestige {
-                "ASCENSION"
+    render_sized_neon_animation(
+        kind,
+        DIG_PINNACLE_WIDTH,
+        DIG_PINNACLE_HEIGHT,
+        DIG_PINNACLE_PALETTE,
+        &durations,
+        move |frame, canvas| {
+            let phase = dig_pinnacle_phase_state(frame, frame_count, prestige);
+            canvas.fill(if prestige {
+                DIG_PINNACLE_BG_PRESTIGE_START
+                    + u8::try_from((phase.progress * 15.0).round() as usize)
+                        .unwrap_or(15)
+                        .min(15)
             } else {
-                "THE PINNACLE"
-            },
-            226,
-            highlight,
-            2,
-        );
-        canvas.text_centered(
-            if prestige { "PRESTIGE" } else { "DEPTH 350" },
-            252,
-            COLOR_DIM_CYAN,
-            1,
-        );
-        draw_dig_particles(canvas, seed, frame, accent, 30);
-    })
+                DIG_PINNACLE_BG_TERMINAL
+            });
+            let radius = if prestige {
+                40 + (130.0 * phase.progress) as i32
+            } else {
+                20 + (80.0 * phase.progress) as i32
+            };
+            draw_dig_pinnacle_glow(
+                canvas,
+                160,
+                phase.glow_center_y,
+                radius,
+                phase.progress,
+                prestige,
+            );
+            draw_dig_pinnacle_player(canvas, 160, phase.player_top);
+            let title_color = if prestige {
+                staged_text_color(
+                    phase.progress,
+                    DIG_PINNACLE_PRESTIGE_TITLE,
+                    DIG_PINNACLE_PRESTIGE_TITLE_MID,
+                    DIG_PINNACLE_PRESTIGE_TITLE_DIM,
+                )
+            } else {
+                staged_text_color(
+                    phase.progress,
+                    DIG_PINNACLE_TERMINAL_TITLE,
+                    DIG_PINNACLE_TERMINAL_TITLE_MID,
+                    DIG_PINNACLE_TERMINAL_TITLE_DIM,
+                )
+            };
+            if let Some(color) = title_color {
+                canvas.text_centered(
+                    if prestige {
+                        "ASCENSION"
+                    } else {
+                        "THE PINNACLE"
+                    },
+                    i32::from(DIG_PINNACLE_HEIGHT) - 46,
+                    color,
+                    2,
+                );
+            }
+            let subtitle_color = if prestige {
+                staged_text_color(
+                    phase.progress,
+                    DIG_PINNACLE_PRESTIGE_SUBTITLE,
+                    DIG_PINNACLE_PRESTIGE_SUBTITLE_MID,
+                    DIG_PINNACLE_PRESTIGE_SUBTITLE_DIM,
+                )
+            } else {
+                staged_text_color(
+                    phase.progress,
+                    DIG_PINNACLE_TERMINAL_SUBTITLE,
+                    DIG_PINNACLE_TERMINAL_SUBTITLE_MID,
+                    DIG_PINNACLE_TERMINAL_SUBTITLE_DIM,
+                )
+            };
+            if let Some(color) = subtitle_color {
+                canvas.text_centered(
+                    if prestige { "PRESTIGE" } else { "DEPTH 350" },
+                    i32::from(DIG_PINNACLE_HEIGHT) - 26,
+                    color,
+                    1,
+                );
+            }
+        },
+    )
 }
 
 #[must_use]

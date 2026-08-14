@@ -12,6 +12,7 @@ use std::path::Path;
 use cama_app::blame_luke_media::render_blame_luke;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
+use cama_app::dig_neon::animate_pinnacle;
 use cama_app::drawing::{
     AdvantageData, BalancePoint, GambaInfo, GambaPoint, GambaStats, HeroPerformanceEntry, MatchRow,
     RatingHistoryEntry, draw_advantage_graph, draw_balance_chart, draw_gamba_chart,
@@ -44,6 +45,7 @@ struct Fixture {
     chart: ChartFixture,
     animation: AnimationFixture,
     terminal_crash: TerminalCrashFixture,
+    dig_neon: DigNeonFixture,
     pinnacle: PinnacleFixture,
     balance: BalanceFixture,
     gamba: GambaFixture,
@@ -277,6 +279,17 @@ struct AnimationFixture {
 struct TerminalCrashFixture {
     name: String,
     filing_number: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct DigNeonFixture {
+    terminal: DigNeonModeFixture,
+    prestige: DigNeonModeFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct DigNeonModeFixture {
+    prestige: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -718,6 +731,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_terminal_crash.gif"),
         terminal_crash.bytes,
+    )?;
+
+    let dig_terminal = animate_pinnacle(fixture.dig_neon.terminal.prestige);
+    fs::write(
+        Path::new(&output_dir).join("rust_dig_terminal.gif"),
+        dig_terminal.bytes,
+    )?;
+    let dig_prestige = animate_pinnacle(fixture.dig_neon.prestige.prestige);
+    fs::write(
+        Path::new(&output_dir).join("rust_dig_prestige.gif"),
+        dig_prestige.bytes,
     )?;
 
     let pinnacle_source_path =

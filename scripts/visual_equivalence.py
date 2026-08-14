@@ -109,6 +109,17 @@ RATING_DISTRIBUTION_COLOR_VARIANTS = {
     "median": ((244, 123, 103), (205, 108, 93)),
 }
 ANIMATION_MIN_FOREGROUND_GRID_IOU = 0.65
+DIG_NEON_MAX_MEAN_FRAME_MAE = 0.135
+DIG_NEON_MAX_MEAN_FRAME_RMS = 0.255
+DIG_NEON_MAX_FRAME_MAE = 0.280
+# The native family uses an indexed palette and bitmap font while Python's
+# source uses Pillow's alpha-composited radial glow and a host font. Keep the
+# pixel gate bounded but record that coarse masks are not byte-identical; the
+# Rust phase-state tests independently keep the authored motion/text timing
+# strict.
+DIG_NEON_TERMINAL_MIN_FOREGROUND_GRID_IOU = 0.50
+DIG_NEON_PRESTIGE_MIN_FOREGROUND_GRID_IOU = 0.25
+DIG_NEON_MIN_FOREGROUND_COUNT_RATIO = 0.50
 PINNACLE_MIN_FOREGROUND_GRID_IOU = 0.85
 PINNACLE_MIN_FOREGROUND_COUNT_RATIO = 0.80
 BALANCE_MIN_FOREGROUND_GRID_IOU = 0.80
@@ -278,6 +289,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "chart",
         "animation",
         "terminal_crash",
+        "dig_neon",
         "pinnacle",
         "balance",
         "gamba",
@@ -295,7 +307,7 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "profile",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, gamba, wrapped_gamba, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
+            "fixture must contain exactly chart, animation, terminal_crash, dig_neon, pinnacle, balance, gamba, wrapped_gamba, rating_history, rating_distribution, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
         )
     return fixture
 
@@ -640,6 +652,18 @@ def render_python(
     finally:
         random.setstate(random_state)
     (output_dir / "python_terminal_crash.gif").write_bytes(terminal_crash_bytes)
+
+    # The live Dig prestige and depth-350 terminal hooks both call the same
+    # authored Python renderer with a boolean mode. Keep both variants at the
+    # typed hook boundary so the Rust provider cannot pass with only one mode.
+    dig_neon = fixture["dig_neon"]
+    for mode in ("terminal", "prestige"):
+        if not isinstance(dig_neon[mode]["prestige"], bool):
+            raise ValueError(f"dig_neon.{mode}.prestige must be boolean")
+        dig_bytes = dig_drawing.animate_pinnacle(
+            prestige=bool(dig_neon[mode]["prestige"])
+        ).getvalue()
+        (output_dir / f"python_dig_{mode}.gif").write_bytes(dig_bytes)
 
     pinnacle = fixture["pinnacle"]
     source_root = (fixture_path or DEFAULT_FIXTURE).resolve().parent
@@ -1250,6 +1274,129 @@ def check_gif(python_path: Path, rust_path: Path) -> list[str]:
             f"mean MAE {mean_mae:.5f} <= {ANIMATION_MAX_MEAN_FRAME_MAE:.5f}, "
             f"mean RMS {mean_rms:.5f} <= {ANIMATION_MAX_MEAN_FRAME_RMS:.5f}, "
             f"max frame MAE {max_mae:.5f} <= {ANIMATION_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
+def check_dig_neon(python_path: Path, rust_path: Path, *, mode: str) -> list[str]:
+    """Compare one live Dig prestige/Pinnacle attachment variant.
+
+    Pillow coalesces a small number of identical early logical frames when it
+    decodes the Python GIF. The authored Python durations and the Rust output
+    are still checked exactly; visual frames are paired by each frame's
+    cumulative authored start time (with the terminal hold excluded from the
+    active-motion scale). This keeps a coalesced 270ms Python frame aligned
+    with the first of the three 90ms Rust phases it represents rather than
+    pairing by decoded frame index.
+    """
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    expected_authored = [90] * 17 + [130] * 12 + [60_000]
+    expected_decoded = {
+        "terminal": [270] + [90] * 14 + [130] * 12 + [60_000],
+        "prestige": [90, 180] + [90] * 14 + [130] * 12 + [60_000],
+    }
+    if mode not in expected_decoded:
+        raise AssertionError(f"unknown Dig Neon mode: {mode}")
+    if python_size != (320, 180) or rust_size != python_size:
+        raise AssertionError(
+            f"Dig Neon {mode} dimensions differ or are invalid: "
+            f"Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop != 1 or rust_loop != python_loop:
+        raise AssertionError(
+            f"Dig Neon {mode} loop count differs: Python {python_loop}, Rust {rust_loop}"
+        )
+    if python_durations != expected_decoded[mode]:
+        raise AssertionError(
+            f"Python Dig Neon {mode} decoded timing drifted: {python_durations}"
+        )
+    if rust_durations != expected_authored:
+        raise AssertionError(
+            f"Rust Dig Neon {mode} authored timing drifted: {rust_durations}"
+        )
+    if len(rust_frames) != len(expected_authored) or not python_frames:
+        raise AssertionError(
+            f"Dig Neon {mode} frame count differs: "
+            f"Python decoded {len(python_frames)}, Rust authored {len(rust_frames)}"
+        )
+
+    pairs = []
+    python_active = python_durations[:-1]
+    rust_active = rust_durations[:-1]
+    python_active_total = sum(python_active)
+    rust_active_total = sum(rust_active)
+    if python_active_total != rust_active_total:
+        raise AssertionError(
+            f"Dig Neon {mode} active authored timelines differ: "
+            f"Python {python_active_total}ms, Rust {rust_active_total}ms"
+        )
+    rust_starts: list[int] = []
+    elapsed = 0
+    for duration in rust_active:
+        rust_starts.append(elapsed)
+        elapsed += duration
+    for python_index, (python_frame, _duration) in enumerate(
+        zip(python_frames[:-1], python_active)
+    ):
+        # Map the Python frame's cumulative start into the equal authored
+        # active span, then select the Rust interval containing that point.
+        # The Python decoder can only coalesce adjacent duplicate frames; the
+        # first Rust phase in that coalesced interval is its authored visual
+        # representative (not an arbitrary normalized frame index).
+        python_start = sum(python_active[:python_index])
+        target = python_start * rust_active_total / python_active_total
+        rust_index = len(rust_active) - 1
+        for candidate, start in enumerate(rust_starts):
+            if target < start + rust_active[candidate]:
+                rust_index = candidate
+                break
+        pairs.append((python_frame, rust_frames[rust_index]))
+    # Both encoders retain the final authored frame and its 60s hold.
+    pairs.append((python_frames[-1], rust_frames[-1]))
+    metrics = [pixel_metrics(left, right) for left, right in pairs]
+    structures = [
+        compare_foreground_structure(
+            left,
+            right,
+            python_size,
+            grid=(10, 10),
+            margin=8,
+            minimum_grid_iou=(
+                DIG_NEON_PRESTIGE_MIN_FOREGROUND_GRID_IOU
+                if mode == "prestige"
+                else DIG_NEON_TERMINAL_MIN_FOREGROUND_GRID_IOU
+            ),
+            minimum_count_ratio=DIG_NEON_MIN_FOREGROUND_COUNT_RATIO,
+            label=f"Dig Neon {mode} frame {index}",
+        )
+        for index, (left, right) in enumerate(pairs)
+    ]
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    minimum_foreground_ratio = min(structure[0] for structure in structures)
+    minimum_foreground_iou = min(structure[1] for structure in structures)
+    print(
+        f"dig_neon_{mode}: size={python_size[0]}x{python_size[1]} "
+        f"python_frames={len(python_frames)} rust_frames={len(rust_frames)} "
+        f"loop={python_loop} authored_durations={expected_authored} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} "
+        f"max_frame_MAE={max_mae:.5f} min_foreground_ratio={minimum_foreground_ratio:.3f} "
+        f"min_grid_IoU={minimum_foreground_iou:.3f} "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > DIG_NEON_MAX_MEAN_FRAME_MAE
+        or mean_rms > DIG_NEON_MAX_MEAN_FRAME_RMS
+        or max_mae > DIG_NEON_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            f"Dig Neon {mode} pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {DIG_NEON_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {DIG_NEON_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {DIG_NEON_MAX_FRAME_MAE:.5f}"
         )
     return []
 
@@ -2714,6 +2861,16 @@ def main(argv: list[str] | None = None) -> int:
             check_terminal_crash(
                 output_dir / "python_terminal_crash.gif",
                 output_dir / "rust_terminal_crash.gif",
+            )
+            check_dig_neon(
+                output_dir / "python_dig_terminal.gif",
+                output_dir / "rust_dig_terminal.gif",
+                mode="terminal",
+            )
+            check_dig_neon(
+                output_dir / "python_dig_prestige.gif",
+                output_dir / "rust_dig_prestige.gif",
+                mode="prestige",
             )
             check_pinnacle(
                 output_dir / "python_pinnacle_phase3.gif",

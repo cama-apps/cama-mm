@@ -20,6 +20,14 @@
     "name": "Client 47",
     "filing_number": 5
   },
+  "dig_neon": {
+    "terminal": {
+      "prestige": false
+    },
+    "prestige": {
+      "prestige": true
+    }
+  },
   "pinnacle": {
     "source_path": "../assets/dig/bosses/lantern_engine_encounter.png",
     "boss_id": "lantern_engine",

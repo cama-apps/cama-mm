@@ -12860,6 +12860,99 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn live_prestige_provider_attaches_pinnacle_gif_through_temporary_send() {
+        let config = ApplicationConfig::from_lookup(|name| match name {
+            "DISCORD_BOT_TOKEN" => Some("dig-provider-neon-test-token".to_owned()),
+            "NEON_DEGEN_ENABLED" => Some("true".to_owned()),
+            _ => None,
+        })
+        .expect("Neon-enabled provider test config");
+        let (database, provider, discord) =
+            fixture_with_discord_and_config(Arc::new(TestDiscord::default()), config);
+        let mut progress = serde_json::Map::new();
+        for boundary in cama_app::dig_bosses::BOSS_BOUNDARIES {
+            progress.insert(
+                boundary.to_string(),
+                serde_json::Value::String("defeated".to_owned()),
+            );
+        }
+        progress.insert(
+            cama_app::dig_bosses::PINNACLE_DEPTH.to_string(),
+            serde_json::json!({"status": "defeated", "boss_id": "forgotten_king"}),
+        );
+        Connection::open(database.path())
+            .expect("live Neon fixture DB")
+            .execute(
+                "INSERT INTO tunnels (
+                     discord_id,guild_id,depth,max_depth,prestige_level,
+                     prestige_perks,boss_progress,current_run_jc,current_run_events,
+                     pickaxe_tier,tunnel_name
+                 ) VALUES (?1,?2,350,350,0,'[]',?3,50,7,4,'Prestige Tunnel')",
+                params![
+                    USER as i64,
+                    GUILD as i64,
+                    serde_json::Value::Object(progress).to_string(),
+                ],
+            )
+            .expect("seed live Neon prestige tunnel");
+
+        // Make the service's production provider call deterministic while
+        // retaining the real SeededDigNeonRandom and cooldown implementation.
+        {
+            let mut neon = provider
+                .handler
+                .state
+                .neon
+                .lock()
+                .expect("Neon service lock");
+            *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);
+        }
+
+        let preview_responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                command_request(60, "prestige", Vec::new()),
+                preview_responder.clone(),
+            )
+            .await
+            .expect("live Neon prestige preview");
+        let chosen = preview_responder
+            .responses
+            .lock()
+            .expect("live Neon preview response")[0]
+            .components[0]
+            .buttons[0]
+            .custom_id
+            .clone();
+        let committed = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(component_request(chosen, Vec::new()), committed.clone())
+            .await
+            .expect("live Neon prestige selection");
+
+        // The component handler above is the real production path:
+        // prestige_neon_response -> dig_neon_response ->
+        // DigDiscordPort::dig_send_temporary. TestDiscord retains temporary
+        // messages, allowing the attachment and lifecycle boundary to be
+        // asserted without a Discord network dependency.
+        let public = discord.public.lock().expect("live Neon public responses");
+        let neon_response = public
+            .iter()
+            .find(|response| !response.attachments.is_empty())
+            .expect("live prestige path sends a Neon attachment");
+        assert_eq!(neon_response.attachments.len(), 1);
+        let attachment = &neon_response.attachments[0];
+        assert_eq!(attachment.filename, "jopat_terminal.gif");
+        let media = cama_app::dig_assets::inspect_media(&attachment.bytes)
+            .expect("live provider attachment is valid media");
+        assert_eq!(media.format, cama_app::dig_assets::MediaFormat::Gif);
+        assert_eq!((media.width, media.height), (320, 180));
+        assert_eq!(media.frame_count, 30);
+    }
+
     #[test]
     fn prestige_view_owner_timeout_transition_and_claim_are_exact() {
         let (_database, provider, _discord) = fixture();

@@ -4,18 +4,22 @@ use crate::dig_assets::{MediaFormat, inspect_media};
 
 use super::*;
 
-fn assert_valid_gif(gif: &GifAsset) {
+fn assert_valid_gif_with_size(gif: &GifAsset, expected_size: (u32, u32)) {
     assert!(!gif.bytes.is_empty());
     assert!(gif.bytes.len() < DISCORD_GIF_LIMIT);
     assert!(gif.upload_safe());
     let info = inspect_media(&gif.bytes).expect("valid GIF header and frame stream");
     assert_eq!(info.format, MediaFormat::Gif);
-    assert_eq!((info.width, info.height), (400, 300));
+    assert_eq!((info.width, info.height), expected_size);
     assert!(info.frame_count >= 2);
     assert_eq!(info.frame_count, gif.frame_durations_ms.len());
     assert_eq!(info.frame_durations_ms.last(), Some(&60_000));
     assert_eq!(gif.frame_durations_ms.last(), Some(&60_000));
     assert!(gif.shared_palette);
+}
+
+fn assert_valid_gif(gif: &GifAsset) {
+    assert_valid_gif_with_size(gif, (400, 300));
 }
 
 fn boss_event() -> BossVictory<'static> {
@@ -70,12 +74,70 @@ fn test_cave_in() {
 
 #[test]
 fn test_pinnacle() {
-    assert_valid_gif(&animate_pinnacle(false));
+    assert_valid_gif_with_size(&animate_pinnacle(false), (320, 180));
 }
 
 #[test]
 fn test_prestige() {
-    assert_valid_gif(&animate_pinnacle(true));
+    assert_valid_gif_with_size(&animate_pinnacle(true), (320, 180));
+}
+
+#[test]
+fn test_pinnacle_and_prestige_playback_contract_is_authored() {
+    for (prestige, kind) in [(false, "dig_pinnacle"), (true, "dig_prestige")] {
+        let gif = animate_pinnacle(prestige);
+        let info = inspect_media(&gif.bytes).expect("inspect Dig endgame GIF");
+        assert_eq!(gif.kind, kind);
+        assert_eq!((info.width, info.height), (320, 180));
+        assert!(
+            gif.bytes
+                .windows(b"NETSCAPE2.0".len())
+                .any(|window| window == b"NETSCAPE2.0"),
+            "finite-repeat GIF must carry the Netscape loop extension"
+        );
+        assert_eq!(info.frame_count, 30);
+        assert_eq!(
+            info.frame_durations_ms,
+            [vec![90; 17], vec![130; 12], vec![60_000]].concat()
+        );
+    }
+}
+
+#[test]
+fn test_pinnacle_phase_uses_smoothstep_trajectory_and_staged_copy() {
+    let early = dig_pinnacle_phase_state(8, 30, false);
+    assert!(
+        early.progress < early.linear_progress - 0.05,
+        "early phase must ease below linear progress: {early:?}"
+    );
+    let late = dig_pinnacle_phase_state(22, 30, false);
+    assert!(
+        late.progress > late.linear_progress + 0.05,
+        "late phase must ease above linear progress: {late:?}"
+    );
+
+    let first_terminal = dig_pinnacle_phase_state(0, 30, false);
+    assert_eq!(first_terminal.progress, 0.0);
+    assert_eq!(first_terminal.player_top, 60);
+    assert_eq!(first_terminal.glow_center_y, 100);
+    assert_eq!(first_terminal.title_stage, DigPinnacleTextStage::Hidden);
+    assert_eq!(first_terminal.subtitle_stage, DigPinnacleTextStage::Hidden);
+    assert_eq!(dig_pinnacle_glow_band_count(first_terminal.progress), 0);
+
+    let first_prestige = dig_pinnacle_phase_state(0, 30, true);
+    assert_eq!(first_prestige.player_top, 90);
+    assert_eq!(first_prestige.glow_center_y, 90);
+    assert_eq!(first_prestige.title_stage, DigPinnacleTextStage::Hidden);
+    assert_eq!(first_prestige.subtitle_stage, DigPinnacleTextStage::Hidden);
+    assert_eq!(dig_pinnacle_glow_band_count(first_prestige.progress), 0);
+
+    let mid = dig_pinnacle_phase_state(15, 30, false);
+    assert_eq!(mid.title_stage, DigPinnacleTextStage::Dim);
+    assert_eq!(mid.subtitle_stage, DigPinnacleTextStage::Dim);
+    let final_frame = dig_pinnacle_phase_state(29, 30, false);
+    assert_eq!(final_frame.progress, 1.0);
+    assert_eq!(final_frame.title_stage, DigPinnacleTextStage::Full);
+    assert_eq!(final_frame.subtitle_stage, DigPinnacleTextStage::Full);
 }
 
 #[test]
@@ -309,7 +371,7 @@ fn test_prestige_fires() {
     let result = service
         .on_dig_prestige(1, Some(0))
         .expect("forced roll fires");
-    assert_valid_gif(result.gif_file.as_ref().expect("prestige GIF"));
+    assert_valid_gif_with_size(result.gif_file.as_ref().expect("prestige GIF"), (320, 180));
 }
 
 #[test]

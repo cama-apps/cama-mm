@@ -28,6 +28,7 @@ from scripts.visual_equivalence import (
     _assert_native_wrapped_gamba_copy,
     _gamba_marker_specs,
     check_blame_luke,
+    check_dig_neon,
     check_explosion,
     check_hero_grid,
     check_pet,
@@ -64,6 +65,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     chart = fixture["chart"]
     animation = fixture["animation"]
     pinnacle = fixture["pinnacle"]
+    dig_neon = fixture["dig_neon"]
     balance = fixture["balance"]
     gamba = fixture["gamba"]
     wrapped_gamba = fixture["wrapped_gamba"]
@@ -81,6 +83,10 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     terminal_crash = fixture["terminal_crash"]
     assert terminal_crash["name"] == "Client 47"
     assert terminal_crash["filing_number"] == 5
+    assert dig_neon == {
+        "terminal": {"prestige": False},
+        "prestige": {"prestige": True},
+    }
     assert pinnacle["source_path"].endswith("lantern_engine_encounter.png")
     assert pinnacle["boss_id"] == "lantern_engine"
     assert pinnacle["secret"] is True
@@ -225,6 +231,8 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_terminal_crash.gif").read_bytes() == (
         second / "python_terminal_crash.gif"
     ).read_bytes()
+    for filename in ("python_dig_terminal.gif", "python_dig_prestige.gif"):
+        assert (first / filename).read_bytes() == (second / filename).read_bytes()
     assert (first / "python_pinnacle_phase3.gif").read_bytes() == (
         second / "python_pinnacle_phase3.gif"
     ).read_bytes()
@@ -262,6 +270,16 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
         + [60] * 20
         + [1100, 300, 300, 300, 300, 600, 300, 60000]
     )
+    size, loop, durations, frames = gif_frames(first / "python_dig_terminal.gif")
+    assert size == (320, 180)
+    assert loop == 1
+    assert len(frames) == 28
+    assert durations == [270] + [90] * 14 + [130] * 12 + [60_000]
+    size, loop, durations, frames = gif_frames(first / "python_dig_prestige.gif")
+    assert size == (320, 180)
+    assert loop == 1
+    assert len(frames) == 29
+    assert durations == [90, 180] + [90] * 14 + [130] * 12 + [60_000]
     rating_size, rating_pixels = rgba_pixels(first / "python_rating_history.png")
     assert rating_size == (700, 400)
     assert max(rating_pixels) == 255
