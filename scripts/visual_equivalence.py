@@ -6,10 +6,11 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
     uv run --locked python scripts/visual_equivalence.py
 
-It renders production prediction-market, balance-journey, rating-history,
-rating-analysis comparison, calibration, trend,
-OpenDota advantage, betting wheel/explosion, Blame Luke, scout report,
-Hero Grid, post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
+    It renders production prediction-market, balance-journey, rating-history,
+    rating-analysis comparison, calibration, trend,
+    OpenDota advantage, profile role/lane/hero/recent-match media, betting
+    wheel/explosion, Blame Luke, scout report, Hero Grid, post-match,
+    terminal-crash, pinnacle phase-3, and one production pet-card attachment from
 the shared JSON fixture, then decodes both
 sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
@@ -139,6 +140,25 @@ PET_MAX_RMS = 0.120
 PET_MIN_FOREGROUND_GRID_IOU = 0.85
 PET_MIN_FOREGROUND_COUNT_RATIO = 0.75
 PET_MAX_FOREGROUND_COUNT_RATIO = 1.35
+# Profile charts share the live Python Pillow helpers and native Rust raster
+# geometry. Keep the semantic palette/row geometry strict while allowing the
+# intentionally different fonts and antialiasing backends.
+PROFILE_ROLE_MAX_MAE = 0.120
+PROFILE_ROLE_MAX_RMS = 0.260
+PROFILE_ROLE_MIN_FOREGROUND_GRID_IOU = 0.70
+PROFILE_ROLE_MIN_FOREGROUND_COUNT_RATIO = 0.35
+PROFILE_LANE_MAX_MAE = 0.090
+PROFILE_LANE_MAX_RMS = 0.200
+PROFILE_LANE_MIN_FOREGROUND_GRID_IOU = 0.70
+PROFILE_LANE_MIN_FOREGROUND_COUNT_RATIO = 0.55
+PROFILE_HERO_MAX_MAE = 0.090
+PROFILE_HERO_MAX_RMS = 0.200
+PROFILE_HERO_MIN_FOREGROUND_GRID_IOU = 0.70
+PROFILE_HERO_MIN_FOREGROUND_COUNT_RATIO = 0.55
+PROFILE_RECENT_MAX_MAE = 0.090
+PROFILE_RECENT_MAX_RMS = 0.200
+PROFILE_RECENT_MIN_FOREGROUND_GRID_IOU = 0.80
+PROFILE_RECENT_MIN_FOREGROUND_COUNT_RATIO = 0.55
 
 
 class FixedDateTime(dt.datetime):
@@ -185,9 +205,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "blame_luke",
         "scout",
         "hero_grid",
+        "profile",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, and hero_grid objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, rating_analysis, advantage, pet, wheel, explosion, blame_luke, scout, hero_grid, and profile objects"
         )
     return fixture
 
@@ -208,6 +229,9 @@ def render_python(
         draw_rating_comparison_chart,
         draw_rating_history_chart,
     )
+    from utils.drawing import heroes as drawing_heroes
+    from utils.drawing import roles as drawing_roles
+    from utils.drawing import tables as drawing_tables
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
     from utils.pet_assets import get_pet_card
@@ -391,6 +415,31 @@ def render_python(
         title=str(hero_grid["title"]),
     ).getvalue()
     (output_dir / "python_hero_grid.png").write_bytes(hero_grid_bytes)
+
+    # These are the live profile/media attachment boundaries. The profile
+    # command supplies role/lane distributions and hero aggregates directly to
+    # the drawing helpers; `/matches recent` supplies the ordered match rows to
+    # the same table renderer. Keep the fixture at that typed payload edge so
+    # neither side can pass by copying the other runtime's pixels.
+    profile = fixture["profile"]
+    role_bytes = drawing_roles.draw_role_graph(
+        {str(name): float(value) for name, value in profile["roles"].items()},
+        title=f"Roles: {profile['username']}",
+    ).getvalue()
+    (output_dir / "python_profile_role_graph.png").write_bytes(role_bytes)
+    lane_bytes = drawing_roles.draw_lane_distribution(
+        {str(row["name"]): float(row["value"]) for row in profile["lanes"]}
+    ).getvalue()
+    (output_dir / "python_profile_lane_distribution.png").write_bytes(lane_bytes)
+    hero_bytes = drawing_heroes.draw_hero_performance_chart(
+        [dict(row) for row in profile["hero_performance"]],
+        str(profile["username"]),
+    ).getvalue()
+    (output_dir / "python_profile_hero_performance.png").write_bytes(hero_bytes)
+    recent_bytes = drawing_tables.draw_matches_table(
+        [dict(row) for row in profile["recent_matches"]],
+    ).getvalue()
+    (output_dir / "python_profile_recent_matches.png").write_bytes(recent_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -1340,6 +1389,172 @@ def check_hero_grid(python_path: Path, rust_path: Path, expected_players: int, e
     return []
 
 
+def _check_profile_image(
+    python_path: Path,
+    rust_path: Path,
+    *,
+    label: str,
+    expected_size: tuple[int, int],
+    grid: tuple[int, int],
+    margin: int,
+    minimum_grid_iou: float,
+    minimum_count_ratio: float,
+    max_mae: float,
+    max_rms: float,
+    semantic_colors: dict[str, tuple[int, int, int, int]],
+) -> list[str]:
+    """Compare one profile attachment at its production renderer boundary."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            f"{label} dimensions differ or are invalid: Python {python_size}, "
+            f"Rust {rust_size}; expected {expected_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=grid,
+        margin=margin,
+        minimum_grid_iou=minimum_grid_iou,
+        minimum_count_ratio=minimum_count_ratio,
+        label=label,
+    )
+
+    def color_count(pixels: bytes, color: tuple[int, int, int, int]) -> int:
+        # Pillow text and result labels are antialiased, so semantic colors
+        # are checked by a tight RGB distance rather than requiring every
+        # reference edge pixel to be opaque. Native bars/results remain exact
+        # palette pixels and therefore still satisfy this stricter bound.
+        return sum(
+            sum(
+                abs(channel - expected)
+                for channel, expected in zip(pixels[offset : offset + 3], color[:3])
+            )
+            <= 30
+            for offset in range(0, len(pixels), 4)
+        )
+
+    counts = {
+        name: color_count(rust_pixels, color)
+        for name, color in semantic_colors.items()
+    }
+    missing = [name for name, count in counts.items() if count == 0]
+    if missing:
+        raise AssertionError(f"{label} lost semantic colors: {counts}")
+    print(
+        f"{label}: size={python_size[0]}x{python_size[1]} "
+        f"MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"semantic_colors={counts} python_sha={sha256(python_pixels)} "
+        f"rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > max_mae or rms > max_rms:
+        raise AssertionError(
+            f"{label} pixel drift exceeds threshold: MAE {mae:.5f} <= {max_mae:.5f}, "
+            f"RMS {rms:.5f} <= {max_rms:.5f}"
+        )
+    return []
+
+
+def check_profile_role_graph(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the profile role radar and its labels/scale annotations."""
+
+    return _check_profile_image(
+        python_path,
+        rust_path,
+        label="profile role graph",
+        expected_size=(400, 400),
+        grid=(10, 10),
+        margin=0,
+        minimum_grid_iou=PROFILE_ROLE_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PROFILE_ROLE_MIN_FOREGROUND_COUNT_RATIO,
+        max_mae=PROFILE_ROLE_MAX_MAE,
+        max_rms=PROFILE_ROLE_MAX_RMS,
+        semantic_colors={
+            "accent": (88, 101, 242, 255),
+        },
+    )
+
+
+def check_profile_lane_distribution(
+    python_path: Path, rust_path: Path, lane_count: int
+) -> list[str]:
+    """Compare the profile lane bars, order, labels, and semantic colors."""
+
+    return _check_profile_image(
+        python_path,
+        rust_path,
+        label="profile lane distribution",
+        expected_size=(350, lane_count * 40 + 60),
+        grid=(10, 10),
+        margin=0,
+        minimum_grid_iou=PROFILE_LANE_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PROFILE_LANE_MIN_FOREGROUND_COUNT_RATIO,
+        max_mae=PROFILE_LANE_MAX_MAE,
+        max_rms=PROFILE_LANE_MAX_RMS,
+        semantic_colors={
+            "roaming": (233, 30, 99, 255),
+            "safe": (76, 175, 80, 255),
+            "mid": (33, 150, 243, 255),
+            "off": (255, 152, 0, 255),
+            "jungle": (156, 39, 176, 255),
+        },
+    )
+
+
+def check_profile_hero_performance(
+    python_path: Path, rust_path: Path, hero_count: int
+) -> list[str]:
+    """Compare profile hero rows, win-rate colors, and game-count bars."""
+
+    return _check_profile_image(
+        python_path,
+        rust_path,
+        label="profile hero performance",
+        expected_size=(450, 38 * hero_count + 65),
+        grid=(10, 10),
+        margin=0,
+        minimum_grid_iou=PROFILE_HERO_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PROFILE_HERO_MIN_FOREGROUND_COUNT_RATIO,
+        max_mae=PROFILE_HERO_MAX_MAE,
+        max_rms=PROFILE_HERO_MAX_RMS,
+        semantic_colors={
+            "green": (87, 242, 135, 255),
+            "yellow": (254, 231, 92, 255),
+            "red": (237, 66, 69, 255),
+        },
+    )
+
+
+def check_profile_recent_matches(
+    python_path: Path, rust_path: Path, row_count: int
+) -> list[str]:
+    """Compare recent-match rows, result states, and missing-value rendering."""
+
+    return _check_profile_image(
+        python_path,
+        rust_path,
+        label="profile recent matches",
+        expected_size=(370, 36 * row_count + 52),
+        grid=(10, 10),
+        margin=0,
+        minimum_grid_iou=PROFILE_RECENT_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=PROFILE_RECENT_MIN_FOREGROUND_COUNT_RATIO,
+        max_mae=PROFILE_RECENT_MAX_MAE,
+        max_rms=PROFILE_RECENT_MAX_RMS,
+        semantic_colors={
+            "accent": (88, 101, 242, 255),
+            "green": (87, 242, 135, 255),
+            "red": (237, 66, 69, 255),
+            "grey": (185, 187, 190, 255),
+        },
+    )
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -1679,6 +1894,25 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "rust_hero_grid.png",
                 expected_players=len(fixture["hero_grid"]["players"]),
                 expected_heroes=5,
+            )
+            check_profile_role_graph(
+                output_dir / "python_profile_role_graph.png",
+                output_dir / "rust_profile_role_graph.png",
+            )
+            check_profile_lane_distribution(
+                output_dir / "python_profile_lane_distribution.png",
+                output_dir / "rust_profile_lane_distribution.png",
+                lane_count=len(fixture["profile"]["lanes"]),
+            )
+            check_profile_hero_performance(
+                output_dir / "python_profile_hero_performance.png",
+                output_dir / "rust_profile_hero_performance.png",
+                hero_count=len(fixture["profile"]["hero_performance"]),
+            )
+            check_profile_recent_matches(
+                output_dir / "python_profile_recent_matches.png",
+                output_dir / "rust_profile_recent_matches.png",
+                row_count=len(fixture["profile"]["recent_matches"]),
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

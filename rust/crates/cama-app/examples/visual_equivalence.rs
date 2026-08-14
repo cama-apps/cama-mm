@@ -13,8 +13,9 @@ use cama_app::blame_luke_media::render_blame_luke;
 use cama_app::dig_assets::{DigRenderPort, RenderRequest};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
-    draw_prediction_market_chart, draw_rating_history_chart,
+    AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
+    draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
+    draw_matches_table, draw_prediction_market_chart, draw_rating_history_chart, draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -49,6 +50,7 @@ struct Fixture {
     blame_luke: BlameLukeFixture,
     scout: ScoutFixture,
     hero_grid: HeroGridFixture,
+    profile: ProfileFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +176,39 @@ struct HeroGridStatFixture {
     hero_id: i64,
     games: i64,
     wins: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileFixture {
+    username: String,
+    roles: std::collections::BTreeMap<String, f64>,
+    lanes: Vec<ProfileLaneFixture>,
+    hero_performance: Vec<ProfileHeroFixture>,
+    recent_matches: Vec<ProfileMatchFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileLaneFixture {
+    name: String,
+    value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileHeroFixture {
+    hero_id: i64,
+    games: i64,
+    wins: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileMatchFixture {
+    hero_id: Option<i64>,
+    hero_name: Option<String>,
+    kills: i64,
+    deaths: i64,
+    assists: i64,
+    won: Option<bool>,
+    duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +515,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         Path::new(&output_dir).join("rust_hero_grid.png"),
         hero_grid_png,
+    )?;
+
+    // Exercise the same typed payload boundaries used by the live profile
+    // Dota/Heroes tabs and `/matches recent`: role/lane distributions, hero
+    // aggregate rows, and ordered match rows all feed the production drawing
+    // helpers directly. This keeps the cross-runtime recording independent of
+    // Discord and OpenDota while retaining the live renderer call shape.
+    let profile = &fixture.profile;
+    let role_graph = draw_role_graph(&profile.roles, &format!("Roles: {}", profile.username));
+    fs::write(
+        Path::new(&output_dir).join("rust_profile_role_graph.png"),
+        role_graph.into_inner(),
+    )?;
+    let lanes = profile
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.clone(), lane.value))
+        .collect::<Vec<_>>();
+    fs::write(
+        Path::new(&output_dir).join("rust_profile_lane_distribution.png"),
+        draw_lane_distribution(&lanes).into_inner(),
+    )?;
+    let hero_stats = profile
+        .hero_performance
+        .iter()
+        .map(|hero| HeroPerformanceEntry {
+            hero_name: cama_app::hero_lookup::hero_name(hero.hero_id),
+            games: hero.games,
+            wins: hero.wins,
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        Path::new(&output_dir).join("rust_profile_hero_performance.png"),
+        draw_hero_performance_chart(&hero_stats, &profile.username).into_inner(),
+    )?;
+    let recent_matches = profile
+        .recent_matches
+        .iter()
+        .map(|row| MatchRow {
+            hero_id: row.hero_id,
+            hero_name: row.hero_name.clone(),
+            kills: row.kills,
+            deaths: row.deaths,
+            assists: row.assists,
+            won: row.won,
+            duration_seconds: row.duration,
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        Path::new(&output_dir).join("rust_profile_recent_matches.png"),
+        draw_matches_table(&recent_matches, &std::collections::BTreeMap::new()).into_inner(),
     )?;
 
     let animation = render_post_match_gif(

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,9 @@ use cama_app::blame_luke_media::{
 use cama_app::dig_assets::{DigRenderPort, MediaFormat, RenderRequest, inspect_media};
 use cama_app::dig_media_runtime::NativeDigRenderer;
 use cama_app::drawing::{
-    AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
-    draw_prediction_market_chart, draw_rating_history_chart,
+    AdvantageData, BalancePoint, HeroPerformanceEntry, MatchRow, RatingHistoryEntry,
+    draw_advantage_graph, draw_balance_chart, draw_hero_performance_chart, draw_lane_distribution,
+    draw_matches_table, draw_prediction_market_chart, draw_rating_history_chart, draw_role_graph,
 };
 use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
@@ -51,6 +52,7 @@ struct Fixture {
     blame_luke: BlameLukeFixture,
     scout: ScoutFixture,
     hero_grid: HeroGridFixture,
+    profile: ProfileFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +178,39 @@ struct HeroGridStatFixture {
     hero_id: i64,
     games: i64,
     wins: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileFixture {
+    username: String,
+    roles: BTreeMap<String, f64>,
+    lanes: Vec<ProfileLaneFixture>,
+    hero_performance: Vec<ProfileHeroFixture>,
+    recent_matches: Vec<ProfileMatchFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileLaneFixture {
+    name: String,
+    value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileHeroFixture {
+    hero_id: i64,
+    games: i64,
+    wins: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileMatchFixture {
+    hero_id: Option<i64>,
+    hero_name: Option<String>,
+    kills: i64,
+    deaths: i64,
+    assists: i64,
+    won: Option<bool>,
+    duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +408,44 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.hero_grid.stats.len(), 18);
     assert_eq!(fixture.hero_grid.players[0].discord_id, 101);
     assert_eq!(fixture.hero_grid.stats[0].hero_id, 1);
+    assert_eq!(fixture.profile.username, "Visual Profile");
+    assert_eq!(fixture.profile.roles["Carry"], 50.0);
+    assert_eq!(fixture.profile.roles["Support"], 30.0);
+    assert_eq!(fixture.profile.roles["Nuker"], 20.0);
+    assert_eq!(fixture.profile.lanes.len(), 5);
+    assert_eq!(
+        fixture
+            .profile
+            .lanes
+            .iter()
+            .map(|lane| (lane.name.as_str(), lane.value as i32))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Roaming", 20),
+            ("Safe Lane", 30),
+            ("Mid", 25),
+            ("Off Lane", 15),
+            ("Jungle", 10),
+        ]
+    );
+    assert_eq!(
+        fixture
+            .profile
+            .hero_performance
+            .iter()
+            .map(|hero| (hero.games, hero.wins))
+            .collect::<Vec<_>>(),
+        vec![(8, 5), (6, 3), (5, 2), (4, 1)]
+    );
+    assert_eq!(fixture.profile.recent_matches.len(), 3);
+    assert_eq!(fixture.profile.recent_matches[0].hero_id, Some(76));
+    assert_eq!(
+        fixture.profile.recent_matches[0].hero_name.as_deref(),
+        Some("Outworld Destroyer")
+    );
+    assert_eq!(fixture.profile.recent_matches[0].duration, Some(2_400));
+    assert_eq!(fixture.profile.recent_matches[2].won, None);
+    assert_eq!(fixture.profile.recent_matches[2].duration, None);
 }
 
 #[test]
@@ -440,6 +513,114 @@ fn native_hero_grid_fixture_render_is_deterministic_and_preserves_grid_geometry(
             > 1_000,
         "Hero Grid fixture must contain visible rows, labels, and circles"
     );
+}
+
+#[test]
+fn native_profile_fixture_render_preserves_rows_geometry_and_semantic_colors() {
+    let fixture = fixture();
+    let profile = &fixture.profile;
+    let role_first =
+        draw_role_graph(&profile.roles, &format!("Roles: {}", profile.username)).into_inner();
+    let role_second =
+        draw_role_graph(&profile.roles, &format!("Roles: {}", profile.username)).into_inner();
+    assert_eq!(role_first, role_second);
+    let role = decode_png_raster(&role_first).expect("role graph fixture must be a PNG");
+    assert_eq!((role.width, role.height), (400, 400));
+    for expected_color in [
+        [88, 101, 242, 255],
+        [255, 255, 255, 255],
+        [185, 187, 190, 255],
+    ] {
+        assert!(
+            role.pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "role graph should preserve labels, scale annotations, and accent polygon"
+        );
+    }
+
+    let lanes = profile
+        .lanes
+        .iter()
+        .map(|lane| (lane.name.clone(), lane.value))
+        .collect::<Vec<_>>();
+    let lane = decode_png_raster(&draw_lane_distribution(&lanes).into_inner())
+        .expect("lane distribution fixture must be a PNG");
+    assert_eq!((lane.width, lane.height), (350, 260));
+    for expected_color in [
+        [233, 30, 99, 255],
+        [76, 175, 80, 255],
+        [33, 150, 243, 255],
+        [255, 152, 0, 255],
+        [156, 39, 176, 255],
+    ] {
+        assert!(
+            lane.pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "lane distribution should preserve each ordered lane color"
+        );
+    }
+
+    let heroes = profile
+        .hero_performance
+        .iter()
+        .map(|hero| HeroPerformanceEntry {
+            hero_name: cama_app::hero_lookup::hero_name(hero.hero_id),
+            games: hero.games,
+            wins: hero.wins,
+        })
+        .collect::<Vec<_>>();
+    let hero =
+        decode_png_raster(&draw_hero_performance_chart(&heroes, &profile.username).into_inner())
+            .expect("hero performance fixture must be a PNG");
+    assert_eq!((hero.width, hero.height), (450, 217));
+    for expected_color in [
+        [87, 242, 135, 255],
+        [124, 179, 66, 255],
+        [254, 231, 92, 255],
+        [237, 66, 69, 255],
+    ] {
+        assert!(
+            hero.pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "hero performance should preserve every win-rate bracket"
+        );
+    }
+
+    let recent = profile
+        .recent_matches
+        .iter()
+        .map(|row| MatchRow {
+            hero_id: row.hero_id,
+            hero_name: row.hero_name.clone(),
+            kills: row.kills,
+            deaths: row.deaths,
+            assists: row.assists,
+            won: row.won,
+            duration_seconds: row.duration,
+        })
+        .collect::<Vec<_>>();
+    let recent = decode_png_raster(
+        &draw_matches_table(&recent, &std::collections::BTreeMap::new()).into_inner(),
+    )
+    .expect("recent matches fixture must be a PNG");
+    assert_eq!((recent.width, recent.height), (370, 160));
+    for expected_color in [
+        [88, 101, 242, 255],
+        [87, 242, 135, 255],
+        [237, 66, 69, 255],
+        [185, 187, 190, 255],
+    ] {
+        assert!(
+            recent
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "recent match table should preserve result/duration semantics"
+        );
+    }
 }
 
 #[test]

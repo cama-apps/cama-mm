@@ -316,6 +316,34 @@ fn test_missing_duration() {
 }
 
 #[test]
+fn test_zero_duration_matches_python_missing_duration_fallback() {
+    let missing = draw_matches_table(&[match_row("Pudge", false, None)], &BTreeMap::new());
+    let zero = draw_matches_table(
+        &[MatchRow {
+            hero_name: Some("Pudge".to_owned()),
+            won: Some(false),
+            duration_seconds: Some(0),
+            ..match_row("Pudge", false, None)
+        }],
+        &BTreeMap::new(),
+    );
+    assert_eq!(missing.get_ref(), zero.get_ref());
+}
+
+#[test]
+fn test_duration_changes_recent_match_raster() {
+    let first = draw_matches_table(
+        &[match_row("Outworld Destroyer", true, Some(2_400))],
+        &BTreeMap::new(),
+    );
+    let second = draw_matches_table(
+        &[match_row("Outworld Destroyer", true, Some(2_401))],
+        &BTreeMap::new(),
+    );
+    assert_ne!(first.get_ref(), second.get_ref());
+}
+
+#[test]
 fn test_basic_role_graph() {
     let roles = BTreeMap::from([
         ("Carry".to_owned(), 30.0),

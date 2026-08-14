@@ -21,6 +21,10 @@ from scripts.visual_equivalence import (
     check_explosion,
     check_hero_grid,
     check_pet,
+    check_profile_hero_performance,
+    check_profile_lane_distribution,
+    check_profile_recent_matches,
+    check_profile_role_graph,
     check_rating_analysis_calibration,
     check_rating_analysis_comparison,
     check_rating_analysis_trend,
@@ -118,6 +122,24 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert len(fixture["hero_grid"]["players"]) == 4
     assert len(fixture["hero_grid"]["stats"]) == 18
     assert fixture["hero_grid"]["players"][0] == {"discord_id": 101, "name": "Ada Lovelace"}
+    assert fixture["profile"]["username"] == "Visual Profile"
+    assert fixture["profile"]["roles"] == {"Carry": 50, "Support": 30, "Nuker": 20}
+    assert [(row["name"], row["value"]) for row in fixture["profile"]["lanes"]] == [
+        ("Roaming", 20),
+        ("Safe Lane", 30),
+        ("Mid", 25),
+        ("Off Lane", 15),
+        ("Jungle", 10),
+    ]
+    assert [(row["games"], row["wins"]) for row in fixture["profile"]["hero_performance"]] == [
+        (8, 5),
+        (6, 3),
+        (5, 2),
+        (4, 1),
+    ]
+    assert fixture["profile"]["recent_matches"][0]["hero_name"] == "Outworld Destroyer"
+    assert fixture["profile"]["recent_matches"][-1]["won"] is None
+    assert fixture["profile"]["recent_matches"][-1]["duration"] is None
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -169,6 +191,13 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_hero_grid.png").read_bytes() == (
         second / "python_hero_grid.png"
     ).read_bytes()
+    for filename in (
+        "python_profile_role_graph.png",
+        "python_profile_lane_distribution.png",
+        "python_profile_hero_performance.png",
+        "python_profile_recent_matches.png",
+    ):
+        assert (first / filename).read_bytes() == (second / filename).read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
     assert loop == 1
@@ -263,6 +292,49 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rust_hero_grid = first / "rust_hero_grid.png"
     rust_hero_grid.write_bytes((first / "python_hero_grid.png").read_bytes())
     check_hero_grid(first / "python_hero_grid.png", rust_hero_grid, 4, 5)
+    rust_profile_role = first / "rust_profile_role_graph.png"
+    rust_profile_role.write_bytes((first / "python_profile_role_graph.png").read_bytes())
+    check_profile_role_graph(
+        first / "python_profile_role_graph.png",
+        rust_profile_role,
+    )
+    rust_profile_lane = first / "rust_profile_lane_distribution.png"
+    rust_profile_lane.write_bytes((first / "python_profile_lane_distribution.png").read_bytes())
+    check_profile_lane_distribution(
+        first / "python_profile_lane_distribution.png",
+        rust_profile_lane,
+        lane_count=5,
+    )
+    rust_profile_hero = first / "rust_profile_hero_performance.png"
+    rust_profile_hero.write_bytes((first / "python_profile_hero_performance.png").read_bytes())
+    check_profile_hero_performance(
+        first / "python_profile_hero_performance.png",
+        rust_profile_hero,
+        hero_count=4,
+    )
+    rust_profile_recent = first / "rust_profile_recent_matches.png"
+    rust_profile_recent.write_bytes((first / "python_profile_recent_matches.png").read_bytes())
+    check_profile_recent_matches(
+        first / "python_profile_recent_matches.png",
+        rust_profile_recent,
+        row_count=3,
+    )
+
+
+def test_profile_recent_duration_is_rendered_at_python_boundary(tmp_path: Path):
+    """The visual driver must consume the live service field named ``duration``."""
+
+    fixture = load_fixture(DEFAULT_FIXTURE)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    render_python(fixture, first)
+    fixture["profile"]["recent_matches"][0]["duration"] = 2401
+    render_python(fixture, second)
+    assert (first / "python_profile_recent_matches.png").read_bytes() != (
+        second / "python_profile_recent_matches.png"
+    ).read_bytes()
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():

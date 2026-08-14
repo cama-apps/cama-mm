@@ -342,21 +342,46 @@ pub fn draw_matches_table(
         return render(raster);
     }
 
-    let width = 370;
-    let height = 52 + matches.len() * 36;
-    let mut raster = Raster::new(width, height, DISCORD_BG);
-    raster.text(15, 14, "HERO", DISCORD_WHITE, 1);
-    raster.text(137, 14, "K", DISCORD_WHITE, 1);
-    raster.text(172, 14, "D", DISCORD_WHITE, 1);
-    raster.text(207, 14, "A", DISCORD_WHITE, 1);
-    raster.text(238, 14, "RESULT", DISCORD_WHITE, 1);
-    raster.text(298, 14, "DURATION", DISCORD_WHITE, 1);
-    raster.fill_rect(10, 40, 360, 42, DISCORD_ACCENT);
+    // Keep these columns in lockstep with ``utils.drawing.tables``.  The
+    // profile/recent command feeds both renderers the same ordered rows, so
+    // exact column boundaries are part of the attachment contract rather than
+    // an approximation for the native rasterizer.
+    let columns = [
+        ("Hero", 120_i32),
+        ("K", 35_i32),
+        ("D", 35_i32),
+        ("A", 35_i32),
+        ("Result", 55_i32),
+        ("Duration", 70_i32),
+    ];
+    let padding = 10_i32;
+    let header_height = 32_i32;
+    let row_height = 36_i32;
+    let width = columns.iter().map(|(_, width)| width).sum::<i32>() + padding * 2;
+    let height =
+        header_height + i32::try_from(matches.len()).unwrap_or(0) * row_height + padding * 2;
+    let mut raster = Raster::new(
+        usize::try_from(width).unwrap_or(370),
+        usize::try_from(height).unwrap_or(52),
+        DISCORD_BG,
+    );
+    let mut x = padding;
+    for &(header, column_width) in &columns {
+        raster.text(x + 5, padding + 8, header, DISCORD_WHITE, 1);
+        x += column_width;
+    }
+    raster.fill_rect(
+        padding,
+        padding + header_height - 2,
+        width - padding,
+        padding + header_height,
+        DISCORD_ACCENT,
+    );
 
     for (index, row) in matches.iter().enumerate() {
-        let y = 43 + i32::try_from(index).unwrap_or(0) * 36;
+        let y = padding + header_height + i32::try_from(index).unwrap_or(0) * row_height;
         if index % 2 == 1 {
-            raster.fill_rect(10, y, 360, y + 36, DISCORD_DARKER);
+            raster.fill_rect(padding, y, width - padding, y + row_height, DISCORD_DARKER);
         }
         let resolved = row
             .hero_id
@@ -365,21 +390,35 @@ pub fn draw_matches_table(
             .or_else(|| row.hero_name.clone())
             .unwrap_or_else(|| "Unknown".to_owned());
         let hero = truncate(&resolved, 14, 12);
-        raster.text(15, y + 13, &hero, DISCORD_WHITE, 1);
-        raster.text(135, y + 13, &row.kills.to_string(), DISCORD_WHITE, 1);
-        raster.text(170, y + 13, &row.deaths.to_string(), DISCORD_WHITE, 1);
-        raster.text(205, y + 13, &row.assists.to_string(), DISCORD_WHITE, 1);
+        raster.text(15, y + 10, &hero, DISCORD_WHITE, 1);
+        let values = [
+            row.kills.to_string(),
+            row.deaths.to_string(),
+            row.assists.to_string(),
+        ];
+        let mut column_x = padding + columns[0].1;
+        for (value, (_, column_width)) in values.iter().zip(&columns[1..4]) {
+            let text_x = column_x + (column_width - Raster::text_width(value, 1)) / 2;
+            raster.text(text_x, y + 10, value, DISCORD_WHITE, 1);
+            column_x += column_width;
+        }
         let (result, color) = match row.won {
-            Some(true) => ("WIN", DISCORD_GREEN),
-            Some(false) => ("LOSS", DISCORD_RED),
+            Some(true) => ("Win", DISCORD_GREEN),
+            Some(false) => ("Loss", DISCORD_RED),
             None => ("?", DISCORD_GREY),
         };
-        raster.text(240, y + 13, result, color, 1);
-        let duration = row.duration_seconds.map_or_else(
-            || "-".to_owned(),
-            |seconds| format!("{}:{:02}", seconds / 60, seconds % 60),
-        );
-        raster.text(310, y + 13, &duration, DISCORD_GREY, 1);
+        let result_x = column_x + (columns[4].1 - Raster::text_width(result, 1)) / 2;
+        raster.text(result_x, y + 10, result, color, 1);
+        column_x += columns[4].1;
+        let duration = row
+            .duration_seconds
+            .filter(|seconds| *seconds > 0)
+            .map_or_else(
+                || "-".to_owned(),
+                |seconds| format!("{}:{:02}", seconds / 60, seconds % 60),
+            );
+        let duration_x = column_x + (columns[5].1 - Raster::text_width(&duration, 1)) / 2;
+        raster.text(duration_x, y + 10, &duration, DISCORD_GREY, 1);
     }
     render(raster)
 }
@@ -396,7 +435,8 @@ fn truncate(value: &str, limit: usize, prefix: usize) -> String {
 #[must_use]
 pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Vec<u8>> {
     let mut raster = Raster::new(400, 400, DISCORD_BG);
-    raster.text(110, 10, title, DISCORD_WHITE, 2);
+    let title_width = Raster::text_width(title, 2);
+    raster.text((400 - title_width).max(0) / 2, 8, title, DISCORD_WHITE, 2);
     let mut roles = ROLE_ORDER
         .iter()
         .map(|role| (*role).to_owned())
@@ -426,6 +466,14 @@ pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Ve
     for fraction in [0.25, 0.5, 0.75, 1.0] {
         let ring = radial_points(roles.len(), center, 140.0 * fraction, |_| 1.0);
         raster.polygon_outline(&ring, DISCORD_DARKER);
+        let label = format!("{}%", (scale_max * fraction) as i32);
+        raster.text(
+            center.0 + (140.0 * fraction) as i32 + 3,
+            center.1 - 5,
+            &label,
+            DISCORD_GREY,
+            1,
+        );
     }
     let outer = radial_points(roles.len(), center, 140.0, |_| 1.0);
     for point in &outer {
@@ -438,6 +486,39 @@ pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Ve
     raster.polygon_outline(&data, DISCORD_ACCENT);
     for point in data {
         raster.circle(point, 4, DISCORD_ACCENT);
+    }
+
+    // Match Python's two-line spoke labels (role, then percentage), including
+    // the angular centering rules used at the top/bottom spokes.  The native
+    // font is intentionally blocky, but its text and placement remain
+    // semantically identical to the live Pillow helper.
+    let label_offset = 22.0;
+    for (index, role) in roles.iter().enumerate() {
+        let angle =
+            std::f64::consts::TAU * index as f64 / roles.len() as f64 - std::f64::consts::FRAC_PI_2;
+        let mut label_x = center.0 as f64 + (140.0 + label_offset) * angle.cos();
+        let mut label_y = center.1 as f64 + (140.0 + label_offset) * angle.sin();
+        let text_width = Raster::text_width(role, 1);
+        if label_x < f64::from(center.0 - 10) {
+            label_x -= f64::from(text_width);
+        } else if (label_x - f64::from(center.0)).abs() < 10.0 {
+            label_x -= f64::from(text_width / 2);
+        }
+        if label_y < f64::from(center.1 - 10) {
+            label_y -= 7.0;
+        } else if (label_y - f64::from(center.1)).abs() < 10.0 {
+            label_y -= 3.0;
+        }
+        let x = label_x as i32;
+        let y = label_y as i32;
+        raster.text(x, y, role, DISCORD_WHITE, 1);
+        raster.text(
+            x,
+            y + 7,
+            &format!("{}%", values.get(role).copied().unwrap_or(0.0) as i32),
+            DISCORD_GREY,
+            1,
+        );
     }
     render(raster)
 }

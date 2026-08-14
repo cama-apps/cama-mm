@@ -191,5 +191,31 @@
       {"discord_id": 104, "hero_id": 11, "games": 8, "wins": 5},
       {"discord_id": 104, "hero_id": 17, "games": 1, "wins": 0}
     ]
+  },
+  "profile": {
+    "username": "Visual Profile",
+    "roles": {
+      "Carry": 50,
+      "Support": 30,
+      "Nuker": 20
+    },
+    "lanes": [
+      {"name": "Roaming", "value": 20},
+      {"name": "Safe Lane", "value": 30},
+      {"name": "Mid", "value": 25},
+      {"name": "Off Lane", "value": 15},
+      {"name": "Jungle", "value": 10}
+    ],
+    "hero_performance": [
+      {"hero_id": 1, "games": 8, "wins": 5},
+      {"hero_id": 76, "games": 6, "wins": 3},
+      {"hero_id": 39, "games": 5, "wins": 2},
+      {"hero_id": 83, "games": 4, "wins": 1}
+    ],
+    "recent_matches": [
+      {"hero_id": 76, "hero_name": "Outworld Destroyer", "kills": 12, "deaths": 3, "assists": 8, "won": true, "duration": 2400},
+      {"hero_id": 1, "hero_name": "Anti-Mage", "kills": 2, "deaths": 8, "assists": 5, "won": false, "duration": 1850},
+      {"hero_id": null, "hero_name": "Mystery Hero", "kills": 4, "deaths": 4, "assists": 7, "won": null, "duration": null}
+    ]
   }
 }
