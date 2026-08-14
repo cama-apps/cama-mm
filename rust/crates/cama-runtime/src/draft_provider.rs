@@ -17,8 +17,9 @@ use cama_app::betting_service::{
     AutomaticSpectatorConfig, WealthSnapshot, plan_automatic_spectator_bets,
 };
 use cama_app::draft::{
-    DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed, DraftEmbedField,
-    DraftFinalizationPlan, DraftPhase, DraftState, DraftStateEnvelope, DraftStateManager,
+    DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed,
+    DraftEmbedField, DraftFinalizationPlan, DraftFinalizationPlanSeed, DraftFinancialSetupPolicy,
+    DraftFinancialSetupStage, DraftPhase, DraftState, DraftStateEnvelope, DraftStateManager,
     DraftStatePersistencePort, LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS,
     PlayerPoolEntry, SqliteDraftStatePersistence,
 };
@@ -363,6 +364,21 @@ impl DraftRegistrationProvider {
         )
     }
 
+    /// Explicitly resume only the durable financial-setup stage for a
+    /// finalizing Draft after process recreation.
+    ///
+    /// This deliberately does not publish Discord output, restore lobby
+    /// reservations, or run terminal reconciliation; those remain owned by a
+    /// future recovery worker rather than READY composition.
+    pub async fn resume_finalizing_financial_setup(
+        &self,
+        guild_id: i64,
+    ) -> Result<PendingMatchRecord, String> {
+        self.handler
+            .resume_finalizing_financial_setup(guild_id)
+            .await
+    }
+
     /// Hydrate active, non-finalizing drafts from the configured persistence
     /// port and restore their timeout ownership.
     ///
@@ -632,6 +648,12 @@ struct DraftHandler {
     persistence: Option<Arc<dyn DraftStatePersistencePort>>,
     persisted_envelopes: Arc<Mutex<BTreeMap<(i64, u64), DraftStateEnvelope>>>,
     draft_operation_locks: DraftOperationLocks,
+}
+
+#[derive(Debug)]
+struct LinkedDraftFinalization {
+    pending: PendingMatchRecord,
+    plan: DraftFinalizationPlan,
 }
 
 #[async_trait]
@@ -1105,11 +1127,11 @@ impl DraftHandler {
     async fn link_finalizing_pending_match(
         &self,
         state: &DraftState,
-        pending_state: &PendingMatchState,
+        pending_state: Option<&PendingMatchState>,
         lobby_channel_id: Option<u64>,
         origin_channel_id: Option<u64>,
         thread_id: Option<u64>,
-    ) -> Result<PendingMatchRecord, String> {
+    ) -> Result<LinkedDraftFinalization, String> {
         let persistence = self
             .persistence
             .clone()
@@ -1124,9 +1146,7 @@ impl DraftHandler {
                     state.session_id
                 )
             })?;
-        let (pending_payload_json, plan_json) = if let Some(pending_match_id) =
-            current.pending_match_id
-        {
+        if let Some(pending_match_id) = current.pending_match_id {
             let pending_persistence = Arc::clone(&persistence);
             let guild_id = state.guild_id;
             let session_id = state.session_id;
@@ -1143,47 +1163,77 @@ impl DraftHandler {
             .await
             .map_err(|error| format!("draft raw finalization-plan load task failed: {error}"))?
             .map_err(|error| error.to_string())?;
-            (pending_payload_json, plan_json)
-        } else {
-            let pending_payload_json =
-                serde_json::to_string(pending_state).map_err(|error| error.to_string())?;
-            let shuffle_timestamp = pending_state
-                .shuffle_timestamp
-                .ok_or_else(|| "Draft pending match has no shuffle timestamp".to_owned())?;
-            let bet_lock_until = pending_state
-                .bet_lock_until
-                .ok_or_else(|| "Draft pending match has no bet-lock timestamp".to_owned())?;
-            let plan = DraftFinalizationPlan::new(
-                state.guild_id,
-                state.session_id,
-                &pending_payload_json,
-                shuffle_timestamp,
-                shuffle_timestamp,
-                bet_lock_until,
-                pending_state.is_bomb_pot,
-                state.lobby_kind,
-                state.draft_channel_id,
-                state.draft_message_id,
-                signed_destination_id(lobby_channel_id, "lobby channel")?,
-                signed_destination_id(origin_channel_id, "origin channel")?,
-                signed_destination_id(thread_id, "lobby thread")?,
-            )
-            .map_err(|error| error.to_string())?;
-            let plan_json = plan
-                .to_json(&pending_payload_json)
+            let plan =
+                DraftFinalizationPlan::from_json(&plan_json).map_err(|error| error.to_string())?;
+            if plan.schema_version != cama_app::draft::DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+                return Err("linked Draft finalization plan is not schema v2".to_owned());
+            }
+            plan.validate(&pending_payload_json)
                 .map_err(|error| error.to_string())?;
-            (pending_payload_json, plan_json)
-        };
+            if plan
+                .financial_setup
+                .as_ref()
+                .map(|financial| financial.pending_match_id)
+                != Some(pending_match_id)
+            {
+                return Err("linked Draft financial plan names another pending match".to_owned());
+            }
+            let pending = self
+                .pending
+                .pending_match(state.guild_id, pending_match_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "atomically linked pending match {pending_match_id} could not be reloaded"
+                    )
+                })?;
+            return Ok(LinkedDraftFinalization { pending, plan });
+        }
+
+        let mut frozen_pending = pending_state
+            .ok_or_else(|| "first Draft finalization writer has no pending-match state".to_owned())?
+            .clone();
+        frozen_pending.origin_channel_id = origin_channel_id.and_then(|id| i64::try_from(id).ok());
+        frozen_pending.thread_shuffle_thread_id = thread_id.and_then(|id| i64::try_from(id).ok());
+        let pending_payload_json =
+            serde_json::to_string(&frozen_pending).map_err(|error| error.to_string())?;
+        let shuffle_timestamp = frozen_pending
+            .shuffle_timestamp
+            .ok_or_else(|| "Draft pending match has no shuffle timestamp".to_owned())?;
+        let bet_lock_until = frozen_pending
+            .bet_lock_until
+            .ok_or_else(|| "Draft pending match has no bet-lock timestamp".to_owned())?;
+        let policy = self.financial_setup_policy(&frozen_pending)?;
+        let seed = DraftFinalizationPlanSeed::new(
+            state.guild_id,
+            state.session_id,
+            &pending_payload_json,
+            shuffle_timestamp,
+            shuffle_timestamp,
+            bet_lock_until,
+            frozen_pending.is_bomb_pot,
+            state.lobby_kind,
+            state.draft_channel_id,
+            state.draft_message_id,
+            signed_destination_id(lobby_channel_id, "lobby channel")?,
+            signed_destination_id(origin_channel_id, "origin channel")?,
+            signed_destination_id(thread_id, "lobby thread")?,
+            policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let plan_seed_json = seed
+            .to_json(&pending_payload_json)
+            .map_err(|error| error.to_string())?;
         let expected_revision = current.revision;
         let guild_id = state.guild_id;
         let session_id = state.session_id;
         let linked = spawn_blocking(move || {
-            persistence.link_finalizing_pending_match(
+            persistence.link_finalizing_pending_match_v2(
                 guild_id,
                 session_id,
                 expected_revision,
                 &pending_payload_json,
-                &plan_json,
+                &plan_seed_json,
             )
         })
         .await
@@ -1195,8 +1245,22 @@ impl DraftHandler {
         {
             return Err("draft pending-link result does not match the active session".to_owned());
         }
+        let plan = DraftFinalizationPlan::from_json(&linked.plan_json)
+            .map_err(|error| error.to_string())?;
+        plan.validate(&linked.pending_payload_json)
+            .map_err(|error| error.to_string())?;
+        if plan.schema_version != cama_app::draft::DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION
+            || plan
+                .financial_setup
+                .as_ref()
+                .map(|financial| financial.pending_match_id)
+                != Some(linked.pending_match_id)
+        {
+            return Err("Draft v2 pending-link returned the wrong financial plan".to_owned());
+        }
         lock_recover(&self.persisted_envelopes).insert(key, linked.envelope);
-        self.pending
+        let pending = self
+            .pending
             .pending_match(state.guild_id, linked.pending_match_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
@@ -1204,7 +1268,140 @@ impl DraftHandler {
                     "atomically linked pending match {} could not be reloaded",
                     linked.pending_match_id
                 )
-            })
+            })?;
+        Ok(LinkedDraftFinalization { pending, plan })
+    }
+
+    fn financial_setup_policy(
+        &self,
+        pending: &PendingMatchState,
+    ) -> Result<DraftFinancialSetupPolicy, String> {
+        let shuffle_timestamp = pending
+            .shuffle_timestamp
+            .ok_or_else(|| "Draft pending match has no shuffle timestamp".to_owned())?;
+        let game_date = cama_domain::game_date::game_date_for_timestamp(shuffle_timestamp as f64)
+            .map_err(|error| error.to_string())?;
+        let spectator_total_count =
+            u64::try_from(self.config.auto_spectator_bet_count).map_err(|_| {
+                "Draft spectator total count exceeds the financial plan range".to_owned()
+            })?;
+        let spectator_top_count = u64::try_from(self.config.auto_spectator_bet_top_count)
+            .map_err(|_| "Draft spectator top count exceeds the financial plan range".to_owned())?;
+        let policy = DraftFinancialSetupPolicy {
+            schema_version: DRAFT_FINANCIAL_SETUP_PLAN_VERSION,
+            game_date,
+            betting_mode: pending.betting_mode.clone(),
+            seed_max_amount: self.config.dota_bet_seed_amount,
+            first_game_daily_amount: self.config.first_game_pool_daily_amount,
+            auto_blind_enabled: self.config.auto_blind_enabled,
+            normal_blind_threshold: self.config.auto_blind_threshold,
+            normal_blind_percentage_bits: f64_bits(self.config.auto_blind_percentage),
+            bomb_blind_percentage_bits: f64_bits(self.config.bomb_pot_blind_percentage),
+            bomb_ante: self.config.bomb_pot_ante,
+            max_debt: self.config.max_debt,
+            spectator_enabled: self.config.auto_spectator_bet_enabled,
+            spectator_total_count,
+            spectator_top_count,
+            spectator_base_percentage_bits: f64_bits(self.config.auto_spectator_bet_percentage),
+            spectator_top_percentage_bits: f64_bits(self.config.auto_spectator_bet_top_percentage),
+            extensions: BTreeMap::new(),
+        };
+        policy.validate().map_err(|error| error.to_string())?;
+        Ok(policy)
+    }
+
+    async fn run_persisted_financial_setup(
+        &self,
+        state: &DraftState,
+        pending_match_id: i64,
+    ) -> Result<(), String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let guild_id = state.guild_id;
+        let session_id = state.session_id;
+        let stage_loader = Arc::clone(&persistence);
+        let stage = spawn_blocking(move || {
+            stage_loader.finalizing_financial_setup_stage(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft financial stage task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if stage == DraftFinancialSetupStage::SetupComplete {
+            return Ok(());
+        }
+        let now = unix_now();
+        let result = spawn_blocking(move || {
+            persistence.run_finalizing_financial_setup(guild_id, session_id, pending_match_id, now)
+        })
+        .await
+        .map_err(|error| format!("Draft financial setup task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if result.guild_id != guild_id
+            || result.session_id != session_id
+            || result.pending_match_id != pending_match_id
+        {
+            return Err("Draft financial setup returned the wrong job identity".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn resume_finalizing_financial_setup(
+        &self,
+        guild_id: i64,
+    ) -> Result<PendingMatchRecord, String> {
+        let persistence = self
+            .persistence
+            .clone()
+            .ok_or_else(|| "draft persistence is not configured".to_owned())?;
+        let loader = Arc::clone(&persistence);
+        let envelope = spawn_blocking(move || loader.load_all())
+            .await
+            .map_err(|error| format!("Draft finalization resume load task failed: {error}"))?
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|envelope| envelope.guild_id == guild_id)
+            .ok_or_else(|| format!("draft does not exist for guild {guild_id}"))?;
+        let pending_match_id = envelope
+            .pending_match_id
+            .filter(|_| envelope.finalizing)
+            .ok_or_else(|| "Draft envelope is not linked for finalization".to_owned())?;
+        let session_id = envelope.session_id;
+        let raw_loader = Arc::clone(&persistence);
+        let _pending_payload = spawn_blocking(move || {
+            raw_loader.linked_pending_payload(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft resume pending-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let plan_loader = Arc::clone(&persistence);
+        let plan_json = spawn_blocking(move || {
+            plan_loader.linked_finalization_plan(guild_id, session_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("Draft resume plan-load task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let plan =
+            DraftFinalizationPlan::from_json(&plan_json).map_err(|error| error.to_string())?;
+        if plan.schema_version != cama_app::draft::DRAFT_FINALIZATION_PLAN_SCHEMA_VERSION {
+            return Err("linked Draft finalization plan is not schema v2".to_owned());
+        }
+        if plan
+            .financial_setup
+            .as_ref()
+            .map(|financial| financial.pending_match_id)
+            != Some(pending_match_id)
+        {
+            return Err("linked Draft financial plan names another pending match".to_owned());
+        }
+        let state = envelope.state.clone().into_state();
+        self.run_persisted_financial_setup(&state, pending_match_id)
+            .await?;
+        self.pending
+            .pending_match(guild_id, pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("linked pending match {pending_match_id} disappeared"))
     }
 
     async fn send_neon_followup(
@@ -2422,19 +2619,31 @@ impl DraftHandler {
             .as_ref()
             .and_then(|snapshot| snapshot.origin_channel_id)
             .or_else(|| state.draft_channel_id.and_then(|id| u64::try_from(id).ok()));
-        let now = unix_now();
-        let is_bomb_pot = fastrand::f64() < self.config.bomb_pot_chance;
-        let pending_state =
-            db_pending_state(&state, now, self.config.bet_lock_seconds, is_bomb_pot)?;
+        let linked_retry = self.persistence.is_some()
+            && lock_recover(&self.persisted_envelopes)
+                .get(&(state.guild_id, state.session_id))
+                .and_then(|envelope| envelope.pending_match_id)
+                .is_some();
+        let prepared_pending = if linked_retry {
+            None
+        } else {
+            let now = unix_now();
+            let is_bomb_pot = fastrand::f64() < self.config.bomb_pot_chance;
+            Some((
+                now,
+                is_bomb_pot,
+                db_pending_state(&state, now, self.config.bet_lock_seconds, is_bomb_pot)?,
+            ))
+        };
         if let Err(error) = self.mark_finalizing(&state, None).await {
             warn!(%error, guild_id, session_id = state.session_id, "draft finalization fence failed before pending match creation");
             return completion_response(&responder, None, error, deferred).await;
         }
-        let pending = if self.persistence.is_some() {
-            match self
+        let (pending, effective_is_bomb_pot) = if self.persistence.is_some() {
+            let linked = match self
                 .link_finalizing_pending_match(
                     &state,
-                    &pending_state,
+                    prepared_pending.as_ref().map(|(_, _, pending)| pending),
                     snapshot
                         .as_ref()
                         .and_then(|snapshot| snapshot.lobby_channel_id),
@@ -2443,16 +2652,45 @@ impl DraftHandler {
                 )
                 .await
             {
-                Ok(pending) => pending,
+                Ok(linked) => linked,
                 Err(error) => {
                     warn!(%error, guild_id, session_id = state.session_id, "atomic draft pending-match link failed");
                     return completion_response(&responder, None, error, deferred).await;
                 }
+            };
+            let pending_match_id = linked.pending.pending_match_id;
+            if let Err(error) = self
+                .run_persisted_financial_setup(&state, pending_match_id)
+                .await
+            {
+                warn!(
+                    %error,
+                    pending_match_id,
+                    "durable draft financial setup failed and remains retryable"
+                );
+                return financial_setup_retry_response(
+                    &responder,
+                    pending_match_id,
+                    error,
+                    deferred,
+                )
+                .await;
             }
-        } else {
-            match self
+            let pending = self
                 .pending
-                .create_pending_match(guild_id, &pending_state)
+                .pending_match(guild_id, pending_match_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "pending draft match disappeared after financial setup".to_owned()
+                })?;
+            (pending, linked.plan.is_bomb_pot)
+        } else {
+            let (now, is_bomb_pot, pending_state) = prepared_pending
+                .as_ref()
+                .expect("non-persistent Draft completion always prepares pending state");
+            let pending = match self
+                .pending
+                .create_pending_match(guild_id, pending_state)
                 .map_err(|error| error.to_string())
             {
                 Ok(pending) => pending,
@@ -2463,44 +2701,47 @@ impl DraftHandler {
                     self.finish_draft_without_match(&handle, &state);
                     return completion_response(&responder, None, error, deferred).await;
                 }
+            };
+            if let Err(error) =
+                self.pending
+                    .mutate_pending_match(guild_id, pending.pending_match_id, |state| {
+                        state.origin_channel_id =
+                            origin_channel_id.and_then(|id| i64::try_from(id).ok());
+                        state.thread_shuffle_thread_id =
+                            thread_id.and_then(|id| i64::try_from(id).ok());
+                    })
+            {
+                warn!(%error, pending_match_id = pending.pending_match_id, "draft thread metadata persistence failed");
             }
+            if let Err(error) = self
+                .reserve_seed_and_bets(&pending, kind, &state, *now, *is_bomb_pot)
+                .await
+            {
+                warn!(
+                    %error,
+                    pending_match_id = pending.pending_match_id,
+                    "draft seed/bet setup failed"
+                );
+                self.finish_draft_without_match(&handle, &state);
+                return completion_response(
+                    &responder,
+                    Some(pending.pending_match_id),
+                    error,
+                    deferred,
+                )
+                .await;
+            }
+            let pending = self
+                .pending
+                .pending_match(guild_id, pending.pending_match_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "pending draft match disappeared after seed reservation".to_owned()
+                })?;
+            (pending, *is_bomb_pot)
         };
-        if let Err(error) =
-            self.pending
-                .mutate_pending_match(guild_id, pending.pending_match_id, |state| {
-                    state.origin_channel_id =
-                        origin_channel_id.and_then(|id| i64::try_from(id).ok());
-                    state.thread_shuffle_thread_id =
-                        thread_id.and_then(|id| i64::try_from(id).ok());
-                })
-        {
-            warn!(%error, pending_match_id = pending.pending_match_id, "draft thread metadata persistence failed");
-        }
-        if let Err(error) = self
-            .reserve_seed_and_bets(&pending, kind, &state, now, is_bomb_pot)
-            .await
-        {
-            warn!(
-                %error,
-                pending_match_id = pending.pending_match_id,
-                "draft seed/bet setup failed"
-            );
-            self.finish_draft_without_match(&handle, &state);
-            return completion_response(
-                &responder,
-                Some(pending.pending_match_id),
-                error,
-                deferred,
-            )
-            .await;
-        }
-        let pending = self
-            .pending
-            .pending_match(guild_id, pending.pending_match_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "pending draft match disappeared after seed reservation".to_owned())?;
 
-        if is_bomb_pot && let Some(blind) = pending.state.blind_bets_result.as_ref() {
+        if effective_is_bomb_pot && let Some(blind) = pending.state.blind_bets_result.as_ref() {
             let pool_amount = blind
                 .get("total_radiant")
                 .and_then(Value::as_i64)
@@ -4443,6 +4684,10 @@ fn percentage_points(value: f64) -> i64 {
     }
 }
 
+fn f64_bits(value: f64) -> String {
+    format!("{:016x}", value.to_bits())
+}
+
 fn percentage_basis_points(value: f64) -> i64 {
     if !value.is_finite() || value <= 0.0 {
         0
@@ -4579,6 +4824,25 @@ async fn completion_response(
     let response = InteractionResponse::message(content)
         .ephemeral()
         .without_mentions();
+    if deferred {
+        responder.followup(response).await
+    } else {
+        responder.respond(response).await
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn financial_setup_retry_response(
+    responder: &Arc<dyn InteractionResponder>,
+    pending_match_id: i64,
+    _error: String,
+    deferred: bool,
+) -> Result<(), String> {
+    let response = InteractionResponse::message(format!(
+        "⚠️ Draft complete — Match #{pending_match_id} is safely retained, but its financial setup did not finish. Retry finalization before playing or recording the match. No financial effects were partially applied."
+    ))
+    .ephemeral()
+    .without_mentions();
     if deferred {
         responder.followup(response).await
     } else {

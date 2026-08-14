@@ -15,11 +15,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub use cama_db::draft_financial_execution::{
+    DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE, DraftFinancialSetupRun,
+};
 pub use cama_db::draft_financial_setup::{
     DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DraftFinancialEffectIntent, DraftFinancialEffectKind,
     DraftFinancialIntentStatus, DraftFinancialSetupPlan, DraftFinancialSetupPolicy,
     DraftInvestmentSnapshot, DraftWealthSnapshot,
 };
+
+/// Durable financial-setup stages that the live Draft provider may compose.
+/// Publication metadata written after `SetupComplete` is deliberately outside
+/// the executor's immutable pending-payload hash contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftFinancialSetupStage {
+    Linked,
+    SetupComplete,
+}
 
 pub const DRAFT_POOL_SIZE: usize = 10;
 pub const DRAFT_TOTAL_PICKS: usize = 8;
@@ -1202,6 +1214,40 @@ pub trait DraftStatePersistencePort: Send + Sync {
         })
     }
 
+    /// Load the typed financial stage without replaying the immutable setup
+    /// executor. This lets later publication metadata coexist with a finished
+    /// setup while keeping `linked` execution hash-checked.
+    fn finalizing_financial_setup_stage(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<DraftFinancialSetupStage, DraftPersistenceError> {
+        let _ = (session_id, pending_match_id);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft financial stage loading is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
+    /// Claim or renew this session's finalization lease and atomically apply
+    /// (or validate the idempotent replay of) its frozen financial setup.
+    fn run_finalizing_financial_setup(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        now: i64,
+    ) -> Result<DraftFinancialSetupRun, DraftPersistenceError> {
+        let _ = (session_id, pending_match_id, now);
+        Err(DraftPersistenceError::Backend {
+            message: format!(
+                "Draft financial setup is not supported for guild {guild_id} by this persistence port"
+            ),
+        })
+    }
+
     /// Mark the linked finalization job terminal after the live provider has
     /// completed every required downstream operation. Implementations must
     /// lease and CAS the job so a stale worker cannot hide recoverable work.
@@ -1446,6 +1492,109 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
             .map_err(Into::into)
     }
 
+    fn finalizing_financial_setup_stage(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+    ) -> Result<DraftFinancialSetupStage, DraftPersistenceError> {
+        use cama_db::draft_finalization::{
+            DRAFT_FINALIZATION_INITIAL_STAGE, DraftFinalizationError, draft_completion_key,
+        };
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Err(DraftFinalizationError::JobNotFound { completion_key }.into());
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft financial stage job identity does not match".to_owned(),
+            });
+        }
+        match job.stage.as_str() {
+            DRAFT_FINALIZATION_INITIAL_STAGE => Ok(DraftFinancialSetupStage::Linked),
+            DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE => Ok(DraftFinancialSetupStage::SetupComplete),
+            stage => Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: format!("Draft financial setup job is at unexpected stage {stage}"),
+            }),
+        }
+    }
+
+    fn run_finalizing_financial_setup(
+        &self,
+        guild_id: i64,
+        session_id: u64,
+        pending_match_id: i64,
+        now: i64,
+    ) -> Result<DraftFinancialSetupRun, DraftPersistenceError> {
+        use cama_db::draft_finalization::{DraftFinalizationError, draft_completion_key};
+
+        let completion_key = draft_completion_key(guild_id, session_id);
+        let Some(job) = self.finalization.job(&completion_key)? else {
+            return Err(DraftFinalizationError::JobNotFound { completion_key }.into());
+        };
+        if job.guild_id != guild_id
+            || job.session_id != session_id
+            || job.pending_match_id != pending_match_id
+        {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft financial setup job identity does not match".to_owned(),
+            });
+        }
+        if !matches!(
+            job.stage.as_str(),
+            cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
+                | DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE
+        ) {
+            return Err(DraftPersistenceError::Conflict {
+                guild_id,
+                reason: format!(
+                    "Draft financial setup job is at unexpected stage {}",
+                    job.stage
+                ),
+            });
+        }
+        let lease_owner = format!("draft-live:{guild_id}:{session_id}");
+        let lease_until = now
+            .checked_add(60)
+            .ok_or_else(|| DraftPersistenceError::Conflict {
+                guild_id,
+                reason: "Draft financial setup lease deadline overflowed".to_owned(),
+            })?;
+        let claimed = self.finalization.claim_job_lease(
+            &job.completion_key,
+            job.revision,
+            &lease_owner,
+            now,
+            lease_until,
+        )?;
+        self.finalization
+            .run_leased_financial_setup(&job.completion_key, claimed.revision, &lease_owner, now)
+            .map_err(|error| match error {
+                cama_db::draft_financial_execution::DraftFinancialExecutionError::JobNotFound {
+                    completion_key,
+                } => DraftPersistenceError::Backend {
+                    message: format!("draft finalization job {completion_key} does not exist"),
+                },
+                cama_db::draft_financial_execution::DraftFinancialExecutionError::InvalidPlan(
+                    message,
+                ) => DraftPersistenceError::InvalidEnvelope { message },
+                cama_db::draft_financial_execution::DraftFinancialExecutionError::Conflict {
+                    reason,
+                    ..
+                } => DraftPersistenceError::Conflict { guild_id, reason },
+                other => DraftPersistenceError::Backend {
+                    message: other.to_string(),
+                },
+            })
+    }
+
     fn complete_finalization_job(
         &self,
         guild_id: i64,
@@ -1455,8 +1604,7 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         now: i64,
     ) -> Result<(), DraftPersistenceError> {
         use cama_db::draft_finalization::{
-            DRAFT_FINALIZATION_COMPLETE_STAGE, DRAFT_FINALIZATION_INITIAL_STAGE,
-            DraftFinalizationError, draft_completion_key,
+            DRAFT_FINALIZATION_COMPLETE_STAGE, DraftFinalizationError, draft_completion_key,
         };
 
         let completion_key = draft_completion_key(guild_id, session_id);
@@ -1475,7 +1623,7 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
         if job.stage == DRAFT_FINALIZATION_COMPLETE_STAGE {
             return Ok(());
         }
-        if job.stage != DRAFT_FINALIZATION_INITIAL_STAGE {
+        if job.stage != DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE {
             return Err(DraftPersistenceError::Conflict {
                 guild_id,
                 reason: format!(
@@ -1507,7 +1655,7 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
             session_id,
             pending_match_id,
             expected_draft_revision,
-            DRAFT_FINALIZATION_INITIAL_STAGE,
+            DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
         )?;
         if completed.guild_id != guild_id
             || completed.session_id != session_id
@@ -4035,7 +4183,7 @@ mod tests {
                 .expect("reload exact typed plan"),
             plan
         );
-        persistence
+        let error = persistence
             .complete_finalization_job(
                 TEST_GUILD_ID,
                 created.session_id,
@@ -4043,32 +4191,30 @@ mod tests {
                 linked.envelope.revision,
                 300,
             )
-            .expect("lease and complete linked finalization job");
+            .expect_err("legacy linked job must not skip financial setup");
+        assert!(matches!(error, DraftPersistenceError::Conflict { .. }));
         let finalization =
             cama_db::draft_finalization::DraftFinalizationRepository::new(fixture.path());
         let job = finalization
             .job(&linked.completion_key)
-            .expect("load completed job")
-            .expect("completed job");
+            .expect("load retained legacy job")
+            .expect("retained legacy job");
         assert_eq!(
             job.stage,
-            cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+            cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
         );
-        assert!(
+        assert_eq!(
             finalization
                 .load_incomplete_jobs()
-                .expect("load incomplete jobs")
-                .is_empty()
+                .expect("load retained incomplete jobs"),
+            vec![job]
         );
-        persistence
-            .complete_finalization_job(
-                TEST_GUILD_ID,
-                created.session_id,
-                linked.pending_match_id,
-                linked.envelope.revision,
-                400,
-            )
-            .expect("terminal completion is idempotent");
+        assert_eq!(
+            persistence
+                .load_all()
+                .expect("load retained legacy envelope"),
+            vec![linked.envelope]
+        );
     }
 
     #[test]
@@ -4238,6 +4384,39 @@ mod tests {
             DraftFinalizationPlan::from_json(&mismatched_identity.to_string()),
             Err(DraftPersistenceError::InvalidEnvelope { .. })
         ));
+
+        let setup = persistence
+            .run_finalizing_financial_setup(
+                TEST_GUILD_ID,
+                created.session_id,
+                linked.pending_match_id,
+                1_700_000_100,
+            )
+            .expect("run frozen financial setup");
+        assert!(!setup.replayed);
+        persistence
+            .complete_finalization_job(
+                TEST_GUILD_ID,
+                created.session_id,
+                linked.pending_match_id,
+                linked.envelope.revision,
+                1_700_000_101,
+            )
+            .expect("complete setup-complete finalization");
+        assert!(
+            persistence
+                .load_all()
+                .expect("reload terminal envelopes")
+                .is_empty()
+        );
+        let job = cama_db::draft_finalization::DraftFinalizationRepository::new(fixture.path())
+            .job(&linked.completion_key)
+            .expect("reload terminal v2 job")
+            .expect("terminal v2 job");
+        assert_eq!(
+            job.stage,
+            cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+        );
     }
 
     #[test]

@@ -943,7 +943,7 @@ async fn hydration_reserves_nonempty_pool_and_repeated_ready_keeps_live_reservat
         discord.clone(),
         Arc::new(NoopDraftReminderScheduler),
         Arc::new(NoopDraftNeonObserver),
-        Some(persistence),
+        Some(persistence.clone()),
     )
     .expect("draft provider");
 
@@ -1360,7 +1360,7 @@ async fn final_pick_persists_recovery_fence_before_completion_side_effects() {
 }
 
 #[tokio::test]
-async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
+async fn provider_linked_retry_reuses_frozen_plan_despite_opposite_clock_rng_and_destinations() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
@@ -1393,7 +1393,7 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
         discord,
         Arc::new(NoopDraftReminderScheduler),
         Arc::new(NoopDraftNeonObserver),
-        Some(persistence),
+        Some(persistence.clone()),
     )
     .expect("draft provider");
     provider
@@ -1412,21 +1412,27 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
 
     let first = provider
         .handler
-        .link_finalizing_pending_match(&state, &pending_state, Some(700), Some(701), Some(702))
+        .link_finalizing_pending_match(
+            &state,
+            Some(&pending_state),
+            Some(700),
+            Some(701),
+            Some(702),
+        )
         .await
         .expect("first atomic pending link");
     let connection = Connection::open(database.path()).expect("open linked pending database");
     let raw_payload = connection
         .query_row(
             "SELECT payload FROM pending_matches WHERE pending_match_id=?1",
-            [first.pending_match_id],
+            [first.pending.pending_match_id],
             |row| row.get::<_, String>(0),
         )
         .expect("load linked pending payload");
     let raw_plan = connection
         .query_row(
             "SELECT plan_json FROM draft_finalization_jobs WHERE pending_match_id=?1",
-            [first.pending_match_id],
+            [first.pending.pending_match_id],
             |row| row.get::<_, String>(0),
         )
         .expect("load linked finalization plan");
@@ -1443,38 +1449,44 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
     assert_eq!(typed_plan.thread_embed.channel_id, Some(702));
     assert_eq!(typed_plan.source.channel_id, state.draft_channel_id);
     assert_eq!(typed_plan.source.message_id, state.draft_message_id);
-    let mut future_plan: serde_json::Value =
-        serde_json::from_str(&raw_plan).expect("decode linked plan JSON");
-    future_plan["future_plan_field"] = serde_json::json!({"preserve": true});
-    future_plan["source"]["future_delivery_field"] = serde_json::json!(7);
-    let future_plan_raw =
-        serde_json::to_string_pretty(&future_plan).expect("encode forward-compatible plan");
-    let mut future_payload: serde_json::Value =
-        serde_json::from_str(&raw_payload).expect("decode linked pending payload");
-    future_payload["future_pending_field"] = serde_json::json!({"preserve": true});
-    let future_raw = serde_json::to_string_pretty(&future_payload)
-        .expect("encode forward-compatible pending payload");
-    connection
-        .execute(
-            "UPDATE pending_matches SET payload=?1 WHERE pending_match_id=?2",
-            rusqlite::params![future_raw, first.pending_match_id],
-        )
-        .expect("install forward-compatible pending payload");
-    connection
-        .execute(
-            "UPDATE draft_finalization_jobs SET plan_json=?1 WHERE pending_match_id=?2",
-            rusqlite::params![future_plan_raw, first.pending_match_id],
-        )
-        .expect("install forward-compatible finalization plan");
     drop(connection);
-    let retried = provider
+    let retry_config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("1".to_owned()),
+        "AUTO_SPECTATOR_BET_ENABLED" => Some("true".to_owned()),
+        "FIRST_GAME_POOL_DAILY_AMOUNT" => Some("999999".to_owned()),
+        _ => None,
+    })
+    .expect("opposite retry config");
+    let retry_provider =
+        DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+            database.path(),
+            &retry_config,
+            provider.handler.lobbies.clone(),
+            Arc::clone(&provider.handler.drafts),
+            Arc::clone(&provider.handler.discord),
+            Arc::new(NoopDraftReminderScheduler),
+            Arc::new(NoopDraftNeonObserver),
+            Some(persistence),
+        )
+        .expect("opposite retry provider");
+    let linked_envelope = lock_recover(&provider.handler.persisted_envelopes)
+        .get(&(42, state.session_id))
+        .cloned()
+        .expect("first-writer linked envelope");
+    lock_recover(&retry_provider.handler.persisted_envelopes)
+        .insert((42, state.session_id), linked_envelope);
+    let retried = retry_provider
         .handler
-        .link_finalizing_pending_match(&state, &pending_state, Some(700), Some(701), Some(702))
+        .link_finalizing_pending_match(&state, None, Some(900), Some(901), Some(902))
         .await
         .expect("retry atomic pending link");
-    assert_eq!(retried.pending_match_id, first.pending_match_id);
     assert_eq!(
-        provider
+        retried.pending.pending_match_id,
+        first.pending.pending_match_id
+    );
+    assert_eq!(
+        retry_provider
             .handler
             .pending
             .pending_matches(42)
@@ -1482,7 +1494,7 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
             .len(),
         1
     );
-    let cached = provider
+    let cached = retry_provider
         .handler
         .persisted_envelopes
         .lock()
@@ -1490,13 +1502,23 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
         .get(&(42, state.session_id))
         .cloned()
         .expect("linked envelope");
-    assert_eq!(cached.pending_match_id, Some(first.pending_match_id));
+    assert_eq!(
+        cached.pending_match_id,
+        Some(first.pending.pending_match_id)
+    );
     assert_eq!(cached.revision, 2);
+    assert_eq!(retried.plan, typed_plan);
+    assert_eq!(retried.plan.started_at, 1_700_000_000);
+    assert_eq!(retried.plan.shuffle_timestamp, 1_700_000_000);
+    assert!(!retried.plan.is_bomb_pot);
+    assert_eq!(retried.plan.lobby.channel_id, Some(700));
+    assert_eq!(retried.plan.origin.channel_id, Some(701));
+    assert_eq!(retried.plan.thread_embed.channel_id, Some(702));
     let completion_key = Connection::open(database.path())
         .expect("open database")
         .query_row(
             "SELECT completion_key FROM pending_matches WHERE pending_match_id=?1",
-            [first.pending_match_id],
+            [first.pending.pending_match_id],
             |row| row.get::<_, String>(0),
         )
         .expect("completion key");
@@ -1505,20 +1527,58 @@ async fn provider_atomic_pending_link_retry_reuses_one_completion_key() {
         .expect("reopen database")
         .query_row(
             "SELECT payload FROM pending_matches WHERE pending_match_id=?1",
-            [first.pending_match_id],
+            [first.pending.pending_match_id],
             |row| row.get::<_, String>(0),
         )
         .expect("reload preserved pending payload");
-    assert_eq!(preserved_raw, future_raw);
+    assert_eq!(preserved_raw, raw_payload);
     let preserved_plan = Connection::open(database.path())
         .expect("reopen database for plan")
         .query_row(
             "SELECT plan_json FROM draft_finalization_jobs WHERE pending_match_id=?1",
-            [first.pending_match_id],
+            [first.pending.pending_match_id],
             |row| row.get::<_, String>(0),
         )
         .expect("reload preserved finalization plan");
-    assert_eq!(preserved_plan, future_plan_raw);
+    assert_eq!(preserved_plan, raw_plan);
+}
+
+#[test]
+fn financial_setup_policy_uses_frozen_shuffle_timestamp_at_fixed_pst_boundary() {
+    let (_database, provider, _drafts, _discord) =
+        provider_fixture_with_scheduler(Arc::new(NoopDraftReminderScheduler));
+    let state = state_for_draft();
+    let before_rollover = db_pending_state(
+        &state,
+        1_786_708_799,
+        provider.handler.config.bet_lock_seconds,
+        false,
+    )
+    .expect("pending state before fixed-PST rollover");
+    let at_rollover = db_pending_state(
+        &state,
+        1_786_708_800,
+        provider.handler.config.bet_lock_seconds,
+        false,
+    )
+    .expect("pending state at fixed-PST rollover");
+
+    assert_eq!(
+        provider
+            .handler
+            .financial_setup_policy(&before_rollover)
+            .expect("policy before rollover")
+            .game_date,
+        "2026-08-13"
+    );
+    assert_eq!(
+        provider
+            .handler
+            .financial_setup_policy(&at_rollover)
+            .expect("policy at rollover")
+            .game_date,
+        "2026-08-14"
+    );
 }
 
 #[tokio::test]
@@ -1601,7 +1661,7 @@ async fn terminal_job_cas_failure_retains_linked_job_and_envelope() {
         .expect("retained job");
     assert_eq!(
         job.stage,
-        cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
+        cama_db::draft_financial_execution::DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE
     );
     assert_eq!(
         finalization
@@ -1613,6 +1673,245 @@ async fn terminal_job_cas_failure_retains_linked_job_and_envelope() {
     assert_eq!(envelopes.len(), 1);
     assert!(envelopes[0].finalizing);
     assert_eq!(envelopes[0].pending_match_id, Some(job.pending_match_id));
+}
+
+#[tokio::test]
+async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() {
+    let (database, provider, drafts, persistence, handle, state) =
+        persistent_completion_fixture().await;
+    Connection::open(database.path())
+        .expect("open setup-failure fixture")
+        .execute_batch(
+            "CREATE TRIGGER fail_draft_financial_setup
+             BEFORE INSERT ON draft_financial_effects
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated Draft financial setup failure');
+             END;",
+        )
+        .expect("install setup-failure trigger");
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .complete_owned(
+            42,
+            Arc::clone(&handle),
+            state.clone(),
+            responder.clone(),
+            true,
+        )
+        .await
+        .expect("setup failure returns retry guidance");
+
+    assert!(drafts.has_active_draft(Some(42)));
+    let retained_lobby = provider
+        .handler
+        .lobbies
+        .snapshot(42, AppLobbyKind::Open)
+        .expect("retained lobby");
+    assert_eq!(retained_lobby.player_ids.len(), 10);
+    let envelopes = persistence
+        .load_all()
+        .expect("load retained Draft envelope");
+    assert_eq!(envelopes.len(), 1);
+    assert!(envelopes[0].finalizing);
+    let pending_match_id = envelopes[0]
+        .pending_match_id
+        .expect("retained linked pending match");
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
+    let finalization =
+        cama_db::draft_finalization::DraftFinalizationRepository::new(database.path());
+    let linked_job = finalization
+        .job(&completion_key)
+        .expect("load linked job")
+        .expect("linked job");
+    assert_eq!(
+        linked_job.stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
+    );
+    let connection = Connection::open(database.path()).expect("inspect rolled-back setup");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_financial_effects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count rolled-back effects"),
+        0
+    );
+    assert_eq!(
+        provider
+            .handler
+            .pending
+            .pending_matches(42)
+            .expect("retained pending matches")
+            .len(),
+        1
+    );
+    {
+        let response = responder.responses.lock().expect("retry responses");
+        assert_eq!(response.len(), 1);
+        assert!(response[0].content.contains("safely retained"));
+        assert!(response[0].content.contains("Retry finalization"));
+    }
+    connection
+        .execute_batch("DROP TRIGGER fail_draft_financial_setup;")
+        .expect("remove setup-failure trigger");
+    drop(connection);
+
+    provider
+        .handler
+        .complete_owned(
+            42,
+            handle,
+            state.clone(),
+            Arc::new(TestResponder::default()),
+            true,
+        )
+        .await
+        .expect("retry frozen setup and complete Draft");
+
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert!(
+        persistence
+            .load_all()
+            .expect("reload terminal Draft envelopes")
+            .is_empty()
+    );
+    let terminal_job = finalization
+        .job(&completion_key)
+        .expect("reload terminal job")
+        .expect("terminal job");
+    assert_eq!(
+        terminal_job.stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+    );
+    assert_eq!(terminal_job.pending_match_id, pending_match_id);
+    let connection = Connection::open(database.path()).expect("inspect completed setup");
+    assert!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_financial_effects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count applied effects")
+            > 0
+    );
+    assert_eq!(
+        provider
+            .handler
+            .pending
+            .pending_matches(42)
+            .expect("deduplicated pending matches")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn recreated_provider_explicitly_resumes_only_linked_financial_setup() {
+    let (database, provider, drafts, persistence, handle, state) =
+        persistent_completion_fixture().await;
+    Connection::open(database.path())
+        .expect("open restart fixture")
+        .execute_batch(
+            "CREATE TRIGGER fail_draft_financial_setup_for_restart
+             BEFORE INSERT ON draft_financial_effects
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated pre-restart setup failure');
+             END;",
+        )
+        .expect("install restart setup trigger");
+    provider
+        .handler
+        .complete_owned(
+            42,
+            Arc::clone(&handle),
+            state.clone(),
+            Arc::new(TestResponder::default()),
+            true,
+        )
+        .await
+        .expect("retain linked setup before restart");
+    let lobbies = provider.handler.lobbies.clone();
+    let discord = Arc::clone(&provider.handler.discord);
+    Connection::open(database.path())
+        .expect("reopen restart fixture")
+        .execute_batch("DROP TRIGGER fail_draft_financial_setup_for_restart;")
+        .expect("remove restart setup trigger");
+    drop(provider);
+    drop(handle);
+    drop(drafts);
+
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BOMB_POT_CHANCE" => Some("1".to_owned()),
+        "AUTO_SPECTATOR_BET_ENABLED" => Some("true".to_owned()),
+        "FIRST_GAME_POOL_DAILY_AMOUNT" => Some("999999".to_owned()),
+        _ => None,
+    })
+    .expect("opposite restart config");
+    let recreated_drafts = Arc::new(DraftStateManager::default());
+    let recreated =
+        DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+            database.path(),
+            &config,
+            lobbies,
+            Arc::clone(&recreated_drafts),
+            discord,
+            Arc::new(NoopDraftReminderScheduler),
+            Arc::new(NoopDraftNeonObserver),
+            Some(persistence.clone()),
+        )
+        .expect("recreated provider");
+    let pending = recreated
+        .resume_finalizing_financial_setup(42)
+        .await
+        .expect("explicitly resume frozen financial setup");
+
+    assert!(pending.state.blind_bets_result.is_some());
+    assert!(!recreated_drafts.has_active_draft(Some(42)));
+    let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
+    let job = cama_db::draft_finalization::DraftFinalizationRepository::new(database.path())
+        .job(&completion_key)
+        .expect("load resumed job")
+        .expect("resumed job");
+    assert_eq!(
+        job.stage,
+        cama_db::draft_financial_execution::DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE
+    );
+    let envelopes = persistence
+        .load_all()
+        .expect("load retained finalizing envelope");
+    assert_eq!(envelopes.len(), 1);
+    assert!(envelopes[0].finalizing);
+    assert_eq!(
+        envelopes[0].pending_match_id,
+        Some(pending.pending_match_id)
+    );
+
+    recreated
+        .handler
+        .pending
+        .mutate_pending_match(42, pending.pending_match_id, |state| {
+            state.origin_channel_id = Some(9_876);
+            state.shuffle_message_jump_url =
+                Some("https://discord.test/post-setup-publication".to_owned());
+        })
+        .expect("store post-setup publication metadata");
+    let resumed_after_publication = recreated
+        .resume_finalizing_financial_setup(42)
+        .await
+        .expect("setup-complete resume skips immutable executor replay");
+    assert_eq!(
+        resumed_after_publication.state.origin_channel_id,
+        Some(9_876)
+    );
+    assert_eq!(
+        resumed_after_publication
+            .state
+            .shuffle_message_jump_url
+            .as_deref(),
+        Some("https://discord.test/post-setup-publication")
+    );
 }
 
 #[tokio::test]
@@ -1675,7 +1974,7 @@ async fn pre_job_finalizing_row_is_left_for_explicit_manual_recovery() {
 
     let error = provider
         .handler
-        .link_finalizing_pending_match(&state, &pending_state, None, None, None)
+        .link_finalizing_pending_match(&state, Some(&pending_state), None, None, None)
         .await
         .expect_err("pre-job row must not receive a reconstructed plan");
     assert!(error.contains("finalization job") && error.contains("does not exist"));
@@ -2502,6 +2801,23 @@ async fn completion_persists_pending_seed_blinds_receipt_and_reminder() {
     let scheduled = reminders.scheduled.lock().expect("scheduled");
     assert_eq!(scheduled.len(), 1);
     assert_eq!(scheduled[0].pending_match_id, pending.pending_match_id);
+    let connection = Connection::open(database.path()).expect("inspect legacy completion");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count legacy finalization jobs"),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM draft_financial_effects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count legacy financial effects"),
+        0
+    );
 }
 
 #[tokio::test]
