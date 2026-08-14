@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BACKUP = ROOT / "scripts" / "sqlite_backup.py"
 DEPLOY = ROOT / "scripts" / "deploy-runtime"
 RUNTIME_COMPOSE = ROOT / "scripts" / "runtime-compose"
+POST_DEPLOY_VERIFY = ROOT / "scripts" / "post-deploy-verify"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
 READINESS = ROOT / "rust" / "parity" / "cutover_readiness.tsv"
 REHEARSAL_PLAYER_ID = -9_999_999_991
@@ -104,15 +105,44 @@ if command == "inspect":
         finish("true" if container["running"] else "false")
     if ".Mounts" in template:
         finish(str(container["data_mount"]))
+    if ".Config.Labels" in template:
+        finish(str(container.get("oci_revision", "")))
     if ".State.Health" in template:
         finish(str(container["health"]))
     finish("unknown fake inspect format", 45)
 
 if command == "exec":
     container = current_container()
-    if arguments[1] != container["id"] or arguments[2:] != ["id", "-u"]:
-        finish("unexpected fake exec", 46)
-    finish(str(container["uid"]))
+    if arguments[1] != container["id"]:
+        finish("unexpected fake exec container", 46)
+    if arguments[2:] == ["id", "-u"]:
+        finish(str(container["uid"]))
+    if arguments[2:] == [
+        "cama-rust",
+        "health-check",
+        "--db-path",
+        "/app/data/cama_shuffle.db",
+    ]:
+        state["health_check_calls"] = state.get("health_check_calls", 0) + 1
+        if state.get("health_check_failure"):
+            finish("healthy=false runtime=rust revision=failed", 47)
+        finish(
+            str(
+                container.get(
+                    "healthcheck_output",
+                    "healthy=true runtime=rust revision="
+                    + str(container.get("sha", "unknown")),
+                )
+            )
+        )
+    finish("unexpected fake exec", 46)
+
+if command == "logs":
+    container = current_container()
+    if len(arguments) != 4 or arguments[1] != "--since" or arguments[3] != container["id"]:
+        finish("unexpected fake docker logs", 48)
+    state["log_calls"] = state.get("log_calls", 0) + 1
+    finish("\n".join(str(line) for line in container.get("logs", [])))
 
 if command == "tag":
     if len(arguments) != 3:
@@ -491,12 +521,15 @@ def prepare_deploy_fixture(
     copied_deploy = scripts / "deploy-runtime"
     copied_compose = scripts / "runtime-compose"
     copied_backup = scripts / "sqlite_backup.py"
+    copied_post_deploy_verify = scripts / "post-deploy-verify"
     shutil.copy2(DEPLOY, copied_deploy)
     shutil.copy2(RUNTIME_COMPOSE, copied_compose)
     shutil.copy2(BACKUP, copied_backup)
+    shutil.copy2(POST_DEPLOY_VERIFY, copied_post_deploy_verify)
     assert copied_deploy.read_bytes() == DEPLOY.read_bytes()
     assert copied_compose.read_bytes() == RUNTIME_COMPOSE.read_bytes()
     assert copied_backup.read_bytes() == BACKUP.read_bytes()
+    assert copied_post_deploy_verify.read_bytes() == POST_DEPLOY_VERIFY.read_bytes()
     shutil.copy2(ROOT / "docker-compose.yml", fixture / "docker-compose.yml")
     shutil.copy2(ROOT / "docker-compose.rust.yml", fixture / "docker-compose.rust.yml")
     database_path = data / "cama_shuffle.db"
@@ -589,6 +622,86 @@ def run_deploy(
     )
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert not (fixture / "data" / ".cama-deploy.lock").exists()
+    return result, state
+
+
+def configure_post_deploy_fixture(
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+    health: str = "healthy",
+    oci_revision: str | None = None,
+    healthcheck_output: str | None = None,
+    health_check_failure: bool = False,
+    logs: list[str] | None = None,
+) -> None:
+    """Set the black-box facts exposed by the recording Docker daemon."""
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    container = state["current"]
+    container.update(
+        {
+            "runtime": runtime,
+            "sha": git_sha,
+            "health": health,
+            "uid": 1001,
+            "oci_revision": git_sha if oci_revision is None else oci_revision,
+            "healthcheck_output": healthcheck_output
+            or f"healthy=true runtime={runtime} revision={git_sha}",
+            "logs": logs
+            if logs is not None
+            else [
+                json.dumps(
+                    {
+                        "level": "INFO",
+                        "message": "starting Rust Discord runtime",
+                        "runtime": runtime,
+                        "git_sha": git_sha,
+                    },
+                    sort_keys=True,
+                )
+            ],
+            "env": [
+                f"BOT_RUNTIME={runtime}",
+                f"GIT_SHA={git_sha}",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+    )
+    state["health_check_calls"] = 0
+    state["health_check_failure"] = health_check_failure
+    state["log_calls"] = 0
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+def run_post_deploy_verify(
+    fixture: Path,
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fixture / 'fake-bin'}{os.pathsep}{environment['PATH']}",
+            "CAMA_FAKE_DOCKER_STATE": str(state_path),
+            "BOT_RUNTIME": runtime,
+            "GIT_SHA": git_sha,
+            "POST_DEPLOY_LOG_WINDOW_SECONDS": "300",
+        }
+    )
+    result = subprocess.run(
+        [str(fixture / "scripts" / "post-deploy-verify")],
+        cwd=fixture,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
     return result, state
 
 
@@ -931,11 +1044,123 @@ def assert_deploy_runtime_rehearsal() -> None:
             for event in events
         )
 
+        verifier_success, verifier_success_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-success",
+            scenario="post_deploy_success",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_success_state,
+            runtime="rust",
+            git_sha="verified-rust-sha",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_success,
+            verifier_success_state,
+            runtime="rust",
+            git_sha="verified-rust-sha",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "post-deploy verification passed" in result.stdout
+        assert state["health_check_calls"] == 1
+        assert state["log_calls"] == 1
+
+        verifier_mismatch, verifier_mismatch_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-mismatch",
+            scenario="post_deploy_mismatch",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="expected-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "GIT_SHA mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+            oci_revision="different-image-revision",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "OCI revision label mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        verifier_health_failure, verifier_health_failure_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-health-failure",
+            scenario="post_deploy_health_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_health_failure_state,
+            runtime="rust",
+            git_sha="unhealthy-rust-sha",
+            health="unhealthy",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_health_failure,
+            verifier_health_failure_state,
+            runtime="rust",
+            git_sha="unhealthy-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "Docker health is unhealthy" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        verifier_log_failure, verifier_log_failure_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-log-failure",
+            scenario="post_deploy_log_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_log_failure_state,
+            runtime="rust",
+            git_sha="log-mismatch-rust-sha",
+            logs=["not-json"],
+        )
+        result, state = run_post_deploy_verify(
+            verifier_log_failure,
+            verifier_log_failure_state,
+            runtime="rust",
+            git_sha="log-mismatch-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "recent Rust logs failed JSON" in result.stderr
+        assert state["health_check_calls"] == 1
+        assert state["log_calls"] == 1
+
 
 def main() -> int:
     assert BACKUP.is_file(), BACKUP
     assert DEPLOY.is_file(), DEPLOY
     assert RUNTIME_COMPOSE.is_file(), RUNTIME_COMPOSE
+    assert POST_DEPLOY_VERIFY.is_file(), POST_DEPLOY_VERIFY
     assert DEPLOY_WORKFLOW.is_file(), DEPLOY_WORKFLOW
     assert READINESS.is_file(), READINESS
     assert_backup_contract()

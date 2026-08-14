@@ -234,6 +234,22 @@ stopped marker. The loopback command-registration event is only a transport
 seam; it is not evidence of a live Discord REST write or a production gateway
 session, so `container_health_smoke` remains open until those are recorded.
 
+For a Rust service already running through the composed `bot` service, the
+black-box post-deploy verifier checks the selected runtime and revision, UID
+1001, the `/app/data` bind mount, Docker health, and (when present) the OCI
+revision label:
+
+```bash
+BOT_RUNTIME=rust GIT_SHA="$DEPLOY_SHA" ./scripts/post-deploy-verify
+```
+
+It also runs `cama-rust health-check` inside the container. Recent Rust logs
+must be JSON and must contain the structured `starting Rust Discord runtime`
+record with matching `runtime` and `git_sha`; missing startup metadata or a
+non-JSON record fails closed. That check depends on the Rust startup tracing
+hook and is evidence for the running container only—it does not establish a
+live Discord gateway, alert delivery, or close a cutover-readiness gate.
+
 The default Compose graph still starts only the Python `bot`. All deployments
 now go through a checked same-service selector; leaving `BOT_RUNTIME` unset is
 equivalent to selecting `python`:
