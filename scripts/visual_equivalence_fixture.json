@@ -97,5 +97,35 @@
       {"hero_id": 3, "games": 7, "wins": 5, "losses": 2, "bans": 0, "primary_role": 3}
     ],
     "portrait_mode": "cache_miss_fallback"
+  },
+  "hero_grid": {
+    "title": "Hero Grid: Visual Fixture",
+    "min_games": 2,
+    "players": [
+      {"discord_id": 101, "name": "Ada Lovelace"},
+      {"discord_id": 102, "name": "Linus Torvalds"},
+      {"discord_id": 103, "name": "Grace Hopper"},
+      {"discord_id": 104, "name": "Dennis Ritchie"}
+    ],
+    "stats": [
+      {"discord_id": 101, "hero_id": 1, "games": 12, "wins": 8},
+      {"discord_id": 101, "hero_id": 5, "games": 8, "wins": 4},
+      {"discord_id": 101, "hero_id": 6, "games": 3, "wins": 1},
+      {"discord_id": 101, "hero_id": 11, "games": 1, "wins": 1},
+      {"discord_id": 102, "hero_id": 1, "games": 6, "wins": 2},
+      {"discord_id": 102, "hero_id": 5, "games": 10, "wins": 6},
+      {"discord_id": 102, "hero_id": 6, "games": 5, "wins": 3},
+      {"discord_id": 102, "hero_id": 17, "games": 2, "wins": 1},
+      {"discord_id": 103, "hero_id": 1, "games": 4, "wins": 2},
+      {"discord_id": 103, "hero_id": 5, "games": 3, "wins": 1},
+      {"discord_id": 103, "hero_id": 6, "games": 9, "wins": 7},
+      {"discord_id": 103, "hero_id": 11, "games": 6, "wins": 2},
+      {"discord_id": 103, "hero_id": 17, "games": 3, "wins": 2},
+      {"discord_id": 104, "hero_id": 1, "games": 2, "wins": 1},
+      {"discord_id": 104, "hero_id": 5, "games": 7, "wins": 3},
+      {"discord_id": 104, "hero_id": 6, "games": 4, "wins": 2},
+      {"discord_id": 104, "hero_id": 11, "games": 8, "wins": 5},
+      {"discord_id": 104, "hero_id": 17, "games": 1, "wins": 0}
+    ]
   }
 }

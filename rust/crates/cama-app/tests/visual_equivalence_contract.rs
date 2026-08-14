@@ -13,6 +13,7 @@ use cama_app::drawing::{
     AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
     draw_prediction_market_chart, draw_rating_history_chart,
 };
+use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest, decode_png_raster,
@@ -21,6 +22,7 @@ use cama_app::pet_assets::{
 use cama_app::post_match_gif_media::render_post_match_gif;
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
+use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
 use cama_domain::pet::{PetMood, PetStage};
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
@@ -40,6 +42,7 @@ struct Fixture {
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
     scout: ScoutFixture,
+    hero_grid: HeroGridFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +107,28 @@ struct ScoutHeroFixture {
     losses: i64,
     bans: i64,
     primary_role: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridFixture {
+    title: String,
+    min_games: i64,
+    players: Vec<HeroGridPlayerFixture>,
+    stats: Vec<HeroGridStatFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridPlayerFixture {
+    discord_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridStatFixture {
+    discord_id: i64,
+    hero_id: i64,
+    games: i64,
+    wins: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,6 +298,79 @@ fn visual_fixture_has_typed_chart_and_animation_inputs() {
     assert_eq!(fixture.scout.heroes.len(), 3);
     assert_eq!(fixture.scout.heroes[0].hero_id, 1);
     assert_eq!(fixture.scout.portrait_mode, "cache_miss_fallback");
+    assert_eq!(fixture.hero_grid.title, "Hero Grid: Visual Fixture");
+    assert_eq!(fixture.hero_grid.min_games, 2);
+    assert_eq!(fixture.hero_grid.players.len(), 4);
+    assert_eq!(fixture.hero_grid.stats.len(), 18);
+    assert_eq!(fixture.hero_grid.players[0].discord_id, 101);
+    assert_eq!(fixture.hero_grid.stats[0].hero_id, 1);
+}
+
+#[test]
+fn native_hero_grid_fixture_render_is_deterministic_and_preserves_grid_geometry() {
+    let fixture = fixture();
+    let stats = fixture
+        .hero_grid
+        .stats
+        .iter()
+        .map(|stat| HeroGridStat {
+            discord_id: stat.discord_id,
+            hero_id: stat.hero_id,
+            games: stat.games,
+            wins: stat.wins,
+        })
+        .collect::<Vec<_>>();
+    let players = fixture
+        .hero_grid
+        .players
+        .iter()
+        .map(|player| HeroGridPlayer {
+            discord_id: player.discord_id,
+            name: player.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let first = draw_hero_grid(
+        &stats,
+        &players,
+        fixture.hero_grid.min_games,
+        &fixture.hero_grid.title,
+    )
+    .expect("render Hero Grid fixture")
+    .into_inner();
+    let second = draw_hero_grid(
+        &stats,
+        &players,
+        fixture.hero_grid.min_games,
+        &fixture.hero_grid.title,
+    )
+    .expect("render Hero Grid fixture again")
+    .into_inner();
+    assert_eq!(first, second);
+    let raster = decode_png_raster(&first).expect("Hero Grid fixture must be a PNG");
+    assert_eq!((raster.width, raster.height), (370, 406));
+    for expected_color in [
+        [87, 242, 135, 255],
+        [124, 179, 66, 255],
+        [254, 231, 92, 255],
+        [237, 66, 69, 255],
+    ] {
+        assert!(
+            raster
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected_color),
+            "Hero Grid fixture should include every win-rate color bracket"
+        );
+    }
+    assert!(
+        raster
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3].iter().copied().max().unwrap_or(0) > FOREGROUND_THRESHOLD)
+            .count()
+            > 1_000,
+        "Hero Grid fixture must contain visible rows, labels, and circles"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ another.  Run this explicit, dependency-aware gate from the repository root:
 
 It renders production prediction-market, balance-journey, rating-history,
 OpenDota advantage, betting wheel/explosion, Blame Luke, scout report,
-post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
+Hero Grid, post-match, terminal-crash, pinnacle phase-3, and one production pet-card attachment from
 the shared JSON fixture, then decodes both
 sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
@@ -106,6 +106,14 @@ SCOUT_MAX_MAE = 0.080
 SCOUT_MAX_RMS = 0.180
 SCOUT_MIN_FOREGROUND_GRID_IOU = 0.75
 SCOUT_MIN_FOREGROUND_COUNT_RATIO = 0.50
+# Hero Grid uses the live renderer's fixed table geometry and semantic circle
+# colors, while the Rust side uses a native bitmap font and raster primitives.
+# Keep the gate broad enough for those intentional backend differences while
+# rejecting missing rows, columns, or circle clusters.
+HERO_GRID_MAX_MAE = 0.120
+HERO_GRID_MAX_RMS = 0.250
+HERO_GRID_MIN_FOREGROUND_GRID_IOU = 0.75
+HERO_GRID_MIN_FOREGROUND_COUNT_RATIO = 0.50
 # The pet path shares checked-in RGBA components, so it gets a tighter pixel
 # gate than the intentionally native-only chart/GIF ports.  The foreground
 # checks still guard against a blank or badly registered component composite.
@@ -158,9 +166,10 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "explosion",
         "blame_luke",
         "scout",
+        "hero_grid",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, blame_luke, and scout objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, pet, wheel, explosion, blame_luke, scout, and hero_grid objects"
         )
     return fixture
 
@@ -172,7 +181,12 @@ def render_python(
 ) -> None:
     from utils import dig_drawing, pet_compositor
     from utils.drawing import analysis as drawing_analysis
-    from utils.drawing import draw_advantage_graph, draw_balance_chart, draw_rating_history_chart
+    from utils.drawing import (
+        draw_advantage_graph,
+        draw_balance_chart,
+        draw_hero_grid,
+        draw_rating_history_chart,
+    )
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
     from utils.pet_assets import get_pet_card
@@ -311,6 +325,22 @@ def render_python(
             title=str(scout["title"]),
         ).getvalue()
     (output_dir / "python_scout.png").write_bytes(scout_bytes)
+
+    # This is the live Python `/herogrid` renderer boundary: the command
+    # resolves its source and repository data before calling draw_hero_grid.
+    # Keep the cross-language recording at that production renderer boundary
+    # with deterministic, typed fixture rows and insertion-ordered players.
+    hero_grid = fixture["hero_grid"]
+    hero_grid_bytes = draw_hero_grid(
+        [dict(stat) for stat in hero_grid["stats"]],
+        {
+            int(player["discord_id"]): str(player["name"])
+            for player in hero_grid["players"]
+        },
+        min_games=int(hero_grid["min_games"]),
+        title=str(hero_grid["title"]),
+    ).getvalue()
+    (output_dir / "python_hero_grid.png").write_bytes(hero_grid_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -989,6 +1019,46 @@ def check_scout(python_path: Path, rust_path: Path, expected_rows: int) -> list[
     return []
 
 
+def check_hero_grid(python_path: Path, rust_path: Path, expected_players: int, expected_heroes: int) -> list[str]:
+    """Compare the live Python/Rust Hero Grid raster geometry and semantics."""
+
+    python_size, python_pixels = rgba_pixels(python_path)
+    rust_size, rust_pixels = rgba_pixels(rust_path)
+    expected_size = (
+        15 + 120 + expected_heroes * 44 + 15,
+        15 + 30 + 90 + expected_players * 44 + 80 + 15,
+    )
+    if python_size != expected_size or rust_size != python_size:
+        raise AssertionError(
+            f"hero grid dimensions differ or are invalid: Python {python_size}, Rust {rust_size}; "
+            f"expected {expected_size}"
+        )
+    mae, rms, exact = pixel_metrics(python_pixels, rust_pixels)
+    foreground_ratio, foreground_iou = compare_foreground_structure(
+        python_pixels,
+        rust_pixels,
+        python_size,
+        grid=(10, 10),
+        margin=8,
+        minimum_grid_iou=HERO_GRID_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=HERO_GRID_MIN_FOREGROUND_COUNT_RATIO,
+        label="hero grid",
+    )
+    print(
+        f"hero_grid: size={python_size[0]}x{python_size[1]} players={expected_players} "
+        f"heroes={expected_heroes} MAE={mae:.5f} RMS={rms:.5f} exact_channels={exact:.3%} "
+        f"foreground_ratio={foreground_ratio:.3f} grid_IoU={foreground_iou:.3f} "
+        f"python_sha={sha256(python_pixels)} rust_sha={sha256(rust_pixels)}"
+    )
+    if mae > HERO_GRID_MAX_MAE or rms > HERO_GRID_MAX_RMS:
+        raise AssertionError(
+            "hero grid pixel drift exceeds threshold: "
+            f"MAE {mae:.5f} <= {HERO_GRID_MAX_MAE:.5f}, "
+            f"RMS {rms:.5f} <= {HERO_GRID_MAX_RMS:.5f}"
+        )
+    return []
+
+
 def check_terminal_crash(python_path: Path, rust_path: Path) -> list[str]:
     """Compare the production Python/Rust bankruptcy crash renderers.
 
@@ -1310,6 +1380,12 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir / "python_scout.png",
                 output_dir / "rust_scout.png",
                 expected_rows=len(fixture["scout"]["heroes"]),
+            )
+            check_hero_grid(
+                output_dir / "python_hero_grid.png",
+                output_dir / "rust_hero_grid.png",
+                expected_players=len(fixture["hero_grid"]["players"]),
+                expected_heroes=5,
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

@@ -16,6 +16,7 @@ use cama_app::drawing::{
     AdvantageData, BalancePoint, RatingHistoryEntry, draw_advantage_graph, draw_balance_chart,
     draw_prediction_market_chart, draw_rating_history_chart,
 };
+use cama_app::herogrid::draw_hero_grid;
 use cama_app::neon_degen::GifAsset;
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
@@ -23,6 +24,7 @@ use cama_app::pet_assets::{
 use cama_app::post_match_gif_media::render_post_match_gif;
 use cama_app::scout::media::NativeScoutImageRenderer;
 use cama_app::scout::{ScoutData, ScoutHero, ScoutImageRenderer, ScoutReportInput};
+use cama_db::herogrid_repository::{HeroGridPlayer, HeroGridStat};
 use cama_domain::pet::{PetMood, PetStage};
 use serde::Deserialize;
 
@@ -38,6 +40,7 @@ struct Fixture {
     pet: PetFixture,
     blame_luke: BlameLukeFixture,
     scout: ScoutFixture,
+    hero_grid: HeroGridFixture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +105,28 @@ struct ScoutHeroFixture {
     losses: i64,
     bans: i64,
     primary_role: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridFixture {
+    title: String,
+    min_games: i64,
+    players: Vec<HeroGridPlayerFixture>,
+    stats: Vec<HeroGridStatFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridPlayerFixture {
+    discord_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeroGridStatFixture {
+    discord_id: i64,
+    hero_id: i64,
+    games: i64,
+    wins: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,6 +329,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         title: fixture.scout.title,
     })?;
     fs::write(Path::new(&output_dir).join("rust_scout.png"), scout_png)?;
+
+    // Exercise the same renderer called by the live Rust HeroGridCommandService
+    // after its repository/source-resolution step.
+    let hero_grid = &fixture.hero_grid;
+    let stats = hero_grid
+        .stats
+        .iter()
+        .map(|stat| HeroGridStat {
+            discord_id: stat.discord_id,
+            hero_id: stat.hero_id,
+            games: stat.games,
+            wins: stat.wins,
+        })
+        .collect::<Vec<_>>();
+    let players = hero_grid
+        .players
+        .iter()
+        .map(|player| HeroGridPlayer {
+            discord_id: player.discord_id,
+            name: player.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let hero_grid_png =
+        draw_hero_grid(&stats, &players, hero_grid.min_games, &hero_grid.title)?.into_inner();
+    fs::write(
+        Path::new(&output_dir).join("rust_hero_grid.png"),
+        hero_grid_png,
+    )?;
 
     let animation = render_post_match_gif(
         &fixture.animation.name,

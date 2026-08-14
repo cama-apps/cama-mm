@@ -16,6 +16,7 @@ use cama_db::herogrid_repository::{
 };
 
 use crate::embeds::LobbyKind;
+use crate::hero_lookup::hero_short_name;
 
 pub const AMBIGUOUS_LOBBY_MESSAGE: &str = "❓ You're queued in both 🍽️ All You Can Feed and 🧀 Whine & Cheese — add the `lobby` option to pick one.";
 pub const NO_LOBBY_SOURCE_MESSAGE: &str = "No active lobby, pending match, draft, or recent match found. Use `source: All Players` to show all players.";
@@ -637,7 +638,7 @@ pub fn draw_hero_grid(
             raster.draw_vertical_text(
                 i32::try_from(center_x).unwrap_or(i32::MAX),
                 i32::try_from(bottom).unwrap_or(i32::MAX),
-                &format!("H{hero_id}"),
+                &hero_short_name(*hero_id),
                 DISCORD_WHITE,
             );
         }

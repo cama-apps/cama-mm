@@ -19,6 +19,7 @@ from scripts.visual_equivalence import (
     DEFAULT_FIXTURE,
     check_blame_luke,
     check_explosion,
+    check_hero_grid,
     check_pet,
     check_scout,
     check_wheel,
@@ -87,6 +88,11 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert fixture["scout"]["title"] == "SCOUT: Radiant"
     assert len(fixture["scout"]["heroes"]) == 3
     assert fixture["scout"]["portrait_mode"] == "cache_miss_fallback"
+    assert fixture["hero_grid"]["title"] == "Hero Grid: Visual Fixture"
+    assert fixture["hero_grid"]["min_games"] == 2
+    assert len(fixture["hero_grid"]["players"]) == 4
+    assert len(fixture["hero_grid"]["stats"]) == 18
+    assert fixture["hero_grid"]["players"][0] == {"discord_id": 101, "name": "Ada Lovelace"}
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -126,6 +132,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
         second / "python_blame_luke.gif"
     ).read_bytes()
     assert (first / "python_scout.png").read_bytes() == (second / "python_scout.png").read_bytes()
+    assert (first / "python_hero_grid.png").read_bytes() == (
+        second / "python_hero_grid.png"
+    ).read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
     assert loop == 1
@@ -187,6 +196,9 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     rust_scout = first / "rust_scout.png"
     rust_scout.write_bytes((first / "python_scout.png").read_bytes())
     check_scout(first / "python_scout.png", rust_scout, expected_rows=3)
+    rust_hero_grid = first / "rust_hero_grid.png"
+    rust_hero_grid.write_bytes((first / "python_hero_grid.png").read_bytes())
+    check_hero_grid(first / "python_hero_grid.png", rust_hero_grid, 4, 5)
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():
