@@ -251,9 +251,9 @@ pub const EXTERNAL_PROVIDERS: &[CutoverItem] = &[
         "Discord PNG byte attachment upload (Hero Grid)",
         "typed response + Serenity attachment adapter",
     ),
-    required(
+    wired(
         "remaining Discord media upload/edit surfaces",
-        "typed media adapters per command",
+        "typed command/worker upload, replacement, preservation, clear, and delete lifecycles + Serenity transport",
     ),
     required("image/chart rendering", "Rust rendering adapter"),
 ];
@@ -340,6 +340,7 @@ mod tests {
     use super::*;
 
     const MAIN_SOURCE: &str = include_str!("main.rs");
+    const SERENITY_TRANSPORT_SOURCE: &str = include_str!("serenity_transport.rs");
 
     #[test]
     fn all_python_extensions_are_explicit_without_overclaiming_partial_lobby_wiring() {
@@ -393,6 +394,29 @@ mod tests {
                 "shared reqwest adapter consumed by /profile Dota component",
             )
         );
+    }
+
+    #[test]
+    fn remaining_discord_media_lifecycles_and_followup_preservation_are_wired() {
+        assert_eq!(
+            EXTERNAL_PROVIDERS[3],
+            wired(
+                "remaining Discord media upload/edit surfaces",
+                "typed command/worker upload, replacement, preservation, clear, and delete lifecycles + Serenity transport",
+            )
+        );
+        for seam in [
+            "struct ComponentOnlyFollowupEdit",
+            "fn component_only_followup_edit(",
+            "async fn edit_component_only_followup(",
+            "http.edit_followup_message(interaction_token, message_id, &edit, Vec::new())",
+            "component_only_followup_edit_omits_serenity_empty_attachment_list",
+        ] {
+            assert!(
+                SERENITY_TRANSPORT_SOURCE.contains(seam),
+                "missing attachment-preserving followup seam {seam}"
+            );
+        }
     }
 
     #[test]
