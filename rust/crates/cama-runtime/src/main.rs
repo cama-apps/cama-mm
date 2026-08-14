@@ -897,6 +897,7 @@ async fn run_serve() -> ExitCode {
         registration_provider.region_backfill_observer(),
         trivia_provider.gateway_observer(),
         dig_provider.gateway_observer(),
+        blame_luke_provider.gateway_observer(),
         survey_provider.gateway_observer(),
         draft_provider.gateway_observer(),
     ]);

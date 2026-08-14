@@ -4,13 +4,14 @@ use std::sync::Mutex;
 use cama_app::blame_luke_media::{
     BLAME_LUKE_FINAL_HOLD_MS, BLAME_LUKE_FRAME_COUNT, BLAME_LUKE_HEIGHT, BLAME_LUKE_WIDTH,
 };
-use cama_db::blame_luke::BLAME_LUKE_COST;
+use cama_db::blame_luke::{BLAME_LUKE_COST, BlameLukeOperationIdentity};
 use cama_db::schema_manager::initialize_or_migrate;
 use gif::{ColorOutput, DecodeOptions};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use super::*;
+use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
 
 const USER: i64 = 42;
@@ -152,6 +153,14 @@ impl BlameLukeReasonSelector for FixedSelector {
     }
 }
 
+struct PanicSelector;
+
+impl BlameLukeReasonSelector for PanicSelector {
+    fn select(&self, _candidate_count: usize) -> usize {
+        panic!("selector must not run for a pending interaction replay")
+    }
+}
+
 struct FixedRenderer {
     result: Mutex<Result<Vec<u8>, String>>,
     calls: Mutex<Vec<usize>>,
@@ -183,9 +192,27 @@ impl BlameLukeRenderPort for FixedRenderer {
     }
 }
 
+struct EmptyMemberSource;
+
+#[async_trait]
+impl GuildMemberPageSource for EmptyMemberSource {
+    async fn fetch_page(
+        &self,
+        _guild_id: u64,
+        _after: Option<u64>,
+        _limit: u64,
+    ) -> Result<Vec<GatewayMember>, String> {
+        Ok(Vec::new())
+    }
+}
+
 struct ErrorWallet;
 
 impl BlameLukeWalletPort for ErrorWallet {
+    fn eligibility(&self, _user_id: i64, _guild_id: i64) -> Result<BlameLukeChargeOutcome, String> {
+        Err("database unavailable".to_owned())
+    }
+
     fn charge(
         &self,
         _user_id: i64,
@@ -193,6 +220,27 @@ impl BlameLukeWalletPort for ErrorWallet {
         _selected_reason_index: usize,
     ) -> Result<BlameLukeChargeOutcome, String> {
         Err("database unavailable".to_owned())
+    }
+
+    fn refund(&self, _user_id: i64, _guild_id: i64) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct DriftWallet;
+
+impl BlameLukeWalletPort for DriftWallet {
+    fn eligibility(&self, _user_id: i64, _guild_id: i64) -> Result<BlameLukeChargeOutcome, String> {
+        Ok(BlameLukeChargeOutcome::Charged)
+    }
+
+    fn charge(
+        &self,
+        _user_id: i64,
+        _guild_id: i64,
+        _selected_reason_index: usize,
+    ) -> Result<BlameLukeChargeOutcome, String> {
+        Ok(BlameLukeChargeOutcome::InsufficientFunds)
     }
 
     fn refund(&self, _user_id: i64, _guild_id: i64) -> Result<(), String> {
@@ -432,7 +480,34 @@ async fn wallet_error_says_not_charged_and_never_defers_or_renders() {
 }
 
 #[tokio::test]
-async fn defer_failure_refunds_clicker_on_migrated_sqlite() {
+async fn wallet_drift_after_defer_uses_ephemeral_followup_not_second_initial_response() {
+    let renderer = Arc::new(FixedRenderer::bytes(b"unused"));
+    let provider = BlameLukeRegistrationProvider::with_ports(
+        Arc::new(DriftWallet),
+        Arc::new(FixedSelector(1)),
+        renderer,
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .component_handler(BLAME_LUKE_COMPONENT_ID)
+        .expect("component handler")
+        .handle(
+            component_request(USER, "Drifting Clicker"),
+            responder.clone(),
+        )
+        .await
+        .expect("wallet drift response");
+
+    assert!(responder.immediate.lock().expect("immediate").is_empty());
+    assert_eq!(*responder.thinking_defers.lock().expect("defers"), [false]);
+    let followups = responder.followups.lock().expect("followups");
+    assert_eq!(followups.len(), 1);
+    assert_eq!(followups[0].content, INSUFFICIENT);
+    assert!(followups[0].ephemeral);
+}
+
+#[tokio::test]
+async fn defer_failure_does_not_charge_clicker_on_migrated_sqlite() {
     let fixture = Fixture::migrated();
     fixture.register(USER, 100);
     let provider = provider_with(&fixture, 1, Arc::new(FixedRenderer::bytes(b"unused")));
@@ -445,13 +520,7 @@ async fn defer_failure_refunds_clicker_on_migrated_sqlite() {
         .expect("defer failure is absorbed");
 
     assert_eq!(fixture.balance(USER), 100);
-    assert_eq!(
-        fixture.ledger(),
-        [
-            (-10, "blame_luke".to_owned(), Some("1".to_owned())),
-            (10, "blame_luke_refund".to_owned(), None),
-        ]
-    );
+    assert!(fixture.ledger().is_empty());
     assert!(responder.followups.lock().expect("followups").is_empty());
 }
 
@@ -469,13 +538,7 @@ async fn test_render_failure_refunds_clicker() {
         .expect("render failure response");
 
     assert_eq!(fixture.balance(USER), 100);
-    assert_eq!(
-        fixture.ledger(),
-        [
-            (-10, "blame_luke".to_owned(), Some("4".to_owned())),
-            (10, "blame_luke_refund".to_owned(), None),
-        ]
-    );
+    assert!(fixture.ledger().is_empty());
     let followups = responder.followups.lock().expect("followups");
     assert_eq!(followups[0].content, RENDER_ERROR);
     assert!(!followups[0].content.contains("JC"));
@@ -506,6 +569,75 @@ async fn delivery_failure_refunds_clicker_after_successful_render() {
             (10, "blame_luke_refund".to_owned(), None),
         ]
     );
+}
+
+#[tokio::test]
+async fn ready_recovery_refunds_pending_charge_after_simulated_restart() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 100);
+    let repository = BlameLukeRepository::new(&fixture.path);
+    repository
+        .charge_for_interaction(&BlameLukeOperationIdentity {
+            interaction_id: 901,
+            user_id: USER,
+            guild_id: GUILD,
+            channel_id: Some(CHANNEL as i64),
+            selected_reason_index: 2,
+            user_display_name: "Crash Clicker".to_owned(),
+        })
+        .expect("durable pending charge");
+    assert_eq!(fixture.balance(USER), 100 - BLAME_LUKE_COST);
+
+    let provider = BlameLukeRegistrationProvider::new(&fixture.path);
+    let observer = provider.gateway_observer();
+    let context = ReadyRecoveryContext::new([GUILD as u64], Arc::new(EmptyMemberSource));
+    let report = observer.ready_recovery(context.clone()).await;
+    assert!(report.failures.is_empty());
+    assert_eq!(report.guilds_refreshed, 1);
+    assert_eq!(report.members_refreshed, 1);
+    assert_eq!(fixture.balance(USER), 100);
+
+    let repeat = observer.ready_recovery(context).await;
+    assert!(repeat.failures.is_empty());
+    assert_eq!(repeat.guilds_refreshed, 0);
+    assert_eq!(repeat.members_refreshed, 0);
+    assert_eq!(fixture.balance(USER), 100);
+}
+
+#[tokio::test]
+async fn pending_duplicate_replays_persisted_reason_without_selecting_again() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 100);
+    let repository = BlameLukeRepository::new(&fixture.path);
+    repository
+        .charge_for_interaction(&BlameLukeOperationIdentity {
+            interaction_id: 2,
+            user_id: USER,
+            guild_id: GUILD,
+            channel_id: Some(CHANNEL as i64),
+            selected_reason_index: 1,
+            user_display_name: "Clicker".to_owned(),
+        })
+        .expect("durable pending charge");
+    let provider = BlameLukeRegistrationProvider::with_ports(
+        Arc::new(BlameLukeRepository::new(&fixture.path)),
+        Arc::new(PanicSelector),
+        Arc::new(FixedRenderer::bytes(b"GIF89a fixture")),
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .component_handler(BLAME_LUKE_COMPONENT_ID)
+        .expect("component handler")
+        .handle(component_request(USER, "Clicker"), responder.clone())
+        .await
+        .expect("replay pending interaction");
+
+    assert_eq!(fixture.balance(USER), 100 - BLAME_LUKE_COST);
+    assert_eq!(
+        fixture.ledger(),
+        [(-10, "blame_luke".to_owned(), Some("1".to_owned()))]
+    );
+    assert_eq!(responder.followups.lock().expect("followups").len(), 1);
 }
 
 #[tokio::test]

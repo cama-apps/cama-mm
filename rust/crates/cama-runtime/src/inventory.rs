@@ -484,6 +484,7 @@ mod tests {
             "registry.add_provider(&enrichment_provider)",
             "TriviaRegistrationProvider::new(",
             "trivia_provider.gateway_observer()",
+            "blame_luke_provider.gateway_observer()",
             "registry.add_provider(&trivia_provider)",
             "ManaRegistrationProvider::new(",
             "registry.add_provider(&mana_provider)",
