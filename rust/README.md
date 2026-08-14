@@ -8,10 +8,10 @@ behavior. Rust becomes eligible for cutover only after every behavior contract
 is mapped, tested, wired to production adapters, and exercised against the same
 SQLite storage contract.
 
-Current measured status: **5,456 of 6,633 Python test cases mapped (82.26%)**,
-with **54 of 67 production runtime inventory items wired**. Operational cutover
-status: **1 of 14 required readiness gates complete**; the default and only live
-runtime remains Python.
+Current measured status: **6,746 of 6,746 Python test cases mapped (100%)**.
+The parity ledger is complete, but operational cutover status is **4 of 14
+required readiness gates complete**; **66 of 67 production runtime inventory
+items are wired**, and the default and only live runtime remains Python.
 
 ## Non-negotiable invariants
 
@@ -19,7 +19,7 @@ runtime remains Python.
    A Rust shadow never receives the production bot token. Both runtime artifacts
    take the same non-blocking advisory lock next to the SQLite file, so an
    accidental overlap fails before migration, database access, or gateway login.
-2. Rust now owns clean-database initialization and all 226 existing-database
+2. Rust now owns clean-database initialization and all 229 existing-database
    migrations through the shared ledger. Python is retained only as differential
    and rollback evidence; the stopped Python container is not a migration or
    startup dependency.
@@ -73,7 +73,7 @@ runtime remains Python.
 - `cama-runtime`: the production bot entrypoint under construction. The checked-in
   implementation starts a supervised Tokio/Serenity gateway and provides typed
   command, component, response, worker, and lifecycle boundaries. Its immutable
-  startup configuration graph covers every one of `config.py`'s 214 environment
+  startup configuration graph covers every one of `config.py`'s 215 environment
   keys, provider-bound/redacted secrets, derived aliases, and migration inputs;
   a Python-AST drift test keeps that catalog exact. The
   mechanical runtime inventory still reports the unwired command providers,
@@ -155,8 +155,9 @@ progress. The cutover gate is stricter:
 cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
 ```
 
-That command must remain failing until all 6,722 current cases—and any cases
-added later—have an explicit passing Rust contract, and every required gate in
+A complete **6,746/6,746** parity ledger is necessary but not sufficient: this
+command must remain failing until all 6,746 current cases—and any cases added
+later—have an explicit passing Rust contract, and every required gate in
 `parity/cutover_readiness.tsv` is marked complete with evidence. The required
 gate names are compiled into `xtask`, so deleting an open row cannot make the
 cutover check pass.
