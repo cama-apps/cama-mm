@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
+use chrono::{TimeZone, Utc};
+
 pub const DISCORD_BG: Rgba = Rgba::rgb(0x36, 0x39, 0x3f);
 pub const DISCORD_DARKER: Rgba = Rgba::rgb(0x2f, 0x31, 0x36);
 pub const DISCORD_ACCENT: Rgba = Rgba::rgb(0x58, 0x65, 0xf2);
@@ -194,6 +196,38 @@ impl Raster {
         }
     }
 
+    fn text_width(text: &str, scale: i32) -> i32 {
+        text.chars()
+            .count()
+            .try_into()
+            .unwrap_or(i32::MAX)
+            .saturating_mul(6)
+            .saturating_mul(scale.max(0))
+    }
+
+    fn circle_with_outline(&mut self, center: (i32, i32), radius: i32, fill: Rgba, outline: Rgba) {
+        let outer_squared = radius.saturating_mul(radius);
+        let inner_radius = radius.saturating_sub(1);
+        let inner_squared = inner_radius.saturating_mul(inner_radius);
+        for y in -radius..=radius {
+            for x in -radius..=radius {
+                let squared = x.saturating_mul(x).saturating_add(y.saturating_mul(y));
+                if squared > outer_squared {
+                    continue;
+                }
+                self.set_pixel(
+                    center.0 + x,
+                    center.1 + y,
+                    if squared > inner_squared {
+                        outline
+                    } else {
+                        fill
+                    },
+                );
+            }
+        }
+    }
+
     fn pie(&mut self, center: (i32, i32), radius: i32, slices: &[(f64, Rgba)]) {
         let total = slices.iter().map(|(value, _)| value.max(0.0)).sum::<f64>();
         if total <= 0.0 {
@@ -277,6 +311,8 @@ fn glyph(character: char) -> [u8; 7] {
         ')' => [8, 4, 2, 2, 2, 4, 8],
         '#' => [10, 31, 10, 10, 31, 10, 0],
         '\'' => [4, 4, 2, 0, 0, 0, 0],
+        '?' => [14, 17, 1, 2, 4, 0, 4],
+        '—' => [0, 0, 0, 31, 0, 0, 0],
         ' ' => [0; 7],
         _ => [14, 17, 1, 2, 4, 0, 4],
     }
@@ -1204,10 +1240,14 @@ pub fn draw_balance_chart(
 
 /// Render the production prediction-market fair-history chart as a real PNG.
 ///
-/// The geometry follows Python's 700×280 chart: zero/one-point histories keep
-/// the 0–100 scale, multi-point histories zoom to a ten-point padded range,
-/// and the market creation timestamp remains the left edge. `now` is supplied
-/// by the worker clock so scheduling and image output share one time snapshot.
+/// The geometry and branch decisions mirror ``draw_market_fair_history`` in
+/// ``utils/drawing/predictions.py``. The native renderer deliberately uses a
+/// tiny deterministic bitmap font (rather than a process-/host-dependent
+/// system font); title wrapping therefore measures that fallback font, while
+/// retaining Python's greedy word wrapping and fixed 700×280 canvas.
+///
+/// `now` is supplied by the worker clock so scheduling and image output share
+/// one time snapshot.
 #[must_use]
 pub fn draw_prediction_market_chart(
     market_id: i64,
@@ -1218,28 +1258,44 @@ pub fn draw_prediction_market_chart(
 ) -> Cursor<Vec<u8>> {
     const WIDTH: i32 = 700;
     const HEIGHT: i32 = 280;
-    const LEFT: i32 = 50;
-    const RIGHT: i32 = 670;
-    const TOP: i32 = 50;
-    const BOTTOM: i32 = 240;
+    const PADDING_LEFT: i32 = 50;
+    const PADDING_RIGHT: i32 = 30;
+    const PADDING_BOTTOM: i32 = 40;
+    const TITLE_Y: i32 = 12;
+    const TITLE_LINE_HEIGHT: i32 = 22;
+    const TITLE_SCALE: i32 = 2;
+    const LABEL_SCALE: i32 = 1;
+    const LATEST_SCALE: i32 = 2;
+    const CHART_WIDTH: i32 = WIDTH - PADDING_LEFT - PADDING_RIGHT;
+    const CHART_BOTTOM: i32 = HEIGHT - PADDING_BOTTOM;
 
     let mut raster = Raster::new(WIDTH as usize, HEIGHT as usize, DISCORD_BG);
-    let raw_title = title.filter(|value| !value.trim().is_empty()).map_or_else(
-        || format!("Market #{market_id} - fair history"),
-        str::to_owned,
-    );
-    let title = if raw_title.chars().count() > 92 {
-        format!("{}...", raw_title.chars().take(89).collect::<String>())
-    } else {
-        raw_title
+    let raw_title = match title {
+        Some(value) if !value.is_empty() => value.to_owned(),
+        _ => format!("Market #{market_id} — fair history"),
     };
-    raster.text(LEFT, 14, &title, DISCORD_WHITE, 2);
+    let title_lines = wrap_prediction_title(&raw_title, CHART_WIDTH, TITLE_SCALE);
+    for (index, line) in title_lines.iter().enumerate() {
+        let y = TITLE_Y.saturating_add(
+            TITLE_LINE_HEIGHT.saturating_mul(i32::try_from(index).unwrap_or(i32::MAX)),
+        );
+        raster.text(PADDING_LEFT, y, line, DISCORD_WHITE, TITLE_SCALE);
+    }
+    let chart_x = PADDING_LEFT;
+    let chart_y = TITLE_Y
+        .saturating_add(
+            TITLE_LINE_HEIGHT.saturating_mul(i32::try_from(title_lines.len()).unwrap_or(i32::MAX)),
+        )
+        .saturating_add(6);
+    let chart_height = CHART_BOTTOM.saturating_sub(chart_y).max(40);
 
+    // Y range: auto-zoom to data with ±10pp padding snapped to nearest 10
+    // when there are at least two snapshots; otherwise use the full axis.
     let (low, high) = if snapshots.len() >= 2 {
         let minimum = snapshots.iter().map(|(_, fair)| *fair).min().unwrap_or(0);
         let maximum = snapshots.iter().map(|(_, fair)| *fair).max().unwrap_or(100);
-        let low = ((minimum - 10).div_euclid(10) * 10).max(0);
-        let high = (((maximum + 10 + 9).div_euclid(10)) * 10).min(100);
+        let low = ((minimum.saturating_sub(10)).div_euclid(10) * 10).max(0);
+        let high = (maximum.saturating_add(10).saturating_add(9).div_euclid(10) * 10).min(100);
         if high > low { (low, high) } else { (0, 100) }
     } else {
         (0, 100)
@@ -1251,52 +1307,140 @@ pub fn draw_prediction_market_chart(
             now.max(*timestamp)
         });
     let horizontal_span = last_timestamp.saturating_sub(created_at).max(1);
-    let project = |timestamp: i64, fair: i64| {
-        let x_numerator = timestamp
-            .saturating_sub(created_at)
-            .clamp(0, horizontal_span);
-        let x = LEFT
-            + i32::try_from(i64::from(RIGHT - LEFT).saturating_mul(x_numerator) / horizontal_span)
-                .unwrap_or_default();
-        let fair = fair.clamp(low, high);
-        let y = TOP
-            + i32::try_from(i64::from(BOTTOM - TOP).saturating_mul(high - fair) / vertical_span)
-                .unwrap_or_default();
-        (x, y)
+    let x_for = |timestamp: i64| {
+        prediction_x_for(timestamp, created_at, horizontal_span, chart_x, CHART_WIDTH)
+    };
+    let y_for = |fair: i64| {
+        let clamped = fair.clamp(low, high);
+        chart_y
+            + i32::try_from(i64::from(chart_height).saturating_mul(high - clamped) / vertical_span)
+                .unwrap_or_default()
     };
 
-    for index in 0..=4 {
-        let fair = low + (vertical_span * index + 2) / 4;
-        let y = project(created_at, fair).1;
-        raster.line((LEFT, y), (RIGHT, y), DISCORD_GRID, 1);
-        raster.text(4, y - 4, &format!("{fair}%"), DISCORD_GREY, 1);
+    // Python uses round() for the five evenly-spaced gridline labels. This
+    // helper preserves its ties-to-even behavior for integer percentage axes.
+    for index in 0..=4_i64 {
+        let fair = low + round_div_4_bankers(vertical_span * index);
+        let y = y_for(fair);
+        raster.line((chart_x, y), (chart_x + CHART_WIDTH, y), DISCORD_GREY, 1);
+        let label = format!("{fair}%");
+        let text_width = Raster::text_width(&label, LABEL_SCALE);
+        raster.text(
+            chart_x.saturating_sub(text_width).saturating_sub(6),
+            y - 7,
+            &label,
+            DISCORD_GREY,
+            LABEL_SCALE,
+        );
+    }
+
+    // UTC labels: start/end plus two or four interior ticks, matching Python's
+    // short-span HH:MM versus long-span MM-DD choice.
+    let tick_count = if horizontal_span >= 4 * 60 * 60 {
+        4_i64
+    } else {
+        2_i64
+    };
+    for index in 0..=tick_count {
+        let timestamp =
+            created_at.saturating_add(horizontal_span.saturating_mul(index) / tick_count.max(1));
+        let label = prediction_utc_label(timestamp, horizontal_span);
+        let text_width = Raster::text_width(&label, LABEL_SCALE);
+        raster.text(
+            x_for(timestamp).saturating_sub(text_width / 2),
+            chart_y + chart_height + 6,
+            &label,
+            DISCORD_GREY,
+            LABEL_SCALE,
+        );
     }
 
     let points = snapshots
         .iter()
-        .map(|(timestamp, fair)| project(*timestamp, *fair))
+        .map(|(timestamp, fair)| (x_for(*timestamp), y_for(*fair)))
         .collect::<Vec<_>>();
     if points.len() == 1 {
-        raster.line((LEFT, points[0].1), (RIGHT, points[0].1), DISCORD_ACCENT, 2);
-        raster.circle(points[0], 4, DISCORD_ACCENT);
+        let point = points[0];
+        raster.line(
+            (chart_x, point.1),
+            (chart_x + CHART_WIDTH, point.1),
+            DISCORD_ACCENT,
+            2,
+        );
+        raster.circle_with_outline(point, 3, DISCORD_ACCENT, DISCORD_WHITE);
     } else {
         for pair in points.windows(2) {
             raster.line(pair[0], pair[1], DISCORD_ACCENT, 2);
         }
         for point in &points {
-            raster.circle(*point, 3, DISCORD_ACCENT);
+            raster.circle_with_outline(*point, 2, DISCORD_ACCENT, DISCORD_WHITE);
         }
     }
     if let (Some(point), Some((_, fair))) = (points.last(), snapshots.last()) {
+        let label = format!("{fair}%");
+        let text_width = Raster::text_width(&label, LATEST_SCALE);
         raster.text(
-            (point.0 + 6).min(RIGHT - 36),
-            point.1 - 7,
-            &format!("{fair}%"),
+            (point.0 + 6).min(chart_x + CHART_WIDTH - text_width),
+            point.1 - 8,
+            &label,
             DISCORD_WHITE,
-            1,
+            LATEST_SCALE,
         );
     }
     render(raster)
+}
+
+/// Greedy word wrapping equivalent to Python's ``_wrap_text``. A word wider
+/// than the available width is kept intact and allowed to overflow.
+fn wrap_prediction_title(text: &str, max_width: i32, scale: i32) -> Vec<String> {
+    let mut words = text.split_whitespace();
+    let Some(first) = words.next() else {
+        return vec![String::new()];
+    };
+    let mut lines = Vec::new();
+    let mut current = first.to_owned();
+    for word in words {
+        let candidate = format!("{current} {word}");
+        if Raster::text_width(&candidate, scale) <= max_width {
+            current = candidate;
+        } else {
+            lines.push(current);
+            current = word.to_owned();
+        }
+    }
+    lines.push(current);
+    lines
+}
+
+fn round_div_4_bankers(value: i64) -> i64 {
+    let quotient = value.div_euclid(4);
+    match value.rem_euclid(4) {
+        0 | 1 => quotient,
+        3 => quotient + 1,
+        2 if quotient % 2 == 0 => quotient,
+        2 => quotient + 1,
+        _ => unreachable!("remainder modulo four is bounded"),
+    }
+}
+
+fn prediction_x_for(timestamp: i64, created_at: i64, span: i64, left: i32, width: i32) -> i32 {
+    left.saturating_add(
+        i32::try_from(
+            i64::from(width).saturating_mul(timestamp.saturating_sub(created_at)) / span.max(1),
+        )
+        .unwrap_or_default(),
+    )
+}
+
+fn prediction_utc_label(timestamp: i64, span: i64) -> String {
+    let format = if span < 24 * 60 * 60 {
+        "%H:%M"
+    } else {
+        "%m-%d"
+    };
+    Utc.timestamp_opt(timestamp, 0)
+        .single()
+        .map_or_else(|| "--".to_owned(), |date| date.format(format).to_string())
 }
 
 fn source_color(source: &str) -> Rgba {

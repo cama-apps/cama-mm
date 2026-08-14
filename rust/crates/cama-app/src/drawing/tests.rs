@@ -113,7 +113,7 @@ fn prediction_market_chart_is_real_fixed_size_png_for_empty_and_multi_point_hist
     let empty = draw_prediction_market_chart(7, None, &[], 1_000, 2_000);
     let decoded = decode_png(&empty);
     assert_eq!((decoded.width, decoded.height), (700, 280));
-    assert!(decoded.contains(DISCORD_GRID));
+    assert!(decoded.contains(DISCORD_GREY));
 
     let history = draw_prediction_market_chart(
         7,
@@ -126,6 +126,89 @@ fn prediction_market_chart_is_real_fixed_size_png_for_empty_and_multi_point_hist
     assert_eq!((decoded.width, decoded.height), (700, 280));
     assert!(decoded.contains(DISCORD_ACCENT));
     assert!(decoded.contains(DISCORD_WHITE));
+}
+
+#[test]
+fn prediction_chart_wraps_titles_and_formats_utc_ticks_like_python() {
+    assert_eq!(
+        wrap_prediction_title("one two three four", 54, 1),
+        ["one two", "three", "four"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        wrap_prediction_title("supercalifragilistic", 12, 1),
+        vec!["supercalifragilistic"]
+    );
+    assert_eq!(round_div_4_bankers(6), 2, "1.5 rounds up");
+    assert_eq!(round_div_4_bankers(18), 4, "4.5 rounds to even");
+    assert_eq!(
+        prediction_x_for(-100, 0, 100, 50, 620),
+        -570,
+        "Python's int projection keeps out-of-range points out of the chart"
+    );
+    assert_eq!(prediction_x_for(150, 0, 100, 50, 620), 980);
+    assert_eq!(prediction_utc_label(0, 23 * 60 * 60), "00:00");
+    assert_eq!(prediction_utc_label(0, 24 * 60 * 60), "01-01");
+}
+
+#[test]
+fn prediction_chart_uses_python_empty_axis_and_marker_branches() {
+    let empty = decode_png(&draw_prediction_market_chart(1, None, &[], 0, 1));
+    assert!(empty.contains_in((50, 40, 51, 41), DISCORD_GREY));
+    assert!(
+        !empty.contains_in((50, 40, 671, 241), DISCORD_ACCENT),
+        "an empty history has no series pixels"
+    );
+
+    let one = decode_png(&draw_prediction_market_chart(
+        1,
+        Some("one line"),
+        &[(0, 50)],
+        0,
+        1,
+    ));
+    assert!(one.contains_in((50, 137, 55, 145), DISCORD_WHITE));
+    assert!(one.contains_in((50, 140, 671, 141), DISCORD_ACCENT));
+
+    let many = decode_png(&draw_prediction_market_chart(
+        1,
+        Some("one line"),
+        &[(0, 50), (3_600, 51)],
+        0,
+        3_600,
+    ));
+    assert!(many.contains_in((50, 40, 51, 41), DISCORD_GREY));
+    assert!(many.contains(DISCORD_ACCENT));
+    assert!(many.contains(DISCORD_WHITE));
+}
+
+#[test]
+fn prediction_chart_native_output_is_deterministic_for_fixed_clock_input() {
+    let input = [
+        (1_700_000_000, 17),
+        (1_700_003_600, 19),
+        (1_700_007_200, 22),
+        (1_700_010_800, 18),
+    ];
+    let first = draw_prediction_market_chart(
+        10,
+        Some("A deterministic question"),
+        &input,
+        1_700_000_000,
+        1_700_014_400,
+    )
+    .into_inner();
+    let second = draw_prediction_market_chart(
+        10,
+        Some("A deterministic question"),
+        &input,
+        1_700_000_000,
+        1_700_014_400,
+    )
+    .into_inner();
+    assert_eq!(first, second);
 }
 
 fn assert_rgba_png(cursor: &Cursor<Vec<u8>>, size: Option<(usize, usize)>) -> DecodedPng {
