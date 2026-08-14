@@ -228,7 +228,73 @@ fn gear_request<'a>(
         inventory_capacity: 5,
         detail_json: r#"{"succeeded":true,"advance":4,"jc":13}"#,
         created_at: 2_000_000_000,
+        delivery: None,
     }
+}
+
+#[test]
+fn event_delivery_is_present_when_process_stops_after_actor_commit() {
+    let fixture = Fixture::new();
+    fixture.seed(ACTOR, GUILD, 100);
+    let expected = fixture
+        .repository
+        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .expect("actor snapshot")
+        .expect("seeded actor");
+    let mut request = gear_request(&expected, "event:crash-safe");
+    request.delivery = Some(DigEventDeliveryDraft {
+        source_key: "dig-event:event:crash-safe",
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        interaction_id: 0xfeed_beef,
+        channel_id: 700,
+        committed_at: 2_000_000_000,
+        outcome_json: r#"{"success":true,"resolution":{"event_id":"collapsed_armory"}}"#,
+    });
+    let receipt = match fixture
+        .repository
+        .settle_actor_atomic_for_event(request)
+        .expect("actor plus delivery transaction")
+    {
+        DigEventSettlementOutcome::Applied(receipt) => receipt,
+        other => panic!("unexpected settlement outcome: {other:?}"),
+    };
+    assert!(receipt.applied_now);
+
+    // No provider code runs after this point: this models a process stopping
+    // immediately after SQLite COMMIT and before the Discord request/CAS.
+    let ready = fixture
+        .repository
+        .pending_event_deliveries(DigEventDeliveryQuery {
+            guild_id: Some(GUILD),
+            discord_id: Some(ACTOR),
+            limit: 10,
+        })
+        .expect("ready query excludes incomplete result");
+    assert!(ready.is_empty());
+    let recoveries = fixture
+        .repository
+        .pending_event_delivery_recoveries(DigEventDeliveryQuery {
+            guild_id: Some(GUILD),
+            discord_id: Some(ACTOR),
+            limit: 10,
+        })
+        .expect("durable pending recovery result");
+    assert_eq!(recoveries.len(), 1);
+    assert_eq!(recoveries[0].action_id, receipt.action_id);
+    assert_eq!(recoveries[0].interaction_id, 0xfeed_beef);
+    assert_eq!(recoveries[0].state, DigEventDeliveryState::Pending);
+    assert!(recoveries[0].delivered_at.is_none());
+    let outcome_action_id: Option<i64> = fixture
+        .connection()
+        .query_row(
+            "SELECT json_extract(detail, '$.event_delivery.outcome.action_id')
+               FROM dig_actions WHERE id=?1",
+            params![receipt.action_id],
+            |row| row.get(0),
+        )
+        .expect("raw draft outcome");
+    assert_eq!(outcome_action_id, None);
 }
 
 #[test]

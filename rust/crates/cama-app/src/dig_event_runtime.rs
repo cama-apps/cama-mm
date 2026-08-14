@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cama_db::dig_event_runtime::{
-    AtomicDigEventSettlement, DigEventActorKey, DigEventActorSnapshot, DigEventFinaleJcRequest,
+    AtomicDigEventSettlement, DigEventActorKey, DigEventActorSnapshot, DigEventDeliveryDraft,
+    DigEventDeliveryMark, DigEventDeliveryQuery,
+    DigEventDeliverySnapshot as DbDigEventDeliverySnapshot,
+    DigEventDeliveryState as DbDigEventDeliveryState, DigEventFinaleJcRequest,
     DigEventFinaleRelicRequest, DigEventGuildModifierReceipt, DigEventGuildModifierRequest,
     DigEventQuestMutation, DigEventQuestSnapshot, DigEventRewardQueryPlan,
     DigEventRuntimeRepository, DigEventRuntimeRepositoryError, DigEventSettlementOutcome,
@@ -27,6 +30,7 @@ use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_pen
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::ManaEffects;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -51,7 +55,7 @@ pub const DIG_EVENT_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const RANDOM_ACTIVE_LOOKBACK_SECONDS: i64 = 14 * 24 * 60 * 60;
 const ACTIVE_DIGGER_LOOKBACK_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DigEventSplashOutcome {
     pub strategy: String,
     pub event_name: String,
@@ -62,7 +66,7 @@ pub struct DigEventSplashOutcome {
     pub shielded_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DigEventGuildModifierOutcome {
     pub modifier_id: String,
     pub duration_seconds: i64,
@@ -84,7 +88,7 @@ pub struct CanonicalEventRollInput<'a> {
     pub legendary_event_multiplier: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DigEventQuestFinale {
     JcAndModifier {
         quest_id: String,
@@ -103,7 +107,7 @@ pub enum DigEventQuestFinale {
 }
 
 /// Full event payload retained through Discord presentation and restart.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DigEventRuntimeOutcome {
     pub success: bool,
     pub error: Option<String>,
@@ -209,6 +213,81 @@ pub struct DigEventActionRequest<'a> {
     pub dig_action_id: i64,
     pub choice: &'a str,
     pub now: i64,
+}
+
+/// Discord identity captured before an event result is published.  Event
+/// results are a separate public message from the source event controls, so
+/// READY recovery must not depend on the original interaction object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DigEventDeliveryContext {
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub interaction_id: u64,
+    pub channel_id: i64,
+}
+
+impl DigEventDeliveryContext {
+    #[must_use]
+    pub const fn new(discord_id: i64, guild_id: i64, interaction_id: u64, channel_id: i64) -> Self {
+        Self {
+            discord_id,
+            guild_id,
+            interaction_id,
+            channel_id,
+        }
+    }
+}
+
+/// Immutable typed result retained beside the actor event settlement.  The
+/// payload is the exact `DigEventRuntimeOutcome` returned to the provider;
+/// transport code can render it without replaying policy or querying newer
+/// tunnel state after a crash.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DigEventDeliverySnapshot {
+    pub action_id: i64,
+    pub source_key: String,
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub context: DigEventDeliveryContext,
+    pub committed_at: i64,
+    pub state: DigEventDeliveryState,
+    pub outcome: DigEventRuntimeOutcome,
+    pub delivered_at: Option<i64>,
+}
+
+/// Durable delivery lifecycle. `Pending` is an actor-committed result whose
+/// application follow-up still needs recovery; only `Ready` may be handed to
+/// a transport, and `Delivered` is immutable after its CAS.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DigEventDeliveryState {
+    Pending,
+    Ready,
+    Delivered,
+}
+
+impl DigEventDeliverySnapshot {
+    #[must_use]
+    pub fn nonce(&self) -> String {
+        // Discord snowflakes fit in signed 64-bit today, but formatting the
+        // original u64 avoids a lossy cast and keeps this stable across retry.
+        format!("cama-e:{:x}", self.context.interaction_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigEventPendingDeliveryQuery {
+    pub guild_id: Option<i64>,
+    pub discord_id: Option<i64>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigEventDeliveryMarkRequest {
+    pub action_id: i64,
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub source_key: String,
+    pub delivered_at: i64,
 }
 
 /// A Python legacy integer field. `EVENT_POOL` historically accepted either a
@@ -486,6 +565,23 @@ impl DigEventRuntimeService {
         }
     }
 
+    /// Compose the event runtime from the same live Dig policy object used by
+    /// the normal Dig service, including the optional legacy finale tax hook.
+    /// Keeping this constructor explicit prevents provider callsites from
+    /// silently falling back to `DigRuntimeConfig::default()`.
+    #[must_use]
+    pub fn sqlite_with_config_and_finale_tax_hook(
+        path: impl AsRef<Path>,
+        config: DigRuntimeConfig,
+        finale_tax_hook: Option<DigEventFinaleTaxHook>,
+    ) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            config,
+            finale_tax_hook,
+        }
+    }
+
     /// Bind the legacy quest finale tax callback at the typed application
     /// boundary. The hook is intentionally optional so the default runtime
     /// remains identical to the no-tax path.
@@ -706,6 +802,183 @@ impl DigEventRuntimeService {
         })
     }
 
+    /// Resolve an event and atomically seed its immutable public-result
+    /// outbox. The event settlement itself receives the delivery draft when a
+    /// caller supplies this context; the separate persistence helper remains
+    /// useful for upgrading already-settled pre-outbox actions.
+    pub fn resolve_action_event_with_delivery(
+        &self,
+        request: DigEventActionRequest<'_>,
+        context: DigEventDeliveryContext,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let Some(pending) = repository.pending_event(
+            request.dig_action_id,
+            request.discord_id,
+            Some(request.guild_id),
+        )?
+        else {
+            return Ok(DigEventRuntimeOutcome::blocked(
+                "This Dig event expired or belongs to another player.",
+            ));
+        };
+        if event_view_expired(pending.created_at, request.now) {
+            return Ok(DigEventRuntimeOutcome::blocked(
+                "This Dig event expired or belongs to another player.",
+            ));
+        }
+        let event_key = format!("dig-action:{}", pending.action_id);
+        self.resolve_event_with_delivery(
+            DigRuntimeEventRequest {
+                discord_id: request.discord_id,
+                guild_id: request.guild_id,
+                event_id: &pending.event_id,
+                choice: request.choice,
+                event_key: &event_key,
+                now: request.now,
+                chained: false,
+            },
+            context,
+        )
+    }
+
+    /// Persist one immutable event-result projection beside its resolved
+    /// action. New provider paths should use
+    /// [`Self::resolve_action_event_with_delivery`], which owns this call
+    /// immediately after settlement; this method is intentionally public for
+    /// READY migration of actions created before the outbox was introduced.
+    pub fn persist_event_delivery(
+        &self,
+        outcome: &DigEventRuntimeOutcome,
+        context: DigEventDeliveryContext,
+        committed_at: i64,
+    ) -> Result<Option<DigEventDeliverySnapshot>, DigEventRuntimeError> {
+        let Some(action_id) = outcome.action_id else {
+            return Ok(None);
+        };
+        if !outcome.success {
+            return Ok(None);
+        }
+        let outcome_json = serde_json::to_string(outcome)
+            .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+        let source_key = format!("dig-event:{action_id}");
+        let db_snapshot = DigEventRuntimeRepository::new(&self.path).attach_event_delivery(
+            action_id,
+            DigEventDeliveryDraft {
+                source_key: &source_key,
+                discord_id: context.discord_id,
+                guild_id: context.guild_id,
+                interaction_id: context.interaction_id,
+                channel_id: context.channel_id,
+                committed_at,
+                outcome_json: &outcome_json,
+            },
+        )?;
+        Ok(Some(event_delivery_from_db(db_snapshot)?))
+    }
+
+    pub fn pending_event_deliveries(
+        &self,
+        query: DigEventPendingDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, DigEventRuntimeError> {
+        DigEventRuntimeRepository::new(&self.path)
+            .pending_event_deliveries(DigEventDeliveryQuery {
+                guild_id: query.guild_id,
+                discord_id: query.discord_id,
+                limit: query.limit,
+            })?
+            .into_iter()
+            .map(event_delivery_from_db)
+            .collect()
+    }
+
+    /// List actor-committed event results that stopped between the SQLite
+    /// settlement and the application-owned quest/finale follow-up. These
+    /// rows are deliberately not returned by [`Self::pending_event_deliveries`]
+    /// until [`Self::recover_event_delivery`] freezes their complete outcome.
+    pub fn pending_event_delivery_recoveries(
+        &self,
+        query: DigEventPendingDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, DigEventRuntimeError> {
+        DigEventRuntimeRepository::new(&self.path)
+            .pending_event_delivery_recoveries(DigEventDeliveryQuery {
+                guild_id: query.guild_id,
+                discord_id: query.discord_id,
+                limit: query.limit,
+            })?
+            .into_iter()
+            .map(event_delivery_from_db)
+            .collect()
+    }
+
+    /// Replay one pending event's idempotent application follow-up and freeze
+    /// the resulting typed payload as `ready`. The actor mutation is guarded
+    /// by the original event key, so this does not mint a second actor action;
+    /// quest/finale persistence and delivery CAS remain retry-safe.
+    pub fn recover_event_delivery(
+        &self,
+        action_id: i64,
+    ) -> Result<Option<DigEventRuntimeOutcome>, DigEventRuntimeError> {
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let recoveries = repository.pending_event_delivery_recoveries(DigEventDeliveryQuery {
+            guild_id: None,
+            discord_id: None,
+            limit: usize::MAX,
+        })?;
+        let Some(delivery) = recoveries
+            .into_iter()
+            .find(|delivery| delivery.action_id == action_id)
+        else {
+            return Ok(None);
+        };
+        let Some(identity) = repository.resolved_event_identity(
+            action_id,
+            delivery.discord_id,
+            delivery.guild_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        let context = DigEventDeliveryContext::new(
+            delivery.discord_id,
+            delivery.guild_id,
+            delivery.interaction_id,
+            delivery.channel_id,
+        );
+        let outcome = self.resolve_event_with_delivery(
+            DigRuntimeEventRequest {
+                discord_id: identity.actor_id,
+                guild_id: identity.guild_id,
+                event_id: &identity.event_id,
+                choice: &identity.choice,
+                event_key: &identity.event_key,
+                // Preserve the original policy date and economy window. A
+                // recovery after midnight must not roll a different outcome.
+                now: delivery.committed_at,
+                chained: false,
+            },
+            context,
+        )?;
+        Ok(outcome.success.then_some(outcome))
+    }
+
+    pub fn mark_event_delivery_delivered(
+        &self,
+        request: DigEventDeliveryMarkRequest,
+    ) -> Result<bool, DigEventRuntimeError> {
+        Ok(
+            DigEventRuntimeRepository::new(&self.path).mark_event_delivery_delivered(
+                DigEventDeliveryMark {
+                    action_id: request.action_id,
+                    discord_id: request.discord_id,
+                    guild_id: request.guild_id,
+                    source_key: request.source_key,
+                    delivered_at: request.delivered_at,
+                },
+            )?,
+        )
+    }
+
     /// Resolve a pending event through an explicitly supplied legacy catalog.
     /// This is the production migration/import boundary for an old
     /// `EVENT_POOL` snapshot. Canonical generated events continue through
@@ -761,6 +1034,26 @@ impl DigEventRuntimeService {
     pub fn resolve_event(
         &self,
         request: DigRuntimeEventRequest<'_>,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        self.resolve_event_inner(request, None)
+    }
+
+    /// Resolve one event while atomically seeding the immutable public-result
+    /// delivery projection. The normal `resolve_event` API remains transport
+    /// independent; provider code should use this variant when the result is
+    /// going to Discord.
+    pub fn resolve_event_with_delivery(
+        &self,
+        request: DigRuntimeEventRequest<'_>,
+        context: DigEventDeliveryContext,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        self.resolve_event_inner(request, Some(context))
+    }
+
+    fn resolve_event_inner(
+        &self,
+        request: DigRuntimeEventRequest<'_>,
+        delivery_context: Option<DigEventDeliveryContext>,
     ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
         if canonical_event(request.event_id).is_none() {
             return Ok(DigEventRuntimeOutcome::blocked("Unknown event."));
@@ -892,6 +1185,55 @@ impl DigEventRuntimeService {
         let reward = prepared_reward(&resolution)?;
         let reward_source = format!("event:{}", request.event_id);
         let detail = event_detail(&resolution, splash_execution.outcome.as_ref());
+        // Chain selection is part of the immutable event result, so consume
+        // it before the actor transaction and include it in the same outbox
+        // snapshot as the actor settlement.
+        let chain_event = resolve_chain(
+            &resolution,
+            depth_after,
+            expected.prestige_level,
+            &mut entropy,
+        )
+        .map(|event| canonical_event_presentation(&event.id))
+        .transpose()
+        .map_err(DigEventRuntimeError::Policy)?;
+        if let Some(chain) = &chain_event {
+            resolution.chained_event_id = Some(chain.event_id.clone());
+        }
+        let delivery_source_key = format!("dig-event:{}", request.event_key);
+        let delivery_outcome_json = delivery_context
+            .as_ref()
+            .map(|_| {
+                serde_json::to_string(&DigEventRuntimeOutcome {
+                    success: true,
+                    error: None,
+                    resolution: Some(resolution.clone()),
+                    depth_before: expected.depth,
+                    depth_after,
+                    balance_after: expected.balance.saturating_add(resolution.jc),
+                    action_id: None,
+                    reward_row_id: None,
+                    applied_now: true,
+                    splash: splash_execution.outcome.clone(),
+                    guild_modifier: guild_modifier.clone(),
+                    chain_event: chain_event.clone(),
+                    quest_finale: None,
+                })
+            })
+            .transpose()
+            .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+        let delivery_draft = delivery_context
+            .as_ref()
+            .zip(delivery_outcome_json.as_ref())
+            .map(|(context, outcome_json)| DigEventDeliveryDraft {
+                source_key: &delivery_source_key,
+                discord_id: context.discord_id,
+                guild_id: context.guild_id,
+                interaction_id: context.interaction_id,
+                channel_id: context.channel_id,
+                committed_at: request.now,
+                outcome_json,
+            });
         let settlement = repository.settle_actor_atomic_for_event(AtomicDigEventSettlement {
             expected: &expected,
             event_key: request.event_key,
@@ -912,6 +1254,7 @@ impl DigEventRuntimeService {
             inventory_capacity: EVENT_INVENTORY_CAPACITY,
             detail_json: &detail,
             created_at: request.now,
+            delivery: delivery_draft,
         })?;
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
@@ -930,18 +1273,6 @@ impl DigEventRuntimeService {
             }
         };
 
-        let chain_event = resolve_chain(
-            &resolution,
-            depth_after,
-            expected.prestige_level,
-            &mut entropy,
-        )
-        .map(|event| canonical_event_presentation(&event.id))
-        .transpose()
-        .map_err(DigEventRuntimeError::Policy)?;
-        if let Some(chain) = &chain_event {
-            resolution.chained_event_id = Some(chain.event_id.clone());
-        }
         let quest_finale = self.resolve_quest_followup(
             request,
             &repository,
@@ -953,7 +1284,7 @@ impl DigEventRuntimeService {
             &mut entropy,
         );
 
-        Ok(DigEventRuntimeOutcome {
+        let outcome = DigEventRuntimeOutcome {
             success: true,
             error: None,
             resolution: Some(resolution),
@@ -967,7 +1298,21 @@ impl DigEventRuntimeService {
             guild_modifier,
             chain_event,
             quest_finale,
-        })
+        };
+        if let Some(context) = delivery_context.as_ref()
+            && outcome.action_id.is_some()
+        {
+            let outcome_json = serde_json::to_string(&outcome)
+                .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+            repository.update_event_delivery_outcome(
+                outcome.action_id.expect("checked above"),
+                context.discord_id,
+                context.guild_id,
+                &delivery_source_key,
+                &outcome_json,
+            )?;
+        }
+        Ok(outcome)
     }
 
     /// Settle one legacy `outcomes`-shape event supplied by the runtime
@@ -1124,6 +1469,7 @@ impl DigEventRuntimeService {
             inventory_capacity: EVENT_INVENTORY_CAPACITY,
             detail_json: &detail,
             created_at: request.now,
+            delivery: None,
         })?;
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
@@ -1623,6 +1969,41 @@ impl DigEventRuntimeService {
         }
         modified.max(0)
     }
+}
+
+fn event_delivery_from_db(
+    delivery: DbDigEventDeliverySnapshot,
+) -> Result<DigEventDeliverySnapshot, DigEventRuntimeError> {
+    let mut outcome = serde_json::from_str::<DigEventRuntimeOutcome>(&delivery.outcome_json)
+        .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+    // A pending draft is intentionally incomplete and must never be rendered
+    // or delivered. Ready/Delivered rows are frozen full outcomes; retain the
+    // action id fallback only for legacy rows written before the outbox knew
+    // the AUTOINCREMENT value.
+    if delivery.state != DbDigEventDeliveryState::Pending && outcome.action_id.is_none() {
+        outcome.action_id = Some(delivery.action_id);
+    }
+    let state = match delivery.state {
+        DbDigEventDeliveryState::Pending => DigEventDeliveryState::Pending,
+        DbDigEventDeliveryState::Ready => DigEventDeliveryState::Ready,
+        DbDigEventDeliveryState::Delivered => DigEventDeliveryState::Delivered,
+    };
+    Ok(DigEventDeliverySnapshot {
+        action_id: delivery.action_id,
+        source_key: delivery.source_key,
+        discord_id: delivery.discord_id,
+        guild_id: delivery.guild_id,
+        context: DigEventDeliveryContext::new(
+            delivery.discord_id,
+            delivery.guild_id,
+            delivery.interaction_id,
+            delivery.channel_id,
+        ),
+        committed_at: delivery.committed_at,
+        state,
+        outcome,
+        delivered_at: delivery.delivered_at,
+    })
 }
 
 /// Build the exact event prompt from values already captured by a Dig

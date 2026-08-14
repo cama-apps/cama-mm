@@ -1,5 +1,6 @@
 //! Migrated-SQLite application tests for the canonical event runtime.
 
+use crate::economy_event_service::EconomyEventConfig;
 use cama_db::dig_event_runtime::{DigEventActorKey, DigEventRuntimeRepository};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
@@ -163,6 +164,41 @@ fn request<'a>(
         now: NOW,
         chained: false,
     }
+}
+
+#[test]
+fn event_service_keeps_live_runtime_config_without_an_extra_finale_tax_hook() {
+    let fixture = Fixture::new();
+    let config = DigRuntimeConfig::default().with_runtime_policy(
+        0.5,
+        EconomyEventConfig {
+            enabled: true,
+            normal_annual_rate: 0.12,
+            inflation_ceiling: 0.4,
+            lookback_days: 9,
+            max_reserve_burn_pct: 0.2,
+            max_wallet_burn_pct: 0.1,
+            trigger_hour_local: 4,
+        },
+    );
+    let service = DigEventRuntimeService::sqlite_with_config_and_finale_tax_hook(
+        fixture.database.path(),
+        config.clone(),
+        None,
+    );
+    assert_eq!(service.config().minigame_jc_delta_scale, 0.5);
+    assert_eq!(
+        service.config().economy_event.normal_annual_rate,
+        config.economy_event.normal_annual_rate
+    );
+    assert_eq!(
+        service.config().economy_event.trigger_hour_local,
+        config.economy_event.trigger_hour_local
+    );
+    // Quest finales apply the built-in ManaRepository policy. A provider must
+    // pass this configured service through rather than constructing a second
+    // default event service (and must not bind an unrelated second tax_fn).
+    assert!(service.finale_tax_hook.is_none());
 }
 
 fn key_for_outcome(
@@ -548,6 +584,193 @@ fn action_identity_drives_presentation_and_idempotent_component_settlement() {
             .is_some_and(|error| error.contains("expired"))
     );
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn event_result_delivery_is_atomic_recoverable_and_exactly_once() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let action_id = fixture.seed_event_dig_action("underground_stream");
+    let service = fixture.service();
+    let context = DigEventDeliveryContext::new(ACTOR, GUILD, 0x1234_5678, 777);
+    let outcome = service
+        .resolve_action_event_with_delivery(
+            DigEventActionRequest {
+                discord_id: ACTOR,
+                guild_id: GUILD,
+                dig_action_id: action_id,
+                choice: "safe",
+                now: NOW,
+            },
+            context,
+        )
+        .expect("resolve event with durable delivery");
+    assert!(outcome.success && outcome.applied_now);
+    let resolved_action_id = outcome.action_id.expect("resolved event action");
+    let connection = fixture.connection();
+    let delivery_json: String = connection
+        .query_row(
+            "SELECT json_extract(detail, '$.event_delivery.outcome')
+               FROM dig_actions WHERE id=?1",
+            params![resolved_action_id],
+            |row| row.get(0),
+        )
+        .expect("atomic event delivery projection");
+    let persisted: DigEventRuntimeOutcome =
+        serde_json::from_str(&delivery_json).expect("typed persisted event result");
+    assert_eq!(persisted.resolution, outcome.resolution);
+    assert_eq!(persisted.action_id, Some(resolved_action_id));
+    let state: String = connection
+        .query_row(
+            "SELECT json_extract(detail, '$.event_delivery.state')
+               FROM dig_actions WHERE id=?1",
+            params![resolved_action_id],
+            |row| row.get(0),
+        )
+        .expect("terminal ready state");
+    assert_eq!(state, "ready");
+
+    let pending = service
+        .pending_event_deliveries(DigEventPendingDeliveryQuery {
+            guild_id: Some(GUILD),
+            discord_id: Some(ACTOR),
+            limit: 10,
+        })
+        .expect("pending event delivery");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].action_id, resolved_action_id);
+    assert_eq!(pending[0].nonce(), "cama-e:12345678");
+
+    let drifted_json = serde_json::json!({
+        "success": true,
+        "balance_after": outcome.balance_after.saturating_add(999),
+        "drift": "recomputed-after-ready"
+    })
+    .to_string();
+    let drifted = DigEventRuntimeRepository::new(fixture.database.path())
+        .update_event_delivery_outcome(
+            resolved_action_id,
+            ACTOR,
+            GUILD,
+            &pending[0].source_key,
+            &drifted_json,
+        )
+        .expect_err("ready delivery rejects a recomputed drifted outcome");
+    assert!(matches!(
+        drifted,
+        DigEventRuntimeRepositoryError::IdempotencyConflict
+    ));
+    let persisted_after_drift: String = connection
+        .query_row(
+            "SELECT json_extract(detail, '$.event_delivery.outcome')
+               FROM dig_actions WHERE id=?1",
+            params![resolved_action_id],
+            |row| row.get(0),
+        )
+        .expect("frozen delivery after drift rejection");
+    assert_eq!(persisted_after_drift, delivery_json);
+
+    let mark = DigEventDeliveryMarkRequest {
+        action_id: resolved_action_id,
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        source_key: pending[0].source_key.clone(),
+        delivered_at: NOW + 1,
+    };
+    assert!(
+        service
+            .mark_event_delivery_delivered(mark.clone())
+            .expect("delivery CAS")
+    );
+    assert!(
+        service
+            .mark_event_delivery_delivered(mark)
+            .expect("idempotent delivery CAS")
+    );
+    assert!(
+        service
+            .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                guild_id: Some(GUILD),
+                discord_id: Some(ACTOR),
+                limit: 10,
+            })
+            .expect("pending delivery after CAS")
+            .is_empty()
+    );
+}
+
+#[test]
+fn pending_event_delivery_recovery_replays_and_freezes_full_result() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let action_id = fixture.seed_event_dig_action("underground_stream");
+    let context = DigEventDeliveryContext::new(ACTOR, GUILD, 0x1234_5679, 778);
+    let service = fixture.service();
+    let request = DigEventActionRequest {
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        dig_action_id: action_id,
+        choice: "safe",
+        now: NOW,
+    };
+    let first = service
+        .resolve_action_event_with_delivery(request, context)
+        .expect("initial event settlement");
+    let resolved_action_id = first.action_id.expect("resolved action");
+
+    // Simulate the crash point after actor COMMIT by moving the durable row
+    // back to its atomic draft. Recovery must make this state explicit rather
+    // than allowing the incomplete payload through the READY query.
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_actions
+                SET detail=json_set(detail,
+                    '$.event_delivery.state', 'pending',
+                    '$.event_delivery.outcome.action_id', NULL,
+                    '$.event_delivery.outcome.quest_finale', NULL)
+              WHERE id=?1",
+            params![resolved_action_id],
+        )
+        .expect("simulate process stop before finalization");
+    assert!(
+        service
+            .pending_event_deliveries(DigEventPendingDeliveryQuery {
+                guild_id: Some(GUILD),
+                discord_id: Some(ACTOR),
+                limit: 10,
+            })
+            .expect("ready query excludes pending")
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                guild_id: Some(GUILD),
+                discord_id: Some(ACTOR),
+                limit: 10,
+            })
+            .expect("pending recovery query")
+            .len(),
+        1
+    );
+
+    let recovered = service
+        .recover_event_delivery(resolved_action_id)
+        .expect("recover pending event")
+        .expect("recovery outcome");
+    assert!(recovered.success);
+    assert_eq!(recovered.action_id, Some(resolved_action_id));
+    let ready = service
+        .pending_event_deliveries(DigEventPendingDeliveryQuery {
+            guild_id: Some(GUILD),
+            discord_id: Some(ACTOR),
+            limit: 10,
+        })
+        .expect("ready delivery after recovery");
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].state, DigEventDeliveryState::Ready);
+    assert_eq!(ready[0].outcome.action_id, Some(resolved_action_id));
 }
 
 #[test]

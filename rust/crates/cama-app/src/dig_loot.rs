@@ -148,7 +148,7 @@ pub fn is_boss_prep_item(item_id: &str) -> bool {
     BOSS_PREP_ITEM_IDS.contains(&item_id)
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum Rarity {
     Common,
     Uncommon,
@@ -185,7 +185,7 @@ impl Rarity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EventComplexity {
     Simple,
     Choice,
@@ -263,7 +263,7 @@ pub struct CanonicalEventDef {
     pub quest_step: Option<i64>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CanonicalEventStep {
     #[serde(rename = "description")]
     pub descriptions: Vec<String>,
@@ -271,7 +271,7 @@ pub struct CanonicalEventStep {
     pub choices: Vec<CanonicalEventChoice>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CanonicalEventChoice {
     pub label: String,
     pub success: CanonicalEventOutcome,
@@ -279,7 +279,7 @@ pub struct CanonicalEventChoice {
     pub success_chance: f64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CanonicalEventOutcome {
     pub description: String,
     pub advance: i64,
@@ -311,7 +311,7 @@ pub struct CanonicalTempCurse {
     pub effect: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CanonicalSplash {
     pub strategy: String,
     pub victim_count: usize,
@@ -323,7 +323,7 @@ pub struct CanonicalSplash {
 /// A reward selected from an authored outcome after ownership and capacity
 /// filters have been applied.  The event catalog intentionally stores pools,
 /// not a pre-selected item: Python makes this choice at resolution time.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CanonicalReward {
     Gear(String),
     Consumable(String),
@@ -341,7 +341,7 @@ pub struct CanonicalRewardSelection {
 
 /// Conditional draws made after Python selects an authored event outcome.
 /// The runtime consumes these in order without duplicating choice policy.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CanonicalEventRandomPlan {
     pub jc_jitter: bool,
     pub advance_jitter: bool,
@@ -350,7 +350,7 @@ pub struct CanonicalEventRandomPlan {
 /// Presentation data for all four authored event UI modes.  Keeping the
 /// complete description/step/boon payload here lets the application render a
 /// simple, choice, complex, or boon event without a Python callback.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CanonicalEventPresentation {
     pub event_id: String,
     pub event_name: String,
@@ -365,7 +365,7 @@ pub struct CanonicalEventPresentation {
 /// A deterministic, application-level event result.  Repository adapters
 /// can apply the deltas in one transaction, while Discord adapters can render
 /// the exact authored message and reward payload without reparsing Python.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CanonicalEventResolution {
     pub event_id: String,
     pub event_name: String,

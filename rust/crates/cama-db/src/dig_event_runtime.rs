@@ -82,6 +82,87 @@ pub struct DigPendingEvent {
     pub created_at: i64,
 }
 
+/// Identity needed to replay the application-owned follow-up for a resolved
+/// event whose actor transaction committed before its public result became
+/// ready.  These values are read from the immutable audit row rather than
+/// reconstructed from a Discord component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DigResolvedEventIdentity {
+    pub action_id: i64,
+    pub actor_id: i64,
+    pub guild_id: i64,
+    pub event_id: String,
+    pub event_key: String,
+    pub choice: String,
+    pub created_at: i64,
+}
+
+/// Immutable public-delivery projection for one resolved event.
+///
+/// Event components use a separate result message from the Dig summary, so
+/// they cannot reuse the normal Dig delivery row.  The projection is kept in
+/// the resolved event's `dig_actions.detail` JSON to remain compatible with
+/// the existing schema.  `outcome_json` is opaque to the repository; the
+/// application owns its typed serialization and the Discord adapter owns the
+/// final response rendering.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DigEventDeliveryDraft<'a> {
+    pub source_key: &'a str,
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub interaction_id: u64,
+    pub channel_id: i64,
+    pub committed_at: i64,
+    pub outcome_json: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DigEventDeliverySnapshot {
+    pub action_id: i64,
+    pub source_key: String,
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub interaction_id: u64,
+    pub channel_id: i64,
+    pub committed_at: i64,
+    pub outcome_json: String,
+    pub state: DigEventDeliveryState,
+    pub delivered_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DigEventDeliveryState {
+    Pending,
+    Ready,
+    Delivered,
+}
+
+impl DigEventDeliveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Delivered => "delivered",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DigEventDeliveryQuery {
+    pub guild_id: Option<i64>,
+    pub discord_id: Option<i64>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DigEventDeliveryMark {
+    pub action_id: i64,
+    pub discord_id: i64,
+    pub guild_id: i64,
+    pub source_key: String,
+    pub delivered_at: i64,
+}
+
 /// Mutation for one nullable JSON tunnel column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventJsonMutation<'a> {
@@ -126,6 +207,10 @@ pub struct AtomicDigEventSettlement<'a> {
     pub inventory_capacity: usize,
     pub detail_json: &'a str,
     pub created_at: i64,
+    /// Optional event-result outbox payload.  When present it is inserted in
+    /// the same SQLite transaction as the actor mutation, so a crash cannot
+    /// leave a settled event without a recoverable public result.
+    pub delivery: Option<DigEventDeliveryDraft<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +384,10 @@ pub enum DigEventRuntimeRepositoryError {
     IdempotencyConflict,
     #[error("persisted event receipt is malformed")]
     MalformedReceipt,
+    #[error("persisted event delivery projection is malformed")]
+    MalformedDelivery,
+    #[error("event delivery source key cannot be empty")]
+    EmptyDeliverySourceKey,
     #[error("Dig event runtime SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Dig event runtime JSON operation failed: {0}")]
@@ -408,6 +497,344 @@ impl DigEventRuntimeRepository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Read the durable event request for a committed actor action. This is
+    /// deliberately separate from [`Self::pending_event`], which admits only
+    /// the pre-choice `dig` action that owns a Discord event component.
+    pub fn resolved_event_identity(
+        &self,
+        action_id: i64,
+        actor_id: i64,
+        guild_id: i64,
+    ) -> Result<Option<DigResolvedEventIdentity>, DigEventRuntimeRepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT id, actor_id, guild_id,
+                        json_extract(detail, '$.event_id'),
+                        json_extract(detail, '$.event_key'),
+                        json_extract(detail, '$.choice'), created_at
+                   FROM dig_actions
+                  WHERE id=?1 AND actor_id=?2 AND guild_id=?3
+                    AND action_type='event' AND json_valid(detail)
+                    AND json_type(detail, '$.event_id')='text'
+                    AND json_type(detail, '$.event_key')='text'
+                    AND json_type(detail, '$.choice')='text'",
+                params![action_id, actor_id, guild_id],
+                |row| {
+                    Ok(DigResolvedEventIdentity {
+                        action_id: row.get(0)?,
+                        actor_id: row.get(1)?,
+                        guild_id: row.get(2)?,
+                        event_id: row.get(3)?,
+                        event_key: row.get(4)?,
+                        choice: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Attach the immutable event-result delivery projection to an already
+    /// committed event action.  Repeating the same projection is idempotent;
+    /// attempting to replace it is rejected so a retry cannot silently render
+    /// a different result after the actor settlement has committed.
+    pub fn attach_event_delivery(
+        &self,
+        action_id: i64,
+        draft: DigEventDeliveryDraft<'_>,
+    ) -> Result<DigEventDeliverySnapshot, DigEventRuntimeRepositoryError> {
+        if draft.source_key.trim().is_empty() {
+            return Err(DigEventRuntimeRepositoryError::EmptyDeliverySourceKey);
+        }
+        let outcome = serde_json::from_str::<JsonValue>(draft.outcome_json)?;
+        if !outcome.is_object() {
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+        }
+        let outcome_json = outcome.to_string();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                "SELECT actor_id, guild_id, detail
+                   FROM dig_actions
+                  WHERE id=?1 AND actor_id=?2 AND guild_id=?3
+                    AND action_type='event'",
+                params![action_id, draft.discord_id, draft.guild_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((discord_id, guild_id, detail)) = row else {
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+        };
+        let mut value = detail
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
+            .ok_or(DigEventRuntimeRepositoryError::InvalidDetail)?;
+        let object = value
+            .as_object_mut()
+            .ok_or(DigEventRuntimeRepositoryError::InvalidDetail)?;
+        if let Some(existing) = object.get("event_delivery") {
+            let existing = event_delivery_from_value(action_id, existing)?;
+            if existing.discord_id != discord_id
+                || existing.guild_id != guild_id
+                || existing.source_key != draft.source_key
+                || existing.interaction_id != draft.interaction_id
+                || existing.channel_id != draft.channel_id
+                || existing.committed_at != draft.committed_at
+                || existing.outcome_json != outcome_json
+            {
+                return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+            }
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        let delivery = event_delivery_json_with_state(
+            DigEventDeliveryDraft {
+                source_key: draft.source_key,
+                discord_id,
+                guild_id,
+                interaction_id: draft.interaction_id,
+                channel_id: draft.channel_id,
+                committed_at: draft.committed_at,
+                outcome_json: &outcome_json,
+            },
+            DigEventDeliveryState::Ready,
+        )?;
+        object.insert("event_delivery".to_owned(), delivery.clone());
+        let changed = transaction.execute(
+            "UPDATE dig_actions SET detail=?1
+              WHERE id=?2 AND actor_id=?3 AND guild_id=?4 AND action_type='event'",
+            params![value.to_string(), action_id, discord_id, guild_id,],
+        )?;
+        if changed != 1 {
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+        }
+        transaction.commit()?;
+        event_delivery_from_value(action_id, &delivery)
+    }
+
+    /// Return unresolved event-result deliveries for READY recovery.  Only
+    /// event actions with an explicitly attached projection are admitted;
+    /// older actions remain safely non-recoverable rather than being guessed.
+    pub fn pending_event_deliveries(
+        &self,
+        query: DigEventDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, DigEventRuntimeRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, detail FROM dig_actions
+               WHERE action_type='event'
+                 AND (?1 IS NULL OR guild_id=?1)
+                 AND (?2 IS NULL OR actor_id=?2)
+                 AND json_valid(detail)
+                 AND json_type(detail, '$.event_delivery')='object'
+                 AND (json_extract(detail, '$.event_delivery.state')='ready'
+                      OR json_extract(detail, '$.event_delivery.state') IS NULL)
+                 AND json_extract(detail, '$.event_delivery.delivered_at') IS NULL
+               ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                query.guild_id,
+                query.discord_id,
+                i64::try_from(query.limit).unwrap_or(i64::MAX),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (action_id, detail) = row?;
+            let value = serde_json::from_str::<JsonValue>(&detail)?;
+            let Some(delivery) = value.get("event_delivery") else {
+                continue;
+            };
+            pending.push(event_delivery_from_value(action_id, delivery)?);
+        }
+        Ok(pending)
+    }
+
+    /// Return actor-committed event results whose application follow-up did
+    /// not reach the terminal ready state. Pending rows are intentionally not
+    /// deliverable; a READY process must call the application recovery method
+    /// for each row before querying [`Self::pending_event_deliveries`].
+    pub fn pending_event_delivery_recoveries(
+        &self,
+        query: DigEventDeliveryQuery,
+    ) -> Result<Vec<DigEventDeliverySnapshot>, DigEventRuntimeRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, detail FROM dig_actions
+               WHERE action_type='event'
+                 AND (?1 IS NULL OR guild_id=?1)
+                 AND (?2 IS NULL OR actor_id=?2)
+                 AND json_valid(detail)
+                 AND json_type(detail, '$.event_delivery')='object'
+                 AND json_extract(detail, '$.event_delivery.state')='pending'
+                 AND json_extract(detail, '$.event_delivery.delivered_at') IS NULL
+               ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                query.guild_id,
+                query.discord_id,
+                i64::try_from(query.limit).unwrap_or(i64::MAX),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (action_id, detail) = row?;
+            let value = serde_json::from_str::<JsonValue>(&detail)?;
+            let Some(delivery) = value.get("event_delivery") else {
+                continue;
+            };
+            pending.push(event_delivery_from_value(action_id, delivery)?);
+        }
+        Ok(pending)
+    }
+
+    /// Mark an event result delivered using the immutable source key.  The
+    /// compare-and-set is intentionally idempotent: a retry after the CAS has
+    /// already succeeded returns `true` without rewriting the timestamp.
+    pub fn mark_event_delivery_delivered(
+        &self,
+        request: DigEventDeliveryMark,
+    ) -> Result<bool, DigEventRuntimeRepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = transaction
+            .query_row(
+                "SELECT detail FROM dig_actions
+                  WHERE id=?1 AND actor_id=?2 AND guild_id=?3 AND action_type='event'",
+                params![request.action_id, request.discord_id, request.guild_id,],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(Some(detail)) = detail else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let mut value = serde_json::from_str::<JsonValue>(&detail)?;
+        let Some(delivery_value) = value.get_mut("event_delivery") else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let current = event_delivery_from_value(request.action_id, delivery_value)?;
+        if current.source_key != request.source_key {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if current.delivered_at.is_some() || current.state == DigEventDeliveryState::Delivered {
+            transaction.commit()?;
+            return Ok(true);
+        }
+        if current.state != DigEventDeliveryState::Ready {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        delivery_value["delivered_at"] = JsonValue::from(request.delivered_at);
+        delivery_value["state"] = JsonValue::from("delivered");
+        let changed = transaction.execute(
+            "UPDATE dig_actions SET detail=?1
+              WHERE id=?2 AND actor_id=?3 AND guild_id=?4 AND action_type='event'",
+            params![
+                value.to_string(),
+                request.action_id,
+                request.discord_id,
+                request.guild_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Complete the application-owned event projection after any fail-soft
+    /// quest follow-up has run. Only a `Pending` projection may transition to
+    /// `Ready`; once frozen, a retry must carry the identical payload (or is
+    /// rejected) and a `Delivered` projection is never rewritten. A crash
+    /// before this method leaves the atomic base snapshot pending; recovery
+    /// can finish the projection without mutating a ready result.
+    pub fn update_event_delivery_outcome(
+        &self,
+        action_id: i64,
+        discord_id: i64,
+        guild_id: i64,
+        source_key: &str,
+        outcome_json: &str,
+    ) -> Result<DigEventDeliverySnapshot, DigEventRuntimeRepositoryError> {
+        if source_key.trim().is_empty() {
+            return Err(DigEventRuntimeRepositoryError::EmptyDeliverySourceKey);
+        }
+        let outcome = serde_json::from_str::<JsonValue>(outcome_json)?;
+        if !outcome.is_object() {
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = transaction
+            .query_row(
+                "SELECT detail FROM dig_actions
+                  WHERE id=?1 AND actor_id=?2 AND guild_id=?3 AND action_type='event'",
+                params![action_id, discord_id, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+        let mut value = serde_json::from_str::<JsonValue>(&detail)?;
+        let delivery_value = value
+            .get_mut("event_delivery")
+            .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+        let current = event_delivery_from_value(action_id, delivery_value)?;
+        if current.source_key != source_key {
+            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+        }
+        let incoming_outcome_json = outcome.to_string();
+        match current.state {
+            DigEventDeliveryState::Pending => {
+                delivery_value["outcome"] = outcome;
+                delivery_value["state"] = JsonValue::from("ready");
+                transaction.execute(
+                    "UPDATE dig_actions SET detail=?1
+                      WHERE id=?2 AND actor_id=?3 AND guild_id=?4 AND action_type='event'",
+                    params![value.to_string(), action_id, discord_id, guild_id],
+                )?;
+            }
+            DigEventDeliveryState::Ready
+                if current.outcome_json.as_str() != incoming_outcome_json =>
+            {
+                return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+            }
+            DigEventDeliveryState::Ready | DigEventDeliveryState::Delivered => {}
+        }
+        transaction.commit()?;
+        let detail = DigEventRuntimeRepository::new(&self.path)
+            .connection()?
+            .query_row(
+                "SELECT detail FROM dig_actions WHERE id=?1",
+                params![action_id],
+                |row| row.get::<_, String>(0),
+            )?;
+        let value = serde_json::from_str::<JsonValue>(&detail)?;
+        event_delivery_from_value(
+            action_id,
+            value
+                .get("event_delivery")
+                .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?,
+        )
     }
 
     /// Read quest state plus the only cross-system starter predicate used by
@@ -789,6 +1216,9 @@ impl DigEventRuntimeRepository {
             request.event_id,
             request.choice,
         )? {
+            if let Some(delivery) = request.delivery {
+                attach_event_delivery_in_transaction(&transaction, receipt.action_id, delivery)?;
+            }
             transaction.commit()?;
             return Ok(DigEventSettlementOutcome::Applied(receipt));
         }
@@ -1084,6 +1514,184 @@ fn validate_splash_common(
     Ok(())
 }
 
+fn validate_event_delivery_draft(
+    draft: DigEventDeliveryDraft<'_>,
+    expected_key: DigEventActorKey,
+    created_at: i64,
+) -> Result<(), DigEventRuntimeRepositoryError> {
+    if draft.source_key.trim().is_empty() {
+        return Err(DigEventRuntimeRepositoryError::EmptyDeliverySourceKey);
+    }
+    if draft.discord_id != expected_key.discord_id
+        || draft.guild_id != DigEventRuntimeRepository::normalize_guild_id(expected_key.guild_id)
+    {
+        return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+    }
+    if draft.committed_at != created_at {
+        return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+    }
+    let outcome = serde_json::from_str::<JsonValue>(draft.outcome_json)?;
+    if !outcome.is_object() {
+        return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+    }
+    Ok(())
+}
+
+fn event_delivery_json(
+    draft: DigEventDeliveryDraft<'_>,
+) -> Result<JsonValue, DigEventRuntimeRepositoryError> {
+    event_delivery_json_with_state(draft, DigEventDeliveryState::Pending)
+}
+
+fn event_delivery_json_with_state(
+    draft: DigEventDeliveryDraft<'_>,
+    state: DigEventDeliveryState,
+) -> Result<JsonValue, DigEventRuntimeRepositoryError> {
+    let outcome = serde_json::from_str::<JsonValue>(draft.outcome_json)?;
+    if !outcome.is_object() {
+        return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+    }
+    Ok(json!({
+        "source_key": draft.source_key,
+        "discord_id": draft.discord_id,
+        "guild_id": draft.guild_id,
+        "interaction_id": draft.interaction_id,
+        "channel_id": draft.channel_id,
+        "committed_at": draft.committed_at,
+        "outcome": outcome,
+        "state": state.as_str(),
+        "delivered_at": JsonValue::Null,
+    }))
+}
+
+fn attach_event_delivery_in_transaction(
+    transaction: &Transaction<'_>,
+    action_id: i64,
+    draft: DigEventDeliveryDraft<'_>,
+) -> Result<(), DigEventRuntimeRepositoryError> {
+    let detail = transaction
+        .query_row(
+            "SELECT actor_id, guild_id, detail FROM dig_actions
+              WHERE id=?1 AND action_type='event'",
+            params![action_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let (actor_id, guild_id, detail) = detail;
+    let mut value = detail
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
+        .ok_or(DigEventRuntimeRepositoryError::InvalidDetail)?;
+    let object = value
+        .as_object_mut()
+        .ok_or(DigEventRuntimeRepositoryError::InvalidDetail)?;
+    if let Some(existing) = object.get("event_delivery") {
+        let existing = event_delivery_from_value(action_id, existing)?;
+        if existing.discord_id != actor_id
+            || existing.guild_id != guild_id
+            || existing.source_key != draft.source_key
+        {
+            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+        }
+        return Ok(());
+    }
+    object.insert(
+        "event_delivery".to_owned(),
+        event_delivery_json(DigEventDeliveryDraft {
+            discord_id: actor_id,
+            guild_id,
+            ..draft
+        })?,
+    );
+    let changed = transaction.execute(
+        "UPDATE dig_actions SET detail=?1 WHERE id=?2 AND action_type='event'",
+        params![value.to_string(), action_id],
+    )?;
+    if changed != 1 {
+        return Err(DigEventRuntimeRepositoryError::MalformedDelivery);
+    }
+    Ok(())
+}
+
+fn event_delivery_from_value(
+    action_id: i64,
+    value: &JsonValue,
+) -> Result<DigEventDeliverySnapshot, DigEventRuntimeRepositoryError> {
+    let object = value
+        .as_object()
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let source_key = object
+        .get("source_key")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?
+        .to_owned();
+    let discord_id = object
+        .get("discord_id")
+        .and_then(JsonValue::as_i64)
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let guild_id = object
+        .get("guild_id")
+        .and_then(JsonValue::as_i64)
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let interaction_id = object
+        .get("interaction_id")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let channel_id = object
+        .get("channel_id")
+        .and_then(JsonValue::as_i64)
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let committed_at = object
+        .get("committed_at")
+        .and_then(JsonValue::as_i64)
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let outcome_json = object
+        .get("outcome")
+        .filter(|value| value.is_object())
+        .map(ToString::to_string)
+        .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+    let delivered_at = object.get("delivered_at").and_then(JsonValue::as_i64);
+    let state = if delivered_at.is_some() {
+        DigEventDeliveryState::Delivered
+    } else {
+        match object.get("state").and_then(JsonValue::as_str) {
+            Some("pending") => DigEventDeliveryState::Pending,
+            Some("ready") => DigEventDeliveryState::Ready,
+            Some("delivered") => DigEventDeliveryState::Delivered,
+            // Rows written by the pre-state outbox migration contain a
+            // complete outcome and are safe to deliver; preserve that
+            // compatibility while treating every new atomic draft as
+            // explicitly pending.
+            None => DigEventDeliveryState::Ready,
+            Some(_) => return Err(DigEventRuntimeRepositoryError::MalformedDelivery),
+        }
+    };
+    Ok(DigEventDeliverySnapshot {
+        action_id,
+        source_key,
+        discord_id,
+        guild_id,
+        interaction_id,
+        channel_id,
+        committed_at,
+        outcome_json,
+        state,
+        delivered_at,
+    })
+}
+
 fn validate_finale_common(
     quest_id: &str,
     event_key: &str,
@@ -1302,6 +1910,9 @@ fn validate_request(
     {
         return Err(DigEventRuntimeRepositoryError::InvalidDetail);
     }
+    if let Some(delivery) = request.delivery {
+        validate_event_delivery_draft(delivery, request.expected.key, request.created_at)?;
+    }
     if let Some(reward) = request.reward {
         match reward {
             DigEventReward::Gear {
@@ -1425,6 +2036,9 @@ fn settlement_detail(
         "reward_row_id".to_owned(),
         reward_row_id.map_or(JsonValue::Null, JsonValue::from),
     );
+    if let Some(delivery) = request.delivery {
+        detail.insert("event_delivery".to_owned(), event_delivery_json(delivery)?);
+    }
     Ok(JsonValue::Object(detail).to_string())
 }
 
