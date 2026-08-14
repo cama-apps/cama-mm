@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from scripts import production_snapshot_ab_delta as ab
 
@@ -22,9 +25,7 @@ def test_route_state_projection_is_json_order_independent() -> None:
 
 
 def test_scope_delta_reports_schema_aware_rows_and_counts() -> None:
-    empty = {
-        table: {"row_count": 0, "rows": []} for table in ab.SCOPE_COLUMNS
-    }
+    empty = {table: {"row_count": 0, "rows": []} for table in ab.SCOPE_COLUMNS}
     after = ab.expected_scope_after()
 
     delta = ab.scope_delta(empty, after)
@@ -32,9 +33,7 @@ def test_scope_delta_reports_schema_aware_rows_and_counts() -> None:
     assert all(details["before_count"] == 0 for details in delta.values())
     assert delta["guild_config"]["delta"] == 1
     assert delta["survey_answers"]["delta"] == 0
-    assert delta["survey_recipients"]["after_rows"][0]["current_question_id"] == (
-        "<question>"
-    )
+    assert delta["survey_recipients"]["after_rows"][0]["current_question_id"] == ("<question>")
 
 
 def test_expected_contract_is_stable_json() -> None:
@@ -57,3 +56,32 @@ def test_python_write_helper_uses_retained_repositories_for_transitions() -> Non
     assert "set_league_id" in source
     assert "atomic_auto_buy_items" in source
     assert "mark_delivery_sent" in source
+
+
+@pytest.mark.parametrize("report_suffix", ["", "-wal", "-shm"])
+def test_report_path_rejects_source_sqlite_namespace_before_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report_suffix: str
+) -> None:
+    source = tmp_path / "production.db"
+    source.touch()
+    inspected = False
+
+    def unexpected_inspection(_path: Path) -> dict[str, object]:
+        nonlocal inspected
+        inspected = True
+        raise AssertionError("source inspection must not start")
+
+    monkeypatch.setattr(ab, "inspect_database", unexpected_inspection)
+    arguments = SimpleNamespace(
+        source=source,
+        report=Path(f"{source}{report_suffix}"),
+        python=None,
+        cargo="cargo",
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(
+        ValueError, match="report path must not be the source database or its sidecar"
+    ):
+        ab.run(arguments)
+    assert not inspected

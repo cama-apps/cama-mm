@@ -3,9 +3,10 @@
 
 The source is opened read-only and copied with the existing online-backup
 helper. Python migrates only the disposable copy, then Rust runs the preflight,
-repository smoke, and durable Survey recovery path. This one-way rehearsal
-does not read Rust writes back through Python. A JSON report is printed even
-when a step fails so this rehearsal is evidence rather than a cutover claim.
+repository smoke, live match-core referral settlement smoke, and durable Survey
+recovery path. This one-way rehearsal does not read Rust writes back through
+Python. A JSON report is printed even when a step fails so this rehearsal is
+evidence rather than a cutover claim.
 """
 
 from __future__ import annotations
@@ -35,9 +36,7 @@ DIG_SMOKE_ROUTE_STATE = '{"route_id":"shored_passage","status":"active"}'
 SURVEY_SMOKE_GUILD_ID = 9_000_000_000_000_001
 SURVEY_SMOKE_USER_ID = 9_000_000_000_000_002
 SURVEY_SMOKE_TITLE = "Rust disposable Survey recovery smoke"
-SURVEY_SMOKE_PROMPT = (
-    "Can the Rust recovery worker deliver this clone-only sentinel?"
-)
+SURVEY_SMOKE_PROMPT = "Can the Rust recovery worker deliver this clone-only sentinel?"
 SURVEY_SMOKE_CHANNEL_ID = 8_000_000_000_000_001
 SURVEY_SMOKE_MESSAGE_ID = 8_000_000_000_000_002
 VOLATILE_TIME_COLUMN_SUFFIXES = ("_at", "_date", "_time", "_timestamp")
@@ -83,6 +82,20 @@ EXPECTED_SURVEY_SMOKE_DELTAS = {
     "survey_questions": 1,
     "survey_recipients": 1,
     "surveys": 1,
+}
+# Referral settlement is an additional live match-core probe, not a fifteenth
+# repository family in the shared smoke count above.  Its fixture deliberately
+# includes the same player IDs in a second guild to prove guild isolation.
+EXPECTED_REFERRAL_SMOKE_DELTAS = {
+    # Six seeded player balances create six normal balance-ledger rows; the
+    # live settlement adds exactly two referral_reward rows.
+    "economy_ledger_entries": 8,
+    "match_participants": 2,
+    "match_predictions": 1,
+    "matches": 1,
+    "player_pairings": 1,
+    "players": 6,
+    "referrals": 1,
 }
 
 
@@ -154,9 +167,7 @@ class StepFailure(RuntimeError):
 
     def __init__(self, step: dict[str, Any]) -> None:
         self.step = step
-        super().__init__(
-            f"{step['name']} failed with exit status {step.get('returncode')}"
-        )
+        super().__init__(f"{step['name']} failed with exit status {step.get('returncode')}")
 
 
 def _sha256(path: Path) -> str:
@@ -179,8 +190,7 @@ def _volatile_time_columns(columns: Sequence[str]) -> list[str]:
     return sorted(
         column
         for column in columns
-        if column in VOLATILE_TIME_COLUMN_NAMES
-        or column.endswith(VOLATILE_TIME_COLUMN_SUFFIXES)
+        if column in VOLATILE_TIME_COLUMN_NAMES or column.endswith(VOLATILE_TIME_COLUMN_SUFFIXES)
     )
 
 
@@ -191,9 +201,7 @@ def _canonical_sentinel_digest(
     canonical_rows = sorted(
         json.dumps(
             {
-                key: "<volatile-time>"
-                if key in volatile
-                else _json_value(value)
+                key: "<volatile-time>" if key in volatile else _json_value(value)
                 for key, value in row.items()
             },
             sort_keys=True,
@@ -209,9 +217,7 @@ def _assert_volatile_digest_invariant() -> None:
     first = [{"id": 7, "created_at": "2026-08-13 12:00:00", "semantic_value": 42}]
     second = [{"id": 7, "created_at": "2026-08-13 12:00:01", "semantic_value": 42}]
     volatile = _volatile_time_columns(columns)
-    if _canonical_sentinel_digest(first, volatile) != _canonical_sentinel_digest(
-        second, volatile
-    ):
+    if _canonical_sentinel_digest(first, volatile) != _canonical_sentinel_digest(second, volatile):
         raise RuntimeError("volatile sentinel digest normalization self-check failed")
 
 
@@ -225,9 +231,7 @@ def inspect_database(path: Path) -> dict[str, Any]:
     try:
         connection.execute("PRAGMA query_only=ON")
         quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
-        integrity_rows = [
-            str(row[0]) for row in connection.execute("PRAGMA integrity_check")
-        ]
+        integrity_rows = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
         migration_count = int(
             connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
         )
@@ -271,9 +275,7 @@ def table_row_counts(path: Path) -> dict[str, int]:
         ]
         return {
             name: int(
-                connection.execute(
-                    f"SELECT COUNT(*) FROM {_quote_identifier(name)}"
-                ).fetchone()[0]
+                connection.execute(f"SELECT COUNT(*) FROM {_quote_identifier(name)}").fetchone()[0]
             )
             for name in names
         }
@@ -296,9 +298,7 @@ def sentinel_digests(path: Path) -> dict[str, dict[str, Any]]:
         for table in sorted(EXPECTED_SMOKE_DELTAS):
             columns = [
                 str(row[1])
-                for row in connection.execute(
-                    f"PRAGMA table_info({_quote_identifier(table)})"
-                )
+                for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")
             ]
             if "guild_id" not in columns:
                 raise RuntimeError(f"smoke table lacks guild_id filter: {table}")
@@ -307,9 +307,7 @@ def sentinel_digests(path: Path) -> dict[str, dict[str, Any]]:
                 (SMOKE_GUILD_ID,),
             ).fetchall()
             volatile_columns = _volatile_time_columns(columns)
-            row_values = [
-                {key: row[key] for key in row.keys()} for row in rows
-            ]
+            row_values = [{key: row[key] for key in row.keys()} for row in rows]
             digest = _canonical_sentinel_digest(row_values, volatile_columns)
             result[table] = {
                 "row_count": len(row_values),
@@ -423,18 +421,13 @@ def _parse_retained_python_read(output: str) -> dict[str, Any]:
     try:
         value = json.loads(output)
     except json.JSONDecodeError as error:
-        raise RuntimeError(
-            f"retained Python repository read was not JSON: {output}"
-        ) from error
+        raise RuntimeError(f"retained Python repository read was not JSON: {output}") from error
     if not isinstance(value, dict):
-        raise RuntimeError(
-            f"retained Python repository read was not an object: {value!r}"
-        )
+        raise RuntimeError(f"retained Python repository read was not an object: {value!r}")
     expected = expected_retained_python_read()
     if value != expected:
         raise RuntimeError(
-            "retained Python repository read mismatch: "
-            f"expected {expected!r}, found {value!r}"
+            f"retained Python repository read mismatch: expected {expected!r}, found {value!r}"
         )
     return value
 
@@ -476,6 +469,17 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
         partial.unlink(missing_ok=True)
 
 
+def _validate_report_path(source: Path, report_path: Path | None) -> None:
+    """Keep report output out of the source database's SQLite namespace."""
+
+    if report_path is not None and report_path in {
+        source,
+        Path(f"{source}-wal"),
+        Path(f"{source}-shm"),
+    }:
+        raise ValueError("report path must not be the source database or its sidecar")
+
+
 def _source_unchanged(before: dict[str, Any], after: dict[str, Any]) -> bool:
     # The main SQLite file is the source of truth. SQLite may create/update a
     # read-only WAL shared-memory sidecar while coordinating a reader; those
@@ -502,12 +506,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if arguments.report is not None
         else None
     )
-    if report_path is not None and report_path in {
-        source,
-        Path(f"{source}-wal"),
-        Path(f"{source}-shm"),
-    }:
-        raise ValueError("report path must not be the source database or its sidecar")
+    _validate_report_path(source, report_path)
 
     report: dict[str, Any] = {
         "format_version": REPORT_FORMAT_VERSION,
@@ -524,6 +523,10 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "survey_recovery": {
             "status": "not_run",
             "expected_table_deltas": EXPECTED_SURVEY_SMOKE_DELTAS,
+        },
+        "referral_settlement": {
+            "status": "not_run",
+            "expected_table_deltas": EXPECTED_REFERRAL_SMOKE_DELTAS,
         },
         "self_checks": {"volatile_digest": "not_run"},
         "errors": [],
@@ -596,8 +599,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             db_check_values = _parse_key_values(db_check["stdout"])
             if db_check_values.get("schema_compatible") != "true":
                 raise RuntimeError(
-                    "Rust db-check did not report schema_compatible=true: "
-                    f"{db_check['stdout']}"
+                    f"Rust db-check did not report schema_compatible=true: {db_check['stdout']}"
                 )
             report["rust_db_check"] = db_check_values
 
@@ -626,8 +628,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             smoke_marker_found = "shared_repository_roundtrip=ok" in smoke["stdout"]
             if not smoke_marker_found:
                 raise RuntimeError(
-                    "Rust repository smoke exited successfully without its "
-                    "round-trip marker"
+                    "Rust repository smoke exited successfully without its round-trip marker"
                 )
             after_counts = table_row_counts(copy)
             table_deltas = {
@@ -639,9 +640,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 for table in sorted(set(before_counts) | set(after_counts))
                 if after_counts.get(table, 0) != before_counts.get(table, 0)
             }
-            actual_deltas = {
-                table: details["delta"] for table, details in table_deltas.items()
-            }
+            actual_deltas = {table: details["delta"] for table, details in table_deltas.items()}
             report["repository_smoke"] = {
                 "status": "failed",
                 "roundtrip_marker": smoke_marker_found,
@@ -661,9 +660,83 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 {"status": "passed", "sentinel_digests": sentinel_rows}
             )
 
+            referral_before_counts = table_row_counts(copy)
+            report["referral_settlement"] = {
+                "status": "failed",
+                "attempted": True,
+                "settlement_marker": False,
+                "expected_table_deltas": EXPECTED_REFERRAL_SMOKE_DELTAS,
+                "table_deltas": None,
+            }
+            referral_table_deltas: dict[str, dict[str, int]] = {}
+            try:
+                referral_smoke = run_step(
+                    "rust_referral_settlement_smoke",
+                    [
+                        cargo,
+                        "run",
+                        "--locked",
+                        "--manifest-path",
+                        str(runtime_manifest),
+                        "-p",
+                        "cama-db",
+                        "--example",
+                        "referral_snapshot_smoke",
+                        "--",
+                        str(copy),
+                        "--disposable-copy",
+                    ],
+                    cwd=root,
+                    timeout_seconds=arguments.timeout_seconds,
+                    report=report,
+                )
+            finally:
+                # A failed subprocess may have committed fixture rows before it
+                # detected the failure. Preserve that disposable-copy evidence
+                # while allowing the original StepFailure to remain primary.
+                try:
+                    referral_after_counts = table_row_counts(copy)
+                    referral_table_deltas = {
+                        table: {
+                            "before": referral_before_counts.get(table, 0),
+                            "after": referral_after_counts.get(table, 0),
+                            "delta": referral_after_counts.get(table, 0)
+                            - referral_before_counts.get(table, 0),
+                        }
+                        for table in sorted(
+                            set(referral_before_counts) | set(referral_after_counts)
+                        )
+                        if referral_after_counts.get(table, 0)
+                        != referral_before_counts.get(table, 0)
+                    }
+                    report["referral_settlement"]["table_deltas"] = referral_table_deltas
+                    report["disposable_copy"]["after_rust"] = inspect_database(copy)
+                except (OSError, RuntimeError, sqlite3.Error) as evidence_error:
+                    report["referral_settlement"]["evidence_error"] = str(evidence_error)
+            if evidence_error := report["referral_settlement"].get("evidence_error"):
+                raise RuntimeError(
+                    f"could not collect post-referral disposable-copy evidence: {evidence_error}"
+                )
+            actual_referral_deltas = {
+                table: details["delta"] for table, details in referral_table_deltas.items()
+            }
+            referral_marker_found = "referral_snapshot_smoke=ok" in referral_smoke["stdout"]
+            report["referral_settlement"]["settlement_marker"] = referral_marker_found
+            if not referral_marker_found:
+                raise RuntimeError(
+                    "Rust referral settlement smoke exited successfully without "
+                    "its settlement marker"
+                )
+            if actual_referral_deltas != EXPECTED_REFERRAL_SMOKE_DELTAS:
+                raise RuntimeError(
+                    "Rust referral settlement table delta mismatch: "
+                    f"expected {EXPECTED_REFERRAL_SMOKE_DELTAS!r}, "
+                    f"found {actual_referral_deltas!r}"
+                )
+            report["referral_settlement"]["status"] = "passed"
+
             survey_before_counts = {
-                table: after_counts.get(table, 0)
-                for table in EXPECTED_SURVEY_SMOKE_DELTAS
+                table: after_counts.get(table, 0) for table in EXPECTED_SURVEY_SMOKE_DELTAS
             }
             survey_smoke = run_step(
                 "rust_survey_recovery_smoke",
@@ -690,8 +763,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 table: {
                     "before": survey_before_counts[table],
                     "after": survey_after_counts.get(table, 0),
-                    "delta": survey_after_counts.get(table, 0)
-                    - survey_before_counts[table],
+                    "delta": survey_after_counts.get(table, 0) - survey_before_counts[table],
                 }
                 for table in sorted(EXPECTED_SURVEY_SMOKE_DELTAS)
             }
@@ -708,14 +780,11 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 "table_deltas": survey_table_deltas,
             }
             expected_nonzero_survey_deltas = {
-                table: delta
-                for table, delta in EXPECTED_SURVEY_SMOKE_DELTAS.items()
-                if delta != 0
+                table: delta for table, delta in EXPECTED_SURVEY_SMOKE_DELTAS.items() if delta != 0
             }
             if not survey_marker_found:
                 raise RuntimeError(
-                    "Rust Survey recovery smoke exited successfully without its "
-                    "recovery marker"
+                    "Rust Survey recovery smoke exited successfully without its recovery marker"
                 )
             if actual_survey_deltas != expected_nonzero_survey_deltas:
                 raise RuntimeError(
@@ -734,13 +803,9 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             source_after = inspect_database(source)
             report["source"]["after"] = source_after
             if source_before is not None:
-                report["source"]["unchanged"] = _source_unchanged(
-                    source_before, source_after
-                )
+                report["source"]["unchanged"] = _source_unchanged(source_before, source_after)
                 if not report["source"]["unchanged"]:
-                    report["errors"].append(
-                        "source database changed while replay was running"
-                    )
+                    report["errors"].append("source database changed while replay was running")
                     report["status"] = "failed"
         except (OSError, sqlite3.Error) as error:
             report["source"]["after_error"] = str(error)

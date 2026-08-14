@@ -6,8 +6,9 @@ creates two online-backup copies of one current production-shaped database,
 lets the retained Python repositories finish their write subprocess, then
 touches only the Rust copy with the existing repository/recovery smokes.  The
 comparison is limited to schema-aware projections for guild configuration,
-Dig inventory/route state, and Survey delivery.  Timestamps, generated IDs,
-and SQLite file bytes are deliberately not used as semantic equality.
+Dig inventory/route state, Survey delivery, and first-match referrals.
+Timestamps, generated IDs, and SQLite file bytes are deliberately not used as
+semantic equality.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from scripts.production_snapshot_replay import (
     _python_executable,
     _read_only_uri,
     _source_unchanged,
+    _validate_report_path,
     _write_report,
     inspect_database,
     run_step,
@@ -46,6 +48,11 @@ SURVEY_TITLE = "Rust disposable Survey recovery smoke"
 SURVEY_PROMPT = "Can the Rust recovery worker deliver this clone-only sentinel?"
 SURVEY_CHANNEL_ID = 8_000_000_000_000_001
 SURVEY_MESSAGE_ID = 8_000_000_000_000_002
+REFERRAL_GUILD_ID = -8_888_888_888_888_867
+REFERRER_ID = -8_888_888_888_888_866
+REFERRED_ID = -8_888_888_888_888_865
+REFERRAL_OPPONENT_ID = -8_888_888_888_888_864
+REFERRAL_PENDING_MATCH_ID = 8_888_888_888_888_001
 
 # Only these projections are the contract for this bounded A/B slice.  The
 # source snapshot may contain unrelated rows, and the Rust repository smoke
@@ -88,6 +95,25 @@ SCOPE_COLUMNS: dict[str, tuple[str, ...]] = {
         "text_value",
         "skipped",
     ),
+    "players": ("discord_id", "guild_id", "jopacoin_balance", "wins", "losses"),
+    "referrals": (
+        "guild_id",
+        "referred_id",
+        "referrer_id",
+        "rewarded_match_id",
+        "reward_amount",
+        "rewarded_at",
+    ),
+    "matches": ("guild_id", "pending_match_id", "jc_changes"),
+    "economy_ledger_entries": (
+        "guild_id",
+        "account_id",
+        "delta",
+        "source",
+        "related_type",
+        "related_id",
+        "metadata",
+    ),
 }
 
 
@@ -101,8 +127,7 @@ def _scope_filter(table: str) -> tuple[str, tuple[object, ...]]:
     if table == "surveys":
         return "guild_id = ? AND title = ?", (SURVEY_GUILD_ID, SURVEY_TITLE)
     survey_subquery = (
-        "survey_id IN (SELECT survey_id FROM surveys "
-        "WHERE guild_id = ? AND title = ?)"
+        "survey_id IN (SELECT survey_id FROM surveys WHERE guild_id = ? AND title = ?)"
     )
     if table == "survey_questions":
         return f"guild_id = ? AND {survey_subquery}", (
@@ -123,6 +148,20 @@ def _scope_filter(table: str) -> tuple[str, tuple[object, ...]]:
             SURVEY_GUILD_ID,
             SURVEY_TITLE,
         )
+    if table == "players":
+        return "guild_id = ?", (REFERRAL_GUILD_ID,)
+    if table == "referrals":
+        return "guild_id = ? AND referred_id = ?", (
+            REFERRAL_GUILD_ID,
+            REFERRED_ID,
+        )
+    if table == "matches":
+        return "guild_id = ? AND pending_match_id = ?", (
+            REFERRAL_GUILD_ID,
+            REFERRAL_PENDING_MATCH_ID,
+        )
+    if table == "economy_ledger_entries":
+        return "guild_id = ? AND source = 'referral_reward'", (REFERRAL_GUILD_ID,)
     raise KeyError(f"unknown snapshot A/B scope table: {table}")
 
 
@@ -138,16 +177,25 @@ def _canonical_value(table: str, column: str, value: object) -> object:
         return int(value) if value is not None else None
     if column in {"current_question_id", "question_id"}:
         return "<question>" if value is not None else None
+    if table == "referrals" and column == "rewarded_match_id":
+        return "<referral-match>" if value is not None else None
+    if table == "referrals" and column == "rewarded_at":
+        return "<referral-time>" if value is not None else None
+    if column in {"jc_changes", "metadata"} and isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict) and "match_id" in parsed:
+            parsed["match_id"] = "<referral-match>"
+        return parsed
     return value
 
 
 def _project_rows(table: str, rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     columns = SCOPE_COLUMNS[table]
     projected = [
-        {
-            column: _canonical_value(table, column, row.get(column))
-            for column in columns
-        }
+        {column: _canonical_value(table, column, row.get(column)) for column in columns}
         for row in rows
     ]
     return sorted(
@@ -166,7 +214,7 @@ def scope_snapshot(path: Path) -> dict[str, dict[str, object]]:
         for table, columns in SCOPE_COLUMNS.items():
             where, parameters = _scope_filter(table)
             rows = connection.execute(
-                f"SELECT {', '.join(columns)} FROM \"{table}\" WHERE {where}",
+                f'SELECT {", ".join(columns)} FROM "{table}" WHERE {where}',
                 parameters,
             ).fetchall()
             projected = _project_rows(table, [dict(row) for row in rows])
@@ -279,6 +327,91 @@ def expected_scope_after() -> dict[str, dict[str, object]]:
             ],
         },
         "survey_answers": {"row_count": 0, "rows": []},
+        "players": {
+            "row_count": 3,
+            "rows": [
+                {
+                    "discord_id": REFERRAL_OPPONENT_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 30,
+                    "wins": 0,
+                    "losses": 1,
+                },
+                {
+                    "discord_id": REFERRED_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 120,
+                    "wins": 1,
+                    "losses": 0,
+                },
+                {
+                    "discord_id": REFERRER_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 110,
+                    "wins": 0,
+                    "losses": 0,
+                },
+            ],
+        },
+        "referrals": {
+            "row_count": 1,
+            "rows": [
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "referred_id": REFERRED_ID,
+                    "referrer_id": REFERRER_ID,
+                    "rewarded_match_id": "<referral-match>",
+                    "reward_amount": 100,
+                    "rewarded_at": "<referral-time>",
+                }
+            ],
+        },
+        "matches": {
+            "row_count": 1,
+            "rows": [
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "pending_match_id": REFERRAL_PENDING_MATCH_ID,
+                    "jc_changes": {
+                        str(REFERRED_ID): {"referral": 100},
+                        str(REFERRER_ID): {"referral": 100},
+                    },
+                }
+            ],
+        },
+        "economy_ledger_entries": {
+            "row_count": 2,
+            "rows": [
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "account_id": REFERRED_ID,
+                    "delta": 100,
+                    "source": "referral_reward",
+                    "related_type": "referral",
+                    "related_id": str(REFERRED_ID),
+                    "metadata": {
+                        "match_id": "<referral-match>",
+                        "referrer_id": REFERRER_ID,
+                        "referred_id": REFERRED_ID,
+                        "beneficiary_role": "referred",
+                    },
+                },
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "account_id": REFERRER_ID,
+                    "delta": 100,
+                    "source": "referral_reward",
+                    "related_type": "referral",
+                    "related_id": str(REFERRED_ID),
+                    "metadata": {
+                        "match_id": "<referral-match>",
+                        "referrer_id": REFERRER_ID,
+                        "referred_id": REFERRED_ID,
+                        "beneficiary_role": "referrer",
+                    },
+                },
+            ],
+        },
     }
 
 
@@ -330,6 +463,23 @@ def _rust_repository_smoke_command(cargo: str, root: Path, copy: Path) -> list[s
     ]
 
 
+def _rust_referral_smoke_command(cargo: str, root: Path, copy: Path) -> list[str]:
+    return [
+        cargo,
+        "run",
+        "--locked",
+        "--manifest-path",
+        str(root / "rust" / "Cargo.toml"),
+        "-p",
+        "cama-db",
+        "--example",
+        "referral_snapshot_smoke",
+        "--",
+        str(copy),
+        "--disposable-copy",
+    ]
+
+
 def _rust_survey_smoke_command(cargo: str, root: Path, copy: Path) -> list[str]:
     return [
         cargo,
@@ -359,6 +509,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if arguments.report is not None
         else None
     )
+    _validate_report_path(source, report_path)
     report: dict[str, Any] = {
         "format_version": REPORT_FORMAT_VERSION,
         "status": "failed",
@@ -441,9 +592,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             if any(details["row_count"] for details in python_before.values()) or any(
                 details["row_count"] for details in rust_before.values()
             ):
-                raise RuntimeError(
-                    "reserved A/B sentinel rows already exist in a disposable copy"
-                )
+                raise RuntimeError("reserved A/B sentinel rows already exist in a disposable copy")
 
             # This subprocess must complete before any Rust-side operation.
             run_step(
@@ -463,6 +612,13 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             run_step(
                 "rust_repository_ab_write",
                 _rust_repository_smoke_command(cargo, root, rust_copy),
+                cwd=root,
+                timeout_seconds=arguments.timeout_seconds,
+                report=report,
+            )
+            run_step(
+                "rust_referral_ab_write",
+                _rust_referral_smoke_command(cargo, root, rust_copy),
                 cwd=root,
                 timeout_seconds=arguments.timeout_seconds,
                 report=report,
@@ -488,9 +644,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             report["scope"]["rust_matches_expected"] = rust_matches
             report["scope"]["equal"] = python_after == rust_after
             if not python_matches or not rust_matches or not report["scope"]["equal"]:
-                raise RuntimeError(
-                    "Python/Rust normalized A/B scope mismatch; see report scope"
-                )
+                raise RuntimeError("Python/Rust normalized A/B scope mismatch; see report scope")
 
             report["copies"]["python"]["after"] = inspect_database(python_copy)
             report["copies"]["rust"]["after"] = inspect_database(rust_copy)
@@ -508,9 +662,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             if source_before is not None:
                 report["source"]["unchanged"] = _same_source(source_before, source_after)
                 if not report["source"]["unchanged"]:
-                    report["errors"].append(
-                        "source database changed while A/B replay was running"
-                    )
+                    report["errors"].append("source database changed while A/B replay was running")
                     report["status"] = "failed"
         except (OSError, sqlite3.Error) as error:
             report["source"]["after_error"] = str(error)

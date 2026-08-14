@@ -6,7 +6,7 @@
 //! shape. They do not require Python to read post-cutover Rust writes.
 
 use rusqlite::Connection;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::snapshot_contract_support as support;
 
@@ -75,5 +75,120 @@ fn test_snapshot_parser_accepts_only_the_normalized_rust_contract() -> support::
     let error = support::parse_expected_scope_after(&serde_json::to_string(&malformed)?)
         .expect_err("stale route JSON must not satisfy the normalized Rust contract");
     assert!(error.to_string().contains("Rust snapshot mismatch"));
+    let root = support::repository_root()?;
+    let replay_source = support::source_text(&root, "scripts/production_snapshot_replay.py")?;
+    assert!(replay_source.contains("referral_snapshot_smoke"));
+    assert!(!replay_source.contains("python_post_rust_retained_repository_read"));
+    Ok(())
+}
+
+#[test]
+fn test_referral_subprocess_failure_reports_attempt_and_partial_deltas() -> support::TestResult {
+    let root = support::repository_root()?;
+    let output = support::run_python_code(
+        &root,
+        r#"import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from scripts import production_snapshot_replay as replay
+
+with TemporaryDirectory() as directory:
+    source = Path(directory) / "production.db"
+    source.touch()
+    source = source.resolve()
+    phase = {"value": "before"}
+    source_facts = {
+        "sha256": "source",
+        "size_bytes": 1,
+        "migration_count": 1,
+        "quick_check": "ok",
+        "integrity_check": ["ok"],
+        "integrity_ok": True,
+    }
+
+    def fake_inspect(path):
+        if path == source:
+            return dict(source_facts)
+        return {
+            **source_facts,
+            "sha256": f"copy-{phase['value']}",
+            "phase": phase["value"],
+        }
+
+    repository_counts = dict(replay.EXPECTED_SMOKE_DELTAS)
+    partial_referral_counts = dict(repository_counts)
+    partial_referral_counts["matches"] = 1
+    count_results = iter([
+        {},
+        repository_counts,
+        repository_counts,
+        partial_referral_counts,
+    ])
+
+    def fake_run_step(name, command, *, cwd, timeout_seconds, report):
+        del command, cwd, timeout_seconds
+        if name == "rust_db_check":
+            return {"stdout": "schema_compatible=true"}
+        if name == "rust_repository_smoke":
+            return {"stdout": "shared_repository_roundtrip=ok"}
+        if name == "rust_referral_settlement_smoke":
+            phase["value"] = "referral_failed"
+            step = {
+                "name": name,
+                "status": "failed",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "injected failure after a partial write",
+            }
+            report["steps"].append(step)
+            raise replay.StepFailure(step)
+        return {"stdout": ""}
+
+    replay.inspect_database = fake_inspect
+    replay.table_row_counts = lambda path: next(count_results)
+    replay.sentinel_digests = lambda path: {
+        table: {"row_count": 1, "sha256": table}
+        for table in replay.EXPECTED_SMOKE_DELTAS
+    }
+    replay.run_step = fake_run_step
+    replay._python_executable = lambda argument, root: "python"
+    status, report = replay.run(SimpleNamespace(
+        source=source,
+        report=None,
+        python=None,
+        cargo="cargo",
+        timeout_seconds=1,
+    ))
+    print(json.dumps({"status": status, "report": report}, sort_keys=True))"#,
+    )?;
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["status"], 1);
+    assert_eq!(result["report"]["status"], "failed");
+    assert_eq!(
+        result["report"]["referral_settlement"],
+        json!({
+            "status": "failed",
+            "attempted": true,
+            "settlement_marker": false,
+            "expected_table_deltas": {
+                "economy_ledger_entries": 8,
+                "match_participants": 2,
+                "match_predictions": 1,
+                "matches": 1,
+                "player_pairings": 1,
+                "players": 6,
+                "referrals": 1
+            },
+            "table_deltas": {
+                "matches": {"before": 0, "after": 1, "delta": 1}
+            }
+        })
+    );
+    assert_eq!(
+        result["report"]["disposable_copy"]["after_rust"]["phase"],
+        "referral_failed"
+    );
+    assert_eq!(result["report"]["source"]["unchanged"], true);
     Ok(())
 }

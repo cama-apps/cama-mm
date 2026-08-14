@@ -150,8 +150,106 @@ def test_snapshot_parser_accepts_only_the_normalized_contract():
     replay_source = Path(replay.__file__).read_text(encoding="utf-8")
     assert "python_post_rust_retained_repository_read" not in replay_source
     assert "retained_read_script" not in replay_source
+    assert "referral_snapshot_smoke" in replay_source
+    assert replay.EXPECTED_REFERRAL_SMOKE_DELTAS == {
+        "economy_ledger_entries": 8,
+        "match_participants": 2,
+        "match_predictions": 1,
+        "matches": 1,
+        "player_pairings": 1,
+        "players": 6,
+        "referrals": 1,
+    }
 
     malformed = json.loads(json.dumps(expected))
     malformed["dig"]["tunnel"]["route_state"] = "{}"
     with pytest.raises(RuntimeError, match="retained Python repository read mismatch"):
         replay._parse_retained_python_read(json.dumps(malformed))
+
+
+def test_referral_subprocess_failure_reports_attempt_and_partial_deltas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "production.db"
+    source.touch()
+    phase = {"value": "before"}
+    source_facts = {
+        "sha256": "source",
+        "size_bytes": 1,
+        "migration_count": 1,
+        "quick_check": "ok",
+        "integrity_check": ["ok"],
+        "integrity_ok": True,
+    }
+
+    def fake_inspect(path: Path) -> dict[str, object]:
+        if path == source:
+            return dict(source_facts)
+        return {**source_facts, "sha256": f"copy-{phase['value']}", "phase": phase["value"]}
+
+    repository_counts = dict(replay.EXPECTED_SMOKE_DELTAS)
+    partial_referral_counts = dict(repository_counts)
+    partial_referral_counts["matches"] = 1
+    count_results = iter([{}, repository_counts, repository_counts, partial_referral_counts])
+
+    def fake_run_step(
+        name: str,
+        _command: object,
+        *,
+        cwd: Path,
+        timeout_seconds: float,
+        report: dict[str, object],
+    ) -> dict[str, object]:
+        del cwd, timeout_seconds
+        if name == "rust_db_check":
+            return {"stdout": "schema_compatible=true"}
+        if name == "rust_repository_smoke":
+            return {"stdout": "shared_repository_roundtrip=ok"}
+        if name == "rust_referral_settlement_smoke":
+            phase["value"] = "referral_failed"
+            step = {
+                "name": name,
+                "status": "failed",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "injected failure after a partial write",
+            }
+            report["steps"].append(step)  # type: ignore[union-attr]
+            raise replay.StepFailure(step)
+        return {"stdout": ""}
+
+    monkeypatch.setattr(replay, "inspect_database", fake_inspect)
+    monkeypatch.setattr(replay, "table_row_counts", lambda _path: next(count_results))
+    monkeypatch.setattr(
+        replay,
+        "sentinel_digests",
+        lambda _path: {
+            table: {"row_count": 1, "sha256": table} for table in replay.EXPECTED_SMOKE_DELTAS
+        },
+    )
+    monkeypatch.setattr(replay, "run_step", fake_run_step)
+    monkeypatch.setattr(replay, "_python_executable", lambda _argument, _root: "python")
+
+    status, report = replay.run(
+        SimpleNamespace(
+            source=source,
+            report=None,
+            python=None,
+            cargo="cargo",
+            timeout_seconds=1,
+        )
+    )
+
+    assert status == 1
+    assert report["status"] == "failed"
+    assert report["referral_settlement"] == {
+        "status": "failed",
+        "attempted": True,
+        "settlement_marker": False,
+        "expected_table_deltas": replay.EXPECTED_REFERRAL_SMOKE_DELTAS,
+        "table_deltas": {
+            "matches": {"before": 0, "after": 1, "delta": 1},
+        },
+    }
+    assert report["disposable_copy"]["after_rust"]["phase"] == "referral_failed"
+    assert report["source"]["unchanged"] is True

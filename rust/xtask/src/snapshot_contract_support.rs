@@ -12,9 +12,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use cama_db::core_repositories::{CoreMatchRecord, MatchRecord, MatchRepository};
 use cama_db::dig_inventory_repository::{BuyItemOutcome, BuyItemRequest, DigInventoryRepository};
 use cama_db::dig_routes_repository::{DigRouteRepository, RouteStateWriteOutcome};
 use cama_db::guild_config_repository::GuildConfigRepository;
+use cama_db::referrals::ReferralRepository;
 use cama_db::schema_manager::initialize_or_migrate;
 use cama_db::survey::{SurveyQuestionType, SurveyRepository, SurveyTargetType};
 use cama_domain::guild_config::GuildConfigStore;
@@ -35,6 +37,13 @@ pub const SURVEY_TITLE: &str = "Rust disposable Survey recovery smoke";
 pub const SURVEY_PROMPT: &str = "Can the Rust recovery worker deliver this clone-only sentinel?";
 pub const SURVEY_CHANNEL_ID: i64 = 8_000_000_000_000_001;
 pub const SURVEY_MESSAGE_ID: i64 = 8_000_000_000_000_002;
+pub const REFERRAL_GUILD_ID: i64 = -8_888_888_888_888_867;
+pub const REFERRAL_OTHER_GUILD_ID: i64 = -8_888_888_888_888_863;
+pub const REFERRER_ID: i64 = -8_888_888_888_888_866;
+pub const REFERRED_ID: i64 = -8_888_888_888_888_865;
+pub const REFERRAL_OPPONENT_ID: i64 = -8_888_888_888_888_864;
+pub const REFERRAL_PENDING_MATCH_ID: i64 = 8_888_888_888_888_001;
+pub const REFERRAL_REWARDED_AT: i64 = 1_800_000_000;
 pub const ROUTE_STATE_REVERSED: &str = r#"{"status":"active","route_id":"shored_passage"}"#;
 
 /// The exact columns and reserved-row filters used by the Python A/B runner.
@@ -99,6 +108,40 @@ pub const SCOPE_COLUMNS: &[(&str, &[&str])] = &[
             "skipped",
         ],
     ),
+    (
+        "players",
+        &[
+            "discord_id",
+            "guild_id",
+            "jopacoin_balance",
+            "wins",
+            "losses",
+        ],
+    ),
+    (
+        "referrals",
+        &[
+            "guild_id",
+            "referred_id",
+            "referrer_id",
+            "rewarded_match_id",
+            "reward_amount",
+            "rewarded_at",
+        ],
+    ),
+    ("matches", &["guild_id", "pending_match_id", "jc_changes"]),
+    (
+        "economy_ledger_entries",
+        &[
+            "guild_id",
+            "account_id",
+            "delta",
+            "source",
+            "related_type",
+            "related_id",
+            "metadata",
+        ],
+    ),
 ];
 
 pub fn repository_root() -> TestResult<PathBuf> {
@@ -134,9 +177,190 @@ fn seed_dig_fixture(path: &Path) -> TestResult {
     Ok(())
 }
 
+fn seed_referral_fixture(path: &Path) -> TestResult {
+    let connection = Connection::open(path)?;
+    connection.pragma_update(None, "foreign_keys", false)?;
+    for guild_id in [REFERRAL_GUILD_ID, REFERRAL_OTHER_GUILD_ID] {
+        for (discord_id, username, balance) in [
+            (REFERRER_ID, "Rust snapshot referrer", 10_i64),
+            (REFERRED_ID, "Rust snapshot referred", 20_i64),
+            (REFERRAL_OPPONENT_ID, "Rust snapshot opponent", 30_i64),
+        ] {
+            connection.execute(
+                "INSERT INTO players (
+                     discord_id, guild_id, discord_username, jopacoin_balance,
+                     wins, losses, glicko_rating, glicko_rd, glicko_volatility
+                 ) VALUES (?1, ?2, ?3, ?4, 0, 0, NULL, NULL, NULL)",
+                params![discord_id, guild_id, username, balance],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn assert_rust_referral_transition(path: &Path, match_id: i64) -> TestResult {
+    let referrals = ReferralRepository::new(path);
+    let referral = referrals
+        .referral(REFERRED_ID, Some(REFERRAL_GUILD_ID))?
+        .ok_or("Rust referral claim was not persisted")?;
+    if referral.rewarded_match_id != Some(match_id)
+        || referral.reward_amount != Some(100)
+        || referral.rewarded_at != Some(REFERRAL_REWARDED_AT)
+    {
+        return Err(format!("Rust referral claim mismatch: {referral:?}").into());
+    }
+    if referrals.balance(REFERRER_ID, Some(REFERRAL_GUILD_ID))? != Some(110)
+        || referrals.balance(REFERRED_ID, Some(REFERRAL_GUILD_ID))? != Some(120)
+    {
+        return Err("Rust referral beneficiary balances were not credited exactly once".into());
+    }
+
+    let connection = Connection::open(path)?;
+    let match_row: (i64, String) = connection.query_row(
+        "SELECT guild_id, jc_changes FROM matches
+         WHERE guild_id = ?1 AND pending_match_id = ?2",
+        params![REFERRAL_GUILD_ID, REFERRAL_PENDING_MATCH_ID],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expected_changes = json!({
+        REFERRED_ID.to_string(): {"referral": 100},
+        REFERRER_ID.to_string(): {"referral": 100},
+    });
+    let changes: JsonValue = serde_json::from_str(&match_row.1)?;
+    if match_row.0 != REFERRAL_GUILD_ID || changes != expected_changes {
+        return Err(format!("Rust referral JC summary mismatch: {changes}").into());
+    }
+
+    let ledger_rows = connection
+        .prepare(
+            "SELECT account_id, delta, source, related_type, related_id, metadata
+             FROM economy_ledger_entries
+             WHERE guild_id = ?1 AND source = 'referral_reward'
+             ORDER BY ledger_id",
+        )?
+        .query_map([REFERRAL_GUILD_ID], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ledger_rows.len() != 2
+        || ledger_rows[0].0 != REFERRED_ID
+        || ledger_rows[1].0 != REFERRER_ID
+        || ledger_rows.iter().any(|row| {
+            row.1 != 100
+                || row.2 != "referral_reward"
+                || row.3 != "referral"
+                || row.4 != REFERRED_ID.to_string()
+        })
+    {
+        return Err(format!("Rust referral ledger mismatch: {ledger_rows:?}").into());
+    }
+    let metadata: Vec<JsonValue> = ledger_rows
+        .iter()
+        .map(|row| serde_json::from_str(&row.5))
+        .collect::<Result<_, _>>()?;
+    if metadata
+        != [
+            json!({
+                "match_id": match_id,
+                "referrer_id": REFERRER_ID,
+                "referred_id": REFERRED_ID,
+                "beneficiary_role": "referred",
+            }),
+            json!({
+                "match_id": match_id,
+                "referrer_id": REFERRER_ID,
+                "referred_id": REFERRED_ID,
+                "beneficiary_role": "referrer",
+            }),
+        ]
+    {
+        return Err(format!("Rust referral ledger metadata mismatch: {metadata:?}").into());
+    }
+    let (match_count, participant_count, context_count): (i64, i64, i64) = connection.query_row(
+        "SELECT
+             (SELECT COUNT(*) FROM matches
+              WHERE guild_id = ?1 AND pending_match_id = ?2),
+             (SELECT COUNT(*) FROM match_participants
+              WHERE guild_id = ?1 AND match_id = ?3),
+             (SELECT COUNT(*) FROM economy_ledger_context)",
+        params![REFERRAL_GUILD_ID, REFERRAL_PENDING_MATCH_ID, match_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if (match_count, participant_count, context_count) != (1, 2, 0) {
+        return Err(format!(
+            "Rust referral match/context count mismatch: matches={match_count} participants={participant_count} context={context_count}"
+        )
+        .into());
+    }
+    for discord_id in [REFERRER_ID, REFERRED_ID, REFERRAL_OPPONENT_ID] {
+        let current: (i64, i64, i64) = connection.query_row(
+            "SELECT jopacoin_balance, wins, losses FROM players
+             WHERE guild_id = ?1 AND discord_id = ?2",
+            params![REFERRAL_GUILD_ID, discord_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let expected = match discord_id {
+            REFERRER_ID => (110, 0, 0),
+            REFERRED_ID => (120, 1, 0),
+            REFERRAL_OPPONENT_ID => (30, 0, 1),
+            _ => unreachable!(),
+        };
+        if current != expected {
+            return Err(
+                format!("Rust referral player mismatch for {discord_id}: {current:?}").into(),
+            );
+        }
+    }
+    for discord_id in [REFERRER_ID, REFERRED_ID, REFERRAL_OPPONENT_ID] {
+        let other: (i64, i64, i64) = connection.query_row(
+            "SELECT jopacoin_balance, wins, losses FROM players
+             WHERE guild_id = ?1 AND discord_id = ?2",
+            params![REFERRAL_OTHER_GUILD_ID, discord_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let expected_other = match discord_id {
+            REFERRER_ID => (10, 0, 0),
+            REFERRED_ID => (20, 0, 0),
+            REFERRAL_OPPONENT_ID => (30, 0, 0),
+            _ => unreachable!(),
+        };
+        if other != expected_other {
+            return Err(format!(
+                "Rust cross-guild referral isolation mismatch for {discord_id}: {other:?}"
+            )
+            .into());
+        }
+    }
+    let other_guild_counts: (i64, i64, i64) = connection.query_row(
+        "SELECT
+             (SELECT COUNT(*) FROM referrals WHERE guild_id = ?1),
+             (SELECT COUNT(*) FROM matches
+              WHERE guild_id = ?1 AND pending_match_id = ?2),
+             (SELECT COUNT(*) FROM economy_ledger_entries
+              WHERE guild_id = ?1 AND source = 'referral_reward')",
+        params![REFERRAL_OTHER_GUILD_ID, REFERRAL_PENDING_MATCH_ID],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if other_guild_counts != (0, 0, 0) {
+        return Err(format!(
+            "Rust cross-guild referral rows unexpectedly changed: {other_guild_counts:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Apply the bounded Rust-side transitions through production repository APIs.
 pub fn apply_rust_snapshot_transitions(path: &Path) -> TestResult {
     seed_dig_fixture(path)?;
+    seed_referral_fixture(path)?;
 
     let guild = GuildConfigRepository::new(path, false);
     guild.set_league_id(SMOKE_GUILD_ID, 777)?;
@@ -174,6 +398,28 @@ pub fn apply_rust_snapshot_transitions(path: &Path) -> TestResult {
     {
         return Err("Rust snapshot route transition did not update the tunnel".into());
     }
+
+    let referral_repository = ReferralRepository::new(path);
+    referral_repository.create_referral(REFERRER_ID, REFERRED_ID, Some(REFERRAL_GUILD_ID))?;
+    let matches = MatchRepository::new(path);
+    let mut core = CoreMatchRecord::new(
+        MatchRecord::new(
+            vec![REFERRED_ID],
+            vec![REFERRAL_OPPONENT_ID],
+            1,
+            Some(REFERRAL_GUILD_ID),
+        ),
+        "2026-08-07T00:00:00+00:00",
+    );
+    core.pending_match_id = Some(REFERRAL_PENDING_MATCH_ID);
+    core.winning_ids = vec![REFERRED_ID];
+    core.losing_ids = vec![REFERRAL_OPPONENT_ID];
+    core.settle_referrals_at = Some(REFERRAL_REWARDED_AT);
+    let match_id = matches.record_match_core_atomic(&core)?;
+    if matches.record_match_core_atomic(&core)? != match_id {
+        return Err("Rust referral retry returned a different match id".into());
+    }
+    assert_rust_referral_transition(path, match_id)?;
 
     let surveys = SurveyRepository::with_clock(path, || 1_800_000_000);
     let survey = surveys.create_survey(SURVEY_GUILD_ID, SURVEY_TITLE)?;
@@ -304,6 +550,25 @@ fn scope_filter(table: &str) -> TestResult<(&'static str, Vec<Value>)> {
                 Value::Text(SURVEY_TITLE.to_owned()),
             ],
         )),
+        "players" => Ok(("guild_id = ?1", vec![Value::Integer(REFERRAL_GUILD_ID)])),
+        "referrals" => Ok((
+            "guild_id = ?1 AND referred_id = ?2",
+            vec![
+                Value::Integer(REFERRAL_GUILD_ID),
+                Value::Integer(REFERRED_ID),
+            ],
+        )),
+        "matches" => Ok((
+            "guild_id = ?1 AND pending_match_id = ?2",
+            vec![
+                Value::Integer(REFERRAL_GUILD_ID),
+                Value::Integer(REFERRAL_PENDING_MATCH_ID),
+            ],
+        )),
+        "economy_ledger_entries" => Ok((
+            "guild_id = ?1 AND source = 'referral_reward'",
+            vec![Value::Integer(REFERRAL_GUILD_ID)],
+        )),
         other => Err(format!("unknown snapshot scope table {other:?}").into()),
     }
 }
@@ -334,6 +599,36 @@ fn canonical_value(table: &str, column: &str, value: JsonValue) -> JsonValue {
     }
     if matches!(column, "current_question_id" | "question_id") && !value.is_null() {
         return JsonValue::String("<question>".to_owned());
+    }
+    if table == "referrals" && column == "rewarded_match_id" {
+        return if value.is_null() {
+            JsonValue::Null
+        } else {
+            JsonValue::String("<referral-match>".to_owned())
+        };
+    }
+    if table == "referrals" && column == "rewarded_at" {
+        return if value.is_null() {
+            JsonValue::Null
+        } else {
+            JsonValue::String("<referral-time>".to_owned())
+        };
+    }
+    if matches!(column, "jc_changes" | "metadata")
+        && let JsonValue::String(raw) = value
+    {
+        let Ok(mut parsed) = serde_json::from_str::<JsonValue>(&raw) else {
+            return JsonValue::String(raw);
+        };
+        if let Some(object) = parsed.as_object_mut()
+            && object.contains_key("match_id")
+        {
+            object.insert(
+                "match_id".to_owned(),
+                JsonValue::String("<referral-match>".to_owned()),
+            );
+        }
+        return parsed;
     }
     value
 }
@@ -493,7 +788,88 @@ pub fn expected_scope_after() -> JsonValue {
                 "receipt_checked_attempt": 1
             }]
         },
-        "survey_answers": {"row_count": 0, "rows": []}
+        "survey_answers": {"row_count": 0, "rows": []},
+        "players": {
+            "row_count": 3,
+            "rows": [
+                {
+                    "discord_id": REFERRAL_OPPONENT_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 30,
+                    "wins": 0,
+                    "losses": 1
+                },
+                {
+                    "discord_id": REFERRED_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 120,
+                    "wins": 1,
+                    "losses": 0
+                },
+                {
+                    "discord_id": REFERRER_ID,
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "jopacoin_balance": 110,
+                    "wins": 0,
+                    "losses": 0
+                }
+            ]
+        },
+        "referrals": {
+            "row_count": 1,
+            "rows": [{
+                "guild_id": REFERRAL_GUILD_ID,
+                "referred_id": REFERRED_ID,
+                "referrer_id": REFERRER_ID,
+                "rewarded_match_id": "<referral-match>",
+                "reward_amount": 100,
+                "rewarded_at": "<referral-time>"
+            }]
+        },
+        "matches": {
+            "row_count": 1,
+            "rows": [{
+                "guild_id": REFERRAL_GUILD_ID,
+                "pending_match_id": REFERRAL_PENDING_MATCH_ID,
+                "jc_changes": {
+                    (REFERRED_ID.to_string()): {"referral": 100},
+                    (REFERRER_ID.to_string()): {"referral": 100}
+                }
+            }]
+        },
+        "economy_ledger_entries": {
+            "row_count": 2,
+            "rows": [
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "account_id": REFERRED_ID,
+                    "delta": 100,
+                    "source": "referral_reward",
+                    "related_type": "referral",
+                    "related_id": REFERRED_ID.to_string(),
+                    "metadata": {
+                        "match_id": "<referral-match>",
+                        "referrer_id": REFERRER_ID,
+                        "referred_id": REFERRED_ID,
+                        "beneficiary_role": "referred"
+                    }
+                },
+                {
+                    "guild_id": REFERRAL_GUILD_ID,
+                    "account_id": REFERRER_ID,
+                    "delta": 100,
+                    "source": "referral_reward",
+                    "related_type": "referral",
+                    "related_id": REFERRED_ID.to_string(),
+                    "metadata": {
+                        "match_id": "<referral-match>",
+                        "referrer_id": REFERRER_ID,
+                        "referred_id": REFERRED_ID,
+                        "beneficiary_role": "referrer"
+                    }
+                }
+            ]
+        }
     })
 }
 
