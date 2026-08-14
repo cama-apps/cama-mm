@@ -7,8 +7,9 @@ another.  Run this explicit, dependency-aware gate from the repository root:
     uv run --locked python scripts/visual_equivalence.py
 
 It renders production prediction-market, balance-journey, rating-history,
-OpenDota advantage, post-match, terminal-crash, and pinnacle phase-3 artifacts
-from the shared JSON fixture, then decodes both sides to RGBA.
+OpenDota advantage, betting wheel/explosion, post-match, terminal-crash, and
+pinnacle phase-3 artifacts from the shared JSON fixture, then decodes both
+sides to RGBA.
 Geometry, animation metadata, and ordered frame correspondence are checked
 separately from pixel similarity.  The native Rust renderers intentionally use
 an embedded bitmap font, while Python uses its configured Pillow font, so exact
@@ -70,6 +71,23 @@ BALANCE_MIN_FOREGROUND_GRID_IOU = 0.80
 BALANCE_MIN_FOREGROUND_COUNT_RATIO = 0.80
 MIN_FOREGROUND_COUNT_RATIO = 0.50
 MIN_FOREGROUND_PIXELS = 200
+# Wheel and explosion intentionally use different raster primitives and
+# palettes from Pillow.  These limits constrain broad shape/timing drift while
+# allowing the two implementations' fonts and particle trajectories to differ.
+WHEEL_MAX_MEAN_FRAME_MAE = 0.190
+WHEEL_MAX_MEAN_FRAME_RMS = 0.330
+WHEEL_MAX_FRAME_MAE = 0.400
+WHEEL_MIN_FOREGROUND_GRID_IOU = 0.55
+WHEEL_MIN_FOREGROUND_COUNT_RATIO = 0.35
+EXPLOSION_MAX_MEAN_FRAME_MAE = 0.230
+EXPLOSION_MAX_MEAN_FRAME_RMS = 0.390
+EXPLOSION_MAX_FRAME_MAE = 0.650
+EXPLOSION_MIN_AGGREGATE_GRID_IOU = 0.75
+EXPLOSION_MIN_AGGREGATE_COUNT_RATIO = 0.40
+EXPLOSION_MAX_AGGREGATE_COUNT_RATIO = 2.25
+EXPLOSION_MIN_AGGREGATE_CELL_RATIO = 0.75
+EXPLOSION_MAX_AGGREGATE_CELL_RATIO = 1.25
+EXPLOSION_MAX_AGGREGATE_CENTROID_DRIFT = 24.0
 
 
 class FixedDateTime(dt.datetime):
@@ -109,9 +127,11 @@ def load_fixture(path: Path) -> dict[str, Any]:
         "balance",
         "rating_history",
         "advantage",
+        "wheel",
+        "explosion",
     }:
         raise ValueError(
-            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, and advantage objects"
+            "fixture must contain exactly chart, animation, terminal_crash, pinnacle, balance, rating_history, advantage, wheel, and explosion objects"
         )
     return fixture
 
@@ -125,6 +145,7 @@ def render_python(
     from utils.drawing import draw_advantage_graph, draw_balance_chart, draw_rating_history_chart
     from utils.drawing.predictions import draw_market_fair_history
     from utils.neon_drawing import create_post_match_gif, create_terminal_crash_gif
+    from utils.wheel_drawing import create_explosion_gif, create_wheel_gif
 
     chart = fixture["chart"]
     snapshots = [tuple(snapshot) for snapshot in chart["snapshots"]]
@@ -167,6 +188,35 @@ def render_python(
     if advantage_bytes is None:
         raise AssertionError("advantage fixture unexpectedly rendered no image")
     (output_dir / "python_advantage.png").write_bytes(advantage_bytes.getvalue())
+
+    # The production wheel renderer chooses an intentionally varied ending
+    # style.  Pin the existing Python RNG for this explicit cross-language
+    # gate; the live command still uses its normal process RNG.
+    wheel = fixture["wheel"]
+    random_state = random.getstate()
+    try:
+        random.seed(int(wheel["seed"]))
+        wheel_bytes = create_wheel_gif(
+            target_idx=int(wheel["target_index"]),
+            size=int(wheel["size"]),
+            is_bankrupt=bool(wheel["is_bankrupt"]),
+            is_golden=bool(wheel["is_golden"]),
+        ).getvalue()
+    finally:
+        random.setstate(random_state)
+    (output_dir / "python_wheel.gif").write_bytes(wheel_bytes)
+
+    # Explosion particles and smoke also use the module RNG.  Keep the
+    # production implementation unchanged while making this recording
+    # reproducible for the Rust comparison.
+    explosion = fixture["explosion"]
+    random_state = random.getstate()
+    try:
+        random.seed(int(explosion["seed"]))
+        explosion_bytes = create_explosion_gif(size=int(explosion["size"])).getvalue()
+    finally:
+        random.setstate(random_state)
+    (output_dir / "python_explosion.gif").write_bytes(explosion_bytes)
 
     # The production Python animation uses random glitch displacement.  A
     # fixture seed makes that existing behavior reproducible for comparison;
@@ -213,6 +263,13 @@ def render_python(
 
 
 def run_rust(fixture_path: Path, output_dir: Path, target_dir: Path | None) -> None:
+    environment = None
+    if target_dir is not None:
+        import os
+
+        environment = os.environ.copy()
+        environment["CARGO_TARGET_DIR"] = str(target_dir)
+
     command = [
         "cargo",
         "run",
@@ -227,13 +284,27 @@ def run_rust(fixture_path: Path, output_dir: Path, target_dir: Path | None) -> N
         str(fixture_path),
         str(output_dir),
     ]
-    environment = None
-    if target_dir is not None:
-        import os
-
-        environment = os.environ.copy()
-        environment["CARGO_TARGET_DIR"] = str(target_dir)
     subprocess.run(command, cwd=ROOT, env=environment, check=True)
+
+    # Betting media lives in cama-runtime because the provider owns the
+    # Discord attachment boundary.  This second target calls its exact
+    # production renderers; the app example above continues to own the other
+    # renderer families in this fixture.
+    betting_command = [
+        "cargo",
+        "run",
+        "--locked",
+        "--manifest-path",
+        str(ROOT / "rust" / "Cargo.toml"),
+        "-p",
+        "cama-runtime",
+        "--example",
+        "visual_equivalence",
+        "--",
+        str(fixture_path),
+        str(output_dir),
+    ]
+    subprocess.run(betting_command, cwd=ROOT, env=environment, check=True)
 
 
 def rgba_pixels(path: Path) -> tuple[tuple[int, int], bytes]:
@@ -433,6 +504,239 @@ def check_gif(python_path: Path, rust_path: Path) -> list[str]:
             f"mean MAE {mean_mae:.5f} <= {ANIMATION_MAX_MEAN_FRAME_MAE:.5f}, "
             f"mean RMS {mean_rms:.5f} <= {ANIMATION_MAX_MEAN_FRAME_RMS:.5f}, "
             f"max frame MAE {max_mae:.5f} <= {ANIMATION_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
+def _paired_frame_metrics(
+    python_frames: list[bytes],
+    rust_frames: list[bytes],
+    size: tuple[int, int],
+    *,
+    label: str,
+    minimum_grid_iou: float,
+    minimum_count_ratio: float,
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float]]]:
+    """Compare ordered animation phases while tolerating Pillow coalescing.
+
+    Pillow may merge adjacent pixel-identical wheel frames when writing a GIF;
+    the Rust encoder intentionally keeps all authored phases.  Pair frames by
+    normalized position for the wheel while retaining per-frame visual gates.
+    Explosion has a one-to-one frame contract and uses this helper as well.
+    """
+
+    if not python_frames or not rust_frames:
+        raise AssertionError(f"{label} contains no frames")
+    pairs = []
+    python_span = max(1, len(python_frames) - 1)
+    for python_index, python_frame in enumerate(python_frames):
+        rust_index = round(python_index * (len(rust_frames) - 1) / python_span)
+        pairs.append((python_frame, rust_frames[rust_index]))
+    metrics = [pixel_metrics(left, right) for left, right in pairs]
+    structures = [
+        compare_foreground_structure(
+            left,
+            right,
+            size,
+            grid=(10, 10),
+            margin=24,
+            minimum_grid_iou=minimum_grid_iou,
+            minimum_count_ratio=minimum_count_ratio,
+            label=f"{label} frame {index}",
+        )
+        for index, (left, right) in enumerate(pairs)
+    ]
+    return metrics, structures
+
+
+def _aggregate_foreground_structure(
+    frames: list[bytes], size: tuple[int, int]
+) -> tuple[int, set[tuple[int, int]], tuple[float, float]]:
+    count = 0
+    occupied: set[tuple[int, int]] = set()
+    weighted_x = 0
+    weighted_y = 0
+    weighted_count = 0
+    for frame in frames:
+        frame_count, frame_cells = foreground_structure(frame, size, (10, 10), 24)
+        count += frame_count
+        occupied.update(frame_cells)
+        for pixel_index in range(size[0] * size[1]):
+            offset = pixel_index * 4
+            if max(frame[offset : offset + 3]) <= FOREGROUND_CHANNEL_THRESHOLD:
+                continue
+            weighted_x += pixel_index % size[0]
+            weighted_y += pixel_index // size[0]
+            weighted_count += 1
+    centroid = (
+        weighted_x / max(1, weighted_count),
+        weighted_y / max(1, weighted_count),
+    )
+    return count, occupied, centroid
+
+
+def check_wheel(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the production Python/Rust regular-wheel GIFs.
+
+    The Python GIF can coalesce one or more duplicate frames, while the Rust
+    renderer keeps its 70-frame contract.  The shared acceleration bands and
+    terminal hold are exact; visual phases are paired by normalized position.
+    """
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    if python_size != (500, 500) or rust_size != python_size:
+        raise AssertionError(
+            f"wheel dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop != 1 or rust_loop != python_loop:
+        raise AssertionError(f"wheel loop count differs: Python {python_loop}, Rust {rust_loop}")
+    if not 68 <= len(python_frames) <= 70 or len(rust_frames) != 70:
+        raise AssertionError(
+            f"wheel frame count differs: Python {len(python_frames)}, Rust {len(rust_frames)}"
+        )
+    shared_prefix = [30] * 14 + [40] * 14 + [70] * 14 + [110] * 16
+    if python_durations[:58] != shared_prefix or rust_durations[:58] != shared_prefix:
+        raise AssertionError("wheel acceleration/deceleration timing drifted from Python")
+    if python_durations[-2:] != [60_000, 60_000] or rust_durations[-2:] != [60_000, 60_000]:
+        raise AssertionError("wheel terminal hold timing drifted")
+
+    metrics, structures = _paired_frame_metrics(
+        python_frames,
+        rust_frames,
+        python_size,
+        label="wheel",
+        minimum_grid_iou=WHEEL_MIN_FOREGROUND_GRID_IOU,
+        minimum_count_ratio=WHEEL_MIN_FOREGROUND_COUNT_RATIO,
+    )
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    minimum_foreground_ratio = min(structure[0] for structure in structures)
+    minimum_foreground_iou = min(structure[1] for structure in structures)
+    print(
+        f"wheel: size={python_size[0]}x{python_size[1]} "
+        f"python_frames={len(python_frames)} rust_frames={len(rust_frames)} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} max_frame_MAE={max_mae:.5f} "
+        f"min_foreground_ratio={minimum_foreground_ratio:.3f} "
+        f"min_grid_IoU={minimum_foreground_iou:.3f} "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > WHEEL_MAX_MEAN_FRAME_MAE
+        or mean_rms > WHEEL_MAX_MEAN_FRAME_RMS
+        or max_mae > WHEEL_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            "wheel pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {WHEEL_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {WHEEL_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {WHEEL_MAX_FRAME_MAE:.5f}"
+        )
+    return []
+
+
+def check_explosion(python_path: Path, rust_path: Path) -> list[str]:
+    """Compare the production Python/Rust explosion GIFs."""
+
+    python_size, python_loop, python_durations, python_frames = gif_frames(python_path)
+    rust_size, rust_loop, rust_durations, rust_frames = gif_frames(rust_path)
+    expected_durations = (
+        [50] * 14
+        + [60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
+        + [60] * 4
+        + [80] * 14
+        + [100] * 13
+        + [60_000]
+    )
+    if python_size != (500, 500) or rust_size != python_size:
+        raise AssertionError(
+            f"explosion dimensions differ or are invalid: Python {python_size}, Rust {rust_size}"
+        )
+    if python_loop != 1 or rust_loop != python_loop:
+        raise AssertionError(
+            f"explosion loop count differs: Python {python_loop}, Rust {rust_loop}"
+        )
+    if len(python_frames) != 56 or len(rust_frames) != len(python_frames):
+        raise AssertionError(
+            f"explosion frame count differs: Python {len(python_frames)}, Rust {len(rust_frames)}"
+        )
+    if python_durations != expected_durations or rust_durations != python_durations:
+        raise AssertionError(
+            f"explosion durations/order differ: Python {python_durations}, Rust {rust_durations}"
+        )
+
+    metrics = [pixel_metrics(left, right) for left, right in zip(python_frames, rust_frames)]
+    reference_count, reference_cells, reference_centroid = _aggregate_foreground_structure(
+        python_frames, python_size
+    )
+    candidate_count, candidate_cells, candidate_centroid = _aggregate_foreground_structure(
+        rust_frames, rust_size
+    )
+    if reference_count == 0 or not reference_cells:
+        raise AssertionError("explosion reference contains no foreground structure")
+    aggregate_ratio = candidate_count / reference_count
+    union = reference_cells | candidate_cells
+    aggregate_iou = len(reference_cells & candidate_cells) / len(union) if union else 1.0
+    aggregate_cell_ratio = len(candidate_cells) / len(reference_cells)
+    centroid_drift = (
+        (candidate_centroid[0] - reference_centroid[0]) ** 2
+        + (candidate_centroid[1] - reference_centroid[1]) ** 2
+    ) ** 0.5
+    if not (
+        EXPLOSION_MIN_AGGREGATE_COUNT_RATIO
+        <= aggregate_ratio
+        <= EXPLOSION_MAX_AGGREGATE_COUNT_RATIO
+    ):
+        raise AssertionError(
+            "explosion aggregate foreground count drifted: "
+            f"ratio {aggregate_ratio:.3f} must be between "
+            f"{EXPLOSION_MIN_AGGREGATE_COUNT_RATIO:.3f} and "
+            f"{EXPLOSION_MAX_AGGREGATE_COUNT_RATIO:.3f}"
+        )
+    if aggregate_iou < EXPLOSION_MIN_AGGREGATE_GRID_IOU:
+        raise AssertionError(
+            "explosion aggregate foreground layout drifted: "
+            f"grid IoU {aggregate_iou:.3f} < {EXPLOSION_MIN_AGGREGATE_GRID_IOU:.3f}"
+        )
+    if not (
+        EXPLOSION_MIN_AGGREGATE_CELL_RATIO
+        <= aggregate_cell_ratio
+        <= EXPLOSION_MAX_AGGREGATE_CELL_RATIO
+    ):
+        raise AssertionError(
+            "explosion aggregate occupied-cell drifted: "
+            f"ratio {aggregate_cell_ratio:.3f} must be between "
+            f"{EXPLOSION_MIN_AGGREGATE_CELL_RATIO:.3f} and "
+            f"{EXPLOSION_MAX_AGGREGATE_CELL_RATIO:.3f}"
+        )
+    if centroid_drift > EXPLOSION_MAX_AGGREGATE_CENTROID_DRIFT:
+        raise AssertionError(
+            "explosion aggregate foreground centroid drifted: "
+            f"{centroid_drift:.2f}px > {EXPLOSION_MAX_AGGREGATE_CENTROID_DRIFT:.2f}px"
+        )
+    mean_mae = sum(metric[0] for metric in metrics) / len(metrics)
+    mean_rms = sum(metric[1] for metric in metrics) / len(metrics)
+    max_mae = max(metric[0] for metric in metrics)
+    print(
+        f"explosion: size={python_size[0]}x{python_size[1]} frames={len(python_frames)} "
+        f"mean_MAE={mean_mae:.5f} mean_RMS={mean_rms:.5f} max_frame_MAE={max_mae:.5f} "
+        f"aggregate_foreground_ratio={aggregate_ratio:.3f} "
+        f"aggregate_grid_IoU={aggregate_iou:.3f} "
+        f"aggregate_cell_ratio={aggregate_cell_ratio:.3f} "
+        f"aggregate_centroid_drift={centroid_drift:.2f}px "
+        f"python_sha={sha256(python_frames[0])} rust_sha={sha256(rust_frames[0])}"
+    )
+    if (
+        mean_mae > EXPLOSION_MAX_MEAN_FRAME_MAE
+        or mean_rms > EXPLOSION_MAX_MEAN_FRAME_RMS
+        or max_mae > EXPLOSION_MAX_FRAME_MAE
+    ):
+        raise AssertionError(
+            "explosion pixel drift exceeds threshold: "
+            f"mean MAE {mean_mae:.5f} <= {EXPLOSION_MAX_MEAN_FRAME_MAE:.5f}, "
+            f"mean RMS {mean_rms:.5f} <= {EXPLOSION_MAX_MEAN_FRAME_RMS:.5f}, "
+            f"max frame MAE {max_mae:.5f} <= {EXPLOSION_MAX_FRAME_MAE:.5f}"
         )
     return []
 
@@ -690,6 +994,11 @@ def main(argv: list[str] | None = None) -> int:
             check_advantage(
                 output_dir / "python_advantage.png",
                 output_dir / "rust_advantage.png",
+            )
+            check_wheel(output_dir / "python_wheel.gif", output_dir / "rust_wheel.gif")
+            check_explosion(
+                output_dir / "python_explosion.gif",
+                output_dir / "rust_explosion.gif",
             )
             check_gif(output_dir / "python_animation.gif", output_dir / "rust_animation.gif")
             check_terminal_crash(

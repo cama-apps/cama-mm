@@ -61,5 +61,16 @@
     "match_id": 4242,
     "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],
     "radiant_xp_adv": [0, 200, 800, 100, 1500, 3000, 2500]
+  },
+  "wheel": {
+    "target_index": 7,
+    "size": 500,
+    "seed": 13280327,
+    "is_bankrupt": false,
+    "is_golden": false
+  },
+  "explosion": {
+    "size": 500,
+    "seed": 12648430
   }
 }

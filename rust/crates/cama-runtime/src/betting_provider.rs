@@ -1412,6 +1412,27 @@ fn render_explosion_attachment() -> Result<InteractionAttachment, String> {
     Ok(InteractionAttachment::bytes("explosion.gif", bytes))
 }
 
+/// Emit the exact wheel attachment used by the production provider for the
+/// cross-language visual-equivalence runner.  Keeping this façade adjacent to
+/// the private renderer prevents the harness from reimplementing presentation
+/// or accidentally bypassing the provider's upload-limit checks.
+#[doc(hidden)]
+pub fn render_wheel_attachment_for_visual_equivalence(
+    wedges: &[cama_app::wheel::WheelWedge],
+    target_index: usize,
+    golden: bool,
+) -> Result<InteractionAttachment, String> {
+    render_wheel_attachment(wedges, target_index, golden)
+}
+
+/// Emit the exact explosion attachment used by the production provider for
+/// the cross-language visual-equivalence runner.
+#[doc(hidden)]
+pub fn render_explosion_attachment_for_visual_equivalence() -> Result<InteractionAttachment, String>
+{
+    render_explosion_attachment()
+}
+
 /// Return the bounded contact-sheet dimensions used by the Python renderer
 /// when it builds one representative palette for all explosion phases.  The
 /// Rust renderer's fixed six-color palette is already shared by every frame,
@@ -10653,6 +10674,8 @@ mod tests {
         let expected_explosion_delays = (0..EXPLOSION_MEDIA_FRAME_COUNT)
             .map(explosion_frame_delay_ms)
             .collect::<Vec<_>>();
+        assert_eq!(wheel.filename, "wheel.gif");
+        assert_eq!(explosion.filename, "explosion.gif");
         for (attachment, expected_frames, expected_delays) in [
             (
                 wheel,

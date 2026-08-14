@@ -17,6 +17,8 @@ from scripts.visual_equivalence import (
     BALANCE_MIN_FOREGROUND_COUNT_RATIO,
     BALANCE_MIN_FOREGROUND_GRID_IOU,
     DEFAULT_FIXTURE,
+    check_explosion,
+    check_wheel,
     compare_foreground_structure,
     gif_frames,
     load_fixture,
@@ -56,6 +58,14 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
     assert any(entry["os_mu_after"] is None for entry in rating_history["entries"])
     assert advantage["match_id"] == 4242
     assert len(advantage["radiant_gold_adv"]) == len(advantage["radiant_xp_adv"]) == 7
+    assert fixture["wheel"] == {
+        "target_index": 7,
+        "size": 500,
+        "seed": 13280327,
+        "is_bankrupt": False,
+        "is_golden": False,
+    }
+    assert fixture["explosion"] == {"size": 500, "seed": 12648430}
 
 
 def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
@@ -86,6 +96,10 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert (first / "python_pinnacle_phase3.gif").read_bytes() == (
         second / "python_pinnacle_phase3.gif"
     ).read_bytes()
+    assert (first / "python_wheel.gif").read_bytes() == (second / "python_wheel.gif").read_bytes()
+    assert (first / "python_explosion.gif").read_bytes() == (
+        second / "python_explosion.gif"
+    ).read_bytes()
     size, loop, durations, frames = gif_frames(first / "python_animation.gif")
     assert size == (400, 300)
     assert loop == 1
@@ -113,6 +127,28 @@ def test_python_fixture_render_is_deterministic_and_seekable(tmp_path: Path):
     assert loop is None
     assert len(frames) == 8
     assert durations == [90] * 7 + [1_500]
+    wheel_size, wheel_loop, wheel_durations, wheel_frames = gif_frames(first / "python_wheel.gif")
+    assert wheel_size == (500, 500)
+    assert wheel_loop == 1
+    assert 68 <= len(wheel_frames) <= 70
+    assert wheel_durations[:58] == [30] * 14 + [40] * 14 + [70] * 14 + [110] * 16
+    assert wheel_durations[-2:] == [60_000, 60_000]
+    explosion_size, explosion_loop, explosion_durations, explosion_frames = gif_frames(
+        first / "python_explosion.gif"
+    )
+    assert explosion_size == (500, 500)
+    assert explosion_loop == 1
+    assert len(explosion_frames) == 56
+    assert explosion_durations == (
+        [50] * 14
+        + [60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
+        + [60] * 4
+        + [80] * 14
+        + [100] * 13
+        + [60_000]
+    )
+    check_wheel(first / "python_wheel.gif", first / "python_wheel.gif")
+    check_explosion(first / "python_explosion.gif", first / "python_explosion.gif")
 
 
 def test_pixel_metrics_are_normalized_and_exact_for_identical_rgba():
