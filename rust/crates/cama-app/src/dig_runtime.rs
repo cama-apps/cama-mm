@@ -29,7 +29,7 @@ use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
 use cama_db::dig_inventory_repository::{
     AutoBuyRequest, AutoBuySelection, BuyInsuranceOutcome, DigInventoryRepository, SetTrapOutcome,
 };
-use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository};
+use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository, weather_by_id};
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::ManashopRepository;
@@ -3018,6 +3018,21 @@ pub struct DigRuntimeOutcome {
     pub pet_name: Option<String>,
     pub forced_event_consumed: bool,
     pub relic_trim_notice: bool,
+    /// The authored weather affecting the layer reached by this Dig.  The
+    /// first Dig intentionally has no weather: Python lazily rolls the daily
+    /// forecast only once the main Dig path is admitted.
+    #[serde(default)]
+    pub weather: Option<DigRuntimeWeatherInfo>,
+}
+
+/// The user-facing weather portion of a live Dig result.  Keep this separate
+/// from the persisted forecast row and its mechanical effects so the result
+/// remains a stable presentation snapshot even when the daily forecast is
+/// subsequently queried or repaired.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DigRuntimeWeatherInfo {
+    pub name: String,
+    pub description: String,
 }
 
 /// Discord context captured before the Dig transaction commits.  The
@@ -3129,6 +3144,8 @@ pub struct DigRuntimeRenderSnapshot {
     pub layer_media_key: String,
     pub pickaxe_tier: i64,
     pub item_media_keys: Vec<String>,
+    #[serde(default)]
+    pub weather: Option<DigRuntimeWeatherInfo>,
     pub boss: Option<DigRuntimeBossRenderSnapshot>,
 }
 
@@ -3896,6 +3913,7 @@ impl DigRuntimeOutcome {
             pet_name: None,
             forced_event_consumed: false,
             relic_trim_notice: false,
+            weather: None,
         }
     }
 }
@@ -4757,6 +4775,7 @@ where
                 pet_name: None,
                 forced_event_consumed: false,
                 relic_trim_notice: false,
+                weather: None,
             });
         }
 
@@ -4811,6 +4830,7 @@ where
                 pet_name: None,
                 forced_event_consumed: false,
                 relic_trim_notice: false,
+                weather: None,
             });
         }
 
@@ -5073,6 +5093,7 @@ where
                 pet_name,
                 forced_event_consumed: false,
                 relic_trim_notice: false,
+                weather: None,
             };
             let receipt =
                 self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
@@ -6243,7 +6264,11 @@ where
             "helltide_tax": helltide_tax,
             "bankruptcy_penalty": outcome.bankruptcy_penalty,
             "vanity_tax": outcome.vanity_tax,
-            "gross_jc": outcome.economy_gross_jc,
+            // Python's audit contract names the pre-positive-scale authored
+            // payout as gross.  Keep the economy-adjusted/post-scale bucket
+            // separate so live Dig can prove the sink ordering without
+            // relabeling an already scaled value as gross.
+            "gross_jc": outcome.gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
             "economy_reward_multiplier": economy_multiplier,
             "auto_purchases": auto_purchases.iter().map(|purchase| serde_json::json!({
@@ -6335,6 +6360,12 @@ where
             pet_name,
             forced_event_consumed,
             relic_trim_notice: false,
+            weather: weather.and_then(|weather| {
+                weather_by_id(&weather.weather_id).map(|definition| DigRuntimeWeatherInfo {
+                    name: definition.name.to_owned(),
+                    description: definition.description.to_owned(),
+                })
+            }),
         };
         let receipt =
             self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
@@ -6665,6 +6696,7 @@ fn build_delivery_snapshot(
         layer_media_key: layer.name.to_owned(),
         pickaxe_tier: outcome.pickaxe_tier,
         item_media_keys: outcome.items_used.clone(),
+        weather: outcome.weather.clone(),
         boss: None,
     };
     Some(DigRuntimeDeliverySnapshot {
@@ -8493,6 +8525,71 @@ mod tests {
     }
 
     #[test]
+    fn test_weather_effects_in_dig_result_live_sqlite_second_dig() {
+        let database = NamedTempFile::new().expect("temporary weather result database");
+        initialize_or_migrate(database.path()).expect("canonical migration");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(9_006, "weather-result-test", Some(42)))
+            .expect("insert weather result player");
+        let service = DigRuntimeService::sqlite(database.path());
+        let first = service
+            .dig(DigRuntimeRequest {
+                discord_id: 9_006,
+                guild_id: 42,
+                now: 1_700_000_000,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("first dig");
+        assert!(first.success);
+        assert!(first.weather.is_none(), "first Dig defers weather");
+
+        let second_now = 1_700_003_601;
+        let today = game_date_for_timestamp(second_now as f64).expect("weather result date");
+        seed_two_weather_rows(&database, 42, &today, "Dirt", "earthworm_migration");
+        Connection::open(database.path())
+            .expect("reopen weather result database")
+            .execute(
+                "UPDATE tunnels SET last_dig_at=?1 WHERE discord_id=?2 AND guild_id=?3",
+                params![second_now - 10_000_i64, 9_006_i64, 42_i64],
+            )
+            .expect("clear weather result cooldown");
+
+        let execution = service
+            .dig_with_delivery(
+                DigRuntimeRequest {
+                    discord_id: 9_006,
+                    guild_id: 42,
+                    now: second_now,
+                    paid: false,
+                    forced_event: false,
+                },
+                DigRuntimeDeliveryContext::new(90_060, 420, "Weather Miner", None),
+            )
+            .expect("second live Dig");
+        let weather = execution
+            .outcome
+            .weather
+            .as_ref()
+            .expect("affected-layer weather in live Dig result");
+        assert_eq!(weather.name, "Earthworm Migration");
+        assert_eq!(
+            weather.description,
+            "Worms churn the soil. Digging is easy, but they ate all the coins."
+        );
+        let delivery = execution.delivery.expect("durable render snapshot");
+        assert_eq!(delivery.render.weather.as_ref(), Some(weather));
+        let mut legacy = serde_json::to_value(&delivery).expect("serialize delivery snapshot");
+        legacy["render"]
+            .as_object_mut()
+            .expect("render object")
+            .remove("weather");
+        let restored = serde_json::from_value::<super::DigRuntimeDeliverySnapshot>(legacy)
+            .expect("legacy delivery snapshot remains readable");
+        assert!(restored.render.weather.is_none());
+    }
+
+    #[test]
     fn sqlite_pet_work_first_dig_is_settled_and_claimed_atomically() {
         let database = NamedTempFile::new().expect("temporary database");
         initialize_or_migrate(database.path()).expect("canonical migration");
@@ -8674,42 +8771,193 @@ mod tests {
     #[test]
     fn test_drain_at_cap_is_double() {
         let depth = super::PRESTIGE_HARD_CAP - 1;
-        let total =
+        let drain = live_prestige_luminosity_drain(62_101, 62_102, depth);
+        let expected =
             super::layer_at(depth).luminosity_drain + super::deep_luminosity_drain_bonus(depth);
         assert_eq!(super::deep_luminosity_drain_bonus(depth), 7);
-        assert_eq!(total, 17);
+        assert_eq!(expected, 17);
+        assert_eq!(drain.returned, expected);
+        assert_eq!(drain.persisted, expected);
     }
 
     #[test]
     fn test_drain_at_start_depth_matches_base() {
         let depth = super::LUMINOSITY_DEEP_DRAIN_START_DEPTH;
+        let drain = live_prestige_luminosity_drain(62_111, 62_112, depth);
+        let expected = super::layer_at(depth).luminosity_drain;
         assert_eq!(super::deep_luminosity_drain_bonus(depth), 0);
-        assert_eq!(
-            super::layer_at(depth).luminosity_drain,
-            10,
-            "The Hollow's authored base drain"
-        );
+        assert_eq!(expected, 10, "The Hollow's authored base drain");
+        assert_eq!(drain.returned, expected);
+        assert_eq!(drain.persisted, expected);
     }
 
     #[test]
     fn test_drain_below_start_depth_unchanged() {
         let depth = super::LUMINOSITY_DEEP_DRAIN_START_DEPTH - 100;
+        let drain = live_prestige_luminosity_drain(62_121, 62_122, depth);
+        let expected = super::layer_at(depth).luminosity_drain;
         assert_eq!(super::deep_luminosity_drain_bonus(depth), 0);
-        assert_eq!(super::layer_at(depth).luminosity_drain, 7);
+        assert_eq!(expected, 7, "Frozen Core's authored base drain");
+        assert_eq!(drain.returned, expected);
+        assert_eq!(drain.persisted, expected);
     }
 
     #[test]
     fn test_drain_increases_monotonically() {
         let drains = [350_i64, 400, 450]
             .into_iter()
-            .map(|depth| {
-                super::layer_at(depth).luminosity_drain + super::deep_luminosity_drain_bonus(depth)
+            .enumerate()
+            .map(|(index, depth)| {
+                live_prestige_luminosity_drain(
+                    62_131 + i64::try_from(index).expect("small test index"),
+                    62_140 + i64::try_from(index).expect("small test index"),
+                    depth,
+                )
             })
             .collect::<Vec<_>>();
+        let returned = drains
+            .iter()
+            .map(|drain| drain.returned)
+            .collect::<Vec<_>>();
+        let persisted = drains
+            .iter()
+            .map(|drain| drain.persisted)
+            .collect::<Vec<_>>();
+        assert_eq!(returned, [10, 12, 15]);
+        assert_eq!(persisted, returned);
         assert!(
-            drains.windows(2).all(|pair| pair[0] < pair[1]),
-            "{drains:?}"
+            returned.windows(2).all(|pair| pair[0] < pair[1]),
+            "{returned:?}"
         );
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct LivePrestigeLuminosityDrain {
+        returned: i64,
+        persisted: i64,
+    }
+
+    fn live_prestige_luminosity_drain(
+        discord_id: i64,
+        guild_id: i64,
+        depth: i64,
+    ) -> LivePrestigeLuminosityDrain {
+        let database = NamedTempFile::new().expect("prestige drain database");
+        let seed_now = 1_900_300_000;
+        seed_live_runtime_tunnel(
+            &database,
+            discord_id,
+            guild_id,
+            seed_now,
+            depth,
+            1,
+            Some(seed_now - 7_200),
+        );
+        let now = find_non_cave_dig_time_for_depth(discord_id, guild_id, seed_now, depth);
+        let today = game_date_for_timestamp(now as f64).expect("prestige drain game date");
+        let boss_progress = r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"},"100":{"status":"defeated"},"150":{"status":"defeated"},"200":{"status":"defeated"},"275":{"status":"defeated"},"350":{"status":"defeated"}}"#;
+        let layer = super::layer_at(depth).name;
+        let connection = Connection::open(database.path()).expect("prestige drain connection");
+        connection
+            .execute(
+                "UPDATE tunnels
+                 SET depth=?1,max_depth=?1,luminosity=100,last_dig_at=0,
+                     last_lum_update_at=?2,boss_progress=?3
+                 WHERE discord_id=?4 AND guild_id=?5",
+                params![depth, now, boss_progress, discord_id, guild_id],
+            )
+            .expect("seed prestige drain tunnel");
+        // The Python fixture disables weather.  Two unknown persisted IDs
+        // provide the same neutral mechanical effect while still exercising
+        // the migrated weather lookup and its two-row invariant.
+        connection
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES(?1,?2,?3,'prestige_drain_neutral')",
+                params![guild_id, today, layer],
+            )
+            .expect("seed neutral active weather");
+        connection
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES(?1,?2,'Dirt','prestige_drain_neutral_other')",
+                params![guild_id, today],
+            )
+            .expect("seed neutral secondary weather");
+        drop(connection);
+
+        let service = DigRuntimeService::sqlite(database.path());
+        let before = service
+            .tunnel_info(discord_id, guild_id)
+            .expect("read prestige drain input")
+            .expect("prestige drain tunnel")
+            .luminosity;
+        let outcome = service
+            .dig(DigRuntimeRequest {
+                discord_id,
+                guild_id,
+                now,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("live prestige drain Dig");
+        assert!(
+            outcome.success,
+            "live prestige drain Dig failed at depth {depth}: {:?}",
+            outcome.error
+        );
+        assert_eq!(
+            outcome.boss_boundary, None,
+            "prestige drain fixture must clear bosses"
+        );
+        assert!(
+            outcome.action_id.is_some(),
+            "live Dig must persist an action"
+        );
+
+        // `tunnel_info` is the typed application return path used by the
+        // runtime adapter; compare it with the direct migrated-SQLite row so
+        // the test covers both the returned and durable luminosity values.
+        let returned_after = service
+            .tunnel_info(discord_id, guild_id)
+            .expect("read returned prestige drain tunnel")
+            .expect("returned prestige drain tunnel")
+            .luminosity;
+        let persisted_after = Connection::open(database.path())
+            .expect("reload prestige drain database")
+            .query_row(
+                "SELECT luminosity FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, guild_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read persisted prestige luminosity");
+        assert_eq!(returned_after, persisted_after);
+        LivePrestigeLuminosityDrain {
+            returned: before.saturating_sub(returned_after),
+            persisted: before.saturating_sub(persisted_after),
+        }
+    }
+
+    fn find_non_cave_dig_time_for_depth(
+        discord_id: i64,
+        guild_id: i64,
+        start: i64,
+        depth: i64,
+    ) -> i64 {
+        let cave_chance = super::layer_at(depth).cave_in_chance;
+        (start..start.saturating_add(100_000))
+            .find(|candidate| {
+                let mut entropy = SeededLootEntropy::new(super::seed_for(DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                }));
+                entropy.unit() >= cave_chance
+            })
+            .expect("deterministic non-cave prestige drain seed")
     }
 
     fn seed_cap_tunnel(database: &NamedTempFile, depth: i64, luminosity: i64) {

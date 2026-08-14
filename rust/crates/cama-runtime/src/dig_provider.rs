@@ -6819,6 +6819,13 @@ fn dig_responses(
             true,
         )
         .field("Layer", layer.name, true);
+    if let Some(weather) = result.weather.as_ref() {
+        embed = embed.field(
+            "Weather",
+            format!("**{}**\n{}", weather.name, weather.description),
+            false,
+        );
+    }
     if result.cave_in {
         embed = embed.footer("The cave-in was contained; inspect your tunnel before the next dig.");
     }
@@ -6939,6 +6946,13 @@ fn dig_delivery_responses(
     }
     if let Some(artifact) = render.artifact_name.as_deref() {
         embed = embed.field("Artifact found", artifact, false);
+    }
+    if let Some(weather) = render.weather.as_ref() {
+        embed = embed.field(
+            "Weather",
+            format!("**{}**\n{}", weather.name, weather.description),
+            false,
+        );
     }
     if let Some(notice) = render.relic_trim_notice_copy.as_deref() {
         embed = embed.field("Relic loadout updated", notice, false);
@@ -10931,6 +10945,7 @@ mod tests {
             pet_name: None,
             forced_event_consumed: false,
             relic_trim_notice: false,
+            weather: None,
         };
         let response = super::paid_dig_response(&result, "secret-token");
         assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -11436,6 +11451,11 @@ mod tests {
             pet_name: None,
             forced_event_consumed: false,
             relic_trim_notice: false,
+            weather: Some(cama_app::dig_runtime::DigRuntimeWeatherInfo {
+                name: "Earthworm Migration".to_owned(),
+                description: "Worms churn the soil. Digging is easy, but they ate all the coins."
+                    .to_owned(),
+            }),
         };
 
         let (stats, event) =
@@ -11458,6 +11478,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|url| url.starts_with("attachment://layer_"))
         );
+        assert!(stats.embeds[0].fields.iter().any(|field| {
+            field.name == "Weather"
+                && field.value.contains("Earthworm Migration")
+                && field.value.contains("Worms churn the soil")
+        }));
         assert_eq!(
             stats.embeds[0].footer_icon_url.as_deref(),
             Some("attachment://pickaxe_wooden.png")
@@ -11519,6 +11544,7 @@ mod tests {
             pet_name: None,
             forced_event_consumed: false,
             relic_trim_notice: false,
+            weather: None,
         };
         let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
             event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
