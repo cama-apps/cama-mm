@@ -10,8 +10,11 @@ fn assert_valid_gif(gif: &GifAsset) {
     assert!(gif.upload_safe());
     let info = inspect_media(&gif.bytes).expect("valid GIF header and frame stream");
     assert_eq!(info.format, MediaFormat::Gif);
+    assert_eq!((info.width, info.height), (400, 300));
     assert!(info.frame_count >= 2);
     assert_eq!(info.frame_count, gif.frame_durations_ms.len());
+    assert_eq!(info.frame_durations_ms.last(), Some(&60_000));
+    assert_eq!(gif.frame_durations_ms.last(), Some(&60_000));
     assert!(gif.shared_palette);
 }
 
@@ -86,6 +89,41 @@ fn test_unknown_layer_does_not_crash() {
     );
     assert_eq!(layer_palette("Nonexistent Layer").name, "Dirt");
     assert_valid_gif(&gif);
+}
+
+#[test]
+fn test_dig_animation_parameters_change_native_seekable_frames() {
+    let reveal = animate_dig_reveal(
+        "Magma",
+        DigRevealMotion::Victory,
+        "THE KING FALLS",
+        &["+240 jc"],
+        None,
+    );
+    let different_reveal = animate_dig_reveal(
+        "Crystal",
+        DigRevealMotion::Unearth,
+        "Crystal Compass",
+        &[],
+        Some("crystal"),
+    );
+    let cave = animate_cave_in("Stone", 112, 100);
+    let different_cave = animate_cave_in("Stone", 212, 180);
+    let relic = animate_legendary_relic("Ethereal Crown");
+    let different_relic = animate_legendary_relic("Forgotten Map");
+
+    assert_valid_gif(&reveal);
+    assert_valid_gif(&different_reveal);
+    assert_valid_gif(&cave);
+    assert_valid_gif(&different_cave);
+    assert_valid_gif(&relic);
+    assert_valid_gif(&different_relic);
+    assert_ne!(reveal.bytes, different_reveal.bytes);
+    assert_ne!(cave.bytes, different_cave.bytes);
+    assert_ne!(relic.bytes, different_relic.bytes);
+    assert!(reveal.bytes.len() > 1_000);
+    assert!(cave.bytes.len() > 1_000);
+    assert!(relic.bytes.len() > 1_000);
 }
 
 #[test]

@@ -11,7 +11,11 @@ use std::sync::Arc;
 use crate::dig_assets::{LAYER_PALETTES, LayerPalette};
 use crate::dig_flavor::LlmMessage;
 use crate::neon_bigwin_media::render_big_win;
-use crate::neon_degen::{GifAsset, NeonResult, ansi_block, render_don_win};
+use crate::neon_degen::{
+    COLOR_BLACK, COLOR_CYAN, COLOR_DARK_RED, COLOR_DIM_CYAN, COLOR_DIM_GREEN, COLOR_GREEN,
+    COLOR_RED, COLOR_YELLOW, GifAsset, NEON_GIF_HEIGHT, NEON_GIF_WIDTH, NeonCanvas, NeonResult,
+    ansi_block, render_don_win, render_neon_animation,
+};
 
 pub const NEON_DIG_CHANCE: f64 = 0.12;
 pub const NEON_BIGWIN_FLOOR: f64 = 0.05;
@@ -270,54 +274,310 @@ pub fn layer_palette(layer_name: &str) -> &'static LayerPalette {
         .unwrap_or(&LAYER_PALETTES[0])
 }
 
-fn animated_gif(kind: &'static str) -> GifAsset {
-    // Valid GIF89a with a global two-color palette and two independently
-    // seekable 1x1 image frames. The render port can replace it with the full
-    // Python-equivalent scene without changing routing or attachment policy.
-    const TWO_FRAME_GIF: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\
-        !\xf9\x04\0\x0a\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0\
-        !\xf9\x04\0\x0a\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
-    GifAsset {
-        kind,
-        bytes: TWO_FRAME_GIF.to_vec(),
-        frame_durations_ms: vec![100, 100],
-        shared_palette: true,
+const DIG_ANIMATION_HOLD_MS: u32 = 60_000;
+
+fn dig_durations(frame_count: usize, early_ms: u32, late_ms: u32) -> Vec<u32> {
+    let mut durations = (0..frame_count)
+        .map(|frame| {
+            let progress = frame as f64 / frame_count.saturating_sub(1).max(1) as f64;
+            if progress < 0.65 { early_ms } else { late_ms }
+        })
+        .collect::<Vec<_>>();
+    if let Some(last) = durations.last_mut() {
+        *last = DIG_ANIMATION_HOLD_MS;
     }
+    durations
+}
+
+fn dig_scene_seed(parts: &[&str]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn dig_next_seed(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn bounded_scene_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect::<String>()
+}
+
+fn nearest_neon_color(rgb: (u8, u8, u8)) -> u8 {
+    const NEON_COLORS: &[(u8, (u8, u8, u8))] = &[
+        (COLOR_GREEN, (0, 255, 65)),
+        (COLOR_CYAN, (0, 255, 255)),
+        (3, (255, 0, 128)),
+        (COLOR_RED, (255, 30, 30)),
+        (COLOR_YELLOW, (255, 220, 0)),
+        (COLOR_DIM_GREEN, (0, 120, 30)),
+        (COLOR_DIM_CYAN, (0, 100, 100)),
+    ];
+    NEON_COLORS
+        .iter()
+        .min_by_key(|(_, candidate)| {
+            let distance = |left: u8, right: u8| {
+                let difference = i32::from(left) - i32::from(right);
+                difference * difference
+            };
+            distance(rgb.0, candidate.0)
+                + distance(rgb.1, candidate.1)
+                + distance(rgb.2, candidate.2)
+        })
+        .map_or(COLOR_GREEN, |(index, _)| *index)
+}
+
+fn layer_neon_colors(palette: &LayerPalette) -> (u8, u8, u8) {
+    (
+        nearest_neon_color(palette.colors[1]),
+        nearest_neon_color(palette.colors[2]),
+        nearest_neon_color(palette.colors[3]),
+    )
+}
+
+fn draw_dig_frame_grid(canvas: &mut NeonCanvas, shadow: u8, accent: u8, frame: usize) {
+    canvas.rect(
+        12,
+        12,
+        i32::from(NEON_GIF_WIDTH) - 13,
+        i32::from(NEON_GIF_HEIGHT) - 13,
+        shadow,
+    );
+    for x in (24..380).step_by(40) {
+        canvas.line(x, 30, x, 275, shadow);
+    }
+    for y in (40..280).step_by(32) {
+        canvas.line(24, y, 376, y, shadow);
+    }
+    if frame.is_multiple_of(2) {
+        canvas.line(
+            24,
+            30 + (frame as i32 * 7) % 240,
+            376,
+            30 + (frame as i32 * 7) % 240,
+            accent,
+        );
+    }
+}
+
+fn draw_dig_particles(canvas: &mut NeonCanvas, seed: u64, frame: usize, color: u8, count: usize) {
+    let mut state = seed.wrapping_add(frame as u64 * 0x9e37_79b9);
+    for index in 0..count {
+        let sample = dig_next_seed(&mut state);
+        let x = 24 + (sample % 352) as i32;
+        let y = 35 + ((sample >> 16) % 238) as i32;
+        if !(index + frame).is_multiple_of(3) {
+            canvas.pixel(x, y, color);
+        } else {
+            canvas.fill_rect(x - 1, y - 1, x + 1, y + 1, color);
+        }
+    }
+}
+
+fn draw_dig_player(canvas: &mut NeonCanvas, x: i32, y: i32, color: u8) {
+    canvas.rect(x, y, x + 24, y + 30, color);
+    canvas.fill_rect(x + 8, y + 8, x + 16, y + 16, color);
+    canvas.line(x + 22, y + 4, x + 34, y - 8, color);
+    canvas.line(x + 34, y - 8, x + 39, y - 2, color);
+}
+
+fn draw_dig_relic(canvas: &mut NeonCanvas, x: i32, y: i32, size: i32, color: u8, glow: u8) {
+    canvas.line(x, y - size, x + size, y, color);
+    canvas.line(x + size, y, x, y + size, color);
+    canvas.line(x, y + size, x - size, y, color);
+    canvas.line(x - size, y, x, y - size, color);
+    canvas.rect(x - size / 2, y - size / 2, x + size / 2, y + size / 2, glow);
 }
 
 #[must_use]
 pub fn animate_dig_reveal(
     layer_name: &str,
     motion: DigRevealMotion,
-    _title: &str,
-    _sub_lines: &[&str],
-    _sprite_id: Option<&str>,
+    title: &str,
+    sub_lines: &[&str],
+    sprite_id: Option<&str>,
 ) -> GifAsset {
-    let _palette = layer_palette(layer_name);
-    match motion {
-        DigRevealMotion::Victory => animated_gif("dig_reveal_victory"),
-        DigRevealMotion::Unearth => animated_gif("dig_reveal_unearth"),
-    }
+    let palette = layer_palette(layer_name);
+    let layer_label = bounded_scene_text(layer_name, 42);
+    let title = bounded_scene_text(title, 42);
+    let sprite = bounded_scene_text(sprite_id.unwrap_or("crystal"), 28);
+    let sub_lines = sub_lines
+        .iter()
+        .map(|line| bounded_scene_text(line, 42))
+        .collect::<Vec<_>>();
+    let seed = dig_scene_seed(&[
+        layer_name,
+        title.as_str(),
+        sprite.as_str(),
+        match motion {
+            DigRevealMotion::Victory => "victory",
+            DigRevealMotion::Unearth => "unearth",
+        },
+    ]);
+    let durations = dig_durations(26, 80, 110);
+    let frame_count = durations.len();
+    let (shadow, accent, highlight) = layer_neon_colors(palette);
+    let kind = match motion {
+        DigRevealMotion::Victory => "dig_reveal_victory",
+        DigRevealMotion::Unearth => "dig_reveal_unearth",
+    };
+    render_neon_animation(kind, &durations, seed, move |frame, canvas| {
+        let progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
+        canvas.fill(COLOR_BLACK);
+        draw_dig_frame_grid(canvas, shadow, accent, frame);
+        canvas.text_centered("DIG REVEAL", 22, highlight, 2);
+        canvas.text_centered(&layer_label, 48, shadow, 1);
+        draw_dig_particles(canvas, seed, frame, accent, 24);
+        match motion {
+            DigRevealMotion::Victory => {
+                let boss_x = 245 - (progress * 55.0) as i32;
+                let boss_y = 105;
+                canvas.rect(boss_x, boss_y, boss_x + 48, boss_y + 48, accent);
+                canvas.line(boss_x, boss_y, boss_x + 48, boss_y + 48, highlight);
+                canvas.line(boss_x + 48, boss_y, boss_x, boss_y + 48, highlight);
+                draw_dig_player(canvas, 100, 145, highlight);
+                canvas.text_centered("GUARDIAN FALLS", 218, accent, 2);
+            }
+            DigRevealMotion::Unearth => {
+                let relic_size = 12 + (progress * 34.0) as i32;
+                draw_dig_relic(canvas, 200, 132, relic_size, highlight, accent);
+                let curtain_top = 160 - (progress * 95.0) as i32;
+                canvas.fill_rect(130, curtain_top, 270, 177, shadow);
+                draw_dig_relic(canvas, 200, 132, relic_size, highlight, accent);
+                canvas.text_centered("UNEARTHED", 218, accent, 2);
+            }
+        }
+        canvas.text_centered(&title, 246, highlight, 1);
+        for (index, line) in sub_lines.iter().enumerate().take(2) {
+            canvas.text_centered(line, 260 + index as i32 * 14, shadow, 1);
+        }
+        canvas.text_left(&format!("SPRITE: {sprite}"), 22, 282, shadow, 1);
+    })
 }
 
 #[must_use]
-pub fn animate_legendary_relic(_relic_name: &str) -> GifAsset {
-    animated_gif("dig_legendary_relic")
+pub fn animate_legendary_relic(relic_name: &str) -> GifAsset {
+    let name = bounded_scene_text(relic_name, 42);
+    let seed = dig_scene_seed(&["legendary_relic", relic_name]);
+    let durations = dig_durations(34, 90, 130);
+    let frame_count = durations.len();
+    render_neon_animation(
+        "dig_legendary_relic",
+        &durations,
+        seed,
+        move |frame, canvas| {
+            let progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
+            canvas.fill(COLOR_BLACK);
+            canvas.rect(12, 12, 387, 287, COLOR_DIM_CYAN);
+            canvas.text_centered("LEGENDARY RELIC", 26, COLOR_YELLOW, 2);
+            let size = 12 + (progress * 46.0) as i32;
+            let y = 240 - (progress * 105.0) as i32;
+            draw_dig_relic(canvas, 200, y, size, COLOR_YELLOW, COLOR_CYAN);
+            draw_dig_particles(canvas, seed, frame, COLOR_CYAN, 38);
+            canvas.line(200 - size * 2, y, 200 + size * 2, y, COLOR_DIM_CYAN);
+            canvas.text_centered(&name, 258, COLOR_GREEN, 1);
+            canvas.text_centered("THE DEEP OPENS ITS HAND", 278, COLOR_DIM_GREEN, 1);
+        },
+    )
 }
 
 #[must_use]
-pub fn animate_cave_in(layer_name: &str, _depth_before: i64, _depth_after: i64) -> GifAsset {
-    let _palette = layer_palette(layer_name);
-    animated_gif("dig_cave_in")
+pub fn animate_cave_in(layer_name: &str, depth_before: i64, depth_after: i64) -> GifAsset {
+    let palette = layer_palette(layer_name);
+    let layer_label = bounded_scene_text(layer_name, 42);
+    let before = depth_before.to_string();
+    let after = depth_after.to_string();
+    let seed = dig_scene_seed(&["cave_in", layer_name, &before, &after]);
+    let durations = dig_durations(28, 70, 110);
+    let frame_count = durations.len();
+    let (shadow, accent, highlight) = layer_neon_colors(palette);
+    render_neon_animation("dig_cave_in", &durations, seed, move |frame, canvas| {
+        let progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
+        canvas.fill(COLOR_BLACK);
+        draw_dig_frame_grid(canvas, shadow, accent, frame);
+        canvas.text_centered("CAVE IN", 24, COLOR_RED, 2);
+        canvas.text_centered(&layer_label, 50, shadow, 1);
+        let current =
+            (depth_before as f64 + (depth_after - depth_before) as f64 * progress).round();
+        canvas.text_centered(&format!("DEPTH {current:.0}"), 118, highlight, 3);
+        let darkness = (progress * 150.0) as i32;
+        canvas.fill_rect(48, 88 + darkness / 6, 352, 275, COLOR_DARK_RED);
+        for index in 0..12 {
+            let mut state = seed
+                .wrapping_add(index as u64 * 0x517c_c1b7)
+                .wrapping_add(frame as u64 * 0x9e37_79b9);
+            let x = 30 + (dig_next_seed(&mut state) % 340) as i32;
+            let y = 70 + ((dig_next_seed(&mut state) >> 16) % 190) as i32;
+            let size = 2 + (dig_next_seed(&mut state) % 8) as i32;
+            canvas.fill_rect(x, y, x + size, y + size / 2, accent);
+        }
+        canvas.text_centered(&format!("{before} -> {after}"), 250, highlight, 1);
+        canvas.text_centered("THE DARK CLOSES IN", 272, shadow, 1);
+    })
 }
 
 #[must_use]
 pub fn animate_pinnacle(prestige: bool) -> GifAsset {
-    if prestige {
-        animated_gif("dig_prestige")
+    let kind = if prestige {
+        "dig_prestige"
     } else {
-        animated_gif("dig_pinnacle")
-    }
+        "dig_pinnacle"
+    };
+    let durations = dig_durations(30, 90, 130);
+    let frame_count = durations.len();
+    let seed = dig_scene_seed(&[kind]);
+    render_neon_animation(kind, &durations, seed, move |frame, canvas| {
+        let progress = frame as f64 / (frame_count.saturating_sub(1).max(1)) as f64;
+        canvas.fill(COLOR_BLACK);
+        let accent = if prestige { COLOR_YELLOW } else { COLOR_RED };
+        let highlight = if prestige { COLOR_CYAN } else { COLOR_YELLOW };
+        draw_dig_frame_grid(canvas, COLOR_DIM_GREEN, accent, frame);
+        let center_y = if prestige {
+            150 - (progress * 85.0) as i32
+        } else {
+            82 + (progress * 85.0) as i32
+        };
+        draw_dig_player(canvas, 188, center_y, highlight);
+        let radius = 20 + (progress * 105.0) as i32;
+        canvas.rect(
+            200 - radius,
+            center_y - radius,
+            200 + radius,
+            center_y + radius,
+            accent,
+        );
+        canvas.text_centered(
+            if prestige {
+                "ASCENSION"
+            } else {
+                "THE PINNACLE"
+            },
+            226,
+            highlight,
+            2,
+        );
+        canvas.text_centered(
+            if prestige { "PRESTIGE" } else { "DEPTH 350" },
+            252,
+            COLOR_DIM_CYAN,
+            1,
+        );
+        draw_dig_particles(canvas, seed, frame, accent, 30);
+    })
 }
 
 #[must_use]
