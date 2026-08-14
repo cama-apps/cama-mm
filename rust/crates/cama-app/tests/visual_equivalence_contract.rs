@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use cama_app::drawing::{BalancePoint, draw_balance_chart, draw_prediction_market_chart};
+use cama_app::pet_assets::decode_png_raster;
 use cama_app::post_match_gif_media::render_post_match_gif;
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
@@ -84,22 +85,29 @@ fn foreground_signature(
     (interior, occupied)
 }
 
-fn foreground_gate(reference: &[u8], candidate: &[u8], width: usize, height: usize) -> bool {
+fn foreground_gate(
+    reference: &[u8],
+    candidate: &[u8],
+    width: usize,
+    height: usize,
+    minimum_count_ratio: f64,
+    minimum_grid_iou: f64,
+) -> bool {
     let (reference_count, reference_cells) = foreground_signature(reference, width, height);
     let (candidate_count, candidate_cells) = foreground_signature(candidate, width, height);
     if reference_count == 0
-        || candidate_count < 200.max(reference_count / 2)
+        || (candidate_count as f64) < 200.0_f64.max(reference_count as f64 * minimum_count_ratio)
         || reference_cells.is_empty()
     {
         return false;
     }
     let intersection = reference_cells.intersection(&candidate_cells).count();
     let union = reference_cells.union(&candidate_cells).count();
-    union > 0 && intersection as f64 / union as f64 >= 0.65
+    union > 0 && intersection as f64 / union as f64 >= minimum_grid_iou
 }
 
 #[test]
-fn visual_fixture_has_typed_inputs() {
+fn visual_fixture_has_typed_chart_and_animation_inputs() {
     let fixture = fixture();
     assert_eq!(fixture.chart.market_id, 42);
     assert_eq!(fixture.chart.snapshots.len(), 4);
@@ -199,6 +207,46 @@ fn foreground_gate_rejects_contentless_animation() {
     let reference = frame.buffer.to_vec();
     let blank = [5, 5, 8, 255].repeat(400 * 300);
 
-    assert!(foreground_gate(&reference, &reference, 400, 300));
-    assert!(!foreground_gate(&reference, &blank, 400, 300));
+    assert!(foreground_gate(&reference, &reference, 400, 300, 0.5, 0.65));
+    assert!(!foreground_gate(&reference, &blank, 400, 300, 0.5, 0.65));
+}
+
+#[test]
+fn balance_gate_rejects_contentless_candidate() {
+    let fixture = fixture();
+    let balance = fixture.balance;
+    let series = balance
+        .series
+        .iter()
+        .map(|(event_number, cumulative, source)| BalancePoint {
+            event_number: *event_number,
+            cumulative: *cumulative,
+            source: source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let bytes = draw_balance_chart(&balance.username, &series, &balance.source_totals).into_inner();
+    let image = decode_png_raster(&bytes).expect("decode fixture balance chart");
+    let width = image.width;
+    let height = image.height;
+    let reference = image.pixels;
+    let blank = [5, 5, 8, 255].repeat(width * height);
+    let mut border = blank.clone();
+    for y in 0..height {
+        for x in 0..width {
+            if x < 3 || x >= width - 3 || y < 3 || y >= height - 3 {
+                let offset = (y * width + x) * 4;
+                border[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+
+    assert!(foreground_gate(
+        &reference, &reference, width, height, 0.8, 0.8,
+    ));
+    assert!(!foreground_gate(
+        &reference, &blank, width, height, 0.8, 0.8,
+    ));
+    assert!(!foreground_gate(
+        &reference, &border, width, height, 0.8, 0.8,
+    ));
 }

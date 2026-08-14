@@ -26,7 +26,7 @@ from scripts.visual_equivalence import (
 )
 
 
-def test_visual_fixture_has_typed_inputs():
+def test_visual_fixture_has_typed_chart_and_animation_inputs():
     fixture = load_fixture(DEFAULT_FIXTURE)
     chart = fixture["chart"]
     animation = fixture["animation"]
