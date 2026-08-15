@@ -1,0 +1,35 @@
+{
+  "schema": "cama.external-service-recording/v1",
+  "provider": "dotabase_sqlite",
+  "asset": "dotabase.db",
+  "schema_version": "dotabase-compatible-7.8.11",
+  "provenance": {
+    "kind": "sanitized_contract_fixture",
+    "source": "Dotabase read-only SQLite adapter contract",
+    "captured_at": null,
+    "live_network_used": false,
+    "notes": "The SQL body is a minimized synthetic catalog with production table and column shapes. It is not a captured Dotabase database and contains no production identifiers."
+  },
+  "redaction": {
+    "credentials": "none present",
+    "identifiers": "hero, item, ability, response, and facet values are synthetic or public game labels"
+  },
+  "contracts": [
+    {
+      "id": "catalog-success",
+      "operation": "open-readonly-and-query-public-adapters",
+      "body": "sanitized_catalog.sql",
+      "sha256": "737a1fe52d841392cb753c6101b66382621542c702ea37f0dc7ca5cb1f8cefcf"
+    },
+    {
+      "id": "schema-mismatch",
+      "operation": "missing-required-table",
+      "expected": "typed source error; no database creation or write"
+    },
+    {
+      "id": "missing-asset",
+      "operation": "missing-path",
+      "expected": "typed source error; no database creation or write"
+    }
+  ]
+}

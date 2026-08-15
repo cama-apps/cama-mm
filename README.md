@@ -94,6 +94,20 @@ uv run python bot.py
 
 The bot will connect to Discord and sync slash commands automatically.
 
+## Rust lift-and-shift
+
+The replacement implementation lives in [`rust/`](rust/README.md). Python
+remains the production runtime only while the migration is incomplete; the
+terminal deployment stops the Python container and runs `cama-rust` as the sole
+Discord gateway, SQLite migration authority, worker host, and database writer.
+The Rust workspace has an exact test-parity ledger, production gateway and
+migration foundations, CI gates, and a mechanical inventory that prevents a
+partially wired bot from being called cutover-ready. The linked guide defines
+the shared process lock, safe database-snapshot flow, Python-off rehearsal,
+rollback criteria, and current measured status. Deployment now has one
+fail-closed selector, `BOT_RUNTIME=python|rust`; unset still means Python, and
+the Rust choice remains blocked until every cutover-readiness gate is complete.
+
 ## Discord Commands
 
 The bot registers **45 top-level commands/groups totaling 190 command paths**. The
@@ -391,7 +405,8 @@ uv run --locked pytest
 
 **Commands not showing:** Wait a few minutes for Discord to sync, or use `/admin sync` (admin only)
 
-**Database issues:** Only run one bot instance. Delete `cama_shuffle.db` to reset database if needed.
+**Database issues:** Only run one bot instance. Back up the database and diagnose a
+disposable copy; never delete or run reset experiments against deployed data.
 
 **Match enrichment failing:** Check OpenDota availability and verify `OPENDOTA_API_KEY` if one is configured.
 

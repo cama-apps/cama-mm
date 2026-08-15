@@ -78,6 +78,29 @@ def test_register_player_uses_override(monkeypatch):
     assert result["mmr"] == 4000
 
 
+@pytest.mark.parametrize("invalid_mmr", [0, -1])
+def test_register_player_rejects_non_positive_override(monkeypatch, invalid_mmr):
+    repo = FakeRepo()
+    service = PlayerService(repo)
+
+    class DummyAPI:
+        def get_player_data(self, _steam_id):
+            raise AssertionError("Should not call OpenDota when mmr_override is provided")
+
+    monkeypatch.setattr("services.player_service.OpenDotaAPI", lambda: DummyAPI())
+
+    with pytest.raises(ValueError, match="MMR not available"):
+        service.register_player(
+            discord_id=123,
+            discord_username="user#123",
+            guild_id=TEST_GUILD_ID,
+            steam_id=42,
+            mmr_override=invalid_mmr,
+        )
+
+    assert repo.add_calls == []
+
+
 def test_register_player_requires_mmr_if_no_override(monkeypatch):
     repo = FakeRepo()
     service = PlayerService(repo)
@@ -93,4 +116,3 @@ def test_register_player_requires_mmr_if_no_override(monkeypatch):
 
     with pytest.raises(ValueError):
         service.register_player(discord_id=1, discord_username="u", guild_id=TEST_GUILD_ID, steam_id=2)
-

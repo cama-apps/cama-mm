@@ -866,6 +866,18 @@ class SchemaManager:
                 "create_manashop_purchase_lifecycle",
                 self._migration_create_manashop_purchase_lifecycle,
             ),
+            (
+                "add_pending_match_completion_key",
+                self._migration_add_pending_match_completion_key,
+            ),
+            (
+                "create_draft_finalization_jobs",
+                self._migration_create_draft_finalization_jobs,
+            ),
+            (
+                "create_draft_financial_effects",
+                self._migration_create_draft_financial_effects,
+            ),
         ]
 
     # --- Migrations ---
@@ -4180,6 +4192,92 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_manashop_purchase_lookup
             ON manashop_purchases(discord_id, guild_id, item_id, used_date, status)
+            """
+        )
+
+    def _migration_add_pending_match_completion_key(self, cursor) -> None:
+        """Add the idempotency key used by atomic Draft finalization."""
+        self._add_column_if_not_exists(cursor, "pending_matches", "completion_key", "TEXT")
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_matches_completion_key
+            ON pending_matches(completion_key)
+            WHERE completion_key IS NOT NULL
+            """
+        )
+
+    def _migration_create_draft_finalization_jobs(self, cursor) -> None:
+        """Create the durable progress ledger for Draft finalization recovery."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_finalization_jobs (
+                completion_key TEXT PRIMARY KEY NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                stage TEXT NOT NULL CHECK(length(stage) > 0),
+                plan_json TEXT NOT NULL
+                    CHECK(json_valid(plan_json) AND json_type(plan_json) = 'object'),
+                progress_json TEXT NOT NULL DEFAULT '{}'
+                    CHECK(json_valid(progress_json) AND json_type(progress_json) = 'object'),
+                lease_owner TEXT,
+                lease_until INTEGER,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (lease_owner IS NULL AND lease_until IS NULL)
+                    OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL)
+                ),
+                UNIQUE(guild_id, session_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_draft_finalization_jobs_incomplete
+            ON draft_finalization_jobs(stage, lease_until, updated_at)
+            """
+        )
+
+    def _migration_create_draft_financial_effects(self, cursor) -> None:
+        """Create the exact-intent ledger for durable Draft financial setup."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_financial_effects (
+                effect_key TEXT PRIMARY KEY NOT NULL,
+                completion_key TEXT NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL,
+                effect_kind TEXT NOT NULL
+                    CHECK(effect_kind IN ('seed', 'blind', 'investment', 'spectator')),
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                plan_sha256 TEXT NOT NULL
+                    CHECK(
+                        length(plan_sha256) = 64
+                        AND plan_sha256 NOT GLOB '*[^0-9a-f]*'
+                    ),
+                intended_json TEXT NOT NULL
+                    CHECK(json_valid(intended_json) AND json_type(intended_json) = 'object'),
+                status TEXT NOT NULL CHECK(status IN ('applied', 'skipped')),
+                receipt_json TEXT NOT NULL
+                    CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(completion_key, effect_kind, ordinal),
+                FOREIGN KEY(completion_key)
+                    REFERENCES draft_finalization_jobs(completion_key),
+                FOREIGN KEY(pending_match_id)
+                    REFERENCES pending_matches(pending_match_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_draft_financial_effects_completion
+            ON draft_financial_effects(completion_key, ordinal)
             """
         )
 

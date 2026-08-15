@@ -1,0 +1,2307 @@
+#!/usr/bin/env python3
+"""Run the bounded, offline operational rehearsal for the deploy contract.
+
+This deliberately exercises the checked-in backup helper rather than
+reimplementing its copy logic.  It keeps a production-shaped SQLite source
+connection open in WAL mode while the helper runs, then proves that the
+verified backup is immutable and cannot be overwritten.  The deploy workflow
+handoff is checked textually, while byte-identical copies of the deploy scripts
+run in a temporary root against a recording Docker/Compose shim.  CI also passes
+the built Rust image for a network-disabled container smoke; the local default
+needs no Docker.  Neither mode needs SSH, network access, Discord credentials,
+or the repository's development database.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+BACKUP = ROOT / "scripts" / "sqlite_backup.py"
+RESTORE = ROOT / "scripts" / "sqlite_restore.py"
+DEPLOY = ROOT / "scripts" / "deploy-runtime"
+RUNTIME_COMPOSE = ROOT / "scripts" / "runtime-compose"
+POST_DEPLOY_VERIFY = ROOT / "scripts" / "post-deploy-verify"
+DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
+READINESS = ROOT / "rust" / "parity" / "cutover_readiness.tsv"
+REHEARSAL_PLAYER_ID = -9_999_999_991
+EXPECTED_MIGRATION_COUNT = sum(
+    bool(line.strip())
+    for line in (ROOT / "rust" / "schema" / "expected_migrations.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+MINIMUM_PRODUCTION_TABLE_COUNT = 80
+HEALTH_SMOKE_KEY = "__rust_health_smoke__"
+HEALTH_SMOKE_VALUE = "loopback-discord-write"
+
+
+def project_python_command(*arguments: str) -> list[str]:
+    """Return a locked project Python command for full-schema initialization."""
+
+    configured = os.environ.get("CAMA_PARITY_PYTHON")
+    if configured:
+        return [configured, *arguments]
+    return ["uv", "run", "--locked", "python", *arguments]
+
+
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+state_path = Path(os.environ["CAMA_FAKE_DOCKER_STATE"])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+arguments = sys.argv[1:]
+event = {
+    "arguments": arguments,
+    "bot_runtime": os.environ.get("BOT_RUNTIME"),
+    "git_sha": os.environ.get("GIT_SHA"),
+    "cutover_candidate": os.environ.get("RUST_CUTOVER_CANDIDATE"),
+}
+
+
+def finish(output: str = "", status: int = 0) -> None:
+    state["events"].append(event)
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    if output:
+        print(output)
+    raise SystemExit(status)
+
+
+def current_container() -> dict[str, object]:
+    return state["current"]
+
+
+if not arguments:
+    finish("fake docker received no command", 97)
+
+command = arguments[0]
+event["kind"] = "docker"
+event["command"] = command
+event["command_arguments"] = arguments[1:]
+
+if command == "inspect":
+    container = current_container()
+    if arguments[-1] != container["id"]:
+        finish("unknown fake container", 44)
+    template = arguments[arguments.index("--format") + 1]
+    event["format"] = template
+    if ".Image" in template:
+        finish(str(container["image"]))
+    if ".Config.Env" in template:
+        finish("\n".join(container["env"]))
+    if ".State.Running" in template:
+        finish("true" if container["running"] else "false")
+    if ".Mounts" in template:
+        finish(str(container["data_mount"]))
+    if ".Config.Labels" in template:
+        finish(str(container.get("oci_revision", "")))
+    if ".State.Health" in template:
+        finish(str(container["health"]))
+    finish("unknown fake inspect format", 45)
+
+if command == "exec":
+    container = current_container()
+    if arguments[1] != container["id"]:
+        finish("unexpected fake exec container", 46)
+    if arguments[2:] == ["id", "-u"]:
+        finish(str(container["uid"]))
+    if arguments[2:] == [
+        "cama-rust",
+        "health-check",
+        "--db-path",
+        "/app/data/cama_shuffle.db",
+    ]:
+        state["health_check_calls"] = state.get("health_check_calls", 0) + 1
+        if state.get("health_check_failure"):
+            finish("healthy=false runtime=rust revision=failed", 47)
+        finish(
+            str(
+                container.get(
+                    "healthcheck_output",
+                    "healthy=true runtime=rust revision="
+                    + str(container.get("sha", "unknown")),
+                )
+            )
+        )
+    finish("unexpected fake exec", 46)
+
+if command == "logs":
+    container = current_container()
+    if len(arguments) != 4 or arguments[1] != "--since" or arguments[3] != container["id"]:
+        finish("unexpected fake docker logs", 48)
+    state["log_calls"] = state.get("log_calls", 0) + 1
+    if state["scenario"] == "active_marker_failure":
+        marker = Path(state["data_mount"]) / ".cama-rust-cutover"
+        marker_fields = dict(
+            line.split("=", 1)
+            for line in marker.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+        Path(f"{marker}.{marker_fields['updated_at']}.activate.partial").write_text(
+            "forced active-marker collision\n", encoding="utf-8"
+        )
+    finish("\n".join(str(line) for line in container.get("logs", [])))
+
+if command == "tag":
+    if len(arguments) != 3:
+        finish("unexpected fake docker tag", 47)
+    source, destination = arguments[1:]
+    resolved_source = state["tags"].get(source)
+    if resolved_source is None and source.startswith("sha256:"):
+        resolved_source = source
+    if resolved_source is None:
+        finish("unknown fake source image", 47)
+    state["tags"][destination] = resolved_source
+    event["resolved_source_image"] = resolved_source
+    finish()
+
+if command == "build":
+    if len(arguments) != 8 or arguments[:2] != ["build", "--file"]:
+        finish("unexpected fake backup image build", 48)
+    expected = [
+        "build",
+        "--file",
+        "Dockerfile",
+        "--build-arg",
+        f"GIT_SHA={event['git_sha']}",
+        "--tag",
+        arguments[6],
+        ".",
+    ]
+    if arguments != expected or not re.fullmatch(
+        r"cama-mm-python-backup:\d{8}T\d{6}Z", arguments[6]
+    ):
+        finish("unexpected fake backup image build arguments", 48)
+    state["backup_image"] = arguments[6]
+    finish()
+
+if command == "run":
+    command_arguments = arguments[1:]
+    expected_common = [
+        "--rm",
+        "--volume",
+        f"{state['data_mount']}:/app/data",
+        "--entrypoint",
+        "python",
+        state.get("backup_image"),
+    ]
+    if len(command_arguments) != 9 or command_arguments[:6] != expected_common:
+        state["unexpected_direct_run"] = True
+        finish("unexpected fake SQLite helper invocation", 49)
+    helper, source, destination = command_arguments[6:]
+    if helper == "/app/scripts/sqlite_backup.py":
+        if source != "/app/data/cama_shuffle.db" or not re.fullmatch(
+            r"/app/data/backups/predeploy-\d{8}T\d{6}Z\.db", destination
+        ):
+            state["unexpected_direct_run"] = True
+            finish("unexpected fake backup helper invocation", 49)
+        source_path = Path(state["data_mount"]) / "cama_shuffle.db"
+        destination_path = Path(state["data_mount"]) / destination.removeprefix("/app/data/")
+        source_connection = sqlite3.connect(source_path, timeout=30)
+        try:
+            if source_connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
+                finish("fake backup source did not use WAL", 49)
+            source_connection.execute("PRAGMA wal_autocheckpoint=0")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path.cwd() / "scripts" / "sqlite_backup.py"),
+                    str(source_path),
+                    str(destination_path),
+                ],
+                cwd=Path.cwd(),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            source_connection.close()
+        if completed.returncode != 0:
+            finish(completed.stderr, 49)
+        state["backup"] = {
+            "source": str(source_path),
+            "destination": str(destination_path),
+            "metadata": str(destination_path) + ".json",
+        }
+        state["backup_runs"] = state.get("backup_runs", 0) + 1
+        finish(completed.stdout.strip())
+    if helper != "/app/scripts/sqlite_restore.py":
+        state["unexpected_direct_run"] = True
+        finish("unexpected fake SQLite helper", 49)
+    if not re.fullmatch(r"/app/data/backups/predeploy-\d{8}T\d{6}Z\.db", source) \
+        or destination != "/app/data/cama_shuffle.db":
+        state["unexpected_direct_run"] = True
+        finish("unexpected fake restore helper invocation", 49)
+    source_path = Path(state["data_mount"]) / source.removeprefix("/app/data/")
+    destination_path = Path(state["data_mount"]) / "cama_shuffle.db"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path.cwd() / "scripts" / "sqlite_restore.py"),
+            str(source_path),
+            str(destination_path),
+        ],
+        cwd=Path.cwd(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        finish(completed.stderr, 49)
+    state["restore"] = {
+        "source": str(source_path),
+        "destination": str(destination_path),
+    }
+    state["restore_runs"] = state.get("restore_runs", 0) + 1
+    finish(completed.stdout.strip())
+
+if command == "stop":
+    container = current_container()
+    if len(arguments) != 2 or arguments[1] != container["id"]:
+        finish("unexpected fake docker stop", 49)
+    container["running"] = False
+    finish(str(container["id"]))
+
+if command != "compose":
+    finish(f"unsupported fake docker command: {command}", 50)
+
+remaining = arguments[1:]
+compose_files: list[str] = []
+while remaining[:1] == ["--file"]:
+    compose_files.append(remaining[1])
+    remaining = remaining[2:]
+if not remaining:
+    finish("fake compose received no command", 51)
+
+compose_command = remaining[0]
+compose_arguments = remaining[1:]
+runtime = os.environ.get("BOT_RUNTIME")
+event.update(
+    {
+        "kind": "compose",
+        "command": compose_command,
+        "command_arguments": compose_arguments,
+        "compose_files": compose_files,
+    }
+)
+
+if compose_command == "ps":
+    if compose_arguments not in (["--quiet", "bot"], ["--status", "running", "--quiet", "bot"]):
+        finish("unexpected fake compose ps", 52)
+    if (
+        compose_arguments == ["--quiet", "bot"]
+        and state["scenario"] == "candidate_ps_failure"
+        and state.get("candidate_up_seen")
+        and not state.get("candidate_ps_failure_consumed")
+    ):
+        state["candidate_ps_failure_consumed"] = True
+        finish("forced candidate compose ps failure", 60)
+    if compose_arguments == ["--status", "running", "--quiet", "bot"]:
+        finish(str(current_container()["id"]) if current_container()["running"] else "")
+    finish(str(current_container()["id"]) if current_container()["running"] else "")
+
+if compose_command == "config":
+    if compose_arguments != ["--images"]:
+        finish("unexpected fake compose config", 53)
+    finish(f"cama-mm-bot-{runtime}")
+
+if compose_command == "build":
+    if compose_arguments != ["bot"]:
+        finish("unexpected fake compose build", 54)
+    state["tags"][f"cama-mm-bot-{runtime}"] = (
+        f"sha256:built-{runtime}-{os.environ.get('GIT_SHA')}"
+    )
+    finish()
+
+if compose_command == "run":
+    expected_prefix = ["--rm", "--no-deps", "bot", "db-admit", "--db-path"]
+    if (
+        runtime != "rust"
+        or compose_arguments[:5] != expected_prefix
+        or len(compose_arguments) != 9
+        or not re.fullmatch(
+            r"/app/data/backups/rust-preflight-\d{8}T\d{6}Z\.db",
+            compose_arguments[5],
+        )
+        or compose_arguments[6:] != [
+            "--source-db",
+            "/app/data/cama_shuffle.db",
+            "--disposable-copy",
+        ]
+    ):
+        finish("unexpected fake compose preflight", 55)
+    preflight = Path(state["data_mount"]) / compose_arguments[5].removeprefix("/app/data/")
+    if not preflight.is_file():
+        finish("fake compose preflight copy is missing", 55)
+    if state["scenario"] == "pending_marker_failure":
+        timestamp = re.search(r"rust-preflight-(\d{8}T\d{6}Z)\.db", str(preflight)).group(1)
+        Path(state["data_mount"], f".cama-rust-cutover.{timestamp}.ready.partial").write_text(
+            "forced pending-marker collision\n", encoding="utf-8"
+        )
+    if state["scenario"] == "crash_before_ready_marker":
+        state["events"].append(event)
+        state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+        raise SystemExit(99)
+    finish("schema_compatible=true quick_check=ok")
+
+if compose_command == "stop":
+    if compose_arguments != ["bot"]:
+        finish("unexpected fake compose stop", 56)
+    current_container()["running"] = False
+    finish()
+
+if compose_command == "up":
+    if compose_arguments != [
+        "--detach",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "bot",
+    ]:
+        finish("unexpected fake compose up", 56)
+    if runtime not in {"python", "rust"}:
+        finish("fake compose up has no selected runtime", 57)
+    image = state["tags"].get(f"cama-mm-bot-{runtime}")
+    if image is None:
+        finish("fake compose up has no built or retained image", 58)
+    health = "none"
+    if runtime == "rust":
+        state["rust_up_count"] = state.get("rust_up_count", 0) + 1
+        health_failure = (
+            state["scenario"] == "rust_health_failure"
+            and not state.get("candidate_failed")
+        ) or (
+            state["scenario"] == "pending_recovery_health_failure"
+            and state["rust_up_count"] == 1
+        ) or (
+            state["scenario"] == "rollback_restart_failure"
+            and state["rust_up_count"] == 2
+        )
+        health = "unhealthy" if health_failure else "healthy"
+        state["candidate_failed"] = health == "unhealthy"
+        mutates_database = health == "unhealthy" or (
+            state["scenario"]
+            in {
+                "active_marker_failure",
+                "candidate_ps_failure",
+                "rollback_restart_failure",
+                "rust_postdeploy_failure",
+            }
+            and state["rust_up_count"] == 1
+        )
+        if mutates_database:
+            database_path = Path(state["data_mount"]) / "cama_shuffle.db"
+            with sqlite3.connect(database_path) as database:
+                database.execute(
+                    "UPDATE players SET discord_username='rust-candidate-mutated' "
+                    "WHERE discord_id=?",
+                    (state["rehearsal_player_id"],),
+                )
+                database.commit()
+            Path(f"{database_path}-wal").write_bytes(b"stale-rust-wal")
+            Path(f"{database_path}-shm").write_bytes(b"stale-rust-shm")
+            Path(f"{database_path}-journal").write_bytes(b"stale-rust-journal")
+    state["generation"] += 1
+    state["current"] = {
+        "id": f"{runtime}-container-{state['generation']}",
+        "runtime": runtime,
+        "sha": os.environ.get("GIT_SHA"),
+        "image": image,
+        "running": True,
+        "health": health,
+        "uid": 1001,
+        "data_mount": state["data_mount"],
+        "process": "cama-rust" if runtime == "rust" else "python",
+        "oci_revision": os.environ.get("GIT_SHA"),
+        "healthcheck_output": (
+            f"healthy=true runtime={runtime} revision={os.environ.get('GIT_SHA')}"
+        ),
+        "logs": (
+            ["not-json"]
+            if (
+                state["scenario"] == "rust_postdeploy_failure"
+                or (
+                    state["scenario"] == "rollback_restart_failure"
+                    and state["rust_up_count"] == 1
+                )
+            )
+            and runtime == "rust"
+            else
+            [
+                json.dumps(
+                    {
+                        "level": "INFO",
+                        "message": "starting Rust Discord runtime",
+                        "runtime": runtime,
+                        "git_sha": os.environ.get("GIT_SHA"),
+                    },
+                    sort_keys=True,
+                )
+            ]
+            if runtime == "rust"
+            else []
+        ),
+        "env": [
+            f"BOT_RUNTIME={runtime}",
+            f"GIT_SHA={os.environ.get('GIT_SHA')}",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ],
+    }
+    if runtime == "rust":
+        state["candidate_up_seen"] = True
+    state["process_history"].append(state["current"]["process"])
+    finish()
+
+finish(f"unsupported fake compose command: {compose_command}", 59)
+"""
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def run_backup(source: Path, destination: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(BACKUP), str(source), str(destination)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def create_current_schema_database(path: Path) -> None:
+    """Create a disposable database through the retained Python migrations."""
+
+    migration_code = (
+        "import sys; from database import Database; "
+        "database = Database(sys.argv[1]); database.close()"
+    )
+    completed = subprocess.run(
+        project_python_command("-c", migration_code, str(path)),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+            (REHEARSAL_PLAYER_ID, "operational-rehearsal"),
+        )
+        connection.commit()
+
+
+def create_wal_source(path: Path) -> sqlite3.Connection:
+    """Open a current-schema source with a live WAL writer for backup tests."""
+
+    create_current_schema_database(path)
+    connection = sqlite3.connect(path, timeout=30)
+    assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    return connection
+
+
+def assert_container_health_image(image: str) -> None:
+    """Exercise the built Rust image with no network or Discord credential."""
+
+    assert image and not image.isspace(), "Rust health image must not be empty"
+    with tempfile.TemporaryDirectory(prefix="cama-container-health-rehearsal-") as raw_dir:
+        directory = Path(raw_dir)
+        database_path = directory / "cama_shuffle.db"
+        create_current_schema_database(database_path)
+        directory.chmod(0o777)
+        for path in directory.iterdir():
+            path.chmod(0o666)
+
+        healthcheck = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .Config.Healthcheck.Test}}",
+                image,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert healthcheck.returncode == 0, healthcheck.stderr or healthcheck.stdout
+        assert '"CMD"' in healthcheck.stdout
+        assert '"/usr/local/bin/cama-rust"' in healthcheck.stdout
+        assert '"health-check"' in healthcheck.stdout
+        assert '"--max-age-seconds"' in healthcheck.stdout
+        assert '"90"' in healthcheck.stdout
+
+        volume = f"{directory}:/app/data"
+        smoke = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                volume,
+                image,
+                "health-smoke",
+                "--db-path",
+                "/app/data/cama_shuffle.db",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert smoke.returncode == 0, smoke.stderr or smoke.stdout
+        assert (
+            "health_smoke=passed gateway=loopback "
+            "discord_write=interaction_response database_write=app_kv" in smoke.stdout
+        )
+
+        with sqlite3.connect(database_path) as connection:
+            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
+            assert connection.execute(
+                "SELECT value FROM app_kv WHERE guild_id=0 AND key=?",
+                (HEALTH_SMOKE_KEY,),
+            ).fetchone() == (HEALTH_SMOKE_VALUE,)
+
+        marker_path = Path(f"{database_path}.rust-health.json")
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert marker["status"] == "stopped"
+        assert marker["database_ready"] is True
+        assert marker["commands_registered"] is True
+        assert marker["command_tree_synchronized"] is True
+        assert marker["worker_registration_complete"] is True
+        assert marker["expected_workers"] == []
+        assert marker["failed_workers"] == []
+        assert marker["last_error"] is None
+
+        stopped = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                volume,
+                image,
+                "health-check",
+                "--db-path",
+                "/app/data/cama_shuffle.db",
+                "--max-age-seconds",
+                "90",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert stopped.returncode != 0
+        assert "unhealthy:" in stopped.stderr
+        assert "Stopped" in stopped.stderr
+
+
+def assert_backup_contract() -> None:
+    with tempfile.TemporaryDirectory(prefix="cama-operational-rehearsal-") as raw_dir:
+        directory = Path(raw_dir)
+        source_path = directory / "cama_shuffle.db"
+        backup_path = directory / "backups" / "predeploy.db"
+        source = create_wal_source(source_path)
+        try:
+            wal_path = Path(f"{source_path}-wal")
+            assert wal_path.exists(), "source fixture must contain uncheckpointed WAL data"
+            migration_count = source.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+            table_count = source.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone()[0]
+            assert migration_count == EXPECTED_MIGRATION_COUNT, migration_count
+            assert table_count >= MINIMUM_PRODUCTION_TABLE_COUNT, table_count
+
+            first = run_backup(source_path, backup_path)
+            assert first.returncode == 0, first.stderr
+            metadata_path = Path(f"{backup_path}.json")
+            assert backup_path.is_file() and backup_path.stat().st_size > 0
+            assert metadata_path.is_file() and metadata_path.stat().st_size > 0
+
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert metadata["format_version"] == 1
+            assert metadata["quick_check"] == "ok"
+            assert metadata["source"] == str(source_path.resolve())
+            assert metadata["backup"] == str(backup_path.resolve())
+            assert metadata["schema_migration_count"] == migration_count
+            assert metadata["size_bytes"] == backup_path.stat().st_size
+            assert metadata["sha256"] == digest(backup_path)
+
+            with sqlite3.connect(backup_path) as backup:
+                assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+                assert backup.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+                    migration_count,
+                )
+                assert backup.execute(
+                    "SELECT discord_username FROM players WHERE discord_id = ?",
+                    (REHEARSAL_PLAYER_ID,),
+                ).fetchone() == ("operational-rehearsal",)
+                assert backup.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone() == (table_count,)
+
+            backup_bytes = backup_path.read_bytes()
+            metadata_bytes = metadata_path.read_bytes()
+            backup_digest = digest(backup_path)
+
+            # Keep the source writer open and mutate the source after the
+            # backup.  The copied snapshot must remain the pre-deploy view.
+            source.execute(
+                "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+                (REHEARSAL_PLAYER_ID - 1, "after-backup-write"),
+            )
+            source.commit()
+            assert source.execute(
+                "SELECT COUNT(*) FROM players WHERE discord_id < 0"
+            ).fetchone() == (2,)
+            assert backup_path.read_bytes() == backup_bytes
+            assert metadata_path.read_bytes() == metadata_bytes
+            assert digest(backup_path) == backup_digest
+            with sqlite3.connect(backup_path) as backup:
+                assert backup.execute(
+                    "SELECT COUNT(*) FROM players WHERE discord_id < 0"
+                ).fetchone() == (1,)
+
+            # A second invocation against the same destination must fail
+            # closed and must not alter either artifact.
+            second = run_backup(source_path, backup_path)
+            assert second.returncode != 0
+            assert "refusing to overwrite backup" in second.stderr
+            assert backup_path.read_bytes() == backup_bytes
+            assert metadata_path.read_bytes() == metadata_bytes
+
+            # A pre-existing metadata sidecar must also fail closed before a
+            # database artifact is published, preserving the sidecar exactly.
+            collision_path = directory / "backups" / "metadata-collision.db"
+            collision_metadata_path = Path(f"{collision_path}.json")
+            collision_metadata = b"pre-existing metadata sentinel\n"
+            collision_metadata_path.write_bytes(collision_metadata)
+            collision = run_backup(source_path, collision_path)
+            assert collision.returncode != 0
+            assert "refusing to overwrite backup metadata" in collision.stderr
+            assert not collision_path.exists()
+            assert collision_metadata_path.read_bytes() == collision_metadata
+            assert list(collision_path.parent.glob(".*.partial")) == []
+        finally:
+            source.close()
+
+
+def assert_deploy_workflow_handoff() -> None:
+    workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+    required_fragments = (
+        "BOT_RUNTIME_SELECTION: ${{ vars.BOT_RUNTIME }}",
+        "RUST_CUTOVER_CANDIDATE_SELECTION: ${{ vars.RUST_CUTOVER_CANDIDATE }}",
+        "envs: BOT_RUNTIME_SELECTION,RUST_CUTOVER_CANDIDATE_SELECTION",
+        'DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"',
+        'git checkout --force "$DEPLOY_SHA"',
+        'BOT_RUNTIME="$BOT_RUNTIME_SELECTION"',
+        "export BOT_RUNTIME",
+        "RUST_CUTOVER_CANDIDATE=true",
+        "export RUST_CUTOVER_CANDIDATE",
+        'GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime',
+    )
+    missing = [fragment for fragment in required_fragments if fragment not in workflow]
+    assert not missing, f"deploy workflow handoff changed; missing: {missing!r}"
+    assert "post-deploy-verify" not in workflow
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    assert 'BOT_RUNTIME=rust GIT_SHA="$deploy_sha" "$post_deploy_verify"' in deploy
+    assert deploy.index('wait_for_runtime "$new_container"') < deploy.index(
+        'BOT_RUNTIME=rust GIT_SHA="$deploy_sha" "$post_deploy_verify"'
+    )
+
+
+def readiness_manifest(status: str) -> str:
+    assert status in {"open", "complete"}
+    output: list[str] = []
+    for line in READINESS.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            output.append(line)
+            continue
+        gate, _current_status, evidence = line.split("\t")
+        output.append(f"{gate}\t{status}\t{evidence}")
+    return "\n".join(output) + "\n"
+
+
+def prepare_deploy_fixture(
+    parent: Path,
+    name: str,
+    *,
+    scenario: str,
+    initial_runtime: str,
+    readiness_status: str,
+) -> tuple[Path, Path]:
+    fixture = parent / name
+    scripts = fixture / "scripts"
+    parity = fixture / "rust" / "parity"
+    fake_bin = fixture / "fake-bin"
+    data = fixture / "data"
+    for directory in (scripts, parity, fake_bin, data):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    copied_deploy = scripts / "deploy-runtime"
+    copied_compose = scripts / "runtime-compose"
+    copied_backup = scripts / "sqlite_backup.py"
+    copied_restore = scripts / "sqlite_restore.py"
+    copied_post_deploy_verify = scripts / "post-deploy-verify"
+    shutil.copy2(DEPLOY, copied_deploy)
+    shutil.copy2(RUNTIME_COMPOSE, copied_compose)
+    shutil.copy2(BACKUP, copied_backup)
+    shutil.copy2(RESTORE, copied_restore)
+    shutil.copy2(POST_DEPLOY_VERIFY, copied_post_deploy_verify)
+    assert copied_deploy.read_bytes() == DEPLOY.read_bytes()
+    assert copied_compose.read_bytes() == RUNTIME_COMPOSE.read_bytes()
+    assert copied_backup.read_bytes() == BACKUP.read_bytes()
+    assert copied_restore.read_bytes() == RESTORE.read_bytes()
+    assert copied_post_deploy_verify.read_bytes() == POST_DEPLOY_VERIFY.read_bytes()
+    shutil.copy2(ROOT / "docker-compose.yml", fixture / "docker-compose.yml")
+    shutil.copy2(ROOT / "docker-compose.rust.yml", fixture / "docker-compose.rust.yml")
+    database_path = data / "cama_shuffle.db"
+    create_current_schema_database(database_path)
+    if initial_runtime == "rust":
+        (data / ".cama-rust-cutover").write_text(
+            "state=active\nrevision=previous-rust-sha\n",
+            encoding="utf-8",
+        )
+    (parity / "cutover_readiness.tsv").write_text(
+        readiness_manifest(readiness_status), encoding="utf-8"
+    )
+
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(FAKE_DOCKER, encoding="utf-8")
+    fake_docker.chmod(0o755)
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_sleep.chmod(0o755)
+
+    previous_sha = f"previous-{initial_runtime}-sha"
+    state_path = fixture / "fake-docker-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "scenario": scenario,
+                "generation": 0,
+                "data_mount": str(data),
+                "events": [],
+                "unexpected_direct_run": False,
+                "backup_runs": 0,
+                "restore_runs": 0,
+                "backup": None,
+                "restore": None,
+                "backup_image": None,
+                "rehearsal_player_id": REHEARSAL_PLAYER_ID,
+                "tags": {f"cama-mm-bot-{initial_runtime}": f"sha256:initial-{initial_runtime}"},
+                "process_history": ["cama-rust" if initial_runtime == "rust" else "python"],
+                "current": {
+                    "id": f"initial-{initial_runtime}-container",
+                    "runtime": initial_runtime,
+                    "sha": previous_sha,
+                    "image": f"sha256:initial-{initial_runtime}",
+                    "running": True,
+                    "health": "healthy" if initial_runtime == "rust" else "none",
+                    "uid": 1001,
+                    "data_mount": str(data),
+                    "process": "cama-rust" if initial_runtime == "rust" else "python",
+                    "env": [
+                        f"BOT_RUNTIME={initial_runtime}",
+                        f"GIT_SHA={previous_sha}",
+                        "DB_PATH=/app/data/cama_shuffle.db",
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return fixture, state_path
+
+
+def prepare_pending_rust_recovery_fixture(
+    parent: Path,
+    name: str,
+    *,
+    scenario: str,
+    timestamp: str,
+) -> tuple[Path, Path, Path]:
+    fixture, state_path = prepare_deploy_fixture(
+        parent,
+        name,
+        scenario=scenario,
+        initial_runtime="rust",
+        readiness_status="complete",
+    )
+    database_path = fixture / "data" / "cama_shuffle.db"
+    backup_path = fixture / "data" / "backups" / f"predeploy-{timestamp}.db"
+    backup_result = run_backup(database_path, backup_path)
+    assert backup_result.returncode == 0, backup_result.stderr
+    with sqlite3.connect(database_path) as database:
+        database.execute(
+            "UPDATE players SET discord_username='interrupted-rust-redeploy-write' "
+            "WHERE discord_id=?",
+            (REHEARSAL_PLAYER_ID,),
+        )
+        database.commit()
+    Path(f"{database_path}-wal").write_bytes(b"interrupted-rust-wal")
+    Path(f"{database_path}-shm").write_bytes(b"interrupted-rust-shm")
+    Path(f"{database_path}-journal").write_bytes(b"interrupted-rust-journal")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["backup_image"] = f"cama-mm-python-backup:{timestamp}"
+    state["backup_runs"] = 1
+    state["backup"] = {
+        "source": str(database_path),
+        "destination": str(backup_path),
+        "metadata": f"{backup_path}.json",
+    }
+    state["tags"][f"cama-mm-bot-rollback:{timestamp}"] = "sha256:initial-rust"
+    state["current"] = {
+        "id": "interrupted-redeploy-rust-container",
+        "runtime": "rust",
+        "sha": "interrupted-new-rust-sha",
+        "image": "sha256:interrupted-new-rust",
+        "running": True,
+        "health": "starting",
+        "uid": 1001,
+        "data_mount": str(fixture / "data"),
+        "process": "cama-rust",
+        "env": [
+            "BOT_RUNTIME=rust",
+            "GIT_SHA=interrupted-new-rust-sha",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ],
+    }
+    state["process_history"].append("cama-rust")
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    (fixture / "data" / ".cama-rust-cutover").write_text(
+        "\n".join(
+            [
+                "state=pending",
+                "revision=interrupted-new-rust-sha",
+                f"backup={backup_path}",
+                f"updated_at={timestamp}",
+                "backup_ready=true",
+                "previous_runtime=rust",
+                "previous_revision=previous-rust-sha",
+                f"retained_image=cama-mm-bot-rollback:{timestamp}",
+                f"backup_image=cama-mm-python-backup:{timestamp}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return fixture, state_path, backup_path
+
+
+def run_deploy(
+    fixture: Path,
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+    cutover_candidate: str | None,
+    expect_lock_released: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fixture / 'fake-bin'}{os.pathsep}{environment['PATH']}",
+            "CAMA_FAKE_DOCKER_STATE": str(state_path),
+            "BOT_RUNTIME": runtime,
+            "GIT_SHA": git_sha,
+            "DEPLOY_HEALTH_TIMEOUT_SECONDS": "30",
+        }
+    )
+    if cutover_candidate is None:
+        environment.pop("RUST_CUTOVER_CANDIDATE", None)
+    else:
+        environment["RUST_CUTOVER_CANDIDATE"] = cutover_candidate
+    result = subprocess.run(
+        [str(fixture / "scripts" / "deploy-runtime")],
+        cwd=fixture,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        start_new_session=True,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if expect_lock_released:
+        assert not (fixture / "data" / ".cama-deploy.lock").exists()
+    return result, state
+
+
+def run_runtime_compose(
+    fixture: Path,
+    state_path: Path,
+    *arguments: str,
+    runtime: str,
+    git_sha: str,
+    cutover_candidate: str | None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fixture / 'fake-bin'}{os.pathsep}{environment['PATH']}",
+            "CAMA_FAKE_DOCKER_STATE": str(state_path),
+            "BOT_RUNTIME": runtime,
+            "GIT_SHA": git_sha,
+        }
+    )
+    if cutover_candidate is None:
+        environment.pop("RUST_CUTOVER_CANDIDATE", None)
+    else:
+        environment["RUST_CUTOVER_CANDIDATE"] = cutover_candidate
+    result = subprocess.run(
+        [str(fixture / "scripts" / "runtime-compose"), *arguments],
+        cwd=fixture,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result, json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def configure_post_deploy_fixture(
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+    health: str = "healthy",
+    oci_revision: str | None = None,
+    healthcheck_output: str | None = None,
+    health_check_failure: bool = False,
+    logs: list[str] | None = None,
+) -> None:
+    """Set the black-box facts exposed by the recording Docker daemon."""
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    container = state["current"]
+    container.update(
+        {
+            "runtime": runtime,
+            "sha": git_sha,
+            "health": health,
+            "uid": 1001,
+            "data_mount": state["data_mount"],
+            "oci_revision": git_sha if oci_revision is None else oci_revision,
+            "healthcheck_output": healthcheck_output
+            or f"healthy=true runtime={runtime} revision={git_sha}",
+            "logs": logs
+            if logs is not None
+            else [
+                json.dumps(
+                    {
+                        "level": "INFO",
+                        "message": "starting Rust Discord runtime",
+                        "runtime": runtime,
+                        "git_sha": git_sha,
+                    },
+                    sort_keys=True,
+                )
+            ],
+            "env": [
+                f"BOT_RUNTIME={runtime}",
+                f"GIT_SHA={git_sha}",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+    )
+    state["health_check_calls"] = 0
+    state["health_check_failure"] = health_check_failure
+    state["log_calls"] = 0
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+def run_post_deploy_verify(
+    fixture: Path,
+    state_path: Path,
+    *,
+    runtime: str,
+    git_sha: str,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fixture / 'fake-bin'}{os.pathsep}{environment['PATH']}",
+            "CAMA_FAKE_DOCKER_STATE": str(state_path),
+            "BOT_RUNTIME": runtime,
+            "GIT_SHA": git_sha,
+            "POST_DEPLOY_LOG_WINDOW_SECONDS": "300",
+        }
+    )
+    result = subprocess.run(
+        [str(fixture / "scripts" / "post-deploy-verify")],
+        cwd=fixture,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    return result, state
+
+
+def compose_event(events: list[dict[str, object]], command: str, runtime: str) -> dict[str, object]:
+    matches = [
+        event
+        for event in events
+        if event["kind"] == "compose"
+        and event["command"] == command
+        and event["bot_runtime"] == runtime
+    ]
+    assert len(matches) == 1, (command, runtime, matches)
+    return matches[0]
+
+
+def event_index(
+    events: list[dict[str, object]],
+    predicate: Callable[[dict[str, object]], bool],
+    description: str,
+) -> int:
+    matches = [index for index, event in enumerate(events) if predicate(event)]
+    assert len(matches) == 1, (description, matches)
+    return matches[0]
+
+
+def assert_same_service_up(event: dict[str, object]) -> None:
+    assert event["command_arguments"] == [
+        "--detach",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "bot",
+    ]
+
+
+def assert_backup_survives_deploy(fixture: Path, state: dict[str, object]) -> None:
+    """Verify the deploy-time backup and its metadata remain immutable."""
+
+    assert state["backup_runs"] == 1
+    backup = state["backup"]
+    assert isinstance(backup, dict)
+    source_path = Path(str(backup["source"]))
+    backup_path = Path(str(backup["destination"]))
+    metadata_path = Path(str(backup["metadata"]))
+    assert source_path == fixture / "data" / "cama_shuffle.db"
+    assert backup_path == fixture / "data" / "backups" / backup_path.name
+    assert backup_path.is_file() and backup_path.stat().st_size > 0
+    assert metadata_path.is_file() and metadata_path.stat().st_size > 0
+
+    source_facts = sqlite3.connect(source_path)
+    try:
+        migration_count = source_facts.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[
+            0
+        ]
+        table_count = source_facts.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone()[0]
+    finally:
+        source_facts.close()
+    assert migration_count == EXPECTED_MIGRATION_COUNT
+    assert table_count >= MINIMUM_PRODUCTION_TABLE_COUNT
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["quick_check"] == "ok"
+    assert metadata["source"] == str(source_path.resolve())
+    assert metadata["backup"] == str(backup_path.resolve())
+    assert metadata["schema_migration_count"] == migration_count
+    assert metadata["size_bytes"] == backup_path.stat().st_size
+    assert metadata["sha256"] == digest(backup_path)
+    with sqlite3.connect(backup_path) as verified:
+        assert verified.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        assert verified.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            migration_count,
+        )
+        assert verified.execute(
+            "SELECT discord_username FROM players WHERE discord_id = ?",
+            (REHEARSAL_PLAYER_ID,),
+        ).fetchone() == ("operational-rehearsal",)
+        assert verified.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone() == (table_count,)
+
+    backup_bytes = backup_path.read_bytes()
+    metadata_bytes = metadata_path.read_bytes()
+    with sqlite3.connect(source_path) as source:
+        source.execute(
+            "INSERT INTO players(discord_id, discord_username) VALUES (?, ?)",
+            (REHEARSAL_PLAYER_ID - 1, "after-deploy-write"),
+        )
+        source.commit()
+    assert backup_path.read_bytes() == backup_bytes
+    assert metadata_path.read_bytes() == metadata_bytes
+    assert digest(backup_path) == metadata["sha256"]
+    with sqlite3.connect(backup_path) as verified:
+        assert verified.execute("SELECT COUNT(*) FROM players WHERE discord_id < 0").fetchone() == (
+            1,
+        )
+
+
+def assert_database_restored_before_retained_image(
+    fixture: Path,
+    state: dict[str, object],
+    *,
+    expected_restore_runs: int = 1,
+) -> None:
+    """Prove rollback publishes the verified backup, not Rust-mutated bytes."""
+
+    assert state["restore_runs"] == expected_restore_runs
+    backup = state["backup"]
+    restore = state["restore"]
+    assert isinstance(backup, dict)
+    assert isinstance(restore, dict)
+    database_path = fixture / "data" / "cama_shuffle.db"
+    backup_path = Path(str(backup["destination"]))
+    assert Path(str(restore["source"])) == backup_path
+    assert Path(str(restore["destination"])) == database_path
+    assert database_path.read_bytes() == backup_path.read_bytes()
+    assert digest(database_path) == digest(backup_path)
+    assert not Path(f"{database_path}-wal").exists()
+    assert not Path(f"{database_path}-shm").exists()
+    assert not Path(f"{database_path}-journal").exists()
+    with sqlite3.connect(database_path) as restored:
+        assert restored.execute(
+            "SELECT discord_username FROM players WHERE discord_id=?",
+            (REHEARSAL_PLAYER_ID,),
+        ).fetchone() == ("operational-rehearsal",)
+
+
+def assert_preflight_removed(fixture: Path) -> None:
+    backups = fixture / "data" / "backups"
+    assert list(backups.glob("rust-preflight-*.db*")) == []
+
+
+def assert_deploy_runtime_rehearsal() -> None:
+    with tempfile.TemporaryDirectory(prefix="cama-deploy-runtime-rehearsal-") as raw_dir:
+        parent = Path(raw_dir)
+
+        missing_flag, missing_flag_state = prepare_deploy_fixture(
+            parent,
+            "missing-cutover-flag",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            missing_flag,
+            missing_flag_state,
+            runtime="rust",
+            git_sha="guard-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 65
+        assert "RUST_CUTOVER_CANDIDATE=true is required" in result.stderr
+        assert state["events"] == []
+        assert state["backup_runs"] == 0
+        assert state["backup"] is None
+        result, state = run_runtime_compose(
+            missing_flag,
+            missing_flag_state,
+            "up",
+            "--detach",
+            "bot",
+            runtime="rust",
+            git_sha="direct-runtime-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 65
+        assert "RUST_CUTOVER_CANDIDATE=true is required" in result.stderr
+        assert state["events"] == []
+
+        pending_direct, pending_direct_state = prepare_deploy_fixture(
+            parent,
+            "pending-direct-rust-is-not-backup-ready",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        pending_marker = pending_direct / "data" / ".cama-rust-cutover"
+        pending_marker.write_text(
+            "state=pending\n"
+            "revision=direct-pending-sha\n"
+            "backup_ready=false\n"
+            "previous_runtime=python\n"
+            "previous_revision=previous-python-sha\n",
+            encoding="utf-8",
+        )
+        result, state = run_runtime_compose(
+            pending_direct,
+            pending_direct_state,
+            "up",
+            "--detach",
+            "bot",
+            runtime="rust",
+            git_sha="direct-pending-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "not backup-ready for this revision" in result.stderr
+        assert state["events"] == []
+        pending_marker.write_text(
+            "state=pending\n"
+            "revision=other-pending-sha\n"
+            "backup_ready=true\n"
+            "previous_runtime=python\n"
+            "previous_revision=previous-python-sha\n",
+            encoding="utf-8",
+        )
+        result, state = run_runtime_compose(
+            pending_direct,
+            pending_direct_state,
+            "up",
+            "--detach",
+            "bot",
+            runtime="rust",
+            git_sha="direct-pending-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "not backup-ready for this revision" in result.stderr
+        assert state["events"] == []
+
+        open_gate, open_gate_state = prepare_deploy_fixture(
+            parent,
+            "open-readiness-gate",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="open",
+        )
+        result, state = run_deploy(
+            open_gate,
+            open_gate_state,
+            runtime="rust",
+            git_sha="guard-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "cutover_readiness.tsv still has open gates" in result.stderr
+        assert state["events"] == []
+        assert state["backup_runs"] == 0
+        assert state["backup"] is None
+        result, state = run_runtime_compose(
+            open_gate,
+            open_gate_state,
+            "up",
+            "--detach",
+            "bot",
+            runtime="rust",
+            git_sha="direct-open-gate-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "cutover_readiness.tsv still has open gates" in result.stderr
+        assert state["events"] == []
+
+        live_lock, live_lock_state = prepare_deploy_fixture(
+            parent,
+            "live-deploy-lock-is-not-reclaimed",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        lock_directory = live_lock / "data" / ".cama-deploy.lock"
+        lock_directory.mkdir()
+        (lock_directory / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        result, state = run_deploy(
+            live_lock,
+            live_lock_state,
+            runtime="rust",
+            git_sha="live-lock-sha",
+            cutover_candidate="true",
+            expect_lock_released=False,
+        )
+        assert result.returncode == 73
+        assert "another deployment owns" in result.stderr
+        assert state["events"] == []
+        assert lock_directory.is_dir()
+
+        failed, failed_state = prepare_deploy_fixture(
+            parent,
+            "rust-health-failure",
+            scenario="rust_health_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            failed,
+            failed_state,
+            runtime="rust",
+            git_sha="failed-rust-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "BOT_RUNTIME=rust failed deployment verification; rolling back" in result.stderr
+        assert "automatic rollback restored database=" in result.stderr
+        assert "BOT_RUNTIME=python" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["current"]["image"] == "sha256:initial-python"
+        assert state["current"]["uid"] == 1001
+        assert state["current"]["data_mount"] == str(failed / "data")
+        assert state["current"]["env"] == [
+            "BOT_RUNTIME=python",
+            "GIT_SHA=previous-python-sha",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ]
+        assert state["unexpected_direct_run"] is False
+        assert not (failed / "data" / ".cama-rust-cutover").exists()
+        assert_database_restored_before_retained_image(failed, state)
+        assert_preflight_removed(failed)
+        assert_backup_survives_deploy(failed, state)
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        events = state["events"]
+        backup_build = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "build"
+            and str(event["command_arguments"][0]) == "--file",
+            "build backup image",
+        )
+        backup_run = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and event["command_arguments"][0] == "--rm"
+            and "/app/scripts/sqlite_backup.py" in event["command_arguments"],
+            "run backup helper",
+        )
+        build = compose_event(events, "build", "rust")
+        preflight = compose_event(events, "run", "rust")
+        candidate_up = compose_event(events, "up", "rust")
+        rollback_config = compose_event(events, "config", "python")
+        rollback_up = compose_event(events, "up", "python")
+        assert_same_service_up(candidate_up)
+        assert_same_service_up(rollback_up)
+        assert rollback_up["git_sha"] == "previous-python-sha"
+        assert candidate_up["compose_files"] == [
+            "docker-compose.yml",
+            "docker-compose.rust.yml",
+        ]
+        assert rollback_up["compose_files"] == ["docker-compose.yml"]
+        first_tag_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and str(event["command_arguments"][1]).startswith("cama-mm-bot-rollback:"),
+            "retain previous image",
+        )
+        health_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "inspect"
+            and ".State.Health" in str(event.get("format")),
+            "candidate health inspection",
+        )
+        quiesce_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "stop"
+            and event["command_arguments"] == ["initial-python-container"],
+            "quiesce previous Python runtime",
+        )
+        stop_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "stop"
+            and event["command_arguments"] == ["rust-container-1"],
+            "stop failed Rust candidate",
+        )
+        restore_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and "/app/scripts/sqlite_restore.py" in event["command_arguments"],
+            "restore predeploy database",
+        )
+        rollback_tag_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and str(event["command_arguments"][0]).startswith("cama-mm-bot-rollback:"),
+            "restore retained image tag",
+        )
+        assert first_tag_index < events.index(build)
+        assert events.index(build) < backup_build < quiesce_index < backup_run
+        assert backup_run < events.index(preflight) < events.index(candidate_up)
+        assert events.index(candidate_up) < health_index < stop_index < restore_index
+        assert restore_index < events.index(rollback_config)
+        assert events.index(rollback_config) < rollback_tag_index < events.index(rollback_up)
+
+        inconsistent_marker, inconsistent_marker_state = prepare_deploy_fixture(
+            parent,
+            "active-marker-python-runtime-inconsistency",
+            scenario="guard",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        (inconsistent_marker / "data" / ".cama-rust-cutover").write_text(
+            "state=active\nrevision=prior-rust-sha\n", encoding="utf-8"
+        )
+        result, state = run_deploy(
+            inconsistent_marker,
+            inconsistent_marker_state,
+            runtime="rust",
+            git_sha="inconsistent-rust-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 65
+        assert "active Rust cutover marker conflicts with BOT_RUNTIME=python" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["backup_runs"] == 0
+        assert not any(
+            event["kind"] == "compose" and event["command"] in {"build", "run", "up"}
+            for event in state["events"]
+        )
+
+        restored, restored_state = prepare_deploy_fixture(
+            parent,
+            "python-after-rust-refused",
+            scenario="guard",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            restored,
+            restored_state,
+            runtime="python",
+            git_sha="forbidden-python-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 65
+        assert "one-way Rust cutover completed" in result.stderr
+        assert state["events"] == []
+        assert state["current"]["runtime"] == "rust"
+
+        interrupted, interrupted_state = prepare_deploy_fixture(
+            parent,
+            "interrupted-pending-cutover-recovers",
+            scenario="pending_recovery",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        interrupted_timestamp = "20260814T120000Z"
+        interrupted_database = interrupted / "data" / "cama_shuffle.db"
+        interrupted_backup = (
+            interrupted / "data" / "backups" / f"predeploy-{interrupted_timestamp}.db"
+        )
+        backup_result = run_backup(interrupted_database, interrupted_backup)
+        assert backup_result.returncode == 0, backup_result.stderr
+        with sqlite3.connect(interrupted_database) as database:
+            database.execute(
+                "UPDATE players SET discord_username='interrupted-rust-write' WHERE discord_id=?",
+                (REHEARSAL_PLAYER_ID,),
+            )
+            database.commit()
+        interrupted_facts = json.loads(interrupted_state.read_text(encoding="utf-8"))
+        interrupted_facts["backup_image"] = f"cama-mm-python-backup:{interrupted_timestamp}"
+        interrupted_facts["backup_runs"] = 1
+        interrupted_facts["backup"] = {
+            "source": str(interrupted_database),
+            "destination": str(interrupted_backup),
+            "metadata": f"{interrupted_backup}.json",
+        }
+        interrupted_facts["tags"][f"cama-mm-bot-rollback:{interrupted_timestamp}"] = (
+            "sha256:initial-python"
+        )
+        interrupted_facts["current"] = {
+            "id": "interrupted-rust-container",
+            "runtime": "rust",
+            "sha": "interrupted-rust-sha",
+            "image": "sha256:interrupted-rust",
+            "running": True,
+            "health": "starting",
+            "uid": 1001,
+            "data_mount": str(interrupted / "data"),
+            "process": "cama-rust",
+            "env": [
+                "BOT_RUNTIME=rust",
+                "GIT_SHA=interrupted-rust-sha",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+        interrupted_facts["process_history"].append("cama-rust")
+        interrupted_state.write_text(
+            json.dumps(interrupted_facts, sort_keys=True), encoding="utf-8"
+        )
+        (interrupted / "data" / ".cama-rust-cutover").write_text(
+            "\n".join(
+                [
+                    "state=pending",
+                    "revision=interrupted-rust-sha",
+                    f"backup={interrupted_backup}",
+                    f"updated_at={interrupted_timestamp}",
+                    "previous_runtime=python",
+                    "previous_revision=previous-python-sha",
+                    f"retained_image=cama-mm-bot-rollback:{interrupted_timestamp}",
+                    f"backup_image=cama-mm-python-backup:{interrupted_timestamp}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result, state = run_deploy(
+            interrupted,
+            interrupted_state,
+            runtime="python",
+            git_sha="recovery-invocation-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "recovered interrupted Rust deployment" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        assert not (interrupted / "data" / ".cama-rust-cutover").exists()
+        assert_database_restored_before_retained_image(interrupted, state)
+
+        interrupted_redeploy, interrupted_redeploy_state = prepare_deploy_fixture(
+            parent,
+            "interrupted-rust-redeploy-recovers-rust",
+            scenario="pending_rust_recovery",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        redeploy_timestamp = "20260814T130000Z"
+        redeploy_database = interrupted_redeploy / "data" / "cama_shuffle.db"
+        redeploy_backup = (
+            interrupted_redeploy / "data" / "backups" / f"predeploy-{redeploy_timestamp}.db"
+        )
+        backup_result = run_backup(redeploy_database, redeploy_backup)
+        assert backup_result.returncode == 0, backup_result.stderr
+        with sqlite3.connect(redeploy_database) as database:
+            database.execute(
+                "UPDATE players SET discord_username='interrupted-rust-redeploy-write' "
+                "WHERE discord_id=?",
+                (REHEARSAL_PLAYER_ID,),
+            )
+            database.commit()
+        Path(f"{redeploy_database}-wal").write_bytes(b"interrupted-rust-wal")
+        Path(f"{redeploy_database}-shm").write_bytes(b"interrupted-rust-shm")
+        Path(f"{redeploy_database}-journal").write_bytes(b"interrupted-rust-journal")
+        redeploy_facts = json.loads(interrupted_redeploy_state.read_text(encoding="utf-8"))
+        redeploy_facts["backup_image"] = f"cama-mm-python-backup:{redeploy_timestamp}"
+        redeploy_facts["backup_runs"] = 1
+        redeploy_facts["backup"] = {
+            "source": str(redeploy_database),
+            "destination": str(redeploy_backup),
+            "metadata": f"{redeploy_backup}.json",
+        }
+        redeploy_facts["tags"][f"cama-mm-bot-rollback:{redeploy_timestamp}"] = "sha256:initial-rust"
+        redeploy_facts["current"] = {
+            "id": "interrupted-redeploy-rust-container",
+            "runtime": "rust",
+            "sha": "interrupted-new-rust-sha",
+            "image": "sha256:interrupted-new-rust",
+            "running": True,
+            "health": "starting",
+            "uid": 1001,
+            "data_mount": str(interrupted_redeploy / "data"),
+            "process": "cama-rust",
+            "env": [
+                "BOT_RUNTIME=rust",
+                "GIT_SHA=interrupted-new-rust-sha",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+        redeploy_facts["process_history"].append("cama-rust")
+        interrupted_redeploy_state.write_text(
+            json.dumps(redeploy_facts, sort_keys=True), encoding="utf-8"
+        )
+        (interrupted_redeploy / "data" / ".cama-rust-cutover").write_text(
+            "\n".join(
+                [
+                    "state=pending",
+                    "revision=interrupted-new-rust-sha",
+                    f"backup={redeploy_backup}",
+                    f"updated_at={redeploy_timestamp}",
+                    "previous_runtime=rust",
+                    "previous_revision=previous-rust-sha",
+                    f"retained_image=cama-mm-bot-rollback:{redeploy_timestamp}",
+                    f"backup_image=cama-mm-python-backup:{redeploy_timestamp}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result, state = run_deploy(
+            interrupted_redeploy,
+            interrupted_redeploy_state,
+            runtime="rust",
+            git_sha="redeploy-recovery-invocation-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 75, result.stderr
+        assert "recovered interrupted Rust deployment to verified rust" in result.stderr
+        assert "rerun the requested deployment" in result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["current"]["image"] == "sha256:initial-rust"
+        assert state["process_history"] == ["cama-rust", "cama-rust", "cama-rust"]
+        recovered_marker = (interrupted_redeploy / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in recovered_marker
+        assert "revision=previous-rust-sha" in recovered_marker
+        assert "state=pending" not in recovered_marker
+        assert "revision=interrupted-new-rust-sha" not in recovered_marker
+        assert_database_restored_before_retained_image(interrupted_redeploy, state)
+        assert not any(
+            event["kind"] == "compose"
+            and event["command"] in {"build", "run", "up"}
+            and event["bot_runtime"] == "python"
+            for event in state["events"]
+        )
+        redeploy_events = state["events"]
+        stop_candidate_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "stop"
+            and event["command_arguments"] == ["interrupted-redeploy-rust-container"],
+            "stop interrupted Rust redeploy candidate",
+        )
+        restore_database_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and "/app/scripts/sqlite_restore.py" in event["command_arguments"],
+            "restore Rust redeploy database",
+        )
+        restore_image_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and event["command_arguments"][0] == f"cama-mm-bot-rollback:{redeploy_timestamp}",
+            "restore retained Rust image",
+        )
+        recovered_up_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "compose"
+            and event["command"] == "up"
+            and event["bot_runtime"] == "rust",
+            "restart recovered Rust runtime",
+        )
+        assert (
+            stop_candidate_index < restore_database_index < restore_image_index < recovered_up_index
+        )
+
+        crashed_redeploy, crashed_redeploy_state = prepare_deploy_fixture(
+            parent,
+            "crash-before-ready-marker-recovers-rust",
+            scenario="crash_before_ready_marker",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            crashed_redeploy,
+            crashed_redeploy_state,
+            runtime="rust",
+            git_sha="crashed-before-ready-sha",
+            cutover_candidate="true",
+            expect_lock_released=False,
+        )
+        assert result.returncode < 0, result.stderr
+        assert state["current"]["running"] is False
+        assert state["process_history"] == ["cama-rust"]
+        assert state["backup_runs"] == 1
+        assert state["restore_runs"] == 0
+        assert not any(
+            event["kind"] == "compose" and event["command"] == "up" for event in state["events"]
+        )
+        crashed_marker = (crashed_redeploy / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=pending" in crashed_marker
+        assert "backup_ready=false" in crashed_marker
+        assert "previous_runtime=rust" in crashed_marker
+        assert (crashed_redeploy / "data" / ".cama-deploy.lock").is_dir()
+        assert list((crashed_redeploy / "data" / "backups").glob("rust-preflight-*.db"))
+
+        result, state = run_deploy(
+            crashed_redeploy,
+            crashed_redeploy_state,
+            runtime="rust",
+            git_sha="crash-recovery-invocation-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 75, result.stderr
+        assert "recovered interrupted Rust deployment to verified rust" in result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["process_history"] == ["cama-rust", "cama-rust"]
+        assert state["restore_runs"] == 0
+        assert_preflight_removed(crashed_redeploy)
+        assert not (crashed_redeploy / "data" / ".cama-deploy.lock").exists()
+        recovered_crash_marker = (crashed_redeploy / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in recovered_crash_marker
+        assert "revision=previous-rust-sha" in recovered_crash_marker
+        with sqlite3.connect(crashed_redeploy / "data" / "cama_shuffle.db") as database:
+            assert database.execute(
+                "SELECT discord_username FROM players WHERE discord_id=?",
+                (REHEARSAL_PLAYER_ID,),
+            ).fetchone() == ("operational-rehearsal",)
+
+        recovery_health, recovery_health_state, _ = prepare_pending_rust_recovery_fixture(
+            parent,
+            "pending-rust-recovery-health-failure",
+            scenario="pending_recovery_health_failure",
+            timestamp="20260814T131000Z",
+        )
+        result, state = run_deploy(
+            recovery_health,
+            recovery_health_state,
+            runtime="rust",
+            git_sha="recovery-health-invocation-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 1
+        assert "rust runtime did not become healthy" in result.stderr
+        failed_recovery_marker = (recovery_health / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=recovering" in failed_recovery_marker
+        assert "previous_revision=previous-rust-sha" in failed_recovery_marker
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["health"] == "unhealthy"
+        assert state["restore_runs"] == 1
+        assert all(process == "cama-rust" for process in state["process_history"])
+
+        result, state = run_deploy(
+            recovery_health,
+            recovery_health_state,
+            runtime="rust",
+            git_sha="recovery-health-retry-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 75, result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["current"]["health"] == "healthy"
+        assert all(process == "cama-rust" for process in state["process_history"])
+        final_recovery_marker = (recovery_health / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in final_recovery_marker
+        assert "revision=previous-rust-sha" in final_recovery_marker
+        assert_database_restored_before_retained_image(
+            recovery_health,
+            state,
+            expected_restore_runs=2,
+        )
+
+        ps_failed, ps_failed_state = prepare_deploy_fixture(
+            parent,
+            "candidate-ps-failure-rolls-back",
+            scenario="candidate_ps_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            ps_failed,
+            ps_failed_state,
+            runtime="rust",
+            git_sha="candidate-ps-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "Compose could not resolve the rust bot service" in result.stderr
+        assert "automatic rollback restored database=" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        assert state["candidate_ps_failure_consumed"] is True
+        assert not (ps_failed / "data" / ".cama-rust-cutover").exists()
+        assert_database_restored_before_retained_image(ps_failed, state)
+        ps_events = state["events"]
+        fallback_stop = event_index(
+            ps_events,
+            lambda event: event["kind"] == "compose"
+            and event["command"] == "stop"
+            and event["bot_runtime"] == "rust",
+            "fallback candidate service stop",
+        )
+        ps_restore = event_index(
+            ps_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and "/app/scripts/sqlite_restore.py" in event["command_arguments"],
+            "restore after candidate ps failure",
+        )
+        assert fallback_stop < ps_restore
+
+        rust_marker_failed, rust_marker_failed_state = prepare_deploy_fixture(
+            parent,
+            "rust-active-marker-failure-rolls-back-to-rust",
+            scenario="active_marker_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            rust_marker_failed,
+            rust_marker_failed_state,
+            runtime="rust",
+            git_sha="rust-active-marker-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "Rust activation marker could not be persisted" in result.stderr
+        assert "automatic rollback restored database=" in result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["process_history"] == ["cama-rust", "cama-rust", "cama-rust"]
+        assert all(process == "cama-rust" for process in state["process_history"])
+        rust_marker = (rust_marker_failed / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in rust_marker
+        assert "revision=previous-rust-sha" in rust_marker
+        assert_database_restored_before_retained_image(rust_marker_failed, state)
+
+        restart_failed, restart_failed_state = prepare_deploy_fixture(
+            parent,
+            "rust-rollback-restart-failure-remains-recoverable",
+            scenario="rollback_restart_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            restart_failed,
+            restart_failed_state,
+            runtime="rust",
+            git_sha="rollback-restart-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "recent Rust logs failed" in result.stderr
+        assert "rust runtime did not become healthy" in result.stderr
+        assert "automatic rollback failed closed" in result.stderr
+        failed_restart_marker = (restart_failed / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=recovering" in failed_restart_marker
+        assert "previous_revision=previous-rust-sha" in failed_restart_marker
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["health"] == "unhealthy"
+        assert state["restore_runs"] == 1
+        assert all(process == "cama-rust" for process in state["process_history"])
+
+        result, state = run_deploy(
+            restart_failed,
+            restart_failed_state,
+            runtime="rust",
+            git_sha="rollback-restart-recovery-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 75, result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["current"]["health"] == "healthy"
+        assert all(process == "cama-rust" for process in state["process_history"])
+        recovered_restart_marker = (restart_failed / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in recovered_restart_marker
+        assert "revision=previous-rust-sha" in recovered_restart_marker
+        assert_database_restored_before_retained_image(
+            restart_failed,
+            state,
+            expected_restore_runs=2,
+        )
+
+        pending_marker_failed, pending_marker_failed_state = prepare_deploy_fixture(
+            parent,
+            "pending-marker-publication-failure",
+            scenario="pending_marker_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            pending_marker_failed,
+            pending_marker_failed_state,
+            runtime="rust",
+            git_sha="pending-marker-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "Rust verified-backup marker could not be persisted" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["process_history"] == ["python", "python"]
+        assert not (pending_marker_failed / "data" / ".cama-rust-cutover").exists()
+        assert state["restore_runs"] == 0
+        with sqlite3.connect(pending_marker_failed / "data" / "cama_shuffle.db") as database:
+            assert database.execute(
+                "SELECT discord_username FROM players WHERE discord_id=?",
+                (REHEARSAL_PLAYER_ID,),
+            ).fetchone() == ("operational-rehearsal",)
+        assert_preflight_removed(pending_marker_failed)
+
+        rust_only, rust_only_state = prepare_deploy_fixture(
+            parent,
+            "one-way-rust-cutover-success",
+            scenario="rust_success",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            rust_only,
+            rust_only_state,
+            runtime="rust",
+            git_sha="rust-success-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "deployed BOT_RUNTIME=rust GIT_SHA=rust-success-sha" in result.stdout
+        assert_backup_survives_deploy(rust_only, state)
+        assert_preflight_removed(rust_only)
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["process"] == "cama-rust"
+        assert state["current"]["sha"] == "rust-success-sha"
+        assert state["current"]["uid"] == 1001
+        assert state["current"]["data_mount"] == str(rust_only / "data")
+        assert state["current"]["env"] == [
+            "BOT_RUNTIME=rust",
+            "GIT_SHA=rust-success-sha",
+            "DB_PATH=/app/data/cama_shuffle.db",
+        ]
+        assert state["process_history"] == ["python", "cama-rust"]
+        assert state["unexpected_direct_run"] is False
+        marker = (rust_only / "data" / ".cama-rust-cutover").read_text(encoding="utf-8")
+        assert "state=active" in marker
+        assert "revision=rust-success-sha" in marker
+        events = state["events"]
+        backup_build = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "build"
+            and str(event["command_arguments"][0]) == "--file",
+            "build backup image",
+        )
+        backup_run = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and event["command_arguments"][0] == "--rm"
+            and "/app/scripts/sqlite_backup.py" in event["command_arguments"],
+            "run backup helper",
+        )
+        build = compose_event(events, "build", "rust")
+        preflight = compose_event(events, "run", "rust")
+        rust_up = compose_event(events, "up", "rust")
+        assert_same_service_up(rust_up)
+        assert rust_up["git_sha"] == "rust-success-sha"
+        assert rust_up["cutover_candidate"] == "true"
+        assert rust_up["compose_files"] == [
+            "docker-compose.yml",
+            "docker-compose.rust.yml",
+        ]
+        quiesce_index = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "stop"
+            and event["command_arguments"] == ["initial-python-container"],
+            "quiesce Python before cutover backup",
+        )
+        assert events.index(build) < backup_build < quiesce_index < backup_run
+        assert backup_run < events.index(preflight) < events.index(rust_up)
+        assert not any(
+            event["kind"] == "compose"
+            and event["command"] in {"build", "run", "up"}
+            and event["bot_runtime"] == "python"
+            for event in events
+        )
+
+        active_marker_failed, active_marker_failed_state = prepare_deploy_fixture(
+            parent,
+            "active-marker-publication-failure",
+            scenario="active_marker_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            active_marker_failed,
+            active_marker_failed_state,
+            runtime="rust",
+            git_sha="active-marker-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "Rust activation marker could not be persisted; rolling back" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        assert not (active_marker_failed / "data" / ".cama-rust-cutover").exists()
+        assert_database_restored_before_retained_image(active_marker_failed, state)
+        assert_preflight_removed(active_marker_failed)
+
+        postverify_failed, postverify_failed_state = prepare_deploy_fixture(
+            parent,
+            "rust-postdeploy-failure-rolls-back",
+            scenario="rust_postdeploy_failure",
+            initial_runtime="python",
+            readiness_status="complete",
+        )
+        result, state = run_deploy(
+            postverify_failed,
+            postverify_failed_state,
+            runtime="rust",
+            git_sha="postverify-failed-sha",
+            cutover_candidate="true",
+        )
+        assert result.returncode == 1
+        assert "recent Rust logs failed" in result.stderr
+        assert "failed deployment verification; rolling back" in result.stderr
+        assert state["current"]["runtime"] == "python"
+        assert state["current"]["sha"] == "previous-python-sha"
+        assert state["health_check_calls"] == 1
+        assert state["log_calls"] == 1
+        assert state["process_history"] == ["python", "cama-rust", "python"]
+        assert_database_restored_before_retained_image(postverify_failed, state)
+        assert_preflight_removed(postverify_failed)
+        assert not (postverify_failed / "data" / ".cama-rust-cutover").exists()
+
+        verifier_success, verifier_success_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-success",
+            scenario="post_deploy_success",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_success_state,
+            runtime="rust",
+            git_sha="verified-rust-sha",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_success,
+            verifier_success_state,
+            runtime="rust",
+            git_sha="verified-rust-sha",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "post-deploy verification passed" in result.stdout
+        assert state["health_check_calls"] == 1
+        assert state["log_calls"] == 1
+
+        verifier_mismatch, verifier_mismatch_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-mismatch",
+            scenario="post_deploy_mismatch",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="expected-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "GIT_SHA mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        mismatched_db_path_state = json.loads(verifier_mismatch_state.read_text(encoding="utf-8"))
+        mismatched_db_path_state["current"]["env"][-1] = "DB_PATH=/tmp/wrong.db"
+        verifier_mismatch_state.write_text(
+            json.dumps(mismatched_db_path_state, sort_keys=True), encoding="utf-8"
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "DB_PATH mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        mismatched_mount_state = json.loads(verifier_mismatch_state.read_text(encoding="utf-8"))
+        mismatched_mount_state["current"]["data_mount"] = str(verifier_mismatch / "wrong-data")
+        verifier_mismatch_state.write_text(
+            json.dumps(mismatched_mount_state, sort_keys=True), encoding="utf-8"
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "data mount mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        configure_post_deploy_fixture(
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+            oci_revision="different-image-revision",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_mismatch,
+            verifier_mismatch_state,
+            runtime="rust",
+            git_sha="actual-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "OCI revision label mismatch" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        verifier_health_failure, verifier_health_failure_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-health-failure",
+            scenario="post_deploy_health_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_health_failure_state,
+            runtime="rust",
+            git_sha="unhealthy-rust-sha",
+            health="unhealthy",
+        )
+        result, state = run_post_deploy_verify(
+            verifier_health_failure,
+            verifier_health_failure_state,
+            runtime="rust",
+            git_sha="unhealthy-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "Docker health is unhealthy" in result.stderr
+        assert state["health_check_calls"] == 0
+        assert state["log_calls"] == 0
+
+        verifier_log_failure, verifier_log_failure_state = prepare_deploy_fixture(
+            parent,
+            "post-deploy-verifier-log-failure",
+            scenario="post_deploy_log_failure",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        configure_post_deploy_fixture(
+            verifier_log_failure_state,
+            runtime="rust",
+            git_sha="log-mismatch-rust-sha",
+            logs=["not-json"],
+        )
+        result, state = run_post_deploy_verify(
+            verifier_log_failure,
+            verifier_log_failure_state,
+            runtime="rust",
+            git_sha="log-mismatch-rust-sha",
+        )
+        assert result.returncode != 0
+        assert "recent Rust logs failed JSON" in result.stderr
+        assert state["health_check_calls"] == 1
+        assert state["log_calls"] == 1
+
+
+def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rust-health-image",
+        help=(
+            "built Rust image to exercise with Docker networking disabled; CI supplies cama-rust:ci"
+        ),
+    )
+    return parser.parse_args(arguments)
+
+
+def assert_argument_contract() -> None:
+    assert parse_args([]).rust_health_image is None
+    assert (
+        parse_args(["--rust-health-image", "cama-rust:test"]).rust_health_image == "cama-rust:test"
+    )
+
+
+def main() -> int:
+    assert_argument_contract()
+    arguments = parse_args()
+    assert BACKUP.is_file(), BACKUP
+    assert RESTORE.is_file(), RESTORE
+    assert DEPLOY.is_file(), DEPLOY
+    assert RUNTIME_COMPOSE.is_file(), RUNTIME_COMPOSE
+    assert POST_DEPLOY_VERIFY.is_file(), POST_DEPLOY_VERIFY
+    assert DEPLOY_WORKFLOW.is_file(), DEPLOY_WORKFLOW
+    assert READINESS.is_file(), READINESS
+    if arguments.rust_health_image:
+        assert_container_health_image(arguments.rust_health_image)
+    assert_backup_contract()
+    assert_deploy_workflow_handoff()
+    assert_deploy_runtime_rehearsal()
+    evidence = [
+        "WAL backup",
+        "fail-closed guards",
+        "verified DB+image rollback",
+        "one-way Python refusal",
+        "Rust-only deploy",
+    ]
+    if arguments.rust_health_image:
+        evidence[:0] = ["container health", "typed interaction/DB smoke"]
+    print(f"operational rehearsal passed ({', '.join(evidence)})")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (AssertionError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
+        print(f"operational rehearsal failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

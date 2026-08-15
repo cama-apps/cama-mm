@@ -121,3 +121,61 @@ async def test_dota_tab_draws_independent_charts_concurrently(monkeypatch):
     finally:
         for file in files:
             file.close()
+
+
+@pytest.mark.asyncio
+async def test_dota_tab_attaches_lane_chart_without_role_metadata(monkeypatch):
+    async def direct_opendota(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(profile_module, "run_opendota_io", direct_opendota)
+    lane_draw = Mock(return_value=BytesIO(b"lane"))
+    monkeypatch.setattr(profile_module, "draw_lane_distribution", lane_draw)
+
+    player_repo = SimpleNamespace(
+        get_by_id=Mock(return_value=object()),
+        get_steam_id=Mock(return_value=7654321),
+    )
+    opendota_service = SimpleNamespace(
+        get_dota_tab_stats=Mock(
+            return_value={
+                "role_distribution": None,
+                "full_stats": {
+                    "lane_distribution": {
+                        "Roaming": 0.0,
+                        "Safe Lane": 100.0,
+                        "Mid": 0.0,
+                        "Off Lane": 0.0,
+                        "Jungle": 0.0,
+                    },
+                    "lane_parsed_count": 10,
+                    "win_rate": None,
+                    "avg_kills": 0,
+                    "avg_deaths": 0,
+                    "avg_assists": 0,
+                    "hero_counts": [],
+                },
+            }
+        )
+    )
+    cog = ProfileCommands(
+        SimpleNamespace(
+            player_repo=player_repo,
+            opendota_player_service=opendota_service,
+        )
+    )
+
+    embed, files = await cog._build_dota_embed(
+        MockUser(123),
+        123,
+        guild_id=TEST_GUILD_ID,
+    )
+
+    try:
+        assert [file.filename for file in files] == ["lane_graph.png"]
+        assert embed.image.url is None
+        lane_draw.assert_called_once_with({"Safe Lane": 100.0})
+        assert any(field.name == "Lane Distribution" for field in embed.fields)
+    finally:
+        for file in files:
+            file.close()

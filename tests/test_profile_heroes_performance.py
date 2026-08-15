@@ -83,11 +83,8 @@ async def test_heroes_tab_runs_independent_reads_and_drawing_concurrently(
     )
 
     state, _ = _track_thread_waves(monkeypatch)
-    monkeypatch.setattr(
-        profile_module,
-        "draw_hero_performance_chart",
-        MagicMock(return_value=BytesIO(b"chart")),
-    )
+    chart_draw = MagicMock(return_value=BytesIO(b"chart"))
+    monkeypatch.setattr(profile_module, "draw_hero_performance_chart", chart_draw)
 
     embed, files = await cog._build_heroes_embed(
         SimpleNamespace(display_name="Player"),
@@ -100,6 +97,8 @@ async def test_heroes_tab_runs_independent_reads_and_drawing_concurrently(
         assert state["peak"] == 6
         assert embed.title == "Profile: Player > Heroes"
         assert [file.filename for file in files] == ["hero_chart.png"]
+        assert embed.image.url == "attachment://hero_chart.png"
+        chart_draw.assert_called_once_with(hero_stats, "Player")
         for method in (
             match_repo.get_player_overall_hero_stats,
             match_repo.get_player_lane_stats,
@@ -280,6 +279,102 @@ async def test_gambling_loads_balance_impact_and_chart_series_concurrently(
     assert chart_file is None
     assert embed.title == "Profile: Player > Gambling"
     assert state["peak"] == 3
+
+
+@pytest.mark.asyncio
+async def test_gambling_attaches_chart_for_multiple_pnl_events():
+    degen = SimpleNamespace(
+        total=12,
+        emoji="🎲",
+        title="Casual",
+        flavor_texts=[],
+        tagline="Just visiting",
+        max_leverage_score=0,
+        bet_size_score=0,
+        debt_depth_score=0,
+        bankruptcy_score=0,
+        frequency_score=0,
+        loss_chase_score=0,
+        negative_loan_bonus=0,
+    )
+    stats = SimpleNamespace(
+        net_pnl=5,
+        degen_score=degen,
+        roi=0.25,
+        wins=1,
+        losses=1,
+        win_rate=0.5,
+        total_bets=2,
+        total_wagered=20,
+        avg_bet_size=10.0,
+        leverage_distribution={},
+        current_streak=1,
+        best_streak=1,
+        worst_streak=-1,
+        peak_pnl=10,
+        trough_pnl=0,
+        biggest_win=10,
+        biggest_loss=-5,
+        matches_played=0,
+        paper_hands_count=0,
+    )
+    gambling_service = SimpleNamespace(
+        get_player_stats=MagicMock(return_value=stats),
+        get_betting_impact_stats=MagicMock(return_value=None),
+        get_cumulative_pnl_series=MagicMock(
+            return_value=[
+                (
+                    1,
+                    10,
+                    {
+                        "amount": 10,
+                        "leverage": 1,
+                        "effective_bet": 10,
+                        "outcome": "won",
+                        "profit": 10,
+                        "team": "radiant",
+                        "source": "bet",
+                    },
+                ),
+                (
+                    2,
+                    5,
+                    {
+                        "amount": 10,
+                        "leverage": 1,
+                        "effective_bet": 10,
+                        "outcome": "lost",
+                        "profit": -5,
+                        "team": "radiant",
+                        "source": "bet",
+                    },
+                ),
+            ]
+        ),
+    )
+    player_service = SimpleNamespace(
+        get_player=MagicMock(return_value=SimpleNamespace(jopacoin_balance=100))
+    )
+    cog = ProfileCommands(
+        SimpleNamespace(
+            gambling_stats_service=gambling_service,
+            player_service=player_service,
+        )
+    )
+
+    embed, chart_file = await cog._build_gambling_embed(
+        SimpleNamespace(display_name="Player"),
+        123,
+        guild_id=456,
+    )
+
+    try:
+        assert chart_file is not None
+        assert chart_file.filename == "gamba_chart.png"
+        assert embed.image.url == "attachment://gamba_chart.png"
+    finally:
+        if chart_file is not None:
+            chart_file.close()
 
 
 @pytest.mark.asyncio

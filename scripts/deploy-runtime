@@ -1,0 +1,892 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runtime_compose="$repository_root/scripts/runtime-compose"
+post_deploy_verify="$repository_root/scripts/post-deploy-verify"
+readiness_manifest="$repository_root/rust/parity/cutover_readiness.tsv"
+database_dir="$repository_root/data"
+database_path="$database_dir/cama_shuffle.db"
+deploy_lock="$database_dir/.cama-deploy.lock"
+cutover_marker="$database_dir/.cama-rust-cutover"
+preflight_path=
+deploy_lock_owned=false
+
+if [ "${BOT_RUNTIME+x}" = x ]; then
+  selected_runtime=$BOT_RUNTIME
+else
+  selected_runtime=python
+fi
+case "$selected_runtime" in
+  python|rust) ;;
+  "") echo "BOT_RUNTIME is set but empty; expected python or rust" >&2; exit 64 ;;
+  *) echo "invalid BOT_RUNTIME=$selected_runtime; expected python or rust" >&2; exit 64 ;;
+esac
+if [ "$selected_runtime" = python ] && [ -e "$cutover_marker" ]; then
+  existing_cutover_state=$(awk -F= '$1 == "state" { print substr($0, 7); exit }' "$cutover_marker")
+  pending_previous_runtime=$(
+    awk -F= '$1 == "previous_runtime" { print substr($0, 18); exit }' "$cutover_marker"
+  )
+  case "$existing_cutover_state:$pending_previous_runtime" in
+    pending:python|recovering:python) ;;
+    *)
+      echo "Python deployment refused: $cutover_marker proves the one-way Rust cutover completed" >&2
+      exit 65
+      ;;
+  esac
+fi
+
+deploy_sha=${GIT_SHA-}
+if [ -z "$deploy_sha" ]; then
+  deploy_sha=$(git -C "$repository_root" rev-parse --verify HEAD)
+fi
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+health_timeout=${DEPLOY_HEALTH_TIMEOUT_SECONDS:-300}
+case "$health_timeout" in
+  *[!0-9]*|"") echo "DEPLOY_HEALTH_TIMEOUT_SECONDS must be a positive integer" >&2; exit 64 ;;
+esac
+if [ "$health_timeout" -eq 0 ]; then
+  echo "DEPLOY_HEALTH_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 64
+fi
+
+mkdir -p "$database_dir"
+acquire_deploy_lock() {
+  if mkdir "$deploy_lock" 2>/dev/null; then
+    printf '%s\n' "$$" >"$deploy_lock/pid"
+    deploy_lock_owned=true
+    return 0
+  fi
+
+  lock_pid=$(sed -n '1p' "$deploy_lock/pid" 2>/dev/null || true)
+  case "$lock_pid" in
+    *[!0-9]*|"") lock_is_live=false ;;
+    *)
+      if kill -0 "$lock_pid" 2>/dev/null; then
+        lock_is_live=true
+      else
+        lock_is_live=false
+      fi
+      ;;
+  esac
+  if [ "$lock_is_live" = true ]; then
+    echo "another deployment owns $deploy_lock (pid=$lock_pid)" >&2
+    return 1
+  fi
+
+  stale_lock="$deploy_lock.stale.$timestamp.$$"
+  if ! mv "$deploy_lock" "$stale_lock" 2>/dev/null; then
+    echo "deployment lock changed while stale ownership was being verified" >&2
+    return 1
+  fi
+  if ! mkdir "$deploy_lock" 2>/dev/null; then
+    mv "$stale_lock" "$deploy_lock" 2>/dev/null || true
+    echo "another deployment acquired $deploy_lock" >&2
+    return 1
+  fi
+  printf '%s\n' "$$" >"$deploy_lock/pid"
+  deploy_lock_owned=true
+  rm -f -- "$stale_lock/pid"
+  if ! rmdir "$stale_lock"; then
+    rm -f -- "$deploy_lock/pid"
+    rmdir "$deploy_lock" 2>/dev/null || true
+    mv "$stale_lock" "$deploy_lock" 2>/dev/null || true
+    deploy_lock_owned=false
+    echo "stale deployment lock contained unexpected files: $stale_lock" >&2
+    return 1
+  fi
+}
+
+if ! acquire_deploy_lock; then
+  exit 73
+fi
+cleanup_deploy() {
+  if [ -n "${preflight_path:-}" ]; then
+    rm -f -- \
+      "$preflight_path" \
+      "${preflight_path}-wal" \
+      "${preflight_path}-shm" \
+      "${preflight_path}-journal"
+  fi
+  rm -f -- \
+    "$cutover_marker.$timestamp.arm.partial" \
+    "$cutover_marker.$timestamp.ready.partial" \
+    "$cutover_marker.$timestamp.activate.partial" \
+    "$cutover_marker.$timestamp.recovering.partial" \
+    "$cutover_marker.$timestamp.recovered.partial" \
+    "$cutover_marker.$timestamp.rollback.partial"
+  if [ "$deploy_lock_owned" = true ]; then
+    rm -f -- "$deploy_lock/pid"
+    rmdir "$deploy_lock" 2>/dev/null || true
+  fi
+}
+trap cleanup_deploy EXIT
+
+container_env_value() {
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" \
+    | awk -v key="$2" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }'
+}
+
+wait_for_runtime() {
+  container_id=$1
+  expected_runtime=$2
+  expected_sha=$3
+  timeout_seconds=$4
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  stable_checks=0
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    running=$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)
+    if [ "$running" = true ]; then
+      actual_runtime=$(container_env_value "$container_id" BOT_RUNTIME)
+      actual_sha=$(container_env_value "$container_id" GIT_SHA)
+      actual_db_path=$(container_env_value "$container_id" DB_PATH)
+      actual_uid=$(docker exec "$container_id" id -u 2>/dev/null || true)
+      data_mount=$(docker inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' \
+        "$container_id" 2>/dev/null || true)
+      if [ "$actual_runtime" = "$expected_runtime" ] \
+        && [ "$actual_sha" = "$expected_sha" ] \
+        && [ "$actual_db_path" = /app/data/cama_shuffle.db ] \
+        && [ "$actual_uid" = 1001 ] \
+        && [ "$data_mount" = "$database_dir" ]
+      then
+        if [ "$expected_runtime" = rust ]; then
+          health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$container_id" 2>/dev/null || true)
+          if [ "$health" = healthy ]; then
+            return 0
+          fi
+          if [ "$health" = unhealthy ]; then
+            return 1
+          fi
+        else
+          stable_checks=$((stable_checks + 1))
+          if [ "$stable_checks" -ge 6 ]; then
+            return 0
+          fi
+        fi
+      else
+        stable_checks=0
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+record_cutover_state() {
+  marker_state_input=$1
+  marker_revision_input=$2
+  marker_backup_input=${3-}
+  marker_backup_ready_input=${4-false}
+  marker_previous_runtime_input=${5-}
+  marker_previous_revision_input=${6-}
+  marker_retained_image_input=${7-}
+  marker_backup_image_input=${8-}
+  marker_write_token_input=${9-state}
+  marker_transaction_timestamp_input=${10-$timestamp}
+  python3 - \
+    "$cutover_marker" \
+    "$marker_state_input" \
+    "$marker_revision_input" \
+    "$marker_backup_input" \
+    "$marker_transaction_timestamp_input" \
+    "$marker_backup_ready_input" \
+    "$marker_previous_runtime_input" \
+    "$marker_previous_revision_input" \
+    "$marker_retained_image_input" \
+    "$marker_backup_image_input" \
+    "$marker_write_token_input" \
+    "$timestamp" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+marker = Path(sys.argv[1])
+(
+    state,
+    revision,
+    backup,
+    timestamp,
+    backup_ready,
+    previous_runtime,
+    previous_revision,
+    retained_image,
+    backup_image,
+    write_token,
+    write_timestamp,
+) = sys.argv[2:]
+if backup_ready not in {"true", "false"}:
+    raise SystemExit("cutover marker backup_ready must be true or false")
+if not write_token or not write_token.replace("-", "").isalnum():
+    raise SystemExit("cutover marker write token is invalid")
+partial = Path(f"{marker}.{write_timestamp}.{write_token}.partial")
+payload = (
+    f"state={state}\n"
+    f"revision={revision}\n"
+    f"backup={backup}\n"
+    f"updated_at={timestamp}\n"
+    f"backup_ready={backup_ready}\n"
+    f"previous_runtime={previous_runtime}\n"
+    f"previous_revision={previous_revision}\n"
+    f"retained_image={retained_image}\n"
+    f"backup_image={backup_image}\n"
+).encode()
+try:
+    descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(partial, marker)
+        directory_descriptor = os.open(marker.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        partial.unlink(missing_ok=True)
+finally:
+    partial.unlink(missing_ok=True)
+PY
+}
+
+remove_cutover_state() {
+  if ! rm -f -- "$cutover_marker"; then
+    return 1
+  fi
+  python3 - "$database_dir" <<'PY'
+import os
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+stop_container_exact() {
+  container_id=$1
+  docker stop "$container_id" >/dev/null 2>&1 || true
+  if ! stopped_running=$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null); then
+    echo "could not verify that container $container_id stopped" >&2
+    return 1
+  fi
+  if [ "$stopped_running" != false ]; then
+    echo "container $container_id is still running" >&2
+    return 1
+  fi
+}
+
+marker_value() {
+  awk -F= -v key="$1" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' \
+    "$cutover_marker"
+}
+
+remove_interrupted_preflight() {
+  interrupted_timestamp=$1
+  interrupted_preflight="$database_dir/backups/rust-preflight-$interrupted_timestamp.db"
+  rm -f -- \
+    "$interrupted_preflight" \
+    "$interrupted_preflight-wal" \
+    "$interrupted_preflight-shm" \
+    "$interrupted_preflight-journal"
+}
+
+resolve_service_container() {
+  resolver_runtime=$1
+  if ! resolved_container_ids=$(BOT_RUNTIME="$resolver_runtime" "$runtime_compose" ps --quiet bot); then
+    echo "Compose could not resolve the $resolver_runtime bot service" >&2
+    return 1
+  fi
+  set -- $resolved_container_ids
+  case "$#" in
+    0) return 0 ;;
+    1) printf '%s\n' "$1" ;;
+    *)
+      echo "expected at most one $resolver_runtime bot container, found $#" >&2
+      return 1
+      ;;
+  esac
+}
+
+verify_runtime_container() {
+  verified_container=$1
+  verified_runtime=$2
+  verified_revision=$3
+  if ! wait_for_runtime \
+    "$verified_container" \
+    "$verified_runtime" \
+    "$verified_revision" \
+    "$health_timeout"
+  then
+    echo "$verified_runtime runtime did not become healthy" >&2
+    return 1
+  fi
+  if [ "$verified_runtime" = rust ] \
+    && ! BOT_RUNTIME=rust GIT_SHA="$verified_revision" "$post_deploy_verify"
+  then
+    echo "Rust runtime failed full post-deploy verification" >&2
+    return 1
+  fi
+}
+
+start_retained_runtime() {
+  retained_runtime=$1
+  retained_revision=$2
+  retained_image=$3
+
+  if ! target_image=$(BOT_RUNTIME="$retained_runtime" "$runtime_compose" config --images); then
+    echo "could not resolve the $retained_runtime runtime image target" >&2
+    return 1
+  fi
+  if ! docker tag "$retained_image" "$target_image"; then
+    echo "could not restore retained runtime image $retained_image" >&2
+    return 1
+  fi
+  if ! GIT_SHA="$retained_revision" \
+    BOT_RUNTIME="$retained_runtime" \
+    CAMA_DEPLOY_RECOVERY=true \
+    RUST_CUTOVER_CANDIDATE=true \
+    "$runtime_compose" up --detach --no-build --force-recreate --no-deps bot
+  then
+    echo "could not restart retained $retained_runtime runtime" >&2
+    return 1
+  fi
+  if ! retained_container=$(resolve_service_container "$retained_runtime"); then
+    return 1
+  fi
+  if [ -z "$retained_container" ]; then
+    echo "retained $retained_runtime runtime did not create a bot container" >&2
+    return 1
+  fi
+  verify_runtime_container "$retained_container" "$retained_runtime" "$retained_revision"
+}
+
+publish_recovered_state() {
+  recovered_runtime=$1
+  recovered_revision=$2
+  recovered_backup=$3
+  recovered_backup_ready=$4
+  recovered_timestamp=$5
+  recovered_token=$6
+
+  if [ "$recovered_runtime" = python ]; then
+    if ! remove_cutover_state; then
+      echo "recovery could not remove the pre-cutover marker durably" >&2
+      return 1
+    fi
+  elif ! record_cutover_state \
+    active \
+    "$recovered_revision" \
+    "$recovered_backup" \
+    "$recovered_backup_ready" \
+    "" \
+    "" \
+    "" \
+    "" \
+    "$recovered_token" \
+    "$recovered_timestamp"
+  then
+    echo "recovery could not publish the verified Rust active marker" >&2
+    return 1
+  fi
+}
+
+recover_pending_cutover() {
+  pending_state=$(marker_value state)
+  pending_candidate_revision=$(marker_value revision)
+  pending_timestamp=$(marker_value updated_at)
+  pending_backup=$(marker_value backup)
+  pending_backup_ready=$(marker_value backup_ready)
+  pending_runtime=$(marker_value previous_runtime)
+  pending_revision=$(marker_value previous_revision)
+  pending_retained_image=$(marker_value retained_image)
+  pending_backup_image=$(marker_value backup_image)
+  case "$pending_state" in
+    pending|recovering) ;;
+    *) echo "cutover recovery marker has an invalid state" >&2; return 1 ;;
+  esac
+  case "$pending_timestamp" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) echo "pending cutover marker has an invalid timestamp" >&2; return 1 ;;
+  esac
+  expected_backup="$database_dir/backups/predeploy-$pending_timestamp.db"
+  expected_retained_image="cama-mm-bot-rollback:$pending_timestamp"
+  expected_backup_image="cama-mm-python-backup:$pending_timestamp"
+  case "$pending_runtime" in
+    python|rust) ;;
+    *) echo "pending cutover marker has an invalid previous runtime" >&2; return 1 ;;
+  esac
+  # Markers written before backup_ready was introduced were only published
+  # after the verified backup and disposable preflight had completed.
+  if [ -z "$pending_backup_ready" ]; then
+    pending_backup_ready=true
+  fi
+  case "$pending_backup_ready" in
+    true|false) ;;
+    *) echo "pending cutover marker has invalid backup readiness" >&2; return 1 ;;
+  esac
+  if [ -z "$pending_candidate_revision" ] \
+    || [ -z "$pending_revision" ] \
+    || [ "$pending_backup" != "$expected_backup" ] \
+    || [ "$pending_retained_image" != "$expected_retained_image" ] \
+    || [ "$pending_backup_image" != "$expected_backup_image" ]
+  then
+    echo "pending cutover marker does not identify the exact rollback artifacts" >&2
+    return 1
+  fi
+
+  if ! pending_container=$(resolve_service_container rust); then
+    return 1
+  fi
+  if [ "$pending_state" = recovering ] && [ -n "$pending_container" ]; then
+    if verify_runtime_container \
+      "$pending_container" \
+      "$pending_runtime" \
+      "$pending_revision"
+    then
+      if ! publish_recovered_state \
+        "$pending_runtime" \
+        "$pending_revision" \
+        "$pending_backup" \
+        "$pending_backup_ready" \
+        "$pending_timestamp" \
+        recovered
+      then
+        return 1
+      fi
+      remove_interrupted_preflight "$pending_timestamp"
+      echo "recovered interrupted Rust deployment to verified $pending_runtime revision=$pending_revision" >&2
+      return 0
+    fi
+  fi
+  if [ -n "$pending_container" ]; then
+    if ! stop_container_exact "$pending_container"; then
+      echo "pending cutover recovery could not prove the candidate stopped" >&2
+      return 1
+    fi
+  fi
+  if [ "$pending_backup_ready" = true ] \
+    && ! docker run --rm \
+      --volume "$database_dir:/app/data" \
+      --entrypoint python \
+      "$pending_backup_image" \
+      /app/scripts/sqlite_restore.py \
+      "/app/data/backups/predeploy-$pending_timestamp.db" \
+      /app/data/cama_shuffle.db
+  then
+    echo "pending cutover recovery could not restore the verified backup" >&2
+    return 1
+  fi
+  if ! record_cutover_state \
+    recovering \
+    "$pending_candidate_revision" \
+    "$pending_backup" \
+    "$pending_backup_ready" \
+    "$pending_runtime" \
+    "$pending_revision" \
+    "$pending_retained_image" \
+    "$pending_backup_image" \
+    recovering \
+    "$pending_timestamp"
+  then
+    echo "pending cutover recovery could not durably record the restored boundary" >&2
+    return 1
+  fi
+  if ! start_retained_runtime \
+    "$pending_runtime" \
+    "$pending_revision" \
+    "$pending_retained_image"
+  then
+    return 1
+  fi
+  if ! publish_recovered_state \
+    "$pending_runtime" \
+    "$pending_revision" \
+    "$pending_backup" \
+    "$pending_backup_ready" \
+    "$pending_timestamp" \
+    recovered
+  then
+    return 1
+  fi
+  remove_interrupted_preflight "$pending_timestamp"
+  echo "recovered interrupted Rust deployment to verified $pending_runtime revision=$pending_revision" >&2
+}
+
+if [ -e "$cutover_marker" ]; then
+  recovery_state=$(marker_value state)
+  case "$recovery_state" in
+    pending|recovering)
+      if ! recover_pending_cutover; then
+        echo "pending Rust cutover recovery failed closed" >&2
+        exit 1
+      fi
+      if [ "$selected_runtime" = python ]; then
+        exit 0
+      fi
+      echo "pending Rust deployment was recovered; rerun the requested deployment" >&2
+      exit 75
+      ;;
+  esac
+fi
+
+if [ "$selected_runtime" = rust ]; then
+  if [ "${RUST_CUTOVER_CANDIDATE-}" != true ]; then
+    echo "Rust deployment refused: RUST_CUTOVER_CANDIDATE=true is required so CI runs the complete parity gate" >&2
+    exit 65
+  fi
+  if ! awk -F '\t' 'NR > 1 && $2 != "complete" { failed=1 } END { exit failed }' \
+    "$readiness_manifest"
+  then
+    echo "Rust deployment refused: cutover_readiness.tsv still has open gates" >&2
+    exit 65
+  fi
+fi
+
+cd "$repository_root"
+if ! current_container=$(resolve_service_container python); then
+  echo "deployment refused: current bot service could not be resolved" >&2
+  exit 1
+fi
+previous_runtime=python
+previous_sha=unknown
+previous_image_id=
+rollback_tag=
+if [ -n "$current_container" ]; then
+  if ! previous_image_id=$(docker inspect --format '{{.Image}}' "$current_container"); then
+    echo "deployment refused: current bot image could not be inspected" >&2
+    exit 1
+  fi
+  inspected_runtime=$(container_env_value "$current_container" BOT_RUNTIME)
+  inspected_sha=$(container_env_value "$current_container" GIT_SHA)
+  inspected_database_path=$(container_env_value "$current_container" DB_PATH)
+  inspected_running=$(
+    docker inspect --format '{{.State.Running}}' "$current_container" 2>/dev/null || true
+  )
+  inspected_uid=$(docker exec "$current_container" id -u 2>/dev/null || true)
+  inspected_data_mount=$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' \
+    "$current_container" 2>/dev/null || true)
+  previous_runtime=$inspected_runtime
+  previous_sha=$inspected_sha
+  case "$previous_runtime" in
+    python|rust) ;;
+    *) echo "current bot has invalid or missing BOT_RUNTIME=${previous_runtime:-missing}" >&2; exit 65 ;;
+  esac
+  if [ -z "$previous_sha" ] \
+    || [ "$inspected_database_path" != /app/data/cama_shuffle.db ] \
+    || [ "$inspected_running" != true ] \
+    || [ "$inspected_uid" != 1001 ] \
+    || [ "$inspected_data_mount" != "$database_dir" ]
+  then
+    echo "deployment refused: current bot does not match the runtime/SQLite/UID contract" >&2
+    exit 65
+  fi
+  if [ -e "$cutover_marker" ]; then
+    current_cutover_state=$(marker_value state)
+    case "$current_cutover_state:$previous_runtime" in
+      active:rust) ;;
+      active:*)
+        echo "deployment refused: active Rust cutover marker conflicts with BOT_RUNTIME=$previous_runtime" >&2
+        exit 65
+        ;;
+      *)
+        echo "deployment refused: cutover marker has unexpected state=${current_cutover_state:-missing}" >&2
+        exit 65
+        ;;
+    esac
+  elif [ "$previous_runtime" = rust ]; then
+    echo "deployment refused: running Rust service has no durable cutover marker" >&2
+    exit 65
+  fi
+  if [ "$selected_runtime" = python ] && [ "$previous_runtime" = rust ]; then
+    echo "Python deployment refused: the running Rust service has crossed the one-way cutover" >&2
+    exit 65
+  fi
+  rollback_tag="cama-mm-bot-rollback:$timestamp"
+  docker tag "$previous_image_id" "$rollback_tag"
+elif [ "$selected_runtime" = rust ]; then
+  echo "Rust first-deploy refused: no running bot artifact is available for rollback" >&2
+  exit 65
+fi
+
+if [ "$selected_runtime" = rust ] && [ ! -f "$database_path" ]; then
+  echo "Rust deployment refused: $database_path does not exist, so no rollback backup can be created" >&2
+  exit 65
+fi
+
+# Build every artifact while the old runtime still owns the database. The
+# write-free downtime begins only after these potentially long builds finish.
+GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+backup_path=
+backup_image=
+backup_container_path=
+preflight_container_path=
+if [ -f "$database_path" ]; then
+  backup_image="cama-mm-python-backup:$timestamp"
+  backup_container_path="/app/data/backups/predeploy-$timestamp.db"
+  backup_path="$database_dir/backups/predeploy-$timestamp.db"
+  docker build --file Dockerfile --build-arg "GIT_SHA=$deploy_sha" --tag "$backup_image" .
+fi
+
+transition_to_recovering() {
+  recovery_backup_ready=$1
+  recovery_token=$2
+  if [ "$selected_runtime" != rust ]; then
+    return 0
+  fi
+  if ! record_cutover_state \
+    recovering \
+    "$deploy_sha" \
+    "$backup_path" \
+    "$recovery_backup_ready" \
+    "$previous_runtime" \
+    "$previous_sha" \
+    "$rollback_tag" \
+    "$backup_image" \
+    "$recovery_token"
+  then
+    echo "previous runtime recovery boundary could not be persisted" >&2
+    return 1
+  fi
+}
+
+finish_previous_restart() {
+  recovered_backup_ready=$1
+  recovered_token=$2
+  if [ "$selected_runtime" = rust ]; then
+    publish_recovered_state \
+      "$previous_runtime" \
+      "$previous_sha" \
+      "$backup_path" \
+      "$recovered_backup_ready" \
+      "$timestamp" \
+      "$recovered_token"
+  fi
+}
+
+restart_previous_without_database_restore() {
+  if [ -z "$previous_image_id" ] || [ -z "$rollback_tag" ]; then
+    echo "previous runtime cannot be restarted: no retained artifact" >&2
+    return 1
+  fi
+  if ! transition_to_recovering false recovering; then
+    return 1
+  fi
+  if ! start_retained_runtime "$previous_runtime" "$previous_sha" "$rollback_tag"; then
+    return 1
+  fi
+  finish_previous_restart false recovered
+}
+
+candidate_started=false
+new_container=
+stop_candidate_for_rollback() {
+  if [ "$candidate_started" != true ]; then
+    return 0
+  fi
+  if [ -n "$new_container" ]; then
+    stop_container_exact "$new_container"
+    return
+  fi
+  if ! BOT_RUNTIME="$selected_runtime" "$runtime_compose" stop bot; then
+    echo "candidate service stop failed after its identity lookup failed" >&2
+    return 1
+  fi
+  if ! running_candidates=$(
+    BOT_RUNTIME="$selected_runtime" "$runtime_compose" ps --status running --quiet bot
+  ); then
+    echo "candidate service stop could not be verified" >&2
+    return 1
+  fi
+  set -- $running_candidates
+  if [ "$#" -ne 0 ]; then
+    echo "candidate service still exposes $# running container(s)" >&2
+    return 1
+  fi
+}
+
+rollback_previous() {
+  if [ -z "$previous_image_id" ] || [ -z "$rollback_tag" ]; then
+    echo "automatic rollback unavailable: there was no previous bot artifact" >&2
+    return 1
+  fi
+  if [ -z "$backup_path" ] || [ -z "$backup_image" ] || [ -z "$backup_container_path" ]; then
+    echo "automatic rollback refused: no verified predeploy database backup is available" >&2
+    return 1
+  fi
+  if ! stop_candidate_for_rollback; then
+    echo "automatic rollback refused: candidate stop could not be proven" >&2
+    return 1
+  fi
+  if ! docker run --rm \
+    --volume "$database_dir:/app/data" \
+    --entrypoint python \
+    "$backup_image" \
+    /app/scripts/sqlite_restore.py \
+    "$backup_container_path" \
+    /app/data/cama_shuffle.db
+  then
+    echo "automatic rollback refused: predeploy database restore failed" >&2
+    return 1
+  fi
+  if ! transition_to_recovering true rollback; then
+    echo "automatic rollback refused: restored database boundary was not durable" >&2
+    return 1
+  fi
+  if ! start_retained_runtime "$previous_runtime" "$previous_sha" "$rollback_tag"; then
+    return 1
+  fi
+  if ! finish_previous_restart true recovered; then
+    return 1
+  fi
+  echo "automatic rollback restored database=$backup_path BOT_RUNTIME=$previous_runtime image=$rollback_tag" >&2
+}
+
+if [ "$selected_runtime" = rust ]; then
+  if ! record_cutover_state \
+    pending \
+    "$deploy_sha" \
+    "$backup_path" \
+    false \
+    "$previous_runtime" \
+    "$previous_sha" \
+    "$rollback_tag" \
+    "$backup_image" \
+    arm
+  then
+    echo "Rust recovery marker could not be armed before quiescing the current runtime" >&2
+    exit 1
+  fi
+fi
+
+# Freeze all writes before creating the authoritative rollback point. From
+# this line until a runtime is healthy, no old or candidate bot may own SQLite.
+if [ -n "$current_container" ]; then
+  if ! stop_container_exact "$current_container"; then
+    echo "deployment refused: previous runtime could not be quiesced" >&2
+    exit 1
+  fi
+fi
+
+if [ -n "$backup_image" ]; then
+  if ! docker run --rm \
+    --volume "$database_dir:/app/data" \
+    --entrypoint python \
+    "$backup_image" \
+    /app/scripts/sqlite_backup.py \
+    /app/data/cama_shuffle.db \
+    "$backup_container_path"
+  then
+    echo "verified backup failed; restarting the unchanged previous runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+  if [ ! -s "$backup_path" ] || [ ! -s "$backup_path.json" ]; then
+    echo "verified backup artifacts are missing; restarting the unchanged previous runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+fi
+
+if [ "$selected_runtime" = rust ]; then
+  preflight_path="$database_dir/backups/rust-preflight-$timestamp.db"
+  preflight_container_path="/app/data/backups/rust-preflight-$timestamp.db"
+  if [ -e "$preflight_path" ] || ! cp "$backup_path" "$preflight_path"; then
+    echo "Rust disposable preflight copy could not be created; restarting the unchanged runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+  if ! cmp -s "$backup_path" "$preflight_path"; then
+    echo "Rust disposable preflight copy does not match the verified backup; restarting the unchanged runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+  if ! GIT_SHA="$deploy_sha" BOT_RUNTIME=rust "$runtime_compose" run --rm --no-deps bot \
+    db-admit \
+    --db-path "$preflight_container_path" \
+    --source-db /app/data/cama_shuffle.db \
+    --disposable-copy
+  then
+    echo "Rust disposable schema admission failed; restarting the unchanged runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+  if ! record_cutover_state \
+    pending \
+    "$deploy_sha" \
+    "$backup_path" \
+    true \
+    "$previous_runtime" \
+    "$previous_sha" \
+    "$rollback_tag" \
+    "$backup_image" \
+    ready
+  then
+    echo "Rust verified-backup marker could not be persisted; restarting the unchanged runtime" >&2
+    restart_previous_without_database_restore
+    exit 1
+  fi
+fi
+
+candidate_started=true
+set +e
+GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" \
+  up --detach --no-build --force-recreate --no-deps bot
+up_status=$?
+set -e
+deployment_healthy=true
+if ! new_container=$(resolve_service_container "$selected_runtime"); then
+  deployment_healthy=false
+elif [ "$up_status" -ne 0 ] || [ -z "$new_container" ] \
+  || ! wait_for_runtime "$new_container" "$selected_runtime" "$deploy_sha" "$health_timeout"
+then
+  deployment_healthy=false
+elif [ "$selected_runtime" = rust ] \
+  && ! BOT_RUNTIME=rust GIT_SHA="$deploy_sha" "$post_deploy_verify"
+then
+  deployment_healthy=false
+fi
+if [ "$deployment_healthy" != true ]; then
+  echo "BOT_RUNTIME=$selected_runtime failed deployment verification; rolling back" >&2
+  if ! rollback_previous; then
+    echo "automatic rollback failed closed; durable recovery state was retained" >&2
+    exit 1
+  fi
+  echo "failed deployment backup: ${backup_path:-not-created}" >&2
+  exit 1
+fi
+
+if [ "$selected_runtime" = rust ]; then
+  if ! record_cutover_state \
+    active \
+    "$deploy_sha" \
+    "$backup_path" \
+    true \
+    "" \
+    "" \
+    "" \
+    "" \
+    activate
+  then
+    echo "Rust activation marker could not be persisted; rolling back" >&2
+    if ! rollback_previous; then
+      echo "automatic rollback failed closed; durable recovery state was retained" >&2
+    fi
+    exit 1
+  fi
+fi
+echo "deployed BOT_RUNTIME=$selected_runtime GIT_SHA=$deploy_sha"
+echo "verified backup: ${backup_path:-not-needed (database did not exist)}"
+if [ -n "$preflight_path" ]; then
+  echo "Rust disposable preflight passed and will be removed: $preflight_path"
+fi
+if [ -n "$rollback_tag" ]; then
+  echo "retained rollback image: $rollback_tag"
+fi

@@ -90,6 +90,10 @@ LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 20)
 LOBBY_RALLY_COOLDOWN_SECONDS = _parse_int("LOBBY_RALLY_COOLDOWN_SECONDS", 120)  # 2 minutes
 LOBBY_READY_COOLDOWN_SECONDS = _parse_int("LOBBY_READY_COOLDOWN_SECONDS", 60)
 
+# Optional explicit gamba channel. Commands and announcements prefer this ID;
+# name-based discovery remains the fallback for multi-guild deployments.
+GAMBA_CHANNEL_ID = _parse_optional_int("GAMBA_CHANNEL_ID")
+
 # Dedicated lobby channel - if set, lobby embeds are posted here instead of command channel
 LOBBY_CHANNEL_ID: int | None = None
 _lobby_channel_raw = os.getenv("LOBBY_CHANNEL_ID")

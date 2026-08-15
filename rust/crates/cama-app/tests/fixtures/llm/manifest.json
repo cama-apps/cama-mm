@@ -1,0 +1,113 @@
+{
+  "schema": "cama.external-service-recording/v1",
+  "provider": "openai_compatible_groq_cerebras",
+  "base_urls": {
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
+    "cerebras": "https://api.cerebras.ai/v1/chat/completions"
+  },
+  "provenance": {
+    "kind": "sanitized_contract_fixture",
+    "source": "OpenAI-compatible Chat Completions response contract",
+    "captured_at": null,
+    "live_network_used": false,
+    "notes": "Bodies are minimized synthetic response shapes for the production Groq/Cerebras adapter. They are not captured provider traffic and contain no credentials or user prompts."
+  },
+  "redaction": {
+    "credentials": "none present",
+    "identifiers": "fixture model names, text, and token counts are synthetic"
+  },
+  "contracts": [
+    {
+      "id": "completion-success",
+      "provider": "groq",
+      "request": {
+        "method": "POST",
+        "path": "/openai/v1/chat/completions",
+        "model": "qwen/qwen3.6-27b"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "success.json",
+          "sha256": "17978c57e3a3622ecbdc7725cb265ab18ac374b8352ae426356da03c5036a655"
+        }
+      ]
+    },
+    {
+      "id": "rate-limit",
+      "provider": "groq",
+      "request": {
+        "method": "POST",
+        "path": "/openai/v1/chat/completions",
+        "model": "qwen/qwen3.6-27b"
+      },
+      "responses": [
+        {
+          "status": 429,
+          "content_type": "application/json",
+          "body": "rate_limited.json",
+          "sha256": "2c7df1f5c973ad0e75297c6b7ad248bf4e1cc95c9a8a373a5c2e496897b5c4f3"
+        }
+      ]
+    },
+    {
+      "id": "server-failure",
+      "provider": "cerebras",
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "model": "gemma-4-31b"
+      },
+      "responses": [
+        {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "server_error.json",
+          "sha256": "aef518a32622cfcb97fa57fac36c288f57d234a0676f9cad3bfbde6c63536ba6"
+        }
+      ]
+    },
+    {
+      "id": "malformed-response",
+      "provider": "groq",
+      "request": {
+        "method": "POST",
+        "path": "/openai/v1/chat/completions",
+        "model": "qwen/qwen3.6-27b"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "malformed.txt",
+          "sha256": "19d1d6976372c6dcd079ea9105832f282fc25f97ec214a033bc8ed62fdea419c"
+        }
+      ]
+    },
+    {
+      "id": "rate-limit-then-fallback-success",
+      "providers": ["groq", "cerebras"],
+      "request": {
+        "method": "POST",
+        "path": "/openai/v1/chat/completions"
+      },
+      "responses": [
+        {
+          "provider": "groq",
+          "status": 429,
+          "content_type": "application/json",
+          "body": "rate_limited.json",
+          "sha256": "2c7df1f5c973ad0e75297c6b7ad248bf4e1cc95c9a8a373a5c2e496897b5c4f3"
+        },
+        {
+          "provider": "cerebras",
+          "status": 200,
+          "content_type": "application/json",
+          "body": "success.json",
+          "sha256": "17978c57e3a3622ecbdc7725cb265ab18ac374b8352ae426356da03c5036a655"
+        }
+      ]
+    }
+  ]
+}

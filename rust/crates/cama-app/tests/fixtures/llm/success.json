@@ -1,0 +1,15 @@
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Synthetic provider completion.",
+        "reasoning_content": "Synthetic hidden reasoning must not be displayed."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 11,
+    "completion_tokens": 5,
+    "total_tokens": 16
+  }
+}

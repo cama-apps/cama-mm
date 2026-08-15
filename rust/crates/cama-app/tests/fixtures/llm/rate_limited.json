@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded",
+    "message": "Synthetic provider capacity limit."
+  }
+}

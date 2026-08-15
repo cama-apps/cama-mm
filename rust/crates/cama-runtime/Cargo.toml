@@ -1,0 +1,38 @@
+[package]
+name = "cama-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cama-rust"
+path = "src/main.rs"
+
+[dependencies]
+cama-app = { path = "../cama-app" }
+cama-db = { path = "../cama-db" }
+cama-domain = { path = "../cama-domain" }
+async-trait.workspace = true
+chrono.workspace = true
+fastrand.workspace = true
+fs2.workspace = true
+fontdue.workspace = true
+getrandom.workspace = true
+gif.workspace = true
+serenity.workspace = true
+rusqlite.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

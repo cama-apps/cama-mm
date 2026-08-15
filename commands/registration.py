@@ -451,7 +451,7 @@ class RegistrationCommands(commands.Cog):
                     self.error = "Invalid MMR"
                     await interaction_modal.response.send_message("❌ Invalid MMR", ephemeral=True)
                     return
-                if mmr_val < 0 or mmr_val > 12000:
+                if mmr_val <= 0 or mmr_val > 12000:
                     self.error = "Invalid MMR"
                     await interaction_modal.response.send_message("❌ Invalid MMR", ephemeral=True)
                     return

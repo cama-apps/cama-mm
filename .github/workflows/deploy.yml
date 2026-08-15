@@ -20,14 +20,30 @@ jobs:
 
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.2.2
+        env:
+          BOT_RUNTIME_SELECTION: ${{ vars.BOT_RUNTIME }}
+          RUST_CUTOVER_CANDIDATE_SELECTION: ${{ vars.RUST_CUTOVER_CANDIDATE }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: cama
           key: ${{ secrets.SSH_KEY }}
+          envs: BOT_RUNTIME_SELECTION,RUST_CUTOVER_CANDIDATE_SELECTION
           script: |
             set -eu
             DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
             cd ~/cama-mm
             git fetch origin main
             git checkout --force "$DEPLOY_SHA"
-            GIT_SHA="$DEPLOY_SHA" docker compose up -d --build
+            if [ -n "${BOT_RUNTIME_SELECTION:-}" ]; then
+              BOT_RUNTIME="$BOT_RUNTIME_SELECTION"
+              export BOT_RUNTIME
+            else
+              unset BOT_RUNTIME
+            fi
+            if [ "${RUST_CUTOVER_CANDIDATE_SELECTION:-}" = true ]; then
+              RUST_CUTOVER_CANDIDATE=true
+              export RUST_CUTOVER_CANDIDATE
+            else
+              unset RUST_CUTOVER_CANDIDATE
+            fi
+            GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime

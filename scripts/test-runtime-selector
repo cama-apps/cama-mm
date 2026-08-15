@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Mechanical checks for the single-service Compose runtime selector."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+COMPOSE = ROOT / "scripts" / "runtime-compose"
+ENTRYPOINT = ROOT / "scripts" / "runtime-entrypoint"
+DEPLOY = ROOT / "scripts" / "deploy-runtime"
+
+
+def rendered(runtime: str | None, candidate: str | None = None) -> dict[str, object]:
+    env = os.environ.copy()
+    env["GIT_SHA"] = "selector-test-sha"
+    if runtime is None:
+        env.pop("BOT_RUNTIME", None)
+    else:
+        env["BOT_RUNTIME"] = runtime
+    if candidate is None:
+        env.pop("RUST_CUTOVER_CANDIDATE", None)
+    else:
+        env["RUST_CUTOVER_CANDIDATE"] = candidate
+    result = subprocess.run(
+        [str(COMPOSE), "config", "--format", "json"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def assert_selector() -> None:
+    default = rendered(None)
+    python = rendered("python")
+    rust = rendered("rust")
+
+    assert set(default["services"]) == {"bot"}
+    assert set(python["services"]) == {"bot"}
+    assert set(rust["services"]) == {"bot"}
+
+    default_bot = default["services"]["bot"]
+    python_bot = python["services"]["bot"]
+    rust_bot = rust["services"]["bot"]
+    assert default_bot == python_bot
+    assert python_bot["build"]["dockerfile"] == "Dockerfile"
+    assert rust_bot["build"]["dockerfile"] == "Dockerfile.rust"
+    assert python_bot["build"]["args"]["GIT_SHA"] == "selector-test-sha"
+    assert rust_bot["build"]["args"]["GIT_SHA"] == "selector-test-sha"
+    assert python_bot["environment"]["BOT_RUNTIME"] == "python"
+    assert rust_bot["environment"]["BOT_RUNTIME"] == "rust"
+    assert "RUST_CUTOVER_CANDIDATE" not in python_bot["environment"]
+    assert rust_bot["environment"]["RUST_CUTOVER_CANDIDATE"] == "false"
+    assert rust_bot["command"] == ["serve"]
+    assert python_bot["user"] == rust_bot["user"] == "1001:1001"
+    assert python_bot["restart"] == rust_bot["restart"] == "always"
+    assert python_bot["environment"]["DB_PATH"] == "/app/data/cama_shuffle.db"
+    assert rust_bot["environment"]["DB_PATH"] == "/app/data/cama_shuffle.db"
+    assert python_bot["volumes"] == rust_bot["volumes"]
+
+    # The selector replaces only the implementation behind the existing bot
+    # service. Keep this as an exact rendered-service comparison so a future
+    # edit cannot silently drift mounts, credentials, UID, capabilities,
+    # restart policy, TTY, or network identity on just one runtime.
+    expected_rust_bot = json.loads(json.dumps(python_bot))
+    expected_rust_bot["build"]["dockerfile"] = "Dockerfile.rust"
+    expected_rust_bot["environment"]["BOT_RUNTIME"] = "rust"
+    expected_rust_bot["environment"]["RUST_CUTOVER_CANDIDATE"] = "false"
+    expected_rust_bot["command"] = ["serve"]
+    assert rust_bot == expected_rust_bot
+
+    # Compose forwards the exact operator value. RuntimeConfig accepts only
+    # lowercase `true`; case-mismatched values must remain visibly disabled
+    # rather than being normalized by the selector.
+    assert (
+        rendered("rust", "true")["services"]["bot"]["environment"]["RUST_CUTOVER_CANDIDATE"]
+        == "true"
+    )
+    assert (
+        rendered("rust", "TRUE")["services"]["bot"]["environment"]["RUST_CUTOVER_CANDIDATE"]
+        == "TRUE"
+    )
+
+    for invalid in ("", "bogus", "RUST"):
+        env = os.environ | {"BOT_RUNTIME": invalid}
+        result = subprocess.run(
+            [str(COMPOSE), "config", "--quiet"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0, invalid
+
+    for image_runtime in ("python", "rust"):
+        good = subprocess.run(
+            [str(ENTRYPOINT), image_runtime, "true"],
+            env=os.environ | {"BOT_RUNTIME": image_runtime},
+        )
+        assert good.returncode == 0
+        other = "rust" if image_runtime == "python" else "python"
+        mismatch = subprocess.run(
+            [str(ENTRYPOINT), image_runtime, "true"],
+            env=os.environ | {"BOT_RUNTIME": other},
+            capture_output=True,
+            text=True,
+        )
+        assert mismatch.returncode == 64
+
+        for invalid in (None, "", "bogus", "RUST"):
+            entrypoint_env = os.environ.copy()
+            if invalid is None:
+                entrypoint_env.pop("BOT_RUNTIME", None)
+            else:
+                entrypoint_env["BOT_RUNTIME"] = invalid
+            rejected = subprocess.run(
+                [str(ENTRYPOINT), image_runtime, "true"],
+                env=entrypoint_env,
+                capture_output=True,
+                text=True,
+            )
+            assert rejected.returncode == 64, (image_runtime, invalid)
+
+    with tempfile.TemporaryDirectory(prefix="cama-one-way-selector-") as raw_directory:
+        database_directory = Path(raw_directory)
+        database_path = database_directory / "cama_shuffle.db"
+        marker = database_directory / ".cama-rust-cutover"
+        marker.write_text("state=active\n", encoding="utf-8")
+        blocked_python = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "DB_PATH": str(database_path),
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert blocked_python.returncode == 65
+        assert "one-way Rust cutover started" in blocked_python.stderr
+        marker.write_text(
+            "state=recovering\nprevious_runtime=python\nprevious_revision=recovered-python-sha\n",
+            encoding="utf-8",
+        )
+        recovering_python = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "recovered-python-sha",
+                "DB_PATH": str(database_path),
+                "CAMA_DEPLOY_RECOVERY": "true",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert recovering_python.returncode == 0
+        mismatched_recovery = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "different-python-sha",
+                "DB_PATH": str(database_path),
+                "CAMA_DEPLOY_RECOVERY": "true",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert mismatched_recovery.returncode == 65
+        marker.write_text(
+            "state=pending\nprevious_runtime=python\nprevious_revision=recovered-python-sha\n",
+            encoding="utf-8",
+        )
+        pending_python = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "recovered-python-sha",
+                "DB_PATH": str(database_path),
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert pending_python.returncode == 65
+        marker.write_text("state=active\n", encoding="utf-8")
+        allowed_rust = subprocess.run(
+            [str(ENTRYPOINT), "rust", "true"],
+            env=os.environ | {"BOT_RUNTIME": "rust", "DB_PATH": str(database_path)},
+        )
+        assert allowed_rust.returncode == 0
+
+    deploy_env = os.environ | {"BOT_RUNTIME": "rust"}
+    deploy_env.pop("RUST_CUTOVER_CANDIDATE", None)
+    ungated_deploy = subprocess.run(
+        [str(DEPLOY)],
+        cwd=ROOT,
+        env=deploy_env,
+        capture_output=True,
+        text=True,
+    )
+    assert ungated_deploy.returncode == 65
+    assert "complete parity gate" in ungated_deploy.stderr
+
+
+if __name__ == "__main__":
+    try:
+        assert_selector()
+    except (AssertionError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"runtime selector validation failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    print("runtime selector validation passed (default=python, opt-in=rust, invalid=closed)")

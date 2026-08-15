@@ -55,6 +55,7 @@ async def require_gamba_channel(
     """Return True if the channel passes the gamba gate.
 
     Pass-conditions:
+    - channel id (or its parent's id) matches ``GAMBA_CHANNEL_ID``
     - channel name (or its parent, for threads) contains 'gamba'
     - channel id (or its parent's id) is in ``extra_allowed_channel_ids``
 
@@ -67,21 +68,25 @@ async def require_gamba_channel(
     use response.send_message.
     """
     channel = interaction.channel
+    from config import GAMBA_CHANNEL_ID
+
+    configured_ids = (*extra_allowed_channel_ids, GAMBA_CHANNEL_ID)
+    channel_id = getattr(channel, "id", None)
+    parent = getattr(channel, "parent", None)
+    parent_id = getattr(parent, "id", None) if parent is not None else None
+    if any(
+        configured_id is not None
+        and configured_id in (channel_id, parent_id)
+        for configured_id in configured_ids
+    ):
+        return True
+
     channel_name = (getattr(channel, "name", "") or "").lower()
     if "gamba" in channel_name:
         return True
-    parent = getattr(channel, "parent", None)
     if parent is not None:
         parent_name = (getattr(parent, "name", "") or "").lower()
         if "gamba" in parent_name:
-            return True
-
-    if extra_allowed_channel_ids:
-        channel_id = getattr(channel, "id", None)
-        if channel_id is not None and channel_id in extra_allowed_channel_ids:
-            return True
-        parent_id = getattr(parent, "id", None) if parent is not None else None
-        if parent_id is not None and parent_id in extra_allowed_channel_ids:
             return True
 
     # Charge 1 JC
