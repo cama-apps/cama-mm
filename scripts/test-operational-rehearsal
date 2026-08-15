@@ -1328,6 +1328,136 @@ def assert_deploy_runtime_rehearsal() -> None:
         assert not (interrupted / "data" / ".cama-rust-cutover").exists()
         assert_database_restored_before_retained_image(interrupted, state)
 
+        interrupted_redeploy, interrupted_redeploy_state = prepare_deploy_fixture(
+            parent,
+            "interrupted-rust-redeploy-recovers-rust",
+            scenario="pending_rust_recovery",
+            initial_runtime="rust",
+            readiness_status="complete",
+        )
+        redeploy_timestamp = "20260814T130000Z"
+        redeploy_database = interrupted_redeploy / "data" / "cama_shuffle.db"
+        redeploy_backup = (
+            interrupted_redeploy / "data" / "backups" / f"predeploy-{redeploy_timestamp}.db"
+        )
+        backup_result = run_backup(redeploy_database, redeploy_backup)
+        assert backup_result.returncode == 0, backup_result.stderr
+        with sqlite3.connect(redeploy_database) as database:
+            database.execute(
+                "UPDATE players SET discord_username='interrupted-rust-redeploy-write' "
+                "WHERE discord_id=?",
+                (REHEARSAL_PLAYER_ID,),
+            )
+            database.commit()
+        Path(f"{redeploy_database}-wal").write_bytes(b"interrupted-rust-wal")
+        Path(f"{redeploy_database}-shm").write_bytes(b"interrupted-rust-shm")
+        Path(f"{redeploy_database}-journal").write_bytes(b"interrupted-rust-journal")
+        redeploy_facts = json.loads(interrupted_redeploy_state.read_text(encoding="utf-8"))
+        redeploy_facts["backup_image"] = f"cama-mm-python-backup:{redeploy_timestamp}"
+        redeploy_facts["backup_runs"] = 1
+        redeploy_facts["backup"] = {
+            "source": str(redeploy_database),
+            "destination": str(redeploy_backup),
+            "metadata": f"{redeploy_backup}.json",
+        }
+        redeploy_facts["tags"][f"cama-mm-bot-rollback:{redeploy_timestamp}"] = "sha256:initial-rust"
+        redeploy_facts["current"] = {
+            "id": "interrupted-redeploy-rust-container",
+            "runtime": "rust",
+            "sha": "interrupted-new-rust-sha",
+            "image": "sha256:interrupted-new-rust",
+            "running": True,
+            "health": "starting",
+            "uid": 1001,
+            "data_mount": str(interrupted_redeploy / "data"),
+            "process": "cama-rust",
+            "env": [
+                "BOT_RUNTIME=rust",
+                "GIT_SHA=interrupted-new-rust-sha",
+                "DB_PATH=/app/data/cama_shuffle.db",
+            ],
+        }
+        redeploy_facts["process_history"].append("cama-rust")
+        interrupted_redeploy_state.write_text(
+            json.dumps(redeploy_facts, sort_keys=True), encoding="utf-8"
+        )
+        (interrupted_redeploy / "data" / ".cama-rust-cutover").write_text(
+            "\n".join(
+                [
+                    "state=pending",
+                    "revision=interrupted-new-rust-sha",
+                    f"backup={redeploy_backup}",
+                    f"updated_at={redeploy_timestamp}",
+                    "previous_runtime=rust",
+                    "previous_revision=previous-rust-sha",
+                    f"retained_image=cama-mm-bot-rollback:{redeploy_timestamp}",
+                    f"backup_image=cama-mm-python-backup:{redeploy_timestamp}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result, state = run_deploy(
+            interrupted_redeploy,
+            interrupted_redeploy_state,
+            runtime="rust",
+            git_sha="redeploy-recovery-invocation-sha",
+            cutover_candidate=None,
+        )
+        assert result.returncode == 75, result.stderr
+        assert "recovered interrupted Rust deployment to verified rust" in result.stderr
+        assert "rerun the requested deployment" in result.stderr
+        assert state["current"]["runtime"] == "rust"
+        assert state["current"]["sha"] == "previous-rust-sha"
+        assert state["current"]["image"] == "sha256:initial-rust"
+        assert state["process_history"] == ["cama-rust", "cama-rust", "cama-rust"]
+        recovered_marker = (interrupted_redeploy / "data" / ".cama-rust-cutover").read_text(
+            encoding="utf-8"
+        )
+        assert "state=active" in recovered_marker
+        assert "revision=previous-rust-sha" in recovered_marker
+        assert "state=pending" not in recovered_marker
+        assert "revision=interrupted-new-rust-sha" not in recovered_marker
+        assert_database_restored_before_retained_image(interrupted_redeploy, state)
+        assert not any(
+            event["kind"] == "compose"
+            and event["command"] in {"build", "run", "up"}
+            and event["bot_runtime"] == "python"
+            for event in state["events"]
+        )
+        redeploy_events = state["events"]
+        stop_candidate_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "stop"
+            and event["command_arguments"] == ["interrupted-redeploy-rust-container"],
+            "stop interrupted Rust redeploy candidate",
+        )
+        restore_database_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "run"
+            and "/app/scripts/sqlite_restore.py" in event["command_arguments"],
+            "restore Rust redeploy database",
+        )
+        restore_image_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "tag"
+            and event["command_arguments"][0] == f"cama-mm-bot-rollback:{redeploy_timestamp}",
+            "restore retained Rust image",
+        )
+        recovered_up_index = event_index(
+            redeploy_events,
+            lambda event: event["kind"] == "compose"
+            and event["command"] == "up"
+            and event["bot_runtime"] == "rust",
+            "restart recovered Rust runtime",
+        )
+        assert (
+            stop_candidate_index < restore_database_index < restore_image_index < recovered_up_index
+        )
+
         pending_marker_failed, pending_marker_failed_state = prepare_deploy_fixture(
             parent,
             "pending-marker-publication-failure",
