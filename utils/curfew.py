@@ -10,9 +10,12 @@ and embeds/messages (display formatting).
 
 import re
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-DEFAULT_CURFEW_TIMEZONE = "America/New_York"
+from utils.timezone import DEFAULT_TIMEZONE, is_valid_timezone  # noqa: F401  (re-exported)
+
+# Backward-compatible alias — curfew's own default, same value as the general one.
+DEFAULT_CURFEW_TIMEZONE = DEFAULT_TIMEZONE
 
 _CLOCK_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -25,9 +28,13 @@ def parse_clock(text: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def is_valid_timezone(timezone: str) -> bool:
-    """Return whether ``timezone`` is a real IANA zone name."""
-    return timezone in available_timezones()
+def _effective_timezone(player) -> str:
+    """Resolve the timezone to interpret a player's curfew in.
+
+    Prefers a curfew-specific override, falls back to the player's general
+    /player timezone setting, then to the hardcoded default.
+    """
+    return player.curfew_timezone or getattr(player, "timezone", None) or DEFAULT_TIMEZONE
 
 
 def is_within_curfew(player, *, now: datetime | None = None) -> bool:
@@ -45,7 +52,7 @@ def is_within_curfew(player, *, now: datetime | None = None) -> bool:
         return False
 
     try:
-        tz = ZoneInfo(player.curfew_timezone or DEFAULT_CURFEW_TIMEZONE)
+        tz = ZoneInfo(_effective_timezone(player))
     except ZoneInfoNotFoundError:
         tz = ZoneInfo(DEFAULT_CURFEW_TIMEZONE)
 
@@ -67,8 +74,7 @@ def format_curfew_window(player) -> str:
     """Render a player's curfew window for user-facing messages, e.g. '10:00 PM - 6:00 AM America/New_York'."""
     bedtime = _format_clock(player.curfew_hour, player.curfew_minute)
     wake = _format_clock(player.curfew_wake_hour, player.curfew_wake_minute)
-    tz_name = player.curfew_timezone or DEFAULT_CURFEW_TIMEZONE
-    return f"{bedtime} - {wake} {tz_name}"
+    return f"{bedtime} - {wake} {_effective_timezone(player)}"
 
 
 def _format_clock(hour: int | None, minute: int | None) -> str:

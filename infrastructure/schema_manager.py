@@ -879,6 +879,8 @@ class SchemaManager:
                 self._migration_create_draft_financial_effects,
             ),
             ("add_curfew_columns", self._migration_add_curfew_columns),
+            ("add_player_timezone_column", self._migration_add_player_timezone_column),
+            ("add_dota_play_hours_column", self._migration_add_dota_play_hours_column),
         ]
 
     # --- Migrations ---
@@ -4585,6 +4587,14 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "players", "curfew_wake_hour", "INTEGER")
         self._add_column_if_not_exists(cursor, "players", "curfew_wake_minute", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "curfew_timezone", "TEXT")
+
+    def _migration_add_player_timezone_column(self, cursor) -> None:
+        """Add a general per-player timezone preference (used by curfew and future features)."""
+        self._add_column_if_not_exists(cursor, "players", "timezone", "TEXT")
+
+    def _migration_add_dota_play_hours_column(self, cursor) -> None:
+        """Add informational (non-enforced) preferred dota play-time hours, JSON-encoded list of ints."""
+        self._add_column_if_not_exists(cursor, "players", "dota_play_hours", "TEXT")
 
     def _migration_create_dig_system_tables(self, cursor) -> None:
         """Create all tables for the tunnel digging minigame."""

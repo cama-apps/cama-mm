@@ -77,6 +77,16 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def update_timezone(self, discord_id: int, guild_id: int, timezone: str | None) -> None:
+        """Persist a player's general timezone preference."""
+        ...
+
+    @abstractmethod
+    def update_dota_play_hours(self, discord_id: int, guild_id: int, hours: list[int] | None) -> None:
+        """Persist a player's informational (non-enforced) preferred dota play hours."""
+        ...
+
+    @abstractmethod
     def update_curfew(
         self,
         discord_id: int,

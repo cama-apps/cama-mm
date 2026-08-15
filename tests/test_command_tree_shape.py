@@ -185,7 +185,7 @@ def test_command_tree_stays_within_discord_limits():
     assert top_level_count <= 100
     assert all(count <= 25 for count in direct_option_counts.values())
     assert direct_option_counts["/dig"] == 22
-    assert direct_option_counts["/player"] == 9
+    assert direct_option_counts["/player"] == 11
     assert direct_option_counts["/player lobby"] == 2
     assert direct_option_counts["/survey"] == 9
     assert direct_option_counts["/survey question"] == 4

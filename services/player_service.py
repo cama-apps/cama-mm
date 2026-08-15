@@ -10,8 +10,10 @@ from opendota_integration import OpenDotaAPI
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IPlayerRepository
-from utils.curfew import format_curfew_window, is_valid_timezone
+from utils.curfew import format_curfew_window
+from utils.playtime import aggregate_popular_hours
 from utils.region import REGION_NAMES, infer_region_from_counts, resolve_region
+from utils.timezone import DEFAULT_TIMEZONE, is_valid_timezone
 
 logger = logging.getLogger("cama_bot.player_service")
 
@@ -191,6 +193,24 @@ class PlayerService:
             "source": "set" if is_explicit else ("inferred" if code else "none"),
         }
 
+    def set_timezone(self, discord_id: int, guild_id: int, timezone: str) -> None:
+        """Persist a player's general timezone (used by curfew and other time-based features)."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        if not is_valid_timezone(timezone):
+            raise ValueError(
+                f"Unknown timezone '{timezone}'. Use an IANA name like 'America/New_York'."
+            )
+        self.player_repo.update_timezone(discord_id, guild_id, timezone)
+
+    def get_timezone_info(self, discord_id: int, guild_id: int) -> dict:
+        """Return the player's general timezone setting for display."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        return {"timezone": player.timezone}
+
     def set_curfew(
         self,
         discord_id: int,
@@ -200,9 +220,14 @@ class PlayerService:
         curfew_minute: int,
         wake_hour: int,
         wake_minute: int,
-        timezone: str,
+        timezone: str | None = None,
     ) -> None:
-        """Enable a player's personal lobby-queue curfew window."""
+        """Enable a player's personal lobby-queue curfew window.
+
+        ``timezone`` overrides curfew's timezone only; leave it unset to have
+        the curfew follow the player's general /player timezone setting (or
+        the hardcoded default if that's unset too) — see utils.curfew.
+        """
         player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             raise ValueError("Player not registered.")
@@ -213,7 +238,7 @@ class PlayerService:
                 raise ValueError("Minute must be between 0 and 59.")
         if curfew_hour == wake_hour and curfew_minute == wake_minute:
             raise ValueError("Bedtime and wake time can't be the same.")
-        if not is_valid_timezone(timezone):
+        if timezone is not None and not is_valid_timezone(timezone):
             raise ValueError(
                 f"Unknown timezone '{timezone}'. Use an IANA name like 'America/New_York'."
             )
@@ -256,6 +281,49 @@ class PlayerService:
             "enabled": player.curfew_enabled,
             "window": format_curfew_window(player) if player.curfew_hour is not None else None,
         }
+
+    def set_dota_play_hours(self, discord_id: int, guild_id: int, hours: list[int]) -> None:
+        """Persist a player's informational dota play-time hours.
+
+        Purely informational — unlike curfew, this never blocks or removes
+        anyone from a lobby. It only feeds get_popular_play_hours.
+        """
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        if not hours:
+            raise ValueError("Give at least one hour.")
+        if any(not (0 <= hour <= 23) for hour in hours):
+            raise ValueError("Hours must be between 0 and 23.")
+        self.player_repo.update_dota_play_hours(discord_id, guild_id, sorted(set(hours)))
+
+    def clear_dota_play_hours(self, discord_id: int, guild_id: int) -> None:
+        """Clear a player's informational dota play-time hours."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        self.player_repo.update_dota_play_hours(discord_id, guild_id, None)
+
+    def get_dota_play_hours_info(self, discord_id: int, guild_id: int) -> dict:
+        """Return the player's informational play-time hours for display."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        return {"hours": player.dota_play_hours}
+
+    def get_popular_play_hours(
+        self, guild_id: int, *, reporting_timezone: str | None = None
+    ) -> list[int]:
+        """Aggregate every registered player's play hours into a 24-length histogram.
+
+        Index i is the count of players who want to play at hour i (0-23) in
+        ``reporting_timezone`` (default America/New_York), after converting
+        each player's own hours out of their own timezone.
+        """
+        players = self.player_repo.get_all(guild_id)
+        return aggregate_popular_hours(
+            players, reporting_timezone=reporting_timezone or DEFAULT_TIMEZONE
+        )
 
     def backfill_inferred_regions(self, api=None) -> int:
         """Fill inferred_region for registered players not yet checked.

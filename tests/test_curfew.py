@@ -21,16 +21,18 @@ def _player(
     curfew_minute=0,
     wake_hour=6,
     wake_minute=0,
+    curfew_timezone=None,
     timezone=None,
 ):
-    """A minimal stand-in for a Player (is_within_curfew only reads curfew_* attrs)."""
+    """A minimal stand-in for a Player (is_within_curfew only reads curfew_*/timezone attrs)."""
     return SimpleNamespace(
         curfew_enabled=enabled,
         curfew_hour=curfew_hour,
         curfew_minute=curfew_minute,
         curfew_wake_hour=wake_hour,
         curfew_wake_minute=wake_minute,
-        curfew_timezone=timezone,
+        curfew_timezone=curfew_timezone,
+        timezone=timezone,
     )
 
 
@@ -84,15 +86,46 @@ class TestIsWithinCurfew:
 
     def test_converts_from_utc_using_players_timezone(self):
         """10pm EST is 3am UTC (winter, no DST) — the check must convert, not compare raw UTC."""
-        player = _player(curfew_hour=22, wake_hour=6, timezone="America/New_York")
+        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone="America/New_York")
         utc_now = datetime(2026, 1, 2, 3, 30, tzinfo=ZoneInfo("UTC"))  # 10:30pm EST
         assert is_within_curfew(player, now=utc_now) is True
 
     def test_unknown_timezone_falls_back_to_default(self):
-        player = _player(curfew_hour=22, wake_hour=6, timezone="Not/AZone")
+        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone="Not/AZone")
         # 10:30pm in the default timezone, expressed as its UTC equivalent.
         moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_CURFEW_TIMEZONE))
         assert is_within_curfew(player, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
+
+
+class TestTimezoneFallbackChain:
+    """curfew_timezone (override) > player.timezone (general) > DEFAULT_CURFEW_TIMEZONE."""
+
+    def test_falls_back_to_general_timezone_when_curfew_timezone_unset(self):
+        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone=None, timezone="Asia/Tokyo")
+        # 10:30pm JST — should register as inside curfew only under the Tokyo interpretation.
+        utc_now = datetime(2026, 1, 1, 13, 30, tzinfo=ZoneInfo("UTC"))  # 10:30pm JST (UTC+9)
+        assert is_within_curfew(player, now=utc_now) is True
+
+    def test_curfew_timezone_override_wins_over_general_timezone(self):
+        player = _player(
+            curfew_hour=22, wake_hour=6, curfew_timezone="America/New_York", timezone="Asia/Tokyo"
+        )
+        # 13:30 UTC is 8:30am EST (winter) — outside the 10pm-6am EST window,
+        # proving the explicit curfew_timezone override, not the general one, wins.
+        utc_now = datetime(2026, 1, 1, 13, 30, tzinfo=ZoneInfo("UTC"))
+        assert is_within_curfew(player, now=utc_now) is False
+
+    def test_falls_back_to_default_when_both_unset(self):
+        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone=None, timezone=None)
+        moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_CURFEW_TIMEZONE))
+        assert is_within_curfew(player, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
+
+    def test_format_falls_back_to_general_timezone(self):
+        player = _player(
+            curfew_hour=22, curfew_minute=0, wake_hour=6, wake_minute=0,
+            curfew_timezone=None, timezone="Asia/Tokyo",
+        )
+        assert format_curfew_window(player) == "10:00 PM - 6:00 AM Asia/Tokyo"
 
 
 class TestParseClock:
@@ -117,7 +150,9 @@ class TestParseClock:
 
 class TestFormatCurfewWindow:
     def test_formats_am_pm_and_timezone(self):
-        player = _player(curfew_hour=22, curfew_minute=0, wake_hour=6, wake_minute=30, timezone="America/New_York")
+        player = _player(
+            curfew_hour=22, curfew_minute=0, wake_hour=6, wake_minute=30, curfew_timezone="America/New_York"
+        )
         assert format_curfew_window(player) == "10:00 PM - 6:30 AM America/New_York"
 
     def test_midnight_and_noon_edge_cases(self):
