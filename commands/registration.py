@@ -27,7 +27,7 @@ from utils.suspension_format import (
     format_suspension_scope,
     format_suspension_terms,
 )
-from utils.timezone import DEFAULT_TIMEZONE
+from utils.timezone import DEFAULT_TIMEZONE, format_common_timezones
 
 logger = logging.getLogger("cama_bot.commands.registration")
 
@@ -1014,6 +1014,16 @@ class RegistrationCommands(commands.Cog):
         else:
             msg = f"Your timezone is **{info['timezone']}**."
         await interaction.followup.send(msg, ephemeral=True)
+
+    @player_timezone.command(
+        name="list", description="See common timezone names to use with /player timezone set"
+    )
+    @require_guild
+    async def timezone_list(self, interaction: discord.Interaction):
+        """Show a curated menu of common IANA timezone names."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        await interaction.followup.send(format_common_timezones(), ephemeral=True)
 
     @player_playtime.command(
         name="set",
