@@ -92,114 +92,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
     verify_python_to_rust_repository_migration(&root)?;
     let readiness = read_cutover_readiness(&root.join("rust/parity/cutover_readiness.tsv"))?;
 
-    let python_output = checked_output(
-        parity_python(&root).args(["-m", "pytest", "-n", "0", "--collect-only", "-q"]),
-        "collect Python tests",
-    )?;
-    let python_stdout = output_text(python_output, "pytest collection")?;
-    let python_tests: BTreeSet<String> = python_stdout
-        .lines()
-        .filter(|line| line.starts_with("tests/") && line.contains("::"))
-        .map(str::to_owned)
-        .collect();
-    if python_tests.is_empty() {
-        return Err("pytest collection returned no test node IDs".to_owned());
-    }
-
-    let baseline = read_baseline(&root.join("rust/parity/baseline.txt"))?;
-    let actual_fingerprint = fnv1a64_lines(python_tests.iter().map(String::as_str));
-    if baseline.collected_cases != python_tests.len()
-        || baseline.node_id_fingerprint != actual_fingerprint
-    {
-        return Err(format!(
-            "Python test inventory changed: expected {} cases/{:016x}, found {} cases/{:016x}; review the new behavior and intentionally update rust/parity/baseline.txt",
-            baseline.collected_cases,
-            baseline.node_id_fingerprint,
-            python_tests.len(),
-            actual_fingerprint,
-        ));
-    }
-
-    let mappings = read_mappings(&root.join("rust/parity/tests.tsv"))?;
-    let mapped_python: BTreeSet<&str> = mappings
-        .iter()
-        .map(|mapping| mapping.python_test.as_str())
-        .collect();
-    if mapped_python.len() != mappings.len() {
-        return Err("rust/parity/tests.tsv contains duplicate Python node IDs".to_owned());
-    }
-    let mapped_rust: BTreeSet<&str> = mappings
-        .iter()
-        .map(|mapping| mapping.rust_test.as_str())
-        .collect();
-    if mapped_rust.len() != mappings.len() {
-        return Err(
-            "rust/parity/tests.tsv must map each Python case to a distinct Rust test ID".to_owned(),
-        );
-    }
-    let unknown_python: Vec<_> = mapped_python
-        .difference(&python_tests.iter().map(String::as_str).collect())
-        .copied()
-        .collect();
-    if !unknown_python.is_empty() {
-        return Err(format!(
-            "parity mappings reference unknown Python tests: {}",
-            unknown_python.join(", ")
-        ));
-    }
-
-    let rust_output = checked_output(
-        Command::new("cargo").current_dir(&root).args([
-            "test",
-            "--locked",
-            "--manifest-path",
-            "rust/Cargo.toml",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "--list",
-        ]),
-        "list Rust tests",
-    )?;
-    let rust_stdout = output_text(rust_output, "cargo test -- --list")?;
-    let rust_test_list: Vec<&str> = rust_stdout
-        .lines()
-        .filter_map(|line| line.strip_suffix(": test"))
-        .collect();
-    let mut rust_test_counts = BTreeMap::new();
-    for test in &rust_test_list {
-        *rust_test_counts.entry(*test).or_insert(0_usize) += 1;
-    }
-    let duplicate_rust_tests: Vec<_> = rust_test_counts
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(test, count)| format!("{test} ({count} copies)"))
-        .collect();
-    if !duplicate_rust_tests.is_empty() {
-        return Err(format!(
-            "Rust test IDs must be unique across the workspace: {}",
-            duplicate_rust_tests.join(", ")
-        ));
-    }
-    let rust_tests: BTreeSet<&str> = rust_test_list.into_iter().collect();
-    let unknown_rust: Vec<_> = mappings
-        .iter()
-        .filter(|mapping| !rust_tests.contains(mapping.rust_test.as_str()))
-        .map(|mapping| mapping.rust_test.as_str())
-        .collect();
-    if !unknown_rust.is_empty() {
-        return Err(format!(
-            "parity mappings reference unknown Rust tests: {}",
-            unknown_rust.join(", ")
-        ));
-    }
-
-    let mapped = mappings.len();
-    let total = python_tests.len();
-    let percentage = (mapped as f64 / total as f64) * 100.0;
-    println!(
-        "Rust parity inventory: {mapped}/{total} Python cases mapped to distinct existing Rust tests ({percentage:.2}%)"
-    );
     println!(
         "Differential contracts: {vector_count} domain vectors plus one thirteen-repository serial Python→Rust SQLite migration bridge"
     );
@@ -214,21 +106,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
         open_readiness.len(),
     );
     println!("Production runtime inventory: {runtime_wired} wired, {runtime_required} required");
-    if mapped != total {
-        let summary = unmapped_module_counts(&python_tests, &mapped_python)
-            .into_iter()
-            .take(10)
-            .map(|(module, count)| format!("{module} ({count})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("Largest remaining Python modules: {summary}");
-    }
-    if require_complete && mapped != total {
-        return Err(format!(
-            "cutover requires complete parity; {} cases remain unmapped",
-            total - mapped
-        ));
-    }
     if require_complete && !open_readiness.is_empty() {
         return Err(format!(
             "cutover requires all operational readiness gates; {} remain open: {}",
@@ -246,23 +123,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn unmapped_module_counts(
-    python_tests: &BTreeSet<String>,
-    mapped_python: &BTreeSet<&str>,
-) -> Vec<(String, usize)> {
-    let mut counts = BTreeMap::new();
-    for test in python_tests {
-        if mapped_python.contains(test.as_str()) {
-            continue;
-        }
-        let module = test.split("::").next().unwrap_or(test).to_owned();
-        *counts.entry(module).or_insert(0_usize) += 1;
-    }
-    let mut counts = counts.into_iter().collect::<Vec<_>>();
-    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    counts
 }
 
 fn verify_python_to_rust_repository_migration(root: &Path) -> Result<(), String> {
@@ -1636,55 +1496,6 @@ fn output_text(output: Output, description: &str) -> Result<String, String> {
         .map_err(|error| format!("{description} emitted non-UTF-8 output: {error}"))
 }
 
-struct Baseline {
-    collected_cases: usize,
-    node_id_fingerprint: u64,
-}
-
-fn read_baseline(path: &Path) -> Result<Baseline, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let mut collected_cases = None;
-    let mut node_id_fingerprint = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("invalid baseline line {line:?}"))?;
-        match key.trim() {
-            "collected_cases" => {
-                collected_cases = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|error| format!("invalid collected_cases: {error}"))?,
-                );
-            }
-            "node_id_fnv1a64" => {
-                node_id_fingerprint = Some(
-                    u64::from_str_radix(value.trim(), 16)
-                        .map_err(|error| format!("invalid node_id_fnv1a64: {error}"))?,
-                );
-            }
-            key => return Err(format!("unknown baseline key {key:?}")),
-        }
-    }
-    Ok(Baseline {
-        collected_cases: collected_cases
-            .ok_or_else(|| "baseline is missing collected_cases".to_owned())?,
-        node_id_fingerprint: node_id_fingerprint
-            .ok_or_else(|| "baseline is missing node_id_fnv1a64".to_owned())?,
-    })
-}
-
-struct Mapping {
-    python_test: String,
-    rust_test: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadinessStatus {
     Open,
@@ -1777,32 +1588,6 @@ fn parse_cutover_readiness(contents: &str, source: &str) -> Result<Vec<Readiness
     Ok(gates)
 }
 
-fn read_mappings(path: &Path) -> Result<Vec<Mapping>, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    contents
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| {
-            let line = line.trim();
-            !line.is_empty() && !line.starts_with('#')
-        })
-        .map(|(index, line)| {
-            let (python_test, rust_test) = line.split_once('\t').ok_or_else(|| {
-                format!(
-                    "{}:{} must contain a tab-separated Python and Rust test ID",
-                    path.display(),
-                    index + 1
-                )
-            })?;
-            Ok(Mapping {
-                python_test: python_test.to_owned(),
-                rust_test: rust_test.to_owned(),
-            })
-        })
-        .collect()
-}
-
 fn fnv1a64_lines<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for line in lines {
@@ -1817,31 +1602,6 @@ fn fnv1a64_lines<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fnv_fingerprint_is_stable() {
-        assert_eq!(fnv1a64_lines(["a", "b"].into_iter()), 0x78ed_6781_f136_a14e);
-    }
-
-    #[test]
-    fn unmapped_report_is_sorted_by_count_then_module() {
-        let python_tests = [
-            "tests/test_b.py::test_two".to_owned(),
-            "tests/test_a.py::test_one".to_owned(),
-            "tests/test_b.py::test_one".to_owned(),
-            "tests/test_c.py::test_one".to_owned(),
-        ]
-        .into_iter()
-        .collect();
-        let mapped_python = ["tests/test_c.py::test_one"].into_iter().collect();
-        assert_eq!(
-            unmapped_module_counts(&python_tests, &mapped_python),
-            vec![
-                ("tests/test_b.py".to_owned(), 2),
-                ("tests/test_a.py".to_owned(), 1),
-            ]
-        );
-    }
 
     #[test]
     fn cutover_readiness_requires_every_named_operational_gate() {

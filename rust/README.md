@@ -82,9 +82,8 @@ automatic recovery path described below.
   command replacement remains explicitly cutover-gated by the operational
   readiness manifest, so a complete inventory or gateway connection alone cannot
   be mistaken for production readiness.
-- `xtask`: machine-checked Python/Rust test inventory, migration-manifest drift,
-  and cutover-completeness gates.
-- `parity/tests.tsv`: exact Python pytest case to Rust test mappings.
+- `xtask`: migration-manifest drift, differential contracts, and operational
+  readiness checks retained for targeted local audits.
 - `parity/cutover_readiness.tsv`: required operational gates that keep cutover
   blocked even after numeric test parity until live adapters and rehearsals have
   explicit evidence.
@@ -97,7 +96,6 @@ automatic recovery path described below.
   disbursement embeds, and Discord
   embed truncation/packing/validation.
 - `parity/python_vectors.py`: the long-lived Python side of that vector runner.
-- `parity/baseline.txt`: fingerprint of the entire current pytest collection.
 - `schema/expected_migrations.txt`: ordered migration contract exported from
   Python and verified on every CI run.
 

@@ -1,0 +1,4 @@
+[build]
+# Keep native development artifacts separate from Docker/Windows-owned output.
+# CI explicitly overrides this with CARGO_TARGET_DIR=rust/target.
+target-dir = "rust/target-native"
