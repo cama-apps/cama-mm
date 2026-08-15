@@ -40,6 +40,17 @@ def test_dota_betting_window_defaults_to_twenty_minutes():
     assert config_module.BET_LOCK_SECONDS == 20 * 60
 
 
+def test_dota_match_rewards_ignore_environment_overrides():
+    with patch.dict(
+        os.environ,
+        {"JOPACOIN_WIN_REWARD": "3", "JOPACOIN_PER_GAME": "2"},
+    ):
+        config_module = _load_config_without_env()
+
+    assert config_module.JOPACOIN_WIN_REWARD == 10
+    assert config_module.JOPACOIN_PER_GAME == 5
+
+
 def test_openskill_shuffle_chance_defaults_to_two_percent():
     config_module = _load_config_without_env("OPENSKILL_SHUFFLE_CHANCE")
 
