@@ -118,6 +118,21 @@ if command == "inspect":
         finish(str(container["health"]))
     finish("unknown fake inspect format", 45)
 
+if command == "pull":
+    if len(arguments) != 2 or arguments[1] != os.environ.get("RUST_RUNTIME_IMAGE"):
+        finish("unexpected fake docker pull", 45)
+    image = arguments[1]
+    state["tags"][image] = f"sha256:prebuilt-{image.rsplit(':', 1)[-1]}"
+    finish(image)
+
+if command == "image":
+    if len(arguments) != 5 or arguments[1:3] != ["inspect", "--format"]:
+        finish("unexpected fake docker image command", 45)
+    image = arguments[4]
+    if image not in state["tags"]:
+        finish("unknown fake image", 44)
+    finish(image.rsplit(":", 1)[-1])
+
 if command == "exec":
     container = current_container()
     if arguments[1] != container["id"]:
@@ -724,15 +739,15 @@ def assert_backup_contract() -> None:
 def assert_deploy_workflow_handoff() -> None:
     workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
     required_fragments = (
-        "BOT_RUNTIME_SELECTION: ${{ vars.BOT_RUNTIME }}",
-        "RUST_CUTOVER_CANDIDATE_SELECTION: ${{ vars.RUST_CUTOVER_CANDIDATE }}",
-        "envs: BOT_RUNTIME_SELECTION,RUST_CUTOVER_CANDIDATE_SELECTION",
+        "packages: read",
+        "GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "RUST_RUNTIME_IMAGE: ghcr.io/${{ github.repository }}-rust:",
+        "envs: GHCR_USERNAME,GHCR_TOKEN,RUST_RUNTIME_IMAGE",
         'DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"',
         'git checkout --force "$DEPLOY_SHA"',
-        'BOT_RUNTIME="$BOT_RUNTIME_SELECTION"',
-        "export BOT_RUNTIME",
+        'BOT_RUNTIME=rust',
         "RUST_CUTOVER_CANDIDATE=true",
-        "export RUST_CUTOVER_CANDIDATE",
+        "export BOT_RUNTIME RUST_CUTOVER_CANDIDATE RUST_RUNTIME_IMAGE",
         'GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime',
     )
     missing = [fragment for fragment in required_fragments if fragment not in workflow]
@@ -933,6 +948,7 @@ def run_deploy(
     runtime: str,
     git_sha: str,
     cutover_candidate: str | None,
+    runtime_image: str | None = None,
     expect_lock_released: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     environment = os.environ.copy()
@@ -949,6 +965,10 @@ def run_deploy(
         environment.pop("RUST_CUTOVER_CANDIDATE", None)
     else:
         environment["RUST_CUTOVER_CANDIDATE"] = cutover_candidate
+    if runtime_image is None:
+        environment.pop("RUST_RUNTIME_IMAGE", None)
+    else:
+        environment["RUST_RUNTIME_IMAGE"] = runtime_image
     result = subprocess.run(
         [str(fixture / "scripts" / "deploy-runtime")],
         cwd=fixture,
@@ -1988,6 +2008,7 @@ def assert_deploy_runtime_rehearsal() -> None:
             runtime="rust",
             git_sha="rust-success-sha",
             cutover_candidate="true",
+            runtime_image="ghcr.io/cama-apps/cama-mm-rust:rust-success-sha",
         )
         assert result.returncode == 0, result.stderr
         assert "deployed BOT_RUNTIME=rust GIT_SHA=rust-success-sha" in result.stdout
@@ -2024,7 +2045,14 @@ def assert_deploy_runtime_rehearsal() -> None:
             and "/app/scripts/sqlite_backup.py" in event["command_arguments"],
             "run backup helper",
         )
-        build = compose_event(events, "build", "rust")
+        pull = event_index(
+            events,
+            lambda event: event["kind"] == "docker"
+            and event["command"] == "pull"
+            and event["command_arguments"]
+            == ["ghcr.io/cama-apps/cama-mm-rust:rust-success-sha"],
+            "pull immutable Rust image",
+        )
         preflight = compose_event(events, "run", "rust")
         rust_up = compose_event(events, "up", "rust")
         assert_same_service_up(rust_up)
@@ -2041,7 +2069,7 @@ def assert_deploy_runtime_rehearsal() -> None:
             and event["command_arguments"] == ["initial-python-container"],
             "quiesce Python before cutover backup",
         )
-        assert events.index(build) < backup_build < quiesce_index < backup_run
+        assert pull < backup_build < quiesce_index < backup_run
         assert backup_run < events.index(preflight) < events.index(rust_up)
         assert not any(
             event["kind"] == "compose"

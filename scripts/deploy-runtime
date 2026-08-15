@@ -621,9 +621,39 @@ if [ "$selected_runtime" = rust ] && [ ! -f "$database_path" ]; then
   exit 65
 fi
 
-# Build every artifact while the old runtime still owns the database. The
-# write-free downtime begins only after these potentially long builds finish.
-GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+# Prepare every artifact while the old runtime still owns the database. CI
+# publishes Rust images by immutable commit SHA, so normal production deploys
+# only pull, verify, and retag that artifact. A local build remains available
+# for manual/emergency deployments that omit RUST_RUNTIME_IMAGE.
+if [ "$selected_runtime" = rust ] && [ -n "${RUST_RUNTIME_IMAGE-}" ]; then
+  if ! docker pull "$RUST_RUNTIME_IMAGE"; then
+    echo "could not pull Rust runtime image $RUST_RUNTIME_IMAGE" >&2
+    exit 1
+  fi
+  image_revision=$(docker image inspect \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$RUST_RUNTIME_IMAGE" 2>/dev/null || true)
+  if [ "$image_revision" != "$deploy_sha" ]; then
+    echo "Rust runtime image revision mismatch: expected $deploy_sha, found ${image_revision:-missing}" >&2
+    exit 65
+  fi
+  if ! target_images=$(BOT_RUNTIME=rust "$runtime_compose" config --images); then
+    echo "could not resolve the Rust runtime image target" >&2
+    exit 1
+  fi
+  set -- $target_images
+  if [ "$#" -ne 1 ]; then
+    echo "expected exactly one Rust runtime image target, found $#" >&2
+    exit 65
+  fi
+  if ! docker tag "$RUST_RUNTIME_IMAGE" "$1"; then
+    echo "could not stage Rust runtime image $RUST_RUNTIME_IMAGE as $1" >&2
+    exit 1
+  fi
+  echo "using prebuilt Rust runtime image: $RUST_RUNTIME_IMAGE"
+else
+  GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+fi
 backup_path=
 backup_image=
 backup_container_path=

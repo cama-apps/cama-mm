@@ -2338,6 +2338,12 @@ struct SpinResult {
     golden_announcement: Option<InteractionResponse>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GambaResponseRoute {
+    Initial,
+    DeferredOriginal,
+}
+
 /// The durable settlement result returned by an interactive wheel choice.
 ///
 /// Interactive views are process-local, but the economic resolution is still
@@ -4262,10 +4268,21 @@ impl BettingInteractionHandler {
             }
             return response;
         }
-        let now = unix_seconds()?;
-        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let admin_bypass = self.config.admin_user_ids.contains(&user_id)
             || member_permissions & (ADMINISTRATOR_PERMISSION | MANAGE_GUILD_PERMISSION) != 0;
+        let now = unix_seconds()?;
+        if !bonus_spin {
+            let path = self.database_path.clone();
+            let preflight = sqlite("gamba interaction preflight", move || {
+                gamba_interaction_preflight(&path, guild_id, user_id, now, admin_bypass)
+            })
+            .await?;
+            if let Some(message) = preflight {
+                return respond_ephemeral(responder, &message).await;
+            }
+        }
+        let response_route = begin_gamba_response(responder, bonus_spin).await?;
+        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let config = self.config.clone();
         let path = self.database_path.clone();
         let event_config = economy_event_config(&config);
@@ -4336,32 +4353,14 @@ impl BettingInteractionHandler {
             response = response.action_rows(rows);
         }
         let response_has_attachment = !response.attachments.is_empty();
-        let mut attachment_delivered = false;
-        let delivery = match responder.respond(response.clone()).await {
-            Ok(()) => {
-                attachment_delivered = response_has_attachment;
-                Ok(())
-            }
-            Err(error) if !response.attachments.is_empty() => {
-                // Discord can reject a generated media upload (size, transient
-                // CDN failure, or an adapter without attachment support). Keep
-                // the settled result visible with a text-only retry; the money
-                // transaction already committed before this delivery boundary.
-                let mut text_only = response;
-                text_only.attachments.clear();
-                if text_only.content.is_empty() {
-                    if let Some(embed) = completion_embed.clone() {
-                        text_only.embeds.push(embed);
-                    } else {
-                        text_only.content = "The wheel animation could not be uploaded.".to_owned();
-                    }
-                }
-                responder.respond(text_only).await.map_err(|retry_error| {
-                    format!("gamba response failed ({error}); text fallback failed ({retry_error})")
-                })
-            }
-            Err(error) => Err(error.to_string()),
-        };
+        let delivery = deliver_gamba_response(
+            responder,
+            response,
+            completion_embed.clone(),
+            response_route,
+        )
+        .await;
+        let attachment_delivered = delivery.as_ref().copied().unwrap_or(false);
         if delivery.is_ok()
             && let Some(pending_key) = pending_key
             && let Ok(mut interactions) = self.wheel_interactions.lock()
@@ -4416,7 +4415,7 @@ impl BettingInteractionHandler {
                 }
             }
         }
-        delivery
+        delivery.map(drop)
     }
 
     /// Resolve one immutable member snapshot before the wheel's SQLite
@@ -6392,6 +6391,104 @@ async fn followup_ephemeral(
         .map_err(|error| error.to_string())
 }
 
+fn gamba_interaction_preflight(
+    path: &Path,
+    guild_id: i64,
+    user_id: i64,
+    now: i64,
+    admin_bypass: bool,
+) -> Result<Option<String>, String> {
+    let players = PlayerRepository::new(path);
+    if players
+        .get_by_id(user_id, Some(guild_id))
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(Some(
+            "You need to /player register before you can spin the wheel.".to_owned(),
+        ));
+    }
+    if !admin_bypass
+        && let Some(last_spin) = players
+            .get_last_wheel_spin(user_id, Some(guild_id))
+            .map_err(|error| error.to_string())?
+        && last_spin.saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS) > now
+    {
+        return Ok(Some(wheel_cooldown_message(now, last_spin)));
+    }
+    Ok(None)
+}
+
+fn wheel_cooldown_message(now: i64, last_spin: i64) -> String {
+    let remaining = last_spin
+        .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
+        .saturating_sub(now)
+        .max(0);
+    let hours = remaining / 3_600;
+    let minutes = (remaining % 3_600) / 60;
+    format!("You already spun the wheel today! Try again in **{hours}h {minutes}m**.")
+}
+
+async fn begin_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    bonus_spin: bool,
+) -> Result<GambaResponseRoute, String> {
+    if bonus_spin {
+        return Ok(GambaResponseRoute::Initial);
+    }
+    responder
+        .defer(false)
+        .await
+        .map_err(|error| format!("gamba defer failed: {error}"))?;
+    Ok(GambaResponseRoute::DeferredOriginal)
+}
+
+async fn send_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    response: InteractionResponse,
+    route: GambaResponseRoute,
+) -> Result<(), String> {
+    match route {
+        GambaResponseRoute::Initial => responder.respond(response).await,
+        GambaResponseRoute::DeferredOriginal => responder.edit_original(response).await,
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn deliver_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    response: InteractionResponse,
+    completion_embed: Option<InteractionEmbed>,
+    route: GambaResponseRoute,
+) -> Result<bool, String> {
+    let response_has_attachment = !response.attachments.is_empty();
+    match send_gamba_response(responder, response.clone(), route).await {
+        Ok(()) => Ok(response_has_attachment),
+        Err(error) if response_has_attachment => {
+            // A media rejection happens after the wheel transaction commits.
+            // Retry through the same acknowledged delivery route; calling the
+            // initial-response endpoint again would itself be invalid after a
+            // defer and recreates Discord's `Unknown interaction` failure.
+            let mut text_only = response;
+            text_only.attachments.clear();
+            if text_only.content.is_empty() {
+                if let Some(embed) = completion_embed {
+                    text_only.embeds.push(embed);
+                } else {
+                    text_only.content = "The wheel animation could not be uploaded.".to_owned();
+                }
+            }
+            send_gamba_response(responder, text_only, route)
+                .await
+                .map(|()| false)
+                .map_err(|retry_error| {
+                    format!("gamba response failed ({error}); text fallback failed ({retry_error})")
+                })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn sqlite<T, F>(label: &'static str, operation: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -8323,15 +8420,7 @@ fn spin_once(
                 ));
             }
             WheelSpinClaim::Cooldown { last_spin } => {
-                let remaining = last_spin
-                    .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
-                    .saturating_sub(now)
-                    .max(0);
-                let hours = remaining / 3_600;
-                let minutes = (remaining % 3_600) / 60;
-                return Ok(spin_result(format!(
-                    "You already spun the wheel today! Try again in **{hours}h {minutes}m**."
-                )));
+                return Ok(spin_result(wheel_cooldown_message(now, last_spin)));
             }
             WheelSpinClaim::Claimed { .. } => {}
         }
@@ -10494,6 +10583,7 @@ mod tests {
         responses: Arc<Mutex<Vec<InteractionResponse>>>,
         defers: Arc<Mutex<Vec<bool>>>,
         edits: Arc<Mutex<Vec<InteractionResponse>>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     #[async_trait]
@@ -10502,6 +10592,10 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("respond");
             self.responses
                 .lock()
                 .expect("recording responder responses lock")
@@ -10513,6 +10607,10 @@ mod tests {
             &self,
             ephemeral: bool,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("defer");
             self.defers
                 .lock()
                 .expect("recording responder defers lock")
@@ -10524,6 +10622,10 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("followup");
             self.responses
                 .lock()
                 .expect("recording responder responses lock")
@@ -10535,12 +10637,163 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("edit_original");
             self.edits
                 .lock()
                 .expect("recording responder edits lock")
                 .push(response);
             Ok(())
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct RejectingGambaMediaResponder {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        edits: Arc<Mutex<Vec<InteractionResponse>>>,
+    }
+
+    #[async_trait]
+    impl InteractionResponder for RejectingGambaMediaResponder {
+        async fn respond(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("respond");
+            Ok(())
+        }
+
+        async fn defer(
+            &self,
+            _ephemeral: bool,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("defer");
+            Ok(())
+        }
+
+        async fn followup(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("followup");
+            Ok(())
+        }
+
+        async fn edit_original(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("edit_original");
+            let rejects_media = !response.attachments.is_empty();
+            self.edits.lock().unwrap().push(response);
+            if rejects_media {
+                Err(crate::registration::InteractionResponseError::new(
+                    "simulated media rejection",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn gamba_preflight_keeps_registration_and_cooldown_errors_private() {
+        let database = NamedTempFile::new().expect("gamba preflight database");
+        initialize_or_migrate(database.path()).expect("gamba preflight schema");
+        let now = 1_700_000_000;
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, false)
+                .expect("unregistered preflight")
+                .as_deref(),
+            Some("You need to /player register before you can spin the wheel.")
+        );
+
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(7, "spinner", Some(42)))
+            .expect("gamba preflight player");
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, false)
+                .expect("ready preflight"),
+            None
+        );
+
+        players
+            .set_last_wheel_spin(7, Some(42), now - 60)
+            .expect("gamba preflight cooldown");
+        let cooldown = gamba_interaction_preflight(database.path(), 42, 7, now, false)
+            .expect("cooldown preflight")
+            .expect("cooldown copy");
+        assert!(cooldown.contains("You already spun the wheel today!"));
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, true)
+                .expect("admin preflight"),
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_gamba_work_is_deferred_before_editing_the_original_response() {
+        let recording = RecordingResponder::default();
+        let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+        let route = begin_gamba_response(&responder, false)
+            .await
+            .expect("public gamba defer");
+        assert_eq!(route, GambaResponseRoute::DeferredOriginal);
+        assert_eq!(
+            recording.events.lock().expect("gamba events").as_slice(),
+            &["defer"]
+        );
+
+        // Model a render that runs beyond Discord's initial-response window.
+        // The interaction is already acknowledged before this work begins.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            deliver_gamba_response(
+                &responder,
+                InteractionResponse::message("")
+                    .attachment(InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3],)),
+                None,
+                route,
+            )
+            .await
+            .expect("deferred wheel delivery")
+        );
+        assert_eq!(
+            recording.events.lock().expect("gamba events").as_slice(),
+            &["defer", "edit_original"]
+        );
+        assert!(recording.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deferred_gamba_media_fallback_never_reuses_initial_response() {
+        let recording = RejectingGambaMediaResponder::default();
+        let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+        let route = begin_gamba_response(&responder, false)
+            .await
+            .expect("public gamba defer");
+        let delivered_attachment = deliver_gamba_response(
+            &responder,
+            InteractionResponse::message("")
+                .attachment(InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3])),
+            Some(InteractionEmbed::titled("Wheel result")),
+            route,
+        )
+        .await
+        .expect("text-only gamba fallback");
+        assert!(!delivered_attachment);
+        assert_eq!(
+            recording.events.lock().unwrap().as_slice(),
+            &["defer", "edit_original", "edit_original"]
+        );
+        let edits = recording.edits.lock().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].attachments.len(), 1);
+        assert!(edits[1].attachments.is_empty());
+        assert_eq!(edits[1].embeds[0].title.as_deref(), Some("Wheel result"));
     }
 
     struct EmptyMemberSource;

@@ -1290,6 +1290,19 @@ fn rating_distribution_font_supports_authored_stats_punctuation() {
 }
 
 #[test]
+fn rating_distribution_uses_sparse_human_readable_axis_ticks() {
+    assert_eq!(
+        rating_axis_ticks(65.0, 3_035.0, 7),
+        vec![500.0, 1_000.0, 1_500.0, 2_000.0, 2_500.0, 3_000.0]
+    );
+    assert_eq!(
+        rating_axis_ticks(1_380.0, 1_820.0, 7),
+        vec![1_400.0, 1_500.0, 1_600.0, 1_700.0, 1_800.0]
+    );
+    assert!(rating_axis_ticks(10.0, 10.0, 7).is_empty());
+}
+
+#[test]
 fn rating_distribution_explicit_median_controls_the_live_marker() {
     let ratings = [1_400.0, 1_450.0, 1_500.0, 1_520.0, 1_600.0, 1_700.0];
     let median_color = Rgba::rgb(0xf4, 0x7b, 0x67);
