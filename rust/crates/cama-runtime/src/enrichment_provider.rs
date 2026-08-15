@@ -1896,10 +1896,10 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("enrichment blocking task failed: {error}"))?
-        .map_err(|error| error.to_string())
+    crate::ids::blocking("enrichment blocking", move || {
+        operation().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {

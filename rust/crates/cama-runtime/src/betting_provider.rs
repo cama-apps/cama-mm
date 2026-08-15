@@ -77,6 +77,7 @@ use tracing::warn;
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
+use crate::ids::blocking as sqlite;
 use crate::match_provider::{
     MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
     MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest, MatchRegistrationProvider,
@@ -6487,16 +6488,6 @@ async fn deliver_gamba_response(
         }
         Err(error) => Err(error),
     }
-}
-
-async fn sqlite<T, F>(label: &'static str, operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("{label} task failed: {error}"))?
 }
 
 /// Apply Python's wrong-channel penance through the same immediate transaction

@@ -1,9 +1,10 @@
 //! Pure wheel catalog, payout, and result-copy contracts.
 //!
 //! WARNING — stale catalog with no production caller. The live,
-//! Python-parity wheel tables (calibrated values included) are in
-//! `cama_app::wheel`; this module retains pre-calibration constants only for
-//! its own historical tests. Do not wire it to the runtime.
+//! Python-parity wheel tables (calibrated values included) live in the
+//! application crate's `wheel` module; this one retains pre-calibration
+//! constants only for its own historical tests. Do not wire it to the
+//! runtime.
 
 use crate::economy_scaling::scale_minigame_jc_delta;
 use crate::formatting::JOPACOIN_EMOTE;

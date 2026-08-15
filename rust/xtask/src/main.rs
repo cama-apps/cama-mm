@@ -661,14 +661,14 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
     };
     use cama_domain::embed_safety::{EmbedModel, add_lines_field, truncate_field, validate_embed};
     use cama_domain::guild::{is_dm_context, normalize_guild_id};
-    use cama_domain::openskill::{CamaOpenSkillSystem, Rating};
+    use cama_domain::openskill::{CamaOpenSkillSystem, Rating, WeightedPlayer, WinningTeam};
     use cama_domain::pet::PetStage;
     use cama_domain::pet_brawl::{
         BrawlWinner, DuelistSnapshot, PetBrawlMove, brawl_traits, build_duelist, initial_state,
         move_name, resolve_round as resolve_pet_brawl_round,
     };
     use cama_domain::pet_evolution::{PetInstinct, hint_key_for_scores, resolve_evolution};
-    use cama_domain::rating::CamaRatingSystem;
+    use cama_domain::rating::{CamaRatingSystem, MatchUpdateOptions, TeamPlayer};
     use cama_domain::rating_insights::{get_rd_tier_name, rd_to_certainty};
     use cama_domain::wheel::{
         WHEEL_EXPLOSION_REWARD, WedgeValue, eruption_reward, golden_wheel_wedges, wheel_wedges,
@@ -1304,6 +1304,123 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
                 .os_predict_win_probability(&team1, &team2)
                 .to_string())
         }
+        "glicko_match_update" => {
+            let system = CamaRatingSystem::default();
+            let parse_team = |raw: &str, id_offset: u64| -> Result<Vec<TeamPlayer<u64>>, String> {
+                raw.split(';')
+                    .enumerate()
+                    .map(|(index, player)| {
+                        let fields: Vec<_> = player.split(',').collect();
+                        let [rating, rd, volatility] = fields.as_slice() else {
+                            return Err(format!("invalid Glicko player {player:?}"));
+                        };
+                        let parse = |value: &str| {
+                            value
+                                .parse::<f64>()
+                                .map_err(|error| format!("invalid Glicko value {value:?}: {error}"))
+                        };
+                        Ok(TeamPlayer::new(
+                            system.create_player_from_rating(
+                                parse(rating)?,
+                                parse(rd)?,
+                                parse(volatility)?,
+                            ),
+                            id_offset + index as u64 + 1,
+                        ))
+                    })
+                    .collect()
+            };
+            let team1 = parse_team(argument(0)?, 0)?;
+            let team2 = parse_team(argument(1)?, team1.len() as u64)?;
+            let sizes = (team1.len(), team2.len());
+            let options = MatchUpdateOptions {
+                streak_multipliers: parse_per_player_values(operation, argument(3)?, sizes)?
+                    .into_iter()
+                    .collect(),
+                base_rating_delta_multiplier: parse_optional_f64(5)?,
+                gain_multipliers: parse_per_player_values(operation, argument(4)?, sizes)?
+                    .into_iter()
+                    .collect(),
+            };
+            let updates = system
+                .update_ratings_after_match_with_options(&team1, &team2, parse_i32(2)?, &options)
+                .map_err(|error| error.to_string())?;
+            Ok(updates
+                .team1
+                .iter()
+                .chain(&updates.team2)
+                .map(|player| format!("{},{}", player.rating, player.rd))
+                .collect::<Vec<_>>()
+                .join(";"))
+        }
+        "openskill_match_update" => {
+            let parse_team = |raw: &str| -> Result<Vec<(f64, f64)>, String> {
+                raw.split(';')
+                    .map(|player| {
+                        let (mu, sigma) = player
+                            .split_once(',')
+                            .ok_or_else(|| format!("invalid OpenSkill rating {player:?}"))?;
+                        Ok((
+                            mu.parse()
+                                .map_err(|error| format!("invalid OpenSkill mu {mu:?}: {error}"))?,
+                            sigma.parse().map_err(|error| {
+                                format!("invalid OpenSkill sigma {sigma:?}: {error}")
+                            })?,
+                        ))
+                    })
+                    .collect()
+            };
+            let team1 = parse_team(argument(0)?)?;
+            let team2 = parse_team(argument(1)?)?;
+            let sizes = (team1.len(), team2.len());
+            let fantasy: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(3)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let build_team = |team: &[(f64, f64)], id_offset: u64| -> Vec<WeightedPlayer> {
+                team.iter()
+                    .enumerate()
+                    .map(|(index, (mu, sigma))| {
+                        let id = id_offset + index as u64 + 1;
+                        WeightedPlayer::new(id, Some(*mu), Some(*sigma), fantasy.get(&id).copied())
+                    })
+                    .collect()
+            };
+            let team1_players = build_team(&team1, 0);
+            let team2_players = build_team(&team2, team1.len() as u64);
+            let winning_team = argument(2)?
+                .parse::<u8>()
+                .map_err(|error| format!("invalid winning team: {error}"))
+                .and_then(|value| {
+                    WinningTeam::try_from(value).map_err(|error| error.to_string())
+                })?;
+            let streak_multipliers: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(4)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let gain_multipliers: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(5)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let results = CamaOpenSkillSystem::new()
+                .update_ratings_after_match(
+                    &team1_players,
+                    &team2_players,
+                    winning_team,
+                    &streak_multipliers,
+                    &gain_multipliers,
+                )
+                .map_err(|error| error.to_string())?;
+            (1..=(sizes.0 + sizes.1) as u64)
+                .map(|id| {
+                    results
+                        .get(&id)
+                        .map(|update| format!("{},{}", update.rating.mu, update.rating.sigma))
+                        .ok_or_else(|| format!("OpenSkill update omitted player {id}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| rows.join(";"))
+        }
         _ => Err(format!("unknown Rust vector operation {operation:?}")),
     }
 }
@@ -1352,6 +1469,46 @@ fn cave_in_catalog() -> String {
     rows.join("|")
 }
 
+/// Parse `none` or two ;-separated teams of comma-separated per-player floats
+/// into `(1-based player ID, value)` pairs matching the vector team layout.
+fn parse_per_player_values(
+    operation: &str,
+    raw: &str,
+    team_sizes: (usize, usize),
+) -> Result<Vec<(u64, f64)>, String> {
+    if raw == "none" {
+        return Ok(Vec::new());
+    }
+    let groups: Vec<_> = raw.split(';').collect();
+    let [team1, team2] = groups.as_slice() else {
+        return Err(format!(
+            "{operation} per-player values must contain one group per team"
+        ));
+    };
+    let mut values = Vec::new();
+    for (group, expected) in [(*team1, team_sizes.0), (*team2, team_sizes.1)] {
+        let parsed = group
+            .split(',')
+            .map(|value| {
+                value.parse::<f64>().map_err(|error| {
+                    format!("{operation} per-player value {value:?} is not a float: {error}")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parsed.len() != expected {
+            return Err(format!(
+                "{operation} per-player values must match the team size"
+            ));
+        }
+        values.extend(parsed);
+    }
+    Ok(values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (index as u64 + 1, value))
+        .collect())
+}
+
 fn parse_outcome(value: &str) -> Result<bool, String> {
     match value {
         "W" => Ok(true),
@@ -1394,6 +1551,30 @@ fn compare_vector_result(
             // vector shares the strict tolerance.
             let tolerance = 1e-10;
             if (rust_value - python_value).abs() <= tolerance {
+                Ok(())
+            } else {
+                mismatch()
+            }
+        }
+        "glicko_match_update" | "openskill_match_update" => {
+            let parse = |value: &str, language: &str| -> Result<Vec<f64>, String> {
+                value
+                    .split([';', ','])
+                    .map(|field| {
+                        field.parse::<f64>().map_err(|error| {
+                            format!("invalid {language} match update field {field:?}: {error}")
+                        })
+                    })
+                    .collect()
+            };
+            let rust_values = parse(rust, "Rust")?;
+            let python_values = parse(python, "Python")?;
+            if rust_values.len() == python_values.len()
+                && rust_values
+                    .iter()
+                    .zip(&python_values)
+                    .all(|(rust_value, python_value)| (rust_value - python_value).abs() <= 1e-10)
+            {
                 Ok(())
             } else {
                 mismatch()
@@ -1601,6 +1782,19 @@ fn fnv1a64_lines<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+fn fnv_fingerprint_is_stable() {
+        assert_eq!(fnv1a64_lines(["a", "b"].into_iter()), 0x78ed_6781_f136_a14e);
+    }
+
+    #[test]
+    #[ignore = "runs live Python through the locked parity environment"]
+    fn domain_vectors_match_python() {
+        let root = repository_root().expect("repository root must resolve");
+        let count = verify_domain_vectors(&root).expect("domain vectors must match Python");
+        assert!(count > 0, "domain vector inventory must not be empty");
+    }
 
     #[test]
     fn cutover_readiness_requires_every_named_operational_gate() {

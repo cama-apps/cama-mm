@@ -35,6 +35,7 @@ use tracing::{debug, info, warn};
 
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
+use crate::ids::signed_id;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionEmbed, InteractionHandler,
@@ -1363,10 +1364,6 @@ async fn respond_ephemeral(
         .respond(InteractionResponse::message(content).ephemeral())
         .await
         .map_err(|error| error.to_string())
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} ID exceeds SQLite INTEGER"))
 }
 
 fn unix_timestamp() -> Result<i64, String> {
