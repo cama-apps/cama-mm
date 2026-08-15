@@ -182,7 +182,14 @@ jobs:
           --ignored --test-threads=1
 
       - name: Check implemented parity contracts
-        run: cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
+        env:
+          RUST_CUTOVER_CANDIDATE: ${{ vars.RUST_CUTOVER_CANDIDATE }}
+        run: |
+          if [ "$RUST_CUTOVER_CANDIDATE" = true ]; then
+            cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
+          else
+            cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
+          fi
 
   rust:
     if: ${{ always() }}
@@ -365,23 +372,10 @@ jobs:
     needs: [rust, runtime-images]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-
-      - name: Restore Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: "./rust -> target"
-          shared-key: contracts
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
       - name: Require complete behavior and operational parity
-        run: cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          RUNTIME_IMAGES_RESULT: ${{ needs.runtime-images.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$RUNTIME_IMAGES_RESULT" = success
