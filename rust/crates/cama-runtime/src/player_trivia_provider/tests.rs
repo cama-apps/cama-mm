@@ -947,7 +947,6 @@ async fn test_timeout_finishes_run_and_keeps_daily_cooldown() {
         .handle(command(USER, None), Arc::new(RecordingResponder::default()))
         .await
         .expect("timeout command");
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let session_id: i64 = fixture
         .connection()
         .query_row(
@@ -956,6 +955,22 @@ async fn test_timeout_finishes_run_and_keeps_daily_cooldown() {
             |row| row.get(0),
         )
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let timed_out = fixture
+                .repository()
+                .get_session(session_id)
+                .expect("poll timed-out session")
+                .is_some_and(|session| session.status == "timed_out");
+            let edit_sent = !discord.edits.lock().expect("timeout edits").is_empty();
+            if timed_out && edit_sent {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("timeout transition and Discord edit complete");
     let session = fixture
         .repository()
         .get_session(session_id)
