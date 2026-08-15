@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -12,7 +10,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   rust:
@@ -64,58 +61,18 @@ jobs:
           cargo test --locked --manifest-path rust/Cargo.toml
           --workspace --all-targets --all-features
 
-      - name: Build release runtime
-        run: >-
-          cargo build --locked --manifest-path rust/Cargo.toml
-          --release --package cama-runtime --bin cama-rust
-
-      - name: Stage runtime binary
-        run: |
-          mkdir -p .cama-build
-          cp rust/target/release/cama-rust .cama-build/cama-rust
-
-      - name: Upload runtime binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: cama-rust-${{ github.sha }}
-          path: .cama-build/cama-rust
-          if-no-files-found: error
-          retention-days: 1
-
+  # Retain the existing required status context without rebuilding the release
+  # artifact on every PR. The main-only Release workflow owns compilation,
+  # publication, and the deploy handoff.
   runtime-images:
     needs: rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download runtime binary
-        uses: actions/download-artifact@v8
-        with:
-          name: cama-rust-${{ github.sha }}
-          path: .cama-build
-
-      - name: Restore executable bit
-        run: chmod 0755 .cama-build/cama-rust
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Log in to GitHub Container Registry
-        if: ${{ github.event_name == 'push' }}
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Rust runtime image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          file: Dockerfile.rust
-          target: runtime-prebuilt
-          build-args: GIT_SHA=${{ github.sha }}
-          tags: ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
-          push: ${{ github.event_name == 'push' }}
-          cache-from: type=gha,scope=cama-rust-runtime
-          cache-to: type=gha,mode=max,scope=cama-rust-runtime
+      - name: Verify main-only runtime image contract
+        run: |
+          test -f .github/workflows/release.yml
+          grep -Fq 'target: runtime-prebuilt' .github/workflows/release.yml
+          grep -Fq 'push: true' .github/workflows/release.yml
+          grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml
