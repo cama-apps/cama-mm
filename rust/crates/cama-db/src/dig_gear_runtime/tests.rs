@@ -253,10 +253,8 @@ fn duplicate_equipped_slot_is_rejected_before_sql() {
         }),
         Err(DigGearRuntimeRepositoryError::InvalidState(_))
     ));
-    assert_eq!(
-        repository.snapshot(USER, GUILD).expect("after").unwrap(),
-        expected
-    );
+    let after = repository.snapshot(USER, GUILD).expect("after").unwrap();
+    assert!(same_persisted_snapshot(&after, &expected));
 }
 
 #[test]
