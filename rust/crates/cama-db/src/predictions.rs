@@ -1332,6 +1332,10 @@ impl PredictionRepository {
         Ok(true)
     }
 
+    /// WARNING — no production caller. This settlement applies no payout
+    /// multiplier, bankruptcy penalty, or vanity tax; the live settlement is
+    /// `prediction_resolution_repository::settle_orderbook_at`. Do not wire
+    /// this variant to the runtime.
     pub fn settle_orderbook(
         &self,
         prediction_id: i64,
@@ -1534,34 +1538,44 @@ impl PredictionRepository {
         Ok(result)
     }
 
+    /// Python parity (`prediction_repository.py::get_player_pnl_history`):
+    /// realized P&L is the settlement ledger's actual net credit (after
+    /// bankruptcy penalty and vanity tax) whenever ledger rows exist; the
+    /// face-value calculation is only the legacy fallback for settlements
+    /// predating the central ledger.
     pub fn player_pnl_history(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
     ) -> Result<Vec<PnlHistoryPoint>, PredictionRepositoryError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT p.prediction_id,COALESCE(p.resolved_at,0),p.outcome,
-                    pp.yes_contracts,pp.no_contracts,
-                    pp.yes_cost_basis_total+pp.no_cost_basis_total
-             FROM prediction_positions pp JOIN predictions p USING(prediction_id)
-             WHERE pp.discord_id=?1 AND p.guild_id=?2 AND p.status='resolved'
-             ORDER BY p.resolved_at",
-        )?;
+        let mut statement =
+            connection.prepare(crate::prediction_resolution_repository::PNL_HISTORY_SQL)?;
         let rows = statement.query_map(
             params![discord_id, Self::normalize_guild_id(guild_id)],
             |row| {
                 let outcome: String = row.get(2)?;
-                let winning: i64 = if outcome == "yes" {
-                    row.get(3)?
-                } else {
-                    row.get(4)?
-                };
+                let yes_contracts: i64 = row.get(3)?;
+                let no_contracts: i64 = row.get(4)?;
                 let cost: i64 = row.get(5)?;
+                let penalty: i64 = row.get(6)?;
+                let vanity_tax: i64 = row.get(7)?;
+                let settlement_count: i64 = row.get(8)?;
+                let credited: i64 = row.get(9)?;
+                let won = if outcome == "yes" {
+                    yes_contracts
+                } else {
+                    no_contracts
+                };
+                let payout = if settlement_count > 0 {
+                    credited
+                } else {
+                    won * CONTRACT_VALUE - penalty - vanity_tax
+                };
                 Ok(PnlHistoryPoint {
                     prediction_id: row.get(0)?,
                     settle_time: row.get(1)?,
-                    delta: winning * CONTRACT_VALUE - cost,
+                    delta: payout - cost,
                 })
             },
         )?;
@@ -2158,6 +2172,16 @@ mod tests {
                          related_id TEXT,
                          reason TEXT,
                          metadata TEXT
+                     );
+                     CREATE TABLE economy_ledger_entries (
+                         ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         guild_id INTEGER NOT NULL,
+                         account_type TEXT NOT NULL,
+                         account_id INTEGER,
+                         delta INTEGER NOT NULL,
+                         source TEXT,
+                         related_type TEXT,
+                         related_id TEXT
                      );",
                 )
                 .expect("create migrated prediction fixture schema");

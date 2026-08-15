@@ -6668,6 +6668,7 @@ fn generated_match_reward_retry_recovers_base_and_blood_pact_without_second_paym
         player_ids: &players,
         gross: 100,
         apply_bankruptcy_penalty: true,
+        apply_vanity_tax: true,
         source: "match_streaming_bonus",
         related_type: "match",
         related_id: MATCH_ID,

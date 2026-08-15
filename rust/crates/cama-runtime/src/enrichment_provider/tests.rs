@@ -1305,6 +1305,7 @@ fn phase_two_skips_until_all_ten_fantasy_points_exist() {
         .expect("remove unrelated pending replay marker");
 
     let replay = ConfiguredOpenSkillReplay {
+        rating_system: cama_domain::rating::CamaRatingSystem::default(),
         completion: MatchDiscoveryRepository::new(&path),
         correction: MatchCorrectionRepository::new(&path),
         system: CamaOpenSkillSystem::new(),

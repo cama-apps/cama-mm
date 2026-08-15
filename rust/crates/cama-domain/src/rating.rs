@@ -573,7 +573,10 @@ impl CamaRatingSystem {
 
     #[must_use]
     pub fn rating_uncertainty_percentage(&self, rd: f64) -> f64 {
-        ((rd / 350.0 * 100.0).min(100.0) * 10.0).round_ties_even() / 10.0
+        // Python parity: `round(min(rd / 350 * 100, 100), 1)` — CPython
+        // rounds the exact binary value; scaling by 10 first manufactures
+        // false ties (rd 31.325 must display 8.9, not 9.0).
+        crate::formatting::python_round_decimals((rd / 350.0 * 100.0).min(100.0), 1)
     }
 
     #[must_use]

@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -92,6 +92,9 @@ const COMMAND_RATE_LIMIT: usize = 2;
 const COMMAND_RATE_WINDOW: Duration = Duration::from_secs(30);
 const ARTIFACT_RATE_LIMIT: usize = 1;
 const ARTIFACT_RATE_WINDOW: Duration = Duration::from_secs(10);
+/// How long an idle rate-limit bucket survives before the map drops it.
+/// Must exceed every rate window above so an active bucket is never pruned.
+const RATE_LIMIT_BUCKET_RETENTION: Duration = Duration::from_secs(300);
 const ABANDON_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const PRESTIGE_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const SABOTAGE_VIEW_TIMEOUT_SECONDS: i64 = 30;
@@ -2956,6 +2959,15 @@ impl DigInteractionHandler {
             .rate_limits
             .lock()
             .map_err(|_| "Dig rate-limit lock poisoned")?;
+        // Discard buckets whose newest hit fell out of its window so the map
+        // stays bounded by currently-active users instead of growing for the
+        // process lifetime. Windows differ per scope, so use each bucket's
+        // own recency rather than this call's window.
+        all.retain(|_, bucket| {
+            bucket
+                .back()
+                .is_some_and(|latest| now.duration_since(*latest) <= RATE_LIMIT_BUCKET_RETENTION)
+        });
         let hits = all.entry((user_id, guild_id, scope)).or_default();
         while hits
             .front()
@@ -6423,25 +6435,29 @@ impl Default for RuntimeBossEntropy {
 }
 
 impl RuntimeBossEntropy {
+    /// The guarded value is a plain RNG, so a panic elsewhere while the lock
+    /// was held cannot leave it in a broken state. Recovering from poison
+    /// keeps boss encounters alive instead of panicking until restart.
+    fn random(&self) -> std::sync::MutexGuard<'_, fastrand::Rng> {
+        self.random.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[cfg(test)]
     fn reseed(&self, seed: u64) {
-        *self.random.lock().expect("boss entropy lock") = fastrand::Rng::with_seed(seed);
+        *self.random() = fastrand::Rng::with_seed(seed);
     }
 }
 
 impl EntropyPort for RuntimeBossEntropy {
     fn next_unit(&mut self) -> f64 {
-        self.random.lock().expect("boss entropy lock").f64()
+        self.random().f64()
     }
 
     fn choose_index(&mut self, upper_bound: usize) -> usize {
         if upper_bound == 0 {
             0
         } else {
-            self.random
-                .lock()
-                .expect("boss entropy lock")
-                .usize(..upper_bound)
+            self.random().usize(..upper_bound)
         }
     }
 
@@ -6449,10 +6465,7 @@ impl EntropyPort for RuntimeBossEntropy {
         if minimum >= maximum {
             minimum
         } else {
-            self.random
-                .lock()
-                .expect("boss entropy lock")
-                .i32(minimum..=maximum)
+            self.random().i32(minimum..=maximum)
         }
     }
 }

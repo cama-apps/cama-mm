@@ -145,6 +145,8 @@ name = "cama-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fastrand",
+ "libm",
 ]
 
 [[package]]

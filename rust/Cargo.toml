@@ -23,6 +23,7 @@ flate2 = "1.1.9"
 fontdue = "0.9.4"
 gif = "0.14.2"
 getrandom = "0.4.3"
+libm = "0.2.16"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "trace"] }
 serde = { version = "1.0.229", features = ["derive"] }

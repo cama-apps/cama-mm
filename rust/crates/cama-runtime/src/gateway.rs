@@ -388,6 +388,11 @@ where
 
         let mut attempt = 1_u32;
         let mut terminal_error = None;
+        // Observes Ready events emitted during each session so a healthy
+        // connection resets the exponential backoff, matching discord.py's
+        // reconnect behavior. Without the reset, every reconnect after the
+        // process's first few would wait the maximum delay forever.
+        let mut ready_observer = self.events.subscribe();
         loop {
             if *shutdown_receiver.borrow() {
                 break;
@@ -413,6 +418,11 @@ where
                     break;
                 }
             };
+            if session_reached_ready(&mut ready_observer) {
+                // Restart the backoff sequence exactly as at process start:
+                // the delay below becomes the initial delay again.
+                attempt = 1;
+            }
 
             emit(
                 &self.events,
@@ -453,6 +463,28 @@ where
     }
 }
 
+/// Drain lifecycle events accumulated since the previous call and report
+/// whether the just-ended session reached `Ready`. Lagged receivers may skip
+/// events; missing a `Ready` merely keeps the longer backoff, which is the
+/// safe direction.
+fn session_reached_ready(events: &mut broadcast::Receiver<LifecycleEvent>) -> bool {
+    let mut ready = false;
+    loop {
+        match events.try_recv() {
+            Ok(LifecycleEvent::Ready { .. }) => ready = true,
+            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                return ready;
+            }
+        }
+    }
+}
+
+/// A worker run that survived this long before failing is treated as having
+/// been healthy, so its restart backoff starts over instead of compounding
+/// across the process lifetime.
+const WORKER_BACKOFF_RESET_UPTIME: Duration = Duration::from_secs(60);
+
 async fn supervise_worker(
     spec: BackgroundWorkerSpec,
     mut ready_events: broadcast::Receiver<LifecycleEvent>,
@@ -474,9 +506,13 @@ async fn supervise_worker(
                 attempt,
             },
         );
+        let started = tokio::time::Instant::now();
         match spec.worker.run(WorkerContext::new(shutdown.clone())).await {
             Ok(()) => break,
             Err(error) if !*shutdown.borrow() => {
+                if started.elapsed() >= WORKER_BACKOFF_RESET_UPTIME {
+                    attempt = 1;
+                }
                 emit(
                     &events,
                     LifecycleEvent::BackgroundWorkerFailed {
@@ -617,6 +653,94 @@ mod tests {
         async fn admit(&self, _path: &Path) -> Result<DatabaseAdmissionReport, String> {
             Err("injected admission refusal".to_owned())
         }
+    }
+
+    struct AcceptingAdmission;
+
+    #[async_trait]
+    impl DatabaseAdmission for AcceptingAdmission {
+        async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
+            Ok(DatabaseAdmissionReport {
+                path: path.to_path_buf(),
+                applied_migrations: 0,
+                required_migrations: 0,
+                newly_applied_migrations: 0,
+                created_tables: 0,
+                rebuilt_tables: 0,
+                historical_extra_migrations: 0,
+            })
+        }
+    }
+
+    struct ScriptedGateway {
+        calls: u32,
+    }
+
+    #[async_trait]
+    impl GatewayTransport for ScriptedGateway {
+        async fn run_session(
+            &mut self,
+            session: GatewaySession,
+        ) -> Result<GatewaySessionEnd, GatewayError> {
+            self.calls += 1;
+            match self.calls {
+                // Two consecutive connect failures escalate the backoff.
+                1 | 2 => Err(GatewayError::Recoverable("connect refused".to_owned())),
+                // A session that reached Ready must reset the backoff.
+                3 => {
+                    emit(
+                        &session.events,
+                        LifecycleEvent::Ready {
+                            bot_user_id: 7,
+                            guild_count: 1,
+                        },
+                    );
+                    Ok(GatewaySessionEnd::Reconnect {
+                        reason: "healthy session dropped".to_owned(),
+                    })
+                }
+                _ => Ok(GatewaySessionEnd::Shutdown),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_backoff_resets_after_a_ready_session() {
+        let config = RuntimeConfig {
+            token: DiscordToken::parse("test-token").expect("test token"),
+            db_path: "/tmp/backoff-reset-cama.db".into(),
+            reconnect_initial: Duration::from_secs(5),
+            reconnect_max: Duration::from_secs(300),
+            rust_cutover_candidate: false,
+        };
+        let runtime = Runtime::new(
+            config,
+            RegistryBuilder::default().build(),
+            ScriptedGateway { calls: 0 },
+            AcceptingAdmission,
+        );
+        let mut events = runtime.events().subscribe();
+        runtime
+            .run_until(future::pending())
+            .await
+            .expect("scripted runtime completes");
+
+        let mut scheduled = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let LifecycleEvent::ReconnectScheduled { attempt, delay } = event {
+                scheduled.push((attempt, delay));
+            }
+        }
+        assert_eq!(
+            scheduled,
+            [
+                (1, Duration::from_secs(5)),
+                (2, Duration::from_secs(10)),
+                // The Ready session restarted the sequence at the initial
+                // delay instead of continuing to 20 seconds.
+                (1, Duration::from_secs(5)),
+            ]
+        );
     }
 
     struct UnreachableGateway;

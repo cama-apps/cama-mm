@@ -8,6 +8,7 @@ use crate::admin_provider::{CorrectionWinRewardRequest, CorrectionWinRewardResul
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 
 use super::*;
+use cama_domain::rating::CamaRatingSystem;
 
 const GUILD: i64 = 42_424;
 const ADMIN: i64 = 7_777;
@@ -249,6 +250,7 @@ async fn test_correction_replay_failure_has_idempotent_recovery() {
         repository,
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
@@ -391,6 +393,7 @@ async fn pending_correction_recovers_total_reward_snapshot_after_adapter_only_cr
         repository,
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
@@ -450,6 +453,7 @@ async fn ready_observer_recovers_a_persisted_core_applied_correction() {
         repository,
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
@@ -518,6 +522,7 @@ async fn ready_observer_cleans_claim_when_replay_committed_before_process_exit()
         repository: repository.clone(),
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
@@ -536,7 +541,12 @@ async fn ready_observer_cleans_claim_when_replay_committed_before_process_exit()
         .await
         .expect_err("seed core-applied claim and replay job");
     repository
-        .replay_openskill_atomic_configured(Some(GUILD), &CamaOpenSkillSystem::default(), 0)
+        .replay_openskill_atomic_configured(
+            Some(GUILD),
+            &CamaOpenSkillSystem::default(),
+            &CamaRatingSystem::default(),
+            0,
+        )
         .expect("model replay committing before process exit");
     fixture
         .connection()
@@ -584,6 +594,7 @@ async fn reconnect_ready_never_releases_a_live_correction_lease() {
         repository: repository.clone(),
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
@@ -634,6 +645,7 @@ async fn ready_observer_leaves_foreign_guild_correction_and_lease_untouched() {
         repository: repository.clone(),
         database_path: fixture.database.path().to_path_buf(),
         openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,

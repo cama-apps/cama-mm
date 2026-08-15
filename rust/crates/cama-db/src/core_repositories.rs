@@ -1239,8 +1239,12 @@ impl PlayerRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let victim_balance = required_balance(&transaction, victim_discord_id, guild_id, "victim")?;
         let thief_balance = required_balance(&transaction, thief_discord_id, guild_id, "thief")?;
-        let victim_new_balance = victim_balance - amount;
-        let thief_new_balance = thief_balance + amount;
+        let victim_new_balance = victim_balance.checked_sub(amount).ok_or_else(|| {
+            CoreRepositoryError::InvalidInput("steal amount overflows victim balance".to_owned())
+        })?;
+        let thief_new_balance = thief_balance.checked_add(amount).ok_or_else(|| {
+            CoreRepositoryError::InvalidInput("steal amount overflows thief balance".to_owned())
+        })?;
         if let Some(context) = context {
             install_balance_ledger_context(
                 &transaction,
@@ -1693,9 +1697,20 @@ fn decode_string_array(json: &str) -> Result<Vec<String>, CoreRepositoryError> {
                     match bytes[cursor] {
                         b'"' => item.push('"'),
                         b'\\' => item.push('\\'),
+                        b'/' => item.push('/'),
+                        b'b' => item.push('\u{08}'),
+                        b'f' => item.push('\u{0c}'),
                         b'n' => item.push('\n'),
                         b'r' => item.push('\r'),
                         b't' => item.push('\t'),
+                        b'u' => {
+                            // \uXXXX escape, including surrogate pairs, as
+                            // written by json.dumps and escape_json_string.
+                            let (character, consumed) = decode_unicode_escape(&bytes[cursor..])
+                                .ok_or_else(|| CoreRepositoryError::InvalidJson(json.to_owned()))?;
+                            item.push(character);
+                            cursor += consumed - 1;
+                        }
                         _ => return Err(CoreRepositoryError::InvalidJson(json.to_owned())),
                     }
                     cursor += 1;
@@ -1724,18 +1739,57 @@ fn decode_string_array(json: &str) -> Result<Vec<String>, CoreRepositoryError> {
     Ok(result)
 }
 
+/// Decode a `uXXXX` escape body (the slice starts at the `u`), returning the
+/// character and the number of bytes consumed starting from the `u`.
+/// Surrogate pairs consume the following `\uXXXX` as well.
+fn decode_unicode_escape(bytes: &[u8]) -> Option<(char, usize)> {
+    fn hex_quad(bytes: &[u8]) -> Option<u32> {
+        let digits = std::str::from_utf8(bytes.get(..4)?).ok()?;
+        u32::from_str_radix(digits, 16).ok()
+    }
+
+    let first = hex_quad(bytes.get(1..)?)?;
+    if (0xd800..=0xdbff).contains(&first) {
+        if bytes.get(5..7) != Some(b"\\u") {
+            return None;
+        }
+        let second = hex_quad(bytes.get(7..)?)?;
+        if !(0xdc00..=0xdfff).contains(&second) {
+            return None;
+        }
+        let scalar = 0x1_0000 + ((first - 0xd800) << 10) + (second - 0xdc00);
+        Some((char::from_u32(scalar)?, 11))
+    } else if (0xdc00..=0xdfff).contains(&first) {
+        None
+    } else {
+        Some((char::from_u32(first)?, 5))
+    }
+}
+
+/// Escape exactly like Python's `json.dumps` (`ensure_ascii=False` is not
+/// used for these columns, but escaping below the named shortcuts matches
+/// both modes): named escapes for the common controls, `\u00XX` for the
+/// remaining C0 range. Without the `\u00XX` arm, a control character wrote
+/// JSON that [`decode_string_array`] rejects, silently dropping the value on
+/// read-back.
 fn escape_json_string(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| match character {
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            '\\' => "\\\\".chars().collect(),
-            '\n' => "\\n".chars().collect(),
-            '\r' => "\\r".chars().collect(),
-            '\t' => "\\t".chars().collect(),
-            other => vec![other],
-        })
-        .collect()
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 fn parse_enrichment_json(raw: &str) -> Result<EnrichmentJsonValue, CoreRepositoryError> {

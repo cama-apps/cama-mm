@@ -1389,11 +1389,10 @@ fn compare_vector_result(
             let python_value: f64 = python
                 .parse()
                 .map_err(|error| format!("invalid Python float {python:?}: {error}"))?;
-            let tolerance = if operation == "openskill_predict" {
-                2e-7
-            } else {
-                1e-10
-            };
+            // `openskill_predict` previously needed 2e-7 for an approximated
+            // erfc; the Rust CDF now uses an exact erf, so every numeric
+            // vector shares the strict tolerance.
+            let tolerance = 1e-10;
             if (rust_value - python_value).abs() <= tolerance {
                 Ok(())
             } else {

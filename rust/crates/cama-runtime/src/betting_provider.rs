@@ -7222,9 +7222,10 @@ fn resolve_wheel_value(
                     adjusted = adjusted
                         .saturating_sub((adjusted as f64 * effects.blue_gamba_reduction) as i64);
                 }
-                if effects.green_gain_cap.is_some_and(|cap| adjusted > cap) {
-                    adjusted = effects.green_gain_cap.unwrap_or(adjusted);
-                }
+                // Python parity: `_numeric_result` applies only dig scaling
+                // and the Blue reduction. The Green gain cap belongs solely
+                // to the Overgrowth mechanic (`wheel_outcomes.py:510`), so
+                // capping every positive wedge here shorted Green players.
                 let receipt = credit_wheel_income(
                     path,
                     guild_id,
@@ -7250,10 +7251,13 @@ fn resolve_wheel_value(
                     .consume_wheel_pardon_atomic(user_id, Some(guild_id))
                     .map_err(|error| error.to_string())?
             {
+                // Python parity: the pardon rewrites the result to 0, which
+                // `commands/betting.py` treats as Lose-a-Turn — the pardoned
+                // spinner still serves the extended penalty cooldown.
                 return Ok(WheelResolution::new(
                     WheelValue::Numeric(0),
                     0,
-                    CooldownOutcome::Other,
+                    CooldownOutcome::LoseTurn,
                     "🛡️ Comeback pardon consumed: the bankrupt loss was forgiven.".to_owned(),
                 ));
             }
@@ -7863,9 +7867,15 @@ fn resolve_hostile_mechanic(
                 .map_err(|error| error.to_string())?
                 && let Some(victim_id) = victim.discord_id
             {
+                // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
+                    cama_domain::economy_scaling::scale_minigame_jc_delta(
+                        fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1)
+                            as f64,
+                        config.minigame_jc_delta_scale,
+                    )
+                    .min(victim.jopacoin_balance),
                     DbHostileDestination::Burn,
                     None,
                     true,
@@ -7881,9 +7891,15 @@ fn resolve_hostile_mechanic(
                 && let Some(victim_id) = victim.discord_id
             {
                 let before = total.get();
+                // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
+                    cama_domain::economy_scaling::scale_minigame_jc_delta(
+                        fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1)
+                            as f64,
+                        config.minigame_jc_delta_scale,
+                    )
+                    .min(victim.jopacoin_balance),
                     DbHostileDestination::Player,
                     Some(user_id),
                     false,
@@ -7900,11 +7916,16 @@ fn resolve_hostile_mechanic(
             for victim in sampled.iter().take(WHEEL_BOMB_OMB_VICTIM_COUNT) {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
+                    // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                     settle(
                         victim_id,
-                        fastrand::i64(
-                            WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
-                        ),
+                        cama_domain::economy_scaling::scale_minigame_jc_delta(
+                            fastrand::i64(
+                                WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
+                            ) as f64,
+                            config.minigame_jc_delta_scale,
+                        )
+                        .min(victim.jopacoin_balance),
                         DbHostileDestination::Burn,
                         None,
                         true,
@@ -7973,15 +7994,35 @@ fn resolve_hostile_mechanic(
             log_result = total.get();
         }
         WheelMechanic::Heist => {
-            for victim in eligible.iter().rev().take(30) {
+            // Python parity: the window is the poorest thirty accounts with
+            // any positive balance (spinner included), and only then filters
+            // to stealable victims (`wheel_outcomes.py::_heist`). Filtering by
+            // the hostile floor first would target the richest players
+            // instead. The leaderboard is sorted exactly opposite to
+            // `get_leaderboard_bottom`, so reversing reproduces its order.
+            let heist_window = leaderboard
+                .iter()
+                .rev()
+                .filter(|player| player.jopacoin_balance >= 1)
+                .take(30)
+                .filter(|player| {
+                    player.discord_id != Some(user_id)
+                        && player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+                })
+                .collect::<Vec<_>>();
+            for victim in heist_window {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
+                    // Python truncates before scaling:
+                    // scale(max(1, int(balance * uniform(0.05, 0.12)))).
                     settle(
                         victim_id,
                         cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (victim.jopacoin_balance as f64
-                                * (0.05 + fastrand::f64() * (0.12 - 0.05)))
-                                .max(1.0),
+                            1_i64.max(
+                                (victim.jopacoin_balance as f64
+                                    * (0.05 + fastrand::f64() * (0.12 - 0.05)))
+                                    as i64,
+                            ) as f64,
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -8027,12 +8068,16 @@ fn resolve_hostile_mechanic(
                     && victim.jopacoin_balance >= 50
                 {
                     let before = total.get();
+                    // Python truncates before scaling:
+                    // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                     settle(
                         victim_id,
                         cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (victim.jopacoin_balance as f64
-                                * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                                .max(1.0),
+                            1_i64.max(
+                                (victim.jopacoin_balance as f64
+                                    * (0.08 + fastrand::f64() * (0.15 - 0.08)))
+                                    as i64,
+                            ) as f64,
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -8077,11 +8122,16 @@ fn resolve_hostile_mechanic(
                 && victim.jopacoin_balance >= 50
             {
                 let before = total.get();
+                // Python truncates before scaling:
+                // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                 settle(
                     victim_id,
                     cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        (victim.jopacoin_balance as f64 * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                            .max(1.0),
+                        1_i64.max(
+                            (victim.jopacoin_balance as f64
+                                * (0.08 + fastrand::f64() * (0.15 - 0.08)))
+                                as i64,
+                        ) as f64,
                         config.minigame_jc_delta_scale,
                     ),
                     DbHostileDestination::Player,

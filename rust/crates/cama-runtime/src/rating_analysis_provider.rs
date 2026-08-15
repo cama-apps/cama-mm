@@ -45,6 +45,8 @@ const GREEN: u32 = 0x57_f2_87;
 pub enum RatingAnalysisProviderBuildError {
     #[error("invalid OpenSkill runtime configuration: {0}")]
     OpenSkill(#[from] OpenSkillError),
+    #[error("invalid Glicko runtime configuration: {0}")]
+    InvalidRatingConfig(&'static str),
 }
 
 #[derive(Clone)]
@@ -63,9 +65,13 @@ impl RatingAnalysisRegistrationProvider {
         // `with_config` validates update parameters; force validation of the
         // probability temperature before accepting live traffic as well.
         openskill.calibrate_win_probability(0.5, None)?;
+        let rating_system = config
+            .glicko_rating_system()
+            .map_err(RatingAnalysisProviderBuildError::InvalidRatingConfig)?;
         let repository = RatingAnalysisRepository::new(
             database_path,
             openskill.clone(),
+            rating_system,
             config.migration.new_player_mmr_discount,
         );
         Ok(Self::with_worker(

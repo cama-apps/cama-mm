@@ -313,6 +313,35 @@ impl ApplicationConfig {
         Self::from_lookup(|name| env::var(name).ok())
     }
 
+    /// The env-configured Glicko system shared by every rating-mutating path.
+    ///
+    /// Python's module-level constants make its default-constructed
+    /// `CamaRatingSystem` env-configured; the Rust default bakes compile-time
+    /// constants, so production paths must construct through here or silently
+    /// ignore deployment overrides such as `MAX_RATING_SWING_PER_GAME`.
+    pub fn glicko_rating_system(
+        &self,
+    ) -> Result<cama_domain::rating::CamaRatingSystem, &'static str> {
+        use cama_domain::rating::{CamaRatingSystem, RatingConfig};
+        Ok(CamaRatingSystem::with_config(
+            self.values.initial_glicko_rd,
+            0.06,
+            RatingConfig {
+                calibration_rd_threshold: self.values.calibration_rd_threshold,
+                initial_rd: self.values.initial_glicko_rd,
+                max_rating_swing_per_game: self.values.max_rating_swing_per_game,
+                base_rating_delta_multiplier: self.values.base_rating_delta_multiplier,
+                max_rd_contraction_per_game: self.values.max_rd_contraction_per_game,
+                new_player_mmr_discount: self.migration.new_player_mmr_discount,
+                rd_decay_constant: self.values.rd_decay_constant,
+                rd_decay_grace_period_days: i32::try_from(self.values.rd_decay_grace_period_days)
+                    .map_err(|_| "RD_DECAY_GRACE_PERIOD_DAYS")?,
+                streak_threshold: self.values.streak_threshold,
+                streak_multiplier_per_game: self.values.streak_multiplier_per_game,
+            },
+        ))
+    }
+
     pub fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, crate::ConfigError> {

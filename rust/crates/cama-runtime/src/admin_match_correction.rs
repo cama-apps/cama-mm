@@ -20,6 +20,7 @@ use cama_db::match_correction_repository::{
     MatchCorrectionRepository, MatchSide, OPENSKILL_REPLAY_ALGORITHM_VERSION,
 };
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError};
+use cama_domain::rating::CamaRatingSystem;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -44,6 +45,8 @@ static OWNER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub enum AdminMatchCorrectionBuildError {
     #[error("invalid OpenSkill runtime configuration: {0}")]
     OpenSkill(#[from] OpenSkillError),
+    #[error("invalid Glicko runtime configuration: {0}")]
+    InvalidRatingConfig(&'static str),
 }
 
 /// One production composition exposes both the slash-command control and the
@@ -63,10 +66,14 @@ impl AdminMatchCorrectionRuntime {
     ) -> Result<Self, AdminMatchCorrectionBuildError> {
         let openskill = CamaOpenSkillSystem::with_config(config.migration.openskill.clone())?;
         openskill.calibrate_win_probability(0.5, None)?;
+        let rating = config
+            .glicko_rating_system()
+            .map_err(AdminMatchCorrectionBuildError::InvalidRatingConfig)?;
         let control = Arc::new(ProductionAdminMatchCorrectionControl {
             repository: MatchCorrectionRepository::new(database_path.as_ref()),
             database_path: database_path.as_ref().to_path_buf(),
             openskill,
+            rating,
             new_player_mmr_discount: config.migration.new_player_mmr_discount,
             house_payout_multiplier: config.values.house_payout_multiplier,
             vanity_tax_rate: config.values.vanity_tax_rate,
@@ -118,6 +125,7 @@ struct ProductionAdminMatchCorrectionControl {
     repository: MatchCorrectionRepository,
     database_path: PathBuf,
     openskill: CamaOpenSkillSystem,
+    rating: CamaRatingSystem,
     new_player_mmr_discount: i32,
     house_payout_multiplier: f64,
     vanity_tax_rate: f64,
@@ -132,6 +140,7 @@ impl Clone for ProductionAdminMatchCorrectionControl {
             repository: MatchCorrectionRepository::new(&self.database_path),
             database_path: self.database_path.clone(),
             openskill: self.openskill.clone(),
+            rating: self.rating,
             new_player_mmr_discount: self.new_player_mmr_discount,
             house_payout_multiplier: self.house_payout_multiplier,
             vanity_tax_rate: self.vanity_tax_rate,
@@ -266,6 +275,7 @@ impl ProductionAdminMatchCorrectionControl {
                 Some(request.guild_id),
                 new_side,
                 &self.openskill,
+                &self.rating,
             )
             .map_err(classify_repository_error)?;
 
@@ -433,6 +443,7 @@ impl ProductionAdminMatchCorrectionControl {
             .replay_openskill_atomic_configured(
                 Some(guild_id),
                 &self.openskill,
+                &self.rating,
                 self.new_player_mmr_discount,
             )
             .map_err(unexpected_repository_error)?;

@@ -423,6 +423,12 @@ impl BankruptcyRepository {
 
     /// Credit all awards and optionally consume penalty wins in one transaction.
     /// Results preserve input order; duplicate IDs are processed sequentially.
+    ///
+    /// WARNING — no production caller. This parallel implementation computes
+    /// the bankruptcy penalty from the gross award and skips garnishment,
+    /// unlike the live path (`match_recording_repository::
+    /// credit_income_awards_atomic`). Fix the penalty base before wiring it
+    /// anywhere.
     pub fn award_winners_atomic(
         &self,
         request: WinnerAwardRequest<'_>,
