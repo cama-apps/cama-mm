@@ -520,13 +520,15 @@ impl GuildMemberPageSource for UnusedMembers {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ready_region_backfill_dedupes_steam_ids_and_bulk_updates_all_database_guilds() {
+async fn ready_region_backfill_dedupes_steam_ids_and_ignores_foreign_guilds() {
     let database = database();
     let connection = Connection::open(database.path()).expect("open registration database");
     connection
         .pragma_update(None, "foreign_keys", false)
         .expect("production foreign-key mode");
-    for (discord_id, guild_id, steam_id) in [(101, 42, 99), (101, 43, 99), (102, 42, 77)] {
+    for (discord_id, guild_id, steam_id) in
+        [(101, 42, 99), (101, 43, 99), (102, 42, 77), (103, 43, 88)]
+    {
         connection
             .execute(
                 "INSERT INTO players (
@@ -551,8 +553,8 @@ async fn ready_region_backfill_dedupes_steam_ids_and_bulk_updates_all_database_g
         .ready_recovery(ReadyRecoveryContext::new(vec![42], Arc::new(UnusedMembers)))
         .await;
     assert!(report.failures.is_empty());
-    assert_eq!(report.guilds_attempted, 2);
-    assert_eq!(report.members_refreshed, 3);
+    assert_eq!(report.guilds_attempted, 1);
+    assert_eq!(report.members_refreshed, 2);
     let requests = server.requests(2);
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -562,10 +564,16 @@ async fn ready_region_backfill_dedupes_steam_ids_and_bulk_updates_all_database_g
             .count(),
         1
     );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.starts_with("GET /players/88/counts ")),
+        "foreign-guild Steam IDs must not trigger OpenDota HTTP"
+    );
     let regions = connection
         .prepare(
             "SELECT discord_id,guild_id,inferred_region FROM players
-             WHERE discord_id IN (101,102) ORDER BY discord_id,guild_id",
+             WHERE discord_id IN (101,102,103) ORDER BY discord_id,guild_id",
         )
         .expect("prepare region read")
         .query_map([], |row| {
@@ -582,8 +590,9 @@ async fn ready_region_backfill_dedupes_steam_ids_and_bulk_updates_all_database_g
         regions,
         [
             (101, 42, Some("USW".to_owned())),
-            (101, 43, Some("USW".to_owned())),
+            (101, 43, None),
             (102, 42, Some("USE".to_owned())),
+            (103, 43, None),
         ]
     );
 }
@@ -1334,6 +1343,63 @@ async fn test_register_with_valid_opendota_response() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn computed_mmr_float_registers_without_manual_mmr_prompt() {
+    let database = database();
+    let server = RouteServer::start(vec![
+        r#"{"profile":{"personaname":"PMA arc"},"computed_mmr":3811.28}"#,
+        "{}",
+    ]);
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        Arc::new(MockDiscord::default()),
+        config(),
+    );
+    let responder = Arc::new(CapturingResponder::default());
+
+    registry(&provider)
+        .command_handler("player")
+        .expect("player handler")
+        .handle(
+            player_command(
+                10,
+                100_002,
+                "register",
+                vec![option("steam_id", InteractionValue::Integer(11_758_567))],
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("successful registration response");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let success = captured.followups.last().expect("success followup");
+    assert!(success.content.starts_with("✅ Registered <@100002>!"));
+    assert!(success.components.is_empty(), "manual MMR prompt was shown");
+    drop(captured);
+    assert_eq!(
+        server
+            .requests(2)
+            .iter()
+            .filter(|request| request.starts_with("GET /players/11758567 "))
+            .count(),
+        1,
+        "registration must reuse the one OpenDota player payload"
+    );
+    let connection = Connection::open(database.path()).expect("inspect registration");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT initial_mmr FROM players WHERE discord_id=100002 AND guild_id=42",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("registered player"),
+        3_811
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
     let database = database();
     let server = RouteServer::start(vec![r#"{"mmr_estimate":{"estimate":null}}"#]);
@@ -1983,7 +2049,7 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
         .custom_id
         .clone();
     let modal_id = button_id.replace(":button:", ":modal:");
-    for value in ["", "not-a-number", "12001"] {
+    for value in ["", "not-a-number", "0", "12001"] {
         let invalid = Arc::new(CapturingResponder::default());
         initial_registry
             .component_handler(&modal_id)

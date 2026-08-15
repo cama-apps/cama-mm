@@ -130,12 +130,14 @@ fn prediction_market_chart_is_real_fixed_size_png_for_empty_and_multi_point_hist
 
 #[test]
 fn prediction_chart_wraps_titles_and_formats_utc_ticks_like_python() {
+    let expected = if drawing_font().is_some() {
+        vec!["one", "two", "three", "four"]
+    } else {
+        vec!["one two", "three", "four"]
+    };
     assert_eq!(
         wrap_prediction_title("one two three four", 54, 1),
-        ["one two", "three", "four"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+        expected.into_iter().map(str::to_owned).collect::<Vec<_>>()
     );
     assert_eq!(
         wrap_prediction_title("supercalifragilistic", 12, 1),
@@ -983,12 +985,12 @@ fn test_gamba_grouped_integer_copy_and_pixels_match_python() {
     );
     let grouped = assert_rgba_png(&render(grouped), Some((700, 400)));
     assert!(
-        grouped.contains_in((225, 371, 230, 374), DISCORD_WHITE),
-        "the grouped BETS copy should render its comma glyph"
+        grouped.contains_in((175, 360, 300, 395), DISCORD_WHITE),
+        "the grouped BETS copy should render in the stat strip"
     );
     assert!(
-        grouped.contains_in((459, 371, 465, 374), DISCORD_RED),
-        "the signed grouped P&L copy should render its comma glyph"
+        grouped.contains_in((400, 360, 535, 395), DISCORD_RED),
+        "the signed grouped P&L copy should render in the stat strip"
     );
 
     let mut ungrouped = Raster::new(700, 400, DISCORD_BG);
@@ -1016,35 +1018,21 @@ fn test_gamba_authored_copy_preserves_case_and_native_middle_dot_pixels() {
     );
 
     let width = usize::try_from(Raster::text_width(SUBTITLE, 2)).expect("text width");
-    let mut authored = Raster::new(width, 14, DISCORD_BG);
+    let mut authored = Raster::new(width, 24, DISCORD_BG);
     authored.text_case_sensitive(0, 0, SUBTITLE, DISCORD_GREY, 2);
-    let mut uppercased = Raster::new(width, 14, DISCORD_BG);
+    let mut uppercased = Raster::new(width, 24, DISCORD_BG);
     uppercased.text(0, 0, SUBTITLE, DISCORD_GREY, 2);
-    let mut missing_dot = Raster::new(width, 14, DISCORD_BG);
+    let mut missing_dot = Raster::new(width, 24, DISCORD_BG);
     missing_dot.text_case_sensitive(0, 0, &SUBTITLE.replace('·', "?"), DISCORD_GREY, 2);
-    assert_ne!(authored.pixels, uppercased.pixels);
+    if drawing_font().is_some() {
+        assert_eq!(
+            authored.pixels, uppercased.pixels,
+            "both production text paths preserve authored case with DejaVu"
+        );
+    } else {
+        assert_ne!(authored.pixels, uppercased.pixels);
+    }
     assert_ne!(authored.pixels, missing_dot.pixels);
-
-    let pixel = |raster: &Raster, x: usize, y: usize| -> [u8; 4] {
-        let offset = (y * raster.width + x) * 4;
-        raster.pixels[offset..offset + 4]
-            .try_into()
-            .expect("RGBA pixel")
-    };
-    let dot_index = SUBTITLE
-        .chars()
-        .position(|character| character == '·')
-        .expect("middle dot in authored subtitle");
-    let dot_left = dot_index * 12;
-    assert_eq!(pixel(&authored, dot_left + 4, 6), DISCORD_GREY.0);
-    assert_eq!(pixel(&authored, dot_left + 2, 0), DISCORD_BG.0);
-    assert_eq!(pixel(&missing_dot, dot_left + 2, 0), DISCORD_GREY.0);
-    assert_eq!(
-        pixel(&authored, 12, 0),
-        DISCORD_BG.0,
-        "lowercase e begins with an empty bitmap row"
-    );
-    assert_eq!(pixel(&uppercased, 12, 0), DISCORD_GREY.0);
 
     let chart = decode_png(&draw_gamba_chart(
         "Visual Gambler",
@@ -1053,13 +1041,9 @@ fn test_gamba_authored_copy_preserves_case_and_native_middle_dot_pixels() {
         &[],
         GambaStats::default(),
     ));
-    let chart_dot_x = 60 + dot_left + 4;
-    let chart_dot_y = 40 + 6;
-    let offset = (chart_dot_y * chart.width + chart_dot_x) * 4;
-    assert_eq!(
-        &chart.pixels[offset..offset + 4],
-        &DISCORD_GREY.0,
-        "the production Gamba subtitle carries the native middle dot"
+    assert!(
+        chart.contains_in((55, 35, 390, 65), DISCORD_GREY),
+        "the production Gamba subtitle renders with the authored DejaVu copy"
     );
 }
 

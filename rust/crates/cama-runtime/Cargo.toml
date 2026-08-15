@@ -17,6 +17,7 @@ async-trait.workspace = true
 chrono.workspace = true
 fastrand.workspace = true
 fs2.workspace = true
+fontdue.workspace = true
 getrandom.workspace = true
 gif.workspace = true
 serenity.workspace = true

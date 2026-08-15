@@ -7,8 +7,12 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::sync::OnceLock;
 
 use chrono::{TimeZone, Utc};
+use fontdue::{Font, FontSettings};
+
+use crate::font_assets::{DejaVuFace, load_dejavu_font};
 
 pub const DISCORD_BG: Rgba = Rgba::rgb(0x36, 0x39, 0x3f);
 pub const DISCORD_DARKER: Rgba = Rgba::rgb(0x2f, 0x31, 0x36);
@@ -210,6 +214,10 @@ impl Raster {
     }
 
     fn text(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
+        if let Some(font) = drawing_font() {
+            self.truetype_text(x, y, text, color, font_pixel_size(scale), font);
+            return;
+        }
         let mut cursor = x;
         for character in text.chars() {
             self.draw_glyph(cursor, y, character, color, scale);
@@ -218,6 +226,10 @@ impl Raster {
     }
 
     fn text_case_sensitive(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
+        if let Some(font) = drawing_font() {
+            self.truetype_text(x, y, text, color, font_pixel_size(scale), font);
+            return;
+        }
         let mut cursor = x;
         for character in text.chars() {
             self.draw_glyph_case_sensitive(cursor, y, character, color, scale);
@@ -226,12 +238,62 @@ impl Raster {
     }
 
     fn text_width(text: &str, scale: i32) -> i32 {
+        if let Some(font) = drawing_font() {
+            return truetype_text_width(text, font_pixel_size(scale), font);
+        }
         text.chars()
             .count()
             .try_into()
             .unwrap_or(i32::MAX)
             .saturating_mul(6)
             .saturating_mul(scale.max(0))
+    }
+
+    fn truetype_text(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Rgba,
+        pixel_size: f32,
+        font: &Font,
+    ) {
+        let ascent = font
+            .horizontal_line_metrics(pixel_size)
+            .map_or(pixel_size, |metrics| metrics.ascent);
+        let baseline = y as f32 + ascent;
+        let mut pen_x = x as f32;
+        let mut previous = None;
+        for character in text.chars() {
+            if let Some(previous) = previous {
+                pen_x += font
+                    .horizontal_kern(previous, character, pixel_size)
+                    .unwrap_or_default();
+            }
+            let (metrics, bitmap) = font.rasterize(character, pixel_size);
+            let origin_x = pen_x.round() as i32 + metrics.xmin;
+            let origin_y = baseline.round() as i32
+                - metrics.ymin
+                - i32::try_from(metrics.height).unwrap_or_default();
+            for glyph_y in 0..metrics.height {
+                for glyph_x in 0..metrics.width {
+                    let alpha = bitmap[glyph_y * metrics.width + glyph_x];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let alpha =
+                        u8::try_from(u16::from(alpha) * u16::from(color.0[3]) / u16::from(u8::MAX))
+                            .unwrap_or(u8::MAX);
+                    self.set_pixel(
+                        origin_x + i32::try_from(glyph_x).unwrap_or_default(),
+                        origin_y + i32::try_from(glyph_y).unwrap_or_default(),
+                        Rgba([color.0[0], color.0[1], color.0[2], alpha]),
+                    );
+                }
+            }
+            pen_x += metrics.advance_width;
+            previous = Some(character);
+        }
     }
 
     fn circle_with_outline(&mut self, center: (i32, i32), radius: i32, fill: Rgba, outline: Rgba) {
@@ -377,6 +439,35 @@ impl Raster {
             }
         }
     }
+}
+
+fn drawing_font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        load_dejavu_font(DejaVuFace::Sans)
+            .ok()
+            .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
+}
+
+fn font_pixel_size(scale: i32) -> f32 {
+    if scale <= 1 { 14.0 } else { 20.0 }
+}
+
+fn truetype_text_width(text: &str, pixel_size: f32, font: &Font) -> i32 {
+    let mut width = 0.0_f32;
+    let mut previous = None;
+    for character in text.chars() {
+        if let Some(previous) = previous {
+            width += font
+                .horizontal_kern(previous, character, pixel_size)
+                .unwrap_or_default();
+        }
+        width += font.metrics(character, pixel_size).advance_width;
+        previous = Some(character);
+    }
+    width.ceil() as i32
 }
 
 fn glyph(character: char) -> [u8; 7] {
@@ -859,7 +950,7 @@ pub fn draw_rating_history_chart(
         12,
         &format!("{username}'s Rating History"),
         DISCORD_WHITE,
-        1,
+        2,
     );
     if most_recent_first.len() < 2 {
         let message = if most_recent_first.is_empty() {

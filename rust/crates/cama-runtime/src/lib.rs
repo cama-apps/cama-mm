@@ -197,7 +197,8 @@ pub use serenity_transport::{SerenityDiscordTransport, SerenityGateway};
 pub use shop_provider::{ShopDiscordPort, ShopProviderBuildError, ShopRegistrationProvider};
 pub use survey_provider::{
     SURVEY_RECOVERY_WAKE_INTERVAL, SURVEY_RECOVERY_WORKER_NAME, SurveyDiscordPort, SurveyDmError,
-    SurveyDmErrorKind, SurveyDmHistory, SurveyProviderBuildError, SurveyRegistrationProvider,
+    SurveyDmErrorKind, SurveyDmHistory, SurveyEditError, SurveyEditErrorKind,
+    SurveyProviderBuildError, SurveyRegistrationProvider,
 };
 pub use tax_provider::TaxRegistrationProvider;
 pub use trivia_provider::{TriviaDiscordPort, TriviaRegistrationProvider};

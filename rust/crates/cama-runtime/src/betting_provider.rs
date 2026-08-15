@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -17,6 +17,7 @@ use cama_app::dota_bet_seed::{BetTotals, bets_overview};
 use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::economy_event_service::EconomyEventConfig;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
+use cama_app::font_assets::{DejaVuFace, load_dejavu_font};
 use cama_app::golden_wheel::{LiveGoldenEconomy, compute_live_golden_wedges};
 use cama_app::jopat_post_match::{JopatPostMatchContext, NumericFact};
 use cama_app::mana_service::mana_day_label;
@@ -67,6 +68,7 @@ use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
 use chrono::{DateTime, FixedOffset, Utc};
+use fontdue::{Font, FontSettings};
 use gif::{Encoder, Frame, Repeat};
 use rusqlite::types::Value as SqlValue;
 use serde_json::json;
@@ -695,7 +697,10 @@ const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(10);
 const DISBURSE_VOTES_PAGE_SIZE: usize = 15;
 const DISBURSE_VOTES_TTL: Duration = Duration::from_secs(300);
 const BETTING_NEON_DELETE_DELAY: Duration = Duration::from_secs(60);
-const BETTING_EXPLOSION_DISPLAY_DELAY: Duration = Duration::from_secs(8);
+// Python waits for the animation and then gives Discord half a second before
+// adding the result embed to the attachment-only message.
+const BETTING_WHEEL_DISPLAY_DELAY: Duration = Duration::from_millis(15_500);
+const BETTING_EXPLOSION_DISPLAY_DELAY: Duration = Duration::from_millis(8_500);
 
 #[derive(Clone, Debug)]
 pub struct BettingRuntimeConfig {
@@ -719,6 +724,9 @@ pub struct BettingRuntimeConfig {
     pub loan_max_amount: i64,
     pub tip_fee_rate: f64,
     pub minigame_jc_delta_scale: f64,
+    /// Admit negative-ID database fixtures to wheel rank mechanics. Real
+    /// Discord IDs remain checked against the live guild member snapshot.
+    pub synthetic_members_enabled: bool,
     pub disburse_min_fund: i64,
     pub disburse_quorum_percentage: f64,
     /// Daily economy-event policy is read from the same existing-schema
@@ -761,6 +769,7 @@ impl BettingRuntimeConfig {
             loan_max_amount: values.loan_max_amount,
             tip_fee_rate: values.tip_fee_rate,
             minigame_jc_delta_scale: values.minigame_jc_delta_scale,
+            synthetic_members_enabled: values.gamba_synthetic_members_enabled,
             disburse_min_fund: values.disburse_min_fund,
             disburse_quorum_percentage: values.disburse_quorum_percentage,
             economy_events_enabled: values.economy_events_enabled,
@@ -945,7 +954,15 @@ impl BettingRegistrationProvider {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         self.handler
-            .gamba(user_id, Some(guild_id), channel_id, 0, &responder, true)
+            .gamba(
+                user_id,
+                "digger",
+                Some(guild_id),
+                channel_id,
+                0,
+                &responder,
+                true,
+            )
             .await
     }
 }
@@ -1289,19 +1306,28 @@ fn render_wheel_attachment(
     wedges: &[cama_app::wheel::WheelWedge],
     target_index: usize,
     golden: bool,
+    display_name: Option<&str>,
 ) -> Result<InteractionAttachment, String> {
     if wedges.is_empty() {
         return Err("cannot render an empty wheel".to_owned());
     }
     let mut palette = vec![
-        [7, 9, 14],                                      // background
-        [241, 196, 15],                                  // gold hub/final highlight
+        [30, 30, 35],                                    // Python wheel background
+        [255, 215, 0],                                   // gold outline/glow
         [231, 76, 60],                                   // pointer
         if golden { [58, 40, 0] } else { [44, 62, 80] }, // hub
         [0, 0, 0],                                       // label shadow
-        [255, 255, 255],                                 // label text
+        [255, 255, 255],                                 // label/divider text
+        [55, 190, 55],                                   // terminal prompt
+        [55, 90, 55],                                    // dim matrix/status text
+        [255, 255, 0],                                   // selected wedge outline
+        [160, 160, 160],                                 // font edge gray
+        [220, 220, 220],                                 // font edge white
+        [150, 127, 0],                                   // font edge gold
+        [30, 110, 30],                                   // font edge green
     ];
     let mut wedge_indices = Vec::with_capacity(wedges.len());
+    let mut bright_wedge_indices = Vec::with_capacity(wedges.len());
     for wedge in wedges {
         let rgb = parse_hex_rgb(wedge.color).unwrap_or([80, 80, 80]);
         let index = palette
@@ -1312,6 +1338,16 @@ fn render_wheel_attachment(
                 palette.len() - 1
             });
         wedge_indices.push(u8::try_from(index).map_err(|_| "wheel palette overflow".to_owned())?);
+        let bright = rgb.map(|channel| channel.saturating_add(120));
+        let bright_index = palette
+            .iter()
+            .position(|candidate| candidate == &bright)
+            .unwrap_or_else(|| {
+                palette.push(bright);
+                palette.len() - 1
+            });
+        bright_wedge_indices
+            .push(u8::try_from(bright_index).map_err(|_| "wheel palette overflow".to_owned())?);
     }
     let palette_bytes = palette
         .iter()
@@ -1337,10 +1373,12 @@ fn render_wheel_attachment(
             draw_wheel_frame(
                 &mut pixels,
                 &wedge_indices,
+                &bright_wedge_indices,
                 &label_atlas,
                 target_index,
                 frame_index,
                 golden,
+                display_name,
             );
             let mut frame = Frame {
                 width: WHEEL_MEDIA_SIZE,
@@ -1421,8 +1459,9 @@ pub fn render_wheel_attachment_for_visual_equivalence(
     wedges: &[cama_app::wheel::WheelWedge],
     target_index: usize,
     golden: bool,
+    display_name: Option<&str>,
 ) -> Result<InteractionAttachment, String> {
-    render_wheel_attachment(wedges, target_index, golden)
+    render_wheel_attachment(wedges, target_index, golden, display_name)
 }
 
 /// Emit the exact explosion attachment used by the production provider for
@@ -1478,6 +1517,60 @@ struct WheelLabelAtlas {
     wedge_sprite_indices: Vec<usize>,
 }
 
+fn wheel_font(bold: bool) -> Option<&'static Font> {
+    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
+    let slot = if bold { &BOLD } else { &REGULAR };
+    slot.get_or_init(|| {
+        let face = if bold {
+            DejaVuFace::SansBold
+        } else {
+            DejaVuFace::SansMono
+        };
+        load_dejavu_font(face)
+            .ok()
+            .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
+}
+
+fn render_font_mask(text: &str, pixel_size: f32, bold: bool) -> Option<WheelLabelSprite> {
+    let font = wheel_font(bold)?;
+    let baseline = pixel_size.ceil() as i32 + 3;
+    let mut pen_x = 2.0_f32;
+    let mut glyphs = Vec::new();
+    for character in text.chars() {
+        let (metrics, bitmap) = font.rasterize(character, pixel_size);
+        let x = pen_x.round() as i32 + metrics.xmin;
+        let y = baseline - metrics.ymin - i32::try_from(metrics.height).ok()?;
+        pen_x += metrics.advance_width;
+        glyphs.push((x, y, metrics, bitmap));
+    }
+    let width = (pen_x.ceil() as i32 + 2).max(1);
+    let height = (pixel_size * 1.45).ceil() as i32 + 4;
+    let mut mask = vec![0_u8; usize::try_from(width.checked_mul(height)?).ok()?];
+    for (origin_x, origin_y, metrics, bitmap) in glyphs {
+        for glyph_y in 0..metrics.height {
+            for glyph_x in 0..metrics.width {
+                let alpha = bitmap[glyph_y * metrics.width + glyph_x];
+                if alpha == 0 {
+                    continue;
+                }
+                let x = origin_x + i32::try_from(glyph_x).ok()?;
+                let y = origin_y + i32::try_from(glyph_y).ok()?;
+                if (0..width).contains(&x) && (0..height).contains(&y) {
+                    mask[usize::try_from(y * width + x).ok()?] = alpha;
+                }
+            }
+        }
+    }
+    Some(WheelLabelSprite {
+        width,
+        height,
+        mask,
+    })
+}
+
 /// Bounded process-local sprite cache used while composing wheel media.
 ///
 /// Pillow's implementation uses an LRU cache keyed by the measured label
@@ -1506,13 +1599,20 @@ impl WheelLabelSpriteCache {
             return sprite;
         }
         self.misses = self.misses.saturating_add(1);
-        let width = bitmap_text_width(text, scale).max(1);
-        let height = 7 * scale;
-        let sprite = WheelLabelSprite {
-            width,
-            height,
-            mask: render_bitmap_mask(text, scale, width, height),
+        let pixel_size = match scale {
+            3 => 16.0,
+            2 => 14.0,
+            _ => 10.0,
         };
+        let sprite = render_font_mask(text, pixel_size, true).unwrap_or_else(|| {
+            let width = bitmap_text_width(text, scale).max(1);
+            let height = 7 * scale;
+            WheelLabelSprite {
+                width,
+                height,
+                mask: render_bitmap_mask(text, scale, width, height),
+            }
+        });
         if self.entries.len() >= MAX_WHEEL_LABEL_SPRITES
             && let Some(evicted) = self.order.pop_front()
         {
@@ -1558,24 +1658,51 @@ fn build_wheel_label_atlas(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_wheel_frame(
     pixels: &mut [u8],
     wedge_indices: &[u8],
+    bright_wedge_indices: &[u8],
     label_atlas: &WheelLabelAtlas,
     target_index: usize,
     frame_index: usize,
     golden: bool,
+    display_name: Option<&str>,
 ) {
     let size = i32::from(WHEEL_MEDIA_SIZE);
     let center = size / 2;
     let radius = center - 30;
     let inner_radius = radius / 3;
     let wedge_count = wedge_indices.len();
-    let progress = frame_index as f64 / (WHEEL_MEDIA_FRAME_COUNT.saturating_sub(1)) as f64;
-    let full_spins = std::f64::consts::TAU * 4.0 * (1.0 - progress);
-    let target_rotation = std::f64::consts::TAU * target_index as f64 / wedge_count as f64;
-    let rotation = full_spins + target_rotation;
+    if wedge_count == 0 {
+        return;
+    }
     let slice = std::f64::consts::TAU / wedge_count as f64;
+    let rotation = wheel_frame_rotation(frame_index, target_index, wedge_count);
+
+    if let Some(display_name) = display_name {
+        draw_matrix_background(pixels, frame_index);
+        draw_terminal_status(pixels, frame_index, display_name);
+    }
+
+    // Pillow paints several translucent glow rings. A palette GIF cannot
+    // preserve alpha here, so use thin, nested gold rings over the same dark
+    // background; the silhouette and spacing match the Python composition.
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x - center;
+            let dy = y - center;
+            let distance = ((dx * dx + dy * dy) as f64).sqrt();
+            if (f64::from(radius + 3)..=f64::from(radius + 4)).contains(&distance)
+                || (f64::from(radius + 8)..=f64::from(radius + 9)).contains(&distance)
+                || (f64::from(radius + 13)..=f64::from(radius + 14)).contains(&distance)
+            {
+                pixels[usize::try_from(y * size + x).unwrap_or_default()] = 11;
+            }
+        }
+    }
+
+    let reveal_winner = frame_index == WHEEL_MEDIA_FRAME_COUNT.saturating_sub(1);
     for y in 0..size {
         for x in 0..size {
             let dx = x - center;
@@ -1586,47 +1713,274 @@ fn draw_wheel_frame(
                 continue;
             }
             if distance <= f64::from(inner_radius) {
-                pixels[index] = 3;
+                pixels[index] = if distance >= f64::from(inner_radius - 4) {
+                    1
+                } else {
+                    3
+                };
                 continue;
             }
-            if distance >= f64::from(radius - 6) {
-                pixels[index] = 1;
+            if distance >= f64::from(radius - 2) {
+                pixels[index] = 5;
                 continue;
             }
             let angle = (f64::from(dx).atan2(f64::from(-dy)) + std::f64::consts::TAU)
                 .rem_euclid(std::f64::consts::TAU);
-            let wedge = ((angle + rotation).rem_euclid(std::f64::consts::TAU) / slice).floor()
-                as usize
-                % wedge_count;
-            pixels[index] = wedge_indices[wedge];
+            let rotated = (angle + rotation).rem_euclid(std::f64::consts::TAU);
+            let wedge = (rotated / slice).floor() as usize % wedge_count;
+            let from_boundary = (rotated % slice).min(slice - (rotated % slice));
+            if from_boundary * distance <= 1.25 {
+                pixels[index] = if reveal_winner && wedge == target_index {
+                    8
+                } else {
+                    5
+                };
+            } else if reveal_winner && wedge == target_index {
+                pixels[index] = bright_wedge_indices
+                    .get(wedge)
+                    .copied()
+                    .unwrap_or(wedge_indices[wedge]);
+            } else {
+                pixels[index] = wedge_indices[wedge];
+            }
         }
     }
     draw_wheel_labels(pixels, label_atlas, rotation);
-    // Draw the red pointer over the wheel face so its target remains obvious.
-    let pointer_top = center - radius - 22;
-    let pointer_tip = center - radius + 30;
-    for y in pointer_top..=pointer_tip {
-        let progress = (y - pointer_top) as f64 / (pointer_tip - pointer_top).max(1) as f64;
-        let half_width = (18.0 - 14.0 * progress).max(2.0) as i32;
-        for x in (center - half_width)..=(center + half_width) {
+
+    let center_lines = if golden {
+        ["GOLDEN", "WHEEL"]
+    } else {
+        ["WHEEL OF", "FORTUNE"]
+    };
+    for (line_index, line) in center_lines.iter().enumerate() {
+        let y = center - 18 + i32::try_from(line_index).unwrap_or_default() * 20;
+        if let Some(sprite) = render_font_mask(line, 13.0, false) {
+            let x = center - sprite.width / 2;
+            blit_bitmap_mask(pixels, &sprite, x, y, 1);
+        } else {
+            let scale = 2;
+            let x = center - bitmap_text_width(line, scale) / 2;
+            draw_bitmap_text(pixels, line, x, y, scale, 1);
+        }
+    }
+
+    // Match Python's notched pointer, including the high-contrast white edge.
+    let pointer_y = center - radius - 5;
+    let pointer = [
+        (center, pointer_y + 35),
+        (center - 18, pointer_y - 8),
+        (center - 6, pointer_y + 2),
+        (center, pointer_y + 18),
+        (center + 6, pointer_y + 2),
+        (center + 18, pointer_y - 8),
+    ];
+    draw_filled_polygon(pixels, &pointer, 5);
+    let pointer_inner = [
+        (center, pointer_y + 30),
+        (center - 14, pointer_y - 4),
+        (center - 4, pointer_y + 4),
+        (center, pointer_y + 16),
+        (center + 4, pointer_y + 4),
+        (center + 14, pointer_y - 4),
+    ];
+    draw_filled_polygon(pixels, &pointer_inner, 2);
+}
+
+fn wheel_frame_rotation(frame_index: usize, target_index: usize, wedge_count: usize) -> f64 {
+    if wedge_count == 0 {
+        return 0.0;
+    }
+    let frame_index = frame_index.min(WHEEL_MEDIA_FRAME_COUNT.saturating_sub(1));
+    let slice = std::f64::consts::TAU / wedge_count as f64;
+    // Python rotates its wheel face by the negative of this animation value.
+    // This rasterizer samples the source face directly, so use the inverse
+    // convention: six negative turns ending with the target wedge centered at
+    // the fixed top pointer.
+    let target_center = (target_index as f64 + 0.5) * slice;
+    let final_rotation = target_center - std::f64::consts::TAU * 6.0;
+    let near_miss_rotation = final_rotation + slice * 1.2;
+    const SLOW_END: usize = 58;
+    const CREEP_END: usize = 68;
+    if frame_index <= SLOW_END {
+        let progress = frame_index as f64 / SLOW_END as f64;
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        near_miss_rotation * eased
+    } else {
+        let progress =
+            ((frame_index - SLOW_END) as f64 / (CREEP_END - SLOW_END) as f64).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - progress).powi(2);
+        near_miss_rotation + (final_rotation - near_miss_rotation) * eased
+    }
+}
+
+#[cfg(test)]
+fn wheel_index_at_pointer(rotation: f64, wedge_count: usize) -> Option<usize> {
+    if wedge_count == 0 {
+        return None;
+    }
+    let slice = std::f64::consts::TAU / wedge_count as f64;
+    Some((rotation.rem_euclid(std::f64::consts::TAU) / slice).floor() as usize % wedge_count)
+}
+
+fn draw_matrix_background(pixels: &mut [u8], frame_index: usize) {
+    if frame_index >= 32 {
+        return;
+    }
+    let size = i32::from(WHEEL_MEDIA_SIZE);
+    let center = size / 2;
+    let radius = center - 30;
+    const STREAMS: &[(i32, i32, i32, usize, &str)] = &[
+        (3, 19, 31, 7, "JOPACOINDEGEN$01234567890"),
+        (10, 27, 143, 5, "GAMBARIGGED322JOPA"),
+        (18, 34, 287, 8, "ALLINNOBALLSSENDIT"),
+        (34, 16, 403, 4, "RNGGODGGEZCOPIUM"),
+        (466, 31, 211, 9, "JOPAWASHEREDEGEN"),
+        (480, 22, 79, 6, "EZCLAPJOPACOINS"),
+        (488, 35, 347, 8, "JUMPMANGAMBA322"),
+        (495, 18, 459, 5, "RIGGEDSENDITRNG"),
+    ];
+    let fade_step = frame_index.saturating_sub(27);
+    for (x, speed_tenths, offset, length, glyphs) in STREAMS {
+        let trail_span = i32::try_from(*length).unwrap_or_default() * 10;
+        let head_y = (offset + i32::try_from(frame_index).unwrap_or_default() * speed_tenths)
+            .rem_euclid(size + trail_span);
+        let glyphs = glyphs.chars().collect::<Vec<_>>();
+        for trail_index in 0..*length {
+            if fade_step > 0 && trail_index % 5 < fade_step {
+                continue;
+            }
+            let y = head_y - i32::try_from(trail_index).unwrap_or_default() * 10;
+            if !(0..size).contains(&y) {
+                continue;
+            }
+            let dx = *x - center;
+            let dy = y - center;
+            if dx * dx + dy * dy < (radius + 8) * (radius + 8) {
+                continue;
+            }
+            let glyph_index =
+                (usize::try_from(head_y / 10).unwrap_or_default() + trail_index) % glyphs.len();
+            let color = if trail_index == 0 { 6 } else { 7 };
+            draw_font_text(
+                pixels,
+                &glyphs[glyph_index].to_string(),
+                *x,
+                y,
+                9.0,
+                false,
+                color,
+            );
+        }
+    }
+}
+
+fn draw_terminal_status(pixels: &mut [u8], frame_index: usize, display_name: &str) {
+    let y = i32::from(WHEEL_MEDIA_SIZE) - 15;
+    let session = display_name.bytes().fold(0x811c_u32, |hash, byte| {
+        hash.wrapping_mul(0x0100_0193) ^ u32::from(byte)
+    }) & 0xffff;
+    let old_text = format!("JOPA-T/v3.7 │ {display_name} │ #{session:04x}");
+    let prompt = format!("{display_name}@jopa-t:~$ ");
+    if frame_index < 27 {
+        draw_font_text(pixels, &old_text, 4, y, 9.0, false, 7);
+        return;
+    }
+    if frame_index < 31 {
+        let progress = frame_index - 27;
+        let width = old_text.chars().count().max(prompt.chars().count());
+        let mut transition = String::with_capacity(width);
+        for index in 0..width {
+            let edge_distance = index.min(width.saturating_sub(index + 1));
+            let reveal = progress * width / 4;
+            let character = if edge_distance <= reveal {
+                prompt.chars().nth(index).unwrap_or(' ')
+            } else if (index + frame_index).is_multiple_of(5) {
+                ['█', '▓', '▒', '░'][(index + frame_index) % 4]
+            } else {
+                old_text.chars().nth(index).unwrap_or(' ')
+            };
+            transition.push(character);
+        }
+        draw_font_text(
+            pixels,
+            &transition,
+            4,
+            y,
+            9.0,
+            false,
+            if progress >= 2 { 6 } else { 7 },
+        );
+        return;
+    }
+    let status_width = draw_font_text(pixels, &prompt, 4, y, 9.0, false, 6);
+    draw_font_text(pixels, "█", 4 + status_width, y, 9.0, false, 6);
+}
+
+fn draw_bitmap_text(pixels: &mut [u8], text: &str, left: i32, top: i32, scale: i32, color: u8) {
+    let width = bitmap_text_width(text, scale).max(1);
+    let height = 7 * scale;
+    let sprite = WheelLabelSprite {
+        width,
+        height,
+        mask: render_bitmap_mask(text, scale, width, height),
+    };
+    blit_bitmap_mask(pixels, &sprite, left, top, color);
+}
+
+fn draw_font_text(
+    pixels: &mut [u8],
+    text: &str,
+    left: i32,
+    top: i32,
+    pixel_size: f32,
+    bold: bool,
+    color: u8,
+) -> i32 {
+    if let Some(sprite) = render_font_mask(text, pixel_size, bold) {
+        let width = sprite.width;
+        blit_bitmap_mask(pixels, &sprite, left, top, color);
+        width
+    } else {
+        let scale = (pixel_size / 7.0).round().max(1.0) as i32;
+        draw_bitmap_text(pixels, text, left, top, scale, color);
+        bitmap_text_width(text, scale)
+    }
+}
+
+fn draw_filled_rect(pixels: &mut [u8], left: i32, top: i32, width: i32, height: i32, color: u8) {
+    let size = i32::from(WHEEL_MEDIA_SIZE);
+    for y in top..top.saturating_add(height) {
+        for x in left..left.saturating_add(width) {
             if (0..size).contains(&x) && (0..size).contains(&y) {
-                pixels[usize::try_from(y * size + x).unwrap_or_default()] = 2;
+                pixels[usize::try_from(y * size + x).unwrap_or_default()] = color;
             }
         }
     }
-    // A gold hub distinguishes Golden Wheel without changing the policy face.
-    if golden {
-        for y in (center - inner_radius)..=(center + inner_radius) {
-            for x in (center - inner_radius)..=(center + inner_radius) {
-                let dx = x - center;
-                let dy = y - center;
-                if dx * dx + dy * dy <= inner_radius * inner_radius
-                    && (0..size).contains(&x)
-                    && (0..size).contains(&y)
-                {
-                    pixels[usize::try_from(y * size + x).unwrap_or_default()] = 1;
-                }
+}
+
+fn draw_filled_polygon(pixels: &mut [u8], points: &[(i32, i32)], color: u8) {
+    if points.len() < 3 {
+        return;
+    }
+    let Some(min_y) = points.iter().map(|(_, y)| *y).min() else {
+        return;
+    };
+    let Some(max_y) = points.iter().map(|(_, y)| *y).max() else {
+        return;
+    };
+    for y in min_y..=max_y {
+        let mut intersections = Vec::new();
+        for index in 0..points.len() {
+            let (x1, y1) = points[index];
+            let (x2, y2) = points[(index + 1) % points.len()];
+            if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
+                let x = x1 + (y - y1) * (x2 - x1) / (y2 - y1);
+                intersections.push(x);
             }
+        }
+        intersections.sort_unstable();
+        for pair in intersections.chunks_exact(2) {
+            draw_filled_rect(pixels, pair[0], y, pair[1] - pair[0] + 1, 1, color);
         }
     }
 }
@@ -1650,13 +2004,16 @@ fn draw_wheel_labels(pixels: &mut [u8], atlas: &WheelLabelAtlas, rotation: f64) 
         let Some(sprite) = atlas.sprites.get(sprite_index) else {
             continue;
         };
-        let scale = sprite.height / 7;
         let width = sprite.width;
-        let angle = index as f64 * slice + rotation + slice / 2.0;
+        // The face sampler rotates source wedges clockwise by `rotation`.
+        // Labels are overlays, so their destination positions use the inverse
+        // sign. Keeping these conventions paired is what makes the visible
+        // label under the pointer equal the economically settled wedge.
+        let angle = index as f64 * slice - rotation + slice / 2.0;
         let x = f64::from(center) + f64::from(text_radius) * angle.sin();
         let y = f64::from(center) - f64::from(text_radius) * angle.cos();
         let left = x.round() as i32 - width / 2;
-        let top = y.round() as i32 - (7 * scale) / 2;
+        let top = y.round() as i32 - sprite.height / 2;
         blit_bitmap_mask(pixels, sprite, left + 1, top + 1, 4);
         blit_bitmap_mask(pixels, sprite, left, top, 5);
     }
@@ -1691,7 +2048,7 @@ fn render_bitmap_mask(text: &str, scale: i32, width: i32, height: i32) -> Vec<u8
                         let x = origin_x + column * scale + dx;
                         let y = row as i32 * scale + dy;
                         if (0..width).contains(&x) && (0..height).contains(&y) {
-                            mask[usize::try_from(y * width + x).unwrap_or_default()] = 1;
+                            mask[usize::try_from(y * width + x).unwrap_or_default()] = u8::MAX;
                         }
                     }
                 }
@@ -1712,7 +2069,25 @@ fn blit_bitmap_mask(pixels: &mut [u8], sprite: &WheelLabelSprite, left: i32, top
             let target_x = left + x;
             let target_y = top + y;
             if (0..size).contains(&target_x) && (0..size).contains(&target_y) {
-                pixels[usize::try_from(target_y * size + target_x).unwrap_or_default()] = color;
+                // Preserve fontdue's coverage with fixed edge tones from the
+                // shared GIF palette. Ordered dithering made small labels
+                // look perforated; tonal edges stay solid like Pillow text.
+                let resolved_color = match color {
+                    5 if source >= 192 => 5,
+                    5 if source >= 112 => 10,
+                    5 if source >= 48 => 9,
+                    1 if source >= 144 => 1,
+                    1 if source >= 48 => 11,
+                    6 if source >= 144 => 6,
+                    6 if source >= 48 => 12,
+                    7 if source >= 144 => 7,
+                    7 if source >= 48 => 12,
+                    4 if source >= 64 => 4,
+                    _ if source >= 128 => color,
+                    _ => continue,
+                };
+                pixels[usize::try_from(target_y * size + target_x).unwrap_or_default()] =
+                    resolved_color;
             }
         }
     }
@@ -1759,6 +2134,14 @@ fn bitmap_glyph(character: char) -> [u8; 7] {
         '+' => [0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00],
         '-' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
         '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f],
+        '@' => [0x0e, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0f],
+        ':' => [0x00, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
+        '/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
+        '#' => [0x0a, 0x1f, 0x0a, 0x0a, 0x1f, 0x0a, 0x00],
+        '$' => [0x04, 0x0f, 0x14, 0x0e, 0x05, 0x1e, 0x04],
+        '|' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        '~' => [0x00, 0x00, 0x09, 0x16, 0x00, 0x00, 0x00],
         ' ' => [0; 7],
         _ => [0x1f, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x1f],
     }
@@ -1812,6 +2195,9 @@ struct PendingWheelInteraction {
     /// above intentionally remain the smaller policy surface.
     wheel_wedges: Vec<cama_app::wheel::WheelWedge>,
     golden: bool,
+    /// Python chooses the final wedge before rendering, so retain the name
+    /// needed to render the selected animation after a button click.
+    display_name: Option<String>,
     /// The exact bytes sent with the initial prompt.  Python edits the
     /// message without an `attachments=` argument when settling, which keeps
     /// that GIF visible; carrying the bytes through gives the typed responder
@@ -1939,6 +2325,7 @@ fn timeout_option_score(option: &WheelOption) -> f64 {
 
 struct SpinResult {
     message: String,
+    embeds: Vec<InteractionEmbed>,
     completion_message: Option<String>,
     completion_embed: Option<InteractionEmbed>,
     completion_delay: Duration,
@@ -2089,6 +2476,7 @@ impl BettingInteractionHandler {
             let original_responder = pending.original_responder.clone();
             let vanity_taxable_ids = self.vanity_tax.taxable_ids(pending.guild_id);
             let option = timeout_wheel_option(&pending);
+            let option_for_settlement = option.clone();
             let result = sqlite("expired wheel interaction sweep", move || {
                 resolve_pending_wheel(
                     &path,
@@ -2099,7 +2487,7 @@ impl BettingInteractionHandler {
                     &effects,
                     &config,
                     &event_id,
-                    &option,
+                    &option_for_settlement,
                     unix_seconds()?,
                     false,
                     pending.bonus_spin,
@@ -2119,11 +2507,11 @@ impl BettingInteractionHandler {
                         in_flight.remove(&key);
                     }
                     if let Some(original_responder) = original_responder {
+                        let attachment = wheel_attachment_for_option(&pending, &option)
+                            .or_else(|| pending.initial_attachment.clone());
                         let _ = original_responder
-                            .edit_original(wheel_completion_response(
-                                format!("This Wheel interaction timed out. {}", result.message),
-                                Some(result.completion_embed.clone()),
-                                pending.initial_attachment.clone(),
+                            .edit_original(wheel_timeout_response(
+                                &pending, &option, &result, attachment,
                             ))
                             .await;
                     }
@@ -2189,6 +2577,7 @@ impl BettingInteractionHandler {
             "gamba" => {
                 self.gamba(
                     user_id,
+                    &user_display_name,
                     guild_id,
                     channel_id,
                     member_permissions.unwrap_or_default(),
@@ -2512,11 +2901,21 @@ impl BettingInteractionHandler {
             }
             WheelComponentDecision::ResolveTimeout(key, pending, option) => {
                 let original_responder = pending.original_responder.clone();
+                let final_attachment = wheel_attachment_for_option(&pending, &option)
+                    .or_else(|| pending.initial_attachment.clone());
+                // A late click still receives only a component acknowledgement.
+                // Keep the timeout result on the public wheel message, matching
+                // the normal choice path instead of creating a private duplicate.
+                responder
+                    .defer(false)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let path = self.database_path.clone();
                 let config = pending.config.clone();
                 let event_id = pending.event_id.clone();
                 let effects = pending.effects.clone();
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+                let option_for_settlement = option.clone();
                 let result = sqlite("expired wheel interaction resolution", move || {
                     resolve_pending_wheel(
                         &path,
@@ -2527,7 +2926,7 @@ impl BettingInteractionHandler {
                         &effects,
                         &config,
                         &event_id,
-                        &option,
+                        &option_for_settlement,
                         unix_seconds()?,
                         false,
                         pending.bonus_spin,
@@ -2553,30 +2952,32 @@ impl BettingInteractionHandler {
                 if let Ok(mut in_flight) = self.wheel_in_flight.lock() {
                     in_flight.remove(&key);
                 }
-                let timeout_message =
-                    format!("This Wheel interaction timed out. {}", result.message);
-                let response = responder
-                    .respond(
-                        InteractionResponse::message(&timeout_message)
-                            .ephemeral()
-                            .embed(result.completion_embed.clone()),
-                    )
-                    .await
-                    .map_err(|error| error.to_string());
-                if response.is_ok() {
-                    if let Some(original_responder) = original_responder {
-                        let _ = original_responder
-                            .edit_original(wheel_completion_response(
-                                timeout_message,
-                                Some(result.completion_embed.clone()),
-                                pending.initial_attachment.clone(),
-                            ))
-                            .await;
+                if let Some(original_responder) = original_responder {
+                    let animation_delivered = if let Some(attachment) = final_attachment.clone() {
+                        original_responder
+                            .edit_original(wheel_completion_response("", None, Some(attachment)))
+                            .await
+                            .is_ok()
+                    } else {
+                        false
+                    };
+                    if animation_delivered {
+                        tokio::time::sleep(BETTING_WHEEL_DISPLAY_DELAY).await;
                     }
-                    self.emit_pending_neon(channel_id, user_id, guild_id, &result)
-                        .await;
+                    let timeout = if animation_delivered {
+                        wheel_timeout_response(&pending, &option, &result, None)
+                            .preserve_attachments()
+                    } else {
+                        wheel_timeout_response(&pending, &option, &result, final_attachment)
+                    };
+                    original_responder
+                        .edit_original(timeout)
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
-                return response;
+                self.emit_pending_neon(channel_id, user_id, guild_id, &result)
+                    .await;
+                return Ok(());
             }
             WheelComponentDecision::Resolve(key, pending, action) => {
                 let use_reroll = match &action {
@@ -2596,12 +2997,15 @@ impl BettingInteractionHandler {
         };
         let (key, pending, option, use_reroll) = pending;
         let original_responder = pending.original_responder.clone();
-        let final_attachment = if use_reroll {
-            wheel_attachment_for_option(&pending, &option)
-                .or_else(|| pending.initial_attachment.clone())
-        } else {
-            pending.initial_attachment.clone()
-        };
+        let final_attachment = wheel_attachment_for_option(&pending, &option)
+            .or_else(|| pending.initial_attachment.clone());
+        // Python's button callback only acknowledges the component. The
+        // selected result is revealed on the public wheel message after its
+        // animation, never as an immediate private duplicate.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let path = self.database_path.clone();
         let config = pending.config.clone();
         let event_id = pending.event_id.clone();
@@ -2644,28 +3048,36 @@ impl BettingInteractionHandler {
         if let Ok(mut in_flight) = self.wheel_in_flight.lock() {
             in_flight.remove(&key);
         }
-        let response = responder
-            .respond(
-                InteractionResponse::message(&result.message)
-                    .ephemeral()
-                    .embed(result.completion_embed.clone()),
-            )
-            .await
-            .map_err(|error| error.to_string());
-        if response.is_ok() {
-            if let Some(original_responder) = original_responder {
-                let _ = original_responder
-                    .edit_original(wheel_completion_response(
-                        result.message.clone(),
-                        Some(result.completion_embed.clone()),
-                        final_attachment,
-                    ))
-                    .await;
+        if let Some(original_responder) = original_responder {
+            let animation_delivered = if let Some(attachment) = final_attachment.clone() {
+                original_responder
+                    .edit_original(wheel_completion_response("", None, Some(attachment)))
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            if animation_delivered {
+                tokio::time::sleep(BETTING_WHEEL_DISPLAY_DELAY).await;
             }
-            self.emit_pending_neon(channel_id, user_id, guild_id, &result)
-                .await;
+            let completion = if animation_delivered {
+                wheel_completion_response("", Some(result.completion_embed.clone()), None)
+                    .preserve_attachments()
+            } else {
+                wheel_completion_response(
+                    "",
+                    Some(result.completion_embed.clone()),
+                    final_attachment,
+                )
+            };
+            original_responder
+                .edit_original(completion)
+                .await
+                .map_err(|error| error.to_string())?;
         }
-        response
+        self.emit_pending_neon(channel_id, user_id, guild_id, &result)
+            .await;
+        Ok(())
     }
 
     async fn bet(
@@ -3791,9 +4203,11 @@ impl BettingInteractionHandler {
         fired
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn gamba(
         &self,
         user_id: i64,
+        user_display_name: &str,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         member_permissions: u64,
@@ -3814,20 +4228,7 @@ impl BettingInteractionHandler {
             };
             let guild_raw =
                 u64::try_from(guild_id).map_err(|_| "guild id is negative".to_owned())?;
-            let gamba_channel = self.discord.mafia_gamba_channel_id(guild_raw).await?;
-            let direct_match = gamba_channel == Some(channel_id);
-            let parent_match = if direct_match {
-                true
-            } else if let Some(parent_id) = self
-                .discord
-                .channel_parent_id(guild_raw, channel_id)
-                .await?
-            {
-                gamba_channel == Some(parent_id)
-            } else {
-                false
-            };
-            if !parent_match {
+            if !self.discord.channel_is_gamba(guild_raw, channel_id).await? {
                 let _ = charge_wrong_channel(&self.database_path, user_id, guild_id).await;
                 return respond_ephemeral(
                     responder,
@@ -3870,6 +4271,7 @@ impl BettingInteractionHandler {
         let event_config = economy_event_config(&config);
         let event_path = self.database_path.clone();
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+        let wheel_display_name = user_display_name.to_owned();
         let (event_win_multiplier, event_loss_multiplier) =
             sqlite("gamba economy-event effects", move || {
                 let service = SqliteEconomyEventService::new(event_path, event_config);
@@ -3893,13 +4295,13 @@ impl BettingInteractionHandler {
                 admin_bypass,
                 bonus_spin,
                 member_snapshot.as_ref(),
+                Some(&wheel_display_name),
             )
         })
         .await?;
         let completion_message = outcome.completion_message.clone();
         let completion_embed = outcome.completion_embed.clone();
         let completion_delay = outcome.completion_delay;
-        let initial_attachment = outcome.attachment.clone();
         let neon_wheel_result = outcome.neon_wheel_result;
         let neon_wheel_balance_before = outcome.neon_wheel_balance_before;
         let neon_wheel_balance = outcome.neon_wheel_balance;
@@ -3919,6 +4321,9 @@ impl BettingInteractionHandler {
         // ephemeral above; only the successful reveal is public.
         let pending_key = outcome.pending.as_ref().map(|(key, _)| key.clone());
         let mut response = InteractionResponse::message(outcome.message);
+        for embed in outcome.embeds {
+            response = response.embed(embed);
+        }
         if let Some(attachment) = outcome.attachment {
             response = response.attachment(attachment);
         }
@@ -3944,6 +4349,13 @@ impl BettingInteractionHandler {
                 // transaction already committed before this delivery boundary.
                 let mut text_only = response;
                 text_only.attachments.clear();
+                if text_only.content.is_empty() {
+                    if let Some(embed) = completion_embed.clone() {
+                        text_only.embeds.push(embed);
+                    } else {
+                        text_only.content = "The wheel animation could not be uploaded.".to_owned();
+                    }
+                }
                 responder.respond(text_only).await.map_err(|retry_error| {
                     format!("gamba response failed ({error}); text fallback failed ({retry_error})")
                 })
@@ -3956,23 +4368,20 @@ impl BettingInteractionHandler {
             && let Some(pending) = interactions.get_mut(&pending_key)
         {
             pending.original_responder = Some(Arc::clone(responder));
-            if !attachment_delivered {
+            if response_has_attachment && !attachment_delivered {
                 pending.initial_attachment = None;
             }
         }
         if delivery.is_ok()
             && let Some(completion_message) = completion_message
         {
-            // Python keeps the explosion attachment visible for the full
-            // animation before replacing the reveal copy.  The settlement
-            // already committed before this delivery boundary; an edit
-            // failure therefore degrades to the initial attachment message.
+            // Python edits the attachment-only post with an embed and does
+            // not send replacement content or re-upload the GIF.  The
+            // settlement already committed before this delivery boundary; an
+            // edit failure therefore degrades to the initial attachment.
             tokio::time::sleep(completion_delay).await;
-            let completion = wheel_completion_response(
-                completion_message,
-                completion_embed,
-                attachment_delivered.then_some(initial_attachment).flatten(),
-            );
+            let completion = wheel_completion_response(completion_message, completion_embed, None)
+                .preserve_attachments();
             let _ = responder.edit_original(completion).await;
         }
         if delivery.is_ok() {
@@ -4033,6 +4442,10 @@ impl BettingInteractionHandler {
         .ok()?;
         let mut visible = BTreeSet::new();
         for id in ids {
+            if is_enabled_synthetic_wheel_member(id, self.config.synthetic_members_enabled) {
+                visible.insert(id);
+                continue;
+            }
             let Ok(user_id) = u64::try_from(id) else {
                 continue;
             };
@@ -7753,12 +8166,12 @@ fn hostile_result_note(
         WheelMechanic::Heist => {
             if outcome.count == 0 {
                 format!(
-                    "No eligible players were found. Consolation prize: **+{}** {}.",
+                    "**HEIST**\n\nYou cased the joint... but the bottom 30 are already broke.\n\n*Consolation prize: **+{}** {}.*",
                     outcome.total, JOPACOIN_EMOTE
                 )
             } else {
                 format!(
-                    "Robbed **{}** players at the bottom of the ladder for **{}** {} total.",
+                    "**HEIST**\n\n💰 You robbed **{}** players at the bottom of the ladder!\nTotal stolen: **{}** {}\n\n*Crime pays — when you're already on top.*",
                     outcome.count, outcome.total, JOPACOIN_EMOTE
                 )
             }
@@ -7871,6 +8284,7 @@ fn spin_once(
     admin_bypass: bool,
     bonus_spin: bool,
     visible_member_ids: Option<&BTreeSet<i64>>,
+    display_name: Option<&str>,
 ) -> Result<SpinResult, String> {
     let players = PlayerRepository::new(path);
     let Some(player) = players
@@ -7909,9 +8323,14 @@ fn spin_once(
                 ));
             }
             WheelSpinClaim::Cooldown { last_spin } => {
+                let remaining = last_spin
+                    .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
+                    .saturating_sub(now)
+                    .max(0);
+                let hours = remaining / 3_600;
+                let minutes = (remaining % 3_600) / 60;
                 return Ok(spin_result(format!(
-                    "You already spun the wheel today! Try again <t:{}:R>.",
-                    last_spin.saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
+                    "You already spun the wheel today! Try again in **{hours}h {minutes}m**."
                 )));
             }
             WheelSpinClaim::Claimed { .. } => {}
@@ -8059,20 +8478,7 @@ fn spin_once(
             &format!("wheel:{event_id}"),
             now,
         );
-        let blood_pact_note = if blood_pact_skim > 0 {
-            format!("\n🩸 Blood Pact skimmed **{blood_pact_skim}** {JOPACOIN_EMOTE}.")
-        } else {
-            String::new()
-        };
-        let final_message = format!(
-            "💥 **THE WHEEL EXPLODES!**\nYou received **{}** {}. Balance: **{}** {}.{blood_pact_note}",
-            receipt.net, JOPACOIN_EMOTE, receipt.balance_after, JOPACOIN_EMOTE
-        );
-        let mut result = spin_result_with_attachment(
-            "💥 **THE WHEEL EXPLODES!** The wheel is resolving...",
-            render_explosion_attachment().ok(),
-        );
-        result.completion_message = Some(final_message);
+        let mut result = wheel_animation_result(render_explosion_attachment().ok());
         let next_spin_at =
             cooldown_after_resolution(now, bonus_spin, last_regular_spin, CooldownOutcome::Other)
                 .next_spin_at;
@@ -8153,35 +8559,25 @@ fn spin_once(
         },
         bonus_spin,
         last_regular_spin,
+        display_name.map(str::to_owned),
     ) {
-        let (key, mut pending) = (key, pending);
-        let prompt = match pending.kind {
-            WheelInteractionKind::TownTrial => {
-                "⚖️ **TOWN TRIAL** — the town has five minutes to decide your fate."
-            }
-            WheelInteractionKind::Discover => {
-                "🃏 **DISCOVER** — choose your fate before this view expires."
-            }
-            WheelInteractionKind::Scrying => {
-                "🏝️ **MANA SCRYING** — Blue mana reveals two possible outcomes."
-            }
-            WheelInteractionKind::Reroll => {
-                "🔴 **RE-ROLL AVAILABLE** — Red mana lets you choose whether to spin again."
-            }
-        };
-        let prompt = blue_bankrupt_preview.as_deref().map_or_else(
-            || prompt.to_owned(),
-            |preview| format!("{prompt}\n\n{preview}"),
-        );
-        let attachment = render_wheel_attachment(&wedges, index, kind == WheelKind::Golden).ok();
-        pending.initial_attachment = attachment.clone();
+        let (key, pending) = (key, pending);
+        let prompt_embed = wheel_interaction_prompt_embed(&pending);
+        let mut prompt_embeds = Vec::with_capacity(2);
+        if let Some(preview) = blue_bankrupt_preview.as_deref() {
+            prompt_embeds.push(wheel_bankrupt_preview_embed(preview));
+        }
+        prompt_embeds.push(prompt_embed);
         return Ok(SpinResult {
-            message: prompt,
+            message: String::new(),
+            embeds: prompt_embeds,
             completion_message: None,
             completion_embed: None,
             completion_delay: Duration::ZERO,
             pending: Some((key, pending)),
-            attachment,
+            // Python presents only the choice embed/buttons at this stage and
+            // renders the selected wedge after the button resolves.
+            attachment: None,
             neon_wheel_result: None,
             neon_wheel_balance_before: None,
             neon_wheel_balance: None,
@@ -8269,10 +8665,6 @@ fn spin_once(
         &format!("wheel:{event_id}"),
         now,
     );
-    let result_label = match resolved {
-        WheelValue::Numeric(value) => value.to_string(),
-        WheelValue::Mechanic(mechanic) => mechanic.code().to_owned(),
-    };
     let loss_note = if cooldown_outcome == CooldownOutcome::LoseTurn {
         "\n⏳ Lose Turn: your next spin is delayed for five days."
     } else {
@@ -8284,19 +8676,15 @@ fn spin_once(
         String::new()
     };
     let presentation_note = format!("{extra_note}{loss_note}{blood_pact_note}");
-    let final_message = format!(
-        "🎡 **{}**\nYou spun **{}** {}. Balance: **{}** {}.{extra_note}{loss_note}{blood_pact_note}",
-        landed.label, result_label, JOPACOIN_EMOTE, balance, JOPACOIN_EMOTE
+    // Blue mana's preview is additional information in both runtimes.  The
+    // ordinary Python wheel post itself has no content: just the GIF, then the
+    // result embed after the animation.
+    let mut result = wheel_animation_result(
+        render_wheel_attachment(&wedges, index, kind == WheelKind::Golden, display_name).ok(),
     );
-    let spinning_message = blue_bankrupt_preview.as_deref().map_or_else(
-        || "🎡 The wheel is spinning...".to_owned(),
-        |preview| format!("🎡 The wheel is spinning...\n\n{preview}"),
-    );
-    let mut result = spin_result_with_attachment(
-        spinning_message,
-        render_wheel_attachment(&wedges, index, kind == WheelKind::Golden).ok(),
-    );
-    result.completion_message = Some(final_message);
+    if let Some(preview) = blue_bankrupt_preview {
+        result.embeds.push(wheel_bankrupt_preview_embed(&preview));
+    }
     let mut result_embed = wheel_result_embed(
         &landed.label,
         resolved,
@@ -8314,7 +8702,7 @@ fn spin_once(
         );
     }
     result.completion_embed = Some(result_embed);
-    result.completion_delay = Duration::from_secs(15);
+    result.completion_delay = BETTING_WHEEL_DISPLAY_DELAY;
     // Python evaluates Neon against the post-policy wedge.  This avoids
     // firing the bankrupt hook after a Comeback pardon changed a negative
     // wedge into LOSE/zero, and preserves the event-adjusted loss amount.
@@ -8334,6 +8722,16 @@ fn spin_result(message: impl Into<String>) -> SpinResult {
     spin_result_with_attachment(message, None)
 }
 
+/// Match Python's successful `/gamba` message contract: initially the post
+/// contains only the animation attachment, then the same post receives the
+/// result embed.  `completion_message` remains the scheduling marker used by
+/// the handler, but its empty value intentionally clears/omits message text.
+fn wheel_animation_result(attachment: Option<InteractionAttachment>) -> SpinResult {
+    let mut result = spin_result_with_attachment("", attachment);
+    result.completion_message = Some(String::new());
+    result
+}
+
 fn filter_visible_wheel_leaderboard(
     players: Vec<Player>,
     visible_member_ids: Option<&BTreeSet<i64>>,
@@ -8345,6 +8743,10 @@ fn filter_visible_wheel_leaderboard(
             .cloned()
             .collect()
     })
+}
+
+fn is_enabled_synthetic_wheel_member(discord_id: i64, enabled: bool) -> bool {
+    enabled && discord_id < 0
 }
 
 fn visible_wheel_positive_balance(
@@ -8407,6 +8809,7 @@ fn spin_result_with_attachment(
 ) -> SpinResult {
     SpinResult {
         message: message.into(),
+        embeds: Vec::new(),
         completion_message: None,
         completion_embed: None,
         completion_delay: Duration::ZERO,
@@ -8435,6 +8838,45 @@ fn wheel_completion_response(
     response
 }
 
+fn wheel_timeout_response(
+    pending: &PendingWheelInteraction,
+    option: &WheelOption,
+    result: &PendingWheelResolution,
+    attachment: Option<InteractionAttachment>,
+) -> InteractionResponse {
+    let mut response = InteractionResponse::message(format!(
+        "This Wheel interaction timed out. {}",
+        result.message
+    ));
+    let terminal = match pending.kind {
+        WheelInteractionKind::TownTrial => Some(
+            InteractionEmbed::titled("⚖️ THE TOWN HAS SPOKEN")
+                .description(format!(
+                    "The town decided: **{}** for <@{}>!",
+                    option.label, pending.user_id
+                ))
+                .color(0xED_42_45),
+        ),
+        WheelInteractionKind::Discover => Some(
+            InteractionEmbed::titled("🃏 DISCOVER — TIMEOUT")
+                .description(format!(
+                    "<@{}> didn't choose in time. The worst fate applies: **{}**!",
+                    pending.user_id, option.label
+                ))
+                .color(0xED_42_45),
+        ),
+        WheelInteractionKind::Scrying | WheelInteractionKind::Reroll => None,
+    };
+    if let Some(terminal) = terminal {
+        response = response.embed(terminal);
+    }
+    response = response.embed(result.completion_embed.clone());
+    if let Some(attachment) = attachment {
+        response = response.attachment(attachment);
+    }
+    response
+}
+
 fn wheel_attachment_for_option(
     pending: &PendingWheelInteraction,
     option: &WheelOption,
@@ -8442,7 +8884,13 @@ fn wheel_attachment_for_option(
     let index = pending.wheel_wedges.iter().position(|wedge| {
         wedge.label == option.label && wedge.value == option.value && wedge.color == option.color
     })?;
-    render_wheel_attachment(&pending.wheel_wedges, index, pending.golden).ok()
+    render_wheel_attachment(
+        &pending.wheel_wedges,
+        index,
+        pending.golden,
+        pending.display_name.as_deref(),
+    )
+    .ok()
 }
 
 fn wheel_result_embed(
@@ -8531,7 +8979,14 @@ fn wheel_result_embed(
         WheelValue::Numeric(_) => unreachable!("wheel numeric value was not classified"),
         WheelValue::Mechanic(mechanic) => wheel_mechanic_embed_copy(mechanic, landed_label),
     };
-    if !extra_note.trim().is_empty() {
+    if matches!(resolved, WheelValue::Mechanic(WheelMechanic::Heist))
+        && !extra_note.trim().is_empty()
+    {
+        // HEIST's Python embed is entirely outcome-dependent (including the
+        // zero-victim consolation copy), so the resolved note replaces the
+        // generic mechanic placeholder instead of being appended to it.
+        description = extra_note.trim().to_owned();
+    } else if !extra_note.trim().is_empty() {
         description.push_str("\n\n");
         description.push_str(extra_note.trim());
     }
@@ -8739,7 +9194,7 @@ fn wheel_mechanic_embed_copy(mechanic: WheelMechanic, landed_label: &str) -> (St
 
 fn wheel_bankrupt_preview(wedges: &[cama_app::wheel::WheelWedge]) -> String {
     if wedges.is_empty() {
-        return "🔮 Blue mana reveals: no wedges available".to_owned();
+        return "Blue mana reveals: no wedges available".to_owned();
     }
     let sample_count = wedges.len().min(3);
     let mut indices = Vec::with_capacity(sample_count);
@@ -8758,7 +9213,61 @@ fn wheel_bankrupt_preview(wedges: &[cama_app::wheel::WheelWedge]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("🔮 Blue mana reveals: {preview}")
+    format!("Blue mana reveals: {preview}")
+}
+
+fn scrying_display_label(option: &WheelOption) -> String {
+    match option.value {
+        WheelValue::Numeric(0) => "LOSE (0 JC)".to_owned(),
+        WheelValue::Numeric(value) if value > 0 => format!("+{value} JC"),
+        WheelValue::Numeric(value) => format!("{value} JC"),
+        WheelValue::Mechanic(_) => option.label.clone(),
+    }
+}
+
+fn wheel_bankrupt_preview_embed(preview: &str) -> InteractionEmbed {
+    InteractionEmbed::titled("Wheel preview")
+        .description(preview)
+        .color(0x34_98_DB)
+}
+
+fn wheel_interaction_prompt_embed(pending: &PendingWheelInteraction) -> InteractionEmbed {
+    match pending.kind {
+        WheelInteractionKind::TownTrial => InteractionEmbed::titled("⚖️ TOWN TRIAL")
+            .description(format!(
+                "⚖️ **TOWN TRIAL** — The town has **5 minutes** to decide <@{}>'s fate!\n\nVote for a result:",
+                pending.user_id
+            ))
+            .color(0x2A_1A_1A),
+        WheelInteractionKind::Discover => InteractionEmbed::titled("🃏 DISCOVER")
+            .description(format!(
+                "🃏 **DISCOVER** — <@{}> must choose their fate!\n\nYou have **60 seconds** to choose:",
+                pending.user_id
+            ))
+            .color(0x1A_2A_2A),
+        WheelInteractionKind::Scrying => {
+            let first = pending
+                .options
+                .first()
+                .map_or_else(|| "LOSE (0 JC)".to_owned(), scrying_display_label);
+            let second = pending
+                .options
+                .get(1)
+                .map_or_else(|| "LOSE (0 JC)".to_owned(), scrying_display_label);
+            InteractionEmbed::titled("🏝️ MANA SCRYING")
+                .description(format!(
+                    "🔮 <@{}>, the Island reveals two fates:\n\n**A:** {first}\n**B:** {second}\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*",
+                    pending.user_id
+                ))
+                .color(0x34_98_DB)
+        }
+        WheelInteractionKind::Reroll => InteractionEmbed::titled("Re-roll available")
+            .description(format!(
+                "<@{}> — Red mana lets you re-roll once. 30 seconds to decide.",
+                pending.user_id
+            ))
+            .color(0xED_42_45),
+    }
 }
 
 fn wheel_option(wedge: &cama_app::wheel::WheelWedge) -> WheelOption {
@@ -8809,6 +9318,7 @@ fn pending_wheel_interaction(
     reroll_available: bool,
     bonus_spin: bool,
     last_regular_spin: Option<i64>,
+    display_name: Option<String>,
 ) -> Option<(String, PendingWheelInteraction)> {
     let mut options = Vec::new();
     let interaction_kind = if kind == WheelKind::Regular
@@ -8909,6 +9419,7 @@ fn pending_wheel_interaction(
             options,
             wheel_wedges: wedges.to_vec(),
             golden: kind == WheelKind::Golden,
+            display_name,
             initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: kind,
@@ -8998,7 +9509,7 @@ fn wheel_interaction_rows(
                     format!(
                         "{}: {}",
                         choice.to_ascii_uppercase(),
-                        wheel_display_label(option)
+                        scrying_display_label(option)
                     ),
                 )
                 .style(InteractionButtonStyle::Primary)
@@ -9559,6 +10070,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn synthetic_wheel_members_require_explicit_opt_in_and_negative_ids() {
+        assert!(is_enabled_synthetic_wheel_member(-101, true));
+        assert!(!is_enabled_synthetic_wheel_member(-101, false));
+        assert!(!is_enabled_synthetic_wheel_member(101, true));
     }
 
     #[test]
@@ -10177,6 +10695,7 @@ mod tests {
                     }],
                     wheel_wedges: Vec::new(),
                     golden: false,
+                    display_name: None,
                     initial_attachment: None,
                     votes: BTreeMap::new(),
                     spin_kind: WheelKind::Regular,
@@ -10276,6 +10795,7 @@ mod tests {
                     }],
                     wheel_wedges: Vec::new(),
                     golden: false,
+                    display_name: None,
                     initial_attachment: None,
                     votes: BTreeMap::new(),
                     spin_kind: WheelKind::Regular,
@@ -10458,6 +10978,46 @@ mod tests {
         assert!(description.contains("<@7> is spinning the GOLDEN WHEEL!"));
         assert!(description.contains("**#1** <@7> — 900"));
         assert!(description.contains("**#2** <@8> — 700"));
+    }
+
+    #[test]
+    fn wheel_animation_message_contract_matches_python_attachment_then_embed_edit() {
+        let attachment = InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3]);
+        let initial = wheel_animation_result(Some(attachment.clone()));
+        assert_eq!(initial.message, "");
+        assert_eq!(initial.completion_message.as_deref(), Some(""));
+        assert_eq!(initial.attachment, Some(attachment));
+
+        let reveal =
+            wheel_completion_response("", Some(InteractionEmbed::titled("🎉 Winner!")), None)
+                .preserve_attachments();
+        assert_eq!(reveal.content, "");
+        assert_eq!(reveal.embeds.len(), 1);
+        assert!(reveal.attachments.is_empty());
+        assert_eq!(
+            reveal.attachment_policy,
+            crate::registration::InteractionAttachmentPolicy::Preserve
+        );
+    }
+
+    #[test]
+    fn heist_result_embed_uses_python_outcome_copy_without_generic_duplication() {
+        let note = format!(
+            "**HEIST**\n\n💰 You robbed **3** players at the bottom of the ladder!\nTotal stolen: **42** {JOPACOIN_EMOTE}\n\n*Crime pays — when you're already on top.*"
+        );
+        let embed = wheel_result_embed(
+            "HEIST",
+            WheelValue::Mechanic(WheelMechanic::Heist),
+            WheelKind::Golden,
+            123,
+            1_800_000_000,
+            &note,
+            None,
+        );
+        assert_eq!(embed.title.as_deref(), Some("🥇 HEIST! 🥇"));
+        assert_eq!(embed.description.as_deref(), Some(note.as_str()));
+        assert_eq!(embed.fields[0].name, "New Balance");
+        assert_eq!(embed.fields[1].name, "Next Spin");
     }
 
     #[test]
@@ -10666,7 +11226,7 @@ mod tests {
             golden_target_ev: 10.0,
         };
         let wedges = get_wheel_wedges(false, false, policy);
-        let wheel = render_wheel_attachment(&wedges, 3, false).expect("wheel gif");
+        let wheel = render_wheel_attachment(&wedges, 3, false, None).expect("wheel gif");
         let explosion = render_explosion_attachment().expect("explosion gif");
         let expected_wheel_delays = (0..WHEEL_MEDIA_FRAME_COUNT)
             .map(wheel_frame_delay_ms)
@@ -10721,6 +11281,28 @@ mod tests {
     }
 
     #[test]
+    fn wheel_final_pointer_is_centered_on_the_settled_wedge() {
+        for wedge_count in [2, 6, 12, 24, 32] {
+            let slice = std::f64::consts::TAU / wedge_count as f64;
+            for target_index in 0..wedge_count {
+                let rotation =
+                    wheel_frame_rotation(WHEEL_MEDIA_FRAME_COUNT - 1, target_index, wedge_count);
+                assert_eq!(
+                    wheel_index_at_pointer(rotation, wedge_count),
+                    Some(target_index),
+                    "pointer must resolve the same wedge as settlement"
+                );
+                let target_label_angle = (target_index as f64 * slice - rotation + slice / 2.0)
+                    .rem_euclid(std::f64::consts::TAU);
+                assert!(
+                    target_label_angle.min(std::f64::consts::TAU - target_label_angle) < 1e-9,
+                    "settled wedge label must be centered under the pointer"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn wheel_media_labels_cover_python_themes_and_fractional_phases() {
         let policies = WheelEconomyPolicy {
             minigame_scale: 1.0,
@@ -10742,12 +11324,19 @@ mod tests {
                 .map(|wedge| parse_hex_rgb(wedge.color).unwrap_or([80, 80, 80]))
                 .collect::<Vec<_>>();
             let mut palette = vec![
-                [7, 9, 14],
-                [241, 196, 15],
+                [30, 30, 35],
+                [255, 215, 0],
                 [231, 76, 60],
                 if golden { [58, 40, 0] } else { [44, 62, 80] },
                 [0, 0, 0],
                 [255, 255, 255],
+                [55, 190, 55],
+                [55, 90, 55],
+                [255, 255, 0],
+                [160, 160, 160],
+                [220, 220, 220],
+                [150, 127, 0],
+                [30, 110, 30],
             ];
             let indices = colors
                 .iter()
@@ -10767,10 +11356,12 @@ mod tests {
             draw_wheel_frame(
                 &mut pixels,
                 &indices,
+                &indices,
                 &label_atlas,
                 0,
                 ((rotation / 11.75).round() as usize).min(WHEEL_MEDIA_FRAME_COUNT - 1),
                 golden,
+                None,
             );
             assert!(pixels.contains(&4));
             assert!(pixels.contains(&5));
@@ -10792,12 +11383,19 @@ mod tests {
             .map(|wedge| parse_hex_rgb(wedge.color).unwrap_or([80, 80, 80]))
             .collect::<Vec<_>>();
         let palette = [
-            [7, 9, 14],
-            [241, 196, 15],
+            [30, 30, 35],
+            [255, 215, 0],
             [231, 76, 60],
             if golden { [58, 40, 0] } else { [44, 62, 80] },
             [0, 0, 0],
             [255, 255, 255],
+            [55, 190, 55],
+            [55, 90, 55],
+            [255, 255, 0],
+            [160, 160, 160],
+            [220, 220, 220],
+            [150, 127, 0],
+            [30, 110, 30],
         ];
         let indices = colors
             .iter()
@@ -10814,10 +11412,12 @@ mod tests {
         draw_wheel_frame(
             &mut pixels,
             &indices,
+            &indices,
             &atlas,
             0,
             frame_index.min(WHEEL_MEDIA_FRAME_COUNT - 1),
             golden,
+            None,
         );
         assert!(pixels.contains(&4));
         assert!(pixels.contains(&5));
@@ -10943,9 +11543,13 @@ mod tests {
         let atlas = build_wheel_label_atlas(&wedges, &mut cache);
         assert_eq!(atlas.sprites.len(), 1);
         let expected_scale = label_scale("PHASE", std::f64::consts::TAU, 220);
+        let expected = cache
+            .entries
+            .get(&("PHASE".to_owned(), expected_scale))
+            .expect("atlas geometry is cached under its measured scale");
         assert_eq!(
-            atlas.sprites[0].width,
-            bitmap_text_width("PHASE", expected_scale)
+            atlas.sprites[0].width, expected.width,
+            "atlas reuses the font-backed sprite for the measured geometry"
         );
     }
 
@@ -10958,7 +11562,8 @@ mod tests {
             golden_target_ev: 10.0,
         };
         let wedges = get_wheel_wedges(false, false, policy);
-        let attachment = render_wheel_attachment(&wedges, 7, false).expect("production wheel");
+        let attachment =
+            render_wheel_attachment(&wedges, 7, false, None).expect("production wheel");
         assert!(attachment.bytes.len() < WHEEL_MEDIA_UPLOAD_LIMIT);
         let decoder = gif::DecodeOptions::new()
             .read_info(Cursor::new(attachment.bytes))
@@ -10984,8 +11589,9 @@ mod tests {
             bankrupt_target_ev: 10.0,
             golden_target_ev: 10.0,
         };
-        let attachment = render_wheel_attachment(&get_wheel_wedges(false, false, policy), 0, false)
-            .expect("seeded wheel GIF");
+        let attachment =
+            render_wheel_attachment(&get_wheel_wedges(false, false, policy), 0, false, None)
+                .expect("seeded wheel GIF");
         let mut decoder = gif::DecodeOptions::new()
             .read_info(Cursor::new(attachment.bytes))
             .expect("wheel GIF header");
@@ -11272,6 +11878,7 @@ mod tests {
             options: options.clone(),
             wheel_wedges: Vec::new(),
             golden: false,
+            display_name: None,
             initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Bankrupt,
@@ -11295,6 +11902,7 @@ mod tests {
                 loan_max_amount: 0,
                 tip_fee_rate: 0.0,
                 minigame_jc_delta_scale: 1.0,
+                synthetic_members_enabled: false,
                 disburse_min_fund: 0,
                 disburse_quorum_percentage: 0.0,
                 economy_events_enabled: false,
@@ -11328,6 +11936,118 @@ mod tests {
         let mut reroll = base();
         reroll.kind = WheelInteractionKind::Reroll;
         assert_eq!(timeout_wheel_option(&reroll).label, "GOOD");
+    }
+
+    #[test]
+    fn wheel_choice_and_blue_preview_embeds_match_python_presentation() {
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let options = vec![
+            WheelOption {
+                label: "25".to_owned(),
+                value: WheelValue::Numeric(25),
+                color: "#ffffff",
+            },
+            WheelOption {
+                label: "LOSE".to_owned(),
+                value: WheelValue::Numeric(0),
+                color: "#000000",
+            },
+        ];
+        let pending = PendingWheelInteraction {
+            kind: WheelInteractionKind::Scrying,
+            user_id: 7,
+            guild_id: 42,
+            created_at: Instant::now(),
+            options,
+            wheel_wedges: Vec::new(),
+            golden: false,
+            display_name: None,
+            initial_attachment: None,
+            votes: BTreeMap::new(),
+            spin_kind: WheelKind::Regular,
+            balance_before: 100,
+            effects: ManaEffects::default(),
+            event_id: "embed".to_owned(),
+            config: BettingRuntimeConfig::from_application_config(&config),
+            event_win_multiplier: 1.0,
+            event_loss_multiplier: 1.0,
+            bonus_spin: false,
+            last_regular_spin: None,
+            original_responder: None,
+        };
+
+        let scrying = wheel_interaction_prompt_embed(&pending);
+        assert_eq!(scrying.title.as_deref(), Some("🏝️ MANA SCRYING"));
+        assert_eq!(scrying.color, Some(0x34_98_DB));
+        assert_eq!(
+            scrying.description.as_deref(),
+            Some(
+                "🔮 <@7>, the Island reveals two fates:\n\n**A:** +25 JC\n**B:** LOSE (0 JC)\n\nChoose wisely. *(Blue mana: winnings reduced by 25%)*"
+            )
+        );
+        let rows = wheel_interaction_rows("betting:scry:embed", &pending);
+        assert_eq!(rows[0].buttons[0].label, "A: +25 JC");
+        assert_eq!(rows[0].buttons[1].label, "B: LOSE (0 JC)");
+
+        let preview = wheel_bankrupt_preview_embed("Blue mana reveals: CHAIN, BANANA, +1");
+        assert_eq!(preview.title.as_deref(), Some("Wheel preview"));
+        assert_eq!(preview.color, Some(0x34_98_DB));
+        assert_eq!(
+            preview.description.as_deref(),
+            Some("Blue mana reveals: CHAIN, BANANA, +1")
+        );
+
+        for (kind, title, color) in [
+            (WheelInteractionKind::TownTrial, "⚖️ TOWN TRIAL", 0x2A_1A_1A),
+            (WheelInteractionKind::Discover, "🃏 DISCOVER", 0x1A_2A_2A),
+            (
+                WheelInteractionKind::Reroll,
+                "Re-roll available",
+                0xED_42_45,
+            ),
+        ] {
+            let mut candidate = pending.clone();
+            candidate.kind = kind;
+            let embed = wheel_interaction_prompt_embed(&candidate);
+            assert_eq!(embed.title.as_deref(), Some(title));
+            assert_eq!(embed.color, Some(color));
+        }
+
+        let resolution = PendingWheelResolution {
+            message: "Result settled.".to_owned(),
+            completion_embed: InteractionEmbed::titled("Wheel Result"),
+            neon_wheel_result: None,
+            neon_wheel_balance_before: None,
+            neon_wheel_balance: None,
+            neon_lightning: None,
+        };
+        let option = pending.options[0].clone();
+        let mut trial = pending.clone();
+        trial.kind = WheelInteractionKind::TownTrial;
+        let trial_timeout = wheel_timeout_response(&trial, &option, &resolution, None);
+        assert_eq!(
+            trial_timeout.embeds[0].title.as_deref(),
+            Some("⚖️ THE TOWN HAS SPOKEN")
+        );
+        assert_eq!(
+            trial_timeout.embeds[0].description.as_deref(),
+            Some("The town decided: **25** for <@7>!")
+        );
+
+        let mut discover = pending;
+        discover.kind = WheelInteractionKind::Discover;
+        let discover_timeout = wheel_timeout_response(&discover, &option, &resolution, None);
+        assert_eq!(
+            discover_timeout.embeds[0].title.as_deref(),
+            Some("🃏 DISCOVER — TIMEOUT")
+        );
+        assert_eq!(
+            discover_timeout.embeds[0].description.as_deref(),
+            Some("<@7> didn't choose in time. The worst fate applies: **25**!")
+        );
     }
 
     #[test]
@@ -11596,6 +12316,7 @@ mod tests {
             }],
             wheel_wedges: Vec::new(),
             golden: false,
+            display_name: None,
             initial_attachment: None,
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Bankrupt,
@@ -11637,7 +12358,7 @@ mod tests {
         assert_eq!(responses[0].content, "This choice isn't yours to make.");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn wheel_component_edits_public_prompt_after_resolution() {
         let database = NamedTempFile::new().expect("temporary database");
         initialize_or_migrate(database.path()).expect("schema");
@@ -11668,6 +12389,7 @@ mod tests {
             }],
             wheel_wedges: Vec::new(),
             golden: false,
+            display_name: Some("player".to_owned()),
             initial_attachment: Some(initial_attachment.clone()),
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Regular,
@@ -11707,22 +12429,137 @@ mod tests {
             .expect("resolve wheel component");
 
         let responses = responder.responses.lock().expect("responses lock");
-        assert_eq!(responses.len(), 1);
-        assert!(responses[0].ephemeral);
+        assert!(responses.is_empty());
         drop(responses);
+        assert_eq!(*responder.defers.lock().expect("defers lock"), [false]);
         let edits = responder.edits.lock().expect("edits lock");
-        assert_eq!(edits.len(), 1);
+        assert_eq!(edits.len(), 2);
         assert!(!edits[0].ephemeral);
-        assert!(edits[0].content.contains("You spun"));
+        assert!(edits[0].content.is_empty());
+        assert!(edits[0].embeds.is_empty());
+        assert_eq!(edits[0].attachments, vec![initial_attachment]);
+        assert!(edits[1].content.is_empty());
         assert_eq!(
-            edits[0].embeds[0].title.as_deref(),
+            edits[1].embeds[0].title.as_deref(),
             Some("🚫 LOSE A TURN 🚫")
         );
-        assert_eq!(edits[0].embeds.len(), 1);
-        assert_eq!(edits[0].attachments, vec![initial_attachment]);
+        assert_eq!(edits[1].embeds.len(), 1);
+        assert!(edits[1].attachments.is_empty());
+        assert_eq!(
+            edits[1].attachment_policy,
+            crate::registration::InteractionAttachmentPolicy::Preserve
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        PlayerRepository::new(database.path())
+            .add(&NewPlayer::new(7, "player", Some(42)))
+            .expect("player");
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let wedges = vec![
+            cama_app::wheel::WheelWedge {
+                label: "GOOD".to_owned(),
+                value: WheelValue::Numeric(5),
+                color: "#ffffff",
+            },
+            cama_app::wheel::WheelWedge {
+                label: "LOSE".to_owned(),
+                value: WheelValue::Numeric(0),
+                color: "#000000",
+            },
+        ];
+        let expected =
+            render_wheel_attachment(&wedges, 1, false, Some("player")).expect("selected wheel GIF");
+        let responder = RecordingResponder::default();
+        let pending = PendingWheelInteraction {
+            kind: WheelInteractionKind::Scrying,
+            user_id: 7,
+            guild_id: 42,
+            created_at: Instant::now(),
+            options: wedges.iter().map(wheel_option).collect(),
+            wheel_wedges: wedges,
+            golden: false,
+            display_name: Some("player".to_owned()),
+            // Production does not render a random wedge before the user picks.
+            initial_attachment: None,
+            votes: BTreeMap::new(),
+            spin_kind: WheelKind::Regular,
+            balance_before: 0,
+            effects: ManaEffects {
+                color: Some("Blue".to_owned()),
+                ..Default::default()
+            },
+            event_id: "blue-scry-media".to_owned(),
+            config: BettingRuntimeConfig::from_application_config(&config),
+            event_win_multiplier: 1.0,
+            event_loss_multiplier: 1.0,
+            bonus_spin: false,
+            last_regular_spin: None,
+            original_responder: Some(Arc::new(responder.clone())),
+        };
+        let provider = BettingRegistrationProvider::new(
+            database.path(),
+            &config,
+            Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+        );
+        provider
+            .handler
+            .wheel_interactions
+            .lock()
+            .expect("wheel state lock")
+            .insert("betting:scry:blue-scry-media".to_owned(), pending);
+
+        provider
+            .handler
+            .handle(
+                InteractionRequest::Component {
+                    interaction_id: 48,
+                    custom_id: "betting:scry:blue-scry-media:b".to_owned(),
+                    user_id: 7,
+                    user_display_name: "player".to_owned(),
+                    guild_id: Some(42),
+                    channel_id: Some(99),
+                    member_permissions: None,
+                    values: Vec::new(),
+                },
+                Arc::new(responder.clone()),
+            )
+            .await
+            .expect("resolve Blue mana choice");
+
+        assert!(
+            responder
+                .responses
+                .lock()
+                .expect("responses lock")
+                .is_empty()
+        );
+        assert_eq!(*responder.defers.lock().expect("defers lock"), [false]);
+        let edits = responder.edits.lock().expect("edits lock");
+        assert_eq!(edits.len(), 2);
+        assert!(edits[0].content.is_empty());
+        assert!(edits[0].embeds.is_empty());
+        assert_eq!(edits[0].attachments, vec![expected]);
+        assert!(edits[1].content.is_empty());
+        assert_eq!(edits[1].embeds.len(), 1);
+        assert_eq!(
+            edits[1].embeds[0].title.as_deref(),
+            Some("🚫 LOSE A TURN 🚫")
+        );
+        assert!(edits[1].attachments.is_empty());
+        assert_eq!(
+            edits[1].attachment_policy,
+            crate::registration::InteractionAttachmentPolicy::Preserve
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn wheel_component_reroll_replaces_public_gif_attachment() {
         let database = NamedTempFile::new().expect("temporary database");
         initialize_or_migrate(database.path()).expect("schema");
@@ -11753,7 +12590,7 @@ mod tests {
             },
         ];
         let initial_attachment =
-            render_wheel_attachment(&wedges, 0, false).expect("initial wheel GIF");
+            render_wheel_attachment(&wedges, 0, false, None).expect("initial wheel GIF");
         let responder = RecordingResponder::default();
         let pending = PendingWheelInteraction {
             kind: WheelInteractionKind::Reroll,
@@ -11763,6 +12600,7 @@ mod tests {
             options: wedges.iter().map(wheel_option).collect(),
             wheel_wedges: wedges.clone(),
             golden: false,
+            display_name: Some("player".to_owned()),
             initial_attachment: Some(initial_attachment.clone()),
             votes: BTreeMap::new(),
             spin_kind: WheelKind::Bankrupt,
@@ -11807,15 +12645,21 @@ mod tests {
             .expect("resolve reroll component");
 
         let responses = responder.responses.lock().expect("responses lock");
-        assert_eq!(responses.len(), 1);
-        assert!(responses[0].ephemeral);
-        assert!(responses[0].attachments.is_empty());
+        assert!(responses.is_empty());
         drop(responses);
+        assert_eq!(*responder.defers.lock().expect("defers lock"), [false]);
         let edits = responder.edits.lock().expect("edits lock");
-        assert_eq!(edits.len(), 1);
+        assert_eq!(edits.len(), 2);
         assert_eq!(edits[0].attachments.len(), 1);
         assert_eq!(edits[0].attachments[0].filename, "wheel.gif");
         assert_ne!(edits[0].attachments[0].bytes, initial_attachment.bytes);
+        assert!(edits[1].content.is_empty());
+        assert_eq!(edits[1].embeds.len(), 1);
+        assert!(edits[1].attachments.is_empty());
+        assert_eq!(
+            edits[1].attachment_policy,
+            crate::registration::InteractionAttachmentPolicy::Preserve
+        );
         assert!(
             ManaRepository::new(database.path())
                 .is_bankrupt_buff_used(7, Some(42), BankruptBuff::Reroll)

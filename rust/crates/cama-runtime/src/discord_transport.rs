@@ -288,6 +288,22 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
+    /// Whether this channel, or its thread parent, is an allowed gamba venue.
+    ///
+    /// The compatibility default retains the legacy single-destination
+    /// behavior for alternate transports. Production overrides this with
+    /// name-based channel resolution so every `gamba` channel is accepted.
+    async fn channel_is_gamba(&self, guild_id: u64, channel_id: u64) -> Result<bool, String> {
+        let gamba_channel = self.mafia_gamba_channel_id(guild_id).await?;
+        if gamba_channel == Some(channel_id) {
+            return Ok(true);
+        }
+        Ok(self
+            .channel_parent_id(guild_id, channel_id)
+            .await?
+            .is_some_and(|parent_id| gamba_channel == Some(parent_id)))
+    }
+
     /// Whether a channel is present in the guild's resolved channel cache.
     ///
     /// This deliberately answers only the same lookup question as Discord.py

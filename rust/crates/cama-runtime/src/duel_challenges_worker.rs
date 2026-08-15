@@ -31,6 +31,7 @@ use chrono::Utc;
 use tracing::{debug, error, warn};
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage};
+use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::registration::{InteractionEmbed, InteractionResponse};
 use crate::{BackgroundWorker, BackgroundWorkerSpec, SerenityDiscordTransport, WorkerContext};
 
@@ -205,7 +206,7 @@ pub(crate) struct DuelGuildSnapshot {
 /// the production implementation continues to use the context already held by
 /// [`SerenityDiscordTransport`].
 #[async_trait]
-pub(crate) trait DuelDiscordPort: Send + Sync {
+pub(crate) trait DuelDiscordPort: FirstGamePoolGuildSource + Send + Sync {
     async fn guild_snapshot(&self, guild_id: i64) -> Result<Option<DuelGuildSnapshot>, String>;
 
     async fn cached_channel(&self, channel_id: i64) -> Result<Option<DuelChannelSnapshot>, String>;
@@ -650,8 +651,16 @@ impl DuelChallengesWorker {
 
     async fn wake_once(&self, context: &mut WorkerContext) -> Result<bool, String> {
         let now = self.clock.now();
+        let live_guilds = self
+            .discord
+            .live_guild_ids()?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let due = self.due_challenge_ids(now).await?;
-        for (challenge_id, guild_id) in due {
+        for (challenge_id, guild_id) in due
+            .into_iter()
+            .filter(|(_, guild_id)| live_guilds.contains(guild_id))
+        {
             if context.shutdown_requested() {
                 return Ok(true);
             }

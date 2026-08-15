@@ -12,7 +12,10 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
-use crate::open_runtime_connection;
+use crate::{
+    json_numeric::{coerce_integral_i64, number_f64},
+    open_runtime_connection,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamLinkedPlayer {
@@ -647,7 +650,7 @@ fn refresh_wrapped_enrichment_facts(
                 candidate
                     .as_object()
                     .and_then(|fields| fields.get("account_id"))
-                    .and_then(JsonValue::as_i64)
+                    .and_then(coerce_integral_i64)
                     .is_some_and(|account_id| {
                         linked.contains(&account_id)
                             || (linked.is_empty() && legacy_steam_id == Some(account_id))
@@ -694,8 +697,8 @@ fn refresh_wrapped_enrichment_facts(
                     player
                         .and_then(|fields| fields.get("lane_role"))
                         .and_then(JsonValue::as_i64),
-                    match_data.get("comeback").and_then(JsonValue::as_i64),
-                    match_data.get("throw").and_then(JsonValue::as_i64),
+                    number_f64(match_data.get("comeback")),
+                    number_f64(match_data.get("throw")),
                 ],
             )?;
         }

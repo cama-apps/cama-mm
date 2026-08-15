@@ -659,7 +659,9 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let discord_transport = Arc::new(SerenityDiscordTransport::new());
+    let discord_transport = Arc::new(SerenityDiscordTransport::with_gamba_channel_id(
+        application_config.channels.gamba,
+    ));
     let draft_states = Arc::new(DraftStateManager::default());
     let lobby_provider = match LobbyRegistrationProvider::new(
         &config.db_path,
@@ -1091,11 +1093,14 @@ async fn run_serve() -> ExitCode {
         registry.enable_global_command_sync();
     }
     let registry = registry.build();
-    if let Err(error) = validate_production_registry(&registry) {
+    if let Err(error) =
+        validate_production_registry(&registry, application_config.channels.pet.is_some())
+    {
         error!(%error, "production command-tree contract refused startup");
         return ExitCode::from(1);
     }
-    let manashop_debt_worker = manashop_debt_worker_spec(&config.db_path);
+    let manashop_debt_worker =
+        manashop_debt_worker_spec(&config.db_path, discord_transport.clone());
     let duel_challenges_worker = duel_challenges_worker_spec(
         &config.db_path,
         application_config.channels.duel,

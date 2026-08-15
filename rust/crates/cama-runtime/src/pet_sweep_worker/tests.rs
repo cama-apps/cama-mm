@@ -20,6 +20,7 @@ use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 use super::*;
 
 const GUILD: i64 = 70_701;
+const OTHER_GUILD: i64 = 70_702;
 const CHANNEL: i64 = 80_801;
 
 #[derive(Clone)]
@@ -242,6 +243,12 @@ impl FakeDiscord {
 
     fn dms(&self) -> Vec<(i64, DiscordMessage)> {
         self.dms.lock().expect("direct messages").clone()
+    }
+}
+
+impl FirstGamePoolGuildSource for FakeDiscord {
+    fn live_guild_ids(&self) -> Result<Vec<i64>, String> {
+        Ok(vec![self.guild_id])
     }
 }
 
@@ -472,6 +479,67 @@ async fn stale_brawls_precede_hatch_delivery_and_authored_bytes_are_sent() {
     assert_eq!(
         reminders.rearmed.lock().expect("rearmed reminders").len(),
         2
+    );
+}
+
+#[tokio::test]
+async fn mixed_live_and_foreign_pet_state_fails_closed_before_mutation_or_delivery() {
+    let now = Utc::now().timestamp();
+    let database = migrated_database();
+    let live = adopt_and_resolve(
+        database.path(),
+        111,
+        "Live",
+        now - EGG_HATCH_SECONDS - 10,
+        "common_cama",
+    );
+    let foreign = adopt_and_resolve(
+        database.path(),
+        112,
+        "Foreign",
+        now - EGG_HATCH_SECONDS - 10,
+        "common_cama",
+    );
+    Connection::open(database.path())
+        .expect("open pet database")
+        .execute(
+            "UPDATE pets SET guild_id=?1 WHERE pet_id=?2",
+            params![OTHER_GUILD, foreign.pet_id],
+        )
+        .expect("move pet into foreign guild fixture");
+    let assets = TempDir::new().expect("pet assets directory");
+    let discord = Arc::new(FakeDiscord::new(Some(CHANNEL)));
+    let reminders = Arc::new(FakeReminders::default());
+    let worker = worker(
+        database.path(),
+        Arc::clone(&discord),
+        Arc::clone(&reminders),
+        &assets,
+    );
+    let (_shutdown, context) = worker_context();
+
+    worker.sweep_once(&context).await;
+
+    assert_eq!(pet_announcement_times(database.path(), live.pet_id).0, None);
+    assert_eq!(
+        pet_announcement_times(database.path(), foreign.pet_id).0,
+        None
+    );
+    assert!(discord.messages().is_empty());
+    assert!(discord.dms().is_empty());
+    assert!(
+        reminders
+            .rearmed
+            .lock()
+            .expect("rearmed reminders")
+            .is_empty()
+    );
+    assert!(
+        reminders
+            .cancelled
+            .lock()
+            .expect("cancelled reminders")
+            .is_empty()
     );
 }
 

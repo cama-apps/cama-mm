@@ -21,6 +21,8 @@ struct RecoveryDiscord {
     active_sends: AtomicUsize,
     peak_sends: AtomicUsize,
     block_edits: AtomicBool,
+    edit_attempts: AtomicUsize,
+    permanent_edit_error: Mutex<Option<SurveyEditErrorKind>>,
 }
 
 #[async_trait]
@@ -84,9 +86,19 @@ impl SurveyDiscordPort for RecoveryDiscord {
         channel_id: i64,
         message_id: i64,
         message: DiscordMessage,
-    ) -> Result<(), String> {
+    ) -> Result<(), SurveyEditError> {
+        self.edit_attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = *self.permanent_edit_error.lock().unwrap() {
+            return Err(SurveyEditError {
+                kind,
+                message: "injected permanent edit failure".to_owned(),
+            });
+        }
         if self.block_edits.load(Ordering::SeqCst) {
-            return Err("injected edit failure".to_owned());
+            return Err(SurveyEditError {
+                kind: SurveyEditErrorKind::Unavailable,
+                message: "injected edit failure".to_owned(),
+            });
         }
         self.edits
             .lock()
@@ -189,6 +201,7 @@ fn fixture() -> (
     initialize_or_migrate(&path).unwrap();
     let discord = Arc::new(RecoveryDiscord::default());
     let provider = SurveyRegistrationProvider::new(&path, discord.clone()).unwrap();
+    provider.state.replace_active_guilds(&[22]);
     let mut builder = RegistryBuilder::default();
     provider.register(&mut builder).unwrap();
     let registry = builder.build();
@@ -223,6 +236,100 @@ fn pager_fixture(
         .register_pager(9, pages, responder.clone())
         .unwrap();
     (directory, provider, responder, pager)
+}
+
+#[tokio::test]
+async fn connected_guild_scope_leaves_foreign_delivery_and_edit_work_untouched() {
+    let (_directory, path, provider, discord, _registry) = fixture();
+    let repository = db::SurveyRepository::new(&path);
+    let survey = repository
+        .create_survey(99, "Foreign production survey")
+        .unwrap();
+    repository
+        .add_question(
+            99,
+            survey.survey_id,
+            "Recommend?",
+            db::SurveyQuestionType::Nps,
+            true,
+        )
+        .unwrap();
+    repository
+        .open_survey(
+            99,
+            survey.survey_id,
+            &[44, 45],
+            db::SurveyTargetType::Role,
+            false,
+        )
+        .unwrap();
+    let sent = repository.claim_deliveries(1, 300).unwrap().remove(0);
+    repository
+        .mark_delivery_sent(sent.recipient_id, sent.attempt_count, 55, 66)
+        .unwrap();
+
+    assert_eq!(provider.state.recover(None).await.unwrap(), 0);
+    assert!(discord.sent.lock().unwrap().is_empty());
+    assert!(discord.edits.lock().unwrap().is_empty());
+    assert_eq!(discord.edit_attempts.load(Ordering::SeqCst), 0);
+    let pending = repository
+        .get_response_session(survey.survey_id, 45)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending.recipient.delivery_status,
+        db::SurveyDeliveryStatus::Pending
+    );
+    let foreign_edit = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert!(!foreign_edit.recipient.controls_finalized);
+}
+
+#[tokio::test]
+async fn permanent_edit_rejection_retires_terminal_controls_once() {
+    let (_directory, path, provider, discord, _registry) = fixture();
+    let repository = db::SurveyRepository::new(&path);
+    let survey = open_survey(&repository, &[44]);
+    let claimed = repository.claim_deliveries(1, 300).unwrap().remove(0);
+    repository
+        .mark_delivery_sent(claimed.recipient_id, claimed.attempt_count, 55, 66)
+        .unwrap();
+    repository.close_survey(22, survey.survey_id).unwrap();
+    *discord.permanent_edit_error.lock().unwrap() = Some(SurveyEditErrorKind::Forbidden);
+
+    provider.state.recover(None).await.unwrap();
+    provider.state.recover(None).await.unwrap();
+
+    assert_eq!(discord.edit_attempts.load(Ordering::SeqCst), 1);
+    let retired = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert!(retired.recipient.controls_finalized);
+}
+
+#[tokio::test]
+async fn transient_edit_rejection_uses_backoff_instead_of_tight_retrying() {
+    let (_directory, path, provider, discord, _registry) = fixture();
+    let repository = db::SurveyRepository::new(&path);
+    let survey = open_survey(&repository, &[44]);
+    let claimed = repository.claim_deliveries(1, 300).unwrap().remove(0);
+    repository
+        .mark_delivery_sent(claimed.recipient_id, claimed.attempt_count, 55, 66)
+        .unwrap();
+    discord.block_edits.store(true, Ordering::SeqCst);
+
+    provider.state.recover(None).await.unwrap();
+    provider.state.recover(None).await.unwrap();
+
+    assert_eq!(discord.edit_attempts.load(Ordering::SeqCst), 1);
+    let pending = repository
+        .get_response_session(survey.survey_id, 44)
+        .unwrap()
+        .unwrap();
+    assert!(!pending.recipient.controls_finalized);
 }
 
 async fn page_click(

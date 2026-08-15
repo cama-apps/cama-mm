@@ -75,7 +75,8 @@ use crate::registration::{
 };
 use crate::shop_provider::ShopDiscordPort;
 use crate::survey_provider::{
-    SurveyDiscordPort, SurveyDmError, SurveyDmErrorKind, SurveyDmHistory,
+    SurveyDiscordPort, SurveyDmError, SurveyDmErrorKind, SurveyDmHistory, SurveyEditError,
+    SurveyEditErrorKind,
 };
 use crate::trivia_provider::TriviaDiscordPort;
 use crate::wrapped_provider::{WrappedDiscordPort, WrappedDiscordProfile};
@@ -89,6 +90,7 @@ pub struct SerenityDiscordTransport {
     context: Arc<RwLock<Option<SerenityContext>>>,
     admin_registry: Arc<RwLock<Option<Arc<Registry>>>>,
     shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
+    gamba_channel_id: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -101,6 +103,14 @@ impl SerenityDiscordTransport {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_gamba_channel_id(gamba_channel_id: Option<i64>) -> Self {
+        Self {
+            gamba_channel_id,
+            ..Self::default()
+        }
     }
 
     fn attach(&self, context: &Context) {
@@ -792,14 +802,18 @@ impl SurveyDiscordPort for SerenityDiscordTransport {
         channel_id: i64,
         message_id: i64,
         message: DiscordMessage,
-    ) -> Result<(), String> {
-        let context = self.context()?;
+    ) -> Result<(), SurveyEditError> {
+        let unavailable = |message| SurveyEditError {
+            kind: SurveyEditErrorKind::Unavailable,
+            message,
+        };
+        let context = self.context().map_err(unavailable)?;
         let channel_id = u64::try_from(channel_id)
             .map(ChannelId::new)
-            .map_err(|_| "survey DM channel id is negative".to_owned())?;
+            .map_err(|_| unavailable("survey DM channel id is negative".to_owned()))?;
         let message_id = u64::try_from(message_id)
             .map(MessageId::new)
-            .map_err(|_| "survey DM message id is negative".to_owned())?;
+            .map_err(|_| unavailable("survey DM message id is negative".to_owned()))?;
         channel_id
             .edit_message(
                 (&context.cache, context.http.as_ref()),
@@ -808,7 +822,26 @@ impl SurveyDiscordPort for SerenityDiscordTransport {
             )
             .await
             .map(drop)
-            .map_err(|error| error.to_string())
+            .map_err(|error| SurveyEditError {
+                kind: match &error {
+                    serenity::Error::Http(http)
+                        if http
+                            .status_code()
+                            .is_some_and(|status| status.as_u16() == 403) =>
+                    {
+                        SurveyEditErrorKind::Forbidden
+                    }
+                    serenity::Error::Http(http)
+                        if http
+                            .status_code()
+                            .is_some_and(|status| status.as_u16() == 404) =>
+                    {
+                        SurveyEditErrorKind::NotFound
+                    }
+                    _ => SurveyEditErrorKind::Unavailable,
+                },
+                message: error.to_string(),
+            })
     }
 }
 
@@ -828,10 +861,22 @@ impl GambaGuildSource for SerenityDiscordTransport {
                 continue;
             };
             channels.sort_unstable_by_key(|channel| (channel.position, channel.id.get()));
-            let Some(channel) = channels.into_iter().find(|channel| {
-                matches!(channel.kind, ChannelType::Text | ChannelType::News)
-                    && channel.name.to_lowercase().contains("gamba")
-            }) else {
+            let configured_id = self
+                .gamba_channel_id
+                .and_then(|channel_id| u64::try_from(channel_id).ok());
+            let Some(channel) = channels
+                .iter()
+                .find(|channel| {
+                    configured_id == Some(channel.id.get())
+                        && matches!(channel.kind, ChannelType::Text | ChannelType::News)
+                })
+                .or_else(|| {
+                    channels.iter().find(|channel| {
+                        matches!(channel.kind, ChannelType::Text | ChannelType::News)
+                            && channel.name.to_lowercase().contains("gamba")
+                    })
+                })
+            else {
                 continue;
             };
             destinations.push(GambaDestination {
@@ -2888,6 +2933,12 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
             u64::try_from(channel_id)
                 .map_err(|_| "Discord prediction channel ID is outside the supported range")?,
         );
+        let configured_id = self
+            .gamba_channel_id
+            .and_then(|channel_id| u64::try_from(channel_id).ok());
+        if configured_id == Some(channel_id.get()) {
+            return Ok(true);
+        }
         let Some(channel) = prediction_channel(&context, guild_id, channel_id).await? else {
             return Ok(false);
         };
@@ -2900,6 +2951,9 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
         let Some(parent_id) = channel.parent_id else {
             return Ok(false);
         };
+        if configured_id == Some(parent_id.get()) {
+            return Ok(true);
+        }
         Ok(prediction_channel(&context, guild_id, parent_id)
             .await?
             .is_some_and(|parent| parent.name.to_ascii_lowercase().contains("gamba")))
@@ -3810,11 +3864,15 @@ impl DiscordTransport for SerenityDiscordTransport {
         let bot_member = guild.members.get(&context.cache.current_user().id);
         let mut channels = guild.channels.values().cloned().collect::<Vec<_>>();
         channels.sort_unstable_by_key(|channel| (channel.position, channel.id.get()));
+        let configured_id = self
+            .gamba_channel_id
+            .and_then(|channel_id| u64::try_from(channel_id).ok());
         Ok(channels
             .into_iter()
             .filter(|channel| {
                 matches!(channel.kind, ChannelType::Text | ChannelType::News)
-                    && channel.name.to_ascii_lowercase().contains("gamba")
+                    && (configured_id == Some(channel.id.get())
+                        || channel.name.to_ascii_lowercase().contains("gamba"))
             })
             .find(|channel| {
                 bot_member.is_none_or(|member| {
@@ -3824,6 +3882,16 @@ impl DiscordTransport for SerenityDiscordTransport {
                 })
             })
             .map(|channel| channel.id.get()))
+    }
+
+    async fn channel_is_gamba(&self, guild_id: u64, channel_id: u64) -> Result<bool, String> {
+        PredictionCommandDiscordPort::prediction_channel_is_gamba(
+            self,
+            i64::try_from(guild_id).map_err(|_| "Discord gamba guild ID exceeds SQLite INTEGER")?,
+            i64::try_from(channel_id)
+                .map_err(|_| "Discord gamba channel ID exceeds SQLite INTEGER")?,
+        )
+        .await
     }
 
     async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {

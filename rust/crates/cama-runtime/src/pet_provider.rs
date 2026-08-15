@@ -1573,6 +1573,8 @@ impl PetInteractionHandler {
             } else {
                 Some(self.render_pet(pet).await?)
             }
+        } else if let Some(dead) = data.0.last_dead.as_ref() {
+            Some(self.render_tombstone(&dead.name, dead.pet_id).await?)
         } else {
             None
         };
@@ -2711,6 +2713,26 @@ impl PetInteractionHandler {
                 .lock()
                 .map_err(|_| "pet asset lock poisoned".to_owned())?;
             let file = assets.get_altar_card(&name, seed);
+            let filename = file.filename.clone();
+            let bytes = file.bytes().to_vec();
+            Ok(InteractionAttachment::bytes(filename, bytes))
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn render_tombstone(
+        &self,
+        name: &str,
+        seed: i64,
+    ) -> Result<InteractionAttachment, String> {
+        let name = name.to_owned();
+        let assets = Arc::clone(&self.state.assets);
+        tokio::task::spawn_blocking(move || {
+            let mut assets = assets
+                .lock()
+                .map_err(|_| "pet asset lock poisoned".to_owned())?;
+            let file = assets.get_tombstone_card(&name, seed);
             let filename = file.filename.clone();
             let bytes = file.bytes().to_vec();
             Ok(InteractionAttachment::bytes(filename, bytes))
@@ -5439,6 +5461,13 @@ mod tests {
             update.embeds[0].title.as_deref(),
             Some("🩸 Provider Test Pet was given to the altar")
         );
+        assert!(
+            update.embeds[0]
+                .image_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("attachment://"))
+        );
+        assert_eq!(update.attachments.len(), 1);
     }
 
     #[tokio::test]
@@ -5466,6 +5495,14 @@ mod tests {
         let followups = responder.followups.lock().expect("adopt followups");
         assert_eq!(followups.len(), 1);
         assert_eq!(followups[0].attachments.len(), 1);
+        assert_eq!(
+            followups[0].embeds[0].image_url.as_deref(),
+            Some(format!(
+                "attachment://{}",
+                followups[0].attachments[0].filename
+            ))
+            .as_deref()
+        );
         assert!(
             followups[0].embeds[0]
                 .description

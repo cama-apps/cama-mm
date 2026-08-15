@@ -141,11 +141,14 @@ pub enum CommandTreeContractError {
     MissingApprovedPaths(Vec<String>),
     #[error("retired command paths are still registered: {0:?}")]
     RetiredPathsPresent(Vec<String>),
-    #[error("expected {expected} top-level commands, found {actual} (ask present: {ask_present})")]
+    #[error(
+        "expected {expected} top-level commands, found {actual} (ask present: {ask_present}, pet expected: {pet_expected})"
+    )]
     UnexpectedTopLevelCount {
         expected: usize,
         actual: usize,
         ask_present: bool,
+        pet_expected: bool,
     },
     #[error("command path {path:?} has {actual} direct options; Discord permits at most {limit}")]
     OptionLimitExceeded {
@@ -192,12 +195,13 @@ pub fn snapshot_registry(registry: &Registry) -> CommandTreeSnapshot {
 ///
 /// This is the production-callable seam for the final command-tree checks.
 /// The caller should pass the fully composed registry, not an individual
-/// provider or a source-derived list.  `ask` remains conditional in Python:
-/// when the optional Ask provider is present the expected root count is 45;
-/// otherwise it is 44.  The required `/pet` paths and representative roots
-/// keep the Pet-enabled production shape explicit.
+/// provider or a source-derived list.  `ask` remains conditional in Python,
+/// and `pet` is independently conditional on `PET_CHANNEL_ID`.  The caller
+/// supplies whether the Pet provider is expected from that startup
+/// configuration so a missing provider still fails when the channel is set.
 pub fn validate_production_registry(
     registry: &Registry,
+    pet_expected: bool,
 ) -> Result<CommandTreeSnapshot, CommandTreeContractError> {
     let snapshot = snapshot_registry(registry);
 
@@ -214,6 +218,7 @@ pub fn validate_production_registry(
 
     let missing_paths = APPROVED_PATHS
         .iter()
+        .filter(|path| pet_expected || !path.starts_with("/pet "))
         .filter(|path| !snapshot.command_paths.contains(**path))
         .map(|path| (*path).to_owned())
         .collect::<Vec<_>>();
@@ -233,12 +238,13 @@ pub fn validate_production_registry(
     }
 
     let ask_present = snapshot.top_level_commands.contains("ask");
-    let expected_top_level_count = 44 + usize::from(ask_present);
+    let expected_top_level_count = 43 + usize::from(ask_present) + usize::from(pet_expected);
     if snapshot.top_level_commands.len() != expected_top_level_count {
         return Err(CommandTreeContractError::UnexpectedTopLevelCount {
             expected: expected_top_level_count,
             actual: snapshot.top_level_commands.len(),
             ask_present,
+            pet_expected,
         });
     }
     if snapshot.top_level_commands.len() > DISCORD_GLOBAL_COMMAND_LIMIT {
@@ -369,7 +375,7 @@ mod tests {
     /// intentionally exercise the validator against a complete command tree,
     /// including all approved paths and nested option limits, rather than
     /// claiming that this fixture itself boots the external service graph.
-    fn fixture_registry(with_ask: bool) -> Registry {
+    fn fixture_registry(with_ask: bool, with_pet: bool) -> Registry {
         let mut builder = RegistryBuilder::default();
 
         builder
@@ -492,26 +498,28 @@ mod tests {
                 ],
             ))
             .expect("admin fixture");
-        builder
-            .command(command(
-                "pet",
-                options(&[
-                    "adopt",
-                    "status",
-                    "feed",
-                    "shop",
-                    "buy",
-                    "rename",
-                    "graveyard",
-                    "leaderboard",
-                    "trinket",
-                    "brawl",
-                    "altar",
-                    "eat",
-                    "train",
-                ]),
-            ))
-            .expect("pet fixture");
+        if with_pet {
+            builder
+                .command(command(
+                    "pet",
+                    options(&[
+                        "adopt",
+                        "status",
+                        "feed",
+                        "shop",
+                        "buy",
+                        "rename",
+                        "graveyard",
+                        "leaderboard",
+                        "trinket",
+                        "brawl",
+                        "altar",
+                        "eat",
+                        "train",
+                    ]),
+                ))
+                .expect("pet fixture");
+        }
 
         for root in REPRESENTATIVE_ROOTS.iter().copied().filter(|root| {
             !matches!(
@@ -567,8 +575,9 @@ mod tests {
 
     #[test]
     fn production_registry_uses_approved_consolidated_paths() {
-        let registry = fixture_registry(false);
-        let snapshot = validate_production_registry(&registry).expect("valid command contract");
+        let registry = fixture_registry(false, true);
+        let snapshot =
+            validate_production_registry(&registry, true).expect("valid command contract");
         assert!(
             APPROVED_PATHS
                 .iter()
@@ -583,8 +592,9 @@ mod tests {
 
     #[test]
     fn production_registry_stays_within_discord_limits() {
-        let registry = fixture_registry(true);
-        let snapshot = validate_production_registry(&registry).expect("valid command contract");
+        let registry = fixture_registry(true, true);
+        let snapshot =
+            validate_production_registry(&registry, true).expect("valid command contract");
         assert_eq!(snapshot.top_level_commands.len(), 45);
         assert!(
             snapshot
@@ -601,8 +611,9 @@ mod tests {
 
     #[test]
     fn production_registry_registers_expected_bot_commands() {
-        let registry = fixture_registry(true);
-        let snapshot = validate_production_registry(&registry).expect("valid command contract");
+        let registry = fixture_registry(true, true);
+        let snapshot =
+            validate_production_registry(&registry, true).expect("valid command contract");
         for root in REPRESENTATIVE_ROOTS {
             assert!(
                 snapshot.top_level_commands.contains(*root),
@@ -611,6 +622,21 @@ mod tests {
         }
         assert!(snapshot.top_level_commands.contains("ask"));
         assert_eq!(snapshot.top_level_commands.len(), 45);
+    }
+
+    #[test]
+    fn production_registry_allows_pet_to_be_disabled_without_a_channel() {
+        let registry = fixture_registry(false, false);
+        let snapshot =
+            validate_production_registry(&registry, false).expect("valid command contract");
+        assert!(!snapshot.top_level_commands.contains("pet"));
+        assert!(
+            snapshot
+                .command_paths
+                .iter()
+                .all(|path| !path.starts_with("/pet "))
+        );
+        assert_eq!(snapshot.top_level_commands.len(), 43);
     }
 
     #[test]

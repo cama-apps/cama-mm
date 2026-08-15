@@ -198,6 +198,7 @@
     "target_index": 7,
     "size": 500,
     "seed": 13280327,
+    "display_name": "Visual Gambler",
     "is_bankrupt": false,
     "is_golden": false
   },

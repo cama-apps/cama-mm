@@ -57,6 +57,8 @@ fn request(discord_id: i64, steam_id: i64) -> RegisterPlayerRequest<'static> {
         glicko_volatility: 0.06,
         os_mu: 40.0,
         os_sigma: 8.333,
+        os_rating_version: 5,
+        os_algorithm_fingerprint: "ffdaf6752ef51115",
         exclusion_count: 4,
         added_at: 1_700_000_000,
     }
@@ -190,6 +192,105 @@ fn test_register_populates_junction_table() {
         )
         .expect("legacy Steam column");
     assert_eq!(legacy, 222_333);
+}
+
+#[test]
+fn test_same_player_can_register_same_steam_id_in_multiple_guilds() {
+    const SECOND_GUILD: i64 = GUILD + 1;
+    let fixture = Fixture::new();
+    fixture
+        .repository
+        .register_player_atomic(&request(7, 222_333))
+        .expect("register first guild");
+    let mut second = request(7, 222_333);
+    second.guild_id = Some(SECOND_GUILD);
+    fixture
+        .repository
+        .register_player_atomic(&second)
+        .expect("register same Steam identity in second guild");
+
+    let connection = fixture.connection();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM players WHERE discord_id=7",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("guild player rows"),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM player_steam_ids
+                 WHERE discord_id=7 AND steam_id=222333 AND is_primary=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("single primary membership"),
+        1
+    );
+}
+
+#[test]
+fn test_second_guild_registration_replaces_global_primary_and_syncs_legacy_rows() {
+    const SECOND_GUILD: i64 = GUILD + 1;
+    let fixture = Fixture::new();
+    fixture
+        .repository
+        .register_player_atomic(&request(8, 111_111))
+        .expect("register first guild");
+    let mut second = request(8, 222_222);
+    second.guild_id = Some(SECOND_GUILD);
+    fixture
+        .repository
+        .register_player_atomic(&second)
+        .expect("register second guild with a new primary");
+
+    let connection = fixture.connection();
+    let memberships = connection
+        .prepare(
+            "SELECT steam_id,is_primary FROM player_steam_ids
+             WHERE discord_id=8 ORDER BY steam_id",
+        )
+        .expect("prepare memberships")
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+        })
+        .expect("query memberships")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect memberships");
+    assert_eq!(memberships, [(111_111, false), (222_222, true)]);
+
+    let legacy_ids = connection
+        .prepare("SELECT steam_id FROM players WHERE discord_id=8 ORDER BY guild_id")
+        .expect("prepare legacy IDs")
+        .query_map([], |row| row.get::<_, i64>(0))
+        .expect("query legacy IDs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect legacy IDs");
+    assert_eq!(legacy_ids, [222_222, 222_222]);
+}
+
+#[test]
+fn test_register_persists_openskill_algorithm_identity() {
+    let fixture = Fixture::new();
+    fixture
+        .repository
+        .register_player_atomic(&request(10, 333_333))
+        .expect("register player");
+
+    let identity = fixture
+        .connection()
+        .query_row(
+            "SELECT os_rating_version,os_algorithm_fingerprint
+             FROM players WHERE discord_id=10 AND guild_id=?1",
+            [GUILD],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("OpenSkill algorithm identity");
+    assert_eq!(identity, (5, "ffdaf6752ef51115".to_owned()));
 }
 
 #[test]
@@ -414,6 +515,8 @@ CREATE TABLE players (
     glicko_volatility REAL,
     os_mu REAL,
     os_sigma REAL,
+    os_rating_version INTEGER NOT NULL DEFAULT 3,
+    os_algorithm_fingerprint TEXT,
     exclusion_count INTEGER DEFAULT 0,
     jopacoin_balance INTEGER DEFAULT 3,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,

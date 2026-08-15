@@ -7,6 +7,7 @@
 //! clickers cannot spend the same coins or leak audit metadata into another
 //! writer.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -409,6 +410,20 @@ impl BlameLukeRepository {
     pub fn recover_pending_interactions(
         &self,
     ) -> Result<BlameLukeRecoverySummary, BlameLukeRepositoryError> {
+        self.recover_pending_interactions_scoped(None)
+    }
+
+    pub fn recover_pending_interactions_for_guilds(
+        &self,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<BlameLukeRecoverySummary, BlameLukeRepositoryError> {
+        self.recover_pending_interactions_scoped(Some(guild_ids))
+    }
+
+    fn recover_pending_interactions_scoped(
+        &self,
+        guild_ids: Option<&BTreeSet<i64>>,
+    ) -> Result<BlameLukeRecoverySummary, BlameLukeRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
         let mut statement = connection.prepare(
             "SELECT value FROM app_kv
@@ -430,6 +445,9 @@ impl BlameLukeRepository {
                     continue;
                 }
             };
+            if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&operation.guild_id)) {
+                continue;
+            }
             if operation.status == BlameLukeOperationStatus::Charged {
                 match self.refund_interaction(operation.interaction_id) {
                     Ok(true) => {

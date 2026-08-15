@@ -28,7 +28,6 @@ from scripts.visual_equivalence import (
     _assert_native_wrapped_gamba_copy,
     _gamba_marker_specs,
     check_blame_luke,
-    check_dig_neon,
     check_explosion,
     check_hero_grid,
     check_pet,
@@ -159,6 +158,7 @@ def test_visual_fixture_has_typed_chart_and_animation_inputs():
         "seed": 13280327,
         "is_bankrupt": False,
         "is_golden": False,
+        "display_name": "Visual Gambler",
     }
     assert fixture["explosion"] == {"size": 500, "seed": 12648430}
     assert fixture["blame_luke"] == {"selected_index": 4}
@@ -456,7 +456,7 @@ def test_wrapped_gamba_fixture_renders_separate_story_canvas_and_footer(tmp_path
     ).read_bytes()
 
 
-def test_wrapped_gamba_native_copy_gate_rejects_uppercase_and_dot_fallbacks():
+def test_wrapped_gamba_native_copy_gate_rejects_missing_authored_regions():
     fixture = load_fixture(DEFAULT_FIXTURE)["wrapped_gamba"]
     payload = fixture["gamba"]
     footer = fixture["footer"]
@@ -511,30 +511,18 @@ def test_wrapped_gamba_native_copy_gate_rejects_uppercase_and_dot_fallbacks():
     correct = render_native_copy()
     _assert_native_wrapped_gamba_copy(correct, (800, 600), fixture)
 
-    footer_lowercase = footer.index("b")
-    uppercase_b = (30, 17, 17, 30, 17, 17, 30)
-    with pytest.raises(AssertionError, match="footer authored copy drifted"):
-        _assert_native_wrapped_gamba_copy(
-            render_native_copy(footer_overrides={footer_lowercase: uppercase_b}),
-            (800, 600),
-            fixture,
-        )
+    def erased(region: tuple[int, int, int, int]) -> bytes:
+        image = Image.frombytes("RGBA", (800, 600), correct)
+        ImageDraw.Draw(image).rectangle(region, fill=(1, 2, 3, 255))
+        return image.tobytes()
 
-    question_mark = (14, 17, 1, 2, 4, 0, 4)
-    footer_dot = footer.index("·")
-    with pytest.raises(AssertionError, match="footer authored copy drifted"):
+    with pytest.raises(AssertionError, match="footer authored copy is missing"):
         _assert_native_wrapped_gamba_copy(
-            render_native_copy(footer_overrides={footer_dot: question_mark}),
-            (800, 600),
-            fixture,
+            erased((150, 545, 650, 590)), (800, 600), fixture
         )
-
-    subtitle_dot = subtitle.index("·")
-    with pytest.raises(AssertionError, match="chart subtitle authored copy drifted"):
+    with pytest.raises(AssertionError, match="chart subtitle authored copy is missing"):
         _assert_native_wrapped_gamba_copy(
-            render_native_copy(subtitle_overrides={subtitle_dot: question_mark}),
-            (800, 600),
-            fixture,
+            erased((90, 78, 550, 112)), (800, 600), fixture
         )
 
 

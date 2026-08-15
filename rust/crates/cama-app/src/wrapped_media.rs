@@ -2,15 +2,19 @@
 //!
 //! The production command supplies semantic slide data and this module draws
 //! the complete server, awards, personal, records, pairwise, package, lane,
-//! rating, and gambling pages without Python, Pillow, matplotlib, fonts, or
-//! temporary files. Discord avatar PNGs are decoded fail-soft and composited
-//! when available.
+//! rating, and gambling pages without Python, Pillow, matplotlib, or temporary
+//! files. Fixed DejaVu assets preserve Python's authored Gamba typography;
+//! Discord avatar PNGs are decoded fail-soft and composited when available.
 
 use std::io::{Read, Write};
+use std::sync::OnceLock;
 
 use crate::drawing::{GambaPoint, GambaStats, draw_gamba_chart};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use fontdue::{Font, FontSettings};
 use thiserror::Error;
+
+use crate::font_assets::{DejaVuFace, load_dejavu_font};
 
 pub const WRAPPED_SLIDE_WIDTH: usize = 800;
 pub const WRAPPED_SLIDE_HEIGHT: usize = 600;
@@ -149,11 +153,12 @@ fn render_wrapped_gamba(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMedi
         WRAPPED_BACKGROUND_START,
     );
     canvas.vertical_gradient(WRAPPED_BACKGROUND_START, WRAPPED_BACKGROUND_END);
-    canvas.text_centered(
+    canvas.truetype_text_centered(
         &slide.title.to_ascii_uppercase(),
         15,
         WRAPPED_GAMBA_ACCENT,
-        2,
+        18.0,
+        true,
     );
 
     if let Some(gamba) = &slide.gamba {
@@ -175,7 +180,7 @@ fn render_wrapped_gamba(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMedi
     }
 
     if let Some(footer) = slide.lines.first().filter(|line| !line.is_empty()) {
-        canvas.text_centered_case_sensitive(footer, 560, GREY, 2);
+        canvas.truetype_text_centered(footer, 560, GREY, 16.0, false);
     }
     Ok(encode_png(&canvas))
 }
@@ -448,7 +453,22 @@ impl Canvas {
             return;
         }
         let offset = (y * self.width + x) * 4;
-        self.pixels[offset..offset + 4].copy_from_slice(&color.0);
+        if color.0[3] == u8::MAX {
+            self.pixels[offset..offset + 4].copy_from_slice(&color.0);
+            return;
+        }
+        let alpha = u16::from(color.0[3]);
+        let inverse = u16::from(u8::MAX) - alpha;
+        for channel in 0..3 {
+            self.pixels[offset + channel] = u8::try_from(
+                (u16::from(color.0[channel]) * alpha
+                    + u16::from(self.pixels[offset + channel]) * inverse
+                    + 127)
+                    / 255,
+            )
+            .unwrap_or(u8::MAX);
+        }
+        self.pixels[offset + 3] = u8::MAX;
     }
 
     fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: Rgba) {
@@ -562,6 +582,55 @@ impl Canvas {
         self.text_case_sensitive((self.width as i32 - width) / 2, y, text, color, scale);
     }
 
+    fn truetype_text_centered(
+        &mut self,
+        text: &str,
+        y: i32,
+        color: Rgba,
+        pixel_size: f32,
+        bold: bool,
+    ) {
+        let Some(font) = wrapped_font(bold) else {
+            self.text_centered_case_sensitive(text, y, color, 2);
+            return;
+        };
+        let width = truetype_text_width(text, pixel_size, font);
+        let x = (self.width as i32 - width) / 2;
+        let ascent = font
+            .horizontal_line_metrics(pixel_size)
+            .map_or(pixel_size, |metrics| metrics.ascent);
+        let baseline = y as f32 + ascent;
+        let mut pen_x = x as f32;
+        let mut previous = None;
+        for character in text.chars() {
+            if let Some(previous) = previous {
+                pen_x += font
+                    .horizontal_kern(previous, character, pixel_size)
+                    .unwrap_or_default();
+            }
+            let (metrics, bitmap) = font.rasterize(character, pixel_size);
+            let origin_x = pen_x.round() as i32 + metrics.xmin;
+            let origin_y = baseline.round() as i32
+                - metrics.ymin
+                - i32::try_from(metrics.height).unwrap_or_default();
+            for glyph_y in 0..metrics.height {
+                for glyph_x in 0..metrics.width {
+                    let alpha = bitmap[glyph_y * metrics.width + glyph_x];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    self.set(
+                        origin_x + i32::try_from(glyph_x).unwrap_or_default(),
+                        origin_y + i32::try_from(glyph_y).unwrap_or_default(),
+                        Rgba([color.0[0], color.0[1], color.0[2], alpha]),
+                    );
+                }
+            }
+            pen_x += metrics.advance_width;
+            previous = Some(character);
+        }
+    }
+
     fn text_right(&mut self, text: &str, right: i32, y: i32, color: Rgba, scale: i32) {
         let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
         self.text(right - width, y, text, color, scale);
@@ -633,6 +702,37 @@ impl Canvas {
         }
         self.pixels[offset + 3] = 255;
     }
+}
+
+fn wrapped_font(bold: bool) -> Option<&'static Font> {
+    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
+    let slot = if bold { &BOLD } else { &REGULAR };
+    slot.get_or_init(|| {
+        load_dejavu_font(if bold {
+            DejaVuFace::SansBold
+        } else {
+            DejaVuFace::Sans
+        })
+        .ok()
+        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
+}
+
+fn truetype_text_width(text: &str, pixel_size: f32, font: &Font) -> i32 {
+    let mut width = 0.0_f32;
+    let mut previous = None;
+    for character in text.chars() {
+        if let Some(previous) = previous {
+            width += font
+                .horizontal_kern(previous, character, pixel_size)
+                .unwrap_or_default();
+        }
+        width += font.metrics(character, pixel_size).advance_width;
+        previous = Some(character);
+    }
+    width.ceil() as i32
 }
 
 #[derive(Clone, Debug)]
@@ -970,9 +1070,15 @@ mod tests {
             crate::drawing::DISCORD_BG.0,
             "the typed 700x400 chart begins at Python's wrapped offset"
         );
+        let mut untitled = slide;
+        untitled.title.clear();
+        let untitled =
+            decode_png(&render_wrapped_slide(&untitled).expect("untitled Wrapped Gamba PNG"))
+                .expect("untitled Wrapped Gamba native PNG");
+        let title_band = 4 * decoded.width * 36;
         assert_ne!(
-            &decoded.pixels[(15 * decoded.width + 400) * 4..][..3],
-            &WRAPPED_BACKGROUND_START.0[..3],
+            &decoded.pixels[..title_band],
+            &untitled.pixels[..title_band],
             "the story title is drawn on the wrapped gradient"
         );
     }
@@ -986,36 +1092,11 @@ mod tests {
         let slide = wrapped_gamba_fixture_slide();
         let rendered = render_wrapped_slide(&slide).expect("authored Wrapped Gamba copy");
         let decoded = decode_png(&rendered).expect("native Wrapped Gamba PNG");
-        let pixel = |x: usize, y: usize| -> &[u8] {
-            let offset = (y * decoded.width + x) * 4;
-            &decoded.pixels[offset..offset + 4]
-        };
-        let footer_left = (WRAPPED_SLIDE_WIDTH - FOOTER.chars().count() * 12) / 2;
-        let first_dot = FOOTER
-            .chars()
-            .position(|character| character == '·')
-            .expect("middle dot in footer");
-        let dot_left = footer_left + first_dot * 12;
-        assert_eq!(pixel(dot_left + 4, 566), GREY.0);
-        assert_ne!(
-            pixel(dot_left + 2, 560),
-            GREY.0,
-            "a middle dot must not render as the question-mark fallback"
-        );
-        let first_lowercase = FOOTER
-            .chars()
-            .position(|character| character == 'b')
-            .expect("lowercase footer copy");
-        let lowercase_left = footer_left + first_lowercase * 12;
-        assert_eq!(
-            pixel(lowercase_left, 560),
-            GREY.0,
-            "lowercase b retains its ascender"
-        );
-        assert_ne!(
-            pixel(lowercase_left + 2, 560),
-            GREY.0,
-            "the lowercase bitmap does not acquire uppercase B's top bar"
+        assert!(
+            decoded.pixels[(550 * decoded.width * 4)..(585 * decoded.width * 4)]
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == GREY.0[..3]),
+            "the authored footer renders on the story canvas"
         );
 
         let mut upper_footer = slide.clone();

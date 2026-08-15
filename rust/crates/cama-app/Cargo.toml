@@ -10,6 +10,7 @@ async-trait.workspace = true
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
 chrono.workspace = true
+fontdue.workspace = true
 flate2.workspace = true
 fastrand.workspace = true
 gif.workspace = true

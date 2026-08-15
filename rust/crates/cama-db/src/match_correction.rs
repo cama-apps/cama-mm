@@ -864,6 +864,30 @@ impl MatchCorrectionRepository {
         Ok(changed)
     }
 
+    /// Release dead-process correction leases only for guilds present in the
+    /// current gateway READY snapshot. A dev bot may intentionally open a
+    /// production database copy without belonging to those production guilds.
+    pub fn release_match_correction_leases_for_startup_guilds(
+        &self,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<usize, MatchCorrectionError> {
+        if guild_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = 0usize;
+        for guild_id in guild_ids {
+            changed = changed.saturating_add(transaction.execute(
+                "UPDATE match_correction_claims SET owner_token=NULL,claimed_at=0
+                 WHERE owner_token IS NOT NULL AND guild_id=?1",
+                [guild_id],
+            )?);
+        }
+        transaction.commit()?;
+        Ok(changed)
+    }
+
     /// Enumerate every correction that has not reached claim cleanup.
     ///
     /// A process can exit while the claim is still `pending` after one or more

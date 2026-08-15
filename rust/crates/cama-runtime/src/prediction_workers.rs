@@ -23,6 +23,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use tracing::{info, warn};
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
+use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gamba_guild_source::{GambaDestination, GambaGuildSource};
 use crate::registration::{InteractionAttachment, InteractionEmbed, InteractionResponse};
 use crate::{ApplicationConfig, BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
@@ -75,7 +76,7 @@ fn configured_duration(seconds: i64) -> Duration {
 }
 
 #[async_trait]
-pub trait PredictionDiscordPort: Send + Sync {
+pub trait PredictionDiscordPort: FirstGamePoolGuildSource + Send + Sync {
     /// Fetch the persisted message before reviving its thread, then render the
     /// live market embed/chart while retaining the existing persistent view.
     async fn edit_prediction_market_message(
@@ -308,10 +309,18 @@ impl PredictionRefreshWorker {
 
     async fn wake_once(&self, context: &WorkerContext) -> Result<(), String> {
         let now = self.clock.now_seconds();
+        let live_guilds = self
+            .discord
+            .live_guild_ids()?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let mut failures = Vec::new();
         match self.due_markets(now).await {
             Ok(markets) => {
-                for market in markets {
+                for market in markets
+                    .into_iter()
+                    .filter(|market| live_guilds.contains(&market.guild_id))
+                {
                     if context.shutdown_requested() {
                         return Ok(());
                     }
@@ -331,7 +340,10 @@ impl PredictionRefreshWorker {
 
         match self.pending_publications().await {
             Ok(publications) => {
-                for publication in publications {
+                for publication in publications
+                    .into_iter()
+                    .filter(|publication| live_guilds.contains(&publication.guild_id))
+                {
                     if context.shutdown_requested() {
                         return Ok(());
                     }

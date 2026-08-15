@@ -1606,6 +1606,16 @@ fn value_text(values: &BTreeMap<String, AiValue>, key: &str) -> Option<String> {
     values.get(key).and_then(AiValue::as_str).map(str::to_owned)
 }
 
+fn value_f64(values: &BTreeMap<String, AiValue>, key: &str) -> Option<f64> {
+    let value = values.get(key)?;
+    let parsed = value.as_f64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+    })?;
+    parsed.is_finite().then_some(parsed)
+}
+
 fn value_object<'a>(
     values: &'a BTreeMap<String, AiValue>,
     key: &str,
@@ -1629,7 +1639,7 @@ fn flavor_tool_args_from_values(values: &BTreeMap<String, AiValue>) -> FlavorToo
         callback_reference: value_text(values, "callback_reference"),
         picked_event_id: value_text(values, "picked_event_id"),
         npc_appearance,
-        flavor_bonus_pct: values.get("flavor_bonus_pct").and_then(AiValue::as_f64),
+        flavor_bonus_pct: value_f64(values, "flavor_bonus_pct"),
         memory_update: value_text(values, "memory_update"),
     }
 }

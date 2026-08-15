@@ -4,9 +4,9 @@ mod player_mmr_fallback;
 use std::convert::Infallible;
 
 use player_mmr_fallback::{
-    MmrRegistrationRepository, OpenDotaMmrValue, OpenDotaPlayerData, OpenDotaRegistrationPort,
-    RegisterPlayerError, RegisterPlayerInput, RegistrationSeed, estimate_immortal_mmr,
-    get_player_mmr_from_data, register_player,
+    MmrRegistrationRepository, OPENSKILL_ALGORITHM_VERSION, OpenDotaMmrValue, OpenDotaPlayerData,
+    OpenDotaRegistrationPort, RegisterPlayerError, RegisterPlayerInput, RegistrationSeed,
+    estimate_immortal_mmr, get_player_mmr_from_data, register_player,
 };
 
 const TEST_GUILD_ID: i64 = 12_345;
@@ -108,6 +108,8 @@ fn test_register_player_fallback_to_current_mmr() {
     assert_eq!(added.initial_mmr, 5_200);
     assert!((added.glicko_rating - 1_175.0).abs() < f64::EPSILON);
     assert!((added.os_mu - 48.5).abs() < f64::EPSILON);
+    assert_eq!(added.os_rating_version, OPENSKILL_ALGORITHM_VERSION);
+    assert_eq!(added.os_algorithm_fingerprint, "ffdaf6752ef51115");
     assert_eq!(result.mmr, 5_200);
     assert_eq!((api.player_data_calls, api.mmr_from_data_calls), (1, 1));
 }

@@ -8,12 +8,14 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
+use fontdue::{Font, FontSettings};
 use gif::{Encoder, Frame, Repeat};
 
 use crate::dig_neon::{BigWinFlavor, BigWinSource};
+use crate::font_assets::{DejaVuFace, load_dejavu_font};
 use crate::jopat_match_routing::{
     ContractGifRenderer, POST_MATCH_GIF_CHANCE, PostMatchGifPort, post_match_gif_theme,
 };
@@ -771,6 +773,53 @@ impl NeonCanvas {
         self.text_left(text, (i32::from(self.width) - width) / 2, y, color, scale);
     }
 
+    pub(crate) fn text_centered_dejavu(
+        &mut self,
+        text: &str,
+        y: i32,
+        color: u8,
+        pixel_size: f32,
+        bold: bool,
+    ) {
+        let Some(font) = neon_font(bold) else {
+            self.text_centered(text, y, color, if pixel_size >= 16.0 { 2 } else { 1 });
+            return;
+        };
+        let width = neon_text_width(text, pixel_size, font);
+        let ascent = font
+            .horizontal_line_metrics(pixel_size)
+            .map_or(pixel_size, |metrics| metrics.ascent);
+        let baseline = y as f32 + ascent;
+        let mut pen_x = (f32::from(self.width) - width) / 2.0;
+        let mut previous = None;
+        for character in text.chars() {
+            if let Some(previous) = previous {
+                pen_x += font
+                    .horizontal_kern(previous, character, pixel_size)
+                    .unwrap_or_default();
+            }
+            let (metrics, bitmap) = font.rasterize(character, pixel_size);
+            let origin_x = pen_x.round() as i32 + metrics.xmin;
+            let origin_y = baseline.round() as i32
+                - metrics.ymin
+                - i32::try_from(metrics.height).unwrap_or_default();
+            for glyph_y in 0..metrics.height {
+                for glyph_x in 0..metrics.width {
+                    if bitmap[glyph_y * metrics.width + glyph_x] < 48 {
+                        continue;
+                    }
+                    self.pixel(
+                        origin_x + i32::try_from(glyph_x).unwrap_or_default(),
+                        origin_y + i32::try_from(glyph_y).unwrap_or_default(),
+                        color,
+                    );
+                }
+            }
+            pen_x += metrics.advance_width;
+            previous = Some(character);
+        }
+    }
+
     pub(crate) fn glyph(&mut self, character: char, left: i32, top: i32, color: u8, scale: i32) {
         let rows = glyph_rows(character);
         for (row, bits) in rows.iter().copied().enumerate() {
@@ -787,6 +836,37 @@ impl NeonCanvas {
             }
         }
     }
+}
+
+fn neon_font(bold: bool) -> Option<&'static Font> {
+    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
+    let slot = if bold { &BOLD } else { &REGULAR };
+    slot.get_or_init(|| {
+        load_dejavu_font(if bold {
+            DejaVuFace::SansMonoBold
+        } else {
+            DejaVuFace::SansMono
+        })
+        .ok()
+        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
+}
+
+fn neon_text_width(text: &str, pixel_size: f32, font: &Font) -> f32 {
+    let mut width = 0.0_f32;
+    let mut previous = None;
+    for character in text.chars() {
+        if let Some(previous) = previous {
+            width += font
+                .horizontal_kern(previous, character, pixel_size)
+                .unwrap_or_default();
+        }
+        width += font.metrics(character, pixel_size).advance_width;
+        previous = Some(character);
+    }
+    width
 }
 
 fn glyph_rows(character: char) -> [u8; 7] {

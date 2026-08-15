@@ -9,9 +9,11 @@ is mapped, tested, wired to production adapters, and exercised against the same
 SQLite storage contract.
 
 Current measured status: **6,750 of 6,750 Python test cases mapped (100%)**.
-The parity ledger is complete, but operational cutover status is **5 of 13
-required readiness gates complete**; **67 of 67 production runtime inventory
-items are wired**, and the default and only live runtime remains Python.
+The parity ledger and operational cutover manifest are complete: **13 of 13
+required readiness gates complete**, with **67 of 67 production runtime
+inventory items wired**. Deployment still requires the explicit candidate and
+runtime selectors plus the transactional backup, health verification, and
+automatic recovery path described below.
 
 ## Non-negotiable invariants
 

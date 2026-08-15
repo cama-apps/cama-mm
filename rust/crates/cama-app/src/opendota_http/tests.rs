@@ -186,6 +186,90 @@ fn client_with(
     OpenDotaHttpClient::with_config(config).expect("test client")
 }
 
+#[test]
+fn test_registration_projection_truncates_json_float_mmr_like_python_int() {
+    let player_data = project_registration_player(serde_json::json!({
+        "computed_mmr": 3811.28
+    }))
+    .expect("registration player projection");
+
+    assert_eq!(
+        get_player_mmr_from_data(Some(&player_data)),
+        Ok(Some(3_811))
+    );
+
+    let negative = project_registration_player(serde_json::json!({
+        "computed_mmr": -3811.28
+    }))
+    .expect("negative registration player projection");
+    assert_eq!(get_player_mmr_from_data(Some(&negative)), Ok(Some(-3_811)));
+}
+
+#[test]
+fn test_registration_projection_preserves_integer_numeric_strings() {
+    let player_data = project_registration_player(serde_json::json!({
+        "computed_mmr": " 3811 "
+    }))
+    .expect("registration player projection");
+
+    assert_eq!(
+        get_player_mmr_from_data(Some(&player_data)),
+        Ok(Some(3_811))
+    );
+}
+
+#[test]
+fn test_registration_projection_rejects_fractional_and_non_finite_strings() {
+    for invalid in ["3811.28", "NaN", "Infinity", "-Infinity"] {
+        let player_data = project_registration_player(serde_json::json!({
+            "computed_mmr": invalid
+        }))
+        .expect("registration player projection");
+
+        assert!(get_player_mmr_from_data(Some(&player_data)).is_err());
+    }
+}
+
+#[test]
+fn test_registration_projection_rejects_out_of_range_numeric_mmr() {
+    let player_data = project_registration_player(
+        serde_json::from_str(r#"{"computed_mmr":9223372036854775808}"#)
+            .expect("valid JSON with an unsigned integer"),
+    )
+    .expect("registration player projection");
+
+    assert!(get_player_mmr_from_data(Some(&player_data)).is_err());
+}
+
+#[test]
+fn test_mmr_float_truncation_rejects_non_finite_and_unsafe_values() {
+    assert_eq!(truncate_finite_f64_to_i64(f64::NAN), None);
+    assert_eq!(truncate_finite_f64_to_i64(f64::INFINITY), None);
+    assert_eq!(truncate_finite_f64_to_i64(f64::NEG_INFINITY), None);
+    assert_eq!(
+        truncate_finite_f64_to_i64(9_223_372_036_854_775_808.0),
+        None
+    );
+    assert_eq!(
+        truncate_finite_f64_to_i64(-9_223_372_036_854_777_000.0),
+        None
+    );
+}
+
+#[test]
+fn test_shared_i64_projection_truncates_safely() {
+    assert_eq!(value_i64(&serde_json::json!(3811.28)), Some(3_811));
+    assert_eq!(value_i64(&serde_json::json!(-3811.28)), Some(-3_811));
+    assert_eq!(
+        value_i64(
+            &serde_json::from_str::<Value>("9223372036854775808")
+                .expect("valid unsigned JSON integer")
+        ),
+        None
+    );
+    assert_eq!(value_i64(&serde_json::json!(1e100)), None);
+}
+
 #[tokio::test]
 async fn test_get_player_data_passes_timeout() {
     let server = ScriptedServer::start(vec![

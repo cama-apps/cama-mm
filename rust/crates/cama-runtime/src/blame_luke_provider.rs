@@ -1,5 +1,6 @@
 //! Live `/blameluke` launcher and paid persistent investigation button.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -136,7 +137,10 @@ trait BlameLukeWalletPort: Send + Sync {
         self.refund(user_id, guild_id)
     }
 
-    fn recover_pending_interactions(&self) -> Result<BlameLukeRecoverySummary, String> {
+    fn recover_pending_interactions(
+        &self,
+        _guild_ids: &BTreeSet<i64>,
+    ) -> Result<BlameLukeRecoverySummary, String> {
         Ok(BlameLukeRecoverySummary::default())
     }
 }
@@ -193,8 +197,12 @@ impl BlameLukeWalletPort for BlameLukeRepository {
             .map_err(|error| error.to_string())
     }
 
-    fn recover_pending_interactions(&self) -> Result<BlameLukeRecoverySummary, String> {
-        BlameLukeRepository::recover_pending_interactions(self).map_err(|error| error.to_string())
+    fn recover_pending_interactions(
+        &self,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<BlameLukeRecoverySummary, String> {
+        BlameLukeRepository::recover_pending_interactions_for_guilds(self, guild_ids)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -241,8 +249,15 @@ impl GatewayEventObserver for BlameLukeReadyRecoveryObserver {
     }
 
     async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+        let guild_ids = context
+            .guild_ids()
+            .iter()
+            .filter_map(|guild_id| i64::try_from(*guild_id).ok())
+            .collect::<BTreeSet<_>>();
         let wallet = Arc::clone(&self.wallet);
-        match tokio::task::spawn_blocking(move || wallet.recover_pending_interactions()).await {
+        match tokio::task::spawn_blocking(move || wallet.recover_pending_interactions(&guild_ids))
+            .await
+        {
             Ok(Ok(recovered)) => {
                 let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
                 report.guilds_refreshed = recovered.guilds_recovered.min(context.guild_ids().len());

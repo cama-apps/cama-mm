@@ -605,6 +605,43 @@ async fn ready_recovery_refunds_pending_charge_after_simulated_restart() {
 }
 
 #[tokio::test]
+async fn ready_recovery_leaves_foreign_guild_charge_untouched() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 100);
+    let repository = BlameLukeRepository::new(&fixture.path);
+    repository
+        .charge_for_interaction(&BlameLukeOperationIdentity {
+            interaction_id: 902,
+            user_id: USER,
+            guild_id: GUILD,
+            channel_id: Some(CHANNEL as i64),
+            selected_reason_index: 2,
+            user_display_name: "Foreign Clicker".to_owned(),
+        })
+        .expect("durable foreign-guild charge");
+
+    let provider = BlameLukeRegistrationProvider::new(&fixture.path);
+    let report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            [(GUILD + 1) as u64],
+            Arc::new(EmptyMemberSource),
+        ))
+        .await;
+
+    assert!(report.failures.is_empty());
+    assert_eq!(report.guilds_refreshed, 0);
+    assert_eq!(report.members_refreshed, 0);
+    assert_eq!(fixture.balance(USER), 100 - BLAME_LUKE_COST);
+    assert!(matches!(
+        repository
+            .existing_operation(902)
+            .expect("foreign operation remains"),
+        Some(BlameLukeExistingOperation::Pending(_))
+    ));
+}
+
+#[tokio::test]
 async fn pending_duplicate_replays_persisted_reason_without_selecting_again() {
     let fixture = Fixture::migrated();
     fixture.register(USER, 100);

@@ -609,7 +609,10 @@ fn dig_pinnacle_text_stage(progress: f64) -> DigPinnacleTextStage {
     let alpha = ((progress - 0.45) / 0.55).clamp(0.0, 1.0);
     if alpha <= 0.0 {
         DigPinnacleTextStage::Hidden
-    } else if alpha < 0.34 {
+    // Python alpha-blends the full title color. Around 25% opacity its
+    // brightest glyph pixels cross the visual foreground threshold, so move
+    // to the middle palette band at the same point.
+    } else if alpha < 0.25 {
         DigPinnacleTextStage::Dim
     } else if alpha < 0.78 {
         DigPinnacleTextStage::Mid
@@ -788,7 +791,7 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
                 )
             };
             if let Some(color) = title_color {
-                canvas.text_centered(
+                canvas.text_centered_dejavu(
                     if prestige {
                         "ASCENSION"
                     } else {
@@ -796,7 +799,8 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
                     },
                     i32::from(DIG_PINNACLE_HEIGHT) - 46,
                     color,
-                    2,
+                    18.0,
+                    true,
                 );
             }
             let subtitle_color = if prestige {
@@ -815,11 +819,12 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
                 )
             };
             if let Some(color) = subtitle_color {
-                canvas.text_centered(
+                canvas.text_centered_dejavu(
                     if prestige { "PRESTIGE" } else { "DEPTH 350" },
                     i32::from(DIG_PINNACLE_HEIGHT) - 26,
                     color,
-                    1,
+                    12.0,
+                    false,
                 );
             }
         },

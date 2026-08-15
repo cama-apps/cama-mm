@@ -13,6 +13,15 @@ use super::*;
 const NOW: i64 = 2_000_000_000;
 const USER: i64 = 31_337;
 const GUILD: i64 = 9_001;
+const FOREIGN_GUILD: i64 = 9_002;
+
+struct FixedGuilds(Vec<i64>);
+
+impl FirstGamePoolGuildSource for FixedGuilds {
+    fn live_guild_ids(&self) -> Result<Vec<i64>, String> {
+        Ok(self.0.clone())
+    }
+}
 
 struct FixedClock {
     now: i64,
@@ -52,17 +61,25 @@ impl Fixture {
     }
 
     fn register(&self, discord_id: i64, balance: i64) {
+        self.register_in(GUILD, discord_id, balance);
+    }
+
+    fn register_in(&self, guild_id: i64, discord_id: i64, balance: i64) {
         self.connection()
             .execute(
                 "INSERT INTO players
                      (discord_id, guild_id, discord_username, jopacoin_balance)
                  VALUES (?1, ?2, 'worker-fixture', ?3)",
-                params![discord_id, GUILD, balance],
+                params![discord_id, guild_id, balance],
             )
             .expect("insert player");
     }
 
     fn debt(&self, discord_id: i64, expires_at: i64) -> i64 {
+        self.debt_in(GUILD, discord_id, expires_at)
+    }
+
+    fn debt_in(&self, guild_id: i64, discord_id: i64, expires_at: i64) -> i64 {
         let connection = self.connection();
         connection
             .execute(
@@ -72,7 +89,7 @@ impl Fixture {
                  ) VALUES (?1, ?2, 'dark_bargain', ?3, ?4, 0, ?5)",
                 params![
                     discord_id,
-                    GUILD,
+                    guild_id,
                     expires_at - 86_400,
                     expires_at,
                     r#"{"amount_due":700,"default_penalty":1600,"default_penalty_games":5}"#,
@@ -83,11 +100,15 @@ impl Fixture {
     }
 
     fn player_balance(&self, discord_id: i64) -> i64 {
+        self.player_balance_in(GUILD, discord_id)
+    }
+
+    fn player_balance_in(&self, guild_id: i64, discord_id: i64) -> i64 {
         self.connection()
             .query_row(
                 "SELECT jopacoin_balance FROM players
                  WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, GUILD],
+                params![discord_id, guild_id],
                 |row| row.get(0),
             )
             .expect("read player balance")
@@ -108,9 +129,33 @@ impl Fixture {
 fn test_worker(path: &Path, calls: Arc<AtomicUsize>, interval: Duration) -> ManashopDebtWorker {
     ManashopDebtWorker::with_clock_and_interval(
         path,
+        Arc::new(FixedGuilds(vec![GUILD])),
         Arc::new(FixedClock { now: NOW, calls }),
         interval,
     )
+}
+
+#[tokio::test]
+async fn settlement_skips_due_debt_from_foreign_guilds() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, 1_100);
+    fixture.register_in(FOREIGN_GUILD, USER + 1, 1_100);
+    let live_debt = fixture.debt(USER, NOW);
+    let foreign_debt = fixture.debt_in(FOREIGN_GUILD, USER + 1, NOW);
+    let worker = test_worker(
+        &fixture.path,
+        Arc::new(AtomicUsize::new(0)),
+        Duration::from_secs(3_600),
+    );
+
+    let settlements = worker.settle_once().await.expect("guild-scoped settlement");
+
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].guild_id, GUILD);
+    assert!(fixture.triggered(live_debt));
+    assert!(!fixture.triggered(foreign_debt));
+    assert_eq!(fixture.player_balance(USER), 400);
+    assert_eq!(fixture.player_balance_in(FOREIGN_GUILD, USER + 1), 1_100);
 }
 
 #[tokio::test]
@@ -258,7 +303,7 @@ async fn sqlite_failure_returns_error_for_supervisor_restart() {
 #[test]
 fn production_spec_uses_the_exact_cutover_worker_name_and_hourly_interval() {
     let fixture = Fixture::migrated();
-    let spec = manashop_debt_worker_spec(&fixture.path);
+    let spec = manashop_debt_worker_spec(&fixture.path, Arc::new(FixedGuilds(vec![GUILD])));
     assert_eq!(spec.name, MANASHOP_DEBT_WORKER_NAME);
     assert_eq!(MANASHOP_DEBT_WAKE_INTERVAL, Duration::from_secs(3_600));
 }

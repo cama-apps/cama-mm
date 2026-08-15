@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
-use crate::open_runtime_connection;
+use crate::{json_numeric::coerce_i64_like_python, open_runtime_connection};
 
 pub const DEFAULT_WIN_REWARD: i64 = 10;
 pub const DEFAULT_PARTICIPATION_REWARD: i64 = 5;
@@ -1445,15 +1445,14 @@ fn replace_match_bans(
         let Some(fields) = entry.as_object() else {
             continue;
         };
-        let is_ban = matches!(fields.get("is_pick"), Some(JsonValue::Bool(false)))
-            || fields.get("is_pick").and_then(JsonValue::as_i64) == Some(0);
+        let is_ban = fields.get("is_pick").is_some_and(json_false_or_zero);
         if !is_ban {
             continue;
         }
-        let Some(team) = fields.get("team").and_then(json_integer) else {
+        let Some(team) = fields.get("team").and_then(json_ban_integer) else {
             continue;
         };
-        let Some(hero_id) = fields.get("hero_id").and_then(json_integer) else {
+        let Some(hero_id) = fields.get("hero_id").and_then(json_ban_integer) else {
             continue;
         };
         if !matches!(team, 0 | 1) || hero_id <= 0 {
@@ -1473,12 +1472,15 @@ fn replace_match_bans(
     Ok(())
 }
 
-fn json_integer(value: &JsonValue) -> Option<i64> {
-    match value {
-        JsonValue::Number(number) => number.as_i64(),
-        JsonValue::String(number) => number.parse().ok(),
-        JsonValue::Bool(_) | JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_) => None,
-    }
+fn json_false_or_zero(value: &JsonValue) -> bool {
+    matches!(value, JsonValue::Bool(false))
+        || matches!(value, JsonValue::Number(number) if number.as_f64() == Some(0.0))
+}
+
+fn json_ban_integer(value: &JsonValue) -> Option<i64> {
+    (!value.is_boolean())
+        .then(|| coerce_i64_like_python(value))
+        .flatten()
 }
 
 fn player_from_row(row: &rusqlite::Row<'_>) -> Result<PlayerRecord, rusqlite::Error> {

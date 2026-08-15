@@ -74,6 +74,7 @@ pub mod golden_wheel_repository;
 pub mod guild_config_repository;
 #[path = "herogrid.rs"]
 pub mod herogrid_repository;
+mod json_numeric;
 pub mod llm_request;
 #[path = "loan.rs"]
 pub mod loan_repository;

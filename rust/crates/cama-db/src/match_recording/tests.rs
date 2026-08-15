@@ -1368,14 +1368,20 @@ fn test_extract_match_bans_keeps_only_valid_bans() {
                     {"is_pick": false, "team": 3, "hero_id": 30},
                     {"is_pick": false, "team": 0, "hero_id": 0},
                     "corrupt",
-                    {"is_pick": 0, "team": "0", "hero_id": "40"}
+                    {"is_pick": 0, "team": "0", "hero_id": "40"},
+                    {"is_pick": 0.0, "team": 0.9, "hero_id": 50.9},
+                    {"is_pick": false, "team": " 1 ", "hero_id": " 6_000 "},
+                    {"is_pick": false, "team": false, "hero_id": true}
                 ]
             }"#,
             "manual",
         ),
         0
     );
-    assert_eq!(projected_bans(&fixture, match_id), [(0, 1, 10), (5, 0, 40)]);
+    assert_eq!(
+        projected_bans(&fixture, match_id),
+        [(0, 1, 10), (5, 0, 40), (6, 0, 50), (7, 1, 6_000)]
+    );
 
     assert_eq!(
         apply_enrichment_payload(&fixture, match_id, "{not-json", "manual"),

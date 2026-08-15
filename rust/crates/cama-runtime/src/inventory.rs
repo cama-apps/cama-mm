@@ -689,7 +689,7 @@ mod tests {
             "dig_provider.gateway_observer()",
             "registry.add_provider(&dig_bonus_runtime)",
             "registry.add_provider(&dig_provider)",
-            "validate_production_registry(&registry)",
+            "validate_production_registry(&registry,",
         ] {
             assert!(
                 MAIN_SOURCE.contains(seam),

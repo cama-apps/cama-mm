@@ -864,6 +864,52 @@ fn test_steam_id_link_rebuilds_previously_unmatched_history_bulk() {
 }
 
 #[test]
+fn test_wrapped_refresh_matches_integral_float_account_id_and_preserves_real_match_facts() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "float-account", None);
+    link(&fixture, 100, 12_345, true, 10);
+    let match_id = fixture.enriched_match(
+        &[100],
+        r#"{
+            "players":[{"account_id":12345.0,"actions_per_min":444}],
+            "comeback":50.25,
+            "throw":25.75
+        }"#,
+    );
+
+    let row = fixture
+        .connection()
+        .query_row(
+            "SELECT actions_per_min,comeback,throw
+               FROM wrapped_enrichment_facts
+              WHERE guild_id=?1 AND match_id=?2 AND discord_id=100",
+            params![GUILD, match_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            },
+        )
+        .expect("read float-compatible Wrapped facts");
+    assert_eq!(row, (Some(444), Some(50.25), Some(25.75)));
+}
+
+#[test]
+fn test_wrapped_refresh_rejects_fractional_and_string_account_ids() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "strict-account", None);
+    link(&fixture, 100, 12_345, true, 10);
+    for account_id in ["12345.9", r#""12345""#] {
+        let payload =
+            format!(r#"{{"players":[{{"account_id":{account_id},"actions_per_min":444}}]}}"#);
+        let match_id = fixture.enriched_match(&[100], &payload);
+        assert_eq!(fixture.wrapped_facts(match_id)[0].1, None);
+    }
+}
+
+#[test]
 fn test_steam_id_unlink_removes_stale_historical_attribution() {
     let fixture = Fixture::new();
     fixture.player(100, GUILD, "unlink", None);

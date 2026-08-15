@@ -26,7 +26,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavio
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror::Error;
 
-use crate::expected_migrations;
+use crate::{
+    expected_migrations,
+    json_numeric::{coerce_i64_like_python, number_f64},
+};
 
 /// Canonical schema produced by the final ordered migration set.
 pub const CANONICAL_SCHEMA_SQL: &str = include_str!("../../../schema/canonical_schema.sql");
@@ -1573,15 +1576,14 @@ fn backfill_match_bans(transaction: &Transaction<'_>) -> Result<(), rusqlite::Er
             let Some(fields) = entry.as_object() else {
                 continue;
             };
-            let is_ban = matches!(fields.get("is_pick"), Some(JsonValue::Bool(false)))
-                || fields.get("is_pick").and_then(JsonValue::as_i64) == Some(0);
+            let is_ban = fields.get("is_pick").is_some_and(json_false_or_zero);
             if !is_ban {
                 continue;
             }
-            let Some(team) = fields.get("team").and_then(json_coerce_i64) else {
+            let Some(team) = fields.get("team").and_then(json_ban_integer) else {
                 continue;
             };
-            let Some(hero_id) = fields.get("hero_id").and_then(json_coerce_i64) else {
+            let Some(hero_id) = fields.get("hero_id").and_then(json_ban_integer) else {
                 continue;
             };
             if !matches!(team, 0 | 1) || hero_id <= 0 {
@@ -1610,11 +1612,19 @@ fn json_coerce_i64(value: &JsonValue) -> Option<i64> {
     }
 }
 
+fn json_false_or_zero(value: &JsonValue) -> bool {
+    matches!(value, JsonValue::Bool(false))
+        || matches!(value, JsonValue::Number(number) if number.as_f64() == Some(0.0))
+}
+
+fn json_ban_integer(value: &JsonValue) -> Option<i64> {
+    (!value.is_boolean())
+        .then(|| coerce_i64_like_python(value))
+        .flatten()
+}
+
 fn json_number_f64(value: Option<&JsonValue>) -> Option<f64> {
-    value.and_then(|number| match number {
-        JsonValue::Number(number) => number.as_f64(),
-        _ => None,
-    })
+    number_f64(value)
 }
 
 fn json_number_i64(value: Option<&JsonValue>) -> Option<i64> {

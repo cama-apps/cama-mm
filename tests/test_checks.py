@@ -93,6 +93,33 @@ async def test_passes_when_channel_id_in_allowed_list():
 
 
 @pytest.mark.asyncio
+async def test_passes_when_channel_id_matches_configured_gamba(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "GAMBA_CHANNEL_ID", 12345)
+    interaction = _mock_interaction(channel_name="casino", channel_id=12345)
+
+    assert await require_gamba_channel(interaction) is True
+    interaction.response.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_thread_inherits_configured_gamba_parent(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "GAMBA_CHANNEL_ID", 12345)
+    interaction = _mock_interaction(
+        channel_name="market-thread",
+        parent_name="casino",
+        channel_id=999,
+        parent_id=12345,
+    )
+
+    assert await require_gamba_channel(interaction) is True
+    interaction.response.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_passes_when_thread_parent_id_in_allowed_list():
     """A thread under an allowed channel passes via the parent.id check."""
     interaction = _mock_interaction(

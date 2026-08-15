@@ -6,7 +6,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "rust" / "scripts" / "generate_dig_event_catalog.py"
 TARGET = ROOT / "rust" / "crates" / "cama-app" / "src" / "dig_event_catalog.json"

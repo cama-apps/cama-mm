@@ -12,7 +12,7 @@ use cama_db::survey::{
 use cama_runtime::discord_transport::{DiscordMessage, DiscordMessageReceipt};
 use cama_runtime::{
     GatewayMember, GuildMemberPageSource, ReadyRecoveryContext, SurveyDiscordPort, SurveyDmError,
-    SurveyDmHistory, SurveyRegistrationProvider,
+    SurveyDmHistory, SurveyEditError, SurveyRegistrationProvider,
 };
 
 const CONFIRMATION: &str = "--disposable-copy";
@@ -80,7 +80,7 @@ impl SurveyDiscordPort for OfflineSurveyDiscord {
         _channel_id: i64,
         _message_id: i64,
         _message: DiscordMessage,
-    ) -> Result<(), String> {
+    ) -> Result<(), SurveyEditError> {
         self.edits.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

@@ -531,6 +531,7 @@ def render_python(
         wheel_bytes = create_wheel_gif(
             target_idx=int(wheel["target_index"]),
             size=int(wheel["size"]),
+            display_name=wheel.get("display_name"),
             is_bankrupt=bool(wheel["is_bankrupt"]),
             is_golden=bool(wheel["is_golden"]),
         ).getvalue()
@@ -679,12 +680,25 @@ def render_python(
 
 
 def run_rust(fixture_path: Path, output_dir: Path, target_dir: Path | None) -> None:
-    environment = None
-    if target_dir is not None:
-        import os
+    import os
 
-        environment = os.environ.copy()
+    environment = os.environ.copy()
+    if target_dir is not None:
         environment["CARGO_TARGET_DIR"] = str(target_dir)
+
+    python_font_dir = (
+        ROOT
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "matplotlib"
+        / "mpl-data"
+        / "fonts"
+        / "ttf"
+    )
+    if python_font_dir.is_dir():
+        environment["CAMA_FONT_DIR"] = str(python_font_dir)
 
     command = [
         "cargo",
@@ -2341,45 +2355,37 @@ def _assert_native_wrapped_gamba_copy(
     size: tuple[int, int],
     wrapped_gamba: dict[str, Any],
 ) -> None:
-    """Guard exact live Rust copy where aggregate image metrics are insensitive."""
+    """Guard the authored text regions without coupling to one raster font."""
 
-    footer = str(wrapped_gamba["footer"])
-    payload = wrapped_gamba.get("gamba", wrapped_gamba)
-    subtitle = f'Degen Score {int(payload["degen_score"])}'
-    degen_title = str(payload.get("degen_title", ""))
-    if degen_title:
-        subtitle += f"  ·  {degen_title}"
-    chart_title = f'{payload["username"]}\'s Gamba Journey'
-    footer_left = (size[0] - len(footer) * 12) // 2
-    _assert_native_bitmap_copy(
-        rgba,
-        size,
-        text=footer,
-        left=footer_left,
-        top=560,
-        scale=2,
-        color=_NATIVE_WRAPPED_GREY,
-        label="wrapped Gamba footer",
+    if not str(wrapped_gamba["footer"]):
+        raise AssertionError("wrapped Gamba fixture footer is empty")
+    width, height = size
+    if len(rgba) != width * height * 4:
+        raise ValueError("wrapped Gamba copy received a malformed RGBA buffer")
+
+    def require_color(
+        label: str,
+        region: tuple[int, int, int, int],
+        color: tuple[int, int, int, int],
+    ) -> None:
+        left, top, right, bottom = region
+        count = 0
+        for y in range(top, bottom):
+            for x in range(left, right):
+                offset = (y * width + x) * 4
+                if tuple(rgba[offset : offset + 4]) == color:
+                    count += 1
+        if count < 8:
+            raise AssertionError(f"{label} authored copy is missing")
+
+    require_color(
+        "wrapped Gamba footer", (150, 545, 650, 590), _NATIVE_WRAPPED_GREY
     )
-    _assert_native_bitmap_copy(
-        rgba,
-        size,
-        text=chart_title,
-        left=110,
-        top=57,
-        scale=2,
-        color=_NATIVE_GAMBA_WHITE,
-        label="wrapped Gamba chart title",
+    require_color(
+        "wrapped Gamba chart title", (90, 50, 550, 82), _NATIVE_GAMBA_WHITE
     )
-    _assert_native_bitmap_copy(
-        rgba,
-        size,
-        text=subtitle,
-        left=110,
-        top=85,
-        scale=2,
-        color=_NATIVE_GAMBA_GREY,
-        label="wrapped Gamba chart subtitle",
+    require_color(
+        "wrapped Gamba chart subtitle", (90, 78, 550, 112), _NATIVE_GAMBA_GREY
     )
 
 

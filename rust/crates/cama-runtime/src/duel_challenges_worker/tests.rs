@@ -18,6 +18,7 @@ use super::*;
 const NOW: i64 = 2_000_000_000;
 const DAY: i64 = 86_400;
 const GUILD: i64 = 9_001;
+const OTHER_GUILD: i64 = 9_002;
 const MAIN_CHANNEL: i64 = 900;
 const ORIGIN_CHANNEL: i64 = 901;
 const CHALLENGER: i64 = 41;
@@ -125,6 +126,12 @@ impl MockDiscord {
     }
 }
 
+impl FirstGamePoolGuildSource for MockDiscord {
+    fn live_guild_ids(&self) -> Result<Vec<i64>, String> {
+        Ok(vec![GUILD])
+    }
+}
+
 #[async_trait]
 impl DuelDiscordPort for MockDiscord {
     async fn guild_snapshot(&self, guild_id: i64) -> Result<Option<DuelGuildSnapshot>, String> {
@@ -220,18 +227,26 @@ impl Fixture {
     }
 
     fn register(&self, discord_id: i64, balance: i64) {
+        self.register_in(GUILD, discord_id, balance);
+    }
+
+    fn register_in(&self, guild_id: i64, discord_id: i64, balance: i64) {
         self.connection()
             .execute(
                 "INSERT INTO players
                      (discord_id, guild_id, discord_username, jopacoin_balance,
                       glicko_rating, glicko_rd)
                  VALUES (?1, ?2, 'duel-worker-fixture', ?3, 1500, 100)",
-                params![discord_id, GUILD, balance],
+                params![discord_id, guild_id, balance],
             )
             .expect("insert player");
     }
 
     fn pending_challenge(&self, expires_at: i64, next_reminder_at: i64) -> i64 {
+        self.pending_challenge_in(GUILD, expires_at, next_reminder_at)
+    }
+
+    fn pending_challenge_in(&self, guild_id: i64, expires_at: i64, next_reminder_at: i64) -> i64 {
         let connection = self.connection();
         connection
             .execute(
@@ -245,7 +260,7 @@ impl Fixture {
                      1500, 100, ?5, ?6, ?7
                  )",
                 params![
-                    GUILD,
+                    guild_id,
                     ORIGIN_CHANNEL,
                     CHALLENGER,
                     RECIPIENT,
@@ -283,11 +298,15 @@ impl Fixture {
     }
 
     fn balance(&self, user_id: i64) -> i64 {
+        self.balance_in(GUILD, user_id)
+    }
+
+    fn balance_in(&self, guild_id: i64, user_id: i64) -> i64 {
         self.connection()
             .query_row(
                 "SELECT jopacoin_balance FROM players
                  WHERE discord_id = ?1 AND guild_id = ?2",
-                params![user_id, GUILD],
+                params![user_id, guild_id],
                 |row| row.get(0),
             )
             .expect("read player balance")
@@ -457,6 +476,46 @@ async fn migrated_sqlite_expiry_is_atomic_and_confirmed_after_discord_send() {
     assert_eq!(
         edits[0].2.content_mode,
         crate::discord_transport::DiscordMessageContentMode::Preserve
+    );
+}
+
+#[tokio::test]
+async fn expiry_settles_live_guild_but_leaves_foreign_challenge_and_balances_untouched() {
+    let fixture = Fixture::migrated();
+    fixture.register_in(OTHER_GUILD, CHALLENGER, 1_000);
+    fixture.register_in(OTHER_GUILD, RECIPIENT, 1_000);
+    let live_id = fixture.pending_challenge(NOW, NOW);
+    let foreign_id = fixture.pending_challenge_in(OTHER_GUILD, NOW, NOW);
+    let discord = MockDiscord::with_channels(vec![
+        MockDiscord::text_channel(MAIN_CHANNEL, MAIN_CHANNEL_NAME),
+        MockDiscord::text_channel(ORIGIN_CHANNEL, "gamba"),
+    ]);
+    let worker = test_worker(
+        &fixture.path,
+        None,
+        Arc::clone(&discord),
+        Arc::new(AtomicUsize::new(0)),
+        DUEL_CHALLENGES_WAKE_INTERVAL,
+    );
+
+    let (_shutdown_sender, mut context) = worker_context();
+    worker
+        .wake_once(&mut context)
+        .await
+        .expect("guild-scoped expiry wake");
+
+    assert_eq!(fixture.state(live_id), ("expired".to_owned(), None));
+    assert_eq!(fixture.state(foreign_id), ("pending".to_owned(), Some(NOW)));
+    assert_eq!(fixture.balance_in(OTHER_GUILD, CHALLENGER), 1_000);
+    assert_eq!(fixture.balance_in(OTHER_GUILD, RECIPIENT), 1_000);
+    let sent = discord.sent();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0]
+            .message
+            .response
+            .content
+            .contains(&format!("Challenge #{live_id}"))
     );
 }
 

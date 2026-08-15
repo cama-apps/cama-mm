@@ -67,7 +67,7 @@ impl SurveyDiscordPort for RecordingDiscord {
         channel_id: i64,
         message_id: i64,
         message: DiscordMessage,
-    ) -> Result<(), String> {
+    ) -> Result<(), SurveyEditError> {
         self.edits
             .lock()
             .unwrap()
@@ -86,6 +86,7 @@ fn fixture() -> (
     initialize_or_migrate(&path).unwrap();
     let discord = Arc::new(RecordingDiscord::default());
     let provider = SurveyRegistrationProvider::new(&path, discord.clone()).unwrap();
+    provider.state.replace_active_guilds(&[22]);
     (directory, provider, discord)
 }
 
@@ -255,8 +256,16 @@ async fn ready_recovery_is_repeatable_and_skips_identical_response_edits() {
         .mark_delivery_sent(claimed.recipient_id, claimed.attempt_count, 55, 66)
         .unwrap();
 
-    provider.state.reconcile_response_messages().await.unwrap();
-    provider.state.reconcile_response_messages().await.unwrap();
+    provider
+        .state
+        .reconcile_response_messages(SurveyRecoveryScope::Guild(22))
+        .await
+        .unwrap();
+    provider
+        .state
+        .reconcile_response_messages(SurveyRecoveryScope::Guild(22))
+        .await
+        .unwrap();
     assert_eq!(discord.edits.lock().unwrap().len(), 1);
 }
 

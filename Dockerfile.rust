@@ -29,6 +29,11 @@ FROM rust:1.94.0-bookworm AS builder
 
 WORKDIR /build/rust
 
+# Builder-run examples and tests must use the same verified fonts as the
+# minimal runtime image; otherwise validation silently exercises the legacy
+# bitmap fallback instead of production rendering.
+COPY --from=dotabase-assets /build/font-assets/ /app/assets/fonts/
+
 # Build the lift-and-shift Rust runtime in isolation. Compose continues to run
 # Python until the machine-checked cutover gates prove this binary can own the
 # gateway, migrations, workers, and shared database by itself.

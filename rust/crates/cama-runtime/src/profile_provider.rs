@@ -301,9 +301,15 @@ impl ProfileHandler {
         let Some(database_name) = registered_name else {
             let target_name = requested_name.unwrap_or_else(|| format!("User {target_id}"));
             return responder
-                .followup(InteractionResponse::message(format!(
-                    "❌ {target_name} is not registered. Use `/player register` to get started."
-                )))
+                .followup(
+                    InteractionResponse::message("").embed(
+                        InteractionEmbed::titled("Not Registered")
+                            .description(format!(
+                                "{target_name} is not registered.\nUse `/player register` to get started."
+                            ))
+                            .color(DISCORD_RED),
+                    ),
+                )
                 .await
                 .map_err(|error| error.to_string());
         };

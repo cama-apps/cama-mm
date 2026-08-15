@@ -2997,6 +2997,26 @@ pub struct DigRuntimeOutcome {
     /// Vanity tax withheld from the post-Mana/post-Helltide gross reward.
     pub vanity_tax: i64,
     pub balance_after: i64,
+    /// Python's result-card inputs, captured at settlement so reconnect
+    /// delivery does not have to reconstruct presentation from newer state.
+    #[serde(default)]
+    pub tunnel_name: String,
+    #[serde(default)]
+    pub milestone_bonus: i64,
+    #[serde(default)]
+    pub streak_bonus: i64,
+    #[serde(default)]
+    pub bankruptcy_penalty: i64,
+    #[serde(default = "default_luminosity")]
+    pub luminosity_after: i64,
+    #[serde(default)]
+    pub luminosity_drained: i64,
+    #[serde(default)]
+    pub corruption_description: Option<String>,
+    #[serde(default)]
+    pub mutation_names: Vec<String>,
+    #[serde(default)]
+    pub tip: String,
     pub cave_in: bool,
     pub cave_in_detail: Option<String>,
     pub event_id: Option<String>,
@@ -3023,6 +3043,10 @@ pub struct DigRuntimeOutcome {
     /// forecast only once the main Dig path is admitted.
     #[serde(default)]
     pub weather: Option<DigRuntimeWeatherInfo>,
+}
+
+const fn default_luminosity() -> i64 {
+    LUMINOSITY_MAX
 }
 
 /// The user-facing weather portion of a live Dig result.  Keep this separate
@@ -3892,6 +3916,21 @@ impl DigRuntimeOutcome {
             jc_earned: 0,
             vanity_tax: 0,
             balance_after: snapshot.balance,
+            tunnel_name: snapshot.tunnel.as_ref().map_or_else(
+                || "Unknown Tunnel".to_owned(),
+                |tunnel| tunnel.tunnel_name.clone(),
+            ),
+            milestone_bonus: 0,
+            streak_bonus: 0,
+            bankruptcy_penalty: 0,
+            luminosity_after: snapshot
+                .tunnel
+                .as_ref()
+                .map_or(LUMINOSITY_MAX, |tunnel| tunnel.luminosity),
+            luminosity_drained: 0,
+            corruption_description: None,
+            mutation_names: Vec::new(),
+            tip: String::new(),
             cave_in: false,
             cave_in_detail: None,
             event_id: None,
@@ -4757,6 +4796,18 @@ where
                 jc_earned: 0,
                 vanity_tax: 0,
                 balance_after: current.balance,
+                tunnel_name: tunnel.tunnel_name.clone(),
+                milestone_bonus: 0,
+                streak_bonus: 0,
+                bankruptcy_penalty: 0,
+                luminosity_after: tunnel.luminosity,
+                luminosity_drained: 0,
+                corruption_description: None,
+                mutation_names: mutations_from_json(tunnel.mutations.as_deref())
+                    .into_iter()
+                    .map(|mutation| mutation.name.to_owned())
+                    .collect(),
+                tip: String::new(),
                 cave_in: false,
                 cave_in_detail: None,
                 event_id: None,
@@ -4812,6 +4863,18 @@ where
                 jc_earned: 0,
                 vanity_tax: 0,
                 balance_after: current.balance,
+                tunnel_name: tunnel.tunnel_name.clone(),
+                milestone_bonus: 0,
+                streak_bonus: 0,
+                bankruptcy_penalty: 0,
+                luminosity_after: tunnel.luminosity,
+                luminosity_drained: 0,
+                corruption_description: None,
+                mutation_names: mutations_from_json(tunnel.mutations.as_deref())
+                    .into_iter()
+                    .map(|mutation| mutation.name.to_owned())
+                    .collect(),
+                tip: String::new(),
                 cave_in: false,
                 cave_in_detail: None,
                 event_id: None,
@@ -5072,6 +5135,28 @@ where
                 jc_earned: first.jc_earned,
                 vanity_tax: 0,
                 balance_after,
+                tunnel_name: current.tunnel.as_ref().map_or_else(
+                    || "Unknown Tunnel".to_owned(),
+                    |tunnel| tunnel.tunnel_name.clone(),
+                ),
+                milestone_bonus: 0,
+                streak_bonus: 0,
+                bankruptcy_penalty: 0,
+                luminosity_after: current
+                    .tunnel
+                    .as_ref()
+                    .map_or(LUMINOSITY_MAX, |tunnel| tunnel.luminosity),
+                luminosity_drained: 0,
+                corruption_description: None,
+                mutation_names: current
+                    .tunnel
+                    .as_ref()
+                    .map(|tunnel| mutations_from_json(tunnel.mutations.as_deref()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mutation| mutation.name.to_owned())
+                    .collect(),
+                tip: "Welcome to the mines! Use /dig again after the cooldown.".to_owned(),
                 cave_in: false,
                 cave_in_detail: None,
                 event_id: None,
@@ -6294,6 +6379,10 @@ where
             .map(|item| (*item).to_owned())
             .collect::<Vec<_>>();
         let balance_after = staged.balance;
+        let luminosity_after = staged
+            .tunnel
+            .as_ref()
+            .map_or(LUMINOSITY_MAX, |next_tunnel| next_tunnel.luminosity);
         let commit = DigRuntimeCommit {
             expected: DigRuntimeVersion::from(&snapshot),
             next: staged,
@@ -6337,6 +6426,20 @@ where
                 outcome.vanity_tax
             },
             balance_after,
+            tunnel_name: tunnel.tunnel_name.clone(),
+            milestone_bonus: outcome.milestone_bonus,
+            streak_bonus: outcome.streak_bonus,
+            bankruptcy_penalty: outcome.bankruptcy_penalty,
+            luminosity_after,
+            luminosity_drained,
+            corruption_description: corruption
+                .as_ref()
+                .map(|corruption| corruption.description.to_owned()),
+            mutation_names: mutations
+                .iter()
+                .map(|mutation| mutation.name.to_owned())
+                .collect(),
+            tip: dig_progressive_tip(outcome.depth_after, request.now),
             cave_in: outcome.cave_in,
             cave_in_detail: cave_in_detail_value.map(|mut detail| {
                 if let Some(object) = detail.as_object_mut() {
@@ -6647,15 +6750,7 @@ fn build_delivery_snapshot(
     let description = if outcome.first_dig {
         "You've started digging your very own tunnel!\n\nUse `/dig` to advance deeper, `/dig shop` to buy items, and `/dig guide` for a full tutorial.\n\nGood luck, miner! **DIG DUG!**".to_owned()
     } else {
-        format!(
-            "**{}** reached **{}** blocks in **{}**.\nAdvanced **{}** blocks and earned **{}** JC. Balance: **{}** JC.",
-            context.display_name,
-            outcome.depth_after,
-            layer.name,
-            outcome.advance,
-            outcome.jc_earned,
-            outcome.balance_after,
-        )
+        String::new()
     };
     let artifact_name = outcome.artifact_id.as_deref().map(|artifact_id| {
         crate::dig_loot::artifact_catalog()
@@ -6673,16 +6768,28 @@ fn build_delivery_snapshot(
         } else if kind == DigRuntimeRenderKind::Boss {
             "Boss boundary reached".to_owned()
         } else {
-            "Dig complete".to_owned()
+            let standard = format!("{} — Depth {}", outcome.tunnel_name, outcome.depth_after);
+            if action_id.rem_euclid(5) == 0 {
+                const TITLES: [&str; 5] = [
+                    "DIG DUG!",
+                    "Dig Dug would be proud.",
+                    "Another layer conquered!",
+                    "Dig Dug: Underground Champion",
+                    "You really dug that!",
+                ];
+                let index =
+                    usize::try_from(action_id.rem_euclid(TITLES.len() as i64)).unwrap_or_default();
+                format!("{} — Depth {}", TITLES[index], outcome.depth_after)
+            } else {
+                standard
+            }
         },
         description,
         layer_color: delivery_layer_color(layer.name),
         depth_transition: format!("{} → {}", outcome.depth_before, outcome.depth_after),
         layer_name: layer.name.to_owned(),
         flavor_narrative: None,
-        footer: outcome.cave_in.then(|| {
-            "The cave-in was contained; inspect your tunnel before the next dig.".to_owned()
-        }),
+        footer: (!outcome.tip.is_empty()).then(|| outcome.tip.clone()),
         boss_boundary_copy: outcome
             .boss_boundary
             .map(|boundary| format!("A boss encounter begins at depth {boundary}.")),
@@ -6720,15 +6827,46 @@ fn build_delivery_snapshot(
 
 fn delivery_layer_color(layer_name: &str) -> u32 {
     match layer_name {
-        "Dirt" => 0x8E_6E_53,
-        "Stone" => 0x95_A5_A6,
-        "Crystal" => 0x9B_59_B6,
-        "Magma" => 0xE7_4C_3C,
-        "Abyss" => 0x34_49_5E,
-        "Fungal Depths" => 0x2E_CC_71,
-        "Frozen Core" => 0x74_B9_FF,
-        _ => 0x58_65_F2,
+        "Dirt" => 0x8B_45_13,
+        "Stone" => 0x80_80_80,
+        "Crystal" => 0x00_CE_D1,
+        "Magma" => 0xFF_45_00,
+        "Abyss" => 0x2F_00_47,
+        "Fungal Depths" => 0x7C_FC_00,
+        "Frozen Core" => 0x87_CE_EB,
+        "The Hollow" => 0x0D_0D_0D,
+        _ => 0x8B_45_13,
     }
+}
+
+fn dig_progressive_tip(depth: i64, seed: i64) -> String {
+    let tips: &[&str] = if depth <= 10 {
+        &[
+            "Use /dig to advance your tunnel. Your first dig each day is free!",
+            "Buy items from the shop with /dig shop. Dynamite blasts through rock fast.",
+            "Each layer gets harder but more rewarding. Keep digging!",
+        ]
+    } else if depth <= 25 {
+        &[
+            "Ask a friend to /dig help you — it slows down decay too.",
+            "Watch out for sabotage! Buy insurance to protect your tunnel.",
+            "Set a trap to punish anyone who tries to sabotage you.",
+        ]
+    } else if depth <= 50 {
+        &[
+            "Bosses guard each layer boundary. Choose your strategy wisely.",
+            "Prestige resets your depth but grants permanent bonuses.",
+            "Upgrade your pickaxe for better digging performance.",
+        ]
+    } else {
+        &[
+            "Relics give permanent bonuses — equip them from your inventory.",
+            "Deeper layers have rarer artifacts. Keep exploring!",
+            "Stack sabotage defenses: insurance + reinforcement + relics.",
+        ]
+    };
+    let index = usize::try_from(seed.rem_euclid(tips.len() as i64)).unwrap_or_default();
+    tips[index].to_owned()
 }
 
 fn seed_for(request: DigRuntimeRequest) -> u64 {

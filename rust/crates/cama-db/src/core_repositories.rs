@@ -4936,7 +4936,7 @@ mod tests {
                 .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&12_345),
-            Some(&4)
+            Some(&NEW_PLAYER_EXCLUSION_BOOST)
         );
         fixture
             .players
@@ -4952,7 +4952,7 @@ mod tests {
                 .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&12_345),
-            Some(&16)
+            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 12))
         );
         for _ in 0..20 {
             fixture

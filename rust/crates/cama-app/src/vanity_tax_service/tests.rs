@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
@@ -85,11 +85,12 @@ struct BlockingPersistence {
 
 impl BlockingPersistence {
     fn wait_for_read(&self) {
-        for _ in 0..1_000 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if self.read_started.load(Ordering::Acquire) {
                 return;
             }
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
         }
         panic!("refresh repository read did not start");
     }

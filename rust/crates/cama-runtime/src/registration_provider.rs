@@ -187,10 +187,15 @@ impl GatewayEventObserver for RegionBackfillObserver {
     }
 
     async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+        let ready_guild_ids = context
+            .guild_ids()
+            .iter()
+            .filter_map(|guild_id| i64::try_from(*guild_id).ok())
+            .collect::<BTreeSet<_>>();
         let repository = self.registration.clone();
         let candidates = match tokio::task::spawn_blocking(move || {
             repository
-                .region_backfill_candidates()
+                .region_backfill_candidates_for_guilds(&ready_guild_ids)
                 .map_err(|error| error.to_string())
         })
         .await
@@ -1396,7 +1401,7 @@ impl PlayerRegistrationHandler {
             .map(|raw| raw.trim())
             .filter(|raw| !raw.is_empty())
             .and_then(|raw| raw.parse::<i64>().ok())
-            .filter(|mmr| (0..=12_000).contains(mmr));
+            .filter(|mmr| (1..=12_000).contains(mmr));
         let Some(mmr) = mmr else {
             let state = self.record_prompt_failure(encoded_guild, nonce).await?;
             respond_ephemeral(&responder, "❌ Invalid MMR").await?;

@@ -6,6 +6,7 @@
 //! primary Steam link share one `BEGIN IMMEDIATE` transaction, so any junction
 //! failure rolls the player row back as well.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -28,6 +29,8 @@ pub struct RegisterPlayerRequest<'a> {
     pub glicko_volatility: f64,
     pub os_mu: f64,
     pub os_sigma: f64,
+    pub os_rating_version: i64,
+    pub os_algorithm_fingerprint: &'a str,
     pub exclusion_count: i64,
     pub added_at: i64,
 }
@@ -187,11 +190,12 @@ impl RegistrationRepository {
             "INSERT INTO players (
                  discord_id, guild_id, discord_username, dotabuff_url, steam_id,
                  initial_mmr, current_mmr, glicko_rating, glicko_rd,
-                 glicko_volatility, os_mu, os_sigma, exclusion_count,
-                 jopacoin_balance, updated_at
+                 glicko_volatility, os_mu, os_sigma, os_rating_version,
+                 os_algorithm_fingerprint, exclusion_count, jopacoin_balance,
+                 updated_at
              ) VALUES (
                  ?1, ?2, ?3, ?4, NULL, ?5, ?5, ?6, ?7, ?8, ?9, ?10,
-                 ?11, 3, CURRENT_TIMESTAMP
+                 ?11, ?12, ?13, 3, CURRENT_TIMESTAMP
              )",
             params![
                 request.discord_id,
@@ -204,19 +208,26 @@ impl RegistrationRepository {
                 request.glicko_volatility,
                 request.os_mu,
                 request.os_sigma,
+                request.os_rating_version,
+                request.os_algorithm_fingerprint,
                 request.exclusion_count,
             ],
         )?;
         transaction.execute(
+            "UPDATE player_steam_ids SET is_primary = 0 WHERE discord_id = ?1",
+            [request.discord_id],
+        )?;
+        transaction.execute(
             "INSERT INTO player_steam_ids
                  (discord_id, steam_id, is_primary, added_at)
-             VALUES (?1, ?2, 1, ?3)",
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(discord_id, steam_id) DO UPDATE SET is_primary = 1",
             params![request.discord_id, request.steam_id, request.added_at],
         )?;
         transaction.execute(
             "UPDATE players SET steam_id = ?1, updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![request.steam_id, request.discord_id, guild_id],
+             WHERE discord_id = ?2",
+            params![request.steam_id, request.discord_id],
         )?;
         transaction.commit()?;
         Ok(RegisteredPlayer {
@@ -323,6 +334,20 @@ impl RegistrationRepository {
     pub fn region_backfill_candidates(
         &self,
     ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
+        self.region_backfill_candidates_scoped(None)
+    }
+
+    pub fn region_backfill_candidates_for_guilds(
+        &self,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
+        self.region_backfill_candidates_scoped(Some(guild_ids))
+    }
+
+    fn region_backfill_candidates_scoped(
+        &self,
+        guild_ids: Option<&BTreeSet<i64>>,
+    ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT p.discord_id, p.guild_id,
@@ -335,7 +360,7 @@ impl RegistrationRepository {
                AND COALESCE(psi.steam_id, p.steam_id) IS NOT NULL
              ORDER BY p.discord_id, p.guild_id",
         )?;
-        statement
+        let candidates = statement
             .query_map([], |row| {
                 Ok(RegionBackfillCandidate {
                     discord_id: row.get(0)?,
@@ -344,7 +369,13 @@ impl RegistrationRepository {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(RegistrationRepositoryError::from)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|candidate| {
+                guild_ids.is_none_or(|guild_ids| guild_ids.contains(&candidate.guild_id))
+            })
+            .collect())
     }
 
     /// Persist a completed startup inference in one existing-schema

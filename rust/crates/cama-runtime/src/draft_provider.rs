@@ -458,6 +458,20 @@ impl DraftRegistrationProvider {
     /// deliveries use the plan's deterministic nonce, and the final envelope
     /// deletion is a leased revision/stage CAS.
     pub async fn recover_finalizing(&self) -> Result<usize, String> {
+        self.recover_finalizing_scoped(None).await
+    }
+
+    async fn recover_finalizing_for_guilds(
+        &self,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<usize, String> {
+        self.recover_finalizing_scoped(Some(guild_ids)).await
+    }
+
+    async fn recover_finalizing_scoped(
+        &self,
+        guild_ids: Option<&BTreeSet<i64>>,
+    ) -> Result<usize, String> {
         let Some(persistence) = self.handler.persistence.clone() else {
             return Ok(0);
         };
@@ -468,6 +482,9 @@ impl DraftRegistrationProvider {
         let mut recovered = 0usize;
         let mut failures = Vec::new();
         for envelope in envelopes {
+            if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&envelope.guild_id)) {
+                continue;
+            }
             if !envelope.finalizing && envelope.pending_match_id.is_none() {
                 continue;
             }
@@ -507,6 +524,14 @@ impl DraftRegistrationProvider {
     /// `finalizing` or `pending_match_id` requires an idempotent pending-match
     /// reconciliation protocol before it can safely be published or cleared.
     pub async fn hydrate(&self) -> Result<usize, String> {
+        self.hydrate_scoped(None).await
+    }
+
+    async fn hydrate_for_guilds(&self, guild_ids: &BTreeSet<i64>) -> Result<usize, String> {
+        self.hydrate_scoped(Some(guild_ids)).await
+    }
+
+    async fn hydrate_scoped(&self, guild_ids: Option<&BTreeSet<i64>>) -> Result<usize, String> {
         let Some(persistence) = self.handler.persistence.clone() else {
             return Ok(0);
         };
@@ -516,6 +541,9 @@ impl DraftRegistrationProvider {
             .map_err(|error| error.to_string())?;
         let mut restored = 0usize;
         for envelope in envelopes {
+            if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&envelope.guild_id)) {
+                continue;
+            }
             let guild_id = envelope.guild_id;
             let session_id = envelope.session_id;
             let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
@@ -805,9 +833,18 @@ impl GatewayEventObserver for DraftGatewayObserver {
     async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
         let _ready_guard = self.ready_lock.lock().await;
         let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
-        match self.provider.hydrate().await {
+        let guild_ids = context
+            .guild_ids()
+            .iter()
+            .filter_map(|guild_id| i64::try_from(*guild_id).ok())
+            .collect::<BTreeSet<_>>();
+        match self.provider.hydrate_for_guilds(&guild_ids).await {
             Ok(_restored) => {
-                if let Err(error) = self.provider.recover_finalizing().await {
+                if let Err(error) = self
+                    .provider
+                    .recover_finalizing_for_guilds(&guild_ids)
+                    .await
+                {
                     for guild_id in context.guild_ids() {
                         report.failures.push(ReadyRecoveryFailure {
                             guild_id: *guild_id,

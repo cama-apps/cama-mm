@@ -254,6 +254,12 @@ impl PredictionNeonPort for FakePredictionNeon {
     }
 }
 
+impl crate::first_game_pool_worker::FirstGamePoolGuildSource for FakeMarketDiscord {
+    fn live_guild_ids(&self) -> Result<Vec<i64>, String> {
+        Ok(vec![GUILD])
+    }
+}
+
 #[async_trait]
 impl PredictionDiscordPort for FakeMarketDiscord {
     async fn edit_prediction_market_message(
@@ -1377,8 +1383,34 @@ async fn remaining_live_subcommands_and_position_button_preserve_python_visibili
     let view = view.snapshot();
     assert_eq!(view.deferred, [false]);
     assert!(view.followups[0].components.is_empty());
+    let market_embed = &view.followups[0].embeds[0];
+    assert_eq!(
+        market_embed.title.as_deref(),
+        Some(format!("📈 Market #{prediction_id}")).as_deref()
+    );
+    assert_eq!(market_embed.color, Some(0x34_98_DB));
+    assert_eq!(
+        market_embed
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Current", "Order book", "Recent", "\u{200B}"]
+    );
+    assert!(market_embed.fields[1].value.starts_with("```ansi\n"));
+    assert!(market_embed.fields[1].value.contains("🟢 Buy YES"));
+    assert!(market_embed.fields[1].value.contains("🔴 Buy NO"));
+    assert_eq!(
+        market_embed.footer.as_deref(),
+        Some("100 jopa per winning contract")
+    );
+    assert_eq!(view.followups[0].attachments.len(), 1);
+    assert_eq!(
+        market_embed.image_url.as_deref(),
+        Some(format!("attachment://predict_{prediction_id}.png")).as_deref()
+    );
     assert!(
-        view.followups[0].embeds[0]
+        market_embed
             .fields
             .iter()
             .any(|field| field.value.starts_with("Your position:"))

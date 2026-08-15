@@ -715,6 +715,14 @@ impl SurveyRepository {
         &self,
         stale_after_seconds: i64,
     ) -> Result<usize, SurveyRepositoryError> {
+        self.recover_stale_deliveries_for_guild(None, stale_after_seconds)
+    }
+
+    pub fn recover_stale_deliveries_for_guild(
+        &self,
+        guild_id: Option<i64>,
+        stale_after_seconds: i64,
+    ) -> Result<usize, SurveyRepositoryError> {
         if stale_after_seconds < 0 {
             return Err(SurveyRepositoryError::Invalid(
                 "stale_after_seconds cannot be negative".to_owned(),
@@ -722,7 +730,7 @@ impl SurveyRepository {
         }
         let (mut connection, now) = self.immediate()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count = recover_stale(&transaction, stale_after_seconds, now)?;
+        let count = recover_stale(&transaction, guild_id, stale_after_seconds, now)?;
         transaction.commit()?;
         Ok(count)
     }
@@ -787,6 +795,49 @@ impl SurveyRepository {
         Ok(recipients)
     }
 
+    pub fn list_unconfirmed_deliveries_for_guild(
+        &self,
+        guild_id: i64,
+        sending_stale_after_seconds: i64,
+        failed_grace_seconds: i64,
+    ) -> Result<Vec<SurveyRecipient>, SurveyRepositoryError> {
+        if sending_stale_after_seconds < 0 || failed_grace_seconds < 0 {
+            return Err(SurveyRepositoryError::Invalid(
+                "delivery receipt ages cannot be negative".to_owned(),
+            ));
+        }
+        let connection = self.connection()?;
+        let now = self.now();
+        let mut statement = connection.prepare(
+            "SELECT recipients.* FROM survey_recipients recipients
+             JOIN surveys ON surveys.survey_id=recipients.survey_id
+                         AND surveys.guild_id=recipients.guild_id
+             WHERE surveys.status IN ('open','closed')
+               AND recipients.guild_id=?3
+               AND recipients.delivery_status IN ('pending','sending','failed')
+               AND recipients.dm_message_id IS NULL
+               AND recipients.attempt_count>recipients.receipt_checked_attempt
+               AND ((recipients.delivery_status='sending'
+                     AND COALESCE(recipients.claimed_at,recipients.updated_at)<=?1)
+                 OR (recipients.delivery_status IN ('pending','failed')
+                     AND recipients.updated_at<=?2))
+             ORDER BY recipients.recipient_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                now - sending_stale_after_seconds,
+                now - failed_grace_seconds,
+                guild_id
+            ],
+            recipient_from_row,
+        )?;
+        let mut recipients = Vec::new();
+        for row in rows {
+            recipients.push(row??);
+        }
+        Ok(recipients)
+    }
+
     pub fn retry_failed_deliveries(
         &self,
         guild_id: i64,
@@ -816,23 +867,61 @@ impl SurveyRepository {
     }
 
     pub fn queue_requested_delivery_retries(&self) -> Result<usize, SurveyRepositoryError> {
+        self.queue_requested_delivery_retries_for_guild(None)
+    }
+
+    pub fn queue_requested_delivery_retries_for_guild(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<usize, SurveyRepositoryError> {
         let (mut connection, now) = self.immediate()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "UPDATE survey_recipients SET delivery_status='pending',claimed_at=NULL,
+        let base = "UPDATE survey_recipients SET delivery_status='pending',claimed_at=NULL,
              retry_requested=0,last_error=NULL,updated_at=?1
              WHERE delivery_status='failed' AND retry_requested=1
                AND receipt_checked_attempt>=attempt_count AND EXISTS (
                  SELECT 1 FROM surveys WHERE surveys.survey_id=survey_recipients.survey_id
-                   AND surveys.guild_id=survey_recipients.guild_id AND surveys.status='open')",
-            [now],
-        )?;
+                   AND surveys.guild_id=survey_recipients.guild_id AND surveys.status='open')";
+        let changed = if let Some(guild_id) = guild_id {
+            transaction.execute(&format!("{base} AND guild_id=?2"), params![now, guild_id])?
+        } else {
+            transaction.execute(base, [now])?
+        };
         transaction.commit()?;
         Ok(changed)
     }
 
     pub fn claim_deliveries(
         &self,
+        limit: usize,
+        stale_after_seconds: i64,
+    ) -> Result<Vec<SurveyRecipient>, SurveyRepositoryError> {
+        self.claim_deliveries_for_guild(None, limit, stale_after_seconds)
+    }
+
+    pub fn claim_deliveries_for_guild(
+        &self,
+        guild_id: Option<i64>,
+        limit: usize,
+        stale_after_seconds: i64,
+    ) -> Result<Vec<SurveyRecipient>, SurveyRepositoryError> {
+        self.claim_deliveries_for_scope(guild_id, None, limit, stale_after_seconds)
+    }
+
+    pub fn claim_deliveries_for_survey(
+        &self,
+        guild_id: i64,
+        survey_id: i64,
+        limit: usize,
+        stale_after_seconds: i64,
+    ) -> Result<Vec<SurveyRecipient>, SurveyRepositoryError> {
+        self.claim_deliveries_for_scope(Some(guild_id), Some(survey_id), limit, stale_after_seconds)
+    }
+
+    fn claim_deliveries_for_scope(
+        &self,
+        guild_id: Option<i64>,
+        survey_id: Option<i64>,
         limit: usize,
         stale_after_seconds: i64,
     ) -> Result<Vec<SurveyRecipient>, SurveyRepositoryError> {
@@ -848,17 +937,40 @@ impl SurveyRepository {
         }
         let (mut connection, now) = self.immediate()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        recover_stale(&transaction, stale_after_seconds, now)?;
-        let mut statement = transaction.prepare(
-            "SELECT recipients.* FROM survey_recipients recipients
+        recover_stale(&transaction, guild_id, stale_after_seconds, now)?;
+        let base = "SELECT recipients.* FROM survey_recipients recipients
              JOIN surveys ON surveys.survey_id=recipients.survey_id
                          AND surveys.guild_id=recipients.guild_id
              WHERE recipients.delivery_status='pending'
                AND recipients.receipt_checked_attempt>=recipients.attempt_count
-               AND surveys.status='open'
-             ORDER BY recipients.recipient_id LIMIT ?1",
+               AND surveys.status='open'";
+        let (sql, query_parameters) = if let (Some(guild_id), Some(survey_id)) =
+            (guild_id, survey_id)
+        {
+            (
+                format!(
+                    "{base} AND recipients.guild_id=?1 AND recipients.survey_id=?2 ORDER BY recipients.recipient_id LIMIT ?3"
+                ),
+                vec![guild_id, survey_id, limit as i64],
+            )
+        } else if let Some(guild_id) = guild_id {
+            (
+                format!(
+                    "{base} AND recipients.guild_id=?1 ORDER BY recipients.recipient_id LIMIT ?2"
+                ),
+                vec![guild_id, limit as i64],
+            )
+        } else {
+            (
+                format!("{base} ORDER BY recipients.recipient_id LIMIT ?1"),
+                vec![limit as i64],
+            )
+        };
+        let mut statement = transaction.prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(query_parameters),
+            recipient_from_row,
         )?;
-        let rows = statement.query_map([limit as i64], recipient_from_row)?;
         let mut pending = Vec::new();
         for row in rows {
             pending.push(row??);
@@ -1101,21 +1213,39 @@ impl SurveyRepository {
     pub fn list_recoverable_response_sessions(
         &self,
     ) -> Result<Vec<SurveySession>, SurveyRepositoryError> {
+        self.list_recoverable_response_sessions_for_guild(None)
+    }
+
+    pub fn list_recoverable_response_sessions_for_guild(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<SurveySession>, SurveyRepositoryError> {
         let connection = self.connection()?;
         connection.execute_batch("BEGIN")?;
-        let mut statement = connection.prepare(
-            "SELECT recipients.survey_id,recipients.discord_id
+        let base = "SELECT recipients.survey_id,recipients.discord_id
              FROM survey_recipients recipients
              JOIN surveys ON surveys.survey_id=recipients.survey_id
                          AND surveys.guild_id=recipients.guild_id
              WHERE surveys.status IN ('open','closed')
                AND recipients.delivery_status='sent'
                AND recipients.controls_finalized=0
-               AND COALESCE(recipients.ui_message_id,recipients.dm_message_id) IS NOT NULL
-             ORDER BY recipients.recipient_id",
-        )?;
+               AND COALESCE(recipients.ui_message_id,recipients.dm_message_id) IS NOT NULL";
+        let (sql, query_parameters) = if let Some(guild_id) = guild_id {
+            (
+                format!("{base} AND recipients.guild_id=?1 ORDER BY recipients.recipient_id"),
+                vec![guild_id],
+            )
+        } else {
+            (
+                format!("{base} ORDER BY recipients.recipient_id"),
+                Vec::new(),
+            )
+        };
+        let mut statement = connection.prepare(&sql)?;
         let keys = statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .query_map(rusqlite::params_from_iter(query_parameters), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let mut sessions = Vec::new();
@@ -1679,17 +1809,24 @@ fn replace_question_order(
 
 fn recover_stale(
     transaction: &Transaction<'_>,
+    guild_id: Option<i64>,
     stale_after_seconds: i64,
     now: i64,
 ) -> Result<usize, SurveyRepositoryError> {
-    Ok(transaction.execute(
+    let base =
         "UPDATE survey_recipients SET delivery_status='pending',claimed_at=NULL,updated_at=?1
          WHERE delivery_status='sending' AND claimed_at<=?2
            AND receipt_checked_attempt>=attempt_count AND EXISTS (
              SELECT 1 FROM surveys WHERE surveys.survey_id=survey_recipients.survey_id
-               AND surveys.guild_id=survey_recipients.guild_id AND surveys.status='open')",
-        params![now, now - stale_after_seconds],
-    )?)
+               AND surveys.guild_id=survey_recipients.guild_id AND surveys.status='open')";
+    Ok(if let Some(guild_id) = guild_id {
+        transaction.execute(
+            &format!("{base} AND guild_id=?3"),
+            params![now, now - stale_after_seconds, guild_id],
+        )?
+    } else {
+        transaction.execute(base, params![now, now - stale_after_seconds])?
+    })
 }
 
 fn require_recipient(

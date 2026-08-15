@@ -1109,12 +1109,18 @@ async fn selected_unregistered_profile_is_public_and_preserves_resolved_display_
         .expect("unregistered response");
     let captured = responder.captured.lock().expect("response capture lock");
     assert_eq!(captured.deferred, [false]);
+    assert_eq!(captured.followups.len(), 1);
+    assert_eq!(captured.followups[0].content, "");
+    assert_eq!(captured.followups[0].embeds.len(), 1);
     assert_eq!(
-        captured.followups,
-        [InteractionResponse::message(
-            "❌ Selected Name is not registered. Use `/player register` to get started."
-        )]
+        captured.followups[0].embeds[0].title.as_deref(),
+        Some("Not Registered")
     );
+    assert_eq!(
+        captured.followups[0].embeds[0].description.as_deref(),
+        Some("Selected Name is not registered.\nUse `/player register` to get started.")
+    );
+    assert_eq!(captured.followups[0].embeds[0].color, Some(0xE7_4C_3C));
     assert!(captured.immediate.is_empty());
 }
 

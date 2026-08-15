@@ -1089,13 +1089,16 @@ where
         if let Some(flavor) = flavor {
             embed.field("💬 Cama chatter", flavor, false);
         }
-        let attachment = status.pet.as_ref().map(|pet| {
-            if status.stage == Some(PetStage::Egg) {
-                egg_attachment(pet.pet_id)
-            } else {
-                pet_attachment(pet)
-            }
-        });
+        let attachment = status.pet.as_ref().map_or_else(
+            || status.last_dead.as_ref().map(tombstone_attachment),
+            |pet| {
+                Some(if status.stage == Some(PetStage::Egg) {
+                    egg_attachment(pet.pet_id)
+                } else {
+                    pet_attachment(pet)
+                })
+            },
+        );
         let view = if with_view {
             status.pet.as_ref().map(|pet| {
                 let game_date =
@@ -1407,7 +1410,9 @@ pub fn build_adoption_embed(outcome: &AdoptOutcome, owner_name: &str) -> Embed {
             outcome.pet.name, outcome.pet.adopt_fee, outcome.pet.hatched_at
         )
     };
-    Embed::new(title, description, EmbedColor::Gold)
+    let mut embed = Embed::new(title, description, EmbedColor::Gold);
+    embed.image = Some(format!("attachment://pet-egg-{}.png", outcome.pet.pet_id));
+    embed
 }
 
 #[must_use]
@@ -1445,7 +1450,7 @@ pub fn build_altar_cancel_embed(preview: &SacrificePreview) -> Embed {
 
 #[must_use]
 pub fn build_altar_success_embed(outcome: &SacrificeOutcome) -> Embed {
-    Embed::new(
+    let mut embed = Embed::new(
         format!("🩸 {} was given to the altar", outcome.dead_pet.name),
         format!(
             "The altar accepts **{}** ({}).\nIn the ashes, a new egg: **{}**, hatching <t:{}:R> — its species already chosen, already hidden.\nFee: {} {JOPACOIN_EMOTE}.",
@@ -1456,7 +1461,12 @@ pub fn build_altar_success_embed(outcome: &SacrificeOutcome) -> Embed {
             outcome.fee,
         ),
         EmbedColor::Gold,
-    )
+    );
+    embed.image = Some(format!(
+        "attachment://pet-altar-{}.png",
+        outcome.dead_pet.pet_id
+    ));
+    embed
 }
 
 #[must_use]
@@ -1510,15 +1520,32 @@ pub fn build_status_embed_with_details(request: StatusEmbedRequest<'_>) -> Embed
     } = request;
     let Some(pet) = status.pet.as_ref() else {
         return if let Some(dead) = status.last_dead.as_ref() {
-            Embed::new(
+            let species = get_species(&dead.species);
+            let calling = pet_calling_label(dead);
+            let mut identity = pet_species_label(dead);
+            if let Some(calling) = calling {
+                identity.push_str(&format!(" · {calling}"));
+            }
+            let died_at = dead.died_at.unwrap_or(dead.adopted_at);
+            let death_phrase = if dead.death_cause.as_deref() == Some("eaten") {
+                "was eaten".to_owned()
+            } else {
+                format!(
+                    "died of {}",
+                    dead.death_cause.as_deref().unwrap_or("starvation")
+                )
+            };
+            let mut embed = Embed::new(
                 format!("In memoriam: {}", dead.name),
                 format!(
-                    "{} · died of {}\n\nF.\n\nAdopt again with `/pet adopt` — {next_fee} {JOPACOIN_EMOTE}",
-                    get_species(&dead.species).display_name,
-                    dead.death_cause.as_deref().unwrap_or("starvation")
+                    "{identity} · {death_phrase}, {} — <t:{died_at}:R>\n\n_{}_\n\nF.\n\nAdopt again with `/pet adopt` — {next_fee} {JOPACOIN_EMOTE}",
+                    format_age(dead.age_seconds(died_at)),
+                    species.blurb,
                 ),
                 EmbedColor::Slate,
-            )
+            );
+            embed.image = Some(format!("attachment://pet-tombstone-{}.png", dead.pet_id));
+            embed
         } else {
             Embed::new(
                 format!("{owner_name} has no cama"),
@@ -1761,7 +1788,7 @@ pub fn build_hatch_embed(pet: &Pet) -> Embed {
         SpeciesTier::Rare => "✨ Incredible — it's a",
         SpeciesTier::Legendary => "🎆 UNBELIEVABLE — it's the",
     };
-    Embed::new(
+    let mut embed = Embed::new(
         format!("🐣 {} hatched!", pet.name),
         format!(
             "<@{}>'s egg cracked open... **{reveal} {}!**\n\n_{}_",
@@ -1772,7 +1799,9 @@ pub fn build_hatch_embed(pet: &Pet) -> Embed {
         } else {
             EmbedColor::Green
         },
-    )
+    );
+    embed.image = Some(format!("attachment://pet-{}.png", pet.pet_id));
+    embed
 }
 
 #[must_use]
@@ -1784,7 +1813,7 @@ pub fn build_evolution_embed(pet: &Pet) -> Embed {
         .unwrap_or(PetCalling::Wayfarer);
     let profile = calling_profile(calling);
     let paths = pet_calling_paths(pet);
-    Embed::new(
+    let mut embed = Embed::new(
         format!(
             "{} {} evolved — {}!",
             profile.emoji, pet.name, profile.label
@@ -1796,7 +1825,9 @@ pub fn build_evolution_embed(pet: &Pet) -> Embed {
             profile.blurb
         ),
         EmbedColor::Custom(profile.color),
-    )
+    );
+    embed.image = Some(format!("attachment://pet-{}.png", pet.pet_id));
+    embed
 }
 
 #[must_use]
@@ -1809,7 +1840,7 @@ pub fn build_death_embed(pet: &Pet) -> Embed {
     let calling = pet_calling_label(pet);
     let calling = calling.map_or_else(String::new, |label| format!(" · {label}"));
     let died_at = pet.died_at.unwrap_or(pet.adopted_at);
-    Embed::new(
+    let mut embed = Embed::new(
         format!("🪦 {} has died", pet.name),
         format!(
             "<@{}>'s {}{calling} {cause}, {}.\nTime of death: <t:{died_at}:f>. F.",
@@ -1818,7 +1849,9 @@ pub fn build_death_embed(pet: &Pet) -> Embed {
             format_age(pet.age_seconds(died_at)),
         ),
         EmbedColor::Slate,
-    )
+    );
+    embed.image = Some(format!("attachment://pet-tombstone-{}.png", pet.pet_id));
+    embed
 }
 
 #[must_use]
@@ -2129,6 +2162,12 @@ fn egg_attachment(pet_id: i64) -> Attachment {
 fn pet_attachment(pet: &Pet) -> Attachment {
     Attachment {
         filename: format!("pet-{}.png", pet.pet_id),
+    }
+}
+
+fn tombstone_attachment(pet: &Pet) -> Attachment {
+    Attachment {
+        filename: format!("pet-tombstone-{}.png", pet.pet_id),
     }
 }
 
@@ -3059,6 +3098,7 @@ mod tests {
         assert!(hatch.description.contains("🎆 UNBELIEVABLE — it's the"));
         assert!(hatch.description.contains("Sunspun Cama"));
         assert!(hatch.description.contains("Sun-warm threads"));
+        assert_eq!(hatch.image.as_deref(), Some("attachment://pet-1.png"));
 
         legendary.evolution_calling = Some("oracle".to_owned());
         legendary.evolution_primary = Some("fortune".to_owned());
@@ -3072,6 +3112,7 @@ mod tests {
         assert!(evolution.description.contains("👑 Sunspun Cama"));
         assert!(evolution.description.contains("**Fortune + Wisdom**"));
         assert!(evolution.description.contains("Reads tomorrow in patterns"));
+        assert_eq!(evolution.image.as_deref(), Some("attachment://pet-1.png"));
 
         legendary.died_at = Some(legendary.hatched_at + 9 * DAY);
         legendary.death_cause = Some("starvation".to_owned());
@@ -3082,6 +3123,47 @@ mod tests {
             death
                 .description
                 .contains(&format!("<t:{}:f>", legendary.hatched_at + 9 * DAY))
+        );
+        assert_eq!(
+            death.image.as_deref(),
+            Some("attachment://pet-tombstone-1.png")
+        );
+    }
+
+    #[test]
+    fn dead_status_embed_preserves_python_memorial_copy_and_tombstone() {
+        let mut dead = make_pet();
+        dead.species = "sunspun_cama".to_owned();
+        dead.evolution_calling = Some("oracle".to_owned());
+        dead.died_at = Some(dead.hatched_at + 9 * DAY);
+        dead.death_cause = Some("eaten".to_owned());
+        let status = PetStatus {
+            pet: None,
+            hunger: 0,
+            stage: None,
+            mood: None,
+            age_seconds: 0,
+            supplies: None,
+            last_dead: Some(dead.clone()),
+            dig_work_units: 0,
+            dig_work_rate: 0,
+            evolution_hint: None,
+        };
+
+        let embed = build_status_embed(&status, 20, dead.died_at.unwrap(), "Owner", 40);
+
+        assert_eq!(embed.title, "In memoriam: Blep");
+        assert_eq!(
+            embed.description,
+            format!(
+                "👑 Sunspun Cama · 🔮 Oracle · was eaten, 9 days old — <t:{}:R>\n\n_{}_\n\nF.\n\nAdopt again with `/pet adopt` — 40 {JOPACOIN_EMOTE}",
+                dead.died_at.unwrap(),
+                get_species("sunspun_cama").blurb,
+            )
+        );
+        assert_eq!(
+            embed.image.as_deref(),
+            Some("attachment://pet-tombstone-1.png")
         );
     }
 
@@ -3985,6 +4067,10 @@ mod tests {
                 .contains("its species already chosen, already hidden")
         );
         assert_eq!(success.color, EmbedColor::Gold);
+        assert_eq!(
+            success.image.as_deref(),
+            Some("attachment://pet-altar-1.png")
+        );
     }
 
     #[test]

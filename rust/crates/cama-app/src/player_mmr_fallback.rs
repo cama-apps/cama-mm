@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub const STEAM_ID64_OFFSET: i64 = 76_561_197_960_265_728;
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
+pub const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 /// A truthy OpenDota MMR scalar. OpenDota has historically returned both JSON
 /// numbers and numeric strings for these fields.
@@ -138,6 +139,8 @@ pub struct RegistrationSeed {
     pub glicko_volatility: f64,
     pub os_mu: f64,
     pub os_sigma: f64,
+    pub os_rating_version: i64,
+    pub os_algorithm_fingerprint: String,
     pub exclusion_count: i64,
     pub added_at: i64,
 }
@@ -174,6 +177,8 @@ impl MmrRegistrationRepository for RegistrationRepository {
             glicko_volatility: seed.glicko_volatility,
             os_mu: seed.os_mu,
             os_sigma: seed.os_sigma,
+            os_rating_version: seed.os_rating_version,
+            os_algorithm_fingerprint: &seed.os_algorithm_fingerprint,
             exclusion_count: seed.exclusion_count,
             added_at: seed.added_at,
         })?;
@@ -310,6 +315,8 @@ where
         glicko_volatility: glicko.volatility,
         os_mu: openskill.mmr_to_os_mu(seed_mmr),
         os_sigma: CamaOpenSkillSystem::DEFAULT_SIGMA,
+        os_rating_version: OPENSKILL_ALGORITHM_VERSION,
+        os_algorithm_fingerprint: openskill.algorithm_fingerprint(),
         exclusion_count: input.exclusion_count,
         added_at: input.added_at,
     };

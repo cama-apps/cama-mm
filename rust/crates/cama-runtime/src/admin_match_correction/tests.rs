@@ -400,9 +400,9 @@ async fn pending_correction_recovers_total_reward_snapshot_after_adapter_only_cr
     });
     let observer = AdminMatchCorrectionRecoveryObserver {
         control,
-        startup_leases_released: Mutex::new(false),
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
     };
-    let ready = ReadyRecoveryContext::new(Arc::<[u64]>::from([]), Arc::new(EmptyMemberSource));
+    let ready = ReadyRecoveryContext::new([GUILD as u64], Arc::new(EmptyMemberSource));
     let report = observer.ready_recovery(ready).await;
     assert_eq!(report.guilds_attempted, 1);
     assert_eq!(report.guilds_refreshed, 1);
@@ -484,9 +484,9 @@ async fn ready_observer_recovers_a_persisted_core_applied_correction() {
 
     let observer = AdminMatchCorrectionRecoveryObserver {
         control: Arc::clone(&control),
-        startup_leases_released: Mutex::new(false),
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
     };
-    let context = ReadyRecoveryContext::new(Arc::<[u64]>::from([]), Arc::new(EmptyMemberSource));
+    let context = ReadyRecoveryContext::new([GUILD as u64], Arc::new(EmptyMemberSource));
     let report = observer.ready_recovery(context).await;
     assert_eq!(report.observer, RECOVERY_OBSERVER_NAME);
     assert_eq!(report.guilds_attempted, 1);
@@ -550,9 +550,9 @@ async fn ready_observer_cleans_claim_when_replay_committed_before_process_exit()
 
     let observer = AdminMatchCorrectionRecoveryObserver {
         control,
-        startup_leases_released: Mutex::new(false),
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
     };
-    let context = ReadyRecoveryContext::new(Arc::<[u64]>::from([]), Arc::new(EmptyMemberSource));
+    let context = ReadyRecoveryContext::new([GUILD as u64], Arc::new(EmptyMemberSource));
     let report = observer.ready_recovery(context).await;
     assert_eq!(report.guilds_attempted, 1);
     assert_eq!(report.guilds_refreshed, 1);
@@ -593,9 +593,9 @@ async fn reconnect_ready_never_releases_a_live_correction_lease() {
     });
     let observer = AdminMatchCorrectionRecoveryObserver {
         control,
-        startup_leases_released: Mutex::new(false),
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
     };
-    let ready = || ReadyRecoveryContext::new(Arc::<[u64]>::from([]), Arc::new(EmptyMemberSource));
+    let ready = || ReadyRecoveryContext::new([GUILD as u64], Arc::new(EmptyMemberSource));
     let first = observer.ready_recovery(ready()).await;
     assert!(first.failures.is_empty());
 
@@ -620,4 +620,72 @@ async fn reconnect_ready_never_releases_a_live_correction_lease() {
         )
         .expect("load live owner after reconnect READY");
     assert_eq!(owner.as_deref(), Some("live-command-owner"));
+}
+
+#[tokio::test]
+async fn ready_observer_leaves_foreign_guild_correction_and_lease_untouched() {
+    let fixture = Fixture::new();
+    let repository = MatchCorrectionRepository::new(fixture.database.path());
+    let rewards = Arc::new(RepositoryReward {
+        repository: repository.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let control = Arc::new(ProductionAdminMatchCorrectionControl {
+        repository: repository.clone(),
+        database_path: fixture.database.path().to_path_buf(),
+        openskill: CamaOpenSkillSystem::default(),
+        new_player_mmr_discount: 0,
+        house_payout_multiplier: 1.0,
+        vanity_tax_rate: 0.1,
+        rewards: rewards.clone(),
+        vanity_tax: Arc::new(NoVanityTax),
+        replay_gate: Arc::new(FailFirstReplay(AtomicBool::new(true))),
+    });
+    control
+        .correct_match(AdminCorrectMatchRequest {
+            guild_id: GUILD,
+            actor_id: ADMIN,
+            match_id: fixture.match_id,
+            correct_result: AdminCorrectMatchSide::Dire,
+        })
+        .await
+        .expect_err("seed recoverable foreign correction");
+    fixture
+        .connection()
+        .execute(
+            "UPDATE match_correction_claims
+             SET owner_token='foreign-dead-owner',claimed_at=?1
+             WHERE match_id=?2",
+            params![unix_seconds(), fixture.match_id],
+        )
+        .expect("seed foreign dead-process lease");
+    let calls_before_ready = rewards.calls.load(Ordering::SeqCst);
+    let observer = AdminMatchCorrectionRecoveryObserver {
+        control,
+        startup_guild_leases_released: Mutex::new(BTreeSet::new()),
+    };
+
+    let report = observer
+        .ready_recovery(ReadyRecoveryContext::new(
+            [(GUILD + 1) as u64],
+            Arc::new(EmptyMemberSource),
+        ))
+        .await;
+
+    assert!(report.failures.is_empty());
+    assert_eq!(report.guilds_attempted, 1);
+    assert_eq!(report.guilds_refreshed, 0);
+    assert_eq!(rewards.calls.load(Ordering::SeqCst), calls_before_ready);
+    let state: (String, i64, i64) = fixture
+        .connection()
+        .query_row(
+            "SELECT owner_token,
+                    (SELECT COUNT(*) FROM match_correction_claims WHERE match_id=?1),
+                    (SELECT COUNT(*) FROM openskill_replay_jobs WHERE guild_id=?2)
+             FROM match_correction_claims WHERE match_id=?1",
+            params![fixture.match_id, GUILD],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("foreign recovery state remains");
+    assert_eq!(state, ("foreign-dead-owner".to_owned(), 1, 1));
 }

@@ -54,11 +54,22 @@ impl GambaGuildSource for FakeGamba {
     }
 }
 
-#[derive(Default)]
 struct MockPredictionDiscord {
     edits: Mutex<Vec<(i64, i64, DiscordMessage)>>,
     summaries: Mutex<Vec<(i64, DiscordMessage)>>,
     failing_threads: Mutex<BTreeSet<i64>>,
+    live_guilds: Mutex<Vec<i64>>,
+}
+
+impl Default for MockPredictionDiscord {
+    fn default() -> Self {
+        Self {
+            edits: Mutex::new(Vec::new()),
+            summaries: Mutex::new(Vec::new()),
+            failing_threads: Mutex::new(BTreeSet::new()),
+            live_guilds: Mutex::new(vec![GUILD, OTHER_GUILD]),
+        }
+    }
 }
 
 impl MockPredictionDiscord {
@@ -71,6 +82,16 @@ impl MockPredictionDiscord {
             .lock()
             .expect("prediction summary lock")
             .clone()
+    }
+}
+
+impl FirstGamePoolGuildSource for MockPredictionDiscord {
+    fn live_guild_ids(&self) -> Result<Vec<i64>, String> {
+        Ok(self
+            .live_guilds
+            .lock()
+            .expect("prediction live-guild lock")
+            .clone())
     }
 }
 
@@ -471,6 +492,67 @@ async fn refresh_catches_up_due_markets_before_first_sleep_and_delivers_live_emb
             .bytes
             .starts_with(b"\x89PNG")
     );
+}
+
+#[tokio::test]
+async fn refresh_leaves_foreign_market_and_outbox_untouched() {
+    let fixture = Fixture::migrated();
+    let live_id = fixture.market(GUILD, NOW - 200);
+    let foreign_id = fixture.market(OTHER_GUILD, NOW - 200);
+    PredictionWorkerRepository::new(&fixture.path)
+        .refresh_market_and_queue(foreign_id, NOW - 50, 0, &refresh_settings())
+        .expect("queue foreign publication")
+        .expect("foreign refresh outcome");
+    fixture
+        .connection()
+        .execute(
+            "UPDATE predictions SET last_refresh_at=?1 WHERE prediction_id=?2",
+            params![NOW - 200, foreign_id],
+        )
+        .expect("make foreign market due without changing its outbox");
+    let foreign_pending_before = PredictionWorkerRepository::new(&fixture.path)
+        .pending_refresh_publications()
+        .expect("read refresh outbox")
+        .into_iter()
+        .filter(|publication| publication.guild_id == OTHER_GUILD)
+        .collect::<Vec<_>>();
+    assert!(!foreign_pending_before.is_empty());
+
+    let discord = Arc::new(MockPredictionDiscord::default());
+    *discord
+        .live_guilds
+        .lock()
+        .expect("prediction live-guild lock") = vec![GUILD];
+    let worker = refresh_worker(&fixture.path, discord.clone(), NOW, Duration::ZERO);
+    let (_shutdown, context) = worker_context();
+    worker.wake_once(&context).await.expect("guild-scoped wake");
+
+    let repository = PredictionRepository::new(&fixture.path);
+    assert_eq!(
+        repository
+            .get_prediction(live_id)
+            .unwrap()
+            .unwrap()
+            .last_refresh_at,
+        Some(NOW)
+    );
+    assert_eq!(
+        repository
+            .get_prediction(foreign_id)
+            .unwrap()
+            .unwrap()
+            .last_refresh_at,
+        Some(NOW - 200)
+    );
+    let foreign_pending_after = PredictionWorkerRepository::new(&fixture.path)
+        .pending_refresh_publications()
+        .expect("read refresh outbox")
+        .into_iter()
+        .filter(|publication| publication.guild_id == OTHER_GUILD)
+        .collect::<Vec<_>>();
+    assert_eq!(foreign_pending_after, foreign_pending_before);
+    assert_eq!(discord.edits().len(), 1);
+    assert_eq!(discord.edits()[0].0, 700 + live_id);
 }
 
 #[tokio::test]

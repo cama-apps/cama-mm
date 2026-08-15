@@ -1193,6 +1193,26 @@ impl ManashopRepository {
         &self,
         now: i64,
     ) -> Result<Vec<DarkBargainSettlement>, ManashopRepositoryError> {
+        self.settle_due_dark_bargains_scoped(now, None)
+    }
+
+    /// Settle due debt only for guilds present in the live gateway snapshot.
+    ///
+    /// This prevents a development bot using a production database copy from
+    /// applying financial state transitions for guilds it is not connected to.
+    pub fn settle_due_dark_bargains_for_guilds(
+        &self,
+        now: i64,
+        guild_ids: &BTreeSet<i64>,
+    ) -> Result<Vec<DarkBargainSettlement>, ManashopRepositoryError> {
+        self.settle_due_dark_bargains_scoped(now, Some(guild_ids))
+    }
+
+    fn settle_due_dark_bargains_scoped(
+        &self,
+        now: i64,
+        guild_ids: Option<&BTreeSet<i64>>,
+    ) -> Result<Vec<DarkBargainSettlement>, ManashopRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let debts = {
@@ -1214,6 +1234,9 @@ impl ManashopRepository {
         };
         let mut settlements = Vec::new();
         for (buff_id, discord_id, guild_id, raw) in debts {
+            if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&guild_id)) {
+                continue;
+            }
             let data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
             let amount_due = data.amount_due.unwrap_or(0);
             let default_penalty = data.default_penalty.unwrap_or(1_600);

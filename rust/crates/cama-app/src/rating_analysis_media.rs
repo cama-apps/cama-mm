@@ -1,9 +1,14 @@
 //! Native semantic PNG charts for `/ratinganalysis`.
 
+use std::sync::OnceLock;
+
+use fontdue::{Font, FontSettings};
+
 use crate::drawing::{
     DISCORD_ACCENT, DISCORD_BG, DISCORD_DARKER, DISCORD_GREEN, DISCORD_GREY, DISCORD_GRID,
     DISCORD_WHITE, DISCORD_YELLOW, Rgba,
 };
+use crate::font_assets::{DejaVuFace, load_dejavu_font};
 use crate::rating_analysis_command::{CalibrationCurveData, RatingAnalysisDrawingPort};
 use crate::rating_comparison_service::RatingComparisonResult;
 
@@ -369,8 +374,23 @@ impl Canvas {
             return;
         };
         if x < self.width && y < self.height {
-            self.pixels[(y * self.width + x) * 4..(y * self.width + x + 1) * 4]
-                .copy_from_slice(&color.0);
+            let offset = (y * self.width + x) * 4;
+            if color.0[3] == u8::MAX {
+                self.pixels[offset..offset + 4].copy_from_slice(&color.0);
+                return;
+            }
+            let alpha = u16::from(color.0[3]);
+            let inverse = u16::from(u8::MAX) - alpha;
+            for channel in 0..3 {
+                self.pixels[offset + channel] = u8::try_from(
+                    (u16::from(color.0[channel]) * alpha
+                        + u16::from(self.pixels[offset + channel]) * inverse
+                        + 127)
+                        / 255,
+                )
+                .unwrap_or(u8::MAX);
+            }
+            self.pixels[offset + 3] = u8::MAX;
         }
     }
 
@@ -445,6 +465,10 @@ impl Canvas {
     }
 
     fn text(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
+        if let Some(font) = rating_font(scale >= 2) {
+            self.truetype_text(x, y, text, color, rating_font_size(scale), font);
+            return;
+        }
         for (index, character) in text.chars().enumerate() {
             let x = x + i32::try_from(index).unwrap_or_default() * 6 * scale;
             for (row, bits) in glyph(character).into_iter().enumerate() {
@@ -472,9 +496,91 @@ impl Canvas {
         color: Rgba,
         scale: i32,
     ) {
-        let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
+        let width = rating_font(scale >= 2).map_or_else(
+            || i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale,
+            |font| truetype_text_width(text, rating_font_size(scale), font),
+        );
         self.text(left + (right - left - width) / 2, y, text, color, scale);
     }
+
+    fn truetype_text(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Rgba,
+        pixel_size: f32,
+        font: &Font,
+    ) {
+        let ascent = font
+            .horizontal_line_metrics(pixel_size)
+            .map_or(pixel_size, |metrics| metrics.ascent);
+        let baseline = y as f32 + ascent;
+        let mut pen_x = x as f32;
+        let mut previous = None;
+        for character in text.chars() {
+            if let Some(previous) = previous {
+                pen_x += font
+                    .horizontal_kern(previous, character, pixel_size)
+                    .unwrap_or_default();
+            }
+            let (metrics, bitmap) = font.rasterize(character, pixel_size);
+            let origin_x = pen_x.round() as i32 + metrics.xmin;
+            let origin_y = baseline.round() as i32
+                - metrics.ymin
+                - i32::try_from(metrics.height).unwrap_or_default();
+            for glyph_y in 0..metrics.height {
+                for glyph_x in 0..metrics.width {
+                    let alpha = bitmap[glyph_y * metrics.width + glyph_x];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    self.set(
+                        origin_x + i32::try_from(glyph_x).unwrap_or_default(),
+                        origin_y + i32::try_from(glyph_y).unwrap_or_default(),
+                        Rgba([color.0[0], color.0[1], color.0[2], alpha]),
+                    );
+                }
+            }
+            pen_x += metrics.advance_width;
+            previous = Some(character);
+        }
+    }
+}
+
+fn rating_font(bold: bool) -> Option<&'static Font> {
+    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
+    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
+    let slot = if bold { &BOLD } else { &REGULAR };
+    slot.get_or_init(|| {
+        load_dejavu_font(if bold {
+            DejaVuFace::SansBold
+        } else {
+            DejaVuFace::Sans
+        })
+        .ok()
+        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
+}
+
+fn rating_font_size(scale: i32) -> f32 {
+    if scale >= 2 { 18.0 } else { 10.0 }
+}
+
+fn truetype_text_width(text: &str, pixel_size: f32, font: &Font) -> i32 {
+    let mut width = 0.0_f32;
+    let mut previous = None;
+    for character in text.chars() {
+        if let Some(previous) = previous {
+            width += font
+                .horizontal_kern(previous, character, pixel_size)
+                .unwrap_or_default();
+        }
+        width += font.metrics(character, pixel_size).advance_width;
+        previous = Some(character);
+    }
+    width.ceil() as i32
 }
 
 fn glyph(character: char) -> [u8; 7] {

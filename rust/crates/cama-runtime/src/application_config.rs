@@ -49,6 +49,7 @@ pub struct IdentityConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChannelConfig {
+    pub gamba: Option<i64>,
     pub lobby: Option<i64>,
     pub low_skill_lobby: Option<i64>,
     pub dig: Option<i64>,
@@ -114,6 +115,9 @@ pub struct Values {
     pub enrichment_retry_delays: Vec<i64>,
     pub exclusion_penalty_weight: f64,
     pub first_game_pool_daily_amount: i64,
+    /// Explicit dev-only wheel fixture support. When enabled, negative
+    /// Discord IDs in the database are treated as synthetic guild members.
+    pub gamba_synthetic_members_enabled: bool,
     pub garnishment_percentage: f64,
     pub hostile_loss_min_balance: i64,
     pub house_payout_multiplier: f64,
@@ -360,6 +364,7 @@ impl ApplicationConfig {
                 tax_man_user_ids,
             },
             channels: ChannelConfig {
+                gamba: p.optional_channel("GAMBA_CHANNEL_ID"),
                 lobby: p.optional_channel("LOBBY_CHANNEL_ID"),
                 low_skill_lobby: p.optional_channel("LOWSKILL_LOBBY_CHANNEL_ID"),
                 dig: p.optional_channel("DIG_CHANNEL_ID"),
@@ -419,6 +424,7 @@ impl ApplicationConfig {
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
                 exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 70.0),
                 first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 100),
+                gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
                 hostile_loss_min_balance: p.i64("HOSTILE_LOSS_MIN_BALANCE", 50),
                 house_payout_multiplier: p.f64("HOUSE_PAYOUT_MULTIPLIER", 1.0),
@@ -756,6 +762,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
     keys.extend([
         "CAMA_GATEWAY_RECONNECT_INITIAL_SECONDS",
         "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
+        "GAMBA_SYNTHETIC_MEMBERS_ENABLED",
         "OPENDOTA_API_KEY",
         "RUST_CUTOVER_CANDIDATE",
     ]);
@@ -788,8 +795,19 @@ mod tests {
         assert_eq!(config.values.auto_spectator_bet_top_percentage, 0.02);
         assert_eq!(config.values.pingedash_cost, 10);
         assert_eq!(config.values.recent_match_penalty_weight, 230.0);
+        assert!(!config.values.gamba_synthetic_members_enabled);
+        assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
         assert_eq!(config.llm.model, DEFAULT_CEREBRAS_MODEL);
+    }
+
+    #[test]
+    fn synthetic_gamba_members_are_explicitly_opt_in() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("GAMBA_SYNTHETIC_MEMBERS_ENABLED", "true"),
+        ]);
+        assert!(config.values.gamba_synthetic_members_enabled);
     }
 
     #[test]
@@ -827,6 +845,7 @@ mod tests {
             ("VANITY_TAX_RATE", "-1"),
             ("TIP_FEE_RATE", "nan"),
             ("LOBBY_CHANNEL_ID", " 42 "),
+            ("GAMBA_CHANNEL_ID", " 84 "),
         ]);
         assert_eq!(config.values.bet_lock_seconds, 1_200);
         assert!(!config.values.auto_blind_enabled);
@@ -835,6 +854,7 @@ mod tests {
         assert_eq!(config.values.tip_fee_rate, 0.5);
         assert_eq!(config.values.vanity_tax_rate, 0.0);
         assert_eq!(config.channels.lobby, Some(42));
+        assert_eq!(config.channels.gamba, Some(84));
     }
 
     #[test]
@@ -971,7 +991,7 @@ mod tests {
     #[test]
     fn catalog_has_exactly_one_entry_for_every_config_py_environment_key() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 215, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
         let config_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
         let script = r#"
@@ -1040,6 +1060,7 @@ overrides.update({
     'TAX_MAN_USER_IDS': '987654321',
     'TAX_MEN_USER_IDS': '987654321',
     'LOBBY_CHANNEL_ID': '987654321',
+    'GAMBA_CHANNEL_ID': '987654321',
     'LOWSKILL_LOBBY_CHANNEL_ID': '987654321',
     'DIG_CHANNEL_ID': '987654321',
     'DUEL_CHANNEL_ID': '987654321',

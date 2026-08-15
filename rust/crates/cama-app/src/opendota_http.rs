@@ -715,7 +715,7 @@ fn value_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
-        .or_else(|| value.as_f64().map(|value| value as i64))
+        .or_else(|| value.as_f64().and_then(truncate_finite_f64_to_i64))
         .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
@@ -996,11 +996,38 @@ fn project_registration_player(value: Value) -> Option<OpenDotaPlayerData> {
 }
 
 fn project_mmr_value(value: &Value) -> Option<OpenDotaMmrValue> {
-    value.as_i64().map(OpenDotaMmrValue::Integer).or_else(|| {
-        value
-            .as_str()
-            .map(|value| OpenDotaMmrValue::Text(value.to_owned()))
-    })
+    match value {
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                return Some(OpenDotaMmrValue::Integer(value));
+            }
+
+            // Python's `int(float)` truncates toward zero. OpenDota's
+            // `computed_mmr` is sometimes a JSON float even though the
+            // registration domain stores whole MMR. Preserve that behavior,
+            // but do not rely on Rust's saturating float-to-int cast for
+            // non-finite or out-of-range values.
+            number
+                .as_f64()
+                .and_then(truncate_finite_f64_to_i64)
+                .map(OpenDotaMmrValue::Integer)
+                // Keep an unsafe numeric scalar truthy and unparseable so the
+                // fallback policy reports it instead of silently skipping to a
+                // lower-priority field.
+                .or_else(|| Some(OpenDotaMmrValue::Text(number.to_string())))
+        }
+        Value::String(value) => Some(OpenDotaMmrValue::Text(value.to_owned())),
+        _ => None,
+    }
+}
+
+fn truncate_finite_f64_to_i64(value: f64) -> Option<i64> {
+    // `i64::MAX as f64` rounds up to 2^63, so the upper bound must be
+    // exclusive. i64::MIN is exactly representable as f64.
+    const I64_EXCLUSIVE_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0;
+
+    (value.is_finite() && value >= i64::MIN as f64 && value < I64_EXCLUSIVE_UPPER_BOUND)
+        .then(|| value.trunc() as i64)
 }
 
 impl OpenDotaPlayerApiPort for OpenDotaHttpClient {

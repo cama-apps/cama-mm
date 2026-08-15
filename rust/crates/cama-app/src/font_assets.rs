@@ -5,8 +5,8 @@
 //! package upgrades or a different base image can silently change glyph
 //! metrics.  `Dockerfile.rust` copies the four exact files from the locked
 //! Matplotlib dependency and verifies [`FONT_MANIFEST`] while building the
-//! runtime image.  This module provides the future renderer seam and repeats
-//! the check at load time so an incomplete or mutated deployment fails closed.
+//! runtime image. This module supplies the production renderers and repeats the
+//! check at load time so an incomplete or mutated deployment fails closed.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,7 @@ use thiserror::Error;
 
 /// Runtime location populated by `Dockerfile.rust`.
 pub const RUNTIME_FONT_DIR: &str = "/app/assets/fonts";
+pub const FONT_DIR_ENV: &str = "CAMA_FONT_DIR";
 
 #[cfg(test)]
 const FONT_MANIFEST: &str = include_str!("../../../../assets/fonts/dejavu.sha256");
@@ -74,11 +75,13 @@ pub enum FontAssetError {
 
 /// Load a fixed DejaVu face from the Rust runtime's retained asset directory.
 ///
-/// The returned bytes are intentionally unparsed.  A future renderer can pass
-/// them to its font rasterizer without taking a host font dependency, while a
-/// bad image/container asset fails before rendering begins.
+/// The returned bytes are intentionally unparsed so each renderer can choose
+/// the appropriate face and size without taking a host font dependency.
 pub fn load_dejavu_font(face: DejaVuFace) -> Result<Vec<u8>, FontAssetError> {
-    load_dejavu_font_from(Path::new(RUNTIME_FONT_DIR), face)
+    let directory = std::env::var_os(FONT_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(RUNTIME_FONT_DIR));
+    load_dejavu_font_from(&directory, face)
 }
 
 /// Testable/configurable form of [`load_dejavu_font`].

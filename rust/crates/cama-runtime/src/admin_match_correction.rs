@@ -76,7 +76,7 @@ impl AdminMatchCorrectionRuntime {
         });
         let observer = Arc::new(AdminMatchCorrectionRecoveryObserver {
             control: Arc::clone(&control),
-            startup_leases_released: Mutex::new(false),
+            startup_guild_leases_released: Mutex::new(BTreeSet::new()),
         });
         Ok(Self { control, observer })
     }
@@ -449,9 +449,9 @@ impl ProductionAdminMatchCorrectionControl {
 struct AdminMatchCorrectionRecoveryObserver {
     control: Arc<ProductionAdminMatchCorrectionControl>,
     /// READY also runs after gateway reconnects. Dead-process leases must be
-    /// cleared exactly once on the first READY, never during a live command
-    /// after a resume.
-    startup_leases_released: Mutex<bool>,
+    /// cleared exactly once per observed guild, never during a live command
+    /// after that guild has resumed.
+    startup_guild_leases_released: Mutex<BTreeSet<i64>>,
 }
 
 #[async_trait]
@@ -460,17 +460,26 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
         RECOVERY_OBSERVER_NAME
     }
 
-    async fn ready_recovery(&self, _context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+    async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+        let ready_guild_ids = context
+            .guild_ids()
+            .iter()
+            .filter_map(|guild_id| i64::try_from(*guild_id).ok())
+            .collect::<BTreeSet<_>>();
         {
             // Serialize simultaneous READY/reconnect callbacks around the
             // one-time lease release. A follower must not enumerate claims
             // until the first callback has finished clearing dead owners.
-            let mut released = self.startup_leases_released.lock().await;
-            if !*released {
+            let mut released = self.startup_guild_leases_released.lock().await;
+            let unreleased = ready_guild_ids
+                .difference(&released)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if !unreleased.is_empty() {
                 if let Err(error) = self
                     .control
                     .repository
-                    .release_match_correction_leases_for_startup()
+                    .release_match_correction_leases_for_startup_guilds(&unreleased)
                 {
                     return ReadyRecoveryReport {
                         observer: RECOVERY_OBSERVER_NAME,
@@ -484,7 +493,7 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                         }],
                     };
                 }
-                *released = true;
+                released.extend(unreleased);
             }
         }
         let claims = match self.control.repository.list_recoverable_match_corrections() {
@@ -521,6 +530,7 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
         };
         let mut corrections = claims
             .into_iter()
+            .filter(|claim| ready_guild_ids.contains(&claim.guild_id))
             .map(|claim| {
                 (
                     (claim.guild_id, claim.match_id),
@@ -528,7 +538,10 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        for job in jobs {
+        for job in jobs
+            .into_iter()
+            .filter(|job| ready_guild_ids.contains(&job.guild_id))
+        {
             if let Some(match_id) = job
                 .reason
                 .strip_prefix(CORRECTION_REASON_PREFIX)
@@ -537,7 +550,8 @@ impl GatewayEventObserver for AdminMatchCorrectionRecoveryObserver {
                 corrections.entry((job.guild_id, match_id)).or_default();
             }
         }
-        let mut report = ReadyRecoveryReport::empty(RECOVERY_OBSERVER_NAME, corrections.len());
+        let mut report =
+            ReadyRecoveryReport::empty(RECOVERY_OBSERVER_NAME, context.guild_ids().len());
         for ((guild_id, match_id), requested_side) in corrections {
             let correct_result = if let Some(side) = requested_side {
                 side

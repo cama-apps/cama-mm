@@ -1498,3 +1498,13 @@ fn migration_report_records_manifest_order() {
         .expect("count ledger timestamps");
     assert_eq!(application_time_count, 1);
 }
+
+#[test]
+fn match_ban_migration_uses_python_numeric_projection() {
+    assert!(json_false_or_zero(&serde_json::json!(false)));
+    assert!(json_false_or_zero(&serde_json::json!(0.0)));
+    assert!(!json_false_or_zero(&serde_json::json!("0")));
+    assert_eq!(json_ban_integer(&serde_json::json!(1.9)), Some(1));
+    assert_eq!(json_ban_integer(&serde_json::json!(" 7_400 ")), Some(7_400));
+    assert_eq!(json_ban_integer(&serde_json::json!(true)), None);
+}

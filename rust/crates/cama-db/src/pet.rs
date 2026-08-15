@@ -1526,6 +1526,28 @@ impl PetRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Return every guild that has durable state touched by the global pet
+    /// lifecycle worker.
+    ///
+    /// The production sweep currently performs global repository scans.  Its
+    /// runtime adapter uses this read-only inventory as a fail-closed guard so
+    /// importing a database from a guild the bot has not joined cannot mutate
+    /// pets, settle brawls/refunds, or acknowledge announcements for that
+    /// foreign guild.
+    pub fn list_worker_guild_ids(&self) -> Result<Vec<i64>, PetRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT guild_id FROM pets
+             UNION
+             SELECT guild_id FROM pet_brawls
+             UNION
+             SELECT guild_id FROM pet_refund_windows
+             ORDER BY guild_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn list_week_care(
         &self,
         guild_id: Option<i64>,

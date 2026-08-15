@@ -1112,6 +1112,76 @@ fn draft_ready_observer_hydrates_active_rows_idempotently() {
 }
 
 #[test]
+fn draft_ready_observer_ignores_foreign_guild_rows_before_transport() {
+    let database = NamedTempFile::new().expect("draft database");
+    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    let mut state = DraftState::with_session(43, DraftLobbyKind::Open, 10);
+    state.phase = DraftPhase::WinnerSideChoice;
+    state.draft_channel_id = Some(777);
+    state.draft_message_id = Some(1234);
+    persistence
+        .create_envelope(&state.to_snapshot().envelope(1))
+        .expect("create foreign durable draft");
+    let mut finalizing = DraftState::with_session(44, DraftLobbyKind::Open, 11);
+    finalizing.phase = DraftPhase::Complete;
+    let mut finalizing_envelope = finalizing.to_snapshot().envelope(1);
+    finalizing_envelope.finalizing = true;
+    persistence
+        .create_envelope(&finalizing_envelope)
+        .expect("create foreign finalizing draft");
+    let drafts = Arc::new(DraftStateManager::default());
+    let discord = Arc::new(NullDiscord::default());
+    let lobby = LobbyRegistrationProvider::new(
+        database.path(),
+        LobbyRuntimeConfig {
+            lobby_channel_id: Some(700),
+            low_skill_lobby_channel_id: Some(701),
+            admin_user_ids: BTreeSet::from([9001]),
+            ready_threshold: 10,
+            max_players: 20,
+            first_game_pool_daily_amount: 0,
+        },
+        Arc::clone(&drafts),
+        discord.clone(),
+    )
+    .expect("lobby provider");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobby.match_lobby_port(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    let report = block_on(provider.gateway_observer().ready_recovery(
+        crate::gateway_events::ReadyRecoveryContext::new(vec![42], Arc::new(EmptyMemberSource)),
+    ));
+
+    assert!(report.failures.is_empty());
+    assert_eq!(report.guilds_attempted, 1);
+    assert_eq!(report.guilds_refreshed, 1);
+    assert!(drafts.get_state(Some(43)).is_none());
+    assert!(drafts.get_state(Some(44)).is_none());
+    assert_eq!(
+        persistence.load_all().expect("foreign rows retained").len(),
+        2
+    );
+    assert!(discord.sent.lock().expect("sent messages").is_empty());
+    assert!(discord.edited.lock().expect("edited messages").is_empty());
+}
+
+#[test]
 fn production_main_composes_draft_sqlite_recovery_and_ready_observer() {
     let source = include_str!("../main.rs");
     assert!(source.contains("SqliteDraftStatePersistence::new(&config.db_path)"));

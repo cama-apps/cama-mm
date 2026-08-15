@@ -6,10 +6,10 @@
 //! repeatable. No respondent answer text is logged or retained outside the
 //! short-lived render value used for an edit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cama_app::survey_commands as policy;
@@ -35,6 +35,7 @@ use crate::worker::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
 pub const SURVEY_RECOVERY_WORKER_NAME: &str = "survey_scheduled_delivery_recovery";
 pub const SURVEY_RECOVERY_WAKE_INTERVAL: Duration = Duration::from_secs(30);
+const SURVEY_RESPONSE_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(30 * 60);
 pub const SURVEY_RESULTS_TIMEOUT: Duration =
     Duration::from_secs(policy::RESULTS_TIMEOUT_SECONDS as u64);
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
@@ -58,6 +59,19 @@ pub enum SurveyDmErrorKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurveyDmError {
     pub kind: SurveyDmErrorKind,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurveyEditErrorKind {
+    Forbidden,
+    NotFound,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurveyEditError {
+    pub kind: SurveyEditErrorKind,
     pub message: String,
 }
 
@@ -92,7 +106,7 @@ pub trait SurveyDiscordPort: Send + Sync {
         channel_id: i64,
         message_id: i64,
         message: DiscordMessage,
-    ) -> Result<(), String>;
+    ) -> Result<(), SurveyEditError>;
 }
 
 #[derive(Debug, Error)]
@@ -131,6 +145,9 @@ impl SurveyRegistrationProvider {
             delivery_semaphore: Arc::new(Semaphore::new(policy::DELIVERY_CONCURRENCY)),
             response_locks: Mutex::new(BTreeMap::new()),
             fingerprints: Mutex::new(BTreeMap::new()),
+            active_guilds: Mutex::new(BTreeSet::new()),
+            response_edit_retries: Mutex::new(BTreeMap::new()),
+            permanently_uneditable_responses: Mutex::new(BTreeSet::new()),
             pagers: Mutex::new(BTreeMap::new()),
             results_timeout,
         });
@@ -217,11 +234,110 @@ struct SurveyRuntimeState {
     delivery_semaphore: Arc<Semaphore>,
     response_locks: Mutex<BTreeMap<SurveyResponseKey, SurveyResponseLock>>,
     fingerprints: Mutex<BTreeMap<SurveyResponseKey, u64>>,
+    active_guilds: Mutex<BTreeSet<i64>>,
+    response_edit_retries: Mutex<BTreeMap<SurveyResponseKey, SurveyResponseEditRetry>>,
+    permanently_uneditable_responses: Mutex<BTreeSet<SurveyResponseKey>>,
     pagers: Mutex<BTreeMap<String, SurveyPagerHandle>>,
     results_timeout: Duration,
 }
 
+#[derive(Clone, Copy)]
+struct SurveyResponseEditRetry {
+    failures: u32,
+    retry_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum SurveyRecoveryScope {
+    Guild(i64),
+    Survey(i64, i64),
+}
+
+impl SurveyRecoveryScope {
+    const fn guild_id(self) -> i64 {
+        match self {
+            Self::Guild(guild_id) | Self::Survey(guild_id, _) => guild_id,
+        }
+    }
+}
+
 impl SurveyRuntimeState {
+    fn replace_active_guilds(&self, guild_ids: &[u64]) {
+        let guilds = guild_ids
+            .iter()
+            .filter_map(|&guild_id| i64::try_from(guild_id).ok())
+            .collect();
+        *self
+            .active_guilds
+            .lock()
+            .expect("survey active guild registry poisoned") = guilds;
+    }
+
+    fn recovery_scopes(&self, scope: Option<(i64, i64)>) -> Vec<SurveyRecoveryScope> {
+        match scope {
+            Some((guild_id, survey_id)) => {
+                vec![SurveyRecoveryScope::Survey(guild_id, survey_id)]
+            }
+            None => self
+                .active_guilds
+                .lock()
+                .expect("survey active guild registry poisoned")
+                .iter()
+                .copied()
+                .map(SurveyRecoveryScope::Guild)
+                .collect(),
+        }
+    }
+
+    fn response_edit_is_due(&self, key: SurveyResponseKey) -> bool {
+        if self
+            .permanently_uneditable_responses
+            .lock()
+            .expect("survey permanent edit registry poisoned")
+            .contains(&key)
+        {
+            return false;
+        }
+        self.response_edit_retries
+            .lock()
+            .expect("survey response retry registry poisoned")
+            .get(&key)
+            .is_none_or(|retry| Instant::now() >= retry.retry_at)
+    }
+
+    fn defer_response_edit(&self, key: SurveyResponseKey) -> Duration {
+        let mut retries = self
+            .response_edit_retries
+            .lock()
+            .expect("survey response retry registry poisoned");
+        let failures = retries
+            .get(&key)
+            .map_or(1, |retry| retry.failures.saturating_add(1));
+        let exponent = failures.saturating_sub(1).min(6);
+        let delay = SURVEY_RECOVERY_WAKE_INTERVAL
+            .saturating_mul(1_u32 << exponent)
+            .min(SURVEY_RESPONSE_RETRY_MAX_INTERVAL);
+        retries.insert(
+            key,
+            SurveyResponseEditRetry {
+                failures,
+                retry_at: Instant::now() + delay,
+            },
+        );
+        delay
+    }
+
+    fn clear_response_edit_failure(&self, key: SurveyResponseKey) {
+        self.response_edit_retries
+            .lock()
+            .expect("survey response retry registry poisoned")
+            .remove(&key);
+        self.permanently_uneditable_responses
+            .lock()
+            .expect("survey permanent edit registry poisoned")
+            .remove(&key);
+    }
+
     fn response_lock(&self, survey_id: i64, discord_id: i64) -> Arc<AsyncMutex<()>> {
         self.response_locks
             .lock()
@@ -357,47 +473,67 @@ impl SurveyRuntimeState {
     async fn recover(self: &Arc<Self>, scope: Option<(i64, i64)>) -> Result<usize, String> {
         let _delivery = self.delivery_lock.lock().await;
         let mut delivered = 0usize;
-        loop {
-            self.reconcile_receipts(scope).await?;
-            let repository = self.repository.clone();
-            sqlite("queue survey retries", move || {
-                repository
-                    .queue_requested_delivery_retries()
-                    .map_err(|error| error.to_string())
-            })
-            .await?;
-            let repository = self.repository.clone();
-            sqlite("recover stale survey claims", move || {
-                repository
-                    .recover_stale_deliveries(policy::DELIVERY_STALE_SECONDS)
-                    .map_err(|error| error.to_string())
-            })
-            .await?;
-            let repository = self.repository.clone();
-            let claims = sqlite("claim survey deliveries", move || {
-                repository
-                    .claim_deliveries(policy::DELIVERY_BATCH_SIZE, policy::DELIVERY_STALE_SECONDS)
-                    .map_err(|error| error.to_string())
-            })
-            .await?;
-            if claims.is_empty() {
-                break;
-            }
-            delivered = delivered.saturating_add(claims.len());
-            let mut tasks = tokio::task::JoinSet::new();
-            for claim in claims {
-                let state = Arc::clone(self);
-                tasks.spawn(async move { state.deliver(claim).await });
-            }
-            while let Some(result) = tasks.join_next().await {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(message)) => warn!(error = %message, "survey delivery attempt failed"),
-                    Err(error) => warn!(%error, "survey delivery task panicked"),
+        for recovery_scope in self.recovery_scopes(scope) {
+            loop {
+                self.reconcile_receipts(recovery_scope).await?;
+                let repository = self.repository.clone();
+                let guild_id = recovery_scope.guild_id();
+                sqlite("queue survey retries", move || {
+                    repository
+                        .queue_requested_delivery_retries_for_guild(Some(guild_id))
+                        .map_err(|error| error.to_string())
+                })
+                .await?;
+                let repository = self.repository.clone();
+                sqlite("recover stale survey claims", move || {
+                    repository
+                        .recover_stale_deliveries_for_guild(
+                            Some(guild_id),
+                            policy::DELIVERY_STALE_SECONDS,
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .await?;
+                let repository = self.repository.clone();
+                let claims = sqlite("claim survey deliveries", move || {
+                    let result = match recovery_scope {
+                        SurveyRecoveryScope::Guild(_) => repository.claim_deliveries_for_guild(
+                            Some(guild_id),
+                            policy::DELIVERY_BATCH_SIZE,
+                            policy::DELIVERY_STALE_SECONDS,
+                        ),
+                        SurveyRecoveryScope::Survey(_, survey_id) => repository
+                            .claim_deliveries_for_survey(
+                                guild_id,
+                                survey_id,
+                                policy::DELIVERY_BATCH_SIZE,
+                                policy::DELIVERY_STALE_SECONDS,
+                            ),
+                    };
+                    result.map_err(|error| error.to_string())
+                })
+                .await?;
+                if claims.is_empty() {
+                    break;
+                }
+                delivered = delivered.saturating_add(claims.len());
+                let mut tasks = tokio::task::JoinSet::new();
+                for claim in claims {
+                    let state = Arc::clone(self);
+                    tasks.spawn(async move { state.deliver(claim).await });
+                }
+                while let Some(result) = tasks.join_next().await {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(message)) => {
+                            warn!(error = %message, "survey delivery attempt failed")
+                        }
+                        Err(error) => warn!(%error, "survey delivery task panicked"),
+                    }
                 }
             }
+            self.reconcile_response_messages(recovery_scope).await?;
         }
-        self.reconcile_response_messages().await?;
         Ok(delivered)
     }
 
@@ -486,7 +622,9 @@ impl SurveyRuntimeState {
             .await?
                 && latest.survey.status == db::SurveyStatus::Closed
             {
-                self.reconcile_response(latest).await?;
+                self.reconcile_response(latest)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
         }
         Ok(())
@@ -509,16 +647,24 @@ impl SurveyRuntimeState {
         .await
     }
 
-    async fn reconcile_receipts(&self, scope: Option<(i64, i64)>) -> Result<usize, String> {
+    async fn reconcile_receipts(&self, scope: SurveyRecoveryScope) -> Result<usize, String> {
         let repository = self.repository.clone();
         let recipients = sqlite("list unconfirmed survey deliveries", move || {
-            repository
-                .list_unconfirmed_deliveries(
-                    scope,
-                    policy::DELIVERY_STALE_SECONDS,
-                    policy::DELIVERY_RECEIPT_GRACE_SECONDS,
-                )
-                .map_err(|error| error.to_string())
+            let result = match scope {
+                SurveyRecoveryScope::Guild(guild_id) => repository
+                    .list_unconfirmed_deliveries_for_guild(
+                        guild_id,
+                        policy::DELIVERY_STALE_SECONDS,
+                        policy::DELIVERY_RECEIPT_GRACE_SECONDS,
+                    ),
+                SurveyRecoveryScope::Survey(guild_id, survey_id) => repository
+                    .list_unconfirmed_deliveries(
+                        Some((guild_id, survey_id)),
+                        policy::DELIVERY_STALE_SECONDS,
+                        policy::DELIVERY_RECEIPT_GRACE_SECONDS,
+                    ),
+            };
+            result.map_err(|error| error.to_string())
         })
         .await?;
         let count = recipients.len();
@@ -584,14 +730,27 @@ impl SurveyRuntimeState {
         Ok(count)
     }
 
-    async fn reconcile_response_messages(self: &Arc<Self>) -> Result<usize, String> {
+    async fn reconcile_response_messages(
+        self: &Arc<Self>,
+        scope: SurveyRecoveryScope,
+    ) -> Result<usize, String> {
         let repository = self.repository.clone();
         let sessions = sqlite("list recoverable survey responses", move || {
             repository
-                .list_recoverable_response_sessions()
+                .list_recoverable_response_sessions_for_guild(Some(scope.guild_id()))
                 .map_err(|error| error.to_string())
         })
         .await?;
+        let sessions = sessions
+            .into_iter()
+            .filter(|session| match scope {
+                SurveyRecoveryScope::Guild(_) => true,
+                SurveyRecoveryScope::Survey(_, survey_id) => session.survey.survey_id == survey_id,
+            })
+            .filter(|session| {
+                self.response_edit_is_due((session.survey.survey_id, session.recipient.discord_id))
+            })
+            .collect::<Vec<_>>();
         let count = sessions.len();
         let mut tasks = tokio::task::JoinSet::new();
         for session in sessions {
@@ -653,9 +812,47 @@ impl SurveyRuntimeState {
             .copied()
             != Some(fingerprint);
         if changed {
-            self.discord
+            match self
+                .discord
                 .survey_edit_dm(channel_id, message_id, render_message(&latest)?)
-                .await?;
+                .await
+            {
+                Ok(()) => self.clear_response_edit_failure(key),
+                Err(error) if error.kind == SurveyEditErrorKind::Unavailable => {
+                    let delay = self.defer_response_edit(key);
+                    return Err(format!(
+                        "{}; retrying in {}s",
+                        error.message,
+                        delay.as_secs()
+                    ));
+                }
+                Err(error) => {
+                    if latest.recipient.submitted_at.is_some()
+                        || latest.survey.status == db::SurveyStatus::Closed
+                    {
+                        let repository = self.repository.clone();
+                        sqlite("retire inaccessible survey response controls", move || {
+                            repository
+                                .finalize_response_ui(survey_id, discord_id, message_id)
+                                .map(drop)
+                                .map_err(|error| error.to_string())
+                        })
+                        .await?;
+                    } else {
+                        self.permanently_uneditable_responses
+                            .lock()
+                            .expect("survey permanent edit registry poisoned")
+                            .insert(key);
+                    }
+                    warn!(
+                        survey_id,
+                        discord_id,
+                        error = %error.message,
+                        "survey response edit retired after permanent Discord rejection"
+                    );
+                    return Ok(());
+                }
+            }
             self.fingerprints
                 .lock()
                 .expect("survey fingerprint lock poisoned")
@@ -722,6 +919,12 @@ impl GatewayEventObserver for SurveyReadyRecoveryObserver {
             report.guilds_superseded = context.guild_ids().len();
             return report;
         };
+        self.state.replace_active_guilds(context.guild_ids());
+        self.state
+            .response_edit_retries
+            .lock()
+            .expect("survey response retry registry poisoned")
+            .clear();
         let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
         match self.state.recover(None).await {
             Ok(recovered) => {
@@ -1298,7 +1501,7 @@ impl SurveyInteractionHandler {
         let survey_id = integer_option(options, "survey_id")?;
         let _delivery = self.state.delivery_lock.lock().await;
         self.state
-            .reconcile_receipts(Some((guild_id, survey_id)))
+            .reconcile_receipts(SurveyRecoveryScope::Survey(guild_id, survey_id))
             .await?;
         let repository = self.state.repository.clone();
         let survey = sqlite("close survey", move || {
@@ -1308,10 +1511,12 @@ impl SurveyInteractionHandler {
         })
         .await?;
         self.state
-            .reconcile_receipts(Some((guild_id, survey_id)))
+            .reconcile_receipts(SurveyRecoveryScope::Survey(guild_id, survey_id))
             .await?;
         drop(_delivery);
-        self.state.reconcile_response_messages().await?;
+        self.state
+            .reconcile_response_messages(SurveyRecoveryScope::Survey(guild_id, survey_id))
+            .await?;
         followup(
             responder.as_ref(),
             InteractionResponse::message(format!(

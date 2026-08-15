@@ -26,6 +26,7 @@ struct WheelFixture {
     target_index: usize,
     is_bankrupt: bool,
     is_golden: bool,
+    display_name: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wedges,
         fixture.wheel.target_index,
         fixture.wheel.is_golden,
+        fixture.wheel.display_name.as_deref(),
     )?;
     if wheel.filename != "wheel.gif" {
         return Err(format!("unexpected wheel attachment name: {}", wheel.filename).into());

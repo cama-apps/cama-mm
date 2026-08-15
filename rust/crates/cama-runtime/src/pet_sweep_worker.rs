@@ -4,6 +4,7 @@
 //! keeps both on Tokio's blocking pool, returns fully owned notices/media, and
 //! never holds either service across a Discord await.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,6 +31,7 @@ use cama_app::pet_sqlite::SqlitePetCommandService;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::pet_brawl_repository::PetBrawlRepository;
+use cama_db::pet_repository::PetRepository;
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::pet::{
     DeathNotice, EvolutionNotice, HatchNotice, PET_BRAWL_ACTIVE_TTL_SECONDS, Pet, PetMood,
@@ -38,11 +40,12 @@ use cama_domain::pet::{
 use cama_domain::pet_evolution::{PetCalling, PetInstinct};
 use chrono::Utc;
 use rusqlite::{Connection, params};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::SerenityDiscordTransport;
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::DiscordMessage;
+use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::pet_death_delivery::is_active as direct_death_delivery_active;
 use crate::registration::{InteractionAttachment, InteractionEmbed, InteractionResponse};
 use crate::reminder_provider::ReminderHooks;
@@ -264,7 +267,7 @@ pub enum PetSweepDeliveryError {
 /// Cache/HTTP boundary used by the worker. Channel discovery is deliberately
 /// cache-only and guild-scoped, matching `bot.get_guild().get_channel()`.
 #[async_trait]
-pub trait PetSweepDiscordPort: Send + Sync {
+pub trait PetSweepDiscordPort: FirstGamePoolGuildSource + Send + Sync {
     async fn cached_text_channel(
         &self,
         guild_id: i64,
@@ -446,6 +449,17 @@ impl PetSweepWorker {
         })
         .await
         .map_err(|error| format!("pet brawl sweep task failed: {error}"))?
+    }
+
+    async fn worker_state_guild_ids(&self) -> Result<Vec<i64>, String> {
+        let database_path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            PetRepository::new(database_path)
+                .list_worker_guild_ids()
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("pet guild-inventory task failed: {error}"))?
     }
 
     async fn sweep_pets(&self) -> Result<SweepOutcome, String> {
@@ -675,6 +689,31 @@ impl PetSweepWorker {
     }
 
     async fn sweep_once(&self, context: &WorkerContext) {
+        let live_guilds = match self.discord.live_guild_ids() {
+            Ok(guilds) => guilds.into_iter().collect::<BTreeSet<_>>(),
+            Err(error) => {
+                warn!(%error, "pet live-guild inventory failed; skipping sweep");
+                return;
+            }
+        };
+        let persisted_guilds = match self.worker_state_guild_ids().await {
+            Ok(guilds) => guilds,
+            Err(error) => {
+                warn!(%error, "pet persisted-guild inventory failed; skipping sweep");
+                return;
+            }
+        };
+        let foreign_guilds = persisted_guilds
+            .into_iter()
+            .filter(|guild_id| !live_guilds.contains(guild_id))
+            .collect::<Vec<_>>();
+        if !foreign_guilds.is_empty() {
+            debug!(
+                ?foreign_guilds,
+                "pet sweep skipped because the database contains non-live guild state"
+            );
+            return;
+        }
         if let Err(error) = self.sweep_brawls().await {
             warn!(%error, "pet brawl stale sweep failed");
         }

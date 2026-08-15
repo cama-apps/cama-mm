@@ -1802,9 +1802,15 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let now = unix_now();
-            let result = self
-                .resume_boss(user_id, guild_id, option_index, now)
-                .await?;
+            let result = match self.resume_boss(user_id, guild_id, option_index, now).await {
+                Ok(result) => result,
+                Err(error) => {
+                    return responder
+                        .followup(boss_error_response(error))
+                        .await
+                        .map_err(|error| error.to_string());
+                }
+            };
             if boss_resume_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }
@@ -2582,9 +2588,18 @@ impl DigInteractionHandler {
                     .await
                     .map_err(|error| error.to_string())?;
                 let now = unix_now();
-                let result = self
+                let result = match self
                     .start_boss(user_id, guild_id, risk_tier, wager, now)
-                    .await?;
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return responder
+                            .followup(boss_error_response(error))
+                            .await
+                            .map_err(|error| error.to_string());
+                    }
+                };
                 if boss_start_is_resolved(&result) {
                     self.reconcile_resolved_boss(user_id, guild_id, now).await;
                 }
@@ -2878,9 +2893,18 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let now = unix_now();
-            let result = self
+            let result = match self
                 .start_boss(user_id, guild_id, risk_tier, wager, now)
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return responder
+                        .followup(boss_error_response(error))
+                        .await
+                        .map_err(|error| error.to_string());
+                }
+            };
             if boss_start_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }
@@ -6807,6 +6831,16 @@ fn prestige_mutation_response(
         &mutation.forced.description,
         false,
     );
+    embed = embed.field(
+        "Choose a Mutation",
+        mutation
+            .choices
+            .iter()
+            .map(|choice| format!("**{}** — {}", choice.name, choice.description))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        false,
+    );
     let buttons = mutation
         .choices
         .iter()
@@ -6833,19 +6867,21 @@ fn prestige_perk_response(
     view_token: &str,
     mutation_choice: Option<&str>,
 ) -> InteractionResponse {
-    let mut embed = prestige_preview_embed(preview);
-    if let Some(mutation_id) = mutation_choice
-        && let Some(mutation) = preview
-            .mutation
-            .as_ref()
-            .and_then(|roll| roll.choices.iter().find(|choice| choice.id == mutation_id))
-    {
-        embed = embed.field(
-            format!("Mutation Selected: {}", mutation.name),
-            &mutation.description,
-            false,
-        );
-    }
+    let perk_lines = preview
+        .offered_perks
+        .iter()
+        .map(|perk| format!("**{}**", perk.name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let embed = if mutation_choice.is_some() {
+        // Python sends a fresh, deliberately minimal perk picker after the
+        // mutation click instead of carrying the mutation preview forward.
+        InteractionEmbed::titled("Choose a Prestige Perk")
+            .description(perk_lines)
+            .color(0xFF_D7_00)
+    } else {
+        prestige_preview_embed(preview).field("Choose a Perk", perk_lines, false)
+    };
     let mutation = mutation_choice.unwrap_or("_");
     let buttons = preview
         .offered_perks
@@ -7710,14 +7746,15 @@ fn artifact_name(artifact_id: &str) -> String {
 
 fn layer_color(layer: cama_app::dig_service::Layer) -> u32 {
     match layer.name {
-        "Dirt" => 0x8E_6E_53,
-        "Stone" => 0x95_A5_A6,
-        "Crystal" => 0x9B_59_B6,
-        "Magma" => 0xE7_4C_3C,
-        "Abyss" => 0x34_49_5E,
-        "Fungal Depths" => 0x2E_CC_71,
-        "Frozen Core" => 0x74_B9_FF,
-        _ => PUBLIC_COLOR,
+        "Dirt" => 0x8B_45_13,
+        "Stone" => 0x80_80_80,
+        "Crystal" => 0x00_CE_D1,
+        "Magma" => 0xFF_45_00,
+        "Abyss" => 0x2F_00_47,
+        "Fungal Depths" => 0x7C_FC_00,
+        "Frozen Core" => 0x87_CE_EB,
+        "The Hollow" => 0x0D_0D_0D,
+        _ => 0x8B_45_13,
     }
 }
 
@@ -7828,6 +7865,183 @@ fn pickaxe_name(tier: i64) -> &'static str {
         .map_or("Unknown Pickaxe", |pickaxe| pickaxe.name)
 }
 
+fn python_dig_result_embed(
+    result: &DigRuntimeResult,
+    title: &str,
+    display_name: &str,
+    avatar: Option<String>,
+    narrative: Option<&str>,
+    callback_reference: Option<&str>,
+) -> InteractionEmbed {
+    let layer = layer_at(result.depth_after);
+    let mut embed = InteractionEmbed::titled(title).color(layer_color(layer));
+    if let Some(narrative) = narrative.filter(|narrative| !narrative.is_empty()) {
+        embed = embed.field("\u{200b}", format!("*{narrative}*"), false);
+    }
+    if !result.cave_in || result.advance > 0 || result.jc_earned > 0 {
+        let mut progress = format!(
+            "+{} blocks | +{} {JOPACOIN_EMOTE}",
+            result.advance, result.jc_earned
+        );
+        if result.pet_dig_bonus > 0
+            && let Some(pet_name) = result.pet_name.as_deref()
+        {
+            progress.push_str(&format!(
+                "\n🐾 {pet_name} excavated +{} blocks",
+                result.pet_dig_bonus
+            ));
+        }
+        if result.bankruptcy_penalty > 0 {
+            progress.push_str(&format!(
+                "\n−{} {JOPACOIN_EMOTE} withheld while bankrupt",
+                result.bankruptcy_penalty
+            ));
+        }
+        if result.vanity_tax > 0 {
+            progress.push_str(&format!(
+                "\n−{} {JOPACOIN_EMOTE} vanity tax",
+                result.vanity_tax
+            ));
+        }
+        embed = embed.field("Progress", progress, false);
+    }
+    if result.relic_trim_notice {
+        embed = embed.field(
+            "Relic slots capped",
+            "Relics are now capped at **6**. Your extra relics were unequipped and are safe in your inventory — re-pick with `/dig gear`.",
+            false,
+        );
+    }
+    if result.cave_in {
+        let detail = result
+            .cave_in_detail
+            .as_deref()
+            .and_then(|detail| serde_json::from_str::<serde_json::Value>(detail).ok());
+        let block_loss = detail
+            .as_ref()
+            .and_then(|detail| detail.get("block_loss"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_else(|| result.depth_before.saturating_sub(result.depth_after));
+        let jc_lost = detail
+            .as_ref()
+            .and_then(|detail| detail.get("jc_lost"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        let cave_type = detail
+            .as_ref()
+            .and_then(|detail| detail.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = detail
+            .as_ref()
+            .and_then(|detail| detail.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let mut value = format!("Lost **{block_loss}** blocks");
+        if jc_lost > 0 {
+            value.push_str(&format!(" and **{jc_lost}** {JOPACOIN_EMOTE}"));
+        }
+        if !message.is_empty() {
+            value.push_str(&format!(". {message}"));
+        }
+        embed = embed.field(
+            if cave_type == "catastrophic" {
+                "CATASTROPHIC CAVE-IN!"
+            } else {
+                "Cave-in!"
+            },
+            value,
+            false,
+        );
+    }
+    if result.milestone_bonus > 0 {
+        embed = embed.field(
+            "DIG DUG! Milestone!",
+            format!("+{} {JOPACOIN_EMOTE}", result.milestone_bonus),
+            false,
+        );
+    }
+    if result.streak_bonus > 0 {
+        embed = embed.field(
+            "Streak Bonus",
+            format!("+{} {JOPACOIN_EMOTE}", result.streak_bonus),
+            true,
+        );
+    }
+    if let Some(artifact_id) = result.artifact_id.as_deref() {
+        let artifact_name = cama_app::dig_loot::artifact_catalog()
+            .into_iter()
+            .find(|artifact| artifact.id == artifact_id)
+            .map_or_else(
+                || artifact_id.replace('_', " "),
+                |artifact| artifact.name.to_owned(),
+            );
+        embed = embed.field("Artifact Found!", format!("**{artifact_name}**"), false);
+    }
+    if !result.items_used.is_empty() {
+        embed = embed.field("Items Used", result.items_used.join(", "), true);
+    }
+    if result.luminosity_drained > 0 || result.luminosity_after < 100 {
+        let luminosity = result.luminosity_after.clamp(0, 100);
+        let filled = usize::try_from(luminosity / 10).unwrap_or_default();
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+        let level = if luminosity >= 76 {
+            "Bright"
+        } else if luminosity >= 51 {
+            "Dim"
+        } else if luminosity >= 26 {
+            "Dark"
+        } else {
+            "Pitch Black"
+        };
+        let mut value = format!("`[{bar}]` {luminosity}% — {level}");
+        if result.luminosity_drained > 0 {
+            value.push_str(&format!(" (-{})", result.luminosity_drained));
+        }
+        embed = embed.field("Luminosity", value, false);
+    }
+    if let Some(corruption) = result
+        .corruption_description
+        .as_deref()
+        .filter(|description| !description.is_empty())
+    {
+        embed = embed.field("Corruption", corruption, false);
+    }
+    if let Some(boundary) = result.boss_boundary {
+        embed = embed.field(
+            "Boss boundary",
+            format!("A boss encounter begins at depth {boundary}."),
+            false,
+        );
+    }
+    let mut footer = result.tip.clone();
+    if !result.mutation_names.is_empty() {
+        footer = format!(
+            "Mutations: {}{}",
+            result.mutation_names.join(", "),
+            if footer.is_empty() {
+                String::new()
+            } else {
+                format!(" | {footer}")
+            }
+        );
+    }
+    if let Some(callback) = callback_reference.filter(|callback| !callback.is_empty()) {
+        footer = if footer.is_empty() {
+            callback.to_owned()
+        } else {
+            format!("{footer} | {callback}")
+        };
+    }
+    if !footer.is_empty() {
+        embed = embed.footer(footer);
+    }
+    if let Some(avatar) = avatar {
+        embed = embed.author(display_name, Some(avatar));
+    }
+    embed
+}
+
 fn dig_responses(
     result: &DigRuntimeResult,
     display_name: &str,
@@ -7844,51 +8058,11 @@ fn dig_responses(
     }
     let layer = layer_at(result.depth_after);
     let title = if result.first_dig {
-        "Your first tunnel opens"
+        "Your first tunnel opens".to_owned()
     } else {
-        "Dig complete"
+        format!("{} — Depth {}", result.tunnel_name, result.depth_after)
     };
-    let mut embed = InteractionEmbed::titled(title)
-        .description(format!(
-            "**{display_name}** reached **{}** blocks in **{}**.\nAdvanced **{}** blocks and earned **{}** {JOPACOIN_EMOTE}. Balance: **{}** {JOPACOIN_EMOTE}.",
-            result.depth_after, layer.name, result.advance, result.jc_earned, result.balance_after
-        ))
-        .color(layer_color(layer))
-        .field(
-            "Depth",
-            format!("{} → {}", result.depth_before, result.depth_after),
-            true,
-        )
-        .field("Layer", layer.name, true);
-    if let Some(weather) = result.weather.as_ref() {
-        embed = embed.field(
-            "Weather",
-            format!("**{}**\n{}", weather.name, weather.description),
-            false,
-        );
-    }
-    if result.cave_in {
-        embed = embed.footer("The cave-in was contained; inspect your tunnel before the next dig.");
-    }
-    if let Some(boundary) = result.boss_boundary {
-        embed = embed.field(
-            "Boss boundary",
-            format!("A boss encounter begins at depth {boundary}."),
-            false,
-        );
-    }
-    if !result.items_used.is_empty() {
-        embed = embed.field("Consumed", result.items_used.join(", "), false);
-    }
-    if let Some(artifact_id) = result.artifact_id.as_deref() {
-        embed = embed.field("Artifact found", artifact_id, false);
-    }
-    if result.route_choice_required {
-        embed = embed.footer("Choose a route before your next dig.");
-    }
-    if let Some(avatar) = avatar {
-        embed = embed.author(display_name, Some(avatar));
-    }
+    let mut embed = python_dig_result_embed(result, &title, display_name, avatar, None, None);
     let mut attachments = Vec::new();
     if let Some(layer_art) = media.layer_thumbnail(layer.name) {
         embed = embed.thumbnail(format!("attachment://{}", layer_art.filename));
@@ -7949,55 +8123,20 @@ fn dig_delivery_responses(
         );
     }
     let projected = dig_blood_pact_projected_outcome(delivery);
-    let description = if matches!(
-        render.kind,
-        DigRuntimeRenderKind::Normal | DigRuntimeRenderKind::Event
-    ) && matches!(
-        delivery.blood_pact,
-        DigRuntimeBloodPactSnapshot::Applied { skimmed } if skimmed > 0
-    ) {
-        format!(
-            "**{}** reached **{}** blocks in **{}**.\nAdvanced **{}** blocks and earned **{}** JC. Balance: **{}** JC.",
-            delivery.context.display_name,
-            projected.depth_after,
-            render.layer_name,
-            projected.advance,
-            projected.jc_earned,
-            projected.balance_after,
-        )
-    } else {
-        render.description.clone()
+    let callback_reference = match &delivery.flavor {
+        DigRuntimeFlavorSnapshot::Applied {
+            callback_reference, ..
+        } => callback_reference.as_deref(),
+        DigRuntimeFlavorSnapshot::Pending | DigRuntimeFlavorSnapshot::Skipped => None,
     };
-    let mut embed = InteractionEmbed::titled(render.title.clone())
-        .description(description)
-        .color(render.layer_color)
-        .field("Depth", render.depth_transition.clone(), true)
-        .field("Layer", render.layer_name.clone(), true);
-    if let Some(narrative) = render.flavor_narrative.as_deref() {
-        embed = embed.field("\u{200b}", format!("*{narrative}*"), false);
-    }
-    if let Some(footer) = render.footer.as_deref() {
-        embed = embed.footer(footer);
-    }
-    if let Some(boundary) = render.boss_boundary_copy.as_deref() {
-        embed = embed.field("Boss boundary", boundary, false);
-    }
-    if let Some(consumed) = render.consumed_copy.as_deref() {
-        embed = embed.field("Consumed", consumed, false);
-    }
-    if let Some(artifact) = render.artifact_name.as_deref() {
-        embed = embed.field("Artifact found", artifact, false);
-    }
-    if let Some(weather) = render.weather.as_ref() {
-        embed = embed.field(
-            "Weather",
-            format!("**{}**\n{}", weather.name, weather.description),
-            false,
-        );
-    }
-    if let Some(notice) = render.relic_trim_notice_copy.as_deref() {
-        embed = embed.field("Relic loadout updated", notice, false);
-    }
+    let mut embed = python_dig_result_embed(
+        &projected,
+        &render.title,
+        &delivery.context.display_name,
+        delivery.context.avatar_url.clone(),
+        render.flavor_narrative.as_deref(),
+        callback_reference,
+    );
     if render.event_kind == Some(cama_app::dig_runtime::DigRuntimeEventKind::Simple)
         && let Some(event) = render.event.as_ref()
     {
@@ -8006,9 +8145,6 @@ fn dig_delivery_responses(
             |art| format!("```\n{art}\n```\n{}", event.description),
         );
         embed = embed.field("\u{200b}", value, false);
-    }
-    if let Some(avatar) = delivery.context.avatar_url.clone() {
-        embed = embed.author(&delivery.context.display_name, Some(avatar));
     }
     let mut attachments = Vec::new();
     if let Some(layer_art) = media.layer_thumbnail(&render.layer_media_key) {
@@ -8722,6 +8858,14 @@ fn boss_start_response(
     }
 }
 
+fn boss_error_response(error: impl Into<String>) -> InteractionResponse {
+    InteractionResponse::message("").embed(
+        InteractionEmbed::titled("Boss Fight Error")
+            .description(error)
+            .color(0xFF_A5_00),
+    )
+}
+
 fn boss_resume_response(
     result: &DigBossCallResult<DigBossResolvedOutcome>,
     media: &DigMediaRuntime,
@@ -8847,13 +8991,16 @@ fn event_resolution_response(
     outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
 ) -> InteractionResponse {
     if !outcome.success {
-        return InteractionResponse::message(
-            outcome
-                .error
-                .clone()
-                .unwrap_or_else(|| "Event choice could not be resolved.".to_owned()),
-        )
-        .ephemeral();
+        return InteractionResponse::message("").ephemeral().embed(
+            InteractionEmbed::titled("Event Failed")
+                .description(
+                    outcome
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Something went wrong.".to_owned()),
+                )
+                .color(0xFF_44_44),
+        );
     }
     let Some(resolution) = outcome.resolution.as_ref() else {
         return InteractionResponse::message("Nothing happened.").ephemeral();
@@ -9209,6 +9356,75 @@ mod tests {
     const USER: u64 = 77_001;
     const GUILD: u64 = 77_002;
     const CHANNEL: u64 = 77_003;
+
+    #[test]
+    fn prestige_picker_embeds_match_python_presentation() {
+        use cama_app::dig_prestige_runtime::{
+            DigPrestigePreview, PrestigeMutationChoice, PrestigeMutationPreview, PrestigePerkChoice,
+        };
+
+        let mutation_choice = PrestigeMutationChoice {
+            id: "bright".to_owned(),
+            name: "Bright Vein".to_owned(),
+            description: "More treasure, more danger.".to_owned(),
+            positive: true,
+        };
+        let preview = DigPrestigePreview {
+            can_prestige: true,
+            reason: None,
+            current_level: 7,
+            target_level: 8,
+            run_score: 4_200,
+            available_perks: vec!["steady_hands".to_owned()],
+            offered_perks: vec![
+                PrestigePerkChoice {
+                    id: "steady_hands".to_owned(),
+                    name: "Steady Hands".to_owned(),
+                },
+                PrestigePerkChoice {
+                    id: "deep_pockets".to_owned(),
+                    name: "Deep Pockets".to_owned(),
+                },
+            ],
+            mutation: Some(PrestigeMutationPreview {
+                forced: PrestigeMutationChoice {
+                    id: "brittle".to_owned(),
+                    name: "Brittle Stone".to_owned(),
+                    description: "Cave-ins strike harder.".to_owned(),
+                    positive: false,
+                },
+                choices: vec![mutation_choice],
+            }),
+            ascension_unlock: None,
+        };
+
+        let mutation = super::prestige_mutation_response(&preview, "token");
+        let mutation_embed = &mutation.embeds[0];
+        assert_eq!(mutation_embed.title.as_deref(), Some("Prestige to P8?"));
+        assert!(mutation_embed.fields.iter().any(|field| {
+            field.name == "Choose a Mutation"
+                && field.value == "**Bright Vein** — More treasure, more danger."
+        }));
+
+        let initial_perks = super::prestige_perk_response(&preview, "token", None);
+        let initial_embed = &initial_perks.embeds[0];
+        assert_eq!(initial_embed.title.as_deref(), Some("Prestige to P8?"));
+        assert!(initial_embed.fields.iter().any(|field| {
+            field.name == "Choose a Perk" && field.value == "**Steady Hands**\n**Deep Pockets**"
+        }));
+
+        let post_mutation = super::prestige_perk_response(&preview, "token", Some("bright"));
+        let post_mutation_embed = &post_mutation.embeds[0];
+        assert_eq!(
+            post_mutation_embed.title.as_deref(),
+            Some("Choose a Prestige Perk")
+        );
+        assert_eq!(
+            post_mutation_embed.description.as_deref(),
+            Some("**Steady Hands**\n**Deep Pockets**")
+        );
+        assert!(post_mutation_embed.fields.is_empty());
+    }
 
     fn persistent_vanity_tax(
         database_path: impl AsRef<std::path::Path>,
@@ -9688,12 +9904,14 @@ mod tests {
             &provider.handler.state.view_nonce,
         );
         assert!(event.is_none());
-        let description = response.embeds[0]
-            .description
-            .as_deref()
-            .expect("Blood Pact delivery description");
-        assert!(description.contains(&format!("earned **{}** JC", gross - skimmed)));
-        assert!(!description.contains(&format!("earned **{gross}** JC")));
+        let progress = response.embeds[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "Progress")
+            .map(|field| field.value.as_str())
+            .expect("Blood Pact delivery progress");
+        assert!(progress.contains(&format!("+{} {JOPACOIN_EMOTE}", gross - skimmed)));
+        assert!(!progress.contains(&format!("+{gross} {JOPACOIN_EMOTE}")));
         let connection = Connection::open(database.path()).expect("inspect Blood Pact delivery");
         assert_eq!(
             connection
@@ -10030,6 +10248,50 @@ mod tests {
         assert!(field.value.contains("Ironclad Armor"));
         assert!(field.value.contains("effects disabled"));
         assert!(field.value.contains("Repair All"));
+    }
+
+    #[test]
+    fn boss_failure_uses_python_error_embed() {
+        let response = super::boss_error_response("The guardian refuses the wager.");
+        assert!(response.content.is_empty());
+        let embed = &response.embeds[0];
+        assert_eq!(embed.title.as_deref(), Some("Boss Fight Error"));
+        assert_eq!(
+            embed.description.as_deref(),
+            Some("The guardian refuses the wager.")
+        );
+        assert_eq!(embed.color, Some(0xFF_A5_00));
+    }
+
+    // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
+    #[test]
+    fn failed_event_uses_python_error_embed() {
+        let outcome = cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+            success: false,
+            error: Some("The tunnel rejects that choice.".to_owned()),
+            resolution: None,
+            depth_before: 12,
+            depth_after: 12,
+            balance_after: 50,
+            action_id: Some(17),
+            reward_row_id: None,
+            applied_now: false,
+            splash: None,
+            guild_modifier: None,
+            chain_event: None,
+            quest_finale: None,
+        };
+
+        let response = super::event_resolution_response(&outcome);
+        assert!(response.ephemeral);
+        assert!(response.content.is_empty());
+        let embed = &response.embeds[0];
+        assert_eq!(embed.title.as_deref(), Some("Event Failed"));
+        assert_eq!(
+            embed.description.as_deref(),
+            Some("The tunnel rejects that choice.")
+        );
+        assert_eq!(embed.color, Some(0xFF_44_44));
     }
 
     // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
@@ -10710,6 +10972,15 @@ mod tests {
             jc_earned: 2,
             vanity_tax: 0,
             balance_after: 100,
+            tunnel_name: "Test Tunnel".to_owned(),
+            milestone_bonus: 0,
+            streak_bonus: 0,
+            bankruptcy_penalty: 0,
+            luminosity_after: 100,
+            luminosity_drained: 0,
+            corruption_description: None,
+            mutation_names: Vec::new(),
+            tip: "Keep digging!".to_owned(),
             cave_in: false,
             cave_in_detail: None,
             event_id: None,
@@ -12922,6 +13193,15 @@ mod tests {
             jc_earned: 0,
             vanity_tax: 0,
             balance_after: 100,
+            tunnel_name: "Test Tunnel".to_owned(),
+            milestone_bonus: 0,
+            streak_bonus: 0,
+            bankruptcy_penalty: 0,
+            luminosity_after: 100,
+            luminosity_drained: 0,
+            corruption_description: None,
+            mutation_names: Vec::new(),
+            tip: String::new(),
             cave_in: false,
             cave_in_detail: None,
             event_id: None,
@@ -13847,6 +14127,15 @@ mod tests {
             jc_earned: 6,
             vanity_tax: 0,
             balance_after: 106,
+            tunnel_name: "The Media Mine".to_owned(),
+            milestone_bonus: 0,
+            streak_bonus: 3,
+            bankruptcy_penalty: 0,
+            luminosity_after: 90,
+            luminosity_drained: 10,
+            corruption_description: Some("-1 JC this dig".to_owned()),
+            mutation_names: vec!["Dark Sight".to_owned()],
+            tip: "Keep digging!".to_owned(),
             cave_in: false,
             cave_in_detail: None,
             event_id: Some("underground_stream".to_owned()),
@@ -13892,11 +14181,34 @@ mod tests {
                 .as_deref()
                 .is_some_and(|url| url.starts_with("attachment://layer_"))
         );
+        assert_eq!(
+            stats.embeds[0].title.as_deref(),
+            Some("The Media Mine — Depth 24")
+        );
         assert!(stats.embeds[0].fields.iter().any(|field| {
-            field.name == "Weather"
-                && field.value.contains("Earthworm Migration")
-                && field.value.contains("Worms churn the soil")
+            field.name == "Progress" && field.value.starts_with("+4 blocks | +6")
         }));
+        assert!(stats.embeds[0].fields.iter().any(|field| {
+            field.name == "Luminosity" && field.value == "`[█████████░]` 90% — Bright (-10)"
+        }));
+        assert!(
+            stats.embeds[0]
+                .fields
+                .iter()
+                .any(|field| field.name == "Corruption" && field.value == "-1 JC this dig")
+        );
+        assert!(
+            !stats.embeds[0]
+                .fields
+                .iter()
+                .any(|field| field.name == "Weather"
+                    || field.name == "Depth"
+                    || field.name == "Layer")
+        );
+        assert_eq!(
+            stats.embeds[0].footer.as_deref(),
+            Some("Mutations: Dark Sight | Keep digging!")
+        );
         assert_eq!(
             stats.embeds[0].footer_icon_url.as_deref(),
             Some("attachment://pickaxe_wooden.png")
@@ -13940,6 +14252,15 @@ mod tests {
             jc_earned: 6,
             vanity_tax: 0,
             balance_after: 106,
+            tunnel_name: "The Event Mine".to_owned(),
+            milestone_bonus: 0,
+            streak_bonus: 0,
+            bankruptcy_penalty: 0,
+            luminosity_after: 0,
+            luminosity_drained: 10,
+            corruption_description: None,
+            mutation_names: Vec::new(),
+            tip: "Keep digging!".to_owned(),
             cave_in: false,
             cave_in_detail: None,
             event_id: Some("underground_stream".to_owned()),

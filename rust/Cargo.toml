@@ -20,6 +20,7 @@ chrono = "0.4.44"
 fs2 = "0.4.3"
 fastrand = "2.3.0"
 flate2 = "1.1.9"
+fontdue = "0.9.4"
 gif = "0.14.2"
 getrandom = "0.4.3"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }

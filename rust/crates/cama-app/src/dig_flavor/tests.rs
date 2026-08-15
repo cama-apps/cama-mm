@@ -414,6 +414,36 @@ fn test_valid_minimal_args_returns_result() {
 }
 
 #[test]
+fn flavor_tool_projection_accepts_finite_numeric_strings_like_python() {
+    let values = BTreeMap::from([
+        (
+            "narrative".to_owned(),
+            AiValue::Text("The walls weep dust.".to_owned()),
+        ),
+        (
+            "flavor_bonus_pct".to_owned(),
+            AiValue::Text(" 2.5 ".to_owned()),
+        ),
+    ]);
+
+    assert_eq!(
+        flavor_tool_args_from_values(&values).flavor_bonus_pct,
+        Some(2.5)
+    );
+
+    for invalid in ["NaN", "Infinity", "not-a-number"] {
+        let invalid_values = BTreeMap::from([(
+            "flavor_bonus_pct".to_owned(),
+            AiValue::Text(invalid.to_owned()),
+        )]);
+        assert_eq!(
+            flavor_tool_args_from_values(&invalid_values).flavor_bonus_pct,
+            None
+        );
+    }
+}
+
+#[test]
 fn test_empty_narrative_rejected() {
     let (events, tone, cap) = validation_context();
     let mut args = valid_args();
