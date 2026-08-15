@@ -173,11 +173,12 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
 NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 5)
 RD_PRIORITY_WEIGHT = _parse_float("RD_PRIORITY_WEIGHT", 0.2)
 
-JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 5)
+# Base Dota rewards are source-controlled so deployments cannot silently drift.
+JOPACOIN_PER_GAME = 5
 STREAMING_BONUS = _parse_int("STREAMING_BONUS", 1)  # JC awarded for Go Live + Dota 2
 FIRST_GAME_POOL_DAILY_AMOUNT = _parse_int("FIRST_GAME_POOL_DAILY_AMOUNT", 100)
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
-JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 10)
+JOPACOIN_WIN_REWARD = 10
 JOPACOIN_EXCLUSION_REWARD = _parse_int("JOPACOIN_EXCLUSION_REWARD", 5)
 BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 1200)  # 20 minutes
 # Betting reminders during the open window: plain terse reminders fire at each
