@@ -39,6 +39,7 @@ jobs:
         run: uv run --locked ruff check .
 
   test:
+    if: ${{ github.event_name == 'push' }}
     needs: parity-inventory
     runs-on: ubuntu-latest
     steps:
@@ -52,7 +53,8 @@ jobs:
       - name: Run tests
         run: uv run --locked pytest
 
-  rust:
+  rust_quality:
+    name: rust-quality
     needs: parity-inventory
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +70,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: validation
+          shared-key: quality
           cache-on-failure: true
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -89,8 +91,57 @@ jobs:
       - name: Lint Rust
         run: cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 
+  rust_tests:
+    name: rust-tests (${{ matrix.package }})
+    needs: parity-inventory
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [cama-domain, cama-db, cama-app, cama-runtime, xtask]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: "tests-${{ matrix.package }}"
+          cache-on-failure: true
+
       - name: Test Rust
-        run: cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
+        run: >-
+          cargo test --locked --manifest-path rust/Cargo.toml
+          --package "${{ matrix.package }}" --all-targets --all-features
+
+  rust_contracts:
+    name: rust-contracts
+    needs: parity-inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: contracts
+          cache-on-failure: true
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
 
       - name: Test pinned Dotabase production adapters
         run: |
@@ -112,6 +163,21 @@ jobs:
 
       - name: Check implemented parity contracts
         run: cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
+
+  rust:
+    if: ${{ always() }}
+    needs: [rust_quality, rust_tests, rust_contracts]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Rust lane
+        env:
+          QUALITY_RESULT: ${{ needs.rust_quality.result }}
+          TEST_RESULT: ${{ needs.rust_tests.result }}
+          CONTRACT_RESULT: ${{ needs.rust_contracts.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$CONTRACT_RESULT" = success
 
   runtime-images:
     needs: parity-inventory
@@ -136,18 +202,36 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
       - name: Build Python runtime image
-        run: docker build --build-arg GIT_SHA="$GITHUB_SHA" --tag cama-python:ci .
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: cama-python:ci
+          load: true
+          cache-from: type=gha,scope=cama-python-runtime
+          cache-to: type=gha,mode=max,scope=cama-python-runtime
 
       - name: Smoke Python runtime image
         run: docker run --rm --entrypoint uv cama-python:ci run --no-sync python -c "import bot"
 
       - name: Build Rust runtime image
-        run: docker build --file Dockerfile.rust --build-arg GIT_SHA="$GITHUB_SHA" --tag cama-rust:ci .
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile.rust
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: cama-rust:ci
+          load: true
+          cache-from: type=gha,scope=cama-rust-runtime
+          cache-to: type=gha,mode=max,scope=cama-rust-runtime
 
       - name: Verify Rust image bundles the locked Dotabase catalog without Python
         run: |
-          expected=$(uv run --locked python -c 'import hashlib,pathlib; import dotabase; path=pathlib.Path(dotabase.__file__).with_name("dotabase.db"); print(hashlib.sha256(path.read_bytes()).hexdigest())')
+          expected=$(uv run --locked python -c 'import hashlib,importlib.util,pathlib; spec=importlib.util.find_spec("dotabase"); assert spec and spec.origin; path=pathlib.Path(spec.origin).with_name("dotabase.db"); print(hashlib.sha256(path.read_bytes()).hexdigest())')
           actual=$(docker run --rm --entrypoint sha256sum cama-rust:ci /app/assets/dotabase.db | cut -d' ' -f1)
           test "$actual" = "$expected"
           docker run --rm --entrypoint sh cama-rust:ci -c 'test -x /usr/local/bin/cama-rust && test -r /app/assets/dotabase.db && ! command -v python3 >/dev/null 2>&1'
@@ -272,7 +356,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: validation
+          shared-key: contracts
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
