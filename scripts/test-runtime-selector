@@ -146,6 +146,53 @@ def assert_selector() -> None:
         )
         assert blocked_python.returncode == 65
         assert "one-way Rust cutover started" in blocked_python.stderr
+        marker.write_text(
+            "state=recovering\nprevious_runtime=python\nprevious_revision=recovered-python-sha\n",
+            encoding="utf-8",
+        )
+        recovering_python = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "recovered-python-sha",
+                "DB_PATH": str(database_path),
+                "CAMA_DEPLOY_RECOVERY": "true",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert recovering_python.returncode == 0
+        mismatched_recovery = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "different-python-sha",
+                "DB_PATH": str(database_path),
+                "CAMA_DEPLOY_RECOVERY": "true",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert mismatched_recovery.returncode == 65
+        marker.write_text(
+            "state=pending\nprevious_runtime=python\nprevious_revision=recovered-python-sha\n",
+            encoding="utf-8",
+        )
+        pending_python = subprocess.run(
+            [str(ENTRYPOINT), "python", "true"],
+            env=os.environ
+            | {
+                "BOT_RUNTIME": "python",
+                "GIT_SHA": "recovered-python-sha",
+                "DB_PATH": str(database_path),
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert pending_python.returncode == 65
+        marker.write_text("state=active\n", encoding="utf-8")
         allowed_rust = subprocess.run(
             [str(ENTRYPOINT), "rust", "true"],
             env=os.environ | {"BOT_RUNTIME": "rust", "DB_PATH": str(database_path)},

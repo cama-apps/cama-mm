@@ -337,9 +337,11 @@ BOT_RUNTIME=python GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime
 Those Python selections are valid only before the Rust cutover marker exists.
 After any Rust cutover begins, `deploy-runtime`, `runtime-compose`, and the
 Python image entrypoint reject Python explicitly. The only Python fallback is
-the automatic failed-cutover path, which stops Rust, restores the verified
-pre-cutover database, durably removes the pending marker, and only then starts
-the retained Python image.
+the automatic failed-cutover path. It stops Rust, restores the verified
+pre-cutover database, records the `recovering` boundary, starts and verifies
+the retained Python image, and only then durably removes the marker. A Python
+process may cross the marker guard only while that exact `recovering` marker
+names Python as the retained runtime; `pending` and `active` remain blocked.
 
 The eventual cutover uses that exact path with both hard gates explicit:
 
@@ -357,13 +359,28 @@ manifest has no open gates; it also rejects
 empty, unknown, or case-mismatched values before invoking Compose. Both images
 independently reject a selector/image mismatch.
 
+The same readiness and candidate checks guard direct Rust `runtime-compose`
+commands that can create or start a process. Read-only `config`/`ps` and stop
+operations remain available. The sole start exception is an exact retained-Rust
+recovery whose durable marker is already `recovering` and whose recorded prior
+revision matches `GIT_SHA`.
+
 `deploy-runtime` builds both artifacts while the old process stays live, then
-stops it and verifies it is stopped before making the authoritative SQLite
-backup. Rust admits a disposable copy of that backup before it can touch live
-SQLite. The candidate must pass runtime health and the full post-deploy verifier.
-Any failure stops Rust, atomically restores the verified pre-cutover database,
-and only then starts the retained Python image. A durable cutover marker blocks
-all later Python selections at both the deployment and process boundaries;
+atomically arms a `pending` recovery marker before it stops anything. It stops
+the prior process and proves it stopped before making the authoritative SQLite
+backup. The marker records `backup_ready=true` only after Rust admits a
+disposable copy; before that boundary recovery restarts the unchanged retained
+runtime without restoring an untrusted or incomplete backup. After a candidate
+can touch live SQLite, every failure proves it stopped, atomically restores the
+verified backup, records `recovering`, and starts the retained runtime. Rust
+must pass both container health and the full post-deploy verifier before the
+marker becomes `active`; failed restarts and marker-write failures remain
+retryable from `recovering`. A killed deploy leaves a PID-owned directory lock
+that the next invocation safely recognizes as stale and reclaims. The offline
+rehearsal kills the deploy between preflight and backup-ready publication and
+also covers container-lookup failure, failed retained-Rust health, marker
+collision, and a failed Rust rollback restart. A durable active marker blocks
+all later Python selections at both deployment and process boundaries;
 subsequent deployments and rollbacks are Rust to Rust. Python is never pointed
 at a database Rust has mutated.
 

@@ -27,8 +27,19 @@ if [ "$expected_runtime" = python ]; then
   database_directory=$(dirname -- "$database_path")
   cutover_marker="$database_directory/.cama-rust-cutover"
   if [ -e "$cutover_marker" ]; then
-    echo "Python runtime refused: $cutover_marker proves the one-way Rust cutover started" >&2
-    exit 65
+    marker_state=$(awk -F= '$1 == "state" { print substr($0, 7); exit }' "$cutover_marker")
+    previous_runtime=$(
+      awk -F= '$1 == "previous_runtime" { print substr($0, 18); exit }' "$cutover_marker"
+    )
+    previous_revision=$(
+      awk -F= '$1 == "previous_revision" { print substr($0, 19); exit }' "$cutover_marker"
+    )
+    if [ "$marker_state:$previous_runtime:$previous_revision" != \
+      "recovering:python:${GIT_SHA-}" ]
+    then
+      echo "Python runtime refused: $cutover_marker proves the one-way Rust cutover started" >&2
+      exit 65
+    fi
   fi
 fi
 
