@@ -500,6 +500,7 @@ impl DigRegistrationProvider {
                     flavor_data,
                     vanity_tax,
                     neon: Mutex::new(neon),
+                    boss_entropy: RuntimeBossEntropy::default(),
                     view_nonce: format!("{:016x}", fastrand::u64(..)),
                     abandon_views: Mutex::new(BTreeMap::new()),
                     prestige_views: Mutex::new(BTreeMap::new()),
@@ -700,6 +701,7 @@ struct DigRuntimeState {
     /// independent from gateway membership refresh state.
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
+    boss_entropy: RuntimeBossEntropy,
     bonus_dispatcher: Mutex<Option<Arc<dyn DigBonusDispatchPort>>>,
     view_nonce: String,
     abandon_views: Mutex<BTreeMap<String, DigAbandonViewState>>,
@@ -3375,6 +3377,7 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let entropy = self.state.boss_entropy.clone();
         blocking(move || {
             configured_boss_runtime(path, decay, vanity_tax)
                 .encounter(
@@ -3383,7 +3386,7 @@ impl DigInteractionHandler {
                         guild_id,
                         now,
                     },
-                    RuntimeBossEntropy,
+                    entropy,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -3412,6 +3415,7 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let entropy = self.state.boss_entropy.clone();
         blocking(move || {
             configured_boss_runtime(path, decay, vanity_tax)
                 .start(
@@ -3422,7 +3426,7 @@ impl DigInteractionHandler {
                     },
                     risk_tier,
                     wager,
-                    RuntimeBossEntropy,
+                    entropy,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -3456,6 +3460,7 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let entropy = self.state.boss_entropy.clone();
         blocking(move || {
             configured_boss_runtime(path, decay, vanity_tax)
                 .resume(
@@ -3465,7 +3470,7 @@ impl DigInteractionHandler {
                         now,
                     },
                     option_index,
-                    RuntimeBossEntropy,
+                    entropy,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -3481,6 +3486,7 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let entropy = self.state.boss_entropy.clone();
         blocking(move || {
             configured_boss_runtime(path, decay, vanity_tax)
                 .scout(
@@ -3489,7 +3495,7 @@ impl DigInteractionHandler {
                         guild_id,
                         now,
                     },
-                    RuntimeBossEntropy,
+                    entropy,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -3505,6 +3511,7 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let entropy = self.state.boss_entropy.clone();
         blocking(move || {
             configured_boss_runtime(path, decay, vanity_tax)
                 .retreat(
@@ -3513,7 +3520,7 @@ impl DigInteractionHandler {
                         guild_id,
                         now,
                     },
-                    RuntimeBossEntropy,
+                    entropy,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -6394,19 +6401,47 @@ impl cama_app::dig_relic_recycling::RelicEntropy for RuntimeRelicEntropy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct RuntimeBossEntropy;
+#[derive(Clone)]
+struct RuntimeBossEntropy {
+    random: Arc<Mutex<fastrand::Rng>>,
+}
+
+impl std::fmt::Debug for RuntimeBossEntropy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeBossEntropy")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for RuntimeBossEntropy {
+    fn default() -> Self {
+        Self {
+            random: Arc::new(Mutex::new(fastrand::Rng::new())),
+        }
+    }
+}
+
+impl RuntimeBossEntropy {
+    #[cfg(test)]
+    fn reseed(&self, seed: u64) {
+        *self.random.lock().expect("boss entropy lock") = fastrand::Rng::with_seed(seed);
+    }
+}
 
 impl EntropyPort for RuntimeBossEntropy {
     fn next_unit(&mut self) -> f64 {
-        fastrand::f64()
+        self.random.lock().expect("boss entropy lock").f64()
     }
 
     fn choose_index(&mut self, upper_bound: usize) -> usize {
         if upper_bound == 0 {
             0
         } else {
-            fastrand::usize(..upper_bound)
+            self.random
+                .lock()
+                .expect("boss entropy lock")
+                .usize(..upper_bound)
         }
     }
 
@@ -6414,7 +6449,10 @@ impl EntropyPort for RuntimeBossEntropy {
         if minimum >= maximum {
             minimum
         } else {
-            fastrand::i32(minimum..=maximum)
+            self.random
+                .lock()
+                .expect("boss entropy lock")
+                .i32(minimum..=maximum)
         }
     }
 }
@@ -9732,8 +9770,8 @@ mod tests {
     async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
         let (database, base, discord) = fixture();
         let now = 1_900_210_029;
-        Connection::open(database.path())
-            .expect("vanity provider database")
+        let connection = Connection::open(database.path()).expect("vanity provider database");
+        connection
             .execute(
                 "INSERT INTO tunnels
                  (discord_id,guild_id,depth,max_depth,total_digs,last_dig_at,luminosity,
@@ -9747,6 +9785,17 @@ mod tests {
                 ],
             )
             .expect("normal Dig tunnel");
+        let game_date = cama_domain::game_date::game_date_for_timestamp(now as f64)
+            .expect("vanity-tax game date");
+        connection
+            .execute(
+                "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,'The Hollow','mineral_vein'),
+                        (?1,?2,'Dirt','earthworm_migration')",
+                params![GUILD as i64, game_date],
+            )
+            .expect("deterministic vanity-tax weather");
+        drop(connection);
         let vanity_tax = persistent_vanity_tax_with_rate(database.path(), 1.0);
         vanity_tax
             .refresh_guild(
@@ -13944,7 +13993,7 @@ mod tests {
                 ],
             )
             .expect("live boss tunnel");
-        fastrand::seed(1);
+        provider.handler.state.boss_entropy.reseed(1);
         {
             let mut neon = provider.handler.state.neon.lock().expect("live Neon lock");
             *neon.random_mut() = cama_app::dig_neon::SeededDigNeonRandom::new(1);

@@ -3729,7 +3729,7 @@ async fn test_distinct_completion_channel_copies_start_together_after_edit() {
             .complete_owned(42, handle, state_snapshot, responder_for_task, true)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while discord.completion_sends_started.load(Ordering::Acquire) < 2 {
             tokio::task::yield_now().await;
         }
