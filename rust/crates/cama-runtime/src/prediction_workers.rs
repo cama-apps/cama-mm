@@ -25,6 +25,7 @@ use tracing::{info, warn};
 use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
 use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gamba_guild_source::{GambaDestination, GambaGuildSource};
+use crate::ids::blocking;
 use crate::registration::{InteractionAttachment, InteractionEmbed, InteractionResponse};
 use crate::{ApplicationConfig, BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
@@ -185,7 +186,7 @@ impl PredictionRefreshWorker {
     async fn due_markets(&self, now: i64) -> Result<Vec<DuePredictionMarket>, String> {
         let repository = self.repository.clone();
         let refresh_seconds = self.settings.refresh_seconds;
-        spawn_sqlite("prediction refresh scan", move || {
+        blocking("prediction refresh scan blocking", move || {
             repository
                 .due_refresh_markets(now, refresh_seconds)
                 .map_err(|error| error.to_string())
@@ -197,7 +198,7 @@ impl PredictionRefreshWorker {
         let repository = self.repository.clone();
         let settings = self.settings.clone();
         let drift = self.drift.drift(self.drift_min, self.drift_max);
-        let outcome = spawn_sqlite("prediction market refresh", move || {
+        let outcome = blocking("prediction market refresh blocking", move || {
             repository
                 .refresh_market_and_queue(market.prediction_id, now, drift, &settings)
                 .map_err(|error| error.to_string())
@@ -218,7 +219,7 @@ impl PredictionRefreshWorker {
 
     async fn pending_publications(&self) -> Result<Vec<PredictionRefreshPublication>, String> {
         let repository = self.repository.clone();
-        spawn_sqlite("prediction refresh outbox read", move || {
+        blocking("prediction refresh outbox read blocking", move || {
             repository
                 .pending_refresh_publications()
                 .map_err(|error| error.to_string())
@@ -236,7 +237,7 @@ impl PredictionRefreshWorker {
                 let repository = self.repository.clone();
                 let prediction_id = *prediction_id;
                 let recent_limit = self.settings.recent_trades_shown;
-                let display = spawn_sqlite("prediction market display read", move || {
+                let display = blocking("prediction market display read blocking", move || {
                     repository
                         .market_display(prediction_id, recent_limit)
                         .map_err(|error| error.to_string())
@@ -271,7 +272,7 @@ impl PredictionRefreshWorker {
             } => {
                 let repository = self.repository.clone();
                 let prediction_id = *prediction_id;
-                let open = spawn_sqlite("prediction summary open-status check", move || {
+                let open = blocking("prediction summary open-status check blocking", move || {
                     repository
                         .market_is_open(prediction_id)
                         .map_err(|error| error.to_string())
@@ -298,12 +299,15 @@ impl PredictionRefreshWorker {
 
     async fn acknowledge(&self, publication: PredictionRefreshPublication) -> Result<(), String> {
         let repository = self.repository.clone();
-        spawn_sqlite("prediction refresh outbox acknowledgement", move || {
-            repository
-                .acknowledge_refresh_publication(&publication)
-                .map(drop)
-                .map_err(|error| error.to_string())
-        })
+        blocking(
+            "prediction refresh outbox acknowledgement blocking",
+            move || {
+                repository
+                    .acknowledge_refresh_publication(&publication)
+                    .map(drop)
+                    .map_err(|error| error.to_string())
+            },
+        )
         .await
     }
 
@@ -450,7 +454,7 @@ impl PredictionDigestWorker {
     ) -> Result<(), String> {
         let repository = self.repository.clone();
         let refresh_seconds = self.refresh_seconds;
-        spawn_sqlite("prediction digest queue", move || {
+        blocking("prediction digest queue blocking", move || {
             repository
                 .queue_digest_if_due(destination.guild_id, slot, now, refresh_seconds)
                 .map(drop)
@@ -461,7 +465,7 @@ impl PredictionDigestWorker {
 
     async fn pending_publications(&self) -> Result<Vec<PredictionDigestPublication>, String> {
         let repository = self.repository.clone();
-        spawn_sqlite("prediction digest outbox read", move || {
+        blocking("prediction digest outbox read blocking", move || {
             repository
                 .pending_digest_publications()
                 .map_err(|error| error.to_string())
@@ -484,7 +488,7 @@ impl PredictionDigestWorker {
             let repository = self.repository.clone();
             let guild_id = publication.guild_id;
             let prediction_id = market.prediction_id;
-            let history = spawn_sqlite("prediction digest chart history", move || {
+            let history = blocking("prediction digest chart history blocking", move || {
                 repository
                     .digest_market_history(guild_id, prediction_id)
                     .map_err(|error| error.to_string())
@@ -523,12 +527,15 @@ impl PredictionDigestWorker {
 
     async fn acknowledge(&self, publication: PredictionDigestPublication) -> Result<(), String> {
         let repository = self.repository.clone();
-        spawn_sqlite("prediction digest outbox acknowledgement", move || {
-            repository
-                .acknowledge_digest_publication(&publication)
-                .map(drop)
-                .map_err(|error| error.to_string())
-        })
+        blocking(
+            "prediction digest outbox acknowledgement blocking",
+            move || {
+                repository
+                    .acknowledge_digest_publication(&publication)
+                    .map(drop)
+                    .map_err(|error| error.to_string())
+            },
+        )
         .await
     }
 
@@ -634,15 +641,6 @@ pub fn prediction_digest_worker_spec(
             discord,
         )),
     )
-}
-
-async fn spawn_sqlite<T: Send + 'static>(
-    operation: &'static str,
-    task: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    tokio::task::spawn_blocking(task)
-        .await
-        .map_err(|error| format!("{operation} blocking task failed: {error}"))?
 }
 
 fn latest_digest_slot(now: i64, anchor_hour_utc: u32) -> Result<i64, String> {

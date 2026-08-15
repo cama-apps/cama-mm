@@ -2448,9 +2448,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("Mafia SQLite task failed: {}", error))?
+    crate::ids::blocking("Mafia SQLite", operation).await
 }
 
 fn to_string(error: impl std::fmt::Display) -> String {

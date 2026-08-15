@@ -38,6 +38,7 @@ use tracing::{debug, warn};
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
 use crate::gamba_guild_source::GambaGuildSource;
+use crate::ids::signed_id;
 use crate::prediction_workers::PredictionDiscordPort;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -2524,10 +2525,6 @@ fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
     })
 }
 
-fn signed_id(value: u64, kind: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {kind} ID exceeds SQLite INTEGER"))
-}
-
 fn rate_to_bps(rate: f64) -> i64 {
     if rate.is_finite() {
         (rate.clamp(0.0, 1.0) * BASIS_POINTS as f64).round() as i64
@@ -2542,10 +2539,10 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(function)
-        .await
-        .map_err(|error| format!("{operation} task failed: {error}"))?
-        .map_err(|error| error.to_string())
+    crate::ids::blocking(operation, move || {
+        function().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 async fn respond_ephemeral(
