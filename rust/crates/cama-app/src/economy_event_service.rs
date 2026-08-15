@@ -620,13 +620,15 @@ pub trait EventRng: Send + 'static {
 pub struct DeterministicEventRng;
 
 impl EventRng for DeterministicEventRng {
+    /// Python parity: `random.Random(int.from_bytes(sha256(f"{guild}:{date}")
+    /// .digest()[:8], "big")).choice(shortlist)`. The previous FNV-1a pick
+    /// selected a different shortlist entry than Python most days, changing
+    /// the announced event and its applied multipliers.
     fn choose_index(&mut self, guild_id: GuildId, event_date: &str, upper: usize) -> usize {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in format!("{}:{event_date}", guild_id.0).bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        usize::try_from(hash % u64::try_from(upper.max(1)).unwrap_or(u64::MAX)).unwrap_or(0)
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!("{}:{event_date}", guild_id.0).as_bytes());
+        let seed = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 yields 32 bytes"));
+        crate::python_random::PythonRandom::from_u64_seed(seed).randbelow(upper)
     }
 }
 
@@ -2031,9 +2033,11 @@ fn pacific_local(timestamp: i64) -> Result<NaiveDateTime, EconomyEventError> {
         .ok_or(EconomyEventError::InvalidTimestamp(timestamp))
 }
 
-fn round_to(value: f64, decimals: u32) -> f64 {
-    let scale = 10_f64.powi(i32::try_from(decimals).unwrap_or(i32::MAX));
-    (value * scale).round_ties_even() / scale
+fn round_to(value: f64, decimals: usize) -> f64 {
+    // Python parity: CPython's `round(value, n)` rounds the exact binary
+    // value; the previous scale-then-`round_ties_even` introduced its own
+    // rounding at `value * 10^n` and flipped severity multipliers by 1e-4.
+    cama_domain::formatting::python_round_decimals(value, decimals)
 }
 
 fn format_integer(value: i64) -> String {

@@ -304,30 +304,10 @@ fn median(values: &[f64]) -> Option<f64> {
     })
 }
 
-// Numerical Recipes' complementary-error-function approximation. Its maximum
-// error is well below the analytics' 1e-6 contract and it avoids a math crate
-// solely for the OpenSkill normal CDF.
+// Python parity: shares the exact-erf normal CDF with the OpenSkill module
+// (`statistics.NormalDist().cdf` on the Python side).
 fn normal_cdf(value: f64) -> f64 {
-    let x = -value / 2.0_f64.sqrt();
-    let z = x.abs();
-    let t = 1.0 / (1.0 + 0.5 * z);
-    let erfc_positive = t
-        * (-z * z - 1.265_512_23
-            + t * (1.000_023_68
-                + t * (0.374_091_96
-                    + t * (0.096_784_18
-                        + t * (-0.186_288_06
-                            + t * (0.278_868_07
-                                + t * (-1.135_203_98
-                                    + t * (1.488_515_87
-                                        + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
-            .exp();
-    let erfc = if x >= 0.0 {
-        erfc_positive
-    } else {
-        2.0 - erfc_positive
-    };
-    0.5 * erfc
+    crate::openskill::normal_cdf(value)
 }
 
 /// Convert RD to certainty percentage. Higher means more certain.

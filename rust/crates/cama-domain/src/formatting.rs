@@ -325,12 +325,26 @@ fn trim_fractional_zeroes(mut value: String) -> String {
     value
 }
 
+/// CPython `round(value, ndigits)`: correctly-rounded decimal rounding of the
+/// exact binary value (ties to even). Multiplying by `10^n` and calling
+/// `round_ties_even` introduces an intermediate binary rounding that
+/// manufactures false ties; fixed-precision formatting performs the same
+/// correctly-rounded conversion as CPython's dtoa-based `round`.
+#[must_use]
+pub fn python_round_decimals(value: f64, decimals: usize) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    format!("{value:.decimals$}").parse().unwrap_or(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BettingDisplayOptions, JOPACOIN_EMOTE, PoolOddsSeeds, ROLE_EMOJIS, ROLE_NAMES,
         SpectatorAutobetSummaryInput, SpectatorAutobetTiers, calculate_pool_odds,
         format_betting_display, format_role_display, format_spectator_autobet_summary,
+        python_round_decimals,
     };
 
     #[test]
@@ -578,5 +592,38 @@ mod tests {
             )
         );
         assert!(!summary.contains("top 0"));
+    }
+
+    #[test]
+    fn python_round_decimals_matches_cpython_vectors() {
+        // Pinned against CPython round(value, n).
+        let cases4 = [
+            (0.96625_f64, 0.9663_f64),
+            (0.94375, 0.9437),
+            (0.966_349_999_9, 0.9663),
+            (1.00005, 1.0001),
+            (0.12345, 0.1235),
+            (2.675, 2.675),
+        ];
+        for (value, expected) in cases4 {
+            assert_eq!(
+                python_round_decimals(value, 4),
+                expected,
+                "round({value}, 4)"
+            );
+        }
+        // rating uncertainty vectors: round(min(rd / 350 * 100, 100), 1)
+        let cases1 = [
+            (31.325_f64, 8.9_f64),
+            (45.675, 13.1),
+            (350.0, 100.0),
+            (123.456, 35.3),
+        ];
+        for (rd, expected) in cases1 {
+            let raw = (rd / 350.0 * 100.0_f64).min(100.0);
+            assert_eq!(python_round_decimals(raw, 1), expected, "uncertainty({rd})");
+        }
+        assert_eq!(python_round_decimals(0.123_456_5, 6), 0.123_456);
+        assert_eq!(python_round_decimals(0.123_457_5, 6), 0.123_457);
     }
 }

@@ -1035,7 +1035,8 @@ pub fn draw_rating_history_chart(
 }
 
 fn mu_to_display(mu: f64) -> f64 {
-    ((mu - 25.0) * 50.0).max(0.0).round()
+    // Python parity: `int(round(x))` is banker's rounding (mu 25.25 -> 12).
+    ((mu - 25.0) * 50.0).max(0.0).round_ties_even()
 }
 
 #[derive(Clone, Copy, Debug)]

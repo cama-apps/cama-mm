@@ -1088,3 +1088,29 @@ fn test_event_has_one_initial_and_one_twelve_hour_reminder_slot() {
     assert_eq!(event.reminder_announced_at, Some(44_201));
     assert_eq!(TestService::pending_announcement_slot(&event, 44_202), None);
 }
+
+#[test]
+fn deterministic_event_rng_matches_python_sha256_mersenne_choice() {
+    // Pinned against CPython:
+    //   seed = int.from_bytes(sha256(f"{guild}:{date}".encode()).digest()[:8], "big")
+    //   random.Random(seed).choice(range(n))
+    let mut rng = DeterministicEventRng;
+    for (guild, date, upper, expected) in [
+        (
+            1_234_567_890_123_456_789_i64,
+            "2026-08-01",
+            3_usize,
+            2_usize,
+        ),
+        (1_234_567_890_123_456_789, "2026-08-03", 3, 2),
+        (0, "2026-01-01", 3, 1),
+        (987_654_321, "2026-12-31", 2, 1),
+        (42, "2026-06-15", 1, 0),
+    ] {
+        assert_eq!(
+            rng.choose_index(GuildId(guild), date, upper),
+            expected,
+            "guild {guild} date {date} upper {upper}"
+        );
+    }
+}

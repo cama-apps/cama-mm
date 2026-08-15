@@ -1546,10 +1546,7 @@ async fn run_command_handler(
             return;
         }
         error!(%handler_error, "interaction handler failed without global policy");
-        if let Err(error) = responder
-            .followup(InteractionResponse::message("Something went wrong.").ephemeral())
-            .await
-        {
+        if let Err(error) = report_handler_failure(&responder).await {
             error!(%error, "failed to report interaction handler failure");
         }
     }
@@ -1562,12 +1559,25 @@ async fn run_component_handler(
 ) {
     if let Err(handler_error) = handler.handle(request, Arc::clone(&responder)).await {
         error!(%handler_error, "component interaction handler failed");
-        if let Err(error) = responder
-            .followup(InteractionResponse::message("Something went wrong.").ephemeral())
-            .await
-        {
+        if let Err(error) = report_handler_failure(&responder).await {
             error!(%error, "failed to report component interaction handler failure");
         }
+    }
+}
+
+/// Deliver the generic failure copy through whichever channel the interaction
+/// can still accept: the initial response when the handler failed before
+/// acknowledging, a followup otherwise. Discord rejects a followup on an
+/// unacknowledged interaction, which previously left the user with only the
+/// client-side "This interaction failed" notice.
+async fn report_handler_failure(
+    responder: &Arc<dyn InteractionResponder>,
+) -> Result<(), InteractionResponseError> {
+    let message = InteractionResponse::message("Something went wrong.").ephemeral();
+    if responder.response_is_done() {
+        responder.followup(message).await
+    } else {
+        responder.respond(message).await
     }
 }
 

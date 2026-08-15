@@ -650,6 +650,10 @@ struct GeneratedRewardBatch<'a> {
     player_ids: &'a [i64],
     gross: i64,
     apply_bankruptcy_penalty: bool,
+    /// Python parity: only `_award_with_penalties` batches (win, exclusion,
+    /// streaming) carry vanity-tax rates; `award_participation` (including
+    /// the bomb-pot bonus) never does.
+    apply_vanity_tax: bool,
     source: &'a str,
     related_type: &'a str,
     related_id: i64,
@@ -765,7 +769,9 @@ impl ProductionMatchRewardControl {
                 garnishment_rate: self.garnishment_rate,
                 apply_bankruptcy_penalty: batch.apply_bankruptcy_penalty,
                 bankruptcy_kept_rate: self.bankruptcy_kept_rate,
-                vanity_tax_rate: if vanity_taxable_ids.contains(discord_id) {
+                vanity_tax_rate: if batch.apply_vanity_tax
+                    && vanity_taxable_ids.contains(discord_id)
+                {
                     self.vanity_tax_rate
                 } else {
                     0.0
@@ -2185,6 +2191,7 @@ impl MatchHandler {
                     player_ids: &player_ids,
                     gross: amount,
                     apply_bankruptcy_penalty: true,
+                    apply_vanity_tax: true,
                     source: "match_streaming_bonus",
                     related_type: "match",
                     related_id: match_id,
@@ -3297,6 +3304,7 @@ impl MatchHandler {
                         0
                     }),
                 apply_bankruptcy_penalty: false,
+                apply_vanity_tax: false,
                 source: "match_participation",
                 related_type: "match",
                 related_id: match_id,
@@ -3323,6 +3331,7 @@ impl MatchHandler {
                     player_ids: winners,
                     gross: self.config.bomb_pot_participation_bonus,
                     apply_bankruptcy_penalty: false,
+                    apply_vanity_tax: false,
                     source: "match_participation",
                     related_type: "match",
                     related_id: match_id,
@@ -3383,6 +3392,7 @@ impl MatchHandler {
                 player_ids: &pending.state.excluded_player_ids,
                 gross: self.config.jopacoin_exclusion_reward,
                 apply_bankruptcy_penalty: true,
+                apply_vanity_tax: true,
                 source: "match_exclusion",
                 related_type: "match",
                 related_id: match_id,
@@ -4286,6 +4296,7 @@ impl MatchHandler {
                 player_ids: &player_ids,
                 gross: self.config.streaming_bonus,
                 apply_bankruptcy_penalty: true,
+                apply_vanity_tax: true,
                 source: "shuffle_streaming_bonus",
                 related_type: "pending_match",
                 related_id: prepared.pending.pending_match_id,

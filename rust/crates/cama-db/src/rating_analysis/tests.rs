@@ -5,6 +5,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::match_correction_repository::{MatchCorrectionError, MatchCorrectionRepository};
 use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use cama_domain::rating::CamaRatingSystem;
 
 const GUILD: i64 = 4242;
 
@@ -150,7 +151,12 @@ fn reads_player_history_and_comparison_rows_from_migrated_schema() {
         [GUILD],
     ).unwrap();
 
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let player = repository.player(1, Some(GUILD)).unwrap().unwrap();
     assert_eq!(player.glicko_rating, Some(1600.0));
     assert_eq!(player.os_mu, Some(31.0));
@@ -204,7 +210,8 @@ fn configured_backfill_is_durable_and_clears_its_job_atomically() {
         ..OpenSkillConfig::default()
     };
     let system = CamaOpenSkillSystem::with_config(config).unwrap();
-    let repository = RatingAnalysisRepository::new(&path, system.clone(), 750);
+    let repository =
+        RatingAnalysisRepository::new(&path, system.clone(), CamaRatingSystem::default(), 750);
     let result = repository.backfill_openskill(Some(GUILD)).unwrap();
     assert_eq!(result.matches_processed, 1);
     assert_eq!(result.total_matches, 1);
@@ -238,7 +245,12 @@ fn failed_replay_retains_the_durable_job_and_error() {
          VALUES(100,?1,1,'2026-01-01','[1]','[]')",
         [GUILD],
     ).unwrap();
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let result = repository.backfill_openskill(Some(GUILD)).unwrap();
     assert_eq!(result.matches_processed, 0);
     assert!(!result.errors.is_empty());
@@ -279,7 +291,12 @@ fn failed_replay_retains_the_durable_job_and_error() {
     // A new process can safely retry from the durable request. The command
     // reasserts ownership of the job, replays the complete history, and only
     // clears the marker in the same commit that persists ratings.
-    let restarted = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let restarted = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let recovered = restarted.backfill_openskill(Some(GUILD)).unwrap();
     assert_eq!(recovered.matches_processed, 1);
     assert!(recovered.errors.is_empty());
@@ -530,7 +547,12 @@ fn backfill_moves_guild_zero_winners_up_and_losers_down_from_reseed() {
         None,
     );
 
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let result = repository.backfill_openskill(None).unwrap();
     assert_eq!(
         (
@@ -593,7 +615,12 @@ fn backfill_writes_only_to_the_requested_guild() {
         .collect::<Result<_, _>>()
         .unwrap();
 
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let result = repository.backfill_openskill(Some(GUILD)).unwrap();
     assert_eq!(result.matches_processed, 1);
     let after_other: Vec<(i64, Option<f64>, Option<f64>)> = connection
@@ -633,7 +660,12 @@ fn backfill_with_no_matches_reports_all_seeded_players_updated() {
     let connection = connection(&path);
     let ids = (10_601..10_611).collect::<Vec<_>>();
     seed_players(&connection, GUILD, &ids, 3_000);
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let result = repository.backfill_openskill(Some(GUILD)).unwrap();
     assert_eq!(result.matches_processed, 0);
     assert_eq!(result.total_matches, 0);
@@ -678,7 +710,12 @@ fn backfill_rolls_back_history_prediction_and_live_ratings_on_write_failure() {
              BEGIN SELECT RAISE(ABORT,'injected replay write failure'); END;",
         )
         .unwrap();
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let error = repository
         .backfill_openskill(Some(GUILD))
         .expect_err("injected trigger must fail replay");
@@ -836,7 +873,12 @@ fn guild_scoped_prediction_uses_the_shared_raw_and_calibrated_model() {
             .unwrap();
     }
 
-    let repository = RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500);
+    let repository = RatingAnalysisRepository::new(
+        &path,
+        CamaOpenSkillSystem::new(),
+        CamaRatingSystem::default(),
+        500,
+    );
     let target = |guild_id| {
         all_ids
             .iter()

@@ -3625,3 +3625,31 @@ fn settled_legacy_bet_rows_are_tagged_once_without_double_pay() {
     assert!(second.winners.is_empty());
     assert_eq!(balance(file.path(), 30_401), 110);
 }
+
+#[test]
+fn pool_settlement_reproduces_python_float_ceiling_ulp() {
+    // Python parity pin (bet_repository.py::_calculate_pool_payouts): the
+    // raw payout is an IEEE double, and `(90 / 676) * 676` lands 1 ULP above
+    // 90.0, so `math.ceil` credits 91 on a pure stake refund. CPython vector:
+    //   {stake 90 -> 91, stake 586 -> 586}
+    // An exact integer ceiling (the pre-parity Rust behavior) pays 90 here.
+    let file = fixture();
+    let result = settle_test_bets(
+        &file,
+        30_020,
+        30_120,
+        BettingMode::Pool,
+        BettingTeam::Radiant,
+        &[
+            (30_371, BettingTeam::Radiant, 90, 1),
+            (30_372, BettingTeam::Radiant, 586, 1),
+        ],
+    );
+    let mut payouts = result
+        .winners
+        .iter()
+        .map(|winner| (winner.effective_amount, winner.payout))
+        .collect::<Vec<_>>();
+    payouts.sort_unstable();
+    assert_eq!(payouts, [(90, 91), (586, 586)]);
+}
