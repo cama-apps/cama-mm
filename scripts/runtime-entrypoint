@@ -22,4 +22,14 @@ if [ "$BOT_RUNTIME" != "$expected_runtime" ]; then
   exit 64
 fi
 
+if [ "$expected_runtime" = python ]; then
+  database_path=${DB_PATH:-/app/data/cama_shuffle.db}
+  database_directory=$(dirname -- "$database_path")
+  cutover_marker="$database_directory/.cama-rust-cutover"
+  if [ -e "$cutover_marker" ]; then
+    echo "Python runtime refused: $cutover_marker proves the one-way Rust cutover started" >&2
+    exit 65
+  fi
+fi
+
 exec "$@"

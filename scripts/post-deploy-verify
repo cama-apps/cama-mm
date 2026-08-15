@@ -7,6 +7,8 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 runtime_compose="$repository_root/scripts/runtime-compose"
+expected_data_mount="$repository_root/data"
+expected_database_path=/app/data/cama_shuffle.db
 
 fail() {
   echo "post-deploy verification failed: $*" >&2
@@ -64,17 +66,21 @@ running=$(inspect_value '{{.State.Running}}')
 container_environment=$(inspect_value '{{range .Config.Env}}{{println .}}{{end}}')
 actual_runtime=$(container_env_value BOT_RUNTIME)
 actual_sha=$(container_env_value GIT_SHA)
+actual_database_path=$(container_env_value DB_PATH)
 [ "$actual_runtime" = "$expected_runtime" ] \
   || fail "BOT_RUNTIME mismatch: expected $expected_runtime, found ${actual_runtime:-<missing>}"
 [ "$actual_sha" = "$expected_sha" ] \
   || fail "GIT_SHA mismatch: expected $expected_sha, found ${actual_sha:-<missing>}"
+[ "$actual_database_path" = "$expected_database_path" ] \
+  || fail "DB_PATH mismatch: expected $expected_database_path, found ${actual_database_path:-<missing>}"
 
 uid=$(docker exec "$container_id" id -u 2>/dev/null || true)
 [ "$uid" = 1001 ] || fail "container UID mismatch: expected 1001, found ${uid:-<missing>}"
 
 data_mount=$(inspect_value \
   '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}')
-[ -n "$data_mount" ] || fail "container has no /app/data mount"
+[ "$data_mount" = "$expected_data_mount" ] \
+  || fail "data mount mismatch: expected $expected_data_mount, found ${data_mount:-<missing>}"
 
 oci_revision=$(inspect_value '{{index .Config.Labels "org.opencontainers.image.revision"}}')
 case "$oci_revision" in

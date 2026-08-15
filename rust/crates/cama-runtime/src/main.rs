@@ -3,7 +3,8 @@
 mod herogrid_provider;
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +13,10 @@ use async_trait::async_trait;
 use cama_app::ai_http::production_ai_service_from_settings;
 use cama_app::draft::{DraftStateManager, SqliteDraftStatePersistence};
 use cama_app::service_container::ServiceContainer;
-use cama_db::audit_database;
+use cama_db::{
+    audit_database,
+    schema_manager::{MigrationSettings, initialize_or_migrate_with_settings},
+};
 use cama_runtime::gateway::{GatewayError, GatewaySession};
 use cama_runtime::inventory;
 use cama_runtime::match_provider::production_betting_flavor;
@@ -57,6 +61,10 @@ enum Command {
     DatabaseCheck {
         path: PathBuf,
     },
+    DatabaseAdmit {
+        path: PathBuf,
+        source: PathBuf,
+    },
     HealthCheck {
         path: PathBuf,
         maximum_age: Duration,
@@ -76,6 +84,7 @@ async fn main() -> ExitCode {
     match parse_command(env::args().skip(1)) {
         Ok(Command::Serve) => run_serve().await,
         Ok(Command::DatabaseCheck { path }) => run_db_check(path),
+        Ok(Command::DatabaseAdmit { path, source }) => run_db_admit(path, source),
         Ok(Command::HealthCheck { path, maximum_age }) => run_health_check(path, maximum_age),
         Ok(Command::HealthSmoke { path }) => run_health_smoke(path).await,
         Ok(Command::Inventory) => {
@@ -114,11 +123,12 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             Ok(Command::Inventory)
         }
         Some("catalog-check") => parse_catalog_check(args),
+        Some("db-admit") => parse_db_admit(args),
         Some("db-check") => parse_db_check(args),
         Some("health-check") => parse_health_check(args),
         Some("health-smoke") => parse_health_smoke(args),
         Some(command) => Err(format!(
-            "unknown command {command:?}; expected `serve`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
+            "unknown command {command:?}; expected `serve`, `db-admit`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
         )),
     }
 }
@@ -166,6 +176,37 @@ fn parse_db_check(mut args: impl Iterator<Item = String>) -> Result<Command, Str
         .or_else(|| env::var_os("DB_PATH").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("cama_shuffle.db"));
     Ok(Command::DatabaseCheck { path })
+}
+
+fn parse_db_admit(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut explicit_path = None;
+    let mut source = None;
+    let mut confirmation_count = 0;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--db-path" => {
+                explicit_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--db-path requires a path".to_owned())?,
+                ));
+            }
+            "--source-db" => {
+                source = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--source-db requires a path".to_owned())?,
+                ));
+            }
+            "--disposable-copy" => confirmation_count += 1,
+            _ => return Err(format!("unexpected db-admit argument {argument:?}")),
+        }
+    }
+    if confirmation_count != 1 {
+        return Err("db-admit requires exactly one --disposable-copy".to_owned());
+    }
+    Ok(Command::DatabaseAdmit {
+        path: explicit_path.ok_or_else(|| "db-admit requires --db-path".to_owned())?,
+        source: source.ok_or_else(|| "db-admit requires --source-db".to_owned())?,
+    })
 }
 
 fn parse_health_check(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -1266,6 +1307,142 @@ fn run_db_check(path: PathBuf) -> ExitCode {
     }
 }
 
+fn sqlite_namespace(path: &Path) -> [PathBuf; 4] {
+    let path_text = path.as_os_str().to_string_lossy();
+    [
+        path.to_path_buf(),
+        PathBuf::from(format!("{path_text}-wal")),
+        PathBuf::from(format!("{path_text}-shm")),
+        PathBuf::from(format!("{path_text}-journal")),
+    ]
+}
+
+fn paths_share_existing_identity(left: &Path, right: &Path) -> Result<bool, String> {
+    if left == right {
+        return Ok(true);
+    }
+    let left_metadata = match fs::metadata(left) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("could not inspect {left:?}: {error}")),
+    };
+    let right_metadata = match fs::metadata(right) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("could not inspect {right:?}: {error}")),
+    };
+    if fs::canonicalize(left).map_err(|error| format!("could not resolve {left:?}: {error}"))?
+        == fs::canonicalize(right)
+            .map_err(|error| format!("could not resolve {right:?}: {error}"))?
+    {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if left_metadata.dev() == right_metadata.dev()
+            && left_metadata.ino() == right_metadata.ino()
+        {
+            return Ok(true);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (left_metadata, right_metadata);
+    }
+    Ok(false)
+}
+
+fn verify_disposable_database(source: &Path, candidate: &Path) -> Result<(), String> {
+    if fs::symlink_metadata(source)
+        .map_err(|error| format!("could not inspect source database: {error}"))?
+        .file_type()
+        .is_symlink()
+        || fs::symlink_metadata(candidate)
+            .map_err(|error| format!("could not inspect disposable database: {error}"))?
+            .file_type()
+            .is_symlink()
+    {
+        return Err("db-admit refuses symbolic-link database paths".to_owned());
+    }
+    let source = fs::canonicalize(source)
+        .map_err(|error| format!("could not resolve source database: {error}"))?;
+    let candidate = fs::canonicalize(candidate)
+        .map_err(|error| format!("could not resolve disposable database: {error}"))?;
+    let source_namespace = sqlite_namespace(&source);
+    let candidate_namespace = sqlite_namespace(&candidate);
+    for candidate_path in &candidate_namespace {
+        match fs::symlink_metadata(candidate_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(
+                    "db-admit refuses symbolic links in the disposable SQLite namespace".to_owned(),
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect disposable SQLite namespace path {candidate_path:?}: {error}"
+                ));
+            }
+        }
+        for source_path in &source_namespace {
+            if paths_share_existing_identity(candidate_path, source_path)? {
+                return Err("db-admit refuses overlap with the source SQLite namespace".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_db_admit(path: PathBuf, source: PathBuf) -> ExitCode {
+    if let Err(error) = verify_disposable_database(&source, &path) {
+        eprintln!("database admission refused: {error}");
+        return ExitCode::from(1);
+    }
+    let migration = match initialize_or_migrate_with_settings(&path, &MigrationSettings::from_env())
+    {
+        Ok(migration) => migration,
+        Err(error) => {
+            eprintln!("database admission failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let audit = match audit_database(&path) {
+        Ok(audit) => audit,
+        Err(error) => {
+            eprintln!("database admission audit failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    println!(
+        "schema_compatible={} migrations={}/{} newly_applied={} created_tables={} rebuilt_tables={} historical_extras={} journal_mode={} quick_check={} foreign_keys={}",
+        audit.is_compatible(),
+        audit.applied_migration_count,
+        audit.required_migration_count,
+        migration.newly_applied.len(),
+        migration.created_tables.len(),
+        migration.rebuilt_tables.len(),
+        migration.historical_extra_migrations.len(),
+        audit.journal_mode,
+        audit.quick_check,
+        if audit.foreign_keys_enabled {
+            "on"
+        } else {
+            "off"
+        },
+    );
+    if audit.is_compatible() {
+        ExitCode::SUCCESS
+    } else {
+        for issue in audit.issues() {
+            eprintln!("incompatible: {issue}");
+        }
+        ExitCode::from(2)
+    }
+}
+
 fn print_inventory() {
     println!(
         "wired={} required={}",
@@ -1328,6 +1505,88 @@ mod tests {
             Ok(Command::DatabaseCheck {
                 path: PathBuf::from("/tmp/test.db")
             })
+        );
+    }
+
+    #[test]
+    fn db_admit_requires_an_explicit_distinct_copy_contract() {
+        assert_eq!(
+            parse_command(
+                [
+                    "db-admit",
+                    "--db-path",
+                    "/tmp/disposable.db",
+                    "--source-db",
+                    "/tmp/live.db",
+                    "--disposable-copy",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            ),
+            Ok(Command::DatabaseAdmit {
+                path: PathBuf::from("/tmp/disposable.db"),
+                source: PathBuf::from("/tmp/live.db"),
+            })
+        );
+        assert!(
+            parse_command(
+                [
+                    "db-admit",
+                    "--db-path",
+                    "/tmp/disposable.db",
+                    "--source-db",
+                    "/tmp/live.db",
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn db_admit_refuses_the_source_and_accepts_a_distinct_file() {
+        let directory = tempdir().expect("temporary admission directory");
+        let source = directory.path().join("live.db");
+        let candidate = directory.path().join("candidate.db");
+        fs::write(&source, b"source").expect("write source identity fixture");
+        fs::write(&candidate, b"candidate").expect("write candidate identity fixture");
+
+        assert!(verify_disposable_database(&source, &source).is_err());
+        verify_disposable_database(&source, &candidate).expect("distinct file is disposable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn db_admit_refuses_a_hard_link_to_the_source() {
+        let directory = tempdir().expect("temporary admission directory");
+        let source = directory.path().join("live.db");
+        let candidate = directory.path().join("candidate.db");
+        fs::write(&source, b"source").expect("write source identity fixture");
+        fs::hard_link(&source, &candidate).expect("create hard-link fixture");
+
+        assert!(
+            verify_disposable_database(&source, &candidate)
+                .expect_err("hard-linked live DB must be refused")
+                .contains("source SQLite namespace")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn db_admit_refuses_a_candidate_sidecar_linked_to_the_source_namespace() {
+        let directory = tempdir().expect("temporary admission directory");
+        let source = directory.path().join("live.db");
+        let candidate = directory.path().join("candidate.db");
+        let candidate_wal = PathBuf::from(format!("{}-wal", candidate.display()));
+        fs::write(&source, b"source").expect("write source identity fixture");
+        fs::write(&candidate, b"candidate").expect("write candidate identity fixture");
+        fs::hard_link(&source, &candidate_wal).expect("create sidecar hard-link fixture");
+
+        assert!(
+            verify_disposable_database(&source, &candidate)
+                .expect_err("candidate sidecar linked to live DB must be refused")
+                .contains("source SQLite namespace")
         );
     }
 

@@ -8,8 +8,8 @@ behavior. Rust becomes eligible for cutover only after every behavior contract
 is mapped, tested, wired to production adapters, and exercised against the same
 SQLite storage contract.
 
-Current measured status: **6,746 of 6,746 Python test cases mapped (100%)**.
-The parity ledger is complete, but operational cutover status is **4 of 13
+Current measured status: **6,750 of 6,750 Python test cases mapped (100%)**.
+The parity ledger is complete, but operational cutover status is **5 of 13
 required readiness gates complete**; **67 of 67 production runtime inventory
 items are wired**, and the default and only live runtime remains Python.
 
@@ -76,10 +76,10 @@ items are wired**, and the default and only live runtime remains Python.
   startup configuration graph covers every one of `config.py`'s 215 environment
   keys, provider-bound/redacted secrets, derived aliases, and migration inputs;
   a Python-AST drift test keeps that catalog exact. The
-  mechanical runtime inventory still reports the unwired command providers,
-  events, recovery flows, workers, and remaining external providers. Global
-  command replacement stays disabled until that inventory is empty, so a gateway
-  connection alone cannot be mistaken for cutover readiness.
+  mechanical runtime inventory reports all 67 production items wired. Global
+  command replacement remains explicitly cutover-gated by the operational
+  readiness manifest, so a complete inventory or gateway connection alone cannot
+  be mistaken for production readiness.
 - `xtask`: machine-checked Python/Rust test inventory, migration-manifest drift,
   and cutover-completeness gates.
 - `parity/tests.tsv`: exact Python pytest case to Rust test mappings.
@@ -155,8 +155,8 @@ progress. The cutover gate is stricter:
 cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
 ```
 
-A complete **6,746/6,746** parity ledger is necessary but not sufficient: this
-command must remain failing until all 6,746 current cases—and any cases added
+A complete **6,750/6,750** parity ledger is necessary but not sufficient: this
+command must remain failing until all 6,750 current cases—and any cases added
 later—have an explicit passing Rust contract, and every required gate in
 `parity/cutover_readiness.tsv` is marked complete with evidence. The required
 gate names are compiled into `xtask`, so deleting an open row cannot make the
@@ -179,8 +179,8 @@ sqlite3 "$CAMA_RUST_SNAPSHOT_DIR/cama_shuffle.db" 'PRAGMA wal_checkpoint(TRUNCAT
 cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- db-check --db-path "$CAMA_RUST_SNAPSHOT_DIR/cama_shuffle.db"
 ```
 
-On 2026-08-11, the original local snapshot was healthy but 25 current migrations
-behind. The copied upgrade had all 226 current migrations plus two legitimate
+On 2026-08-11, the original local snapshot was healthy but 26 current migrations
+behind. The copied upgrade had all 229 current migrations plus two legitimate
 retired ledger rows and passed the Rust preflight. The original remained at 203
 rows. This is exactly why the clone step is mandatory.
 
@@ -204,7 +204,7 @@ cargo test --locked --manifest-path rust/Cargo.toml -p cama-db \
   --example referral_snapshot_smoke
 ```
 
-The same bounded one-way rehearsal is available as a machine-readable,
+The older mixed-runtime development rehearsal is available as a machine-readable,
 fail-closed runner. It keeps the clone in a temporary directory, records
 source immutability before and after, runs Python migration on the clone, Rust
 `db-check`, the fourteen-family repository smoke, an additional live
@@ -226,6 +226,30 @@ This is development evidence only; it does not close the cutover readiness
 gate or replace the broader repository and backup-rollback rehearsal
 requirements.
 
+For the actual one-way cutover rehearsal, use a separately created disposable copy
+and run the Rust-only harness below. It requires both paths so it can hash the
+source before and after; it refuses the same file, SQLite sidecars, missing
+copies, and reports that would overwrite either database. The harness does not
+run Python migration and never asks Python to inspect the Rust-mutated copy.
+The production `cama-rust db-admit` command invokes the same schema migration
+and compatibility audit as startup, then Rust repository, Profile/Info,
+Dig/Pet, referral, and Survey recovery smokes exercise only the disposable copy:
+
+```bash
+sqlite3 /path/to/cama_shuffle.db \
+  ".backup '/tmp/cama-rust-cutover-copy.db'"
+python scripts/rust_cutover_rehearsal.py \
+  /path/to/cama_shuffle.db \
+  --disposable-copy /tmp/cama-rust-cutover-copy.db \
+  --report /tmp/cama-rust-cutover-rehearsal.json
+```
+
+The JSON evidence is marked `mode=rust_only_one_way` and records Rust
+admission/migration counts, every self-checking Rust smoke command, the final
+Rust database health check, and `source.unchanged=true`. A passing report is a disposable
+copy/cutover rehearsal result; it does not itself authorize deployment or
+replace the tested backup-and-rollback path.
+
 The narrower A/B evidence runner uses two independent copies: it completes the
 retained-Python repository writes only on the Python copy, and runs the Rust
 writes only on the second copy. It compares stable, schema-aware projections
@@ -239,10 +263,9 @@ CAMA_PARITY_PYTHON=.venv/bin/python \
   /path/to/cama_shuffle.db --report /tmp/cama-snapshot-ab-delta.json
 ```
 
-This bounded current-schema representative passes as development evidence. The
-`production_snapshot_replay` gate remains open until old-schema coverage and all
-repository families are covered. Retained-Python reads remain optional
-differential evidence only; the one-way replay does not require them. The
+This bounded current-schema representative remains optional development evidence.
+It is not a cutover round-trip requirement: after Rust takes ownership, Python
+never opens the Rust-mutated database. The
 `backup_rollback_rehearsal` gate carries the tested rollback proof through the
 verified database backup and retained Python-image restoration path.
 
@@ -311,6 +334,13 @@ GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime
 BOT_RUNTIME=python GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime
 ```
 
+Those Python selections are valid only before the Rust cutover marker exists.
+After any Rust cutover begins, `deploy-runtime`, `runtime-compose`, and the
+Python image entrypoint reject Python explicitly. The only Python fallback is
+the automatic failed-cutover path, which stops Rust, restores the verified
+pre-cutover database, durably removes the pending marker, and only then starts
+the retained Python image.
+
 The eventual cutover uses that exact path with both hard gates explicit:
 
 ```bash
@@ -327,14 +357,15 @@ manifest has no open gates; it also rejects
 empty, unknown, or case-mismatched values before invoking Compose. Both images
 independently reject a selector/image mismatch.
 
-Before recreating the service, `deploy-runtime` makes a verified SQLite online
-backup and retains the running image under a timestamped rollback tag. It
-builds and preflights the candidate without stopping the current container,
-then waits for the candidate's runtime, UID, revision, data mount, and health.
-Failed startup or health automatically recreates the previous runtime from the
-retained artifact. The database backup is intentionally not restored
-automatically, avoiding silent loss of Discord writes; schema compatibility is
-a separate mandatory gate.
+`deploy-runtime` builds both artifacts while the old process stays live, then
+stops it and verifies it is stopped before making the authoritative SQLite
+backup. Rust admits a disposable copy of that backup before it can touch live
+SQLite. The candidate must pass runtime health and the full post-deploy verifier.
+Any failure stops Rust, atomically restores the verified pre-cutover database,
+and only then starts the retained Python image. A durable cutover marker blocks
+all later Python selections at both the deployment and process boundaries;
+subsequent deployments and rollbacks are Rust to Rust. Python is never pointed
+at a database Rust has mutated.
 
 For configuration inspection and ordinary Compose operations without the
 backup/deploy transaction, use the same selector wrapper:
@@ -358,34 +389,28 @@ parity exist. The bind directory remains writable because WAL readers must
 coordinate through SQLite sidecars; the main preflight database connection is
 still opened with `SQLITE_OPEN_READ_ONLY` and `query_only`.
 
-## What “100% parity” means
+## Cutover safety bar
 
-The numeric pytest mapping is necessary but not sufficient. Cutover also
-requires all of the following to be green. These categories are duplicated in
-the machine-checked cutover-readiness manifest, rather than existing only as a
-documentation checklist:
+The historical Python/Rust mapping remains useful regression evidence, but a
+Python readback or A/B round trip is not part of the one-way production gate.
+Cutover requires these operational properties:
 
-- every Python test case mapped to a passing Rust/shared behavior contract;
-- language-neutral golden vectors for deterministic domain behavior;
-- Python/Rust A/B operations against separate copies of identical SQLite
-  snapshots, comparing normalized return values and table deltas;
-- Python-created old/current SQLite snapshots are readable and writable through
-  Rust adapters; retained-Python reads remain optional differential evidence;
+- the production Rust binary admits a copied pre-cutover SQLite snapshot and
+  passes its Rust-only repository/recovery probes;
 - command schema, interaction timing, ephemeral/mention/component, persistent
   view, reconnect, and scheduled-worker parity;
 - recorded offline fixtures for OpenDota, Dotabase, Steam assets, and LLM
   provider requests/fallbacks;
-- functional media checks for asset selection, filename/type/dimensions,
-  behavior-relevant animation timing, and attachment replace/preserve/clear/retry
-  behavior under real Discord;
+- functional media checks for upload/edit/retry and attachment
+  replace/preserve/clear behavior under real Discord; pixel identity is not required;
 - a copied-dev-database migration rehearsal, integrity checks, restart recovery,
   container smoke test, backup, rollback, and verified single-writer cutover.
 
-At cutover, Python is quiesced, an online backup is verified, and the single
+At cutover, Python is quiesced, a backup is verified, and the single
 Compose `bot` service changes runtime while retaining UID 1001, `.env`, assets,
-`GIT_SHA`, `./data:/app/data`, and `/app/data/cama_shuffle.db`. Python remains
-available for schema-compatible rollback; no destructive schema change belongs
-in the cutover.
+`GIT_SHA`, `./data:/app/data`, and `/app/data/cama_shuffle.db`. Python rollback
+is permitted only after restoring that verified pre-cutover backup; once Rust
+is admitted successfully, the deployment selector is permanently Rust-only.
 
 ## Post-parity Python/Rust benchmarks
 

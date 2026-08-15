@@ -12,6 +12,16 @@ fi
 
 case "$selected_runtime" in
   python)
+    for argument in "$@"; do
+      case "$argument" in
+        up|start|restart|run|create)
+          if [ -e "$repository_root/data/.cama-rust-cutover" ]; then
+            echo "Python runtime refused: the one-way Rust cutover marker exists" >&2
+            exit 65
+          fi
+          ;;
+      esac
+    done
     export BOT_RUNTIME=python
     exec docker compose --file docker-compose.yml "$@"
     ;;

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use cama_app::unified_leaderboard::{
     BalanceLeaderboard, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats,
     GamblingSnapshot, GuildMemberDirectory, LeaderboardTab, NegativeBalanceEntry, RatingKind,
-    ScopedTipLeaderboardEntry, TabData, TipsSnapshot, TriviaEntry,
+    ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabData, TipsSnapshot, TriviaEntry,
     UnifiedLeaderboardRepositoryPort, UnifiedLeaderboardView,
 };
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -29,6 +29,62 @@ use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::tip_service::{TipLeaderboardEntry, TipVolume};
 use rusqlite::{Connection, OpenFlags};
 use tracing::warn;
+
+/// Read-only counts returned by the production `/leaderboard` repository
+/// adapters.  The snapshot smoke uses these normalized values so a copied
+/// current-schema database can be exercised without a Discord transport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InfoAnalyticsSnapshot {
+    pub player_count: usize,
+    pub balance_candidates: usize,
+    pub glicko_candidates: usize,
+    pub openskill_candidates: usize,
+    pub gambling_entries: usize,
+    pub tip_sender_entries: usize,
+    pub tip_receiver_entries: usize,
+    pub trivia_entries: usize,
+}
+
+/// Read the production Info/profile analytics surfaces from an already
+/// admitted SQLite database.  This calls the same repository implementation
+/// used by `/leaderboard`; it does not migrate or write the database.
+pub fn read_info_analytics_snapshot(
+    database_path: impl AsRef<Path>,
+    guild_id: i64,
+    limit: usize,
+) -> Result<InfoAnalyticsSnapshot, String> {
+    let mut repository = InfoLeaderboardRepository::new(database_path);
+    let guild = Some(guild_id);
+    let player_count = repository.player_count(guild)?;
+    let balance_candidates = repository.balance_candidates(guild, limit)?.len();
+    let glicko_candidates = repository
+        .rating_candidates(guild, RatingKind::Glicko, limit)?
+        .len();
+    let openskill_candidates = repository
+        .rating_candidates(guild, RatingKind::OpenSkill, limit)?
+        .len();
+    let gambling_entries = repository
+        .gambling_snapshot(guild, limit)?
+        .map_or(0, |snapshot| snapshot.entries.len());
+    let (tip_sender_entries, tip_receiver_entries) = repository
+        .tips_snapshot(guild, limit)?
+        .map_or((0, 0), |snapshot| {
+            (snapshot.top_senders.len(), snapshot.top_receivers.len())
+        });
+    let trivia_entries = repository
+        .trivia_candidates(guild, TRIVIA_WINDOW_DAYS, limit)?
+        .len();
+    Ok(InfoAnalyticsSnapshot {
+        player_count,
+        balance_candidates,
+        glicko_candidates,
+        openskill_candidates,
+        gambling_entries,
+        tip_sender_entries,
+        tip_receiver_entries,
+        trivia_entries,
+    })
+}
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::DiscordTransport;

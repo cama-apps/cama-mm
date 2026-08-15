@@ -3368,6 +3368,8 @@ impl GuildAiPort for ProductionPetGuildAi {
     }
 }
 
+/// SQLite-backed finance context used by the production `/pet` flavor
+/// service. The public read helper below is the disposable-snapshot boundary.
 #[derive(Clone)]
 struct ProductionPetFlavorData {
     database_path: PathBuf,
@@ -3381,6 +3383,20 @@ impl ProductionPetFlavorData {
             players: PlayerRepository::new(database_path),
         }
     }
+}
+
+/// Read the production `/pet` flavor finance context from an admitted SQLite
+/// database. The function performs no migration or writes.
+pub fn read_production_pet_flavor_context(
+    database_path: impl AsRef<Path>,
+    discord_id: i64,
+    guild_id: i64,
+    limit: usize,
+) -> Result<(i64, Vec<LedgerEntry>), String> {
+    let data = ProductionPetFlavorData::new(database_path);
+    let balance = data.balance(discord_id, guild_id)?;
+    let entries = data.recent_entries(guild_id, discord_id, limit)?;
+    Ok((balance, entries))
 }
 
 impl FlavorDataPort for ProductionPetFlavorData {

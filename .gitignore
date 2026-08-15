@@ -194,9 +194,11 @@ scripts/*
 !scripts/production_snapshot_ab_delta.py
 !scripts/python_snapshot_ab_write.py
 !scripts/retained_python_snapshot_read.py
+!scripts/rust_cutover_rehearsal.py
 !scripts/runtime-compose
 !scripts/runtime-entrypoint
 !scripts/sqlite_backup.py
+!scripts/sqlite_restore.py
 !scripts/test-runtime-selector
 docs/stats.md
 docs/

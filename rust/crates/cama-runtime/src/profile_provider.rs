@@ -64,6 +64,53 @@ type LiveDotaProfileService = OpenDotaPlayerService<
 >;
 type ProfileChartJob<'a> = Box<dyn FnOnce() -> Vec<u8> + Send + 'a>;
 
+/// Read-only evidence returned by the profile economy adapter.
+///
+/// This deliberately contains counts and normalized source totals instead of
+/// chart bytes.  The disposable snapshot smoke uses it to prove that the
+/// production balance-history reads can consume a copied current-schema
+/// database without starting Python or depending on Discord/OpenDota.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileBalanceHistorySnapshot {
+    pub event_count: usize,
+    pub source_event_counts: BTreeMap<String, usize>,
+    pub source_totals: BTreeMap<String, i64>,
+}
+
+/// Read the production profile economy history from an already admitted
+/// SQLite database.
+///
+/// This is intentionally a small, transport-free entry point for cutover
+/// evidence.  It uses the same [`SqliteBalanceHistoryPort`] composed into the
+/// live `/profile` provider and performs no schema creation or migration.
+pub fn read_balance_history_snapshot(
+    database_path: impl AsRef<Path>,
+    discord_id: i64,
+    guild_id: i64,
+) -> Result<ProfileBalanceHistorySnapshot, String> {
+    let history = BalanceHistoryService::new(
+        profile_balance_history::SqliteBalanceHistoryPort::new(database_path),
+    )
+    .get_balance_event_series_concurrently(discord_id, guild_id)
+    .map_err(|error| format!("profile balance-history worker failed: {error}"))?;
+
+    let mut source_event_counts = BTreeMap::new();
+    let mut source_totals = BTreeMap::new();
+    for point in &history.series {
+        *source_event_counts
+            .entry(point.event.source.to_owned())
+            .or_insert(0) += 1;
+        *source_totals
+            .entry(point.event.source.to_owned())
+            .or_insert(0) += point.event.delta;
+    }
+    Ok(ProfileBalanceHistorySnapshot {
+        event_count: history.series.len(),
+        source_event_counts,
+        source_totals,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum ProfileTab {
     Overview,

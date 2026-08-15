@@ -133,7 +133,9 @@ pub use health::{
     DEFAULT_MAX_HEARTBEAT_AGE, HealthCheckReport, HealthError, HealthReporter, HealthSnapshot,
     HealthStatus, check_health, health_path,
 };
-pub use info_provider::InfoRegistrationProvider;
+pub use info_provider::{
+    InfoAnalyticsSnapshot, InfoRegistrationProvider, read_info_analytics_snapshot,
+};
 pub use lobby_provider::{
     ConfirmedLobbyJoin, LobbyJoinObserver, LobbyProviderBuildError, LobbyRegistrationProvider,
     LobbyRuntimeConfig, MatchActiveDraft, MatchLobbyPort, MatchLobbySnapshot,
@@ -166,7 +168,9 @@ pub use prediction_workers::{
     PredictionDigestWorker, PredictionDiscordPort, PredictionRefreshWorker, PredictionWorkerConfig,
     prediction_digest_worker_spec, prediction_refresh_worker_spec,
 };
-pub use profile_provider::ProfileRegistrationProvider;
+pub use profile_provider::{
+    ProfileBalanceHistorySnapshot, ProfileRegistrationProvider, read_balance_history_snapshot,
+};
 pub use rating_analysis_provider::{
     RatingAnalysisProviderBuildError, RatingAnalysisRegistrationProvider,
 };

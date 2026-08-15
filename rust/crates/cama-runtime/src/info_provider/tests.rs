@@ -387,6 +387,24 @@ fn seed_gambling_leaderboard_data(path: &Path) {
     }
 }
 
+#[test]
+fn info_analytics_snapshot_reads_all_production_leaderboard_sources() {
+    let (_directory, path) = migrated_database();
+    seed_leaderboard_data(&path);
+
+    let snapshot = read_info_analytics_snapshot(&path, i64::try_from(GUILD).unwrap(), 100)
+        .expect("read Info analytics snapshot");
+
+    assert_eq!(snapshot.player_count, 3);
+    assert_eq!(snapshot.balance_candidates, 3);
+    assert_eq!(snapshot.glicko_candidates, 3);
+    assert_eq!(snapshot.openskill_candidates, 3);
+    assert_eq!(snapshot.gambling_entries, 0);
+    assert_eq!(snapshot.tip_sender_entries, 1);
+    assert_eq!(snapshot.tip_receiver_entries, 1);
+    assert_eq!(snapshot.trivia_entries, 1);
+}
+
 fn registry(provider: &InfoRegistrationProvider) -> Registry {
     let mut builder = RegistryBuilder::default();
     builder

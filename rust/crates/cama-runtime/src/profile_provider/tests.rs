@@ -420,6 +420,20 @@ fn insert_economy_chart_fixture(database: &NamedTempFile) {
     }
 }
 
+#[test]
+fn balance_history_snapshot_reads_the_production_adapter_from_an_existing_schema() {
+    let database = migrated_player_fixture();
+    insert_economy_chart_fixture(&database);
+
+    let snapshot = read_balance_history_snapshot(database.path(), 100, 42)
+        .expect("production balance-history snapshot");
+
+    assert_eq!(snapshot.event_count, 2);
+    assert_eq!(snapshot.source_event_counts.get("bonus"), Some(&2));
+    assert_eq!(snapshot.source_totals.get("bonus"), Some(&15));
+    assert_eq!(snapshot.source_event_counts.values().sum::<usize>(), 2);
+}
+
 fn insert_heroes_chart_fixture(database: &NamedTempFile) {
     let connection = Connection::open(database.path()).expect("open profile fixture");
     connection
