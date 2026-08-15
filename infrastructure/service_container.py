@@ -88,6 +88,7 @@ class ServiceContainer:
         self._init_mafia_service()
         self._init_extras()
         self._init_reminder_service()
+        self._init_curfew_service()
 
         self._initialized = True
         logger.info("ServiceContainer initialization complete")
@@ -661,6 +662,15 @@ class ServiceContainer:
             pet_service=c.get("pet_service"),
         )
 
+    def _init_curfew_service(self) -> None:
+        from services.curfew_service import CurfewService
+
+        c = self._components
+        c["curfew_service"] = CurfewService(
+            player_repo=c["player_repo"],
+            lobby_service=c["lobby_service"],
+        )
+
     # ------------------------------------------------------------------
     # Bot exposure
     # ------------------------------------------------------------------
@@ -720,6 +730,7 @@ class ServiceContainer:
         bot.duel_service = c["duel_service"]
         bot.duel_flavor_service = c["duel_flavor_service"]
         bot.reminder_service = c["reminder_service"]
+        bot.curfew_service = c["curfew_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]

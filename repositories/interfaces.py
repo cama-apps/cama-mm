@@ -77,6 +77,22 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def update_curfew(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        enabled: bool,
+        curfew_hour: int | None,
+        curfew_minute: int,
+        wake_hour: int | None,
+        wake_minute: int,
+        timezone: str | None,
+    ) -> None:
+        """Persist a player's personal lobby-queue curfew window."""
+        ...
+
+    @abstractmethod
     def update_inferred_regions_bulk(self, updates: list[tuple[int, int, str]]) -> None:
         """Cache multiple inferred regions in one transaction."""
         ...

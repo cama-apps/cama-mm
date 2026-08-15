@@ -10,6 +10,7 @@ from opendota_integration import OpenDotaAPI
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IPlayerRepository
+from utils.curfew import format_curfew_window, is_valid_timezone
 from utils.region import REGION_NAMES, infer_region_from_counts, resolve_region
 
 logger = logging.getLogger("cama_bot.player_service")
@@ -188,6 +189,72 @@ class PlayerService:
             "code": code,
             "name": REGION_NAMES.get(code),
             "source": "set" if is_explicit else ("inferred" if code else "none"),
+        }
+
+    def set_curfew(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        curfew_hour: int,
+        curfew_minute: int,
+        wake_hour: int,
+        wake_minute: int,
+        timezone: str,
+    ) -> None:
+        """Enable a player's personal lobby-queue curfew window."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        for hour, minute in ((curfew_hour, curfew_minute), (wake_hour, wake_minute)):
+            if not (0 <= hour <= 23):
+                raise ValueError("Hour must be between 0 and 23.")
+            if not (0 <= minute <= 59):
+                raise ValueError("Minute must be between 0 and 59.")
+        if curfew_hour == wake_hour and curfew_minute == wake_minute:
+            raise ValueError("Bedtime and wake time can't be the same.")
+        if not is_valid_timezone(timezone):
+            raise ValueError(
+                f"Unknown timezone '{timezone}'. Use an IANA name like 'America/New_York'."
+            )
+        self.player_repo.update_curfew(
+            discord_id,
+            guild_id,
+            enabled=True,
+            curfew_hour=curfew_hour,
+            curfew_minute=curfew_minute,
+            wake_hour=wake_hour,
+            wake_minute=wake_minute,
+            timezone=timezone,
+        )
+
+    def disable_curfew(self, discord_id: int, guild_id: int) -> None:
+        """Turn off a player's curfew without discarding their configured hours."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        self.player_repo.update_curfew(
+            discord_id,
+            guild_id,
+            enabled=False,
+            curfew_hour=player.curfew_hour,
+            curfew_minute=player.curfew_minute,
+            wake_hour=player.curfew_wake_hour,
+            wake_minute=player.curfew_wake_minute,
+            timezone=player.curfew_timezone,
+        )
+
+    def get_curfew_info(self, discord_id: int, guild_id: int) -> dict:
+        """Return the player's curfew configuration for display.
+
+        ``window`` is None until the player has set one at least once.
+        """
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        return {
+            "enabled": player.curfew_enabled,
+            "window": format_curfew_window(player) if player.curfew_hour is not None else None,
         }
 
     def backfill_inferred_regions(self, api=None) -> int:

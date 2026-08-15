@@ -45,6 +45,15 @@ class Player:
     # "NONE" sentinel (checked, no US play) and NULL (not yet checked). See utils/region.
     preferred_region: str | None = None
     inferred_region: str | None = None
+    # Personal lobby-queue curfew: block queueing and auto-remove from any
+    # lobby during [curfew_hour:curfew_minute, curfew_wake_hour:curfew_wake_minute)
+    # local time in curfew_timezone (IANA name, e.g. "America/New_York").
+    curfew_enabled: bool = False
+    curfew_hour: int | None = None
+    curfew_minute: int = 0
+    curfew_wake_hour: int | None = None
+    curfew_wake_minute: int = 0
+    curfew_timezone: str | None = None
 
     def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """

@@ -878,6 +878,7 @@ class SchemaManager:
                 "create_draft_financial_effects",
                 self._migration_create_draft_financial_effects,
             ),
+            ("add_curfew_columns", self._migration_add_curfew_columns),
         ]
 
     # --- Migrations ---
@@ -4575,6 +4576,15 @@ class SchemaManager:
         """Add columns for solo ranked grinder detection."""
         self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
+
+    def _migration_add_curfew_columns(self, cursor) -> None:
+        """Add columns for the personal lobby-queue curfew (auto-lock/kick)."""
+        self._add_column_if_not_exists(cursor, "players", "curfew_enabled", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "players", "curfew_hour", "INTEGER")
+        self._add_column_if_not_exists(cursor, "players", "curfew_minute", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "players", "curfew_wake_hour", "INTEGER")
+        self._add_column_if_not_exists(cursor, "players", "curfew_wake_minute", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "players", "curfew_timezone", "TEXT")
 
     def _migration_create_dig_system_tables(self, cursor) -> None:
         """Create all tables for the tunnel digging minigame."""
