@@ -129,7 +129,7 @@ async def test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum():
     assert "FREE" not in labels["package_deal"]
     assert "0 active" in labels["package_deal"]
     assert "dynamic" in labels["soft_avoid"]
-    assert "minimum 300" in labels["soft_avoid"]
+    assert "minimum 250" in labels["soft_avoid"]
 
 
 @pytest.mark.asyncio
@@ -149,8 +149,8 @@ async def test_package_deal_autocomplete_clamps_configured_duration_to_ten(monke
 def test_soft_avoid_floor_applies_to_configured_default(monkeypatch):
     monkeypatch.setattr("commands.shop.SHOP_SOFT_AVOID_COST", 100)
 
-    assert _calculate_soft_avoid_cost(None) == 300
-    assert _calculate_soft_avoid_cost({"games_together": 2, "wins_together": 0}) == 300
+    assert _calculate_soft_avoid_cost(None) == 250
+    assert _calculate_soft_avoid_cost({"games_together": 2, "wins_together": 0}) == 250
 
 
 @pytest.mark.asyncio
@@ -1036,7 +1036,7 @@ async def test_handle_soft_avoid_charges_minimum_price_after_three_losses(monkey
         guild_id=interaction.guild.id,
         avoider_id=interaction.user.id,
         avoided_id=target.id,
-        cost=300,
+        cost=250,
         games=10,
     )
     safe_defer.assert_awaited_once_with(interaction, ephemeral=True)
@@ -1127,7 +1127,7 @@ async def test_handle_soft_avoid_handles_atomic_insufficient_balance(monkeypatch
     await commands._handle_soft_avoid(interaction, target=target)
 
     message = safe_followup.call_args.kwargs["content"].lower()
-    assert "need 300" in message
+    assert "need 250" in message
     assert "only have 200" in message
     player_service.adjust_balance.assert_not_called()
 
