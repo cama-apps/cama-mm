@@ -168,6 +168,39 @@ fn test_register_player_uses_override() {
     assert_eq!((api.player_data_calls, api.mmr_from_data_calls), (0, 0));
 }
 
+fn assert_non_positive_override_is_rejected(mmr_override: i64) {
+    let mut repo = FakeRepo::default();
+    let mut api = DummyApi::default();
+    let error = register_player(
+        &mut repo,
+        &mut api,
+        RegisterPlayerInput {
+            discord_id: 123,
+            discord_username: "user#123".to_owned(),
+            guild_id: TEST_GUILD_ID,
+            steam_id: 42,
+            mmr_override: Some(mmr_override),
+            exclusion_count: 4,
+            added_at: 0,
+        },
+    )
+    .expect_err("non-positive manual MMR is unavailable");
+
+    assert_eq!(error, RegisterPlayerError::MmrUnavailable);
+    assert!(repo.add_calls.is_empty());
+    assert_eq!((api.player_data_calls, api.mmr_from_data_calls), (0, 0));
+}
+
+#[test]
+fn test_register_player_rejects_zero_override() {
+    assert_non_positive_override_is_rejected(0);
+}
+
+#[test]
+fn test_register_player_rejects_negative_override() {
+    assert_non_positive_override_is_rejected(-1);
+}
+
 #[test]
 fn test_register_player_requires_mmr_if_no_override() {
     let mut repo = FakeRepo::default();

@@ -2917,6 +2917,14 @@ impl PredictionDiscordPort for SerenityDiscordTransport {
     }
 }
 
+fn configured_gamba_location_matches(
+    configured_id: Option<u64>,
+    channel_id: u64,
+    parent_id: Option<u64>,
+) -> bool {
+    configured_id == Some(channel_id) || configured_id == parent_id
+}
+
 #[async_trait]
 impl PredictionCommandDiscordPort for SerenityDiscordTransport {
     async fn prediction_channel_is_gamba(
@@ -2936,7 +2944,7 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
         let configured_id = self
             .gamba_channel_id
             .and_then(|channel_id| u64::try_from(channel_id).ok());
-        if configured_id == Some(channel_id.get()) {
+        if configured_gamba_location_matches(configured_id, channel_id.get(), None) {
             return Ok(true);
         }
         let Some(channel) = prediction_channel(&context, guild_id, channel_id).await? else {
@@ -2951,7 +2959,8 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
         let Some(parent_id) = channel.parent_id else {
             return Ok(false);
         };
-        if configured_id == Some(parent_id.get()) {
+        if configured_gamba_location_matches(configured_id, channel_id.get(), Some(parent_id.get()))
+        {
             return Ok(true);
         }
         Ok(prediction_channel(&context, guild_id, parent_id)
@@ -4440,6 +4449,18 @@ mod tests {
     use std::thread::JoinHandle;
 
     struct WireTestHandler;
+
+    #[test]
+    fn configured_gamba_channel_id_is_accepted() {
+        assert!(configured_gamba_location_matches(Some(42), 42, None));
+        assert!(!configured_gamba_location_matches(Some(42), 43, None));
+    }
+
+    #[test]
+    fn configured_gamba_thread_parent_is_accepted() {
+        assert!(configured_gamba_location_matches(Some(42), 43, Some(42)));
+        assert!(!configured_gamba_location_matches(Some(42), 43, Some(44)));
+    }
 
     struct CapturedCommandRequest {
         request_line: String,

@@ -642,7 +642,7 @@ fn embed_copy_and_production_constants_match_python() {
     let embed = weather_embed(&weather).expect("known weather embed");
 
     assert_eq!(DIG_WEATHER_WORKER_NAME, "dig_weather_broadcast");
-    assert_eq!(DIG_WEATHER_WAKE_INTERVAL, Duration::from_secs(600));
+    assert_eq!(DIG_WEATHER_WAKE_INTERVAL, Duration::from_secs(60));
     assert_eq!(embed.title.as_deref(), Some("⛅ Daily Layer Weather"));
     assert_eq!(
         embed.description.as_deref(),
@@ -653,6 +653,28 @@ fn embed_copy_and_production_constants_match_python() {
     assert_eq!(
         embed.footer.as_deref(),
         Some("Weather affects all diggers in that layer today. Use /dig weather for details.")
+    );
+}
+
+#[test]
+fn production_polling_aligns_to_wall_clock_minutes_without_accumulated_drift() {
+    assert_eq!(
+        aligned_wake_delay(20, DIG_WEATHER_WAKE_INTERVAL),
+        Duration::from_secs(40)
+    );
+    assert_eq!(
+        aligned_wake_delay(40, DIG_WEATHER_WAKE_INTERVAL),
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        aligned_wake_delay(60, DIG_WEATHER_WAKE_INTERVAL),
+        Duration::from_secs(60),
+        "an exact boundary schedules the following minute instead of busy-looping"
+    );
+    assert_eq!(
+        aligned_wake_delay(40, Duration::from_millis(10)),
+        Duration::from_millis(10),
+        "sub-second test intervals retain their exact delay"
     );
 }
 

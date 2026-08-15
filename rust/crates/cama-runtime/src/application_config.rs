@@ -431,8 +431,10 @@ impl ApplicationConfig {
                 initial_glicko_rd: p.f64("INITIAL_GLICKO_RD", 350.0),
                 jopacoin_exclusion_reward: p.i64("JOPACOIN_EXCLUSION_REWARD", 5),
                 jopacoin_min_bet: p.i64("JOPACOIN_MIN_BET", 1),
-                jopacoin_per_game: p.i64("JOPACOIN_PER_GAME", 5),
-                jopacoin_win_reward: p.i64("JOPACOIN_WIN_REWARD", 10),
+                // Base Dota rewards are source-controlled so deployments cannot
+                // silently drift from the 10/5 payout policy.
+                jopacoin_per_game: 5,
+                jopacoin_win_reward: 10,
                 leverage_tiers: p.i64_list("LEVERAGE_TIERS", &[2, 3, 5]),
                 lightning_bolt_min_tax: p.i64("LIGHTNING_BOLT_MIN_TAX", 1),
                 lightning_bolt_pct_max: p.f64("LIGHTNING_BOLT_PCT_MAX", 0.0627),
@@ -802,6 +804,17 @@ mod tests {
     }
 
     #[test]
+    fn dota_match_rewards_ignore_environment_overrides() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("JOPACOIN_WIN_REWARD", "3"),
+            ("JOPACOIN_PER_GAME", "2"),
+        ]);
+        assert_eq!(config.values.jopacoin_win_reward, 10);
+        assert_eq!(config.values.jopacoin_per_game, 5);
+    }
+
+    #[test]
     fn synthetic_gamba_members_are_explicitly_opt_in() {
         let config = parse(&[
             ("DISCORD_BOT_TOKEN", "token"),
@@ -991,7 +1004,7 @@ mod tests {
     #[test]
     fn catalog_has_exactly_one_entry_for_every_config_py_environment_key() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
         let config_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
         let script = r#"

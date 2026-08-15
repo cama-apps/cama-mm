@@ -1,7 +1,7 @@
 //! Supervised daily Dig weather broadcast worker.
 //!
 //! The worker starts after the gateway's Ready event, snapshots the current
-//! game date without broadcasting it, and then checks every ten minutes. On a
+//! game date without broadcasting it, and then checks every wall-clock minute. On a
 //! rollover it records one forecast per live guild through SQLite's blocking
 //! pool, queues a per-guild/day delivery marker, and drains that marker through
 //! Discord. The forecast and delivery state survive a process restart even
@@ -28,7 +28,27 @@ use crate::serenity_transport::SerenityDiscordTransport;
 use crate::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
 pub const DIG_WEATHER_WORKER_NAME: &str = "dig_weather_broadcast";
-pub const DIG_WEATHER_WAKE_INTERVAL: Duration = Duration::from_secs(600);
+pub const DIG_WEATHER_WAKE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keep polling aligned to wall-clock boundaries instead of accumulating the
+/// time spent querying SQLite and sending Discord messages. The game day rolls
+/// at an exact minute, so a healthy worker now observes it on that boundary;
+/// late wakes realign on the following iteration.
+fn aligned_wake_delay(now: i64, interval: Duration) -> Duration {
+    let interval_seconds = interval.as_secs();
+    if interval_seconds == 0 {
+        return interval;
+    }
+    let Ok(interval_seconds_i64) = i64::try_from(interval_seconds) else {
+        return interval;
+    };
+    let elapsed = now.rem_euclid(interval_seconds_i64) as u64;
+    Duration::from_secs(if elapsed == 0 {
+        interval_seconds
+    } else {
+        interval_seconds - elapsed
+    })
+}
 
 trait DigWeatherClock: Send + Sync {
     fn game_date(&self) -> String;
@@ -444,7 +464,8 @@ impl BackgroundWorker for DigWeatherWorker {
                 return Ok(());
             }
             self.poll_once(&mut last_weather_date, &mut context).await?;
-            if !context.sleep(self.wake_interval).await {
+            let wake_delay = aligned_wake_delay(self.clock.now(), self.wake_interval);
+            if !context.sleep(wake_delay).await {
                 return Ok(());
             }
         }
