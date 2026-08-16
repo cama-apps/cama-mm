@@ -15,6 +15,8 @@ use cama_db::moderation::{
     ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
 use cama_db::schema_manager::initialize_or_migrate;
+use cama_domain::curfew::CurfewWindow;
+use chrono::Timelike;
 use tempfile::NamedTempFile;
 
 #[derive(Default)]
@@ -1834,5 +1836,130 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
                     && emoji.name == READY_EMOJI
                     && *user_id == 20
             })
+    );
+}
+
+#[tokio::test]
+async fn test_join_blocked_during_active_curfew_window() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+        })
+        .expect("seed an always-active curfew window");
+
+    let slash = dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    {
+        let captured = slash.captured.lock().expect("slash responses");
+        let response = captured.followups.last().expect("curfew rejection");
+        assert!(response.ephemeral);
+        assert!(response.content.to_lowercase().contains("sleep"));
+    }
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_join_allowed_outside_curfew_window() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Player",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_join_allowed_when_curfew_service_unwired() {
+    // The live runtime always wires a CurfewService, so the closest parity
+    // with Python's "service absent" case is a player who has a general
+    // timezone on file but no curfew windows: the join path must still
+    // resolve the curfew lookup to "nothing active" without erroring.
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    {
+        let connection =
+            rusqlite::Connection::open(database.path()).expect("open database for seeding");
+        connection
+            .execute(
+                "UPDATE players SET timezone = 'America/New_York' WHERE discord_id = 1",
+                [],
+            )
+            .expect("seed general timezone without any curfew window");
+    }
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Player",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
     );
 }

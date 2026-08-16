@@ -17,7 +17,9 @@ use cama_app::opendota_http::OpenDotaRuntimeServices;
 use cama_app::player_mmr_fallback::{
     RegisterPlayerError, RegisterPlayerInput, RegisterPlayerResult, register_player,
 };
+use cama_app::playtime_service::{PlaytimeService, PlaytimeServiceError};
 use cama_app::registration::{RoleInputError, parse_roles};
+use cama_app::timezone_service::{TimezoneService, TimezoneServiceError};
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::curfew::CurfewRepository;
 use cama_db::moderation::{
@@ -456,14 +458,64 @@ fn player_command_options() -> Vec<CommandOptionSpec> {
             ),
             subcommand("list", "View your named curfew windows", Vec::new()),
         ]),
+        CommandOptionSpec::new(
+            "timezone",
+            "Your timezone, used by curfew windows and other time-based features",
+            CommandOptionKind::SubcommandGroup,
+        )
+        .options(vec![
+            subcommand(
+                "set",
+                "Set your timezone, used by curfew windows and other time-based features",
+                vec![required_option(
+                    "timezone",
+                    "IANA timezone name, e.g. America/New_York",
+                    CommandOptionKind::String,
+                )],
+            ),
+            subcommand("status", "View your timezone setting", Vec::new()),
+            subcommand(
+                "list",
+                "See common timezone names to use with /player timezone set",
+                Vec::new(),
+            ),
+        ]),
+        CommandOptionSpec::new(
+            "playtime",
+            "Your preferred dota hours (informational) and the group's most popular times",
+            CommandOptionKind::SubcommandGroup,
+        )
+        .options(vec![
+            subcommand(
+                "set",
+                "Set the hours you like to play dota — informational only, doesn't restrict queueing",
+                vec![required_option(
+                    "hours",
+                    "Hours you're usually free, 24-hour, your own timezone — e.g. '18-23' or '14,20,21'",
+                    CommandOptionKind::String,
+                )],
+            ),
+            subcommand("clear", "Clear your dota play-time hours", Vec::new()),
+            subcommand("status", "View your dota play-time hours", Vec::new()),
+            subcommand(
+                "popular",
+                "See the group's most popular hours to play dota",
+                Vec::new(),
+            ),
+        ]),
     ];
-    // `player_lobby` and `player_curfew` are both constructed with
-    // `parent=player` before Python's decorated leaf commands are evaluated,
-    // so Discord receives them first, in declaration order.
+    // `player_lobby`, `player_curfew`, `player_timezone`, and
+    // `player_playtime` are all constructed with `parent=player` before
+    // Python's decorated leaf commands are evaluated, so Discord receives
+    // them first, in declaration order.
+    let playtime = options.pop().expect("player playtime option is present");
+    let timezone = options.pop().expect("player timezone option is present");
     let curfew = options.pop().expect("player curfew option is present");
     let lobby = options.pop().expect("player lobby option is present");
     options.insert(0, lobby);
     options.insert(1, curfew);
+    options.insert(2, timezone);
+    options.insert(3, playtime);
     options
 }
 
@@ -1092,6 +1144,19 @@ impl PlayerRegistrationHandler {
                             .await
                     }
                     "curfew list" => self.curfew_list(context, guild_id, responder).await,
+                    "timezone set" => {
+                        self.timezone_set(context, guild_id, options, responder)
+                            .await
+                    }
+                    "timezone status" => self.timezone_status(context, guild_id, responder).await,
+                    "timezone list" => self.timezone_list(responder).await,
+                    "playtime set" => {
+                        self.playtime_set(context, guild_id, options, responder)
+                            .await
+                    }
+                    "playtime clear" => self.playtime_clear(context, guild_id, responder).await,
+                    "playtime status" => self.playtime_status(context, guild_id, responder).await,
+                    "playtime popular" => self.playtime_popular(guild_id, responder).await,
                     _ => Err(format!("unknown player command {path:?}")),
                 }
             }
@@ -2019,6 +2084,223 @@ impl PlayerRegistrationHandler {
                     .map(|line| format!("- {line}"))
                     .collect::<Vec<_>>()
                     .join("\n")
+            ),
+        )
+        .await
+    }
+
+    async fn timezone_set(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let timezone = string_option(options, "timezone")
+            .ok_or_else(|| "timezone set requires a timezone".to_owned())?
+            .to_owned();
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let service = TimezoneService::new(self.registration.clone());
+        let result = tokio::task::spawn_blocking(move || {
+            service.set_timezone(user_id, Some(guild), &timezone)
+        })
+        .await
+        .map_err(|error| format!("timezone set task failed: {error}"))?;
+        match result {
+            Ok(()) => {
+                followup_ephemeral(
+                    &responder,
+                    "✅ Timezone set. Curfew windows will use this unless a window was given \
+                     its own timezone with `/player curfew add`.",
+                )
+                .await
+            }
+            Err(TimezoneServiceError::PlayerNotRegistered) => {
+                followup_ephemeral(&responder, "❌ Player not registered.").await
+            }
+            Err(error) => followup_ephemeral(&responder, format!("❌ {error}")).await,
+        }
+    }
+
+    async fn timezone_status(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let service = TimezoneService::new(self.registration.clone());
+        let result =
+            tokio::task::spawn_blocking(move || service.timezone_info(user_id, Some(guild)))
+                .await
+                .map_err(|error| format!("timezone status task failed: {error}"))?;
+        match result {
+            Ok(Some(timezone)) => {
+                followup_ephemeral(&responder, format!("Your timezone is **{timezone}**.")).await
+            }
+            Ok(None) => {
+                followup_ephemeral(
+                    &responder,
+                    format!(
+                        "You haven't set a timezone yet (defaults to {} where needed). \
+                         Use `/player timezone set`.",
+                        cama_domain::timezone::DEFAULT_TIMEZONE
+                    ),
+                )
+                .await
+            }
+            Err(TimezoneServiceError::PlayerNotRegistered) => {
+                followup_ephemeral(&responder, "❌ Player not registered.").await
+            }
+            Err(error) => followup_ephemeral(&responder, format!("❌ {error}")).await,
+        }
+    }
+
+    async fn timezone_list(&self, responder: Arc<dyn InteractionResponder>) -> Result<(), String> {
+        followup_ephemeral(&responder, cama_domain::timezone::format_common_timezones()).await
+    }
+
+    async fn playtime_set(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let raw_hours = string_option(options, "hours")
+            .ok_or_else(|| "playtime set requires hours".to_owned())?;
+        let hours = match cama_domain::playtime::parse_hour_set(raw_hours) {
+            Ok(hours) => hours,
+            Err(error) => return followup_ephemeral(&responder, format!("❌ {error}")).await,
+        };
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let service = PlaytimeService::new(self.registration.clone());
+        let saved_hours: Vec<i64> = hours.iter().map(|&hour| i64::from(hour)).collect();
+        let result = tokio::task::spawn_blocking(move || {
+            service.set_play_hours(user_id, Some(guild), &saved_hours)
+        })
+        .await
+        .map_err(|error| format!("playtime set task failed: {error}"))?;
+        match result {
+            Ok(()) => {
+                followup_ephemeral(
+                    &responder,
+                    format!(
+                        "✅ Play-time hours set: **{}**. This is informational only — it \
+                         doesn't affect queueing.",
+                        cama_domain::playtime::format_hour_ranges(&hours)
+                    ),
+                )
+                .await
+            }
+            Err(PlaytimeServiceError::PlayerNotRegistered) => {
+                followup_ephemeral(&responder, "❌ Player not registered.").await
+            }
+            Err(error) => followup_ephemeral(&responder, format!("❌ {error}")).await,
+        }
+    }
+
+    async fn playtime_clear(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let service = PlaytimeService::new(self.registration.clone());
+        let result =
+            tokio::task::spawn_blocking(move || service.clear_play_hours(user_id, Some(guild)))
+                .await
+                .map_err(|error| format!("playtime clear task failed: {error}"))?;
+        match result {
+            Ok(()) => followup_ephemeral(&responder, "✅ Play-time hours cleared.").await,
+            Err(PlaytimeServiceError::PlayerNotRegistered) => {
+                followup_ephemeral(&responder, "❌ Player not registered.").await
+            }
+            Err(error) => followup_ephemeral(&responder, format!("❌ {error}")).await,
+        }
+    }
+
+    async fn playtime_status(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let service = PlaytimeService::new(self.registration.clone());
+        let result =
+            tokio::task::spawn_blocking(move || service.play_hours_info(user_id, Some(guild)))
+                .await
+                .map_err(|error| format!("playtime status task failed: {error}"))?;
+        match result {
+            Ok(Some(hours)) => {
+                let hour_set: std::collections::BTreeSet<u32> = hours
+                    .into_iter()
+                    .filter_map(|hour| u32::try_from(hour).ok())
+                    .collect();
+                followup_ephemeral(
+                    &responder,
+                    format!(
+                        "Your play-time hours: **{}**.",
+                        cama_domain::playtime::format_hour_ranges(&hour_set)
+                    ),
+                )
+                .await
+            }
+            Ok(None) => {
+                followup_ephemeral(
+                    &responder,
+                    "You haven't set any play-time hours yet. Use `/player playtime set`.",
+                )
+                .await
+            }
+            Err(PlaytimeServiceError::PlayerNotRegistered) => {
+                followup_ephemeral(&responder, "❌ Player not registered.").await
+            }
+            Err(error) => followup_ephemeral(&responder, format!("❌ {error}")).await,
+        }
+    }
+
+    async fn playtime_popular(
+        &self,
+        guild_id: u64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let guild = signed_id(guild_id, "guild")?;
+        let service = PlaytimeService::new(self.registration.clone());
+        let counts =
+            tokio::task::spawn_blocking(move || service.popular_play_hours(Some(guild), None))
+                .await
+                .map_err(|error| format!("playtime popular task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        if counts.iter().all(|&count| count == 0) {
+            return followup_ephemeral(
+                &responder,
+                "No one has set their play-time hours yet. Try `/player playtime set`.",
+            )
+            .await;
+        }
+        let lines: Vec<String> = counts
+            .iter()
+            .enumerate()
+            .map(|(hour, &count)| {
+                let bar = "█".repeat(count as usize);
+                let spacer = if count > 0 { " " } else { "" };
+                format!("{hour:02}:00 | {bar}{spacer}{count}")
+            })
+            .collect();
+        followup_ephemeral(
+            &responder,
+            format!(
+                "**🎮 Most Popular Dota Hours** (times in {})\n```\n{}\n```",
+                cama_domain::timezone::DEFAULT_TIMEZONE,
+                lines.join("\n")
             ),
         )
         .await

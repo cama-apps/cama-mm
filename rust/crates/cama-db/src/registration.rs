@@ -471,6 +471,100 @@ impl RegistrationRepository {
         self.save_mmr_prompt(&state)?;
         Ok(true)
     }
+
+    /// Persist a player's general timezone preference. Returns `false` if the
+    /// player isn't registered in this guild.
+    pub fn set_timezone(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        timezone: &str,
+    ) -> Result<bool, RegistrationRepositoryError> {
+        let updated = self.connection()?.execute(
+            "UPDATE players SET timezone=?1,updated_at=CURRENT_TIMESTAMP
+             WHERE discord_id=?2 AND guild_id=?3",
+            params![timezone, discord_id, Self::normalize_guild_id(guild_id)],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// A player's general timezone setting, or `None` if unset or unregistered.
+    pub fn timezone_of(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<String>, RegistrationRepositoryError> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT timezone FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, Self::normalize_guild_id(guild_id)],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Persist a player's informational (never-enforced) dota play-time
+    /// hours. `None` clears them. Returns `false` if the player isn't
+    /// registered in this guild.
+    pub fn set_dota_play_hours(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        hours: Option<&[i64]>,
+    ) -> Result<bool, RegistrationRepositoryError> {
+        let serialized = hours.map(|hours| serde_json::to_string(hours).unwrap_or_default());
+        let updated = self.connection()?.execute(
+            "UPDATE players SET dota_play_hours=?1,updated_at=CURRENT_TIMESTAMP
+             WHERE discord_id=?2 AND guild_id=?3",
+            params![serialized, discord_id, Self::normalize_guild_id(guild_id)],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// A player's informational dota play-time hours, or `None` if unset or
+    /// unregistered.
+    pub fn dota_play_hours_of(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<Vec<i64>>, RegistrationRepositoryError> {
+        let raw: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT dota_play_hours FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, Self::normalize_guild_id(guild_id)],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(raw.map(|text| serde_json::from_str::<Vec<i64>>(&text).unwrap_or_default()))
+    }
+
+    /// Every registered player's timezone and informational play-time hours
+    /// in a guild, for `/player playtime popular` aggregation.
+    pub fn play_hours_for_guild(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<(Option<String>, Option<Vec<i64>>)>, RegistrationRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT timezone, dota_play_hours FROM players WHERE guild_id=?1")?;
+        let rows = statement.query_map(params![Self::normalize_guild_id(guild_id)], |row| {
+            let timezone: Option<String> = row.get(0)?;
+            let hours_text: Option<String> = row.get(1)?;
+            Ok((timezone, hours_text))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (timezone, hours_text) = row?;
+            let hours =
+                hours_text.map(|text| serde_json::from_str::<Vec<i64>>(&text).unwrap_or_default());
+            results.push((timezone, hours));
+        }
+        Ok(results)
+    }
 }
 
 fn mmr_prompt_key(nonce: u64) -> String {
