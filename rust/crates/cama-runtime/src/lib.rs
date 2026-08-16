@@ -1,7 +1,7 @@
 //! Production runtime boundary for the Rust lift-and-shift.
 //!
 //! Domain/application code stays independent of the Discord SDK. This crate
-//! owns process configuration, database admission, gateway supervision, and
+//! owns process configuration, database schema initialization, gateway supervision, and
 //! conversion between Discord interactions and the typed registration API.
 
 pub mod admin_match_correction;
@@ -131,8 +131,8 @@ pub use first_game_pool_worker::{
 };
 pub use gamba_guild_source::{GambaDestination, GambaGuildSource};
 pub use gateway::{
-    CompletedDatabaseAdmission, DatabaseAdmission, GatewaySessionEnd, GatewayTransport,
-    LifecycleEvent, ReconnectPolicy, Runtime, RuntimeError, SqliteDatabaseAdmission,
+    DatabaseInitializationReport, GatewaySessionEnd, GatewayTransport, LifecycleEvent,
+    ReconnectPolicy, Runtime, RuntimeError, SqliteDatabaseInitializer,
 };
 pub use gateway_events::{
     GatewayEventObserver, GatewayEventObservers, GatewayMember, GatewayObserverFailure,

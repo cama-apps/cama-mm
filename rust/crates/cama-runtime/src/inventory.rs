@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn startup_initialize_failure_does_not_publish_runtime() {
         assert_startup_failure_is_unpublished(
-            "let database_admission = match SqliteDatabaseAdmission::with_migration_settings(",
+            "let database_initialization = match SqliteDatabaseInitializer::with_migration_settings(",
         );
     }
 

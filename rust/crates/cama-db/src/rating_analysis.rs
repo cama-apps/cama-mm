@@ -69,7 +69,7 @@ pub enum RatingAnalysisRepositoryError {
 }
 
 /// Bounded adapter over the migrated production schema. It never creates or
-/// upgrades tables; startup admission remains the sole migration authority.
+/// upgrades tables; startup initialization remains the sole migration authority.
 #[derive(Clone, Debug)]
 pub struct RatingAnalysisRepository {
     path: PathBuf,

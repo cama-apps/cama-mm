@@ -21,17 +21,19 @@ automatic recovery path described below.
    A Rust shadow never receives the production bot token. Both runtime artifacts
    take the same non-blocking advisory lock next to the SQLite file, so an
    accidental overlap fails before migration, database access, or gateway login.
-2. Rust now owns clean-database initialization and all 229 existing-database
-   migrations through the shared ledger. Python is retained only as differential
-   and rollback evidence; the stopped Python container is not a migration or
-   startup dependency.
+2. Rust owns clean-database initialization and ongoing existing-database
+   migrations through the shared ledger. Every production start initializes or
+   upgrades the schema and verifies its integrity before repositories, workers,
+   or the Discord gateway can run. Python is not a migration or startup
+   dependency.
 3. Mutating differential tests use independent online-backup snapshots. They
    never point at the original dev or production database.
 4. Rust preserves the existing SQLite behavior: WAL, a five-second busy timeout,
    `BEGIN IMMEDIATE` for atomic writes, foreign keys disabled, named
    `schema_migrations`, signed 64-bit IDs, and SQLite's existing type coercion.
-5. Retired historical migration rows are valid. Every migration still declared
-   by Python must be present, while additional ledger history is tolerated.
+5. Retired historical migration rows are valid. Every migration required by the
+   current Rust build must be present, while additional ledger history is
+   tolerated.
 6. The existing Python test and deployment paths stay green throughout the work.
 
 ## Workspace
@@ -40,7 +42,7 @@ automatic recovery path described below.
   team balancing and pool shuffling, Dig economy/cave-in/gear rules, pets, mana,
   formatting, permissions, configuration, and shared interaction utilities.
 - `cama-db`: Rust-owned clean/existing SQLite initialization and migration,
-  compatibility checks against the retained Python schema contract, and shared
+  integrity and schema-contract checks, and shared
   repositories for core players/matches, `guild_config`, rating history,
   low-priority state, soft avoids, package deals, tips, player pairings, pets,
   pet evolution, pet brawls, Dig active duels/artifacts, duels, loans,
@@ -98,6 +100,26 @@ automatic recovery path described below.
 - `parity/python_vectors.py`: the long-lived Python side of that vector runner.
 - `schema/expected_migrations.txt`: ordered migration contract exported from
   Python and verified on every CI run.
+
+## Database startup
+
+Database startup is an ongoing Rust schema-initialization and integrity
+boundary, not a Python-to-Rust compatibility gate. Before constructing
+repositories or connecting the Discord gateway, the production runtime:
+
+1. applies canonical schema reconciliation, pending migration backfills, and
+   migration-ledger entries in one `BEGIN IMMEDIATE` transaction;
+2. verifies SQLite integrity and the canonical WAL, foreign-key, and
+   `user_version` settings; and
+3. verifies every migration name and required table embedded in the running
+   Rust build.
+
+Startup fails closed if initialization or integrity verification fails.
+Retired migration names already in the ledger are preserved as historical
+records and do not make an otherwise current database unhealthy. The
+`db-admit` command remains specifically for the historical disposable-copy
+cutover rehearsal described below; normal `serve` startup performs schema
+initialization and verification directly.
 
 Further bounded-context crates or modules cover integrations, rendering, and
 runtime workers as those slices are ported. Typed ports and policy tests are not
@@ -166,7 +188,7 @@ cutover check pass.
 
 The ignored root `cama_shuffle.db` is a real development snapshot. Normal
 pytest tests do not use it. Never start either runtime or run a mutating test
-against that original file merely to check compatibility.
+against that original file merely to validate its schema or integrity.
 
 Create an online backup, let Python upgrade only the copy, then audit it with
 Rust:
