@@ -826,11 +826,7 @@ impl PlayerRegistrationHandler {
             event.lobby_kind.display_name()
         ))
         .color(0x2e_cc_71)
-        .field(
-            "Next Step",
-            "Run `/readycheck` before `/shuffle` to confirm everyone is ready.",
-            false,
-        );
+        .field("Next Step", "Run `/readycheck` before `/shuffle`.", false);
         if let (Some(channel), Some(message)) = (event.lobby_channel_id, event.lobby_message_id) {
             embed = embed.field(
                 "",

@@ -290,11 +290,7 @@ pub fn create_lobby_embed(
         );
     }
     if request.regular_count >= request.ready_threshold {
-        embed.add_field(
-            "✅ Ready!",
-            "Run `/readycheck` before `/shuffle` to confirm everyone is ready.",
-            false,
-        );
+        embed.add_field("✅ Ready!", "Run `/readycheck` before `/shuffle`.", false);
     } else {
         let needed = request.ready_threshold - request.regular_count;
         embed.add_field(

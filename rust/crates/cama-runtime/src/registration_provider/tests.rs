@@ -1886,8 +1886,7 @@ async fn exact_threshold_sends_one_python_ready_embed_instead_of_a_rally() {
         Some("All You Can Feed now has 10 players!")
     );
     assert!(response.embeds[0].fields.iter().any(|field| {
-        field.name == "Next Step"
-            && field.value == "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+        field.name == "Next Step" && field.value == "Run `/readycheck` before `/shuffle`."
     }));
     assert!(
         response.embeds[0].fields.iter().any(|field| {

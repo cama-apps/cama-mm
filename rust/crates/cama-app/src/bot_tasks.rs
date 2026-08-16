@@ -691,9 +691,8 @@ impl BackgroundTaskRegistry {
 // -------------------------------------------------------------------------
 
 pub const READYCHECK_COMPLETE_MESSAGE: &str = concat!(
-    "✅ **🍽️ All You Can Feed: 10 players confirmed ready.** ",
-    "Anyone in this lobby can use `/shuffle` now. ",
-    "Only players who confirmed ready will be included; everyone else will sit out."
+    "✅ **🍽️ All You Can Feed: 10+ players are ready.** ",
+    "You can `/shuffle` now; only ready players will be included."
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -915,7 +914,7 @@ impl LobbyReadyGate {
 
 #[must_use]
 pub const fn lobby_ready_next_step() -> &'static str {
-    "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+    "Run `/readycheck` before `/shuffle`."
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

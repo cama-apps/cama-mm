@@ -19,8 +19,7 @@ pub const FULL_LOBBY_SIZE: usize = 10;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 pub const RECENT_JOIN_GRACE_SECONDS: f64 = 10.0 * 60.0;
-pub const READY_LOBBY_RECOMMENDATION: &str =
-    "Run `/readycheck` before `/shuffle` to confirm everyone is ready.";
+pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
 
 #[must_use]
 pub fn readycheck_description(player_count: usize, ready_threshold: usize) -> String {
@@ -35,7 +34,7 @@ pub fn readycheck_description(player_count: usize, ready_threshold: usize) -> St
 #[must_use]
 pub fn ready_announcement(kind: LobbyKind, ready_threshold: usize) -> String {
     format!(
-        "✅ **{}: {ready_threshold} players confirmed ready.** Anyone in this lobby can use `/shuffle` now. Only players who confirmed ready will be included; everyone else will sit out.",
+        "✅ **{}: {ready_threshold}+ players are ready.** You can `/shuffle` now; only ready players will be included.",
         kind.label()
     )
 }
