@@ -4430,7 +4430,10 @@ impl MatchHandler {
             .collect::<Vec<_>>();
         let players_repository = self.players.clone();
         let guild_id = pending.guild_id;
-        let player_ids = participant_ids.clone();
+        let mut player_ids = participant_ids.clone();
+        player_ids.extend(&pending.state.excluded_player_ids);
+        player_ids.sort_unstable();
+        player_ids.dedup();
         let players = tokio::task::spawn_blocking(move || {
             players_repository.get_by_ids(&player_ids, Some(guild_id))
         })
@@ -4441,6 +4444,35 @@ impl MatchHandler {
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player)))
             .collect::<BTreeMap<_, _>>();
+        let mut excluded_display_names = BTreeMap::new();
+        if let Some(guild_id) = u64::try_from(pending.guild_id)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+        {
+            for player_id in pending.state.excluded_player_ids.iter().copied() {
+                if !players_by_id.contains_key(&player_id) {
+                    continue;
+                }
+                let Ok(user_id) = u64::try_from(player_id) else {
+                    continue;
+                };
+                if user_id == 0 {
+                    continue;
+                }
+                match self
+                    .discord
+                    .cached_guild_member_display_name(guild_id, user_id)
+                {
+                    Ok(Some(display_name)) => {
+                        excluded_display_names.insert(player_id, display_name);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug!(%error, guild_id, player_id, "excluded player name lookup failed");
+                    }
+                }
+            }
+        }
         let line = |player_id: i64, role: &str| {
             let player = players_by_id.get(&player_id);
             let name = player.map_or_else(
@@ -4627,10 +4659,15 @@ impl MatchHandler {
                 .excluded_player_ids
                 .iter()
                 .map(|player_id| {
-                    players_by_id.get(player_id).map_or_else(
-                        || format!("Unknown({player_id})"),
-                        |player| player.name.clone(),
-                    )
+                    excluded_display_names
+                        .get(player_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            players_by_id.get(player_id).map_or_else(
+                                || format!("Unknown({player_id})"),
+                                |player| player.name.clone(),
+                            )
+                        })
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
