@@ -35,6 +35,12 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: nextest@0.9.143
+          fallback: none
+
       - name: Cache compiler objects
         uses: mozilla-actions/sccache-action@v0.0.10
 
@@ -59,8 +65,8 @@ jobs:
 
       - name: Test Rust
         run: >-
-          cargo test --locked --manifest-path rust/Cargo.toml
-          --workspace --all-targets --all-features
+          cargo nextest run --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features --test-threads 8
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
