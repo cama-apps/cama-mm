@@ -2,6 +2,7 @@
 
 pub mod catalogs;
 pub mod config_contract;
+pub mod curfew;
 pub mod dig_cave_in;
 pub mod dig_economy;
 pub mod dig_gear;

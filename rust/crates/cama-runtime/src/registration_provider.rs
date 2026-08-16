@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::curfew_service::{CurfewService, CurfewServiceError};
 use cama_app::moderation::ModerationService;
 use cama_app::neon_degen::{EventKey, NeonDegenService, NeonEventPort, StoreError};
 use cama_app::opendota_http::OpenDotaRuntimeServices;
@@ -18,6 +19,7 @@ use cama_app::player_mmr_fallback::{
 };
 use cama_app::registration::{RoleInputError, parse_roles};
 use cama_db::core_repositories::PlayerRepository;
+use cama_db::curfew::CurfewRepository;
 use cama_db::moderation::{
     LobbySuspension, ModerationRepository, SuspensionCompletion, SuspensionScope,
 };
@@ -136,6 +138,7 @@ impl PlayerRegistrationProvider {
                 notifications: NotificationRepository::new(path),
                 moderation: ModerationRepository::new(path),
                 players: PlayerRepository::new(path),
+                curfew: CurfewService::new(CurfewRepository::new(path)),
                 opendota,
                 discord,
                 config,
@@ -410,11 +413,57 @@ fn player_command_options() -> Vec<CommandOptionSpec> {
                 Vec::new(),
             ),
         ]),
+        CommandOptionSpec::new(
+            "curfew",
+            "Named windows during which you're auto-locked and auto-removed from lobbies",
+            CommandOptionKind::SubcommandGroup,
+        )
+        .options(vec![
+            subcommand(
+                "add",
+                "Add (or update) a named curfew window",
+                vec![
+                    required_option(
+                        "name",
+                        "A name for this window (your choice) — reuse a name to update that window",
+                        CommandOptionKind::String,
+                    ),
+                    required_option(
+                        "start",
+                        "Start time, 24-hour HH:MM",
+                        CommandOptionKind::String,
+                    ),
+                    required_option(
+                        "end",
+                        "End time, 24-hour HH:MM — queueing unlocks then",
+                        CommandOptionKind::String,
+                    ),
+                    CommandOptionSpec::new(
+                        "timezone",
+                        "IANA timezone name — leave blank to use your /player timezone setting",
+                        CommandOptionKind::String,
+                    ),
+                ],
+            ),
+            subcommand(
+                "remove",
+                "Remove one of your named curfew windows",
+                vec![required_option(
+                    "name",
+                    "The window's name",
+                    CommandOptionKind::String,
+                )],
+            ),
+            subcommand("list", "View your named curfew windows", Vec::new()),
+        ]),
     ];
-    // `player_lobby` is constructed with `parent=player` before Python's
-    // decorated leaf commands are evaluated, so Discord receives it first.
+    // `player_lobby` and `player_curfew` are both constructed with
+    // `parent=player` before Python's decorated leaf commands are evaluated,
+    // so Discord receives them first, in declaration order.
+    let curfew = options.pop().expect("player curfew option is present");
     let lobby = options.pop().expect("player lobby option is present");
     options.insert(0, lobby);
+    options.insert(1, curfew);
     options
 }
 
@@ -441,6 +490,7 @@ struct PlayerRegistrationHandler {
     notifications: NotificationRepository,
     moderation: ModerationRepository,
     players: PlayerRepository,
+    curfew: CurfewService,
     opendota: Arc<OpenDotaRuntimeServices>,
     discord: Arc<dyn DiscordTransport>,
     config: PlayerRegistrationConfig,
@@ -1036,6 +1086,12 @@ impl PlayerRegistrationHandler {
                         self.autonotify(context, guild_id, options, responder).await
                     }
                     "lobby status" => self.lobby_status(context, guild_id, responder).await,
+                    "curfew add" => self.curfew_add(context, guild_id, options, responder).await,
+                    "curfew remove" => {
+                        self.curfew_remove(context, guild_id, options, responder)
+                            .await
+                    }
+                    "curfew list" => self.curfew_list(context, guild_id, responder).await,
                     _ => Err(format!("unknown player command {path:?}")),
                 }
             }
@@ -1830,6 +1886,142 @@ impl PlayerRegistrationHandler {
                 .to_owned()
         };
         followup_ephemeral(&responder, message).await
+    }
+
+    async fn curfew_add(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let name = string_option(options, "name")
+            .ok_or_else(|| "curfew add requires a name".to_owned())?
+            .to_owned();
+        let start = string_option(options, "start")
+            .ok_or_else(|| "curfew add requires a start time".to_owned())?;
+        let end = string_option(options, "end")
+            .ok_or_else(|| "curfew add requires an end time".to_owned())?;
+        let timezone = string_option(options, "timezone").map(str::to_owned);
+
+        let (start_hour, start_minute) = match cama_domain::curfew::parse_clock(start) {
+            Ok(parsed) => parsed,
+            Err(error) => return followup_ephemeral(&responder, format!("❌ {error}")).await,
+        };
+        let (end_hour, end_minute) = match cama_domain::curfew::parse_clock(end) {
+            Ok(parsed) => parsed,
+            Err(error) => return followup_ephemeral(&responder, format!("❌ {error}")).await,
+        };
+
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let curfew = self.curfew.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            curfew.add_window(
+                user_id,
+                guild,
+                &name,
+                start_hour,
+                start_minute,
+                end_hour,
+                end_minute,
+                timezone.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| format!("curfew add task failed: {error}"))?;
+
+        let window = match result {
+            Ok(window) => window,
+            Err(CurfewServiceError::PlayerNotRegistered) => {
+                return followup_ephemeral(&responder, "❌ Player not registered.").await;
+            }
+            Err(error) => {
+                return followup_ephemeral(&responder, format!("❌ {error}")).await;
+            }
+        };
+
+        let general_timezone = self.curfew.general_timezone(user_id, guild).unwrap_or(None);
+        followup_ephemeral(
+            &responder,
+            format!(
+                "✅ Window added: {}. You'll be blocked from joining a lobby and auto-removed \
+                 from any lobby you're already in while inside this window.",
+                cama_domain::curfew::format_window(&window, general_timezone.as_deref())
+            ),
+        )
+        .await
+    }
+
+    async fn curfew_remove(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let name = string_option(options, "name")
+            .ok_or_else(|| "curfew remove requires a name".to_owned())?
+            .to_owned();
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let curfew = self.curfew.clone();
+        let remove_name = name.clone();
+        let removed =
+            tokio::task::spawn_blocking(move || curfew.remove_window(user_id, guild, &remove_name))
+                .await
+                .map_err(|error| format!("curfew remove task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        if removed {
+            followup_ephemeral(&responder, format!("✅ Removed **{name}**.")).await
+        } else {
+            followup_ephemeral(
+                &responder,
+                format!(
+                    "❌ You don't have a window named **{name}**. Use `/player curfew list` to see yours."
+                ),
+            )
+            .await
+        }
+    }
+
+    async fn curfew_list(
+        &self,
+        context: CommandContext,
+        guild_id: u64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "user")?;
+        let guild = signed_id(guild_id, "guild")?;
+        let curfew = self.curfew.clone();
+        let windows = tokio::task::spawn_blocking(move || curfew.list_windows(user_id, guild))
+            .await
+            .map_err(|error| format!("curfew list task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        if windows.is_empty() {
+            return followup_ephemeral(
+                &responder,
+                "You don't have any curfew windows set. Use `/player curfew add`.",
+            )
+            .await;
+        }
+        let general_timezone = self.curfew.general_timezone(user_id, guild).unwrap_or(None);
+        let lines: Vec<String> = windows
+            .iter()
+            .map(|window| cama_domain::curfew::format_window(window, general_timezone.as_deref()))
+            .collect();
+        followup_ephemeral(
+            &responder,
+            format!(
+                "Your curfew windows:\n{}",
+                lines
+                    .iter()
+                    .map(|line| format!("- {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .await
     }
 
     async fn exclusion(

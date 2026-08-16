@@ -1093,6 +1093,20 @@ CREATE TABLE pets (
                 CHECK (death_announced_at IS NULL OR died_at IS NOT NULL)
             );
 
+-- table: player_curfew_windows
+CREATE TABLE player_curfew_windows (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                name         TEXT NOT NULL,
+                start_hour   INTEGER NOT NULL,
+                start_minute INTEGER NOT NULL DEFAULT 0,
+                end_hour     INTEGER NOT NULL,
+                end_minute   INTEGER NOT NULL DEFAULT 0,
+                timezone     TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id, name)
+            );
+
 -- table: player_mana
 CREATE TABLE player_mana (
                 discord_id   INTEGER NOT NULL,
@@ -1222,7 +1236,7 @@ CREATE TABLE "players" (
                 last_wheel_spin INTEGER,
                 last_double_or_nothing INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, personal_best_win_streak INTEGER DEFAULT 0, total_bets_placed INTEGER DEFAULT 0, first_leverage_used INTEGER DEFAULT 0, has_wheel_pardon INTEGER DEFAULT 0, last_trivia_session INTEGER, is_solo_grinder INTEGER DEFAULT 0, solo_grinder_checked_at TEXT, dota_streak_days INTEGER NOT NULL DEFAULT 0, dota_last_played_date TEXT, preferred_region TEXT, inferred_region TEXT, last_pingedash INTEGER, last_pingedkevin INTEGER, os_rating_version INTEGER NOT NULL DEFAULT 5, os_algorithm_fingerprint TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, personal_best_win_streak INTEGER DEFAULT 0, total_bets_placed INTEGER DEFAULT 0, first_leverage_used INTEGER DEFAULT 0, has_wheel_pardon INTEGER DEFAULT 0, last_trivia_session INTEGER, is_solo_grinder INTEGER DEFAULT 0, solo_grinder_checked_at TEXT, dota_streak_days INTEGER NOT NULL DEFAULT 0, dota_last_played_date TEXT, preferred_region TEXT, inferred_region TEXT, last_pingedash INTEGER, last_pingedkevin INTEGER, os_rating_version INTEGER NOT NULL DEFAULT 5, os_algorithm_fingerprint TEXT, timezone TEXT, dota_play_hours TEXT,
                 PRIMARY KEY (discord_id, guild_id)
             );
 
@@ -2146,6 +2160,9 @@ CREATE INDEX idx_wheel_spins_spin_time ON wheel_spins(spin_time);
 
 -- index: idx_wrapped_guild_month
 CREATE INDEX idx_wrapped_guild_month ON wrapped_generation(guild_id, year_month);
+
+-- index: idx_curfew_windows_guild_discord
+CREATE INDEX idx_curfew_windows_guild_discord ON player_curfew_windows(guild_id, discord_id);
 
 -- index: uq_dig_gear_one_equipped_per_slot
 CREATE UNIQUE INDEX uq_dig_gear_one_equipped_per_slot

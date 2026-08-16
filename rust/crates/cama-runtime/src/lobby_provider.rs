@@ -11,6 +11,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::curfew_service::CurfewService;
 use cama_app::dedicated_lobby_channel::{
     ChannelId as AppChannelId, GuildId as AppGuildId, LobbyMessageIds, LobbyScope,
     MessageId as AppMessageId, UserId as AppUserId,
@@ -35,6 +36,7 @@ use cama_app::readycheck::{
     readycheck_description,
 };
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
+use cama_db::curfew::CurfewRepository;
 use cama_db::dota_bet_seed_repository::DotaBetSeedRepository;
 use cama_db::moderation::{
     LobbySuspension, ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
@@ -77,7 +79,8 @@ const RECONCILE_ATTEMPTS: usize = 3;
 const RAW_REJECTION_TTL: Duration = Duration::from_secs(10);
 const RAW_LONG_REJECTION_TTL: Duration = Duration::from_secs(15);
 
-type LiveLobbyService = LobbyService<SqliteLobbyPlayers, SqlitePendingMatches, SystemLobbyClock>;
+pub type LiveLobbyService =
+    LobbyService<SqliteLobbyPlayers, SqlitePendingMatches, SystemLobbyClock>;
 type LiveLobbyRuntime =
     LobbyCommandRuntime<SqliteLobbyPlayers, SqlitePendingMatches, SystemLobbyClock>;
 
@@ -231,7 +234,7 @@ impl LobbyPersistencePort for SqliteLobbyPersistence {
 }
 
 #[derive(Clone, Debug)]
-struct SqliteLobbyPlayers {
+pub struct SqliteLobbyPlayers {
     repository: PlayerRepository,
 }
 
@@ -300,7 +303,7 @@ impl LobbyPlayerPort for SqliteLobbyPlayers {
 }
 
 #[derive(Clone, Debug)]
-struct SqlitePendingMatches {
+pub struct SqlitePendingMatches {
     repository: PendingLobbyRepository,
 }
 
@@ -477,6 +480,7 @@ struct LobbyRuntimeState {
     config: LobbyRuntimeConfig,
     first_game_previews: RuntimeFirstGamePoolPreviews,
     moderation: ModerationRepository,
+    curfew: CurfewService,
     join_observer: RwLock<Option<Arc<dyn LobbyJoinObserver>>>,
 }
 
@@ -1244,6 +1248,7 @@ impl LobbyRegistrationProvider {
             config,
             first_game_previews,
             moderation: ModerationRepository::new(database_path),
+            curfew: CurfewService::new(CurfewRepository::new(database_path)),
             join_observer: RwLock::new(None),
         });
         Ok(Self {
@@ -1280,6 +1285,19 @@ impl LobbyRegistrationProvider {
         MatchLobbyPort {
             state: Arc::clone(&self.handler.state),
         }
+    }
+
+    /// Share the live in-memory lobby service with the curfew sweep worker,
+    /// so it can read current membership and remove players in real time.
+    #[must_use]
+    pub fn live_lobby_service(&self) -> Arc<LiveLobbyService> {
+        Arc::clone(&self.handler.state.service)
+    }
+
+    /// Share the SQLite-backed curfew service with the curfew sweep worker.
+    #[must_use]
+    pub fn curfew_service(&self) -> CurfewService {
+        self.handler.state.curfew.clone()
     }
 
     /// Share the production lobby service, operation locks, persistence, and
@@ -2655,6 +2673,30 @@ impl LobbyInteractionHandler {
             return followup_ephemeral(
                 &responder,
                 "❌ Set your preferred roles first! Use `/player roles`.",
+            )
+            .await;
+        }
+        let signed_guild_id = i64::try_from(guild_id.0).unwrap_or_default();
+        let signed_user_id = i64::try_from(command.user_id.0).unwrap_or_default();
+        let curfew = self.state.curfew.clone();
+        let active_window = tokio::task::spawn_blocking(move || {
+            curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())
+        })
+        .await
+        .map_err(|error| format!("curfew lookup task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if let Some(window) = active_window {
+            let general_timezone = self
+                .state
+                .curfew
+                .general_timezone(signed_user_id, signed_guild_id)
+                .unwrap_or(None);
+            return followup_ephemeral(
+                &responder,
+                &format!(
+                    "❌ You're inside your {} curfew window. Use `/player curfew remove` if you'd rather queue through it.",
+                    cama_domain::curfew::format_window(&window, general_timezone.as_deref())
+                ),
             )
             .await;
         }

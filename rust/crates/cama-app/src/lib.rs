@@ -25,6 +25,7 @@ pub mod boss_multi_tier;
 pub mod bot_tasks;
 pub mod bugfix_regressions;
 pub mod channel_checks;
+pub mod curfew_service;
 pub mod dedicated_lobby_channel;
 pub mod dig_abandon_runtime;
 pub mod dig_artifact_catalog_runtime;

@@ -39,7 +39,7 @@ use cama_runtime::{
     ScoutRegistrationProvider, SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider,
     SqliteDatabaseAdmission, SurveyRegistrationProvider, TaxRegistrationProvider,
     TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
-    WrappedRegistrationProvider, check_health, dig_weather_worker_spec,
+    WrappedRegistrationProvider, check_health, curfew_sweep_worker_spec, dig_weather_worker_spec,
     duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
     manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec,
     prediction_refresh_worker_spec, validate_production_registry,
@@ -1137,6 +1137,12 @@ async fn run_serve() -> ExitCode {
         &application_config,
         discord_transport.clone(),
     );
+    let curfew_sweep_worker = curfew_sweep_worker_spec(
+        lobby_provider.curfew_service(),
+        lobby_provider.live_lobby_service(),
+        discord_transport.clone(),
+        discord_transport.clone(),
+    );
     let survey_recovery_worker = survey_provider.recovery_worker_spec();
     let mafia_phase_worker = mafia_provider.worker_spec(discord_transport.clone());
     let betting_view_timeout_worker = betting_provider.timeout_worker();
@@ -1171,7 +1177,8 @@ async fn run_serve() -> ExitCode {
     .with_worker(dig_weather_worker)
     .with_worker(mafia_phase_worker)
     .with_worker(betting_view_timeout_worker)
-    .with_worker(survey_recovery_worker);
+    .with_worker(survey_recovery_worker)
+    .with_worker(curfew_sweep_worker);
     if let Some(first_game_pool_worker) = first_game_pool_worker {
         runtime = runtime.with_worker(first_game_pool_worker);
     }
