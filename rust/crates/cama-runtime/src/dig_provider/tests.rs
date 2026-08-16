@@ -2569,6 +2569,71 @@ async fn configured_fallback_crash_reconciles_without_duplicate_after_rebind() {
 }
 
 #[tokio::test]
+async fn pending_configured_delivery_rejection_falls_back_to_interaction_channel() {
+    const CONFIGURED_CHANNEL: i64 = CHANNEL as i64 + 1;
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let configured = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("dig-provider-test-token".to_owned()),
+        "NEON_DEGEN_ENABLED" => Some("false".to_owned()),
+        "DIG_CHANNEL_ID" => Some(CONFIGURED_CHANNEL.to_string()),
+        _ => None,
+    })
+    .expect("configured Dig provider test config");
+    let (_database, provider, discord) = fixture_with_discord_and_config(discord, configured);
+    provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0xdead_beef,
+                CONFIGURED_CHANNEL,
+                "Dig Test Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("commit pending configured-channel delivery");
+    discord.reject_next_configured_nonce_send();
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(go_request(), responder.clone())
+        .await
+        .expect("safe recovery rejection should fall back to the interaction channel");
+
+    assert_eq!(discord.public.lock().expect("recovered delivery").len(), 1);
+    assert!(
+        discord
+            .message_channels
+            .lock()
+            .expect("delivery channels")
+            .values()
+            .all(|channel| *channel == CHANNEL as i64)
+    );
+    assert!(
+        provider
+            .handler
+            .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
+                guild_id: Some(GUILD as i64),
+                discord_id: Some(USER as i64),
+                limit: 10,
+            })
+            .await
+            .expect("pending delivery query")
+            .is_empty()
+    );
+    assert_eq!(responder.followups.lock().expect("current go").len(), 1);
+}
+
+#[tokio::test]
 async fn accepted_interaction_followup_is_reconciled_by_interaction_and_immutable_body() {
     let (database, provider, discord) = fixture();
     let execution = provider

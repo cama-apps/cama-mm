@@ -3250,7 +3250,37 @@ impl DigInteractionHandler {
             })
             .await?
         {
-            self.deliver_to_channel(&pending).await?;
+            match self.deliver_to_channel_with_failure(&pending).await {
+                Ok(()) => {}
+                Err(DigDeliveryFailure::SafeFallback { part, error }) => {
+                    let Some(interaction_channel) = channel_id else {
+                        return Err(error);
+                    };
+                    if pending.context.channel_id == interaction_channel {
+                        return Err(error);
+                    }
+                    let fallback = self
+                        .rebind_delivery_channel(
+                            &pending,
+                            part,
+                            pending.context.channel_id,
+                            interaction_channel,
+                        )
+                        .await
+                        .map_err(|rebind_error| {
+                            format!(
+                                "{error}; fallback delivery channel could not be persisted: {rebind_error}"
+                            )
+                        })?;
+                    self.deliver_to_channel_with_failure(&fallback)
+                        .await
+                        .map_err(|failure| match failure {
+                            DigDeliveryFailure::SafeFallback { error, .. }
+                            | DigDeliveryFailure::Ambiguous(error) => error,
+                        })?;
+                }
+                Err(DigDeliveryFailure::Ambiguous(error)) => return Err(error),
+            }
         }
         let forced_event = self.force_event_pending(user_id, guild_id)?;
         let result = self
