@@ -53,6 +53,7 @@ use crate::admin_provider::{
     AdminLobbyEjectionResult, AdminLobbyScope,
 };
 use crate::application_config::ApplicationConfig;
+use crate::curfew_sweep_worker::CurfewLobbyDisplayPort;
 use crate::discord_transport::{
     DiscordAllowedMentions, DiscordEmoji, DiscordMessage, DiscordPresence, DiscordTransport,
 };
@@ -1202,6 +1203,28 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
     }
 }
 
+/// Production surface used by the curfew sweep worker to make a removal
+/// actually visible: re-syncs readycheck eligibility and re-renders the
+/// lobby's live Discord embed, matching Python's
+/// `_deliver_curfew_kick` -> `_sync_lobby_displays` pair.
+#[derive(Clone)]
+struct CurfewLobbyDisplay {
+    state: Arc<LobbyRuntimeState>,
+}
+
+#[async_trait]
+impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
+    async fn refresh_curfew_lobby(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+    ) -> Result<(), String> {
+        let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
+        self.state.sync_ready_lobby(scope);
+        self.state.sync_lobby_display(scope).await
+    }
+}
+
 impl LobbyRegistrationProvider {
     pub fn new(
         database_path: impl AsRef<Path>,
@@ -1298,6 +1321,15 @@ impl LobbyRegistrationProvider {
     #[must_use]
     pub fn curfew_service(&self) -> CurfewService {
         self.handler.state.curfew.clone()
+    }
+
+    /// Let the curfew sweep worker refresh a lobby's Discord embed after
+    /// removing members from it.
+    #[must_use]
+    pub fn curfew_lobby_display(&self) -> Arc<dyn CurfewLobbyDisplayPort> {
+        Arc::new(CurfewLobbyDisplay {
+            state: Arc::clone(&self.handler.state),
+        })
     }
 
     /// Share the production lobby service, operation locks, persistence, and

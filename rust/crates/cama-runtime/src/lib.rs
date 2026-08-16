@@ -88,8 +88,8 @@ pub use command_tree_contract::{
 };
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
 pub use curfew_sweep_worker::{
-    CURFEW_SWEEP_WAKE_INTERVAL, CURFEW_SWEEP_WORKER_NAME, CurfewSweepWorker,
-    curfew_sweep_worker_spec,
+    CURFEW_SWEEP_WAKE_INTERVAL, CURFEW_SWEEP_WORKER_NAME, CurfewLobbyDisplayPort,
+    CurfewSweepWorker, curfew_sweep_worker_spec,
 };
 pub use dig_bonus_runtime::{
     BettingDigBonusWheelPort, DigBonusDiscordPort, DigBonusRewardSource, DigBonusRuntime,
