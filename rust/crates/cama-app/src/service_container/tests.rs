@@ -1,8 +1,7 @@
 use super::*;
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cama_db::economy_event_repository::{EventDraft, EventEffects};
@@ -20,17 +19,12 @@ impl PythonDatabase {
             "cama-service-container-{}-{sequence}.db",
             std::process::id()
         ));
-        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let status = Command::new("uv")
+        let status = crate::test_support::parity_python()
             .args([
-                "run",
-                "--locked",
-                "python",
                 "-c",
                 "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()",
             ])
             .arg(&path)
-            .current_dir(project_root)
             .status()
             .expect("run canonical Python schema manager");
         assert!(status.success(), "Python schema initialization failed");
