@@ -117,6 +117,7 @@ pub mod playtime_service;
 pub mod post_match_gif_media;
 pub mod prediction_resolution;
 pub mod predictions;
+pub mod python_random;
 pub mod rating_analysis_command;
 pub mod rating_analysis_media;
 pub mod rating_comparison_service;

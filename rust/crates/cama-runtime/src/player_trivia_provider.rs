@@ -24,6 +24,7 @@ use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
+use crate::ids::signed_id;
 use crate::registration::{
     CommandSpec, ComponentRoute, InteractionActionRow, InteractionButton, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionMessageReceipt, InteractionRequest,
@@ -1439,10 +1440,6 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
             })
             .collect(),
     }
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} ID exceeds SQLite INTEGER"))
 }
 
 fn unix_timestamp() -> Result<i64, String> {

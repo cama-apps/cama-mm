@@ -23,6 +23,7 @@ use crate::gateway::ReconnectPolicy;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::blocking as sqlite;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -2555,16 +2556,6 @@ async fn followup(
 
 fn signed(value: u64, label: &str) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| format!("Discord {label} exceeds SQLite INTEGER"))
-}
-
-async fn sqlite<T, F>(label: &'static str, work: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| format!("{label} task failed: {error}"))?
 }
 
 #[cfg(test)]

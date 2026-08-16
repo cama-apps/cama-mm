@@ -2,9 +2,13 @@ name: Deploy
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [Release]
     types: [completed]
     branches: [main]
+
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   deploy:
@@ -18,32 +22,27 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
-      - name: Deploy to server
+      - name: Deploy immutable Rust image
         uses: appleboy/ssh-action@v1.2.2
         env:
-          BOT_RUNTIME_SELECTION: ${{ vars.BOT_RUNTIME }}
-          RUST_CUTOVER_CANDIDATE_SELECTION: ${{ vars.RUST_CUTOVER_CANDIDATE }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUST_RUNTIME_IMAGE: ghcr.io/${{ github.repository }}-rust:${{ github.event.workflow_run.head_sha }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: cama
           key: ${{ secrets.SSH_KEY }}
-          envs: BOT_RUNTIME_SELECTION,RUST_CUTOVER_CANDIDATE_SELECTION
+          envs: GHCR_USERNAME,GHCR_TOKEN,RUST_RUNTIME_IMAGE
+          command_timeout: 15m
           script: |
             set -eu
             DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
             cd ~/cama-mm
             git fetch origin main
             git checkout --force "$DEPLOY_SHA"
-            if [ -n "${BOT_RUNTIME_SELECTION:-}" ]; then
-              BOT_RUNTIME="$BOT_RUNTIME_SELECTION"
-              export BOT_RUNTIME
-            else
-              unset BOT_RUNTIME
-            fi
-            if [ "${RUST_CUTOVER_CANDIDATE_SELECTION:-}" = true ]; then
-              RUST_CUTOVER_CANDIDATE=true
-              export RUST_CUTOVER_CANDIDATE
-            else
-              unset RUST_CUTOVER_CANDIDATE
-            fi
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            BOT_RUNTIME=rust
+            RUST_CUTOVER_CANDIDATE=true
+            export BOT_RUNTIME RUST_CUTOVER_CANDIDATE RUST_RUNTIME_IMAGE
             GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime

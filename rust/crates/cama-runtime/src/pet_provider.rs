@@ -13,13 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cama_app::ai_services::{
-    AIService, Message, MessageRole, ToolChoice, ToolDefinition, ToolProperty, ToolPropertySchema,
-    ToolRequest, Value as AiValue,
-};
+use cama_app::ai_services::AIService;
 use cama_app::pet::{SeededPetRandom, SystemPetClock};
 use cama_app::pet_assets::{
-    EvolutionVisual, FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
+    FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
 use cama_app::pet_brawl::{
     Clock as BrawlClock, PetBrawlPort, PetBrawlService, PetEvolutionPort, PetPort, PortError,
@@ -41,14 +38,8 @@ use cama_app::pet_eating::{
     PetEatingService,
 };
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
-use cama_app::pet_flavor::{
-    BUNDLE_TOOL_NAME, FlavorClock, FlavorDataPort, FlavorRng, GuildAiPort, LedgerEntry, LlmPort,
-    LlmRequest, PetFlavorEvent as FlavorEvent, PetFlavorService,
-    ToolCallResult as FlavorToolCallResult, ToolValue,
-};
+use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
 use cama_app::pet_sqlite::SqlitePetCommandService;
-use cama_db::core_repositories::PlayerRepository;
-use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::pet_brawl_repository::{
     BrawlSettlement, BrawlSettlementResult, DrawSettlementResult, PetBrawlRepository, SweepResult,
 };
@@ -58,16 +49,14 @@ use cama_db::pet_eating_repository::{
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::{PetRepository, PetTrainingError};
 use cama_domain::formatting::JOPACOIN_EMOTE;
-use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::pet::{
     FOOD_ITEMS, GILDED_EGG_PREMIUM, MAX_BUY_QTY, Pet, PetMood, PetStage, SALT_LICK, TRINKET_COST,
     UNHATCHED_SPECIES,
 };
 use cama_domain::pet_brawl::{PetBrawl, PetBrawlMove};
-use cama_domain::pet_evolution::{PetActivity, PetCalling, PetInstinct};
+use cama_domain::pet_evolution::PetActivity;
 use cama_domain::service_result::ServiceResult;
 use chrono::Utc;
-use rusqlite::{Connection, params};
 use tokio::task::JoinError;
 use tokio::time::Instant;
 
@@ -76,6 +65,8 @@ use crate::discord_transport::DiscordTransport;
 use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 #[cfg(test)]
 use crate::pet_death_delivery::is_active as shared_direct_death_delivery_active;
+pub use crate::pet_flavor_runtime::read_production_pet_flavor_context;
+use crate::pet_flavor_runtime::{evolution_visual, production_pet_flavor_service};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
@@ -3252,29 +3243,6 @@ fn eating_warning_embed(pet: &Pet) -> Embed {
     )
 }
 
-fn evolution_visual(pet: &Pet) -> Option<EvolutionVisual> {
-    let calling = pet.evolution_calling.as_deref().and_then(|value| {
-        PetCalling::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
-    })?;
-    let primary = pet.evolution_primary.as_deref().and_then(|value| {
-        PetInstinct::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
-    })?;
-    let secondary = pet.evolution_secondary.as_deref().and_then(|value| {
-        PetInstinct::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
-    });
-    Some(EvolutionVisual {
-        calling,
-        primary,
-        secondary,
-    })
-}
-
 fn join_error(error: JoinError) -> String {
     format!("pet blocking task failed: {error}")
 }
@@ -3297,20 +3265,8 @@ impl ProductionPetFlavorRuntime {
         ai_service: Option<Arc<AIService>>,
         ai_default: bool,
     ) -> Self {
-        let database_path = database_path.as_ref().to_path_buf();
-        let ai =
-            ai_service.map(|service| Arc::new(ProductionPetFlavorLlm(service)) as Arc<dyn LlmPort>);
         Self {
-            service: Arc::new(PetFlavorService::new(
-                ai,
-                Some(Arc::new(ProductionPetGuildAi(GuildConfigRepository::new(
-                    &database_path,
-                    ai_default,
-                )))),
-                Some(Arc::new(ProductionPetFlavorData::new(&database_path))),
-                Arc::new(SystemPetFlavorClock),
-                Box::new(ProductionPetFlavorRng),
-            )),
+            service: production_pet_flavor_service(database_path, ai_service, ai_default),
         }
     }
 
@@ -3330,212 +3286,6 @@ impl ProductionPetFlavorRuntime {
             PetFlavorEvent::Died => FlavorEvent::Died,
         };
         Some(self.service.generate(event, pet, status))
-    }
-}
-
-#[derive(Clone)]
-struct ProductionPetFlavorLlm(Arc<AIService>);
-
-impl LlmPort for ProductionPetFlavorLlm {
-    fn call_with_tools(&self, request: LlmRequest) -> Result<FlavorToolCallResult, String> {
-        let definition = pet_flavor_tool(request.tool_name)?;
-        let messages = request
-            .messages
-            .into_iter()
-            .map(|message| {
-                let role = match message.role {
-                    "system" => MessageRole::System,
-                    "user" => MessageRole::User,
-                    "assistant" => MessageRole::Assistant,
-                    "tool" => MessageRole::Tool,
-                    other => return Err(format!("unsupported pet flavor message role {other}")),
-                };
-                Ok(Message::new(role, message.content))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let max_tokens = u32::try_from(request.max_tokens)
-            .map_err(|_| format!("invalid pet flavor max token count {}", request.max_tokens))?;
-        let result = self.0.call_with_tools(ToolRequest {
-            messages,
-            tools: vec![definition],
-            tool_choice: ToolChoice::Required(request.tool_name.to_owned()),
-            max_tokens: Some(max_tokens),
-            temperature: Some(request.temperature),
-            feature: request.feature,
-        });
-        let tool_name = result
-            .tool_name
-            .ok_or_else(|| "pet flavor provider returned no tool call".to_owned())?;
-        Ok(FlavorToolCallResult {
-            tool_name,
-            tool_args: ToolValue::Object(
-                result
-                    .tool_args
-                    .into_iter()
-                    .map(|(key, value)| (key, pet_tool_value(value)))
-                    .collect(),
-            ),
-        })
-    }
-}
-
-#[derive(Clone)]
-struct ProductionPetGuildAi(GuildConfigRepository);
-
-impl GuildAiPort for ProductionPetGuildAi {
-    fn ai_enabled(&self, guild_id: i64) -> Result<bool, String> {
-        self.0
-            .get_ai_enabled(guild_id)
-            .map_err(|error| error.to_string())
-    }
-}
-
-/// SQLite-backed finance context used by the production `/pet` flavor
-/// service. The public read helper below is the disposable-snapshot boundary.
-#[derive(Clone)]
-struct ProductionPetFlavorData {
-    database_path: PathBuf,
-    players: PlayerRepository,
-}
-
-impl ProductionPetFlavorData {
-    fn new(database_path: impl AsRef<Path>) -> Self {
-        Self {
-            database_path: database_path.as_ref().to_path_buf(),
-            players: PlayerRepository::new(database_path),
-        }
-    }
-}
-
-/// Read the production `/pet` flavor finance context from an admitted SQLite
-/// database. The function performs no migration or writes.
-pub fn read_production_pet_flavor_context(
-    database_path: impl AsRef<Path>,
-    discord_id: i64,
-    guild_id: i64,
-    limit: usize,
-) -> Result<(i64, Vec<LedgerEntry>), String> {
-    let data = ProductionPetFlavorData::new(database_path);
-    let balance = data.balance(discord_id, guild_id)?;
-    let entries = data.recent_entries(guild_id, discord_id, limit)?;
-    Ok((balance, entries))
-}
-
-impl FlavorDataPort for ProductionPetFlavorData {
-    fn balance(&self, discord_id: i64, guild_id: i64) -> Result<i64, String> {
-        self.players
-            .get_by_id(discord_id, Some(guild_id))
-            .map_err(|error| error.to_string())?
-            .map(|player| player.jopacoin_balance)
-            .ok_or_else(|| "pet flavor player was not found".to_owned())
-    }
-
-    fn recent_entries(
-        &self,
-        guild_id: i64,
-        discord_id: i64,
-        limit: usize,
-    ) -> Result<Vec<LedgerEntry>, String> {
-        let connection =
-            Connection::open(&self.database_path).map_err(|error| error.to_string())?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut statement = connection
-            .prepare(
-                "SELECT CAST(delta AS TEXT),source,COALESCE(reason,''),COALESCE(metadata,'')
-                 FROM economy_ledger_entries
-                 WHERE guild_id=?1 AND account_type='player' AND account_id=?2
-                 ORDER BY created_at DESC,ledger_id DESC LIMIT ?3",
-            )
-            .map_err(|error| error.to_string())?;
-        statement
-            .query_map(params![guild_id, discord_id, limit], |row| {
-                Ok(LedgerEntry {
-                    delta: row.get(0)?,
-                    source: row.get(1)?,
-                    reason: row.get(2)?,
-                    metadata: row.get(3)?,
-                })
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())
-    }
-}
-
-struct SystemPetFlavorClock;
-
-impl FlavorClock for SystemPetFlavorClock {
-    fn now(&self) -> i64 {
-        Utc::now().timestamp()
-    }
-}
-
-struct ProductionPetFlavorRng;
-
-impl FlavorRng for ProductionPetFlavorRng {
-    fn choose_index(&mut self, len: usize) -> usize {
-        if len == 0 { 0 } else { fastrand::usize(..len) }
-    }
-}
-
-fn pet_flavor_tool(name: &str) -> Result<ToolDefinition, String> {
-    let (description, properties) = match name {
-        BUNDLE_TOOL_NAME => (
-            "Generate a reusable bundle of cheerful Camagotchi quips.",
-            [("status", 6), ("fed", 5), ("spat", 3)]
-                .into_iter()
-                .map(|(name, count)| ToolProperty {
-                    name: name.to_owned(),
-                    description: String::new(),
-                    enum_values: Vec::new(),
-                    schema: ToolPropertySchema::StringArray {
-                        min_items: count,
-                        max_items: count,
-                        unique_items: true,
-                    },
-                })
-                .collect(),
-        ),
-        cama_app::pet_flavor::LINE_TOOL_NAME => (
-            "Generate one safe, lighthearted Camagotchi line.",
-            vec![ToolProperty {
-                name: "line".to_owned(),
-                description: String::new(),
-                enum_values: Vec::new(),
-                schema: ToolPropertySchema::String,
-            }],
-        ),
-        other => return Err(format!("unsupported pet flavor tool {other}")),
-    };
-    Ok(ToolDefinition {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        required: properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect(),
-        properties,
-        additional_properties: Some(false),
-    })
-}
-
-fn pet_tool_value(value: AiValue) -> ToolValue {
-    match value {
-        AiValue::Null => ToolValue::Null,
-        AiValue::Text(value) => ToolValue::Text(value),
-        AiValue::List(values) => ToolValue::Array(values.into_iter().map(pet_tool_value).collect()),
-        AiValue::Object(values) => ToolValue::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, pet_tool_value(value)))
-                .collect(),
-        ),
-        AiValue::Bool(value) => ToolValue::Text(value.to_string()),
-        AiValue::Integer(value) => ToolValue::Text(value.to_string()),
-        AiValue::Real(value) => ToolValue::Text(value.to_string()),
     }
 }
 

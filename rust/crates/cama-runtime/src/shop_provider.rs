@@ -3198,10 +3198,11 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| format!("{label} task failed: {error}"))?
-        .map_err(|error| format!("{label} failed: {error}").into())
+    crate::ids::blocking(label, move || {
+        work().map_err(|error| format!("{label} failed: {error}"))
+    })
+    .await
+    .map_err(InteractionHandlerError::from)
 }
 
 fn check_rate_limit(

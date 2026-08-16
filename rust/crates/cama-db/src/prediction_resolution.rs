@@ -756,7 +756,9 @@ impl PredictionResolutionRepository {
     }
 }
 
-const PNL_HISTORY_SQL: &str = "
+/// Shared with `predictions_repository::player_pnl_history` so the profile
+/// stats and the resolution-side stats can never diverge again.
+pub(crate) const PNL_HISTORY_SQL: &str = "
     SELECT p.prediction_id,COALESCE(p.resolved_at,0),p.outcome,
            pp.yes_contracts,pp.no_contracts,
            pp.yes_cost_basis_total+pp.no_cost_basis_total,
@@ -1148,22 +1150,21 @@ fn multiply_bps_floor(value: i64, bps: i64) -> Result<i64, PredictionResolutionE
     i64::try_from(scaled).map_err(|_| PredictionResolutionError::ArithmeticOverflow)
 }
 
+/// Python parity (`prediction_repository.py::resolve_market`):
+/// `round(base_payout * payout_multiplier)` evaluates the product in IEEE
+/// doubles and rounds half-to-even. An exact rational computation rounds
+/// differently whenever the true product sits on a half boundary the double
+/// product misses (300 × 1.005 must pay 301, not 302).
 fn multiply_bps_round_ties_even(value: i64, bps: i64) -> Result<i64, PredictionResolutionError> {
-    let product = i128::from(value)
-        .checked_mul(i128::from(bps))
-        .ok_or(PredictionResolutionError::ArithmeticOverflow)?;
-    let denominator = i128::from(BASIS_POINTS);
-    let quotient = product / denominator;
-    let remainder = product % denominator;
-    let doubled = remainder
-        .checked_mul(2)
-        .ok_or(PredictionResolutionError::ArithmeticOverflow)?;
-    let rounded = if doubled > denominator || (doubled == denominator && quotient % 2 != 0) {
-        quotient + 1
-    } else {
-        quotient
-    };
-    i64::try_from(rounded).map_err(|_| PredictionResolutionError::ArithmeticOverflow)
+    let product = value as f64 * (bps as f64 / BASIS_POINTS as f64);
+    if !product.is_finite() {
+        return Err(PredictionResolutionError::ArithmeticOverflow);
+    }
+    let rounded = product.round_ties_even();
+    if rounded < i64::MIN as f64 || rounded >= 9_223_372_036_854_775_808.0 {
+        return Err(PredictionResolutionError::ArithmeticOverflow);
+    }
+    Ok(rounded as i64)
 }
 
 const fn side_name(side: ContractSide) -> &'static str {

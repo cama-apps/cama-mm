@@ -262,6 +262,33 @@ mod test_render_pet_card {
     }
 
     #[test]
+    fn test_courier_back_layer_does_not_add_foreign_polygon_ears() {
+        let back = render_layer(
+            LayerSlot::Back,
+            "courier_cama",
+            PetStage::Adult,
+            PetMood::Happy,
+            17,
+        );
+        assert_eq!(back.alpha_bounds(), None);
+    }
+
+    #[test]
+    fn test_top_hat_remains_inside_the_adult_headwear_frame() {
+        let mut layer = RasterImage::transparent_card();
+        draw_accessory(&mut layer, "top_hat", PetStage::Adult);
+        let fitted = fit_to_mount(
+            &layer,
+            &geometry_frame(PetStage::Adult),
+            &authoring_frame(PetStage::Adult),
+            "headwear",
+        );
+        let (_, top, _, bottom) = fitted.alpha_bounds().expect("fitted top hat");
+        assert!(top < 32);
+        assert!(bottom <= 40);
+    }
+
+    #[test]
     fn test_riverglow_uses_grounded_effect_instead_of_floating_orbs() {
         let front = render_layer(
             LayerSlot::Front,

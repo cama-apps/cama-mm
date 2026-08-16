@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -92,6 +92,9 @@ const COMMAND_RATE_LIMIT: usize = 2;
 const COMMAND_RATE_WINDOW: Duration = Duration::from_secs(30);
 const ARTIFACT_RATE_LIMIT: usize = 1;
 const ARTIFACT_RATE_WINDOW: Duration = Duration::from_secs(10);
+/// How long an idle rate-limit bucket survives before the map drops it.
+/// Must exceed every rate window above so an active bucket is never pruned.
+const RATE_LIMIT_BUCKET_RETENTION: Duration = Duration::from_secs(300);
 const ABANDON_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const PRESTIGE_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const SABOTAGE_VIEW_TIMEOUT_SECONDS: i64 = 30;
@@ -1799,43 +1802,15 @@ impl DigInteractionHandler {
             .strip_prefix("duel_opt_")
             .and_then(|value| value.parse::<usize>().ok())
         {
-            responder
-                .defer(false)
-                .await
-                .map_err(|error| error.to_string())?;
-            let now = unix_now();
-            let result = match self.resume_boss(user_id, guild_id, option_index, now).await {
-                Ok(result) => result,
-                Err(error) => {
-                    return responder
-                        .followup(boss_error_response(error))
-                        .await
-                        .map_err(|error| error.to_string());
-                }
-            };
-            if boss_resume_is_resolved(&result) {
-                self.reconcile_resolved_boss(user_id, guild_id, now).await;
-            }
-            let action_id = result.action_id;
-            let neon_victory = boss_resume_neon_victory(&result);
-            let next_phase = boss_resume_has_next_phase(&result);
-            let media = Arc::clone(&self.state.media);
-            responder
-                .followup(blocking(move || Ok(boss_resume_response(&result, &media))).await?)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+            return self
+                .handle_duel_option_component(
+                    option_index,
+                    user_id,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
                 .await;
-            if next_phase {
-                responder
-                    .followup(
-                        self.render_boss_encounter(user_id, guild_id, unix_now())
-                            .await?,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-            return Ok(());
         }
         if let Some(raw) = custom_id.strip_prefix(ROUTE_COMPONENT_PREFIX) {
             return self
@@ -1843,6 +1818,137 @@ impl DigInteractionHandler {
                 .await;
         }
         let action = custom_id.strip_prefix(COMPONENT_PREFIX).unwrap_or_default();
+        if action.starts_with("guide:") {
+            return self
+                .handle_guide_component(action, user_id, guild_id, responder)
+                .await;
+        }
+        if action.starts_with("prestige-") {
+            return self
+                .handle_prestige_component(
+                    action,
+                    user_id,
+                    &user_display_name,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
+                .await;
+        }
+        if action.starts_with("paid:") {
+            return self
+                .handle_paid_component(
+                    action,
+                    interaction_id,
+                    user_id,
+                    user_display_name,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
+                .await;
+        }
+        if action.starts_with("event-action:") || action.starts_with("event:") {
+            return self
+                .handle_event_component(
+                    action,
+                    interaction_id,
+                    user_id,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
+                .await;
+        }
+        if action.starts_with("sabotage:") {
+            return self
+                .handle_sabotage_component(action, user_id, guild_id, responder)
+                .await;
+        }
+        if action.starts_with("abandon:") {
+            return self
+                .handle_abandon_component(action, user_id, guild_id, responder)
+                .await;
+        }
+        if let Some(route) = action.strip_prefix("route:") {
+            return self
+                .handle_route_component(route, user_id, guild_id, responder)
+                .await;
+        }
+        if action.starts_with("boss:") {
+            return self
+                .handle_boss_component(
+                    action,
+                    user_id,
+                    &user_display_name,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
+                .await;
+        }
+        if let Some(gear_action) = action.strip_prefix("gear:") {
+            return self
+                .handle_gear_component(user_id, guild_id, gear_action, &values, responder)
+                .await;
+        }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_duel_option_component(
+        &self,
+        option_index: usize,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let now = unix_now();
+        let result = match self.resume_boss(user_id, guild_id, option_index, now).await {
+            Ok(result) => result,
+            Err(error) => {
+                return responder
+                    .followup(boss_error_response(error))
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+        };
+        if boss_resume_is_resolved(&result) {
+            self.reconcile_resolved_boss(user_id, guild_id, now).await;
+        }
+        let action_id = result.action_id;
+        let neon_victory = boss_resume_neon_victory(&result);
+        let next_phase = boss_resume_has_next_phase(&result);
+        let media = Arc::clone(&self.state.media);
+        responder
+            .followup(blocking(move || Ok(boss_resume_response(&result, &media))).await?)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+            .await;
+        if next_phase {
+            responder
+                .followup(
+                    self.render_boss_encounter(user_id, guild_id, unix_now())
+                        .await?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn handle_guide_component(
+        &self,
+        action: &str,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("guide:") {
             let mut parts = raw.split(':');
             let token = parts.next().unwrap_or_default();
@@ -1888,6 +1994,18 @@ impl DigInteractionHandler {
                 }
             }
         }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_prestige_component(
+        &self,
+        action: &str,
+        user_id: i64,
+        user_display_name: &str,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("prestige-perk:") {
             let mut parts = raw.split(':');
             let token = parts.next().unwrap_or_default();
@@ -2051,6 +2169,20 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string());
         }
+        expired_dig_component(&responder).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_paid_component(
+        &self,
+        action: &str,
+        interaction_id: u64,
+        user_id: i64,
+        user_display_name: String,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("paid:confirm:") {
             if raw.is_empty() || raw.contains(':') {
                 return responder
@@ -2198,6 +2330,48 @@ impl DigInteractionHandler {
             .await;
             return Ok(());
         }
+        if let Some(raw) = action.strip_prefix("paid:cancel:") {
+            if raw.is_empty() || raw.contains(':') {
+                return responder
+                    .update(InteractionResponse::message("Dig cancelled.").action_rows(Vec::new()))
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+            match self.claim_paid_view(raw, user_id, guild_id, unix_now())? {
+                DigPaidViewAdmission::Admitted | DigPaidViewAdmission::Expired => {}
+                DigPaidViewAdmission::WrongOwner => {
+                    return respond(
+                        &responder,
+                        InteractionResponse::message("This isn't your dig.").ephemeral(),
+                    )
+                    .await;
+                }
+                DigPaidViewAdmission::AlreadyClaimed => {
+                    return respond(
+                        &responder,
+                        InteractionResponse::message("This paid dig was already answered.")
+                            .ephemeral(),
+                    )
+                    .await;
+                }
+            }
+            return responder
+                .update(InteractionResponse::message("Dig cancelled.").action_rows(Vec::new()))
+                .await
+                .map_err(|error| error.to_string());
+        }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_event_component(
+        &self,
+        action: &str,
+        interaction_id: u64,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("event-action:") {
             let mut parts = raw.split(':');
             let nonce = parts.next().unwrap_or_default();
@@ -2354,6 +2528,16 @@ impl DigInteractionHandler {
             )
             .await;
         }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_sabotage_component(
+        &self,
+        action: &str,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("sabotage:confirm:") {
             if raw.is_empty() || raw.contains(':') {
                 return respond(
@@ -2413,36 +2597,6 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string());
         }
-        if let Some(raw) = action.strip_prefix("paid:cancel:") {
-            if raw.is_empty() || raw.contains(':') {
-                return responder
-                    .update(InteractionResponse::message("Dig cancelled.").action_rows(Vec::new()))
-                    .await
-                    .map_err(|error| error.to_string());
-            }
-            match self.claim_paid_view(raw, user_id, guild_id, unix_now())? {
-                DigPaidViewAdmission::Admitted | DigPaidViewAdmission::Expired => {}
-                DigPaidViewAdmission::WrongOwner => {
-                    return respond(
-                        &responder,
-                        InteractionResponse::message("This isn't your dig.").ephemeral(),
-                    )
-                    .await;
-                }
-                DigPaidViewAdmission::AlreadyClaimed => {
-                    return respond(
-                        &responder,
-                        InteractionResponse::message("This paid dig was already answered.")
-                            .ephemeral(),
-                    )
-                    .await;
-                }
-            }
-            return responder
-                .update(InteractionResponse::message("Dig cancelled.").action_rows(Vec::new()))
-                .await
-                .map_err(|error| error.to_string());
-        }
         if let Some(raw) = action.strip_prefix("sabotage:cancel:") {
             if raw.is_empty() || raw.contains(':') {
                 return respond(
@@ -2495,6 +2649,16 @@ impl DigInteractionHandler {
             )
             .await;
         }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_abandon_component(
+        &self,
+        action: &str,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if action == "abandon:confirm" || action == "abandon:cancel" {
             return respond(
                 &responder,
@@ -2569,11 +2733,18 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string());
         }
-        if let Some(route) = action.strip_prefix("route:") {
-            return self
-                .handle_route_component(route, user_id, guild_id, responder)
-                .await;
-        }
+        expired_dig_component(&responder).await
+    }
+
+    async fn handle_boss_component(
+        &self,
+        action: &str,
+        user_id: i64,
+        user_display_name: &str,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("boss:fight:") {
             let (owner_id, expected_guild) = parse_boss_owner(raw)?;
             if owner_id != user_id || expected_guild != guild_id {
@@ -2784,22 +2955,7 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string());
         }
-        if let Some(gear_action) = action.strip_prefix("gear:") {
-            return self
-                .handle_gear_component(user_id, guild_id, gear_action, &values, responder)
-                .await;
-        }
-        let _ = interaction_id;
-        // Boss and gear views are process-local in Python.
-        // A restart therefore yields an explicit, safe recovery response.
-        respond(
-            &responder,
-            InteractionResponse::message(
-                "This Dig interaction expired. Use `/dig go` to reopen it.",
-            )
-            .ephemeral(),
-        )
-        .await
+        expired_dig_component(&responder).await
     }
 
     async fn handle_modal(
@@ -2956,6 +3112,15 @@ impl DigInteractionHandler {
             .rate_limits
             .lock()
             .map_err(|_| "Dig rate-limit lock poisoned")?;
+        // Discard buckets whose newest hit fell out of its window so the map
+        // stays bounded by currently-active users instead of growing for the
+        // process lifetime. Windows differ per scope, so use each bucket's
+        // own recency rather than this call's window.
+        all.retain(|_, bucket| {
+            bucket
+                .back()
+                .is_some_and(|latest| now.duration_since(*latest) <= RATE_LIMIT_BUCKET_RETENTION)
+        });
         let hits = all.entry((user_id, guild_id, scope)).or_default();
         while hits
             .front()
@@ -6423,25 +6588,29 @@ impl Default for RuntimeBossEntropy {
 }
 
 impl RuntimeBossEntropy {
+    /// The guarded value is a plain RNG, so a panic elsewhere while the lock
+    /// was held cannot leave it in a broken state. Recovering from poison
+    /// keeps boss encounters alive instead of panicking until restart.
+    fn random(&self) -> std::sync::MutexGuard<'_, fastrand::Rng> {
+        self.random.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[cfg(test)]
     fn reseed(&self, seed: u64) {
-        *self.random.lock().expect("boss entropy lock") = fastrand::Rng::with_seed(seed);
+        *self.random() = fastrand::Rng::with_seed(seed);
     }
 }
 
 impl EntropyPort for RuntimeBossEntropy {
     fn next_unit(&mut self) -> f64 {
-        self.random.lock().expect("boss entropy lock").f64()
+        self.random().f64()
     }
 
     fn choose_index(&mut self, upper_bound: usize) -> usize {
         if upper_bound == 0 {
             0
         } else {
-            self.random
-                .lock()
-                .expect("boss entropy lock")
-                .usize(..upper_bound)
+            self.random().usize(..upper_bound)
         }
     }
 
@@ -6449,10 +6618,7 @@ impl EntropyPort for RuntimeBossEntropy {
         if minimum >= maximum {
             minimum
         } else {
-            self.random
-                .lock()
-                .expect("boss entropy lock")
-                .i32(minimum..=maximum)
+            self.random().i32(minimum..=maximum)
         }
     }
 }
@@ -6592,9 +6758,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|error| format!("Dig SQLite task failed: {error}"))?
+    crate::ids::blocking("Dig SQLite", job).await
 }
 
 async fn respond(
@@ -6605,6 +6769,17 @@ async fn respond(
         .respond(response)
         .await
         .map_err(|error| error.to_string())
+}
+
+// Boss and gear views are process-local in Python.
+// A restart therefore yields an explicit, safe recovery response.
+async fn expired_dig_component(responder: &Arc<dyn InteractionResponder>) -> Result<(), String> {
+    respond(
+        responder,
+        InteractionResponse::message("This Dig interaction expired. Use `/dig go` to reopen it.")
+            .ephemeral(),
+    )
+    .await
 }
 
 fn miner_profile_embed(display_name: &str, profile: &DigMinerProfile) -> InteractionEmbed {

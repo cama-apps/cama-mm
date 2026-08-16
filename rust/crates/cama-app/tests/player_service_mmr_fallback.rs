@@ -3,6 +3,8 @@ mod player_mmr_fallback;
 
 use std::convert::Infallible;
 
+use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::CamaRatingSystem;
 use player_mmr_fallback::{
     MmrRegistrationRepository, OPENSKILL_ALGORITHM_VERSION, OpenDotaMmrValue, OpenDotaPlayerData,
     OpenDotaRegistrationPort, RegisterPlayerError, RegisterPlayerInput, RegistrationSeed,
@@ -100,6 +102,8 @@ fn test_register_player_fallback_to_current_mmr() {
             exclusion_count: 4,
             added_at: 0,
         },
+        &CamaRatingSystem::default(),
+        &CamaOpenSkillSystem::default(),
     )
     .unwrap();
 
@@ -137,6 +141,8 @@ fn test_register_player_raises_when_no_mmr_anywhere() {
             exclusion_count: 4,
             added_at: 0,
         },
+        &CamaRatingSystem::default(),
+        &CamaOpenSkillSystem::default(),
     )
     .unwrap_err();
 
@@ -160,6 +166,8 @@ fn test_register_player_uses_override() {
             exclusion_count: 4,
             added_at: 0,
         },
+        &CamaRatingSystem::default(),
+        &CamaOpenSkillSystem::default(),
     )
     .expect("manual MMR registration");
 
@@ -183,6 +191,8 @@ fn assert_non_positive_override_is_rejected(mmr_override: i64) {
             exclusion_count: 4,
             added_at: 0,
         },
+        &CamaRatingSystem::default(),
+        &CamaOpenSkillSystem::default(),
     )
     .expect_err("non-positive manual MMR is unavailable");
 
@@ -224,6 +234,8 @@ fn test_register_player_requires_mmr_if_no_override() {
                 exclusion_count: 4,
                 added_at: 0,
             },
+            &CamaRatingSystem::default(),
+            &CamaOpenSkillSystem::default(),
         ),
         Err(RegisterPlayerError::MmrUnavailable)
     );

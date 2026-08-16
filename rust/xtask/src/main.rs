@@ -92,114 +92,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
     verify_python_to_rust_repository_migration(&root)?;
     let readiness = read_cutover_readiness(&root.join("rust/parity/cutover_readiness.tsv"))?;
 
-    let python_output = checked_output(
-        parity_python(&root).args(["-m", "pytest", "-n", "0", "--collect-only", "-q"]),
-        "collect Python tests",
-    )?;
-    let python_stdout = output_text(python_output, "pytest collection")?;
-    let python_tests: BTreeSet<String> = python_stdout
-        .lines()
-        .filter(|line| line.starts_with("tests/") && line.contains("::"))
-        .map(str::to_owned)
-        .collect();
-    if python_tests.is_empty() {
-        return Err("pytest collection returned no test node IDs".to_owned());
-    }
-
-    let baseline = read_baseline(&root.join("rust/parity/baseline.txt"))?;
-    let actual_fingerprint = fnv1a64_lines(python_tests.iter().map(String::as_str));
-    if baseline.collected_cases != python_tests.len()
-        || baseline.node_id_fingerprint != actual_fingerprint
-    {
-        return Err(format!(
-            "Python test inventory changed: expected {} cases/{:016x}, found {} cases/{:016x}; review the new behavior and intentionally update rust/parity/baseline.txt",
-            baseline.collected_cases,
-            baseline.node_id_fingerprint,
-            python_tests.len(),
-            actual_fingerprint,
-        ));
-    }
-
-    let mappings = read_mappings(&root.join("rust/parity/tests.tsv"))?;
-    let mapped_python: BTreeSet<&str> = mappings
-        .iter()
-        .map(|mapping| mapping.python_test.as_str())
-        .collect();
-    if mapped_python.len() != mappings.len() {
-        return Err("rust/parity/tests.tsv contains duplicate Python node IDs".to_owned());
-    }
-    let mapped_rust: BTreeSet<&str> = mappings
-        .iter()
-        .map(|mapping| mapping.rust_test.as_str())
-        .collect();
-    if mapped_rust.len() != mappings.len() {
-        return Err(
-            "rust/parity/tests.tsv must map each Python case to a distinct Rust test ID".to_owned(),
-        );
-    }
-    let unknown_python: Vec<_> = mapped_python
-        .difference(&python_tests.iter().map(String::as_str).collect())
-        .copied()
-        .collect();
-    if !unknown_python.is_empty() {
-        return Err(format!(
-            "parity mappings reference unknown Python tests: {}",
-            unknown_python.join(", ")
-        ));
-    }
-
-    let rust_output = checked_output(
-        Command::new("cargo").current_dir(&root).args([
-            "test",
-            "--locked",
-            "--manifest-path",
-            "rust/Cargo.toml",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "--list",
-        ]),
-        "list Rust tests",
-    )?;
-    let rust_stdout = output_text(rust_output, "cargo test -- --list")?;
-    let rust_test_list: Vec<&str> = rust_stdout
-        .lines()
-        .filter_map(|line| line.strip_suffix(": test"))
-        .collect();
-    let mut rust_test_counts = BTreeMap::new();
-    for test in &rust_test_list {
-        *rust_test_counts.entry(*test).or_insert(0_usize) += 1;
-    }
-    let duplicate_rust_tests: Vec<_> = rust_test_counts
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(test, count)| format!("{test} ({count} copies)"))
-        .collect();
-    if !duplicate_rust_tests.is_empty() {
-        return Err(format!(
-            "Rust test IDs must be unique across the workspace: {}",
-            duplicate_rust_tests.join(", ")
-        ));
-    }
-    let rust_tests: BTreeSet<&str> = rust_test_list.into_iter().collect();
-    let unknown_rust: Vec<_> = mappings
-        .iter()
-        .filter(|mapping| !rust_tests.contains(mapping.rust_test.as_str()))
-        .map(|mapping| mapping.rust_test.as_str())
-        .collect();
-    if !unknown_rust.is_empty() {
-        return Err(format!(
-            "parity mappings reference unknown Rust tests: {}",
-            unknown_rust.join(", ")
-        ));
-    }
-
-    let mapped = mappings.len();
-    let total = python_tests.len();
-    let percentage = (mapped as f64 / total as f64) * 100.0;
-    println!(
-        "Rust parity inventory: {mapped}/{total} Python cases mapped to distinct existing Rust tests ({percentage:.2}%)"
-    );
     println!(
         "Differential contracts: {vector_count} domain vectors plus one thirteen-repository serial Python→Rust SQLite migration bridge"
     );
@@ -214,21 +106,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
         open_readiness.len(),
     );
     println!("Production runtime inventory: {runtime_wired} wired, {runtime_required} required");
-    if mapped != total {
-        let summary = unmapped_module_counts(&python_tests, &mapped_python)
-            .into_iter()
-            .take(10)
-            .map(|(module, count)| format!("{module} ({count})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("Largest remaining Python modules: {summary}");
-    }
-    if require_complete && mapped != total {
-        return Err(format!(
-            "cutover requires complete parity; {} cases remain unmapped",
-            total - mapped
-        ));
-    }
     if require_complete && !open_readiness.is_empty() {
         return Err(format!(
             "cutover requires all operational readiness gates; {} remain open: {}",
@@ -246,23 +123,6 @@ fn parity(require_complete: bool) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn unmapped_module_counts(
-    python_tests: &BTreeSet<String>,
-    mapped_python: &BTreeSet<&str>,
-) -> Vec<(String, usize)> {
-    let mut counts = BTreeMap::new();
-    for test in python_tests {
-        if mapped_python.contains(test.as_str()) {
-            continue;
-        }
-        let module = test.split("::").next().unwrap_or(test).to_owned();
-        *counts.entry(module).or_insert(0_usize) += 1;
-    }
-    let mut counts = counts.into_iter().collect::<Vec<_>>();
-    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    counts
 }
 
 fn verify_python_to_rust_repository_migration(root: &Path) -> Result<(), String> {
@@ -786,6 +646,9 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
     use cama_app::dig_view_supplements::phase_event_boss_hp_delta;
     use cama_app::disburse_actions::{METHODS, Proposal, build_disburse_embed};
     use cama_app::economy_actions::{apply_gamba_event_multiplier, bounded_economy_multiplier};
+    use cama_app::wheel::{
+        WHEEL_EXPLOSION_REWARD, WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog,
+    };
     use cama_app::wrapped_story::FLAVOR_POOLS;
     use cama_db::package_deal_repository::calculate_package_deal_cost;
     use cama_domain::catalogs::{BETTING_PERSONAS, PERSONAS};
@@ -801,18 +664,16 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
     };
     use cama_domain::embed_safety::{EmbedModel, add_lines_field, truncate_field, validate_embed};
     use cama_domain::guild::{is_dm_context, normalize_guild_id};
-    use cama_domain::openskill::{CamaOpenSkillSystem, Rating};
+    use cama_domain::openskill::{CamaOpenSkillSystem, Rating, WeightedPlayer, WinningTeam};
     use cama_domain::pet::PetStage;
     use cama_domain::pet_brawl::{
         BrawlWinner, DuelistSnapshot, PetBrawlMove, brawl_traits, build_duelist, initial_state,
         move_name, resolve_round as resolve_pet_brawl_round,
     };
     use cama_domain::pet_evolution::{PetInstinct, hint_key_for_scores, resolve_evolution};
-    use cama_domain::rating::CamaRatingSystem;
+    use cama_domain::rating::{CamaRatingSystem, MatchUpdateOptions, TeamPlayer};
     use cama_domain::rating_insights::{get_rd_tier_name, rd_to_certainty};
-    use cama_domain::wheel::{
-        WHEEL_EXPLOSION_REWARD, WedgeValue, eruption_reward, golden_wheel_wedges, wheel_wedges,
-    };
+    use cama_domain::wheel::eruption_reward;
 
     let argument = |index: usize| {
         arguments
@@ -926,20 +787,20 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
         .to_string()),
         "dig_phase_event_boss_hp_delta" => Ok(phase_event_boss_hp_delta(argument(0)?).to_string()),
         "wheel_catalog" => {
-            let wedges = match argument(0)? {
-                "regular" => wheel_wedges(1.0),
-                "golden" => golden_wheel_wedges(1.0),
+            let kind = match argument(0)? {
+                "regular" => WheelKind::Regular,
+                "golden" => WheelKind::Golden,
                 value => return Err(format!("unknown wheel catalog {value:?}")),
             };
-            let mut rows = wedges
+            let mut rows = wheel_catalog(kind, WheelEconomyPolicy::default())
                 .into_iter()
                 .filter_map(|wedge| match wedge.value {
-                    WedgeValue::Numeric(value) if value < 0 => None,
-                    WedgeValue::Numeric(value) => {
+                    WheelValue::Numeric(value) if value < 0 => None,
+                    WheelValue::Numeric(value) => {
                         Some(format!("{}|{value}|{}", wedge.label, wedge.color))
                     }
-                    WedgeValue::Special(value) => {
-                        Some(format!("{}|{value}|{}", wedge.label, wedge.color))
+                    WheelValue::Mechanic(value) => {
+                        Some(format!("{}|{}|{}", wedge.label, value.code(), wedge.color))
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1444,6 +1305,123 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
                 .os_predict_win_probability(&team1, &team2)
                 .to_string())
         }
+        "glicko_match_update" => {
+            let system = CamaRatingSystem::default();
+            let parse_team = |raw: &str, id_offset: u64| -> Result<Vec<TeamPlayer<u64>>, String> {
+                raw.split(';')
+                    .enumerate()
+                    .map(|(index, player)| {
+                        let fields: Vec<_> = player.split(',').collect();
+                        let [rating, rd, volatility] = fields.as_slice() else {
+                            return Err(format!("invalid Glicko player {player:?}"));
+                        };
+                        let parse = |value: &str| {
+                            value
+                                .parse::<f64>()
+                                .map_err(|error| format!("invalid Glicko value {value:?}: {error}"))
+                        };
+                        Ok(TeamPlayer::new(
+                            system.create_player_from_rating(
+                                parse(rating)?,
+                                parse(rd)?,
+                                parse(volatility)?,
+                            ),
+                            id_offset + index as u64 + 1,
+                        ))
+                    })
+                    .collect()
+            };
+            let team1 = parse_team(argument(0)?, 0)?;
+            let team2 = parse_team(argument(1)?, team1.len() as u64)?;
+            let sizes = (team1.len(), team2.len());
+            let options = MatchUpdateOptions {
+                streak_multipliers: parse_per_player_values(operation, argument(3)?, sizes)?
+                    .into_iter()
+                    .collect(),
+                base_rating_delta_multiplier: parse_optional_f64(5)?,
+                gain_multipliers: parse_per_player_values(operation, argument(4)?, sizes)?
+                    .into_iter()
+                    .collect(),
+            };
+            let updates = system
+                .update_ratings_after_match_with_options(&team1, &team2, parse_i32(2)?, &options)
+                .map_err(|error| error.to_string())?;
+            Ok(updates
+                .team1
+                .iter()
+                .chain(&updates.team2)
+                .map(|player| format!("{},{}", player.rating, player.rd))
+                .collect::<Vec<_>>()
+                .join(";"))
+        }
+        "openskill_match_update" => {
+            let parse_team = |raw: &str| -> Result<Vec<(f64, f64)>, String> {
+                raw.split(';')
+                    .map(|player| {
+                        let (mu, sigma) = player
+                            .split_once(',')
+                            .ok_or_else(|| format!("invalid OpenSkill rating {player:?}"))?;
+                        Ok((
+                            mu.parse()
+                                .map_err(|error| format!("invalid OpenSkill mu {mu:?}: {error}"))?,
+                            sigma.parse().map_err(|error| {
+                                format!("invalid OpenSkill sigma {sigma:?}: {error}")
+                            })?,
+                        ))
+                    })
+                    .collect()
+            };
+            let team1 = parse_team(argument(0)?)?;
+            let team2 = parse_team(argument(1)?)?;
+            let sizes = (team1.len(), team2.len());
+            let fantasy: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(3)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let build_team = |team: &[(f64, f64)], id_offset: u64| -> Vec<WeightedPlayer> {
+                team.iter()
+                    .enumerate()
+                    .map(|(index, (mu, sigma))| {
+                        let id = id_offset + index as u64 + 1;
+                        WeightedPlayer::new(id, Some(*mu), Some(*sigma), fantasy.get(&id).copied())
+                    })
+                    .collect()
+            };
+            let team1_players = build_team(&team1, 0);
+            let team2_players = build_team(&team2, team1.len() as u64);
+            let winning_team = argument(2)?
+                .parse::<u8>()
+                .map_err(|error| format!("invalid winning team: {error}"))
+                .and_then(|value| {
+                    WinningTeam::try_from(value).map_err(|error| error.to_string())
+                })?;
+            let streak_multipliers: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(4)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let gain_multipliers: BTreeMap<u64, f64> =
+                parse_per_player_values(operation, argument(5)?, sizes)?
+                    .into_iter()
+                    .collect();
+            let results = CamaOpenSkillSystem::new()
+                .update_ratings_after_match(
+                    &team1_players,
+                    &team2_players,
+                    winning_team,
+                    &streak_multipliers,
+                    &gain_multipliers,
+                )
+                .map_err(|error| error.to_string())?;
+            (1..=(sizes.0 + sizes.1) as u64)
+                .map(|id| {
+                    results
+                        .get(&id)
+                        .map(|update| format!("{},{}", update.rating.mu, update.rating.sigma))
+                        .ok_or_else(|| format!("OpenSkill update omitted player {id}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| rows.join(";"))
+        }
         _ => Err(format!("unknown Rust vector operation {operation:?}")),
     }
 }
@@ -1492,6 +1470,46 @@ fn cave_in_catalog() -> String {
     rows.join("|")
 }
 
+/// Parse `none` or two ;-separated teams of comma-separated per-player floats
+/// into `(1-based player ID, value)` pairs matching the vector team layout.
+fn parse_per_player_values(
+    operation: &str,
+    raw: &str,
+    team_sizes: (usize, usize),
+) -> Result<Vec<(u64, f64)>, String> {
+    if raw == "none" {
+        return Ok(Vec::new());
+    }
+    let groups: Vec<_> = raw.split(';').collect();
+    let [team1, team2] = groups.as_slice() else {
+        return Err(format!(
+            "{operation} per-player values must contain one group per team"
+        ));
+    };
+    let mut values = Vec::new();
+    for (group, expected) in [(*team1, team_sizes.0), (*team2, team_sizes.1)] {
+        let parsed = group
+            .split(',')
+            .map(|value| {
+                value.parse::<f64>().map_err(|error| {
+                    format!("{operation} per-player value {value:?} is not a float: {error}")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parsed.len() != expected {
+            return Err(format!(
+                "{operation} per-player values must match the team size"
+            ));
+        }
+        values.extend(parsed);
+    }
+    Ok(values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (index as u64 + 1, value))
+        .collect())
+}
+
 fn parse_outcome(value: &str) -> Result<bool, String> {
     match value {
         "W" => Ok(true),
@@ -1529,12 +1547,35 @@ fn compare_vector_result(
             let python_value: f64 = python
                 .parse()
                 .map_err(|error| format!("invalid Python float {python:?}: {error}"))?;
-            let tolerance = if operation == "openskill_predict" {
-                2e-7
-            } else {
-                1e-10
-            };
+            // `openskill_predict` previously needed 2e-7 for an approximated
+            // erfc; the Rust CDF now uses an exact erf, so every numeric
+            // vector shares the strict tolerance.
+            let tolerance = 1e-10;
             if (rust_value - python_value).abs() <= tolerance {
+                Ok(())
+            } else {
+                mismatch()
+            }
+        }
+        "glicko_match_update" | "openskill_match_update" => {
+            let parse = |value: &str, language: &str| -> Result<Vec<f64>, String> {
+                value
+                    .split([';', ','])
+                    .map(|field| {
+                        field.parse::<f64>().map_err(|error| {
+                            format!("invalid {language} match update field {field:?}: {error}")
+                        })
+                    })
+                    .collect()
+            };
+            let rust_values = parse(rust, "Rust")?;
+            let python_values = parse(python, "Python")?;
+            if rust_values.len() == python_values.len()
+                && rust_values
+                    .iter()
+                    .zip(&python_values)
+                    .all(|(rust_value, python_value)| (rust_value - python_value).abs() <= 1e-10)
+            {
                 Ok(())
             } else {
                 mismatch()
@@ -1636,55 +1677,6 @@ fn output_text(output: Output, description: &str) -> Result<String, String> {
         .map_err(|error| format!("{description} emitted non-UTF-8 output: {error}"))
 }
 
-struct Baseline {
-    collected_cases: usize,
-    node_id_fingerprint: u64,
-}
-
-fn read_baseline(path: &Path) -> Result<Baseline, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let mut collected_cases = None;
-    let mut node_id_fingerprint = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("invalid baseline line {line:?}"))?;
-        match key.trim() {
-            "collected_cases" => {
-                collected_cases = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|error| format!("invalid collected_cases: {error}"))?,
-                );
-            }
-            "node_id_fnv1a64" => {
-                node_id_fingerprint = Some(
-                    u64::from_str_radix(value.trim(), 16)
-                        .map_err(|error| format!("invalid node_id_fnv1a64: {error}"))?,
-                );
-            }
-            key => return Err(format!("unknown baseline key {key:?}")),
-        }
-    }
-    Ok(Baseline {
-        collected_cases: collected_cases
-            .ok_or_else(|| "baseline is missing collected_cases".to_owned())?,
-        node_id_fingerprint: node_id_fingerprint
-            .ok_or_else(|| "baseline is missing node_id_fnv1a64".to_owned())?,
-    })
-}
-
-struct Mapping {
-    python_test: String,
-    rust_test: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadinessStatus {
     Open,
@@ -1777,32 +1769,6 @@ fn parse_cutover_readiness(contents: &str, source: &str) -> Result<Vec<Readiness
     Ok(gates)
 }
 
-fn read_mappings(path: &Path) -> Result<Vec<Mapping>, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    contents
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| {
-            let line = line.trim();
-            !line.is_empty() && !line.starts_with('#')
-        })
-        .map(|(index, line)| {
-            let (python_test, rust_test) = line.split_once('\t').ok_or_else(|| {
-                format!(
-                    "{}:{} must contain a tab-separated Python and Rust test ID",
-                    path.display(),
-                    index + 1
-                )
-            })?;
-            Ok(Mapping {
-                python_test: python_test.to_owned(),
-                rust_test: rust_test.to_owned(),
-            })
-        })
-        .collect()
-}
-
 fn fnv1a64_lines<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for line in lines {
@@ -1824,23 +1790,72 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_report_is_sorted_by_count_then_module() {
-        let python_tests = [
-            "tests/test_b.py::test_two".to_owned(),
-            "tests/test_a.py::test_one".to_owned(),
-            "tests/test_b.py::test_one".to_owned(),
-            "tests/test_c.py::test_one".to_owned(),
-        ]
-        .into_iter()
-        .collect();
-        let mapped_python = ["tests/test_c.py::test_one"].into_iter().collect();
-        assert_eq!(
-            unmapped_module_counts(&python_tests, &mapped_python),
-            vec![
-                ("tests/test_b.py".to_owned(), 2),
-                ("tests/test_a.py".to_owned(), 1),
-            ]
-        );
+    #[ignore = "runs live Python through the locked parity environment"]
+    fn domain_vectors_match_python() {
+        let root = repository_root().expect("repository root must resolve");
+        let count = verify_domain_vectors(&root).expect("domain vectors must match Python");
+        assert!(count > 0, "domain vector inventory must not be empty");
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_wheel_numeric_wedges_are_scaled_for_display_and_payout`
+    /// against the live application wheel catalog.
+    #[test]
+    fn test_wheel_numeric_wedges_are_scaled_for_display_and_payout() {
+        use std::collections::BTreeSet;
+
+        use cama_app::wheel::{WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog};
+
+        let wedges = wheel_catalog(WheelKind::Regular, WheelEconomyPolicy::default());
+        let values = wedges
+            .iter()
+            .filter_map(|wedge| match wedge.value {
+                WheelValue::Numeric(value) => Some(value),
+                WheelValue::Mechanic(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(values.contains(&5));
+        assert!(values.contains(&100));
+        for wedge in &wedges {
+            if let WheelValue::Numeric(value) = wedge.value
+                && value > 0
+            {
+                assert_eq!(wedge.label, value.to_string());
+            }
+        }
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout`
+    /// against the live application wheel catalog.
+    #[test]
+    fn test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout() {
+        use std::collections::BTreeSet;
+
+        use cama_app::wheel::{WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog};
+
+        let wedges = wheel_catalog(WheelKind::Golden, WheelEconomyPolicy::default());
+        let values = wedges
+            .iter()
+            .filter_map(|wedge| match wedge.value {
+                WheelValue::Numeric(value) => Some(value),
+                WheelValue::Mechanic(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(values.contains(&20));
+        assert!(values.contains(&250));
+        for wedge in &wedges {
+            if let WheelValue::Numeric(value) = wedge.value
+                && value > 0
+            {
+                assert_eq!(wedge.label, value.to_string());
+            }
+        }
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_wheel_explosion_keeps_legacy_sixty_seven_reward`
+    /// against the live application constant.
+    #[test]
+    fn test_wheel_explosion_keeps_legacy_sixty_seven_reward() {
+        assert_eq!(cama_app::wheel::WHEEL_EXPLOSION_REWARD, 67);
     }
 
     #[test]

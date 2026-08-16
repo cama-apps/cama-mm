@@ -18,6 +18,7 @@ use crate::pet_brawl::{
     PetBrawlService, PetEvolutionPort, PetPort, PortResult, ServiceRng, SettleOutcome,
     SoloTrainingOutcome, WagerInput,
 };
+use crate::python_random::PythonRandom;
 
 pub const SAFE_MOVE: PetBrawlMove = PetBrawlMove::Spit;
 pub const JOPACOIN_EMOTE: &str = "<:jopacoin:954159801049440297>";
@@ -430,109 +431,27 @@ impl BattleHandle {
     }
 }
 
-/// MT19937 plus Python's integer-seed and `_randbelow_with_getrandbits`
-/// algorithms. The brawl service hands this layer the same unsigned 64-bit
-/// seed used by `random.Random(seed)`, so a recorded seed replays the same
-/// round sequence in both runtimes.
+/// `random.randint` over the shared CPython MT19937 port. The brawl service
+/// hands this layer the same unsigned 64-bit seed used by
+/// `random.Random(seed)`, so a recorded seed replays the same round sequence
+/// in both runtimes.
 #[derive(Clone, Debug)]
 struct PythonCombatRng {
-    mt: [u32; 624],
-    index: usize,
+    inner: PythonRandom,
 }
 
 impl PythonCombatRng {
     fn new(seed: u64) -> Self {
-        let mut rng = Self {
-            mt: [0; 624],
-            index: 624,
-        };
-        rng.init_genrand(19_650_218);
-        let low = seed as u32;
-        let high = (seed >> 32) as u32;
-        if high == 0 {
-            rng.init_by_array(&[low]);
-        } else {
-            rng.init_by_array(&[low, high]);
-        }
-        rng
-    }
-
-    fn init_genrand(&mut self, seed: u32) {
-        self.mt[0] = seed;
-        for index in 1..624 {
-            self.mt[index] = 1_812_433_253_u32
-                .wrapping_mul(self.mt[index - 1] ^ (self.mt[index - 1] >> 30))
-                .wrapping_add(index as u32);
-        }
-        self.index = 624;
-    }
-
-    fn init_by_array(&mut self, key: &[u32]) {
-        let mut index = 1_usize;
-        let mut key_index = 0_usize;
-        for _ in 0..624_usize.max(key.len()) {
-            self.mt[index] = (self.mt[index]
-                ^ (self.mt[index - 1] ^ (self.mt[index - 1] >> 30)).wrapping_mul(1_664_525))
-            .wrapping_add(key[key_index])
-            .wrapping_add(key_index as u32);
-            index += 1;
-            key_index += 1;
-            if index >= 624 {
-                self.mt[0] = self.mt[623];
-                index = 1;
-            }
-            if key_index >= key.len() {
-                key_index = 0;
-            }
-        }
-        for _ in 0..623 {
-            self.mt[index] = (self.mt[index]
-                ^ (self.mt[index - 1] ^ (self.mt[index - 1] >> 30)).wrapping_mul(1_566_083_941))
-            .wrapping_sub(index as u32);
-            index += 1;
-            if index >= 624 {
-                self.mt[0] = self.mt[623];
-                index = 1;
-            }
-        }
-        self.mt[0] = 0x8000_0000;
-        self.index = 624;
-    }
-
-    fn genrand_u32(&mut self) -> u32 {
-        if self.index >= 624 {
-            for index in 0..624 {
-                let y = (self.mt[index] & 0x8000_0000) | (self.mt[(index + 1) % 624] & 0x7fff_ffff);
-                self.mt[index] = self.mt[(index + 397) % 624]
-                    ^ (y >> 1)
-                    ^ if y & 1 == 0 { 0 } else { 0x9908_b0df };
-            }
-            self.index = 0;
-        }
-        let mut value = self.mt[self.index];
-        self.index += 1;
-        value ^= value >> 11;
-        value ^= (value << 7) & 0x9d2c_5680;
-        value ^= (value << 15) & 0xefc6_0000;
-        value ^= value >> 18;
-        value
-    }
-
-    fn rand_below(&mut self, upper: u32) -> u32 {
-        let bits = 32 - upper.leading_zeros();
-        loop {
-            let candidate = self.genrand_u32() >> (32 - bits);
-            if candidate < upper {
-                return candidate;
-            }
+        Self {
+            inner: PythonRandom::from_u64_seed(seed),
         }
     }
 }
 
 impl BrawlRng for PythonCombatRng {
     fn randint(&mut self, low: i32, high: i32) -> i32 {
-        let span = u32::try_from(high - low + 1).expect("combat range is positive");
-        low + i32::try_from(self.rand_below(span)).expect("combat range fits i32")
+        let span = usize::try_from(high - low + 1).expect("combat range is positive");
+        low + i32::try_from(self.inner.randbelow(span)).expect("combat range fits i32")
     }
 }
 

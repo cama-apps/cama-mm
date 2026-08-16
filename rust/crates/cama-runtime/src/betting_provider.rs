@@ -77,6 +77,7 @@ use tracing::warn;
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
+use crate::ids::blocking as sqlite;
 use crate::match_provider::{
     MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
     MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest, MatchRegistrationProvider,
@@ -2338,6 +2339,12 @@ struct SpinResult {
     golden_announcement: Option<InteractionResponse>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GambaResponseRoute {
+    Initial,
+    DeferredOriginal,
+}
+
 /// The durable settlement result returned by an interactive wheel choice.
 ///
 /// Interactive views are process-local, but the economic resolution is still
@@ -2477,6 +2484,7 @@ impl BettingInteractionHandler {
             let vanity_taxable_ids = self.vanity_tax.taxable_ids(pending.guild_id);
             let option = timeout_wheel_option(&pending);
             let option_for_settlement = option.clone();
+            let member_snapshot = self.guild_member_snapshot(pending.guild_id).await;
             let result = sqlite("expired wheel interaction sweep", move || {
                 resolve_pending_wheel(
                     &path,
@@ -2495,6 +2503,7 @@ impl BettingInteractionHandler {
                     pending.event_win_multiplier,
                     pending.event_loss_multiplier,
                     &vanity_taxable_ids,
+                    member_snapshot.as_ref(),
                 )
             })
             .await;
@@ -2916,6 +2925,7 @@ impl BettingInteractionHandler {
                 let effects = pending.effects.clone();
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let option_for_settlement = option.clone();
+                let member_snapshot = self.guild_member_snapshot(guild_id).await;
                 let result = sqlite("expired wheel interaction resolution", move || {
                     resolve_pending_wheel(
                         &path,
@@ -2934,6 +2944,7 @@ impl BettingInteractionHandler {
                         pending.event_win_multiplier,
                         pending.event_loss_multiplier,
                         &vanity_taxable_ids,
+                        member_snapshot.as_ref(),
                     )
                 })
                 .await;
@@ -3012,6 +3023,7 @@ impl BettingInteractionHandler {
         let event_win_multiplier = pending.event_win_multiplier;
         let event_loss_multiplier = pending.event_loss_multiplier;
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let result = sqlite("wheel interaction resolution", move || {
             resolve_pending_wheel(
                 &path,
@@ -3030,6 +3042,7 @@ impl BettingInteractionHandler {
                 event_win_multiplier,
                 event_loss_multiplier,
                 &vanity_taxable_ids,
+                member_snapshot.as_ref(),
             )
         })
         .await;
@@ -4262,10 +4275,21 @@ impl BettingInteractionHandler {
             }
             return response;
         }
-        let now = unix_seconds()?;
-        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let admin_bypass = self.config.admin_user_ids.contains(&user_id)
             || member_permissions & (ADMINISTRATOR_PERMISSION | MANAGE_GUILD_PERMISSION) != 0;
+        let now = unix_seconds()?;
+        if !bonus_spin {
+            let path = self.database_path.clone();
+            let preflight = sqlite("gamba interaction preflight", move || {
+                gamba_interaction_preflight(&path, guild_id, user_id, now, admin_bypass)
+            })
+            .await?;
+            if let Some(message) = preflight {
+                return respond_ephemeral(responder, &message).await;
+            }
+        }
+        let response_route = begin_gamba_response(responder, bonus_spin).await?;
+        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let config = self.config.clone();
         let path = self.database_path.clone();
         let event_config = economy_event_config(&config);
@@ -4336,32 +4360,14 @@ impl BettingInteractionHandler {
             response = response.action_rows(rows);
         }
         let response_has_attachment = !response.attachments.is_empty();
-        let mut attachment_delivered = false;
-        let delivery = match responder.respond(response.clone()).await {
-            Ok(()) => {
-                attachment_delivered = response_has_attachment;
-                Ok(())
-            }
-            Err(error) if !response.attachments.is_empty() => {
-                // Discord can reject a generated media upload (size, transient
-                // CDN failure, or an adapter without attachment support). Keep
-                // the settled result visible with a text-only retry; the money
-                // transaction already committed before this delivery boundary.
-                let mut text_only = response;
-                text_only.attachments.clear();
-                if text_only.content.is_empty() {
-                    if let Some(embed) = completion_embed.clone() {
-                        text_only.embeds.push(embed);
-                    } else {
-                        text_only.content = "The wheel animation could not be uploaded.".to_owned();
-                    }
-                }
-                responder.respond(text_only).await.map_err(|retry_error| {
-                    format!("gamba response failed ({error}); text fallback failed ({retry_error})")
-                })
-            }
-            Err(error) => Err(error.to_string()),
-        };
+        let delivery = deliver_gamba_response(
+            responder,
+            response,
+            completion_embed.clone(),
+            response_route,
+        )
+        .await;
+        let attachment_delivered = delivery.as_ref().copied().unwrap_or(false);
         if delivery.is_ok()
             && let Some(pending_key) = pending_key
             && let Ok(mut interactions) = self.wheel_interactions.lock()
@@ -4416,7 +4422,7 @@ impl BettingInteractionHandler {
                 }
             }
         }
-        delivery
+        delivery.map(drop)
     }
 
     /// Resolve one immutable member snapshot before the wheel's SQLite
@@ -6392,14 +6398,102 @@ async fn followup_ephemeral(
         .map_err(|error| error.to_string())
 }
 
-async fn sqlite<T, F>(label: &'static str, operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
+fn gamba_interaction_preflight(
+    path: &Path,
+    guild_id: i64,
+    user_id: i64,
+    now: i64,
+    admin_bypass: bool,
+) -> Result<Option<String>, String> {
+    let players = PlayerRepository::new(path);
+    if players
+        .get_by_id(user_id, Some(guild_id))
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(Some(
+            "You need to /player register before you can spin the wheel.".to_owned(),
+        ));
+    }
+    if !admin_bypass
+        && let Some(last_spin) = players
+            .get_last_wheel_spin(user_id, Some(guild_id))
+            .map_err(|error| error.to_string())?
+        && last_spin.saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS) > now
+    {
+        return Ok(Some(wheel_cooldown_message(now, last_spin)));
+    }
+    Ok(None)
+}
+
+fn wheel_cooldown_message(now: i64, last_spin: i64) -> String {
+    let remaining = last_spin
+        .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
+        .saturating_sub(now)
+        .max(0);
+    let hours = remaining / 3_600;
+    let minutes = (remaining % 3_600) / 60;
+    format!("You already spun the wheel today! Try again in **{hours}h {minutes}m**.")
+}
+
+async fn begin_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    bonus_spin: bool,
+) -> Result<GambaResponseRoute, String> {
+    if bonus_spin {
+        return Ok(GambaResponseRoute::Initial);
+    }
+    responder
+        .defer(false)
         .await
-        .map_err(|error| format!("{label} task failed: {error}"))?
+        .map_err(|error| format!("gamba defer failed: {error}"))?;
+    Ok(GambaResponseRoute::DeferredOriginal)
+}
+
+async fn send_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    response: InteractionResponse,
+    route: GambaResponseRoute,
+) -> Result<(), String> {
+    match route {
+        GambaResponseRoute::Initial => responder.respond(response).await,
+        GambaResponseRoute::DeferredOriginal => responder.edit_original(response).await,
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn deliver_gamba_response(
+    responder: &Arc<dyn InteractionResponder>,
+    response: InteractionResponse,
+    completion_embed: Option<InteractionEmbed>,
+    route: GambaResponseRoute,
+) -> Result<bool, String> {
+    let response_has_attachment = !response.attachments.is_empty();
+    match send_gamba_response(responder, response.clone(), route).await {
+        Ok(()) => Ok(response_has_attachment),
+        Err(error) if response_has_attachment => {
+            // A media rejection happens after the wheel transaction commits.
+            // Retry through the same acknowledged delivery route; calling the
+            // initial-response endpoint again would itself be invalid after a
+            // defer and recreates Discord's `Unknown interaction` failure.
+            let mut text_only = response;
+            text_only.attachments.clear();
+            if text_only.content.is_empty() {
+                if let Some(embed) = completion_embed {
+                    text_only.embeds.push(embed);
+                } else {
+                    text_only.content = "The wheel animation could not be uploaded.".to_owned();
+                }
+            }
+            send_gamba_response(responder, text_only, route)
+                .await
+                .map(|()| false)
+                .map_err(|retry_error| {
+                    format!("gamba response failed ({error}); text fallback failed ({retry_error})")
+                })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Apply Python's wrong-channel penance through the same immediate transaction
@@ -6947,7 +7041,10 @@ fn apply_swamp_siphon(
         .map_err(|error| error.to_string())?;
     let eligible = leaderboard
         .iter()
-        .filter(|player| player.discord_id != Some(user_id) && player.jopacoin_balance >= 50)
+        .filter(|player| {
+            player.discord_id != Some(user_id)
+                && player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+        })
         .collect::<Vec<_>>();
     let Some(victim) = eligible.get(fastrand::usize(..eligible.len().max(1))) else {
         return Ok(None);
@@ -7107,6 +7204,7 @@ fn resolve_wheel_value(
     event_loss_multiplier: f64,
     bonus_spin: bool,
     visible_positive_balance: Option<i64>,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<WheelResolution, String> {
     let mechanic = match landed.value {
         WheelValue::Numeric(value) => {
@@ -7125,9 +7223,10 @@ fn resolve_wheel_value(
                     adjusted = adjusted
                         .saturating_sub((adjusted as f64 * effects.blue_gamba_reduction) as i64);
                 }
-                if effects.green_gain_cap.is_some_and(|cap| adjusted > cap) {
-                    adjusted = effects.green_gain_cap.unwrap_or(adjusted);
-                }
+                // Python parity: `_numeric_result` applies only dig scaling
+                // and the Blue reduction. The Green gain cap belongs solely
+                // to the Overgrowth mechanic (`wheel_outcomes.py:510`), so
+                // capping every positive wedge here shorted Green players.
                 let receipt = credit_wheel_income(
                     path,
                     guild_id,
@@ -7153,10 +7252,13 @@ fn resolve_wheel_value(
                     .consume_wheel_pardon_atomic(user_id, Some(guild_id))
                     .map_err(|error| error.to_string())?
             {
+                // Python parity: the pardon rewrites the result to 0, which
+                // `commands/betting.py` treats as Lose-a-Turn — the pardoned
+                // spinner still serves the extended penalty cooldown.
                 return Ok(WheelResolution::new(
                     WheelValue::Numeric(0),
                     0,
-                    CooldownOutcome::Other,
+                    CooldownOutcome::LoseTurn,
                     "🛡️ Comeback pardon consumed: the bankrupt loss was forgiven.".to_owned(),
                 ));
             }
@@ -7351,6 +7453,7 @@ fn resolve_wheel_value(
                 user_id,
                 event_id,
                 config.minigame_jc_delta_scale,
+                visible_member_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7389,6 +7492,7 @@ fn resolve_wheel_value(
                 config,
                 vanity_taxable_ids,
                 event_win_multiplier,
+                visible_member_ids,
             )?;
             let resolution = WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7533,10 +7637,17 @@ fn resolve_recession(
     spinner_id: i64,
     event_id: &str,
     scale: f64,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<RecessionResolution, String> {
-    let leaderboard = PlayerRepository::new(path)
-        .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
-        .map_err(|error| error.to_string())?;
+    // Python parity: every rank-based wheel mechanic reads the guild-member
+    // visibility-filtered leaderboard (`wheel_outcomes.py::_leaderboard`), so
+    // departed ex-members neither hold ranks nor pay the tax.
+    let leaderboard = filter_visible_wheel_leaderboard(
+        PlayerRepository::new(path)
+            .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
+            .map_err(|error| error.to_string())?,
+        visible_member_ids,
+    );
     let now = unix_seconds()?.max(0);
     let mut total = 0_i64;
     let mut count = 0_usize;
@@ -7616,6 +7727,21 @@ struct HostileResolution {
     shielded_count: usize,
 }
 
+/// Python parity: `scale_minigame_jc_delta(max(1, int(balance * roll)))` —
+/// truncate toward zero BEFORE minigame scaling.
+fn hostile_percentage_loss(balance: i64, roll: f64, scale: f64) -> i64 {
+    cama_domain::economy_scaling::scale_minigame_jc_delta(
+        1_i64.max((balance as f64 * roll) as i64) as f64,
+        scale,
+    )
+}
+
+/// Python parity: `min(scale_minigame_jc_delta(amount), balance)` — the flat
+/// hostile losses scale first, then clamp to the victim's balance.
+fn hostile_flat_loss(amount: i64, balance: i64, scale: f64) -> i64 {
+    cama_domain::economy_scaling::scale_minigame_jc_delta(amount as f64, scale).min(balance)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_hostile_mechanic(
     path: &Path,
@@ -7627,15 +7753,27 @@ fn resolve_hostile_mechanic(
     config: &BettingRuntimeConfig,
     vanity_taxable_ids: &BTreeSet<i64>,
     event_win_multiplier: f64,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<HostileResolution, String> {
     let players = PlayerRepository::new(path);
-    let leaderboard = players
-        .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
-        .map_err(|error| error.to_string())?;
+    // Python parity: every hostile victim pool (heist window, crash top-N,
+    // takeover rank, shell/bomb/commune/lightning sweeps) is built from the
+    // guild-member visibility-filtered leaderboard
+    // (`wheel_outcomes.py::_leaderboard`); an unfiltered read lets departed
+    // ex-members consume window slots or be robbed.
+    let leaderboard = filter_visible_wheel_leaderboard(
+        players
+            .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
+            .map_err(|error| error.to_string())?,
+        visible_member_ids,
+    );
     let now = unix_seconds()?;
     let eligible = leaderboard
         .iter()
-        .filter(|row| row.discord_id != Some(user_id) && row.jopacoin_balance >= 50)
+        .filter(|row| {
+            row.discord_id != Some(user_id)
+                && row.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+        })
         .collect::<Vec<_>>();
     let total = Cell::new(0_i64);
     let mut log_result = 0_i64;
@@ -7766,9 +7904,14 @@ fn resolve_hostile_mechanic(
                 .map_err(|error| error.to_string())?
                 && let Some(victim_id) = victim.discord_id
             {
+                // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
+                    hostile_flat_loss(
+                        fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
+                        victim.jopacoin_balance,
+                        config.minigame_jc_delta_scale,
+                    ),
                     DbHostileDestination::Burn,
                     None,
                     true,
@@ -7784,9 +7927,14 @@ fn resolve_hostile_mechanic(
                 && let Some(victim_id) = victim.discord_id
             {
                 let before = total.get();
+                // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
+                    hostile_flat_loss(
+                        fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
+                        victim.jopacoin_balance,
+                        config.minigame_jc_delta_scale,
+                    ),
                     DbHostileDestination::Player,
                     Some(user_id),
                     false,
@@ -7803,10 +7951,15 @@ fn resolve_hostile_mechanic(
             for victim in sampled.iter().take(WHEEL_BOMB_OMB_VICTIM_COUNT) {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
+                    // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                     settle(
                         victim_id,
-                        fastrand::i64(
-                            WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
+                        hostile_flat_loss(
+                            fastrand::i64(
+                                WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
+                            ),
+                            victim.jopacoin_balance,
+                            config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Burn,
                         None,
@@ -7824,16 +7977,16 @@ fn resolve_hostile_mechanic(
             // Lightning is the one server-wide tax that includes the
             // spinner. Python's leaderboard pass intentionally charges every
             // account at/above the hostile floor, including self.
-            for victim in leaderboard
-                .iter()
-                .filter(|player| player.jopacoin_balance >= 50)
-            {
+            for victim in leaderboard.iter().filter(|player| {
+                player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+            }) {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (1_i64.max((victim.jopacoin_balance as f64 * tax_rate) as i64)) as f64,
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            tax_rate,
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Reserve,
@@ -7857,9 +8010,9 @@ fn resolve_hostile_mechanic(
                         if mechanic == WheelMechanic::Commune {
                             1
                         } else {
-                            cama_domain::economy_scaling::scale_minigame_jc_delta(
-                                (1_i64.max((victim.jopacoin_balance as f64 * tax_rate) as i64))
-                                    as f64,
+                            hostile_percentage_loss(
+                                victim.jopacoin_balance,
+                                tax_rate,
                                 config.minigame_jc_delta_scale,
                             )
                         },
@@ -7876,15 +8029,32 @@ fn resolve_hostile_mechanic(
             log_result = total.get();
         }
         WheelMechanic::Heist => {
-            for victim in eligible.iter().rev().take(30) {
+            // Python parity: the window is the poorest thirty accounts with
+            // any positive balance (spinner included), and only then filters
+            // to stealable victims (`wheel_outcomes.py::_heist`). Filtering by
+            // the hostile floor first would target the richest players
+            // instead. The leaderboard is sorted exactly opposite to
+            // `get_leaderboard_bottom`, so reversing reproduces its order.
+            let heist_window = leaderboard
+                .iter()
+                .rev()
+                .filter(|player| player.jopacoin_balance >= 1)
+                .take(30)
+                .filter(|player| {
+                    player.discord_id != Some(user_id)
+                        && player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+                })
+                .collect::<Vec<_>>();
+            for victim in heist_window {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
+                    // Python truncates before scaling:
+                    // scale(max(1, int(balance * uniform(0.05, 0.12)))).
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (victim.jopacoin_balance as f64
-                                * (0.05 + fastrand::f64() * (0.12 - 0.05)))
-                                .max(1.0),
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            0.05 + fastrand::f64() * (0.12 - 0.05),
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -7927,15 +8097,16 @@ fn resolve_hostile_mechanic(
             for victim in leaderboard.iter().take(3) {
                 if let Some(victim_id) = victim.discord_id
                     && victim_id != user_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     let before = total.get();
+                    // Python truncates before scaling:
+                    // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (victim.jopacoin_balance as f64
-                                * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                                .max(1.0),
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            0.08 + fastrand::f64() * (0.15 - 0.08),
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -7977,14 +8148,16 @@ fn resolve_hostile_mechanic(
         WheelMechanic::HostileTakeover => {
             if let Some(victim) = leaderboard.get(3)
                 && let Some(victim_id) = victim.discord_id
-                && victim.jopacoin_balance >= 50
+                && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
             {
                 let before = total.get();
+                // Python truncates before scaling:
+                // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                 settle(
                     victim_id,
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        (victim.jopacoin_balance as f64 * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                            .max(1.0),
+                    hostile_percentage_loss(
+                        victim.jopacoin_balance,
+                        0.08 + fastrand::f64() * (0.15 - 0.08),
                         config.minigame_jc_delta_scale,
                     ),
                     DbHostileDestination::Player,
@@ -8033,7 +8206,7 @@ fn resolve_hostile_mechanic(
         WheelMechanic::Emergency => {
             for victim in &leaderboard {
                 if let Some(victim_id) = victim.discord_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     settle(
                         victim_id,
@@ -8052,7 +8225,7 @@ fn resolve_hostile_mechanic(
             for (rank, victim) in leaderboard.iter().take(4).enumerate() {
                 if let Some(victim_id) = victim.discord_id
                     && victim_id != user_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     settle(
                         victim_id,
@@ -8323,15 +8496,7 @@ fn spin_once(
                 ));
             }
             WheelSpinClaim::Cooldown { last_spin } => {
-                let remaining = last_spin
-                    .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
-                    .saturating_sub(now)
-                    .max(0);
-                let hours = remaining / 3_600;
-                let minutes = (remaining % 3_600) / 60;
-                return Ok(spin_result(format!(
-                    "You already spun the wheel today! Try again in **{hours}h {minutes}m**."
-                )));
+                return Ok(spin_result(wheel_cooldown_message(now, last_spin)));
             }
             WheelSpinClaim::Claimed { .. } => {}
         }
@@ -8608,6 +8773,7 @@ fn spin_once(
         event_loss_multiplier,
         bonus_spin,
         visible_positive_balance,
+        visible_member_ids,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -9543,6 +9709,7 @@ fn resolve_pending_wheel(
     event_win_multiplier: f64,
     event_loss_multiplier: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<PendingWheelResolution, String> {
     if use_reroll
         && !ManaRepository::new(path)
@@ -9584,6 +9751,7 @@ fn resolve_pending_wheel(
         event_loss_multiplier,
         bonus_spin,
         None,
+        visible_member_ids,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -10494,6 +10662,7 @@ mod tests {
         responses: Arc<Mutex<Vec<InteractionResponse>>>,
         defers: Arc<Mutex<Vec<bool>>>,
         edits: Arc<Mutex<Vec<InteractionResponse>>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     #[async_trait]
@@ -10502,6 +10671,10 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("respond");
             self.responses
                 .lock()
                 .expect("recording responder responses lock")
@@ -10513,6 +10686,10 @@ mod tests {
             &self,
             ephemeral: bool,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("defer");
             self.defers
                 .lock()
                 .expect("recording responder defers lock")
@@ -10524,6 +10701,10 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("followup");
             self.responses
                 .lock()
                 .expect("recording responder responses lock")
@@ -10535,12 +10716,163 @@ mod tests {
             &self,
             response: InteractionResponse,
         ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events
+                .lock()
+                .expect("recording responder events lock")
+                .push("edit_original");
             self.edits
                 .lock()
                 .expect("recording responder edits lock")
                 .push(response);
             Ok(())
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct RejectingGambaMediaResponder {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        edits: Arc<Mutex<Vec<InteractionResponse>>>,
+    }
+
+    #[async_trait]
+    impl InteractionResponder for RejectingGambaMediaResponder {
+        async fn respond(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("respond");
+            Ok(())
+        }
+
+        async fn defer(
+            &self,
+            _ephemeral: bool,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("defer");
+            Ok(())
+        }
+
+        async fn followup(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("followup");
+            Ok(())
+        }
+
+        async fn edit_original(
+            &self,
+            response: InteractionResponse,
+        ) -> Result<(), crate::registration::InteractionResponseError> {
+            self.events.lock().unwrap().push("edit_original");
+            let rejects_media = !response.attachments.is_empty();
+            self.edits.lock().unwrap().push(response);
+            if rejects_media {
+                Err(crate::registration::InteractionResponseError::new(
+                    "simulated media rejection",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn gamba_preflight_keeps_registration_and_cooldown_errors_private() {
+        let database = NamedTempFile::new().expect("gamba preflight database");
+        initialize_or_migrate(database.path()).expect("gamba preflight schema");
+        let now = 1_700_000_000;
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, false)
+                .expect("unregistered preflight")
+                .as_deref(),
+            Some("You need to /player register before you can spin the wheel.")
+        );
+
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(7, "spinner", Some(42)))
+            .expect("gamba preflight player");
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, false)
+                .expect("ready preflight"),
+            None
+        );
+
+        players
+            .set_last_wheel_spin(7, Some(42), now - 60)
+            .expect("gamba preflight cooldown");
+        let cooldown = gamba_interaction_preflight(database.path(), 42, 7, now, false)
+            .expect("cooldown preflight")
+            .expect("cooldown copy");
+        assert!(cooldown.contains("You already spun the wheel today!"));
+        assert_eq!(
+            gamba_interaction_preflight(database.path(), 42, 7, now, true)
+                .expect("admin preflight"),
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_gamba_work_is_deferred_before_editing_the_original_response() {
+        let recording = RecordingResponder::default();
+        let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+        let route = begin_gamba_response(&responder, false)
+            .await
+            .expect("public gamba defer");
+        assert_eq!(route, GambaResponseRoute::DeferredOriginal);
+        assert_eq!(
+            recording.events.lock().expect("gamba events").as_slice(),
+            &["defer"]
+        );
+
+        // Model a render that runs beyond Discord's initial-response window.
+        // The interaction is already acknowledged before this work begins.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            deliver_gamba_response(
+                &responder,
+                InteractionResponse::message("")
+                    .attachment(InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3],)),
+                None,
+                route,
+            )
+            .await
+            .expect("deferred wheel delivery")
+        );
+        assert_eq!(
+            recording.events.lock().expect("gamba events").as_slice(),
+            &["defer", "edit_original"]
+        );
+        assert!(recording.responses.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deferred_gamba_media_fallback_never_reuses_initial_response() {
+        let recording = RejectingGambaMediaResponder::default();
+        let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+        let route = begin_gamba_response(&responder, false)
+            .await
+            .expect("public gamba defer");
+        let delivered_attachment = deliver_gamba_response(
+            &responder,
+            InteractionResponse::message("")
+                .attachment(InteractionAttachment::bytes("wheel.gif", vec![1, 2, 3])),
+            Some(InteractionEmbed::titled("Wheel result")),
+            route,
+        )
+        .await
+        .expect("text-only gamba fallback");
+        assert!(!delivered_attachment);
+        assert_eq!(
+            recording.events.lock().unwrap().as_slice(),
+            &["defer", "edit_original", "edit_original"]
+        );
+        let edits = recording.edits.lock().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].attachments.len(), 1);
+        assert!(edits[1].attachments.is_empty());
+        assert_eq!(edits[1].embeds[0].title.as_deref(), Some("Wheel result"));
     }
 
     struct EmptyMemberSource;
@@ -11803,6 +12135,7 @@ mod tests {
             1.0,
             false,
             None,
+            None,
         )
         .expect("resolve no-op extension");
         assert_eq!(
@@ -11829,6 +12162,7 @@ mod tests {
             1.0,
             1.0,
             false,
+            None,
             None,
         )
         .expect("resolve active extension");
@@ -12699,5 +13033,73 @@ mod tests {
         let note = hostile_result_note(WheelMechanic::RedShell, &shell, &config);
         assert!(note.contains("rival"));
         assert!(note.contains("Victim's new balance: **88**"));
+    }
+
+    #[test]
+    fn hostile_mechanics_only_target_visible_guild_members() {
+        // Python parity: every hostile victim pool reads the guild-member
+        // visibility-filtered leaderboard, so a departed ex-member with the
+        // largest balance can neither hold a rank nor be robbed.
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(1, "spinner", Some(42)))
+            .expect("spinner");
+        players
+            .add(&NewPlayer::new(2, "member", Some(42)))
+            .expect("member");
+        players
+            .add(&NewPlayer::new(99, "departed", Some(42)))
+            .expect("departed");
+        players
+            .update_balance(1, Some(42), 100)
+            .expect("spinner balance");
+        players
+            .update_balance(2, Some(42), 100)
+            .expect("member balance");
+        players
+            .update_balance(99, Some(42), 1_000)
+            .expect("departed balance");
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let config = BettingRuntimeConfig::from_application_config(&config);
+        let visible = BTreeSet::from([1_i64, 2]);
+
+        let resolution = resolve_hostile_mechanic(
+            database.path(),
+            42,
+            1,
+            100,
+            WheelMechanic::Heist,
+            "heist-visibility",
+            &config,
+            &BTreeSet::new(),
+            1.0,
+            Some(&visible),
+        )
+        .expect("resolve heist");
+
+        assert!(resolution.total > 0, "the visible member must be robbed");
+        let departed_balance = players
+            .get_by_id(99, Some(42))
+            .expect("read departed")
+            .expect("departed row")
+            .jopacoin_balance;
+        assert_eq!(
+            departed_balance, 1_000,
+            "a departed ex-member must never be a hostile victim"
+        );
+        let member_balance = players
+            .get_by_id(2, Some(42))
+            .expect("read member")
+            .expect("member row")
+            .jopacoin_balance;
+        assert!(
+            member_balance < 100,
+            "the visible member funds the heist (was {member_balance})"
+        );
     }
 }

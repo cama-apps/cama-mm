@@ -404,7 +404,40 @@ where
                 shutdown: shutdown_receiver.clone(),
             };
 
-            let reconnect_reason = match self.gateway.run_session(session).await {
+            // A session that reached Ready resets the exponential backoff,
+            // matching discord.py's reconnect behavior. The observer is
+            // polled concurrently with the running session so a long
+            // session's lifecycle traffic can never evict the single Ready
+            // event from the bounded broadcast channel before it is seen.
+            let mut ready_observer = self.events.subscribe();
+            let mut reached_ready = false;
+            let session_end = {
+                let mut session_future = std::pin::pin!(self.gateway.run_session(session));
+                loop {
+                    tokio::select! {
+                        result = &mut session_future => break result,
+                        event = ready_observer.recv() => {
+                            if matches!(event, Ok(LifecycleEvent::Ready { .. })) {
+                                reached_ready = true;
+                            }
+                        }
+                    }
+                }
+            };
+            // Catch events emitted between the observer's last poll and the
+            // session future completing.
+            loop {
+                match ready_observer.try_recv() {
+                    Ok(LifecycleEvent::Ready { .. }) => reached_ready = true,
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(
+                        broadcast::error::TryRecvError::Empty
+                        | broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+
+            let reconnect_reason = match session_end {
                 Ok(GatewaySessionEnd::Shutdown) => break,
                 Ok(GatewaySessionEnd::Reconnect { reason }) => reason,
                 Err(GatewayError::Recoverable(reason)) => reason,
@@ -413,6 +446,11 @@ where
                     break;
                 }
             };
+            if reached_ready {
+                // Restart the backoff sequence exactly as at process start:
+                // the delay below becomes the initial delay again.
+                attempt = 1;
+            }
 
             emit(
                 &self.events,
@@ -453,6 +491,11 @@ where
     }
 }
 
+/// A worker run that survived this long before failing is treated as having
+/// been healthy, so its restart backoff starts over instead of compounding
+/// across the process lifetime.
+const WORKER_BACKOFF_RESET_UPTIME: Duration = Duration::from_secs(60);
+
 async fn supervise_worker(
     spec: BackgroundWorkerSpec,
     mut ready_events: broadcast::Receiver<LifecycleEvent>,
@@ -474,9 +517,13 @@ async fn supervise_worker(
                 attempt,
             },
         );
+        let started = tokio::time::Instant::now();
         match spec.worker.run(WorkerContext::new(shutdown.clone())).await {
             Ok(()) => break,
             Err(error) if !*shutdown.borrow() => {
+                if started.elapsed() >= WORKER_BACKOFF_RESET_UPTIME {
+                    attempt = 1;
+                }
                 emit(
                     &events,
                     LifecycleEvent::BackgroundWorkerFailed {
@@ -617,6 +664,118 @@ mod tests {
         async fn admit(&self, _path: &Path) -> Result<DatabaseAdmissionReport, String> {
             Err("injected admission refusal".to_owned())
         }
+    }
+
+    struct AcceptingAdmission;
+
+    #[async_trait]
+    impl DatabaseAdmission for AcceptingAdmission {
+        async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
+            Ok(DatabaseAdmissionReport {
+                path: path.to_path_buf(),
+                applied_migrations: 0,
+                required_migrations: 0,
+                newly_applied_migrations: 0,
+                created_tables: 0,
+                rebuilt_tables: 0,
+                historical_extra_migrations: 0,
+            })
+        }
+    }
+
+    struct ScriptedGateway {
+        calls: u32,
+    }
+
+    #[async_trait]
+    impl GatewayTransport for ScriptedGateway {
+        async fn run_session(
+            &mut self,
+            session: GatewaySession,
+        ) -> Result<GatewaySessionEnd, GatewayError> {
+            self.calls += 1;
+            match self.calls {
+                // Two consecutive connect failures escalate the backoff.
+                1 | 2 => Err(GatewayError::Recoverable("connect refused".to_owned())),
+                // A session that reached Ready must reset the backoff, even
+                // when later lifecycle traffic overflows the bounded
+                // broadcast channel (Ready must not be evicted unseen).
+                3 => {
+                    emit(
+                        &session.events,
+                        LifecycleEvent::Ready {
+                            bot_user_id: 7,
+                            guild_count: 1,
+                        },
+                    );
+                    for _ in 0..300 {
+                        emit(&session.events, LifecycleEvent::Resumed);
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(GatewaySessionEnd::Reconnect {
+                        reason: "healthy session dropped".to_owned(),
+                    })
+                }
+                _ => Ok(GatewaySessionEnd::Shutdown),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_backoff_resets_after_a_ready_session() {
+        let config = RuntimeConfig {
+            token: DiscordToken::parse("test-token").expect("test token"),
+            db_path: "/tmp/backoff-reset-cama.db".into(),
+            reconnect_initial: Duration::from_secs(5),
+            reconnect_max: Duration::from_secs(300),
+            rust_cutover_candidate: false,
+        };
+        let runtime = Runtime::new(
+            config,
+            RegistryBuilder::default().build(),
+            ScriptedGateway { calls: 0 },
+            AcceptingAdmission,
+        );
+        // Collect concurrently: the scripted session floods the bounded
+        // broadcast channel, so a drain-at-the-end receiver would itself
+        // lose the ReconnectScheduled events under test.
+        let mut events = runtime.events().subscribe();
+        let scheduled = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collector = tokio::spawn({
+            let scheduled = Arc::clone(&scheduled);
+            async move {
+                loop {
+                    match events.recv().await {
+                        Ok(LifecycleEvent::ReconnectScheduled { attempt, delay }) => scheduled
+                            .lock()
+                            .expect("collector mutex")
+                            .push((attempt, delay)),
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        });
+        runtime
+            .run_until(future::pending())
+            .await
+            .expect("scripted runtime completes");
+        collector.await.expect("collector completes");
+
+        let scheduled = Arc::try_unwrap(scheduled)
+            .expect("collector released its handle")
+            .into_inner()
+            .expect("collector mutex");
+        assert_eq!(
+            scheduled,
+            [
+                (1, Duration::from_secs(5)),
+                (2, Duration::from_secs(10)),
+                // The Ready session restarted the sequence at the initial
+                // delay instead of continuing to 20 seconds.
+                (1, Duration::from_secs(5)),
+            ]
+        );
     }
 
     struct UnreachableGateway;

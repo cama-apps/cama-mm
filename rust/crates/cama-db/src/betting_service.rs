@@ -2576,26 +2576,42 @@ fn calculate_payouts(request: PayoutCalculation<'_>) -> BTreeMap<i64, i64> {
             }
         }
         BettingMode::Pool => {
-            let seeded_pool = request.total_pool.saturating_add(request.winner_seed);
-            for (discord_id, user_stake) in
+            // Python parity (`bet_repository.py::_calculate_pool_payouts`):
+            // per-bet raw payouts are IEEE doubles summed per user in bet
+            // order, ceiled with `math.ceil`, and the per-bet split floors
+            // `raw / user_raw_total * user_final`. The float path is
+            // deliberate — an exact integer ceiling rounds differently on
+            // ~0.7% of settlements (Python's double rounding can land 1 ULP
+            // above an integer and `ceil` promotes it), and the lift-and-shift
+            // contract preserves Python's observable credits.
+            let seeded_pool = request.total_pool.saturating_add(request.winner_seed) as f64;
+            let winning_pool = request.winning_pool as f64;
+            for (discord_id, _user_stake) in
                 ordered_winner_stakes(request.bets, request.winning_team)
             {
-                let normal_payout = user_stake
-                    .saturating_mul(seeded_pool)
-                    .saturating_add(request.winning_pool - 1)
-                    / request.winning_pool;
-                let user_payout = scaled_payout(normal_payout, request.payout_multiplier);
                 let user_bets = request
                     .bets
                     .iter()
                     .filter(|bet| bet.team == request.winning_team && bet.discord_id == discord_id)
                     .collect::<Vec<_>>();
+                let raw_payouts = user_bets
+                    .iter()
+                    .map(|bet| (bet.effective_amount() as f64 / winning_pool) * seeded_pool)
+                    .collect::<Vec<_>>();
+                let mut user_raw_total = 0.0_f64;
+                for raw_payout in &raw_payouts {
+                    user_raw_total += raw_payout;
+                }
+                let normal_payout = user_raw_total.ceil() as i64;
+                let user_payout = scaled_payout(normal_payout, request.payout_multiplier);
                 let mut allocated = 0_i64;
                 for (index, bet) in user_bets.iter().enumerate() {
                     let payout = if index + 1 == user_bets.len() {
                         user_payout.saturating_sub(allocated)
+                    } else if user_raw_total != 0.0 {
+                        ((raw_payouts[index] / user_raw_total) * user_payout as f64) as i64
                     } else {
-                        user_payout.saturating_mul(bet.effective_amount()) / user_stake
+                        0
                     };
                     allocated = allocated.saturating_add(payout);
                     payouts.insert(bet.bet_id, payout);
