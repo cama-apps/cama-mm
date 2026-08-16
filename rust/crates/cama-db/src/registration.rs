@@ -16,6 +16,8 @@ use crate::open_runtime_connection;
 
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
 
+pub type PlayHoursWithTimezone = (Option<String>, Option<Vec<i64>>);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterPlayerRequest<'a> {
     pub discord_id: i64,
@@ -547,7 +549,7 @@ impl RegistrationRepository {
     pub fn play_hours_for_guild(
         &self,
         guild_id: Option<i64>,
-    ) -> Result<Vec<(Option<String>, Option<Vec<i64>>)>, RegistrationRepositoryError> {
+    ) -> Result<Vec<PlayHoursWithTimezone>, RegistrationRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare("SELECT timezone, dota_play_hours FROM players WHERE guild_id=?1")?;

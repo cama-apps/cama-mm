@@ -2676,8 +2676,8 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
-        let signed_guild_id = i64::try_from(guild_id.0).unwrap_or_default();
-        let signed_user_id = i64::try_from(command.user_id.0).unwrap_or_default();
+        let signed_guild_id = guild_id.0;
+        let signed_user_id = command.user_id.0;
         let curfew = self.state.curfew.clone();
         let active_window = tokio::task::spawn_blocking(move || {
             curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())
