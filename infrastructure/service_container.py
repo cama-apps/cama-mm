@@ -110,6 +110,7 @@ class ServiceContainer:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.buff_repository import BuffRepository
+        from repositories.curfew_repository import CurfewRepository
         from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
         from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
@@ -148,6 +149,7 @@ class ServiceContainer:
         p = self.db_path
         self._components.update({
             "player_repo": PlayerRepository(p),
+            "curfew_repo": CurfewRepository(p),
             "player_trivia_repo": PlayerTriviaRepository(p),
             "match_repo": MatchRepository(p),
             "bet_repo": BetRepository(p),
@@ -668,6 +670,7 @@ class ServiceContainer:
         c = self._components
         c["curfew_service"] = CurfewService(
             player_repo=c["player_repo"],
+            curfew_repo=c["curfew_repo"],
             lobby_service=c["lobby_service"],
         )
 

@@ -698,46 +698,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (timezone, discord_id, guild_id),
             )
 
-    def update_curfew(
-        self,
-        discord_id: int,
-        guild_id: int,
-        *,
-        enabled: bool,
-        curfew_hour: int | None,
-        curfew_minute: int,
-        wake_hour: int | None,
-        wake_minute: int,
-        timezone: str | None,
-    ) -> None:
-        """Persist a player's personal lobby-queue curfew window."""
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET curfew_enabled = ?,
-                    curfew_hour = ?,
-                    curfew_minute = ?,
-                    curfew_wake_hour = ?,
-                    curfew_wake_minute = ?,
-                    curfew_timezone = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-            """,
-                (
-                    1 if enabled else 0,
-                    curfew_hour,
-                    curfew_minute,
-                    wake_hour,
-                    wake_minute,
-                    timezone,
-                    discord_id,
-                    guild_id,
-                ),
-            )
-
     def update_inferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None:
         """Cache the region inferred from OpenDota play ("USE"/"USW"/"NONE" sentinel)."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -4681,16 +4641,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         preferred_region = row["preferred_region"] if "preferred_region" in keys else None
         inferred_region = row["inferred_region"] if "inferred_region" in keys else None
 
-        # Curfew fields (may not exist in older schemas)
-        curfew_enabled = bool(row["curfew_enabled"]) if "curfew_enabled" in keys else False
-        curfew_hour = row["curfew_hour"] if "curfew_hour" in keys else None
-        curfew_minute = (row["curfew_minute"] if "curfew_minute" in keys else 0) or 0
-        curfew_wake_hour = row["curfew_wake_hour"] if "curfew_wake_hour" in keys else None
-        curfew_wake_minute = (
-            row["curfew_wake_minute"] if "curfew_wake_minute" in keys else 0
-        ) or 0
-        curfew_timezone = row["curfew_timezone"] if "curfew_timezone" in keys else None
-
         # General timezone preference (may not exist in older schemas)
         timezone = row["timezone"] if "timezone" in keys else None
 
@@ -4726,12 +4676,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             preferred_region=preferred_region,
             inferred_region=inferred_region,
             timezone=timezone,
-            curfew_enabled=curfew_enabled,
-            curfew_hour=curfew_hour,
-            curfew_minute=curfew_minute,
-            curfew_wake_hour=curfew_wake_hour,
-            curfew_wake_minute=curfew_wake_minute,
-            curfew_timezone=curfew_timezone,
             dota_play_hours=dota_play_hours,
         )
 

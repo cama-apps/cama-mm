@@ -18,7 +18,7 @@ from config import (
     MMR_MODAL_TIMEOUT_MINUTES,
 )
 from opendota_integration import run_opendota_io
-from utils.curfew import parse_clock
+from utils.curfew import format_window, parse_clock
 from utils.formatting import escape_discord_text, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
@@ -50,12 +50,12 @@ class RegistrationCommands(commands.Cog):
     )
     player_curfew = app_commands.Group(
         name="curfew",
-        description="Auto-lock and auto-unqueue from lobbies during your bedtime hours",
+        description="Named windows during which you're auto-locked and auto-removed from lobbies",
         parent=player,
     )
     player_timezone = app_commands.Group(
         name="timezone",
-        description="Your timezone, used by curfew and other time-based features",
+        description="Your timezone, used by curfew windows and other time-based features",
         parent=player,
     )
     player_playtime = app_commands.Group(
@@ -855,107 +855,144 @@ class RegistrationCommands(commands.Cog):
             )
 
     @player_curfew.command(
-        name="set", description="Set your queue curfew: auto-lock/unqueue from bedtime until wake time"
+        name="add",
+        description="Add (or update) a named window during which you're auto-locked and auto-removed from lobbies",
     )
     @app_commands.describe(
-        bedtime="Bedtime, 24-hour HH:MM (e.g. 22:00 for 10pm)",
-        wake="Wake time, 24-hour HH:MM (e.g. 06:00 for 6am) — queueing unlocks then",
+        name="A name for this window (your choice) — reuse a name to update that window",
+        start="Start time, 24-hour HH:MM",
+        end="End time, 24-hour HH:MM — queueing unlocks then",
         timezone="IANA timezone name — leave blank to use your /player timezone setting",
     )
     @require_guild
-    async def curfew_set(
+    async def curfew_add(
         self,
         interaction: discord.Interaction,
-        bedtime: str,
-        wake: str,
+        name: str,
+        start: str,
+        end: str,
         timezone: str | None = None,
     ):
-        """Set or update the player's curfew window."""
+        """Add or update one of the player's named curfew windows."""
         logger.info(
-            f"CurfewSet command: User {interaction.user.id} ({interaction.user}) "
-            f"bedtime={bedtime} wake={wake} timezone={timezone}"
+            f"CurfewAdd command: User {interaction.user.id} ({interaction.user}) "
+            f"name={name} start={start} end={end} timezone={timezone}"
         )
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
+            )
+            return
+
         guild_id = interaction.guild.id
         try:
-            curfew_hour, curfew_minute = parse_clock(bedtime)
-            wake_hour, wake_minute = parse_clock(wake)
-            await asyncio.to_thread(
-                self.player_service.set_curfew,
+            start_hour, start_minute = parse_clock(start)
+            end_hour, end_minute = parse_clock(end)
+            window = await asyncio.to_thread(
+                curfew_service.add_window,
                 interaction.user.id,
                 guild_id,
-                curfew_hour=curfew_hour,
-                curfew_minute=curfew_minute,
-                wake_hour=wake_hour,
-                wake_minute=wake_minute,
+                name,
+                start_hour=start_hour,
+                start_minute=start_minute,
+                end_hour=end_hour,
+                end_minute=end_minute,
                 timezone=timezone,
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
             return
         except Exception as e:
-            logger.error(f"Error setting curfew for {interaction.user.id}: {e}", exc_info=True)
+            logger.error(
+                f"Error adding curfew window for {interaction.user.id}: {e}", exc_info=True
+            )
             await safe_followup(
                 interaction,
-                content="❌ Unexpected error setting your curfew. Try again later.",
+                content="❌ Unexpected error adding your window. Try again later.",
                 ephemeral=True,
             )
             return
 
-        info = await asyncio.to_thread(
-            self.player_service.get_curfew_info, interaction.user.id, guild_id
-        )
+        general_timezone = (
+            await asyncio.to_thread(self.player_service.get_timezone_info, interaction.user.id, guild_id)
+        )["timezone"]
         await interaction.followup.send(
-            f"✅ Curfew set: **{info['window']}**. "
+            f"✅ Window added: {format_window(window, general_timezone=general_timezone)}. "
             "You'll be blocked from joining a lobby and auto-removed from any lobby you're "
-            "already in once your bedtime hits.",
+            "already in while inside this window.",
             ephemeral=True,
         )
 
-    @player_curfew.command(name="off", description="Disable your queue curfew")
+    @player_curfew.command(name="remove", description="Remove one of your named curfew windows")
+    @app_commands.describe(name="The window's name")
     @require_guild
-    async def curfew_off(self, interaction: discord.Interaction):
-        """Disable the player's curfew without discarding their configured hours."""
-        logger.info(f"CurfewOff command: User {interaction.user.id} ({interaction.user})")
+    async def curfew_remove(self, interaction: discord.Interaction, name: str):
+        """Delete a named curfew window."""
+        logger.info(
+            f"CurfewRemove command: User {interaction.user.id} ({interaction.user}) name={name}"
+        )
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id
-        try:
-            await asyncio.to_thread(self.player_service.disable_curfew, interaction.user.id, guild_id)
-        except ValueError as e:
-            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
-            return
-        await interaction.followup.send("✅ Curfew disabled. You can queue any time.", ephemeral=True)
-
-    @player_curfew.command(name="status", description="View your queue curfew setting")
-    @require_guild
-    async def curfew_status(self, interaction: discord.Interaction):
-        """Show the player's current curfew configuration."""
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-
-        guild_id = interaction.guild.id
-        try:
-            info = await asyncio.to_thread(
-                self.player_service.get_curfew_info, interaction.user.id, guild_id
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
             )
-        except ValueError as e:
-            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
             return
 
-        if info["window"] is None:
-            msg = "You haven't set a curfew yet. Use `/player curfew set`."
-        elif info["enabled"]:
-            msg = f"🌙 Curfew is **on**: {info['window']}."
+        guild_id = interaction.guild.id
+        removed = await asyncio.to_thread(
+            curfew_service.remove_window, interaction.user.id, guild_id, name
+        )
+        if removed:
+            await interaction.followup.send(f"✅ Removed **{name}**.", ephemeral=True)
         else:
-            msg = f"Curfew is **off** (last set to {info['window']}). Use `/player curfew set` to re-enable."
-        await interaction.followup.send(msg, ephemeral=True)
+            await interaction.followup.send(
+                f"❌ You don't have a window named **{name}**. Use `/player curfew list` to see yours.",
+                ephemeral=True,
+            )
+
+    @player_curfew.command(name="list", description="View your named curfew windows")
+    @require_guild
+    async def curfew_list(self, interaction: discord.Interaction):
+        """Show all of the player's curfew windows."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        windows = await asyncio.to_thread(
+            curfew_service.list_windows, interaction.user.id, guild_id
+        )
+        if not windows:
+            await interaction.followup.send(
+                "You don't have any curfew windows set. Use `/player curfew add`.",
+                ephemeral=True,
+            )
+            return
+
+        general_timezone = (
+            await asyncio.to_thread(self.player_service.get_timezone_info, interaction.user.id, guild_id)
+        )["timezone"]
+        lines = [format_window(window, general_timezone=general_timezone) for window in windows]
+        await interaction.followup.send(
+            "Your curfew windows:\n" + "\n".join(f"- {line}" for line in lines),
+            ephemeral=True,
+        )
 
     @player_timezone.command(
-        name="set", description="Set your timezone, used by curfew and other time-based features"
+        name="set", description="Set your timezone, used by curfew windows and other time-based features"
     )
     @app_commands.describe(timezone=f"IANA timezone name, e.g. America/New_York (default {DEFAULT_TIMEZONE})")
     @require_guild
@@ -985,8 +1022,8 @@ class RegistrationCommands(commands.Cog):
             return
 
         await interaction.followup.send(
-            f"✅ Timezone set to **{timezone}**. Curfew will use this unless you gave it its own "
-            "timezone with `/player curfew set`.",
+            f"✅ Timezone set to **{timezone}**. Unavailability windows will use this unless a "
+            "window was given its own timezone with `/player curfew add`.",
             ephemeral=True,
         )
 

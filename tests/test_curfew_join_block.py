@@ -1,9 +1,6 @@
-"""Integration test: /lobby join is blocked while a player is inside their curfew.
+"""Integration test: /lobby join is blocked while a player is inside an active curfew window."""
 
-The wall-clock check itself is covered by tests/test_curfew.py; here we
-monkeypatch commands.lobby.is_within_curfew so the join-command wiring is
-verified without depending on what time the suite happens to run.
-"""
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,11 +14,17 @@ from tests.test_lobby_commands_guild_id import (
 )
 
 
-@pytest.mark.asyncio
-async def test_join_blocked_during_curfew_window(monkeypatch, monkeypatch_safe_defer):  # noqa: F811
-    from commands.lobby import LobbyCommands
+class FakeCurfewService:
+    def __init__(self, active_window=None):
+        self._active_window = active_window
 
-    monkeypatch.setattr("commands.lobby.is_within_curfew", lambda player: True)
+    def active_window(self, discord_id, guild_id):
+        return self._active_window
+
+
+@pytest.mark.asyncio
+async def test_join_blocked_during_active_curfew_window(monkeypatch_safe_defer):  # noqa: F811
+    from commands.lobby import LobbyCommands
 
     _, lobby_service, player_service, player_repo = make_services()
     lobby_service.get_or_create_lobby(
@@ -29,8 +32,16 @@ async def test_join_blocked_during_curfew_window(monkeypatch, monkeypatch_safe_d
     )
     player_repo.add_player(1, TEST_GUILD_ID)
 
+    window = SimpleNamespace(
+        name="sleep",
+        start_hour=22,
+        start_minute=0,
+        end_hour=6,
+        end_minute=0,
+        timezone="America/New_York",
+    )
     interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
-    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service, FakeCurfewService(window))
 
     await cog.join.callback(cog, interaction, None)
 
@@ -38,14 +49,12 @@ async def test_join_blocked_during_curfew_window(monkeypatch, monkeypatch_safe_d
         guild_id=TEST_GUILD_ID, lobby_kind=LobbyKind.OPEN
     ).players
     message = interaction.followup.messages[-1]["content"]
-    assert "bedtime" in message.lower()
+    assert "sleep" in message.lower()
 
 
 @pytest.mark.asyncio
-async def test_join_allowed_outside_curfew_window(monkeypatch, monkeypatch_safe_defer):  # noqa: F811
+async def test_join_allowed_outside_curfew_window(monkeypatch_safe_defer):  # noqa: F811
     from commands.lobby import LobbyCommands
-
-    monkeypatch.setattr("commands.lobby.is_within_curfew", lambda player: False)
 
     _, lobby_service, player_service, player_repo = make_services()
     lobby_service.get_or_create_lobby(
@@ -54,7 +63,28 @@ async def test_join_allowed_outside_curfew_window(monkeypatch, monkeypatch_safe_
     player_repo.add_player(1, TEST_GUILD_ID)
 
     interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
-    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service, FakeCurfewService(None))
+
+    await cog.join.callback(cog, interaction, None)
+
+    assert 1 in lobby_service.get_lobby(
+        guild_id=TEST_GUILD_ID, lobby_kind=LobbyKind.OPEN
+    ).players
+
+
+@pytest.mark.asyncio
+async def test_join_allowed_when_curfew_service_unwired(monkeypatch_safe_defer):  # noqa: F811
+    """No curfew_service wired at all — join must not crash, just skip the check."""
+    from commands.lobby import LobbyCommands
+
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99, guild_id=TEST_GUILD_ID, lobby_kind=LobbyKind.OPEN
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service, None)
 
     await cog.join.callback(cog, interaction, None)
 

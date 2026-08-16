@@ -87,22 +87,6 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
-    def update_curfew(
-        self,
-        discord_id: int,
-        guild_id: int,
-        *,
-        enabled: bool,
-        curfew_hour: int | None,
-        curfew_minute: int,
-        wake_hour: int | None,
-        wake_minute: int,
-        timezone: str | None,
-    ) -> None:
-        """Persist a player's personal lobby-queue curfew window."""
-        ...
-
-    @abstractmethod
     def update_inferred_regions_bulk(self, updates: list[tuple[int, int, str]]) -> None:
         """Cache multiple inferred regions in one transaction."""
         ...
@@ -474,6 +458,41 @@ class IPlayerRepository(ABC):
         self, guild_id: int, limit: int = 5, min_balance: int = 1
     ) -> list[dict]:
         """Get the top N players by positive jopacoin balance."""
+        ...
+
+
+class ICurfewRepository(ABC):
+    """Named per-player curfew windows (e.g. "work", "gym")."""
+
+    @abstractmethod
+    def add_or_replace(
+        self,
+        discord_id: int,
+        guild_id: int,
+        name: str,
+        *,
+        start_hour: int,
+        start_minute: int,
+        end_hour: int,
+        end_minute: int,
+        timezone: str | None,
+    ) -> None:
+        """Create a named window, or overwrite it if that name already exists for this player."""
+        ...
+
+    @abstractmethod
+    def remove(self, discord_id: int, guild_id: int, name: str) -> bool:
+        """Delete a named window. Returns True if a row was actually removed."""
+        ...
+
+    @abstractmethod
+    def list_for_player(self, discord_id: int, guild_id: int) -> list:
+        """List a single player's windows, ordered by name."""
+        ...
+
+    @abstractmethod
+    def list_for_players(self, discord_ids: list[int], guild_id: int) -> dict[int, list]:
+        """Bulk-fetch windows for a set of players (e.g. everyone in a lobby)."""
         ...
 
 

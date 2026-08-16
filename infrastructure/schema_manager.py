@@ -878,9 +878,12 @@ class SchemaManager:
                 "create_draft_financial_effects",
                 self._migration_create_draft_financial_effects,
             ),
-            ("add_curfew_columns", self._migration_add_curfew_columns),
             ("add_player_timezone_column", self._migration_add_player_timezone_column),
             ("add_dota_play_hours_column", self._migration_add_dota_play_hours_column),
+            (
+                "create_curfew_windows_table",
+                self._migration_create_curfew_windows_table,
+            ),
         ]
 
     # --- Migrations ---
@@ -4579,22 +4582,38 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
 
-    def _migration_add_curfew_columns(self, cursor) -> None:
-        """Add columns for the personal lobby-queue curfew (auto-lock/kick)."""
-        self._add_column_if_not_exists(cursor, "players", "curfew_enabled", "INTEGER DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "players", "curfew_hour", "INTEGER")
-        self._add_column_if_not_exists(cursor, "players", "curfew_minute", "INTEGER DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "players", "curfew_wake_hour", "INTEGER")
-        self._add_column_if_not_exists(cursor, "players", "curfew_wake_minute", "INTEGER DEFAULT 0")
-        self._add_column_if_not_exists(cursor, "players", "curfew_timezone", "TEXT")
-
     def _migration_add_player_timezone_column(self, cursor) -> None:
-        """Add a general per-player timezone preference (used by curfew and future features)."""
+        """Add a general per-player timezone preference (used by curfew windows and future features)."""
         self._add_column_if_not_exists(cursor, "players", "timezone", "TEXT")
 
     def _migration_add_dota_play_hours_column(self, cursor) -> None:
         """Add informational (non-enforced) preferred dota play-time hours, JSON-encoded list of ints."""
         self._add_column_if_not_exists(cursor, "players", "dota_play_hours", "TEXT")
+
+    def _migration_create_curfew_windows_table(self, cursor) -> None:
+        """Create the table of named per-player curfew windows (auto-lock/kick from lobbies)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_curfew_windows (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                name         TEXT NOT NULL,
+                start_hour   INTEGER NOT NULL,
+                start_minute INTEGER NOT NULL DEFAULT 0,
+                end_hour     INTEGER NOT NULL,
+                end_minute   INTEGER NOT NULL DEFAULT 0,
+                timezone     TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id, name)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_curfew_windows_guild_discord
+            ON player_curfew_windows(guild_id, discord_id)
+            """
+        )
 
     def _migration_create_dig_system_tables(self, cursor) -> None:
         """Create all tables for the tunnel digging minigame."""

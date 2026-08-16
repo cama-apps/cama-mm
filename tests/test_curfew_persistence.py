@@ -1,80 +1,78 @@
-"""Curfew settings persistence and guild isolation (PlayerRepository.update_curfew)."""
+"""Curfew window persistence and guild isolation (CurfewRepository)."""
 
+from repositories.curfew_repository import CurfewRepository
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
-class TestCurfewPersistence:
-    def test_defaults_are_disabled_and_unset(self, player_repository):
-        player_repository.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID)
-        player = player_repository.get_by_id(1, TEST_GUILD_ID)
+class TestCurfewRepository:
+    def test_list_for_player_starts_empty(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        assert repo.list_for_player(1, TEST_GUILD_ID) == []
 
-        assert player.curfew_enabled is False
-        assert player.curfew_hour is None
-        assert player.curfew_wake_hour is None
-        assert player.curfew_timezone is None
-
-    def test_update_and_read_curfew(self, player_repository):
-        player_repository.add(discord_id=2, discord_username="P2", guild_id=TEST_GUILD_ID)
-        player_repository.update_curfew(
-            2,
-            TEST_GUILD_ID,
-            enabled=True,
-            curfew_hour=22,
-            curfew_minute=30,
-            wake_hour=6,
-            wake_minute=15,
-            timezone="America/New_York",
+    def test_add_and_read_window(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(
+            1, TEST_GUILD_ID, "work",
+            start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None,
         )
 
-        player = player_repository.get_by_id(2, TEST_GUILD_ID)
-        assert player.curfew_enabled is True
-        assert player.curfew_hour == 22
-        assert player.curfew_minute == 30
-        assert player.curfew_wake_hour == 6
-        assert player.curfew_wake_minute == 15
-        assert player.curfew_timezone == "America/New_York"
+        windows = repo.list_for_player(1, TEST_GUILD_ID)
+        assert len(windows) == 1
+        window = windows[0]
+        assert window.name == "work"
+        assert window.start_hour == 9
+        assert window.end_hour == 17
+        assert window.timezone is None
 
-    def test_disabling_preserves_configured_hours(self, player_repository):
-        player_repository.add(discord_id=3, discord_username="P3", guild_id=TEST_GUILD_ID)
-        player_repository.update_curfew(
-            3,
-            TEST_GUILD_ID,
-            enabled=True,
-            curfew_hour=22,
-            curfew_minute=0,
-            wake_hour=6,
-            wake_minute=0,
-            timezone="America/New_York",
-        )
-        player_repository.update_curfew(
-            3,
-            TEST_GUILD_ID,
-            enabled=False,
-            curfew_hour=22,
-            curfew_minute=0,
-            wake_hour=6,
-            wake_minute=0,
-            timezone="America/New_York",
-        )
+    def test_multiple_named_windows_per_player(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None)
+        repo.add_or_replace(1, TEST_GUILD_ID, "sleep", start_hour=22, start_minute=0, end_hour=6, end_minute=0, timezone=None)
 
-        player = player_repository.get_by_id(3, TEST_GUILD_ID)
-        assert player.curfew_enabled is False
-        assert player.curfew_hour == 22
+        windows = repo.list_for_player(1, TEST_GUILD_ID)
+        assert [w.name for w in windows] == ["sleep", "work"]  # ordered by name
 
-    def test_curfew_is_guild_scoped(self, player_repository):
-        player_repository.add(discord_id=4, discord_username="P4", guild_id=TEST_GUILD_ID)
-        player_repository.add(discord_id=4, discord_username="P4", guild_id=TEST_GUILD_ID_SECONDARY)
+    def test_add_or_replace_overwrites_same_name(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=8, start_minute=30, end_hour=16, end_minute=30, timezone="America/Chicago")
 
-        player_repository.update_curfew(
-            4,
-            TEST_GUILD_ID,
-            enabled=True,
-            curfew_hour=22,
-            curfew_minute=0,
-            wake_hour=6,
-            wake_minute=0,
-            timezone="America/New_York",
-        )
+        windows = repo.list_for_player(1, TEST_GUILD_ID)
+        assert len(windows) == 1
+        assert windows[0].start_hour == 8
+        assert windows[0].start_minute == 30
+        assert windows[0].timezone == "America/Chicago"
 
-        assert player_repository.get_by_id(4, TEST_GUILD_ID).curfew_enabled is True
-        assert player_repository.get_by_id(4, TEST_GUILD_ID_SECONDARY).curfew_enabled is False
+    def test_remove_existing_window_returns_true(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None)
+
+        assert repo.remove(1, TEST_GUILD_ID, "work") is True
+        assert repo.list_for_player(1, TEST_GUILD_ID) == []
+
+    def test_remove_missing_window_returns_false(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        assert repo.remove(1, TEST_GUILD_ID, "nonexistent") is False
+
+    def test_windows_are_guild_scoped(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None)
+
+        assert repo.list_for_player(1, TEST_GUILD_ID_SECONDARY) == []
+        assert len(repo.list_for_player(1, TEST_GUILD_ID)) == 1
+
+    def test_list_for_players_bulk_fetch(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        repo.add_or_replace(1, TEST_GUILD_ID, "work", start_hour=9, start_minute=0, end_hour=17, end_minute=0, timezone=None)
+        repo.add_or_replace(2, TEST_GUILD_ID, "sleep", start_hour=22, start_minute=0, end_hour=6, end_minute=0, timezone=None)
+        # Player 3 has no windows and should be absent from the result.
+
+        result = repo.list_for_players([1, 2, 3], TEST_GUILD_ID)
+
+        assert set(result.keys()) == {1, 2}
+        assert result[1][0].name == "work"
+        assert result[2][0].name == "sleep"
+
+    def test_list_for_players_empty_input(self, repo_db_path):
+        repo = CurfewRepository(repo_db_path)
+        assert repo.list_for_players([], TEST_GUILD_ID) == {}

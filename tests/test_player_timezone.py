@@ -80,25 +80,3 @@ class TestPlayerServiceTimezone:
         player_service.set_timezone(4, TEST_GUILD_ID, "Asia/Tokyo")
 
         assert player_service.get_timezone_info(4, TEST_GUILD_ID) == {"timezone": "Asia/Tokyo"}
-
-    def test_set_curfew_without_timezone_falls_back_to_general_timezone(
-        self, player_repo, player_service
-    ):
-        """set_curfew's timezone stays an override; omitting it lets curfew ride the general setting."""
-        self._register(player_repo, 5)
-        player_service.set_timezone(5, TEST_GUILD_ID, "Asia/Tokyo")
-
-        player_service.set_curfew(
-            5,
-            TEST_GUILD_ID,
-            curfew_hour=22,
-            curfew_minute=0,
-            wake_hour=6,
-            wake_minute=0,
-            timezone=None,
-        )
-
-        player = player_repo.get_by_id(5, TEST_GUILD_ID)
-        assert player.curfew_timezone is None
-        info = player_service.get_curfew_info(5, TEST_GUILD_ID)
-        assert info["window"] == "10:00 PM - 6:00 AM Asia/Tokyo"

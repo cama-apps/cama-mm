@@ -45,20 +45,11 @@ class Player:
     # "NONE" sentinel (checked, no US play) and NULL (not yet checked). See utils/region.
     preferred_region: str | None = None
     inferred_region: str | None = None
-    # General timezone preference (IANA name, e.g. "America/New_York"). Curfew
-    # falls back to this when curfew_timezone is unset; other time-based
-    # features may read it too. See utils/timezone.
+    # General timezone preference (IANA name, e.g. "America/New_York"). Named
+    # curfew windows (repositories/curfew_repository.py) fall back to this
+    # when a window has no timezone of its own; other time-based features
+    # may read it too. See utils/timezone.
     timezone: str | None = None
-    # Personal lobby-queue curfew: block queueing and auto-remove from any
-    # lobby during [curfew_hour:curfew_minute, curfew_wake_hour:curfew_wake_minute)
-    # local time in curfew_timezone, falling back to `timezone` above, then to
-    # utils.timezone.DEFAULT_TIMEZONE. See utils/curfew.
-    curfew_enabled: bool = False
-    curfew_hour: int | None = None
-    curfew_minute: int = 0
-    curfew_wake_hour: int | None = None
-    curfew_wake_minute: int = 0
-    curfew_timezone: str | None = None
     # Informational-only preferred dota hours (0-23, own timezone). Never
     # enforced/blocking — purely for /player playtime popular to aggregate.
     # See utils/playtime.

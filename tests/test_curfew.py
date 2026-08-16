@@ -1,4 +1,4 @@
-"""Tests for the personal lobby-queue curfew window (utils/curfew.py)."""
+"""Tests for named curfew windows (utils/curfew.py)."""
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -7,125 +7,107 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from utils.curfew import (
-    DEFAULT_CURFEW_TIMEZONE,
-    format_curfew_window,
-    is_valid_timezone,
-    is_within_curfew,
+    effective_timezone,
+    find_active_window,
+    format_window,
+    is_within_window,
     parse_clock,
 )
+from utils.timezone import DEFAULT_TIMEZONE
 
 
-def _player(
-    enabled=True,
-    curfew_hour=22,
-    curfew_minute=0,
-    wake_hour=6,
-    wake_minute=0,
-    curfew_timezone=None,
-    timezone=None,
-):
-    """A minimal stand-in for a Player (is_within_curfew only reads curfew_*/timezone attrs)."""
+def _window(name="w", start_hour=22, start_minute=0, end_hour=6, end_minute=0, timezone=None):
+    """A minimal stand-in for a CurfewWindow (only these attrs are read)."""
     return SimpleNamespace(
-        curfew_enabled=enabled,
-        curfew_hour=curfew_hour,
-        curfew_minute=curfew_minute,
-        curfew_wake_hour=wake_hour,
-        curfew_wake_minute=wake_minute,
-        curfew_timezone=curfew_timezone,
+        name=name,
+        start_hour=start_hour,
+        start_minute=start_minute,
+        end_hour=end_hour,
+        end_minute=end_minute,
         timezone=timezone,
     )
 
 
-class TestIsWithinCurfew:
-    def test_disabled_curfew_never_blocks(self):
-        player = _player(enabled=False)
-        now = datetime(2026, 1, 1, 3, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is False
-
-    def test_unset_hours_never_blocks(self):
-        player = _player(curfew_hour=None, wake_hour=None)
+class TestIsWithinWindow:
+    def test_overnight_window_blocks_after_start(self):
+        """22:00-06:00 window: 11pm is inside it."""
+        window = _window(start_hour=22, end_hour=6)
         now = datetime(2026, 1, 1, 23, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is False
+        assert is_within_window(window, now=now) is True
 
-    def test_overnight_window_blocks_after_bedtime(self):
-        """10pm-6am window: 11pm is inside it."""
-        player = _player(curfew_hour=22, wake_hour=6)
-        now = datetime(2026, 1, 1, 23, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is True
-
-    def test_overnight_window_blocks_before_wake(self):
-        """10pm-6am window: 3am (past midnight) is still inside it."""
-        player = _player(curfew_hour=22, wake_hour=6)
+    def test_overnight_window_blocks_before_end(self):
+        """22:00-06:00 window: 3am (past midnight) is still inside it."""
+        window = _window(start_hour=22, end_hour=6)
         now = datetime(2026, 1, 2, 3, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is True
+        assert is_within_window(window, now=now) is True
 
-    def test_overnight_window_allows_after_wake(self):
-        """10pm-6am window: 7am is outside it."""
-        player = _player(curfew_hour=22, wake_hour=6)
+    def test_overnight_window_allows_after_end(self):
+        window = _window(start_hour=22, end_hour=6)
         now = datetime(2026, 1, 2, 7, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is False
+        assert is_within_window(window, now=now) is False
 
-    def test_overnight_window_allows_before_bedtime(self):
-        """10pm-6am window: 9pm is outside it."""
-        player = _player(curfew_hour=22, wake_hour=6)
+    def test_overnight_window_allows_before_start(self):
+        window = _window(start_hour=22, end_hour=6)
         now = datetime(2026, 1, 1, 21, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is False
+        assert is_within_window(window, now=now) is False
 
     def test_same_day_window(self):
-        """1am-5am window (bedtime < wake): only blocks inside that same-day span."""
-        player = _player(curfew_hour=1, wake_hour=5)
-        inside = datetime(2026, 1, 1, 3, 0, tzinfo=ZoneInfo("America/New_York"))
-        outside = datetime(2026, 1, 1, 12, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=inside) is True
-        assert is_within_curfew(player, now=outside) is False
+        """09:00-17:00 window (start < end): only blocks inside that same-day span."""
+        window = _window(start_hour=9, end_hour=17)
+        inside = datetime(2026, 1, 1, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        outside = datetime(2026, 1, 1, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+        assert is_within_window(window, now=inside) is True
+        assert is_within_window(window, now=outside) is False
 
-    def test_equal_bedtime_and_wake_never_blocks(self):
-        player = _player(curfew_hour=22, curfew_minute=0, wake_hour=22, wake_minute=0)
+    def test_equal_start_and_end_never_blocks(self):
+        window = _window(start_hour=22, start_minute=0, end_hour=22, end_minute=0)
         now = datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("America/New_York"))
-        assert is_within_curfew(player, now=now) is False
+        assert is_within_window(window, now=now) is False
 
-    def test_converts_from_utc_using_players_timezone(self):
-        """10pm EST is 3am UTC (winter, no DST) — the check must convert, not compare raw UTC."""
-        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone="America/New_York")
+    def test_window_timezone_overrides_general_timezone(self):
+        window = _window(start_hour=22, end_hour=6, timezone="America/New_York")
         utc_now = datetime(2026, 1, 2, 3, 30, tzinfo=ZoneInfo("UTC"))  # 10:30pm EST
-        assert is_within_curfew(player, now=utc_now) is True
+        assert is_within_window(window, general_timezone="Asia/Tokyo", now=utc_now) is True
 
-    def test_unknown_timezone_falls_back_to_default(self):
-        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone="Not/AZone")
-        # 10:30pm in the default timezone, expressed as its UTC equivalent.
-        moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_CURFEW_TIMEZONE))
-        assert is_within_curfew(player, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
-
-
-class TestTimezoneFallbackChain:
-    """curfew_timezone (override) > player.timezone (general) > DEFAULT_CURFEW_TIMEZONE."""
-
-    def test_falls_back_to_general_timezone_when_curfew_timezone_unset(self):
-        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone=None, timezone="Asia/Tokyo")
-        # 10:30pm JST — should register as inside curfew only under the Tokyo interpretation.
-        utc_now = datetime(2026, 1, 1, 13, 30, tzinfo=ZoneInfo("UTC"))  # 10:30pm JST (UTC+9)
-        assert is_within_curfew(player, now=utc_now) is True
-
-    def test_curfew_timezone_override_wins_over_general_timezone(self):
-        player = _player(
-            curfew_hour=22, wake_hour=6, curfew_timezone="America/New_York", timezone="Asia/Tokyo"
-        )
-        # 13:30 UTC is 8:30am EST (winter) — outside the 10pm-6am EST window,
-        # proving the explicit curfew_timezone override, not the general one, wins.
-        utc_now = datetime(2026, 1, 1, 13, 30, tzinfo=ZoneInfo("UTC"))
-        assert is_within_curfew(player, now=utc_now) is False
+    def test_falls_back_to_general_timezone_when_window_has_none(self):
+        window = _window(start_hour=22, end_hour=6, timezone=None)
+        utc_now = datetime(2026, 1, 1, 13, 30, tzinfo=ZoneInfo("UTC"))  # 10:30pm JST
+        assert is_within_window(window, general_timezone="Asia/Tokyo", now=utc_now) is True
 
     def test_falls_back_to_default_when_both_unset(self):
-        player = _player(curfew_hour=22, wake_hour=6, curfew_timezone=None, timezone=None)
-        moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_CURFEW_TIMEZONE))
-        assert is_within_curfew(player, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
+        window = _window(start_hour=22, end_hour=6, timezone=None)
+        moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
+        assert is_within_window(window, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
 
-    def test_format_falls_back_to_general_timezone(self):
-        player = _player(
-            curfew_hour=22, curfew_minute=0, wake_hour=6, wake_minute=0,
-            curfew_timezone=None, timezone="Asia/Tokyo",
-        )
-        assert format_curfew_window(player) == "10:00 PM - 6:00 AM Asia/Tokyo"
+    def test_unknown_timezone_falls_back_to_default(self):
+        window = _window(start_hour=22, end_hour=6, timezone="Not/AZone")
+        moment_default_tz = datetime(2026, 1, 1, 22, 30, tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
+        assert is_within_window(window, now=moment_default_tz.astimezone(ZoneInfo("UTC"))) is True
+
+
+class TestFindActiveWindow:
+    def test_returns_none_when_no_windows_active(self):
+        windows = [_window(name="work", start_hour=9, end_hour=17)]
+        now = datetime(2026, 1, 1, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+        assert find_active_window(windows, now=now) is None
+
+    def test_returns_matching_window(self):
+        windows = [
+            _window(name="work", start_hour=9, end_hour=17),
+            _window(name="sleep", start_hour=22, end_hour=6),
+        ]
+        now = datetime(2026, 1, 1, 23, 0, tzinfo=ZoneInfo("America/New_York"))
+        match = find_active_window(windows, now=now)
+        assert match.name == "sleep"
+
+    def test_returns_alphabetically_first_when_multiple_active(self):
+        windows = [
+            _window(name="zzz", start_hour=0, start_minute=0, end_hour=23, end_minute=59),
+            _window(name="aaa", start_hour=0, start_minute=0, end_hour=23, end_minute=59),
+        ]
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        match = find_active_window(windows, now=now)
+        assert match.name == "aaa"
 
 
 class TestParseClock:
@@ -148,21 +130,35 @@ class TestParseClock:
             parse_clock(text)
 
 
-class TestFormatCurfewWindow:
-    def test_formats_am_pm_and_timezone(self):
-        player = _player(
-            curfew_hour=22, curfew_minute=0, wake_hour=6, wake_minute=30, curfew_timezone="America/New_York"
+class TestFormatWindow:
+    def test_formats_name_am_pm_and_timezone(self):
+        window = _window(
+            name="work", start_hour=9, start_minute=0, end_hour=17, end_minute=30,
+            timezone="America/New_York",
         )
-        assert format_curfew_window(player) == "10:00 PM - 6:30 AM America/New_York"
+        assert format_window(window) == '"work": 9:00 AM - 5:30 PM America/New_York'
 
-    def test_midnight_and_noon_edge_cases(self):
-        player = _player(curfew_hour=0, curfew_minute=0, wake_hour=12, wake_minute=0)
-        assert format_curfew_window(player) == f"12:00 AM - 12:00 PM {DEFAULT_CURFEW_TIMEZONE}"
+    def test_falls_back_to_general_timezone(self):
+        window = _window(name="sleep", start_hour=22, end_hour=6, timezone=None)
+        assert (
+            format_window(window, general_timezone="Asia/Tokyo")
+            == '"sleep": 10:00 PM - 6:00 AM Asia/Tokyo'
+        )
+
+    def test_falls_back_to_default_timezone(self):
+        window = _window(name="sleep", start_hour=22, end_hour=6, timezone=None)
+        assert format_window(window) == f'"sleep": 10:00 PM - 6:00 AM {DEFAULT_TIMEZONE}'
 
 
-class TestIsValidTimezone:
-    def test_known_timezone(self):
-        assert is_valid_timezone("America/New_York") is True
+class TestEffectiveTimezone:
+    def test_window_timezone_wins(self):
+        window = _window(timezone="America/New_York")
+        assert effective_timezone(window, "Asia/Tokyo") == "America/New_York"
 
-    def test_unknown_timezone(self):
-        assert is_valid_timezone("Not/AZone") is False
+    def test_falls_back_to_general(self):
+        window = _window(timezone=None)
+        assert effective_timezone(window, "Asia/Tokyo") == "Asia/Tokyo"
+
+    def test_falls_back_to_default(self):
+        window = _window(timezone=None)
+        assert effective_timezone(window, None) == DEFAULT_TIMEZONE

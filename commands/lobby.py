@@ -19,7 +19,7 @@ from config import LOBBY_CHANNEL_ID, LOWSKILL_LOBBY_CHANNEL_ID
 from domain.models.lobby import LobbyKind
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.curfew import format_curfew_window, is_within_curfew
+from utils.curfew import format_window
 from utils.formatting import (
     JOPACOIN_EMOJI_ID,
     format_duration_short,
@@ -103,7 +103,7 @@ class LobbyCommands(commands.Cog):
             self._curfew_sweep_loop.cancel()
 
     # ────────────────────────────────────────────────────────────────────
-    # Curfew enforcement
+    # Curfew-window enforcement
     # ────────────────────────────────────────────────────────────────────
 
     @tasks.loop(minutes=1)
@@ -135,11 +135,14 @@ class LobbyCommands(commands.Cog):
         try:
             user = self.bot.get_user(kick.discord_id) or await self.bot.fetch_user(kick.discord_id)
             await user.send(
-                f"🌙 Your bedtime hit, so you've been removed from {kick.lobby_kind.label}. "
-                "Use `/player curfew off` if you'd rather queue through it."
+                f"🔒 You've been removed from {kick.lobby_kind.label} — your \"{kick.window_name}\" "
+                "curfew window started. Use `/player curfew remove` if you'd rather "
+                "queue through it."
             )
         except Exception as exc:
-            logger.debug("Failed to DM user %d about curfew kick: %s", kick.discord_id, exc)
+            logger.debug(
+                "Failed to DM user %d about curfew kick: %s", kick.discord_id, exc
+            )
 
         active_lobby = await asyncio.to_thread(
             self.lobby_service.get_lobby,
@@ -1708,16 +1711,21 @@ class LobbyCommands(commands.Cog):
             return
 
         # Check curfew
-        if is_within_curfew(player):
-            await safe_followup(
-                interaction,
-                content=(
-                    f"❌ It's past your bedtime ({format_curfew_window(player)}). "
-                    "Queueing is locked until your curfew ends. Use `/player curfew off` to disable it."
-                ),
-                ephemeral=True,
+        if self.curfew_service is not None:
+            active_window = await asyncio.to_thread(
+                self.curfew_service.active_window, interaction.user.id, guild_id
             )
-            return
+            if active_window is not None:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"❌ You're inside your "
+                        f"{format_window(active_window, general_timezone=player.timezone)} curfew "
+                        "window. Use `/player curfew remove` if you'd rather queue through it."
+                    ),
+                    ephemeral=True,
+                )
+                return
 
         # Check lobby exists
         active_lobby = await asyncio.to_thread(
