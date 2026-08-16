@@ -4222,6 +4222,25 @@ impl DiscordTransport for SerenityDiscordTransport {
         }))
     }
 
+    fn cached_guild_member_display_name(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Option<String>, String> {
+        if guild_id == 0 || user_id == 0 {
+            return Ok(None);
+        }
+        let context = self.context()?;
+        let guild_id = GuildId::new(guild_id);
+        let user_id = UserId::new(user_id);
+        Ok(context.cache.guild(guild_id).and_then(|guild| {
+            guild
+                .members
+                .get(&user_id)
+                .map(|member| member.display_name().to_owned())
+        }))
+    }
+
     async fn channel_parent_id(
         &self,
         guild_id: u64,
