@@ -439,6 +439,29 @@ async fn autocomplete_filters_python_catalog_and_surfaces_recalibration_cooldown
 }
 
 #[tokio::test]
+async fn autocomplete_uses_shared_soft_avoid_minimum() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(autocomplete("soft avoid"), responder.clone())
+        .await
+        .expect("shop autocomplete");
+    let choices = responder.autocomplete.lock().expect("autocomplete");
+    assert_eq!(choices.len(), 1);
+    assert_eq!(
+        choices[0],
+        vec![CommandOptionChoice::String {
+            name: "Soft Avoid (dynamic, minimum 250, default 750 jopacoin for 10 games)".to_owned(),
+            value: "soft_avoid".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn targeted_announcement_preserves_python_stats_media_mentions_and_restart_balance() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 500);
