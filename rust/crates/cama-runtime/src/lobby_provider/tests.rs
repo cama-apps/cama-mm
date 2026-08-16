@@ -1645,9 +1645,11 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
     assert!(sent.iter().any(|sent| {
         sent.channel_id == 9
             && sent.message.response.content == announcement
-            && sent.message.response.content.ends_with(
-                "Only players who confirmed ready will be included; everyone else will sit out.",
-            )
+            && sent
+                .message
+                .response
+                .content
+                .ends_with("You can `/shuffle` now; only ready players will be included.")
     }));
     assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")) .all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())

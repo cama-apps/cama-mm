@@ -1029,7 +1029,7 @@ fn test_refresh_invoker_reaching_ten_announces_shuffle() {
 
     assert_eq!(service.readycheck_reacted(scope()).len(), 10);
     assert!(service.take_completion_notification(scope(), MESSAGE));
-    assert!(ready_announcement(LobbyKind::Open, 10).contains("10 players confirmed ready"));
+    assert!(ready_announcement(LobbyKind::Open, 10).contains("10+ players are ready"));
 }
 
 #[test]
@@ -1283,6 +1283,6 @@ fn test_stale_prune_keeps_player_reserved_by_in_flight_match() {
 
 #[test]
 fn test_ready_announcement_uses_configured_threshold() {
-    assert!(ready_announcement(LobbyKind::Open, 3).contains("3 players confirmed ready"));
-    assert!(!ready_announcement(LobbyKind::Open, 3).contains("10 players"));
+    assert!(ready_announcement(LobbyKind::Open, 3).contains("3+ players are ready"));
+    assert!(!ready_announcement(LobbyKind::Open, 3).contains("10+ players"));
 }
