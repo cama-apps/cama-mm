@@ -51,7 +51,7 @@ impl ProcessLock {
                 source,
             })?;
         file.try_lock_exclusive().map_err(|source| {
-            if source.kind() == io::ErrorKind::WouldBlock {
+            if source.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                 ProcessLockError::AlreadyRunning { path: path.clone() }
             } else {
                 ProcessLockError::Lock {

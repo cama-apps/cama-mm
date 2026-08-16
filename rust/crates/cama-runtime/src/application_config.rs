@@ -803,9 +803,9 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::process::Command;
 
     use super::*;
+    use crate::test_support::parity_python;
 
     fn parse(values: &[(&str, &str)]) -> ApplicationConfig {
         let values = values
@@ -1034,8 +1034,8 @@ mod tests {
     fn catalog_has_exactly_one_entry_for_every_config_py_environment_key() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
         assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
-        let config_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let config_path = repository_root.join("config.py");
         let script = r#"
 import ast, pathlib, sys
 tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
@@ -1050,7 +1050,7 @@ for node in ast.walk(tree):
         keys.add(node.args[0].value)
 print('\n'.join(sorted(keys)))
 "#;
-        let output = Command::new("python3")
+        let output = parity_python(&repository_root)
             .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
             .output()
             .expect("Python is available to the Rust test suite");
@@ -1069,8 +1069,8 @@ print('\n'.join(sorted(keys)))
 
     #[test]
     fn every_catalog_key_is_consumed_by_a_typed_configuration_field() {
-        let config_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let config_path = repository_root.join("config.py");
         let script = r#"
 import ast, pathlib, sys
 tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
@@ -1113,7 +1113,7 @@ overrides.update({
 })
 print('\n'.join(f'{key}\t{value}' for key, value in sorted(overrides.items())))
 "#;
-        let output = Command::new("python3")
+        let output = parity_python(&repository_root)
             .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
             .output()
             .expect("Python is available to the Rust test suite");

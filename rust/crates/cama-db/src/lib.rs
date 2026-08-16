@@ -141,6 +141,8 @@ pub mod soft_avoid_repository;
 pub mod survey;
 #[path = "tax.rs"]
 pub mod tax_repository;
+#[cfg(test)]
+mod test_support;
 #[path = "tip.rs"]
 pub mod tip_repository;
 #[path = "trivia_commands.rs"]

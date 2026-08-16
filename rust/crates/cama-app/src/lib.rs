@@ -131,6 +131,8 @@ pub mod service_container;
 pub mod shop_commands;
 pub mod survey_commands;
 pub mod tax_commands;
+#[cfg(test)]
+mod test_support;
 pub mod timezone_service;
 pub mod trivia_commands;
 pub mod trivia_data;

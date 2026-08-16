@@ -758,11 +758,11 @@ fn canonical_event_snapshot_generator_gate_is_current() {
     // artifact, catching Python edits that a Rust-only JSON hash cannot see.
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/generate_dig_event_catalog.py");
-    let output = std::process::Command::new("python3")
+    let output = crate::test_support::parity_python()
         .arg(script)
         .arg("--check")
         .output()
-        .expect("python3 is required for the canonical catalog drift gate");
+        .expect("Python is required for the canonical catalog drift gate");
     assert!(
         output.status.success(),
         "canonical Dig catalog is stale: {}",
@@ -803,12 +803,12 @@ fn canonical_quest_snapshot_preserves_typed_finales_and_drift_gate() {
 
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/generate_dig_event_catalog.py");
-    let output = std::process::Command::new("python3")
+    let output = crate::test_support::parity_python()
         .arg(script)
         .arg("--quests")
         .arg("--check")
         .output()
-        .expect("python3 is required for the canonical quest drift gate");
+        .expect("Python is required for the canonical quest drift gate");
     assert!(
         output.status.success(),
         "canonical Dig quest catalog is stale: {}",

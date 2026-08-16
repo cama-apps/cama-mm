@@ -63,6 +63,9 @@ pub mod vanity_tax_observer;
 pub mod worker;
 pub mod wrapped_provider;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use admin_match_correction::{AdminMatchCorrectionBuildError, AdminMatchCorrectionRuntime};
 pub use admin_provider::{
     AdminCommandSyncResult, AdminCorrectMatchBetResult, AdminCorrectMatchError,

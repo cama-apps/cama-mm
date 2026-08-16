@@ -7553,8 +7553,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let root = manifest.ancestors().nth(3).unwrap();
-        let output = std::process::Command::new(root.join(".venv/bin/python"))
-            .current_dir(root)
+        let output = crate::test_support::parity_python(root)
             .args(["-c", "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()", file.path().to_str().unwrap()])
             .output()
             .expect("run Python schema authority");

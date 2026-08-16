@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
@@ -26,9 +25,8 @@ fn run_python(database: &Path, body: &str) {
     let script = format!(
         "import json,sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\n{body}"
     );
-    let output = Command::new("uv")
-        .current_dir(repository_root())
-        .args(["run", "--locked", "python", "-c", &script])
+    let output = crate::test_support::parity_python(&repository_root())
+        .args(["-c", &script])
         .arg(database)
         .output()
         .expect("run Python schema authority");
