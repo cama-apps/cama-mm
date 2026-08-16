@@ -646,6 +646,9 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
     use cama_app::dig_view_supplements::phase_event_boss_hp_delta;
     use cama_app::disburse_actions::{METHODS, Proposal, build_disburse_embed};
     use cama_app::economy_actions::{apply_gamba_event_multiplier, bounded_economy_multiplier};
+    use cama_app::wheel::{
+        WHEEL_EXPLOSION_REWARD, WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog,
+    };
     use cama_app::wrapped_story::FLAVOR_POOLS;
     use cama_db::package_deal_repository::calculate_package_deal_cost;
     use cama_domain::catalogs::{BETTING_PERSONAS, PERSONAS};
@@ -670,9 +673,7 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
     use cama_domain::pet_evolution::{PetInstinct, hint_key_for_scores, resolve_evolution};
     use cama_domain::rating::{CamaRatingSystem, MatchUpdateOptions, TeamPlayer};
     use cama_domain::rating_insights::{get_rd_tier_name, rd_to_certainty};
-    use cama_domain::wheel::{
-        WHEEL_EXPLOSION_REWARD, WedgeValue, eruption_reward, golden_wheel_wedges, wheel_wedges,
-    };
+    use cama_domain::wheel::eruption_reward;
 
     let argument = |index: usize| {
         arguments
@@ -786,20 +787,20 @@ fn evaluate_rust_vector(operation: &str, arguments: &[&str]) -> Result<String, S
         .to_string()),
         "dig_phase_event_boss_hp_delta" => Ok(phase_event_boss_hp_delta(argument(0)?).to_string()),
         "wheel_catalog" => {
-            let wedges = match argument(0)? {
-                "regular" => wheel_wedges(1.0),
-                "golden" => golden_wheel_wedges(1.0),
+            let kind = match argument(0)? {
+                "regular" => WheelKind::Regular,
+                "golden" => WheelKind::Golden,
                 value => return Err(format!("unknown wheel catalog {value:?}")),
             };
-            let mut rows = wedges
+            let mut rows = wheel_catalog(kind, WheelEconomyPolicy::default())
                 .into_iter()
                 .filter_map(|wedge| match wedge.value {
-                    WedgeValue::Numeric(value) if value < 0 => None,
-                    WedgeValue::Numeric(value) => {
+                    WheelValue::Numeric(value) if value < 0 => None,
+                    WheelValue::Numeric(value) => {
                         Some(format!("{}|{value}|{}", wedge.label, wedge.color))
                     }
-                    WedgeValue::Special(value) => {
-                        Some(format!("{}|{value}|{}", wedge.label, wedge.color))
+                    WheelValue::Mechanic(value) => {
+                        Some(format!("{}|{}|{}", wedge.label, value.code(), wedge.color))
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1784,7 +1785,7 @@ mod tests {
     use super::*;
 
     #[test]
-fn fnv_fingerprint_is_stable() {
+    fn fnv_fingerprint_is_stable() {
         assert_eq!(fnv1a64_lines(["a", "b"].into_iter()), 0x78ed_6781_f136_a14e);
     }
 
@@ -1794,6 +1795,67 @@ fn fnv_fingerprint_is_stable() {
         let root = repository_root().expect("repository root must resolve");
         let count = verify_domain_vectors(&root).expect("domain vectors must match Python");
         assert!(count > 0, "domain vector inventory must not be empty");
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_wheel_numeric_wedges_are_scaled_for_display_and_payout`
+    /// against the live application wheel catalog.
+    #[test]
+    fn test_wheel_numeric_wedges_are_scaled_for_display_and_payout() {
+        use std::collections::BTreeSet;
+
+        use cama_app::wheel::{WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog};
+
+        let wedges = wheel_catalog(WheelKind::Regular, WheelEconomyPolicy::default());
+        let values = wedges
+            .iter()
+            .filter_map(|wedge| match wedge.value {
+                WheelValue::Numeric(value) => Some(value),
+                WheelValue::Mechanic(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(values.contains(&5));
+        assert!(values.contains(&100));
+        for wedge in &wedges {
+            if let WheelValue::Numeric(value) = wedge.value
+                && value > 0
+            {
+                assert_eq!(wedge.label, value.to_string());
+            }
+        }
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout`
+    /// against the live application wheel catalog.
+    #[test]
+    fn test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout() {
+        use std::collections::BTreeSet;
+
+        use cama_app::wheel::{WheelEconomyPolicy, WheelKind, WheelValue, wheel_catalog};
+
+        let wedges = wheel_catalog(WheelKind::Golden, WheelEconomyPolicy::default());
+        let values = wedges
+            .iter()
+            .filter_map(|wedge| match wedge.value {
+                WheelValue::Numeric(value) => Some(value),
+                WheelValue::Mechanic(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(values.contains(&20));
+        assert!(values.contains(&250));
+        for wedge in &wedges {
+            if let WheelValue::Numeric(value) = wedge.value
+                && value > 0
+            {
+                assert_eq!(wedge.label, value.to_string());
+            }
+        }
+    }
+
+    /// Mirrors `tests/test_minigame_scaling.py::test_wheel_explosion_keeps_legacy_sixty_seven_reward`
+    /// against the live application constant.
+    #[test]
+    fn test_wheel_explosion_keeps_legacy_sixty_seven_reward() {
+        assert_eq!(cama_app::wheel::WHEEL_EXPLOSION_REWARD, 67);
     }
 
     #[test]

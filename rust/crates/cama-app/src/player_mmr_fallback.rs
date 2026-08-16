@@ -249,10 +249,15 @@ pub enum RegisterPlayerError {
 /// Register and seed one player while fetching the OpenDota player payload at
 /// most once. The concrete repository adapter performs player creation and the
 /// primary Steam link in one `BEGIN IMMEDIATE` transaction.
+/// `rating_system`/`openskill` must be the deployment-configured systems
+/// (Python reads the same env-derived constants at import time); defaults
+/// here would seed new players differently than the replay reconstructs.
 pub fn register_player<R, A>(
     repository: &mut R,
     api: &mut A,
     input: RegisterPlayerInput,
+    rating_system: &CamaRatingSystem,
+    openskill: &CamaOpenSkillSystem,
 ) -> Result<RegisterPlayerResult, RegisterPlayerError>
 where
     R: MmrRegistrationRepository,
@@ -294,11 +299,9 @@ where
         .filter(|mmr| *mmr > 0)
         .ok_or(RegisterPlayerError::MmrUnavailable)?;
 
-    let rating_system = CamaRatingSystem::default();
     let rating_mmr = mmr.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     let glicko = rating_system.create_player_from_mmr(Some(rating_mmr));
     let seed_mmr = rating_system.new_player_seed_mmr(rating_mmr);
-    let openskill = CamaOpenSkillSystem::default();
     let dotabuff_url = format!(
         "https://www.dotabuff.com/players/{}",
         input.steam_id + STEAM_ID64_OFFSET

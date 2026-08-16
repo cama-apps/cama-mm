@@ -1048,7 +1048,7 @@ fn build_match_questions(
         rates.clone(),
         None,
         false,
-        |value| (value * 1_000.0).round() / 10.0,
+        |value| cama_domain::formatting::python_round_decimals(value * 100.0, 1),
         |name, value| {
             format!(
                 "As of game start, {name}'s win rate was {:.1}%.",
@@ -1067,7 +1067,7 @@ fn build_match_questions(
         rates,
         None,
         true,
-        |value| (value * 1_000.0).round() / 10.0,
+        |value| cama_domain::formatting::python_round_decimals(value * 100.0, 1),
         |name, value| {
             format!(
                 "As of game start, {name}'s win rate was {:.1}%.",
@@ -1154,11 +1154,11 @@ fn build_rating_questions(
         {
             continue;
         }
-        glicko.insert(*player_id, rating.round().clamp(0.0, 3_000.0));
+        glicko.insert(*player_id, rating.round_ties_even().clamp(0.0, 3_000.0));
         openskill.insert(
             *player_id,
             ((mu - OPENSKILL_MIN_MU) * OPENSKILL_DISPLAY_SCALE)
-                .round()
+                .round_ties_even()
                 .clamp(0.0, 3_000.0),
         );
     }
@@ -1351,7 +1351,7 @@ fn build_rating_questions(
         largest_gain,
         Some(0.1),
         false,
-        |value| (value * 10.0).round() / 10.0,
+        |value| cama_domain::formatting::python_round_decimals(value, 1),
         |name, value| {
             format!(
                 "As of game start, {name}'s largest one-match Glicko gain was {value:.1} points."
@@ -1578,7 +1578,9 @@ fn build_hero_questions(
                 })
                 .collect::<Vec<_>>();
             rates.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
-            if rates.len() >= 4 && (rates[0].1 * 1_000.0).round() != (rates[1].1 * 1_000.0).round()
+            if rates.len() >= 4
+                && cama_domain::formatting::python_round_decimals(rates[0].1 * 100.0, 1)
+                    != cama_domain::formatting::python_round_decimals(rates[1].1 * 100.0, 1)
             {
                 let hero = hero_name(rates[0].0);
                 add_value_question(
@@ -1686,7 +1688,7 @@ fn build_performance_questions(
                 ))
             })
             .collect();
-        let scale = 10_f64.powi(i32::try_from(digits).unwrap_or(0));
+
         add_player_leader(
             candidates,
             players,
@@ -1696,7 +1698,7 @@ fn build_performance_questions(
             values,
             None,
             false,
-            move |value| (value * scale).round() / scale,
+            move |value| cama_domain::formatting::python_round_decimals(value, digits),
             move |name, value| format!("As of game start, {name}'s {label} was {value:.digits$}."),
             false,
             random,
@@ -1820,7 +1822,8 @@ fn build_pairing_questions(
                 .collect::<Vec<_>>();
             qualifying.sort_by(|left, right| right.3.total_cmp(&left.3).then(left.0.cmp(&right.0)));
             if qualifying.len() >= 4
-                && (qualifying[0].3 * 1_000.0).round() != (qualifying[1].3 * 1_000.0).round()
+                && cama_domain::formatting::python_round_decimals(qualifying[0].3 * 100.0, 1)
+                    != cama_domain::formatting::python_round_decimals(qualifying[1].3 * 100.0, 1)
             {
                 let (teammate_id, games, wins, rate) = qualifying[0];
                 add_value_question(
@@ -1845,7 +1848,8 @@ fn build_pairing_questions(
             }
             qualifying.sort_by(|left, right| left.3.total_cmp(&right.3).then(left.0.cmp(&right.0)));
             if qualifying.len() >= 4
-                && (qualifying[0].3 * 1_000.0).round() != (qualifying[1].3 * 1_000.0).round()
+                && cama_domain::formatting::python_round_decimals(qualifying[0].3 * 100.0, 1)
+                    != cama_domain::formatting::python_round_decimals(qualifying[1].3 * 100.0, 1)
             {
                 let (teammate_id, games, wins, rate) = qualifying[0];
                 add_value_question(
@@ -1905,7 +1909,8 @@ fn build_pairing_questions(
                 .collect::<Vec<_>>();
             qualifying.sort_by(|left, right| right.3.total_cmp(&left.3).then(left.0.cmp(&right.0)));
             if qualifying.len() >= 4
-                && (qualifying[0].3 * 1_000.0).round() != (qualifying[1].3 * 1_000.0).round()
+                && cama_domain::formatting::python_round_decimals(qualifying[0].3 * 100.0, 1)
+                    != cama_domain::formatting::python_round_decimals(qualifying[1].3 * 100.0, 1)
             {
                 let (opponent_id, games, wins, rate) = qualifying[0];
                 add_value_question(
@@ -2221,7 +2226,7 @@ fn build_betting_questions(
             .collect(),
         None,
         false,
-        |value| (value * 1_000.0).round() / 10.0,
+        |value| cama_domain::formatting::python_round_decimals(value * 100.0, 1),
         |name, value| {
             format!(
                 "As of game start, {name}'s settled-bet win rate was {:.1}%.",
@@ -2541,7 +2546,7 @@ fn build_double_questions(
         rates,
         None,
         false,
-        |value| (value * 1_000.0).round() / 10.0,
+        |value| cama_domain::formatting::python_round_decimals(value * 100.0, 1),
         |name, value| {
             format!(
                 "As of game start, {name}'s Double-or-Nothing win rate was {:.1}%.",

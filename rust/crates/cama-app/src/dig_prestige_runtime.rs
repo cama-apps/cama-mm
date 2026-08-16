@@ -26,6 +26,7 @@ use crate::dig_tunnels::{
     PRESTIGE_PERKS, RelicGrant, RelicRarity, prestige_mutation_seed,
 };
 use crate::economy_event_sqlite::{SqliteEconomyEventError, SqliteEconomyEventService};
+use crate::python_random::PythonRandom;
 
 pub use crate::dig_tunnels::{
     READING_STONE_DESPERATE_HINTS, READING_STONE_RISKY_HINTS, READING_STONE_SAFE_HINTS,
@@ -712,103 +713,25 @@ pub fn prestige_perk_choices(eligible: &[&str], discord_id: i64, target_level: i
 
 #[derive(Clone, Debug)]
 struct PythonIntegerRandom {
-    mt: [u32; 624],
-    index: usize,
+    inner: PythonRandom,
 }
 
 impl PythonIntegerRandom {
     fn new(seed: u64) -> Self {
-        let low = seed as u32;
-        let high = (seed >> 32) as u32;
-        if high == 0 {
-            Self::from_words(&[low])
-        } else {
-            Self::from_words(&[low, high])
+        Self {
+            inner: PythonRandom::from_u64_seed(seed),
         }
     }
 
     fn from_words(words: &[u32]) -> Self {
-        let mut random = Self {
-            mt: [0; 624],
-            index: 624,
-        };
-        random.init_genrand(19_650_218);
-        random.init_by_array(words);
-        random
-    }
-
-    fn init_genrand(&mut self, seed: u32) {
-        self.mt[0] = seed;
-        for index in 1..self.mt.len() {
-            self.mt[index] = 1_812_433_253_u32
-                .wrapping_mul(self.mt[index - 1] ^ (self.mt[index - 1] >> 30))
-                .wrapping_add(index as u32);
+        Self {
+            inner: PythonRandom::from_u32_key(words),
         }
-        self.index = self.mt.len();
-    }
-
-    fn init_by_array(&mut self, key: &[u32]) {
-        let mut index = 1_usize;
-        let mut key_index = 0_usize;
-        for _ in 0..self.mt.len().max(key.len()) {
-            self.mt[index] = (self.mt[index]
-                ^ (self.mt[index - 1] ^ (self.mt[index - 1] >> 30)).wrapping_mul(1_664_525))
-            .wrapping_add(key[key_index])
-            .wrapping_add(key_index as u32);
-            index += 1;
-            key_index += 1;
-            if index >= self.mt.len() {
-                self.mt[0] = self.mt[self.mt.len() - 1];
-                index = 1;
-            }
-            if key_index >= key.len() {
-                key_index = 0;
-            }
-        }
-        for _ in 0..(self.mt.len() - 1) {
-            self.mt[index] = (self.mt[index]
-                ^ (self.mt[index - 1] ^ (self.mt[index - 1] >> 30)).wrapping_mul(1_566_083_941))
-            .wrapping_sub(index as u32);
-            index += 1;
-            if index >= self.mt.len() {
-                self.mt[0] = self.mt[self.mt.len() - 1];
-                index = 1;
-            }
-        }
-        self.mt[0] = 0x8000_0000;
-        self.index = self.mt.len();
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        if self.index >= self.mt.len() {
-            for index in 0..self.mt.len() {
-                let value = (self.mt[index] & 0x8000_0000)
-                    | (self.mt[(index + 1) % self.mt.len()] & 0x7fff_ffff);
-                self.mt[index] = self.mt[(index + 397) % self.mt.len()]
-                    ^ (value >> 1)
-                    ^ if value & 1 == 0 { 0 } else { 0x9908_b0df };
-            }
-            self.index = 0;
-        }
-        let mut value = self.mt[self.index];
-        self.index += 1;
-        value ^= value >> 11;
-        value ^= (value << 7) & 0x9d2c_5680;
-        value ^= (value << 15) & 0xefc6_0000;
-        value ^= value >> 18;
-        value
     }
 
     fn rand_below(&mut self, upper: usize) -> usize {
         assert!(upper > 0, "random upper bound must be positive");
-        let upper = u32::try_from(upper).expect("prestige catalog fits u32");
-        let bits = 32 - upper.leading_zeros();
-        loop {
-            let candidate = self.next_u32() >> (32 - bits);
-            if candidate < upper {
-                return candidate as usize;
-            }
-        }
+        self.inner.randbelow(upper)
     }
 }
 
