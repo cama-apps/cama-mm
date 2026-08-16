@@ -66,7 +66,7 @@ jobs:
       - name: Test Rust
         run: >-
           cargo nextest run --locked --manifest-path rust/Cargo.toml
-          --workspace --all-targets --all-features --test-threads 8
+          --workspace --all-targets --all-features --test-threads num-cpus
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
