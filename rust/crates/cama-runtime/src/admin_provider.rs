@@ -37,6 +37,7 @@ use cama_db::rating_history_repository::{RatingHistoryRepository, RecalibrationR
 use cama_db::registration_repository::RegistrationRepository;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::permissions::{DiscordPermissions, PermissionContext, has_admin_permission};
+use cama_domain::rating::CamaRatingSystem;
 use cama_domain::region::{
     CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
 };
@@ -297,6 +298,8 @@ struct AdminCommandConfig {
     recalibration_initial_rd: f64,
     recalibration_initial_volatility: f64,
     new_player_exclusion_boost: i64,
+    registration_rating: CamaRatingSystem,
+    registration_openskill: CamaOpenSkillSystem,
 }
 
 #[derive(Clone)]
@@ -398,6 +401,14 @@ impl AdminCommandConfig {
             recalibration_initial_rd: config.values.recalibration_initial_rd,
             recalibration_initial_volatility: config.values.recalibration_initial_volatility,
             new_player_exclusion_boost: config.values.new_player_exclusion_boost,
+            // Fail-soft like the rest of the admin config values.
+            registration_rating: config
+                .glicko_rating_system()
+                .unwrap_or_else(|_| CamaRatingSystem::default()),
+            registration_openskill: CamaOpenSkillSystem::with_config(
+                config.migration.openskill.clone(),
+            )
+            .unwrap_or_default(),
         }
     }
 }
@@ -1078,10 +1089,13 @@ impl AdminHandler {
             exclusion_count: self.config.new_player_exclusion_boost,
             added_at: now_seconds(),
         };
-        let result =
-            tokio::task::spawn_blocking(move || register_player(&mut repository, &mut api, input))
-                .await
-                .map_err(|task_error| format!("registration task failed: {task_error}"))?;
+        let rating_system = self.config.registration_rating;
+        let openskill = self.config.registration_openskill.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            register_player(&mut repository, &mut api, input, &rating_system, &openskill)
+        })
+        .await
+        .map_err(|task_error| format!("registration task failed: {task_error}"))?;
         match result {
             Ok(result) => {
                 if mmr.is_none() {

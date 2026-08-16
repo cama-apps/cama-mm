@@ -565,30 +565,15 @@ fn steam_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, ru
         .optional()
 }
 
+// Python writes and reads this column with `json`, so both directions
+// delegate to serde_json rather than a hand-rolled escaper that would drift
+// from `core_repositories`' codec for the same column.
 fn encode_roles(roles: &[String]) -> String {
-    let body = roles
-        .iter()
-        .map(|role| format!("\"{}\"", role.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
+    serde_json::to_string(roles).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn decode_roles(raw: &str) -> Vec<String> {
-    raw.strip_prefix('[')
-        .and_then(|body| body.strip_suffix(']'))
-        .map(|body| {
-            body.split(',')
-                .filter_map(|value| {
-                    value
-                        .trim()
-                        .strip_prefix('"')
-                        .and_then(|value| value.strip_suffix('"'))
-                        .map(|value| value.replace("\\\"", "\"").replace("\\\\", "\\"))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 #[cfg(test)]

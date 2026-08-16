@@ -17,6 +17,7 @@ const UPPER_MASK: u32 = 0x8000_0000;
 const LOWER_MASK: u32 = 0x7fff_ffff;
 
 /// CPython-compatible Mersenne Twister (`random.Random(seed)`).
+#[derive(Clone, Debug)]
 pub struct PythonRandom {
     state: [u32; N],
     index: usize,
@@ -38,6 +39,15 @@ impl PythonRandom {
             }
         }
         Self::init_by_array(&key)
+    }
+
+    /// Seed from the little-endian 32-bit words of an arbitrary-size
+    /// non-negative integer, as CPython's `_random.Random.seed` feeds them to
+    /// `init_by_array` (e.g. the version-2 string-seed path, whose integer can
+    /// exceed 64 bits).
+    #[must_use]
+    pub(crate) fn from_u32_key(key: &[u32]) -> Self {
+        Self::init_by_array(key)
     }
 
     fn init_genrand(seed: u32) -> Self {

@@ -388,11 +388,6 @@ where
 
         let mut attempt = 1_u32;
         let mut terminal_error = None;
-        // Observes Ready events emitted during each session so a healthy
-        // connection resets the exponential backoff, matching discord.py's
-        // reconnect behavior. Without the reset, every reconnect after the
-        // process's first few would wait the maximum delay forever.
-        let mut ready_observer = self.events.subscribe();
         loop {
             if *shutdown_receiver.borrow() {
                 break;
@@ -409,7 +404,40 @@ where
                 shutdown: shutdown_receiver.clone(),
             };
 
-            let reconnect_reason = match self.gateway.run_session(session).await {
+            // A session that reached Ready resets the exponential backoff,
+            // matching discord.py's reconnect behavior. The observer is
+            // polled concurrently with the running session so a long
+            // session's lifecycle traffic can never evict the single Ready
+            // event from the bounded broadcast channel before it is seen.
+            let mut ready_observer = self.events.subscribe();
+            let mut reached_ready = false;
+            let session_end = {
+                let mut session_future = std::pin::pin!(self.gateway.run_session(session));
+                loop {
+                    tokio::select! {
+                        result = &mut session_future => break result,
+                        event = ready_observer.recv() => {
+                            if matches!(event, Ok(LifecycleEvent::Ready { .. })) {
+                                reached_ready = true;
+                            }
+                        }
+                    }
+                }
+            };
+            // Catch events emitted between the observer's last poll and the
+            // session future completing.
+            loop {
+                match ready_observer.try_recv() {
+                    Ok(LifecycleEvent::Ready { .. }) => reached_ready = true,
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(
+                        broadcast::error::TryRecvError::Empty
+                        | broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+
+            let reconnect_reason = match session_end {
                 Ok(GatewaySessionEnd::Shutdown) => break,
                 Ok(GatewaySessionEnd::Reconnect { reason }) => reason,
                 Err(GatewayError::Recoverable(reason)) => reason,
@@ -418,7 +446,7 @@ where
                     break;
                 }
             };
-            if session_reached_ready(&mut ready_observer) {
+            if reached_ready {
                 // Restart the backoff sequence exactly as at process start:
                 // the delay below becomes the initial delay again.
                 attempt = 1;
@@ -460,23 +488,6 @@ where
         }
         emit(&self.events, LifecycleEvent::Stopped);
         terminal_error.map_or(Ok(()), Err)
-    }
-}
-
-/// Drain lifecycle events accumulated since the previous call and report
-/// whether the just-ended session reached `Ready`. Lagged receivers may skip
-/// events; missing a `Ready` merely keeps the longer backoff, which is the
-/// safe direction.
-fn session_reached_ready(events: &mut broadcast::Receiver<LifecycleEvent>) -> bool {
-    let mut ready = false;
-    loop {
-        match events.try_recv() {
-            Ok(LifecycleEvent::Ready { .. }) => ready = true,
-            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
-                return ready;
-            }
-        }
     }
 }
 
@@ -686,7 +697,9 @@ mod tests {
             match self.calls {
                 // Two consecutive connect failures escalate the backoff.
                 1 | 2 => Err(GatewayError::Recoverable("connect refused".to_owned())),
-                // A session that reached Ready must reset the backoff.
+                // A session that reached Ready must reset the backoff, even
+                // when later lifecycle traffic overflows the bounded
+                // broadcast channel (Ready must not be evicted unseen).
                 3 => {
                     emit(
                         &session.events,
@@ -695,6 +708,10 @@ mod tests {
                             guild_count: 1,
                         },
                     );
+                    for _ in 0..300 {
+                        emit(&session.events, LifecycleEvent::Resumed);
+                        tokio::task::yield_now().await;
+                    }
                     Ok(GatewaySessionEnd::Reconnect {
                         reason: "healthy session dropped".to_owned(),
                     })
@@ -719,18 +736,36 @@ mod tests {
             ScriptedGateway { calls: 0 },
             AcceptingAdmission,
         );
+        // Collect concurrently: the scripted session floods the bounded
+        // broadcast channel, so a drain-at-the-end receiver would itself
+        // lose the ReconnectScheduled events under test.
         let mut events = runtime.events().subscribe();
+        let scheduled = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collector = tokio::spawn({
+            let scheduled = Arc::clone(&scheduled);
+            async move {
+                loop {
+                    match events.recv().await {
+                        Ok(LifecycleEvent::ReconnectScheduled { attempt, delay }) => scheduled
+                            .lock()
+                            .expect("collector mutex")
+                            .push((attempt, delay)),
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        });
         runtime
             .run_until(future::pending())
             .await
             .expect("scripted runtime completes");
+        collector.await.expect("collector completes");
 
-        let mut scheduled = Vec::new();
-        while let Ok(event) = events.try_recv() {
-            if let LifecycleEvent::ReconnectScheduled { attempt, delay } = event {
-                scheduled.push((attempt, delay));
-            }
-        }
+        let scheduled = Arc::try_unwrap(scheduled)
+            .expect("collector released its handle")
+            .into_inner()
+            .expect("collector mutex");
         assert_eq!(
             scheduled,
             [

@@ -414,6 +414,8 @@ fn config() -> PlayerRegistrationConfig {
         lobby_ready_cooldown: Duration::from_secs(60),
         lobby_channel_id: None,
         low_skill_lobby_channel_id: None,
+        rating_system: cama_domain::rating::CamaRatingSystem::default(),
+        openskill: cama_domain::openskill::CamaOpenSkillSystem::default(),
     }
 }
 

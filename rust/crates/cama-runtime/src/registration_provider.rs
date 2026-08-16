@@ -29,6 +29,8 @@ use cama_db::registration_repository::{
     MmrPromptState, RegistrationRepository, STEAM_ACCOUNT_ID_UPPER_BOUND, SetRolesOutcome,
 };
 use cama_domain::formatting::{escape_discord_text, format_role_display};
+use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::CamaRatingSystem;
 use cama_domain::region::{
     CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
 };
@@ -54,7 +56,7 @@ const MMR_COMPONENT_PREFIX: &str = "registration:mmr:";
 const REFER_COOLDOWN: Duration = Duration::from_secs(5);
 const NEON_DELETE_DELAY: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlayerRegistrationConfig {
     pub mmr_modal_retry_limit: i64,
     pub mmr_modal_timeout: Duration,
@@ -64,6 +66,8 @@ pub struct PlayerRegistrationConfig {
     pub lobby_ready_cooldown: Duration,
     pub lobby_channel_id: Option<i64>,
     pub low_skill_lobby_channel_id: Option<i64>,
+    pub rating_system: CamaRatingSystem,
+    pub openskill: CamaOpenSkillSystem,
 }
 
 impl PlayerRegistrationConfig {
@@ -87,6 +91,14 @@ impl PlayerRegistrationConfig {
                 config.values.lobby_ready_cooldown_seconds.max(0) as u64,
             ),
             lobby_channel_id: config.channels.lobby,
+            // Registration seeds must use the env-configured systems; the
+            // config surface is fail-soft like the rest of `Values`, so the
+            // single pathological overflow error falls back to defaults.
+            rating_system: config
+                .glicko_rating_system()
+                .unwrap_or_else(|_| CamaRatingSystem::default()),
+            openskill: CamaOpenSkillSystem::with_config(config.migration.openskill.clone())
+                .unwrap_or_default(),
             low_skill_lobby_channel_id: config.channels.low_skill_lobby,
         }
     }
@@ -1226,11 +1238,15 @@ impl PlayerRegistrationHandler {
             exclusion_count: self.config.new_player_exclusion_boost,
             added_at: now_seconds(),
         };
-        tokio::task::spawn_blocking(move || register_player(&mut repository, &mut api, input))
-            .await
-            .map_err(|error| {
-                RegisterPlayerError::Repository(format!("registration task failed: {error}"))
-            })?
+        let rating_system = self.config.rating_system;
+        let openskill = self.config.openskill.clone();
+        tokio::task::spawn_blocking(move || {
+            register_player(&mut repository, &mut api, input, &rating_system, &openskill)
+        })
+        .await
+        .map_err(|error| {
+            RegisterPlayerError::Repository(format!("registration task failed: {error}"))
+        })?
     }
 
     async fn best_effort_infer_region(

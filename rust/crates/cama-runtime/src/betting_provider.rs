@@ -2484,6 +2484,7 @@ impl BettingInteractionHandler {
             let vanity_taxable_ids = self.vanity_tax.taxable_ids(pending.guild_id);
             let option = timeout_wheel_option(&pending);
             let option_for_settlement = option.clone();
+            let member_snapshot = self.guild_member_snapshot(pending.guild_id).await;
             let result = sqlite("expired wheel interaction sweep", move || {
                 resolve_pending_wheel(
                     &path,
@@ -2502,6 +2503,7 @@ impl BettingInteractionHandler {
                     pending.event_win_multiplier,
                     pending.event_loss_multiplier,
                     &vanity_taxable_ids,
+                    member_snapshot.as_ref(),
                 )
             })
             .await;
@@ -2923,6 +2925,7 @@ impl BettingInteractionHandler {
                 let effects = pending.effects.clone();
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let option_for_settlement = option.clone();
+                let member_snapshot = self.guild_member_snapshot(guild_id).await;
                 let result = sqlite("expired wheel interaction resolution", move || {
                     resolve_pending_wheel(
                         &path,
@@ -2941,6 +2944,7 @@ impl BettingInteractionHandler {
                         pending.event_win_multiplier,
                         pending.event_loss_multiplier,
                         &vanity_taxable_ids,
+                        member_snapshot.as_ref(),
                     )
                 })
                 .await;
@@ -3019,6 +3023,7 @@ impl BettingInteractionHandler {
         let event_win_multiplier = pending.event_win_multiplier;
         let event_loss_multiplier = pending.event_loss_multiplier;
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let result = sqlite("wheel interaction resolution", move || {
             resolve_pending_wheel(
                 &path,
@@ -3037,6 +3042,7 @@ impl BettingInteractionHandler {
                 event_win_multiplier,
                 event_loss_multiplier,
                 &vanity_taxable_ids,
+                member_snapshot.as_ref(),
             )
         })
         .await;
@@ -7035,7 +7041,10 @@ fn apply_swamp_siphon(
         .map_err(|error| error.to_string())?;
     let eligible = leaderboard
         .iter()
-        .filter(|player| player.discord_id != Some(user_id) && player.jopacoin_balance >= 50)
+        .filter(|player| {
+            player.discord_id != Some(user_id)
+                && player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+        })
         .collect::<Vec<_>>();
     let Some(victim) = eligible.get(fastrand::usize(..eligible.len().max(1))) else {
         return Ok(None);
@@ -7195,6 +7204,7 @@ fn resolve_wheel_value(
     event_loss_multiplier: f64,
     bonus_spin: bool,
     visible_positive_balance: Option<i64>,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<WheelResolution, String> {
     let mechanic = match landed.value {
         WheelValue::Numeric(value) => {
@@ -7443,6 +7453,7 @@ fn resolve_wheel_value(
                 user_id,
                 event_id,
                 config.minigame_jc_delta_scale,
+                visible_member_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7481,6 +7492,7 @@ fn resolve_wheel_value(
                 config,
                 vanity_taxable_ids,
                 event_win_multiplier,
+                visible_member_ids,
             )?;
             let resolution = WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7625,10 +7637,17 @@ fn resolve_recession(
     spinner_id: i64,
     event_id: &str,
     scale: f64,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<RecessionResolution, String> {
-    let leaderboard = PlayerRepository::new(path)
-        .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
-        .map_err(|error| error.to_string())?;
+    // Python parity: every rank-based wheel mechanic reads the guild-member
+    // visibility-filtered leaderboard (`wheel_outcomes.py::_leaderboard`), so
+    // departed ex-members neither hold ranks nor pay the tax.
+    let leaderboard = filter_visible_wheel_leaderboard(
+        PlayerRepository::new(path)
+            .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
+            .map_err(|error| error.to_string())?,
+        visible_member_ids,
+    );
     let now = unix_seconds()?.max(0);
     let mut total = 0_i64;
     let mut count = 0_usize;
@@ -7708,6 +7727,21 @@ struct HostileResolution {
     shielded_count: usize,
 }
 
+/// Python parity: `scale_minigame_jc_delta(max(1, int(balance * roll)))` —
+/// truncate toward zero BEFORE minigame scaling.
+fn hostile_percentage_loss(balance: i64, roll: f64, scale: f64) -> i64 {
+    cama_domain::economy_scaling::scale_minigame_jc_delta(
+        1_i64.max((balance as f64 * roll) as i64) as f64,
+        scale,
+    )
+}
+
+/// Python parity: `min(scale_minigame_jc_delta(amount), balance)` — the flat
+/// hostile losses scale first, then clamp to the victim's balance.
+fn hostile_flat_loss(amount: i64, balance: i64, scale: f64) -> i64 {
+    cama_domain::economy_scaling::scale_minigame_jc_delta(amount as f64, scale).min(balance)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_hostile_mechanic(
     path: &Path,
@@ -7719,15 +7753,27 @@ fn resolve_hostile_mechanic(
     config: &BettingRuntimeConfig,
     vanity_taxable_ids: &BTreeSet<i64>,
     event_win_multiplier: f64,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<HostileResolution, String> {
     let players = PlayerRepository::new(path);
-    let leaderboard = players
-        .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
-        .map_err(|error| error.to_string())?;
+    // Python parity: every hostile victim pool (heist window, crash top-N,
+    // takeover rank, shell/bomb/commune/lightning sweeps) is built from the
+    // guild-member visibility-filtered leaderboard
+    // (`wheel_outcomes.py::_leaderboard`); an unfiltered read lets departed
+    // ex-members consume window slots or be robbed.
+    let leaderboard = filter_visible_wheel_leaderboard(
+        players
+            .get_leaderboard(Some(guild_id), i64::from(i32::MAX), 0)
+            .map_err(|error| error.to_string())?,
+        visible_member_ids,
+    );
     let now = unix_seconds()?;
     let eligible = leaderboard
         .iter()
-        .filter(|row| row.discord_id != Some(user_id) && row.jopacoin_balance >= 50)
+        .filter(|row| {
+            row.discord_id != Some(user_id)
+                && row.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+        })
         .collect::<Vec<_>>();
     let total = Cell::new(0_i64);
     let mut log_result = 0_i64;
@@ -7861,12 +7907,11 @@ fn resolve_hostile_mechanic(
                 // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1)
-                            as f64,
+                    hostile_flat_loss(
+                        fastrand::i64(WHEEL_BANANA_PEEL_LOSS_MIN..WHEEL_BANANA_PEEL_LOSS_MAX + 1),
+                        victim.jopacoin_balance,
                         config.minigame_jc_delta_scale,
-                    )
-                    .min(victim.jopacoin_balance),
+                    ),
                     DbHostileDestination::Burn,
                     None,
                     true,
@@ -7885,12 +7930,11 @@ fn resolve_hostile_mechanic(
                 // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                 settle(
                     victim_id,
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1)
-                            as f64,
+                    hostile_flat_loss(
+                        fastrand::i64(WHEEL_GREEN_SHELL_STEAL_MIN..WHEEL_GREEN_SHELL_STEAL_MAX + 1),
+                        victim.jopacoin_balance,
                         config.minigame_jc_delta_scale,
-                    )
-                    .min(victim.jopacoin_balance),
+                    ),
                     DbHostileDestination::Player,
                     Some(user_id),
                     false,
@@ -7910,13 +7954,13 @@ fn resolve_hostile_mechanic(
                     // Python: min(scale_minigame_jc_delta(randint(...)), balance).
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
+                        hostile_flat_loss(
                             fastrand::i64(
                                 WHEEL_BOMB_OMB_VICTIM_LOSS_MIN..WHEEL_BOMB_OMB_VICTIM_LOSS_MAX + 1,
-                            ) as f64,
+                            ),
+                            victim.jopacoin_balance,
                             config.minigame_jc_delta_scale,
-                        )
-                        .min(victim.jopacoin_balance),
+                        ),
                         DbHostileDestination::Burn,
                         None,
                         true,
@@ -7933,16 +7977,16 @@ fn resolve_hostile_mechanic(
             // Lightning is the one server-wide tax that includes the
             // spinner. Python's leaderboard pass intentionally charges every
             // account at/above the hostile floor, including self.
-            for victim in leaderboard
-                .iter()
-                .filter(|player| player.jopacoin_balance >= 50)
-            {
+            for victim in leaderboard.iter().filter(|player| {
+                player.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
+            }) {
                 if let Some(victim_id) = victim.discord_id {
                     let before = total.get();
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            (1_i64.max((victim.jopacoin_balance as f64 * tax_rate) as i64)) as f64,
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            tax_rate,
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Reserve,
@@ -7966,9 +8010,9 @@ fn resolve_hostile_mechanic(
                         if mechanic == WheelMechanic::Commune {
                             1
                         } else {
-                            cama_domain::economy_scaling::scale_minigame_jc_delta(
-                                (1_i64.max((victim.jopacoin_balance as f64 * tax_rate) as i64))
-                                    as f64,
+                            hostile_percentage_loss(
+                                victim.jopacoin_balance,
+                                tax_rate,
                                 config.minigame_jc_delta_scale,
                             )
                         },
@@ -8008,12 +8052,9 @@ fn resolve_hostile_mechanic(
                     // scale(max(1, int(balance * uniform(0.05, 0.12)))).
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            1_i64.max(
-                                (victim.jopacoin_balance as f64
-                                    * (0.05 + fastrand::f64() * (0.12 - 0.05)))
-                                    as i64,
-                            ) as f64,
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            0.05 + fastrand::f64() * (0.12 - 0.05),
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -8056,19 +8097,16 @@ fn resolve_hostile_mechanic(
             for victim in leaderboard.iter().take(3) {
                 if let Some(victim_id) = victim.discord_id
                     && victim_id != user_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     let before = total.get();
                     // Python truncates before scaling:
                     // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                     settle(
                         victim_id,
-                        cama_domain::economy_scaling::scale_minigame_jc_delta(
-                            1_i64.max(
-                                (victim.jopacoin_balance as f64
-                                    * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                                    as i64,
-                            ) as f64,
+                        hostile_percentage_loss(
+                            victim.jopacoin_balance,
+                            0.08 + fastrand::f64() * (0.15 - 0.08),
                             config.minigame_jc_delta_scale,
                         ),
                         DbHostileDestination::Player,
@@ -8110,19 +8148,16 @@ fn resolve_hostile_mechanic(
         WheelMechanic::HostileTakeover => {
             if let Some(victim) = leaderboard.get(3)
                 && let Some(victim_id) = victim.discord_id
-                && victim.jopacoin_balance >= 50
+                && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
             {
                 let before = total.get();
                 // Python truncates before scaling:
                 // scale(max(1, int(balance * uniform(0.08, 0.15)))).
                 settle(
                     victim_id,
-                    cama_domain::economy_scaling::scale_minigame_jc_delta(
-                        1_i64.max(
-                            (victim.jopacoin_balance as f64
-                                * (0.08 + fastrand::f64() * (0.15 - 0.08)))
-                                as i64,
-                        ) as f64,
+                    hostile_percentage_loss(
+                        victim.jopacoin_balance,
+                        0.08 + fastrand::f64() * (0.15 - 0.08),
                         config.minigame_jc_delta_scale,
                     ),
                     DbHostileDestination::Player,
@@ -8171,7 +8206,7 @@ fn resolve_hostile_mechanic(
         WheelMechanic::Emergency => {
             for victim in &leaderboard {
                 if let Some(victim_id) = victim.discord_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     settle(
                         victim_id,
@@ -8190,7 +8225,7 @@ fn resolve_hostile_mechanic(
             for (rank, victim) in leaderboard.iter().take(4).enumerate() {
                 if let Some(victim_id) = victim.discord_id
                     && victim_id != user_id
-                    && victim.jopacoin_balance >= 50
+                    && victim.jopacoin_balance >= cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE
                 {
                     settle(
                         victim_id,
@@ -8738,6 +8773,7 @@ fn spin_once(
         event_loss_multiplier,
         bonus_spin,
         visible_positive_balance,
+        visible_member_ids,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -9673,6 +9709,7 @@ fn resolve_pending_wheel(
     event_win_multiplier: f64,
     event_loss_multiplier: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<PendingWheelResolution, String> {
     if use_reroll
         && !ManaRepository::new(path)
@@ -9714,6 +9751,7 @@ fn resolve_pending_wheel(
         event_loss_multiplier,
         bonus_spin,
         None,
+        visible_member_ids,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -12097,6 +12135,7 @@ mod tests {
             1.0,
             false,
             None,
+            None,
         )
         .expect("resolve no-op extension");
         assert_eq!(
@@ -12123,6 +12162,7 @@ mod tests {
             1.0,
             1.0,
             false,
+            None,
             None,
         )
         .expect("resolve active extension");
@@ -12993,5 +13033,73 @@ mod tests {
         let note = hostile_result_note(WheelMechanic::RedShell, &shell, &config);
         assert!(note.contains("rival"));
         assert!(note.contains("Victim's new balance: **88**"));
+    }
+
+    #[test]
+    fn hostile_mechanics_only_target_visible_guild_members() {
+        // Python parity: every hostile victim pool reads the guild-member
+        // visibility-filtered leaderboard, so a departed ex-member with the
+        // largest balance can neither hold a rank nor be robbed.
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(1, "spinner", Some(42)))
+            .expect("spinner");
+        players
+            .add(&NewPlayer::new(2, "member", Some(42)))
+            .expect("member");
+        players
+            .add(&NewPlayer::new(99, "departed", Some(42)))
+            .expect("departed");
+        players
+            .update_balance(1, Some(42), 100)
+            .expect("spinner balance");
+        players
+            .update_balance(2, Some(42), 100)
+            .expect("member balance");
+        players
+            .update_balance(99, Some(42), 1_000)
+            .expect("departed balance");
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let config = BettingRuntimeConfig::from_application_config(&config);
+        let visible = BTreeSet::from([1_i64, 2]);
+
+        let resolution = resolve_hostile_mechanic(
+            database.path(),
+            42,
+            1,
+            100,
+            WheelMechanic::Heist,
+            "heist-visibility",
+            &config,
+            &BTreeSet::new(),
+            1.0,
+            Some(&visible),
+        )
+        .expect("resolve heist");
+
+        assert!(resolution.total > 0, "the visible member must be robbed");
+        let departed_balance = players
+            .get_by_id(99, Some(42))
+            .expect("read departed")
+            .expect("departed row")
+            .jopacoin_balance;
+        assert_eq!(
+            departed_balance, 1_000,
+            "a departed ex-member must never be a hostile victim"
+        );
+        let member_balance = players
+            .get_by_id(2, Some(42))
+            .expect("read member")
+            .expect("member row")
+            .jopacoin_balance;
+        assert!(
+            member_balance < 100,
+            "the visible member funds the heist (was {member_balance})"
+        );
     }
 }

@@ -1649,147 +1649,17 @@ fn decode_i64_array(json: &str) -> Result<Vec<i64>, CoreRepositoryError> {
 }
 
 fn encode_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape_json_string(value)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{body}]")
+    // Python writes this column with `json.dumps` and reads it with
+    // `json.loads`, which accepts any standard JSON formatting; delegating
+    // to serde_json keeps every escaping edge case (control characters,
+    // unicode escapes, surrogate pairs) covered by one battle-tested
+    // implementation instead of a hand-rolled escaper.
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn decode_string_array(json: &str) -> Result<Vec<String>, CoreRepositoryError> {
-    let value = json.trim();
-    let Some(body) = value
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    else {
-        return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-    };
-    let mut result = Vec::new();
-    let bytes = body.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b',')
-        {
-            cursor += 1;
-        }
-        if cursor == bytes.len() {
-            break;
-        }
-        if bytes[cursor] != b'"' {
-            return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-        }
-        cursor += 1;
-        let mut item = String::new();
-        let mut closed = false;
-        while cursor < bytes.len() {
-            match bytes[cursor] {
-                b'"' => {
-                    cursor += 1;
-                    closed = true;
-                    break;
-                }
-                b'\\' => {
-                    cursor += 1;
-                    if cursor >= bytes.len() {
-                        return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-                    }
-                    match bytes[cursor] {
-                        b'"' => item.push('"'),
-                        b'\\' => item.push('\\'),
-                        b'/' => item.push('/'),
-                        b'b' => item.push('\u{08}'),
-                        b'f' => item.push('\u{0c}'),
-                        b'n' => item.push('\n'),
-                        b'r' => item.push('\r'),
-                        b't' => item.push('\t'),
-                        b'u' => {
-                            // \uXXXX escape, including surrogate pairs, as
-                            // written by json.dumps and escape_json_string.
-                            let (character, consumed) = decode_unicode_escape(&bytes[cursor..])
-                                .ok_or_else(|| CoreRepositoryError::InvalidJson(json.to_owned()))?;
-                            item.push(character);
-                            cursor += consumed - 1;
-                        }
-                        _ => return Err(CoreRepositoryError::InvalidJson(json.to_owned())),
-                    }
-                    cursor += 1;
-                }
-                byte if byte.is_ascii() => {
-                    item.push(char::from(byte));
-                    cursor += 1;
-                }
-                _ => {
-                    let remainder = std::str::from_utf8(&bytes[cursor..])
-                        .map_err(|_| CoreRepositoryError::InvalidJson(json.to_owned()))?;
-                    let character = remainder
-                        .chars()
-                        .next()
-                        .ok_or_else(|| CoreRepositoryError::InvalidJson(json.to_owned()))?;
-                    item.push(character);
-                    cursor += character.len_utf8();
-                }
-            }
-        }
-        if !closed {
-            return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-        }
-        result.push(item);
-    }
-    Ok(result)
-}
-
-/// Decode a `uXXXX` escape body (the slice starts at the `u`), returning the
-/// character and the number of bytes consumed starting from the `u`.
-/// Surrogate pairs consume the following `\uXXXX` as well.
-fn decode_unicode_escape(bytes: &[u8]) -> Option<(char, usize)> {
-    fn hex_quad(bytes: &[u8]) -> Option<u32> {
-        let digits = std::str::from_utf8(bytes.get(..4)?).ok()?;
-        u32::from_str_radix(digits, 16).ok()
-    }
-
-    let first = hex_quad(bytes.get(1..)?)?;
-    if (0xd800..=0xdbff).contains(&first) {
-        if bytes.get(5..7) != Some(b"\\u") {
-            return None;
-        }
-        let second = hex_quad(bytes.get(7..)?)?;
-        if !(0xdc00..=0xdfff).contains(&second) {
-            return None;
-        }
-        let scalar = 0x1_0000 + ((first - 0xd800) << 10) + (second - 0xdc00);
-        Some((char::from_u32(scalar)?, 11))
-    } else if (0xdc00..=0xdfff).contains(&first) {
-        None
-    } else {
-        Some((char::from_u32(first)?, 5))
-    }
-}
-
-/// Escape exactly like Python's `json.dumps` (`ensure_ascii=False` is not
-/// used for these columns, but escaping below the named shortcuts matches
-/// both modes): named escapes for the common controls, `\u00XX` for the
-/// remaining C0 range. Without the `\u00XX` arm, a control character wrote
-/// JSON that [`decode_string_array`] rejects, silently dropping the value on
-/// read-back.
-fn escape_json_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\u{08}' => escaped.push_str("\\b"),
-            '\u{0c}' => escaped.push_str("\\f"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            control if (control as u32) < 0x20 => {
-                escaped.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => escaped.push(other),
-        }
-    }
-    escaped
+    serde_json::from_str::<Vec<String>>(json)
+        .map_err(|_| CoreRepositoryError::InvalidJson(json.to_owned()))
 }
 
 fn parse_enrichment_json(raw: &str) -> Result<EnrichmentJsonValue, CoreRepositoryError> {
@@ -8289,4 +8159,26 @@ mod tests {
             match_id INTEGER, created_at INTEGER NOT NULL
         );
     "#;
+
+    #[test]
+    fn string_array_codec_round_trips_python_json_bytes() {
+        // Bytes exactly as CPython json.dumps writes them (incl. a control
+        // character, named escapes, and a surrogate-pair \uXXXX emoji).
+        let python_written =
+            r#"["a\u0001b", "tab\tnewline\n", "quote\"back\\", "emoji\ud83d\ude00"]"#;
+        let decoded = decode_string_array(python_written).expect("decode Python-written column");
+        assert_eq!(
+            decoded,
+            [
+                "a\u{1}b".to_owned(),
+                "tab\tnewline\n".to_owned(),
+                "quote\"back\\".to_owned(),
+                "emoji\u{1F600}".to_owned(),
+            ]
+        );
+        // Rust-encoded bytes must round-trip through our own decoder (and are
+        // standard JSON, which Python's json.loads accepts).
+        let encoded = encode_string_array(&decoded);
+        assert_eq!(decode_string_array(&encoded).expect("round trip"), decoded);
+    }
 }
