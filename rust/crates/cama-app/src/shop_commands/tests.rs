@@ -187,7 +187,7 @@ fn test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum() {
     assert!(!package.name.contains("FREE"));
     assert!(package.name.contains("0 active"));
     assert!(avoid.name.contains("dynamic"));
-    assert!(avoid.name.contains("minimum 300"));
+    assert!(avoid.name.contains("minimum 250"));
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn test_package_deal_autocomplete_clamps_configured_duration_to_ten() {
 
 #[test]
 fn test_soft_avoid_floor_applies_to_configured_default() {
-    assert_eq!(calculate_soft_avoid_cost(None, 100), 300);
+    assert_eq!(calculate_soft_avoid_cost(None, 100), 250);
     assert_eq!(
         calculate_soft_avoid_cost(
             Some(PairingRecord {
@@ -211,7 +211,7 @@ fn test_soft_avoid_floor_applies_to_configured_default() {
             }),
             100
         ),
-        300
+        250
     );
 }
 
@@ -580,13 +580,16 @@ fn test_handle_jopa_coin_shortfall_tolerates_lapsed_interaction() {
 
 #[test]
 fn test_handle_soft_avoid_prices_from_teammate_winrate() {
-    let pairing = PairingRecord {
-        games_together: 7,
-        wins_together: 2,
-    };
-    let outcome = soft_avoid_command_outcome("Target", Some(pairing), None, Ok(10));
-    assert_eq!(outcome.cost, 429);
-    assert!(outcome.charged_atomically);
+    for (games_together, wins_together, expected_cost) in [(4, 2, 500), (3, 3, 1_000), (7, 2, 286)]
+    {
+        let pairing = PairingRecord {
+            games_together,
+            wins_together,
+        };
+        let outcome = soft_avoid_command_outcome("Target", Some(pairing), None, Ok(10));
+        assert_eq!(outcome.cost, expected_cost);
+        assert!(outcome.charged_atomically);
+    }
 }
 
 #[test]
@@ -649,7 +652,7 @@ fn test_handle_soft_avoid_charges_minimum_price_after_three_losses() {
         None,
         Ok(10),
     );
-    assert_eq!(outcome.cost, 300);
+    assert_eq!(outcome.cost, 250);
     assert!(outcome.charged_atomically);
     assert_eq!(
         outcome.response.phase,
@@ -700,7 +703,7 @@ fn test_handle_soft_avoid_handles_atomic_insufficient_balance() {
         Err(SoftAvoidFailure::InsufficientBalance { balance: 200 }),
     );
     assert!(!outcome.charged_atomically);
-    assert!(outcome.response.content.contains("need 300"));
+    assert!(outcome.response.content.contains("need 250"));
     assert!(outcome.response.content.contains("only have 200"));
 }
 

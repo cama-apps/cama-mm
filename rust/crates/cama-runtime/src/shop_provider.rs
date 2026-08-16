@@ -22,7 +22,8 @@ use cama_app::mana_service::Land;
 use cama_app::manashop_rework::BuffService;
 use cama_app::neon_degen::{NeonDegenService, NeonResult};
 use cama_app::shop_commands::{
-    ManaItemSpec, ManaTier, PairingRecord, calculate_soft_avoid_cost, mana_item,
+    ManaItemSpec, ManaTier, PairingRecord, SOFT_AVOID_MIN_COST, calculate_soft_avoid_cost,
+    mana_item,
 };
 use cama_db::gambling_stats_repository::{
     GamblingStatsPort, GamblingStatsRepository, GamblingStatsService,
@@ -68,7 +69,6 @@ const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECALIBRATION_MIN_GAMES: i64 = 5;
 const SOFT_AVOID_GAMES: i64 = 10;
-const SOFT_AVOID_MIN_COST: i64 = 300;
 const PACKAGE_DEAL_MAX_GAMES: i64 = 10;
 const PACKAGE_DEAL_NO_ACTIVE_COST: i64 = 1;
 const SOUL_HARVEST_DRAIN_PER_TARGET: i64 = 2;
