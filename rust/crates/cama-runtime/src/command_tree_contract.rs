@@ -74,6 +74,16 @@ const APPROVED_PATHS: &[&str] = &[
     "/matches recent",
     "/player lobby autonotify",
     "/player lobby status",
+    "/player curfew add",
+    "/player curfew remove",
+    "/player curfew list",
+    "/player timezone set",
+    "/player timezone status",
+    "/player timezone list",
+    "/player playtime set",
+    "/player playtime clear",
+    "/player playtime status",
+    "/player playtime popular",
     "/admin lowprio add",
     "/admin lowprio remove",
     "/admin lowprio status",
@@ -269,7 +279,7 @@ pub fn validate_production_registry(
 
     for (path, expected) in [
         ("/dig", 22),
-        ("/player", 8),
+        ("/player", 11),
         ("/player lobby", 2),
         ("/survey", 9),
         ("/survey question", 4),
@@ -328,6 +338,7 @@ mod tests {
         CommandSpec, InteractionHandler, InteractionHandlerError, InteractionRequest,
         InteractionResponder, RegistryBuilder,
     };
+    use crate::registration_provider::player_command_options;
 
     struct FixtureHandler;
 
@@ -414,19 +425,7 @@ mod tests {
             ))
             .expect("dig fixture");
         builder
-            .command(command(
-                "player",
-                vec![
-                    option("exclusion"),
-                    option("link"),
-                    group("lobby", options(&["autonotify", "status"])),
-                    option("region"),
-                    option("register"),
-                    option("roles"),
-                    option("steamids"),
-                    option("unlink"),
-                ],
-            ))
+            .command(command("player", player_command_options()))
             .expect("player fixture");
         builder
             .command(command(
@@ -603,7 +602,7 @@ mod tests {
                 .all(|count| *count <= DISCORD_COMMAND_OPTION_LIMIT)
         );
         assert_eq!(snapshot.direct_option_counts["/dig"], 22);
-        assert_eq!(snapshot.direct_option_counts["/player"], 8);
+        assert_eq!(snapshot.direct_option_counts["/player"], 11);
         assert_eq!(snapshot.direct_option_counts["/player lobby"], 2);
         assert_eq!(snapshot.direct_option_counts["/survey"], 9);
         assert_eq!(snapshot.direct_option_counts["/survey question"], 4);
