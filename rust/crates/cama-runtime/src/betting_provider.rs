@@ -2517,6 +2517,7 @@ impl BettingInteractionHandler {
                     }
                     if let Some(original_responder) = original_responder {
                         let attachment = wheel_attachment_for_option(&pending, &option)
+                            .await
                             .or_else(|| pending.initial_attachment.clone());
                         let _ = original_responder
                             .edit_original(wheel_timeout_response(
@@ -2909,16 +2910,21 @@ impl BettingInteractionHandler {
                 return respond_ephemeral(responder, &message).await;
             }
             WheelComponentDecision::ResolveTimeout(key, pending, option) => {
-                let original_responder = pending.original_responder.clone();
-                let final_attachment = wheel_attachment_for_option(&pending, &option)
-                    .or_else(|| pending.initial_attachment.clone());
-                // A late click still receives only a component acknowledgement.
-                // Keep the timeout result on the public wheel message, matching
-                // the normal choice path instead of creating a private duplicate.
+                // Discord invalidates component tokens unless the initial
+                // acknowledgement arrives within three seconds. Rendering the
+                // selected wheel GIF is CPU-heavy, so acknowledge before any
+                // media work and render outside the async executor.
                 responder
                     .defer(false)
                     .await
                     .map_err(|error| error.to_string())?;
+                let original_responder = pending.original_responder.clone();
+                let final_attachment = wheel_attachment_for_option(&pending, &option)
+                    .await
+                    .or_else(|| pending.initial_attachment.clone());
+                // A late click still receives only a component acknowledgement.
+                // Keep the timeout result on the public wheel message, matching
+                // the normal choice path instead of creating a private duplicate.
                 let path = self.database_path.clone();
                 let config = pending.config.clone();
                 let event_id = pending.event_id.clone();
@@ -3007,16 +3013,19 @@ impl BettingInteractionHandler {
             }
         };
         let (key, pending, option, use_reroll) = pending;
-        let original_responder = pending.original_responder.clone();
-        let final_attachment = wheel_attachment_for_option(&pending, &option)
-            .or_else(|| pending.initial_attachment.clone());
         // Python's button callback only acknowledges the component. The
         // selected result is revealed on the public wheel message after its
-        // animation, never as an immediate private duplicate.
+        // animation, never as an immediate private duplicate. This must happen
+        // before selected-wedge GIF rendering to preserve Discord's three-second
+        // interaction token window.
         responder
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        let original_responder = pending.original_responder.clone();
+        let final_attachment = wheel_attachment_for_option(&pending, &option)
+            .await
+            .or_else(|| pending.initial_attachment.clone());
         let path = self.database_path.clone();
         let config = pending.config.clone();
         let event_id = pending.event_id.clone();
@@ -9074,20 +9083,30 @@ fn wheel_timeout_response(
     response
 }
 
-fn wheel_attachment_for_option(
+async fn wheel_attachment_for_option(
     pending: &PendingWheelInteraction,
     option: &WheelOption,
 ) -> Option<InteractionAttachment> {
-    let index = pending.wheel_wedges.iter().position(|wedge| {
-        wedge.label == option.label && wedge.value == option.value && wedge.color == option.color
-    })?;
-    render_wheel_attachment(
-        &pending.wheel_wedges,
-        index,
-        pending.golden,
-        pending.display_name.as_deref(),
-    )
-    .ok()
+    let wheel_wedges = pending.wheel_wedges.clone();
+    let golden = pending.golden;
+    let display_name = pending.display_name.clone();
+    let option = option.clone();
+    match tokio::task::spawn_blocking(move || {
+        let index = wheel_wedges.iter().position(|wedge| {
+            wedge.label == option.label
+                && wedge.value == option.value
+                && wedge.color == option.color
+        })?;
+        render_wheel_attachment(&wheel_wedges, index, golden, display_name.as_deref()).ok()
+    })
+    .await
+    {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            tracing::warn!(%error, "selected wheel GIF render task failed");
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

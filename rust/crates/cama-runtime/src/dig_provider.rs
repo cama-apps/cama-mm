@@ -74,12 +74,12 @@ use crate::gateway_events::{
 };
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageReceipt,
-    InteractionModal, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, InteractionStringSelect, InteractionStringSelectOption,
-    InteractionTextInput, InteractionValue, RegistrationError, RegistrationProvider,
-    RegistryBuilder,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
+    InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
+    InteractionHandlerError, InteractionMessageReceipt, InteractionModal, InteractionOption,
+    InteractionRequest, InteractionResponder, InteractionResponse, InteractionStringSelect,
+    InteractionStringSelectOption, InteractionTextInput, InteractionValue, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 use crate::reminder_provider::ReminderHooks;
 
@@ -936,6 +936,22 @@ struct DigInteractionHandler {
 
 #[async_trait]
 impl InteractionHandler for DigInteractionHandler {
+    fn acknowledgement_policy(
+        &self,
+        request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        match request {
+            InteractionRequest::Component { custom_id, .. }
+                if custom_id
+                    .strip_prefix("dig:boss:fight:")
+                    .is_some_and(|action| !action.starts_with("carried:")) =>
+            {
+                InteractionAcknowledgementPolicy::Modal
+            }
+            _ => InteractionAcknowledgementPolicy::Automatic,
+        }
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,
@@ -2746,6 +2762,15 @@ impl DigInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if let Some(raw) = action.strip_prefix("boss:fight:") {
+            let (mode, raw) = if let Some(raw) = raw.strip_prefix("carried:") {
+                (Some("carried"), raw)
+            } else if let Some(raw) = raw.strip_prefix("wager:") {
+                (Some("wager"), raw)
+            } else if let Some(raw) = raw.strip_prefix("risk:") {
+                (Some("risk"), raw)
+            } else {
+                (None, raw)
+            };
             let (owner_id, expected_guild) = parse_boss_owner(raw)?;
             if owner_id != user_id || expected_guild != guild_id {
                 return respond(
@@ -2754,12 +2779,29 @@ impl DigInteractionHandler {
                 )
                 .await;
             }
-            let info = self.boss_encounter(user_id, guild_id, unix_now()).await?;
-            if let (Some(wager), Some(risk_tier)) = (info.carried_wager, info.carried_risk_tier) {
+            if matches!(mode, Some("wager" | "risk")) {
+                return show_boss_modal(
+                    responder.as_ref(),
+                    owner_id,
+                    guild_id,
+                    mode == Some("wager"),
+                )
+                .await;
+            }
+            if mode == Some("carried") {
                 responder
                     .defer(false)
                     .await
                     .map_err(|error| error.to_string())?;
+            }
+            let info = self.boss_encounter(user_id, guild_id, unix_now()).await?;
+            if let (Some(wager), Some(risk_tier)) = (info.carried_wager, info.carried_risk_tier) {
+                if mode != Some("carried") {
+                    responder
+                        .defer(false)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
                 let now = unix_now();
                 let result = match self
                     .start_boss(user_id, guild_id, risk_tier, wager, now)
@@ -2790,36 +2832,19 @@ impl DigInteractionHandler {
                     .await;
                 return Ok(());
             }
-            let mut risk =
-                InteractionTextInput::short("risk_tier", "Risk Tier (cautious / bold / reckless)");
-            risk.placeholder = Some("bold".to_owned());
-            risk.min_length = Some(1);
-            risk.max_length = Some(10);
-            let (custom_id, title, inputs) = if info.wager_allowed {
-                let mut wager = InteractionTextInput::short("wager", "Wager Amount (max 1,000 JC)");
-                wager.placeholder = Some("0-1000".to_owned());
-                wager.min_length = Some(1);
-                wager.max_length = Some(10);
-                (
-                    format!("dig:boss:wager:{owner_id}:{guild_id}"),
-                    "Boss Fight Wager",
-                    vec![risk, wager],
-                )
-            } else {
-                (
-                    format!("dig:boss:risk:{owner_id}:{guild_id}"),
-                    "Boss Phase Risk",
-                    vec![risk],
-                )
-            };
-            return responder
-                .show_modal(InteractionModal {
-                    custom_id,
-                    title: title.to_owned(),
-                    inputs,
-                })
-                .await
-                .map_err(|error| error.to_string());
+            if mode == Some("carried") {
+                return responder
+                    .followup(
+                        InteractionResponse::message(
+                            "This carried boss wager is no longer active. Use `/dig go` to continue.",
+                        )
+                        .ephemeral(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+            return show_boss_modal(responder.as_ref(), owner_id, guild_id, info.wager_allowed)
+                .await;
         }
         if let Some(raw) = action.strip_prefix("boss:duel:") {
             let mut parts = raw.split(':');
@@ -6673,6 +6698,44 @@ fn parse_boss_owner(raw: &str) -> Result<(i64, i64), String> {
     Ok((owner_id, guild_id))
 }
 
+async fn show_boss_modal(
+    responder: &dyn InteractionResponder,
+    owner_id: i64,
+    guild_id: i64,
+    wager_allowed: bool,
+) -> Result<(), String> {
+    let mut risk =
+        InteractionTextInput::short("risk_tier", "Risk Tier (cautious / bold / reckless)");
+    risk.placeholder = Some("bold".to_owned());
+    risk.min_length = Some(1);
+    risk.max_length = Some(10);
+    let (custom_id, title, inputs) = if wager_allowed {
+        let mut wager = InteractionTextInput::short("wager", "Wager Amount (max 1,000 JC)");
+        wager.placeholder = Some("0-1000".to_owned());
+        wager.min_length = Some(1);
+        wager.max_length = Some(10);
+        (
+            format!("dig:boss:wager:{owner_id}:{guild_id}"),
+            "Boss Fight Wager",
+            vec![risk, wager],
+        )
+    } else {
+        (
+            format!("dig:boss:risk:{owner_id}:{guild_id}"),
+            "Boss Phase Risk",
+            vec![risk],
+        )
+    };
+    responder
+        .show_modal(InteractionModal {
+            custom_id,
+            title: title.to_owned(),
+            inputs,
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn parse_risk_tier(value: &str) -> Option<RiskTier> {
     match value.trim().to_ascii_lowercase().as_str() {
         "cautious" => Some(RiskTier::Cautious),
@@ -8837,11 +8900,21 @@ fn boss_encounter_response_with_roll(
     if let Some(display) = luminosity_combat_display(info.luminosity) {
         embed = embed.field("\u{200b}", display, false);
     }
+    let fight_mode = if info.carried_wager.is_some() && info.carried_risk_tier.is_some() {
+        "carried"
+    } else if info.wager_allowed {
+        "wager"
+    } else {
+        "risk"
+    };
     let mut response =
         InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
-            InteractionButton::new(format!("dig:boss:fight:{owner_id}:{guild_id}"), "Fight")
-                .emoji("⚔️")
-                .style(InteractionButtonStyle::Danger),
+            InteractionButton::new(
+                format!("dig:boss:fight:{fight_mode}:{owner_id}:{guild_id}"),
+                "Fight",
+            )
+            .emoji("⚔️")
+            .style(InteractionButtonStyle::Danger),
             InteractionButton::new(format!("dig:boss:retreat:{owner_id}:{guild_id}"), "Retreat")
                 .emoji("🏃")
                 .style(InteractionButtonStyle::Secondary),
