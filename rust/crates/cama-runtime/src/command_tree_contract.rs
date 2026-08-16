@@ -68,6 +68,7 @@ const APPROVED_PATHS: &[&str] = &[
     "/shop pingedkevin",
     "/shop avoids",
     "/shop deals",
+    "/shop cancel-deal",
     "/shop mana",
     "/matches history",
     "/matches view",
@@ -460,7 +461,15 @@ mod tests {
         builder
             .command(command(
                 "shop",
-                options(&["buy", "pingedash", "pingedkevin", "avoids", "deals", "mana"]),
+                options(&[
+                    "buy",
+                    "pingedash",
+                    "pingedkevin",
+                    "avoids",
+                    "deals",
+                    "cancel-deal",
+                    "mana",
+                ]),
             ))
             .expect("shop fixture");
         builder
