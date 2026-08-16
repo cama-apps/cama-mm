@@ -809,7 +809,7 @@ fn command_schema_matches_python_extension() {
         .commands()
         .find(|command| command.name == "player")
         .expect("player schema");
-    assert_eq!(player.options.len(), 8);
+    assert_eq!(player.options.len(), 11);
     assert_eq!(
         player
             .options
@@ -818,6 +818,9 @@ fn command_schema_matches_python_extension() {
             .collect::<Vec<_>>(),
         [
             "lobby",
+            "curfew",
+            "timezone",
+            "playtime",
             "register",
             "link",
             "unlink",
@@ -827,12 +830,12 @@ fn command_schema_matches_python_extension() {
             "exclusion"
         ]
     );
-    let register = &player.options[1];
+    let register = &player.options[4];
     assert_eq!(register.description, "Register yourself as a player");
     assert_eq!(register.options[0].name, "steam_id");
     assert_eq!(register.options[0].kind, CommandOptionKind::Integer);
     assert!(register.options[0].required);
-    let link = &player.options[2];
+    let link = &player.options[5];
     assert_eq!(
         link.options
             .iter()
@@ -843,7 +846,7 @@ fn command_schema_matches_python_extension() {
             ("set_primary", CommandOptionKind::Boolean, false)
         ]
     );
-    let region = &player.options[6].options[0];
+    let region = &player.options[9].options[0];
     assert_eq!(
         region.choices,
         [
@@ -878,6 +881,73 @@ fn command_schema_matches_python_extension() {
             ("enabled", CommandOptionKind::Boolean, false),
             ("playername", CommandOptionKind::User, false)
         ]
+    );
+    let curfew = &player.options[1];
+    assert_eq!(curfew.kind, CommandOptionKind::SubcommandGroup);
+    assert_eq!(
+        curfew
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        ["add", "remove", "list"]
+    );
+    assert_eq!(
+        curfew.options[0]
+            .options
+            .iter()
+            .map(|option| (option.name.as_str(), option.kind, option.required))
+            .collect::<Vec<_>>(),
+        [
+            ("name", CommandOptionKind::String, true),
+            ("start", CommandOptionKind::String, true),
+            ("end", CommandOptionKind::String, true),
+            ("timezone", CommandOptionKind::String, false)
+        ]
+    );
+    assert_eq!(
+        curfew.options[1]
+            .options
+            .iter()
+            .map(|option| (option.name.as_str(), option.kind, option.required))
+            .collect::<Vec<_>>(),
+        [("name", CommandOptionKind::String, true)]
+    );
+    let timezone = &player.options[2];
+    assert_eq!(timezone.kind, CommandOptionKind::SubcommandGroup);
+    assert_eq!(
+        timezone
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        ["set", "status", "list"]
+    );
+    assert_eq!(
+        timezone.options[0]
+            .options
+            .iter()
+            .map(|option| (option.name.as_str(), option.kind, option.required))
+            .collect::<Vec<_>>(),
+        [("timezone", CommandOptionKind::String, true)]
+    );
+    let playtime = &player.options[3];
+    assert_eq!(playtime.kind, CommandOptionKind::SubcommandGroup);
+    assert_eq!(
+        playtime
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        ["set", "clear", "status", "popular"]
+    );
+    assert_eq!(
+        playtime.options[0]
+            .options
+            .iter()
+            .map(|option| (option.name.as_str(), option.kind, option.required))
+            .collect::<Vec<_>>(),
+        [("hours", CommandOptionKind::String, true)]
     );
     assert_eq!(
         schema_registry.component_routes()[0].custom_id_prefix,

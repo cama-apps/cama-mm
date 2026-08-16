@@ -38,6 +38,7 @@ jobs:
         with:
           workspaces: "./rust -> target"
           shared-key: rust-release
+          cache-workspace-crates: true
           cache-on-failure: true
 
       - name: Build release runtime

@@ -670,6 +670,34 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (region, discord_id, guild_id),
             )
 
+    def update_dota_play_hours(self, discord_id: int, guild_id: int, hours: list[int] | None) -> None:
+        """Persist a player's informational (non-enforced) preferred dota play hours."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET dota_play_hours = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+            """,
+                (json.dumps(hours) if hours else None, discord_id, guild_id),
+            )
+
+    def update_timezone(self, discord_id: int, guild_id: int, timezone: str | None) -> None:
+        """Persist a player's general timezone preference."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET timezone = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+            """,
+                (timezone, discord_id, guild_id),
+            )
+
     def update_inferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None:
         """Cache the region inferred from OpenDota play ("USE"/"USW"/"NONE" sentinel)."""
         guild_id = self.normalize_guild_id(guild_id)
@@ -4613,6 +4641,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         preferred_region = row["preferred_region"] if "preferred_region" in keys else None
         inferred_region = row["inferred_region"] if "inferred_region" in keys else None
 
+        # General timezone preference (may not exist in older schemas)
+        timezone = row["timezone"] if "timezone" in keys else None
+
+        # Informational preferred play hours (may not exist in older schemas)
+        dota_play_hours = (
+            json.loads(row["dota_play_hours"])
+            if "dota_play_hours" in keys and row["dota_play_hours"]
+            else None
+        )
+
         return Player(
             name=row["discord_username"],
             mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
@@ -4637,6 +4675,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             solo_grinder_checked_at=solo_grinder_checked_at,
             preferred_region=preferred_region,
             inferred_region=inferred_region,
+            timezone=timezone,
+            dota_play_hours=dota_play_hours,
         )
 
     # --- Trivia cooldown ---

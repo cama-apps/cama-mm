@@ -45,6 +45,15 @@ class Player:
     # "NONE" sentinel (checked, no US play) and NULL (not yet checked). See utils/region.
     preferred_region: str | None = None
     inferred_region: str | None = None
+    # General timezone preference (IANA name, e.g. "America/New_York"). Named
+    # curfew windows (repositories/curfew_repository.py) fall back to this
+    # when a window has no timezone of its own; other time-based features
+    # may read it too. See utils/timezone.
+    timezone: str | None = None
+    # Informational-only preferred dota hours (0-23, own timezone). Never
+    # enforced/blocking — purely for /player playtime popular to aggregate.
+    # See utils/playtime.
+    dota_play_hours: list[int] | None = None
 
     def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """

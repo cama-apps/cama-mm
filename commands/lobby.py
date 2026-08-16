@@ -12,13 +12,14 @@ from collections.abc import Awaitable
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from commands.checks import require_guild
 from config import LOBBY_CHANNEL_ID, LOWSKILL_LOBBY_CHANNEL_ID
 from domain.models.lobby import LobbyKind
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
+from utils.curfew import format_window
 from utils.formatting import (
     JOPACOIN_EMOJI_ID,
     format_duration_short,
@@ -71,10 +72,17 @@ def _private_suspension_message(suspension) -> str:
 class LobbyCommands(commands.Cog):
     """Slash commands for lobby management."""
 
-    def __init__(self, bot: commands.Bot, lobby_service: LobbyService, player_service):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        lobby_service: LobbyService,
+        player_service,
+        curfew_service=None,
+    ):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_service = player_service
+        self.curfew_service = curfew_service
         self._readycheck_shuffle_notified: dict[
             tuple[int, LobbyKind], int
         ] = {}
@@ -85,6 +93,64 @@ class LobbyCommands(commands.Cog):
             tuple[int, LobbyKind], asyncio.Lock
         ] = {}
         self._lobby_player_notification_tasks: set[asyncio.Task] = set()
+
+    async def cog_load(self) -> None:
+        if self.curfew_service is not None:
+            self._curfew_sweep_loop.start()
+
+    async def cog_unload(self) -> None:
+        if self.curfew_service is not None:
+            self._curfew_sweep_loop.cancel()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Curfew-window enforcement
+    # ────────────────────────────────────────────────────────────────────
+
+    @tasks.loop(minutes=1)
+    async def _curfew_sweep_loop(self):
+        guild_ids = [guild.id for guild in self.bot.guilds]
+        if not guild_ids:
+            return
+        try:
+            kicks = await asyncio.to_thread(self.curfew_service.sweep, guild_ids)
+        except Exception:
+            logger.exception("Curfew sweep failed")
+            return
+        for kick in kicks:
+            try:
+                await self._deliver_curfew_kick(kick)
+            except Exception:
+                logger.exception(
+                    "Curfew kick delivery failed for discord_id=%s guild_id=%s",
+                    kick.discord_id,
+                    kick.guild_id,
+                )
+
+    @_curfew_sweep_loop.before_loop
+    async def _before_curfew_sweep(self):
+        await self.bot.wait_until_ready()
+
+    async def _deliver_curfew_kick(self, kick) -> None:
+        """DM a player removed from a lobby by the curfew sweep, then refresh the display."""
+        try:
+            user = self.bot.get_user(kick.discord_id) or await self.bot.fetch_user(kick.discord_id)
+            await user.send(
+                f"🔒 You've been removed from {kick.lobby_kind.label} — your \"{kick.window_name}\" "
+                "curfew window started. Use `/player curfew remove` if you'd rather "
+                "queue through it."
+            )
+        except Exception as exc:
+            logger.debug(
+                "Failed to DM user %d about curfew kick: %s", kick.discord_id, exc
+            )
+
+        active_lobby = await asyncio.to_thread(
+            self.lobby_service.get_lobby,
+            guild_id=kick.guild_id,
+            lobby_kind=kick.lobby_kind,
+        )
+        if active_lobby is not None:
+            await self._sync_lobby_displays(active_lobby, kick.guild_id)
 
     def rebuild_readycheck_embed(
         self,
@@ -1644,6 +1710,23 @@ class LobbyCommands(commands.Cog):
             )
             return
 
+        # Check curfew
+        if self.curfew_service is not None:
+            active_window = await asyncio.to_thread(
+                self.curfew_service.active_window, interaction.user.id, guild_id
+            )
+            if active_window is not None:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"❌ You're inside your "
+                        f"{format_window(active_window, general_timezone=player.timezone)} curfew "
+                        "window. Use `/player curfew remove` if you'd rather queue through it."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
         # Check lobby exists
         active_lobby = await asyncio.to_thread(
             self.lobby_service.get_lobby,
@@ -2722,5 +2805,6 @@ def _is_playing_dota(member: discord.Member) -> bool:
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     player_service = getattr(bot, "player_service", None)
-    cog = LobbyCommands(bot, lobby_service, player_service)
+    curfew_service = getattr(bot, "curfew_service", None)
+    cog = LobbyCommands(bot, lobby_service, player_service, curfew_service)
     await bot.add_cog(cog)

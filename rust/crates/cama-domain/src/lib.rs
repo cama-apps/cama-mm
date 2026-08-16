@@ -2,6 +2,7 @@
 
 pub mod catalogs;
 pub mod config_contract;
+pub mod curfew;
 pub mod dig_cave_in;
 pub mod dig_economy;
 pub mod dig_gear;
@@ -21,6 +22,7 @@ pub mod pet;
 pub mod pet_brawl;
 pub mod pet_evolution;
 pub mod player;
+pub mod playtime;
 pub mod prediction_ladder;
 pub mod rate_limiter;
 pub mod rating;
@@ -31,5 +33,6 @@ pub mod shuffler;
 pub mod streaming;
 pub mod team;
 pub mod team_balancing;
+pub mod timezone;
 pub mod tip_service;
 pub mod wheel;

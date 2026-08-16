@@ -13,6 +13,7 @@ pub mod betting_provider;
 pub mod blame_luke_provider;
 pub mod command_tree_contract;
 pub mod config;
+pub mod curfew_sweep_worker;
 pub mod dig_bonus_runtime;
 pub mod dig_provider;
 pub mod dig_weather_worker;
@@ -86,6 +87,10 @@ pub use command_tree_contract::{
     CommandTreeContractError, CommandTreeSnapshot, snapshot_registry, validate_production_registry,
 };
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
+pub use curfew_sweep_worker::{
+    CURFEW_SWEEP_WAKE_INTERVAL, CURFEW_SWEEP_WORKER_NAME, CurfewSweepWorker,
+    curfew_sweep_worker_spec,
+};
 pub use dig_bonus_runtime::{
     BettingDigBonusWheelPort, DigBonusDiscordPort, DigBonusRewardSource, DigBonusRuntime,
     DigBonusRuntimeConfig, DigBonusRuntimeError, DigBonusSendFailure, DigBonusWheelFailure,
@@ -139,8 +144,9 @@ pub use info_provider::{
     InfoAnalyticsSnapshot, InfoRegistrationProvider, read_info_analytics_snapshot,
 };
 pub use lobby_provider::{
-    ConfirmedLobbyJoin, LobbyJoinObserver, LobbyProviderBuildError, LobbyRegistrationProvider,
-    LobbyRuntimeConfig, MatchActiveDraft, MatchLobbyPort, MatchLobbySnapshot,
+    ConfirmedLobbyJoin, LiveLobbyService, LobbyJoinObserver, LobbyProviderBuildError,
+    LobbyRegistrationProvider, LobbyRuntimeConfig, MatchActiveDraft, MatchLobbyPort,
+    MatchLobbySnapshot, SqliteLobbyPlayers, SqlitePendingMatches,
 };
 pub use mafia_provider::{MafiaDiscordPort, MafiaRegistrationProvider};
 pub use mana_provider::{ManaDiscordPort, ManaGuildMember, ManaRegistrationProvider};

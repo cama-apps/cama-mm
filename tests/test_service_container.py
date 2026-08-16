@@ -250,6 +250,7 @@ class TestServiceContainerBotExposure:
             "duel_service": "duel_service",
             "duel_flavor_service": "duel_flavor_service",
             "reminder_service": "reminder_service",
+            "curfew_service": "curfew_service",
             "mafia_service": "mafia_service",
             "mafia_flavor_service": "mafia_flavor_service",
             "pet_service": "pet_service",

@@ -22,6 +22,7 @@ pub mod betting_service_repository;
 pub mod blame_luke;
 #[path = "core_repositories.rs"]
 pub mod core_repositories;
+pub mod curfew;
 pub mod dig_abandon_runtime;
 pub mod dig_action_history;
 pub mod dig_blood_pact;

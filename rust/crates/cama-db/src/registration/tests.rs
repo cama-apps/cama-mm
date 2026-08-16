@@ -500,6 +500,169 @@ fn test_real_repository_backfill_uses_candidate_read_and_one_bulk_write() {
     assert_eq!(regions, ["USE", "USE", "USE"]);
 }
 
+#[test]
+fn test_default_timezone_is_none() {
+    let fixture = Fixture::new();
+    fixture.add_player(1, None);
+
+    assert_eq!(
+        fixture
+            .repository
+            .timezone_of(1, Some(GUILD))
+            .expect("read timezone"),
+        None
+    );
+}
+
+#[test]
+fn test_update_and_read_timezone() {
+    let fixture = Fixture::new();
+    fixture.add_player(2, None);
+
+    assert!(
+        fixture
+            .repository
+            .set_timezone(2, Some(GUILD), "Asia/Tokyo")
+            .expect("update timezone")
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .timezone_of(2, Some(GUILD))
+            .expect("read timezone"),
+        Some("Asia/Tokyo".to_owned())
+    );
+}
+
+#[test]
+fn test_timezone_is_guild_scoped() {
+    const SECONDARY_GUILD: i64 = 43;
+
+    let fixture = Fixture::new();
+    fixture.add_player(3, None);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO players (discord_id, guild_id, discord_username) VALUES (?1, ?2, ?3)",
+            params![3, SECONDARY_GUILD, "P3"],
+        )
+        .expect("insert secondary-guild player");
+
+    fixture
+        .repository
+        .set_timezone(3, Some(GUILD), "Asia/Tokyo")
+        .expect("update timezone");
+
+    assert_eq!(
+        fixture
+            .repository
+            .timezone_of(3, Some(GUILD))
+            .expect("read primary timezone"),
+        Some("Asia/Tokyo".to_owned())
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .timezone_of(3, Some(SECONDARY_GUILD))
+            .expect("read secondary timezone"),
+        None
+    );
+}
+
+#[test]
+fn test_dota_play_hours_default_is_none() {
+    let fixture = Fixture::new();
+    fixture.add_player(1, None);
+
+    assert_eq!(
+        fixture
+            .repository
+            .dota_play_hours_of(1, Some(GUILD))
+            .expect("read play hours"),
+        None
+    );
+}
+
+#[test]
+fn test_dota_play_hours_update_and_read() {
+    let fixture = Fixture::new();
+    fixture.add_player(2, None);
+
+    assert!(
+        fixture
+            .repository
+            .set_dota_play_hours(2, Some(GUILD), Some(&[18, 19, 20]))
+            .expect("update play hours")
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .dota_play_hours_of(2, Some(GUILD))
+            .expect("read play hours"),
+        Some(vec![18, 19, 20])
+    );
+}
+
+#[test]
+fn test_dota_play_hours_clearing_with_none() {
+    let fixture = Fixture::new();
+    fixture.add_player(3, None);
+    fixture
+        .repository
+        .set_dota_play_hours(3, Some(GUILD), Some(&[18, 19]))
+        .expect("set play hours");
+
+    fixture
+        .repository
+        .set_dota_play_hours(3, Some(GUILD), None)
+        .expect("clear play hours");
+
+    assert_eq!(
+        fixture
+            .repository
+            .dota_play_hours_of(3, Some(GUILD))
+            .expect("read play hours"),
+        None
+    );
+}
+
+#[test]
+fn test_dota_play_hours_guild_scoped() {
+    const SECONDARY_GUILD: i64 = 44;
+
+    let fixture = Fixture::new();
+    fixture.add_player(4, None);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO players (discord_id, guild_id, discord_username) VALUES (?1, ?2, ?3)",
+            params![4, SECONDARY_GUILD, "P4"],
+        )
+        .expect("insert secondary-guild player");
+
+    fixture
+        .repository
+        .set_dota_play_hours(4, Some(GUILD), Some(&[18]))
+        .expect("set play hours");
+
+    assert_eq!(
+        fixture
+            .repository
+            .dota_play_hours_of(4, Some(GUILD))
+            .expect("read primary play hours"),
+        Some(vec![18])
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .dota_play_hours_of(4, Some(SECONDARY_GUILD))
+            .expect("read secondary play hours"),
+        None
+    );
+}
+
 const FIXTURE_SCHEMA: &str = "
 CREATE TABLE players (
     discord_id INTEGER NOT NULL,
@@ -522,6 +685,8 @@ CREATE TABLE players (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     preferred_region TEXT,
     inferred_region TEXT,
+    timezone TEXT,
+    dota_play_hours TEXT,
     PRIMARY KEY (discord_id, guild_id)
 );
 CREATE TABLE player_steam_ids (

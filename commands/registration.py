@@ -18,13 +18,16 @@ from config import (
     MMR_MODAL_TIMEOUT_MINUTES,
 )
 from opendota_integration import run_opendota_io
+from utils.curfew import format_window, parse_clock
 from utils.formatting import escape_discord_text, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
+from utils.playtime import format_hour_ranges, parse_hour_set
 from utils.suspension_format import (
     format_suspension_scope,
     format_suspension_terms,
 )
+from utils.timezone import DEFAULT_TIMEZONE, format_common_timezones
 
 logger = logging.getLogger("cama_bot.commands.registration")
 
@@ -43,6 +46,21 @@ class RegistrationCommands(commands.Cog):
     player_lobby = app_commands.Group(
         name="lobby",
         description="Lobby notification preferences",
+        parent=player,
+    )
+    player_curfew = app_commands.Group(
+        name="curfew",
+        description="Named windows during which you're auto-locked and auto-removed from lobbies",
+        parent=player,
+    )
+    player_timezone = app_commands.Group(
+        name="timezone",
+        description="Your timezone, used by curfew windows and other time-based features",
+        parent=player,
+    )
+    player_playtime = app_commands.Group(
+        name="playtime",
+        description="Your preferred dota hours (informational) and the group's most popular times",
         parent=player,
     )
 
@@ -835,6 +853,322 @@ class RegistrationCommands(commands.Cog):
                 content="❌ Unexpected error setting your server. Try again later.",
                 ephemeral=True,
             )
+
+    @player_curfew.command(
+        name="add",
+        description="Add (or update) a named window during which you're auto-locked and auto-removed from lobbies",
+    )
+    @app_commands.describe(
+        name="A name for this window (your choice) — reuse a name to update that window",
+        start="Start time, 24-hour HH:MM",
+        end="End time, 24-hour HH:MM — queueing unlocks then",
+        timezone="IANA timezone name — leave blank to use your /player timezone setting",
+    )
+    @require_guild
+    async def curfew_add(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        start: str,
+        end: str,
+        timezone: str | None = None,
+    ):
+        """Add or update one of the player's named curfew windows."""
+        logger.info(
+            f"CurfewAdd command: User {interaction.user.id} ({interaction.user}) "
+            f"name={name} start={start} end={end} timezone={timezone}"
+        )
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            start_hour, start_minute = parse_clock(start)
+            end_hour, end_minute = parse_clock(end)
+            window = await asyncio.to_thread(
+                curfew_service.add_window,
+                interaction.user.id,
+                guild_id,
+                name,
+                start_hour=start_hour,
+                start_minute=start_minute,
+                end_hour=end_hour,
+                end_minute=end_minute,
+                timezone=timezone,
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+        except Exception as e:
+            logger.error(
+                f"Error adding curfew window for {interaction.user.id}: {e}", exc_info=True
+            )
+            await safe_followup(
+                interaction,
+                content="❌ Unexpected error adding your window. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        general_timezone = (
+            await asyncio.to_thread(self.player_service.get_timezone_info, interaction.user.id, guild_id)
+        )["timezone"]
+        await interaction.followup.send(
+            f"✅ Window added: {format_window(window, general_timezone=general_timezone)}. "
+            "You'll be blocked from joining a lobby and auto-removed from any lobby you're "
+            "already in while inside this window.",
+            ephemeral=True,
+        )
+
+    @player_curfew.command(name="remove", description="Remove one of your named curfew windows")
+    @app_commands.describe(name="The window's name")
+    @require_guild
+    async def curfew_remove(self, interaction: discord.Interaction, name: str):
+        """Delete a named curfew window."""
+        logger.info(
+            f"CurfewRemove command: User {interaction.user.id} ({interaction.user}) name={name}"
+        )
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        removed = await asyncio.to_thread(
+            curfew_service.remove_window, interaction.user.id, guild_id, name
+        )
+        if removed:
+            await interaction.followup.send(f"✅ Removed **{name}**.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"❌ You don't have a window named **{name}**. Use `/player curfew list` to see yours.",
+                ephemeral=True,
+            )
+
+    @player_curfew.command(name="list", description="View your named curfew windows")
+    @require_guild
+    async def curfew_list(self, interaction: discord.Interaction):
+        """Show all of the player's curfew windows."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        curfew_service = getattr(self.bot, "curfew_service", None)
+        if curfew_service is None:
+            await safe_followup(
+                interaction, content="❌ Curfew windows are unavailable right now.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        windows = await asyncio.to_thread(
+            curfew_service.list_windows, interaction.user.id, guild_id
+        )
+        if not windows:
+            await interaction.followup.send(
+                "You don't have any curfew windows set. Use `/player curfew add`.",
+                ephemeral=True,
+            )
+            return
+
+        general_timezone = (
+            await asyncio.to_thread(self.player_service.get_timezone_info, interaction.user.id, guild_id)
+        )["timezone"]
+        lines = [format_window(window, general_timezone=general_timezone) for window in windows]
+        await interaction.followup.send(
+            "Your curfew windows:\n" + "\n".join(f"- {line}" for line in lines),
+            ephemeral=True,
+        )
+
+    @player_timezone.command(
+        name="set", description="Set your timezone, used by curfew windows and other time-based features"
+    )
+    @app_commands.describe(timezone=f"IANA timezone name, e.g. America/New_York (default {DEFAULT_TIMEZONE})")
+    @require_guild
+    async def timezone_set(self, interaction: discord.Interaction, timezone: str):
+        """Set the player's general timezone preference."""
+        logger.info(
+            f"TimezoneSet command: User {interaction.user.id} ({interaction.user}) timezone={timezone}"
+        )
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            await asyncio.to_thread(
+                self.player_service.set_timezone, interaction.user.id, guild_id, timezone
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+        except Exception as e:
+            logger.error(f"Error setting timezone for {interaction.user.id}: {e}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content="❌ Unexpected error setting your timezone. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Timezone set to **{timezone}**. Unavailability windows will use this unless a "
+            "window was given its own timezone with `/player curfew add`.",
+            ephemeral=True,
+        )
+
+    @player_timezone.command(name="status", description="View your timezone setting")
+    @require_guild
+    async def timezone_status(self, interaction: discord.Interaction):
+        """Show the player's current timezone setting."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            info = await asyncio.to_thread(
+                self.player_service.get_timezone_info, interaction.user.id, guild_id
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+
+        if info["timezone"] is None:
+            msg = (
+                f"You haven't set a timezone yet (defaults to {DEFAULT_TIMEZONE} where needed). "
+                "Use `/player timezone set`."
+            )
+        else:
+            msg = f"Your timezone is **{info['timezone']}**."
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @player_timezone.command(
+        name="list", description="See common timezone names to use with /player timezone set"
+    )
+    @require_guild
+    async def timezone_list(self, interaction: discord.Interaction):
+        """Show a curated menu of common IANA timezone names."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        await interaction.followup.send(format_common_timezones(), ephemeral=True)
+
+    @player_playtime.command(
+        name="set",
+        description="Set the hours you like to play dota — informational only, doesn't restrict queueing",
+    )
+    @app_commands.describe(
+        hours="Hours you're usually free, 24-hour, your own timezone — e.g. '18-23' or '14,20,21'"
+    )
+    @require_guild
+    async def playtime_set(self, interaction: discord.Interaction, hours: str):
+        """Set the player's informational dota play-time hours."""
+        logger.info(
+            f"PlaytimeSet command: User {interaction.user.id} ({interaction.user}) hours={hours}"
+        )
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            hour_set = parse_hour_set(hours)
+            await asyncio.to_thread(
+                self.player_service.set_dota_play_hours,
+                interaction.user.id,
+                guild_id,
+                sorted(hour_set),
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+        except Exception as e:
+            logger.error(f"Error setting play-time hours for {interaction.user.id}: {e}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content="❌ Unexpected error setting your play-time hours. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Play-time hours set: **{format_hour_ranges(hour_set)}**. "
+            "This is informational only — it doesn't affect queueing.",
+            ephemeral=True,
+        )
+
+    @player_playtime.command(name="clear", description="Clear your dota play-time hours")
+    @require_guild
+    async def playtime_clear(self, interaction: discord.Interaction):
+        """Clear the player's informational dota play-time hours."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            await asyncio.to_thread(
+                self.player_service.clear_dota_play_hours, interaction.user.id, guild_id
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+        await interaction.followup.send("✅ Play-time hours cleared.", ephemeral=True)
+
+    @player_playtime.command(name="status", description="View your dota play-time hours")
+    @require_guild
+    async def playtime_status(self, interaction: discord.Interaction):
+        """Show the player's own informational play-time hours."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            info = await asyncio.to_thread(
+                self.player_service.get_dota_play_hours_info, interaction.user.id, guild_id
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+            return
+
+        if not info["hours"]:
+            msg = "You haven't set any play-time hours yet. Use `/player playtime set`."
+        else:
+            msg = f"Your play-time hours: **{format_hour_ranges(info['hours'])}**."
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @player_playtime.command(
+        name="popular", description="See the group's most popular hours to play dota"
+    )
+    @require_guild
+    async def playtime_popular(self, interaction: discord.Interaction):
+        """Show an hour-by-hour histogram of everyone's informational play-time hours."""
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        guild_id = interaction.guild.id
+        counts = await asyncio.to_thread(self.player_service.get_popular_play_hours, guild_id)
+        if not any(counts):
+            await interaction.followup.send(
+                "No one has set their play-time hours yet. Try `/player playtime set`."
+            )
+            return
+
+        lines = [
+            f"{hour:02d}:00 | {'█' * count}{' ' if count else ''}{count}"
+            for hour, count in enumerate(counts)
+        ]
+        await interaction.followup.send(
+            f"**🎮 Most Popular Dota Hours** (times in {DEFAULT_TIMEZONE})\n"
+            f"```\n{chr(10).join(lines)}\n```"
+        )
 
     @player.command(name="exclusion", description="Check your exclusion factor")
     @require_guild

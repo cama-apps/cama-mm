@@ -43,6 +43,7 @@ jobs:
         with:
           workspaces: "./rust -> target"
           shared-key: rust-ci
+          cache-workspace-crates: true
           cache-on-failure: true
 
       - name: Lint Python
