@@ -331,7 +331,7 @@ impl RegistrationProvider for PlayerRegistrationProvider {
     }
 }
 
-fn player_command_options() -> Vec<CommandOptionSpec> {
+pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
     let mut options = vec![
         subcommand(
             "register",
