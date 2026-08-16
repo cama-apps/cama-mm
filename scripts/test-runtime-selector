@@ -5,15 +5,27 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ROOT / "scripts" / "runtime-compose"
 ENTRYPOINT = ROOT / "scripts" / "runtime-entrypoint"
 DEPLOY = ROOT / "scripts" / "deploy-runtime"
+MUTATING_DOCKER_OPERATIONS = (
+    "build",
+    "up",
+    "start",
+    "restart",
+    "run",
+    "create",
+    "stop",
+    "tag",
+)
 
 
 def rendered(runtime: str | None, candidate: str | None = None) -> dict[str, object]:
@@ -36,6 +48,206 @@ def rendered(runtime: str | None, candidate: str | None = None) -> dict[str, obj
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def shell_command(script: Path, *arguments: str) -> list[str]:
+    if os.name != "nt":
+        return [str(script), *arguments]
+    shell = os.environ.get("CAMA_TEST_SH") or shutil.which("sh")
+    if shell is None:
+        raise RuntimeError("sh is required to exercise deployment scripts on Windows")
+    return [shell, str(script), *arguments]
+
+
+def copy_runtime_scripts(destination: Path) -> None:
+    (destination / "scripts").mkdir(parents=True)
+    for relative_path in (
+        "scripts/deploy-runtime",
+        "scripts/runtime-compose",
+    ):
+        source = ROOT / relative_path
+        target = destination / relative_path
+        shutil.copy2(source, target)
+
+
+def write_fake_docker(bin_directory: Path) -> Path:
+    docker = bin_directory / "docker"
+    docker.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            set -eu
+            printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+
+            if [ "$1" = compose ]; then
+              for argument in "$@"; do
+                [ "$argument" = ps ] && exit 0
+                if [ "$argument" = config ]; then
+                  printf '%s\n' cama-mm-bot
+                  exit 0
+                fi
+              done
+              exit 99
+            fi
+
+            if [ "$1" = ps ]; then
+              printf '%s\n' foreign-cama-owner
+              exit 0
+            fi
+
+            if [ "$1" = inspect ]; then
+              [ "${FAKE_DOCKER_INSPECT_FAIL-}" = true ] && exit 66
+              case "$*" in
+                *Config.User*Config.Env*)
+                  printf '%s\n' \
+                    1001:1001 \
+                    BOT_RUNTIME=python \
+                    DB_PATH=/app/data/cama_shuffle.db
+                  ;;
+                *Config.Env*)
+                  printf '%s\n' \
+                    BOT_RUNTIME=python \
+                    DB_PATH=/app/data/cama_shuffle.db
+                  ;;
+                *Config.User*) printf '%s\n' 1001:1001 ;;
+              esac
+              exit 0
+            fi
+
+            exit 0
+            """
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    docker.chmod(0o755)
+    python3 = bin_directory / "python3"
+    python3.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+    python3.chmod(0o755)
+    return docker
+
+
+def assert_no_runtime_mutation(invocations: list[str]) -> None:
+    assert not any(
+        f" {operation} " in f" {invocation} "
+        for invocation in invocations
+        for operation in MUTATING_DOCKER_OPERATIONS
+    ), invocations
+
+
+def assert_runtime_ownership() -> None:
+    with tempfile.TemporaryDirectory(prefix="cama-runtime-owner-") as raw_directory:
+        temporary_root = Path(raw_directory)
+        checkout = temporary_root / "checkout"
+        copy_runtime_scripts(checkout)
+        bin_directory = temporary_root / "bin"
+        bin_directory.mkdir()
+        write_fake_docker(bin_directory)
+        log_path = temporary_root / "docker.log"
+        environment = os.environ.copy()
+        environment["PATH"] = os.pathsep.join(
+            [str(bin_directory), environment.get("PATH", "")]
+        )
+        environment["FAKE_DOCKER_LOG"] = str(log_path)
+
+        for runtime in ("python", "rust"):
+            result = subprocess.run(
+                shell_command(
+                    checkout / "scripts" / "runtime-compose", "ps", "--quiet", "bot"
+                ),
+                cwd=checkout,
+                env=environment | {"BOT_RUNTIME": runtime},
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, result.stderr
+        invocations = log_path.read_text(encoding="utf-8").splitlines()
+        assert invocations == [
+            "compose --project-name cama-mm --file docker-compose.yml ps --quiet bot",
+            "compose --project-name cama-mm --file docker-compose.yml "
+            "--file docker-compose.rust.yml ps --quiet bot",
+        ], invocations
+
+        log_path.write_text("", encoding="utf-8")
+        deploy_environment = environment | {
+            "BOT_RUNTIME": "python",
+            "DEPLOY_HEALTH_TIMEOUT_SECONDS": "1",
+            "GIT_SHA": "ownership-test-sha",
+        }
+        result = subprocess.run(
+            shell_command(checkout / "scripts" / "deploy-runtime"),
+            cwd=checkout,
+            env=deploy_environment,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 65, (result.returncode, result.stderr)
+        assert "another Cama bot runtime is already running" in result.stderr, result.stderr
+        invocations = log_path.read_text(encoding="utf-8").splitlines()
+        assert (
+            "ps --no-trunc --filter status=running "
+            "--filter label=com.docker.compose.service=bot --quiet"
+        ) in invocations, invocations
+        assert_no_runtime_mutation(invocations)
+
+        log_path.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            shell_command(checkout / "scripts" / "deploy-runtime"),
+            cwd=checkout,
+            env=deploy_environment | {"FAKE_DOCKER_INSPECT_FAIL": "true"},
+            capture_output=True,
+            text=True,
+        )
+        invocations = log_path.read_text(encoding="utf-8").splitlines()
+        assert_no_runtime_mutation(invocations)
+        assert result.returncode == 65, (result.returncode, result.stderr)
+        assert "runtime ownership could not be inspected" in result.stderr, result.stderr
+
+        recovery_timestamp = "20260816T120000Z"
+        if os.name == "nt":
+            shell = os.environ.get("CAMA_TEST_SH") or shutil.which("sh")
+            assert shell is not None
+            shell_root_result = subprocess.run(
+                [shell, "-c", 'CDPATH= cd -- "$1" && pwd', "sh", str(checkout)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            shell_root = shell_root_result.stdout.strip()
+        else:
+            shell_root = str(checkout.resolve())
+        marker = checkout / "data" / ".cama-rust-cutover"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            "\n".join(
+                (
+                    "state=pending",
+                    "revision=candidate-sha",
+                    f"backup={shell_root}/data/backups/predeploy-{recovery_timestamp}.db",
+                    f"updated_at={recovery_timestamp}",
+                    "backup_ready=false",
+                    "previous_runtime=python",
+                    "previous_revision=previous-sha",
+                    f"retained_image=cama-mm-bot-rollback:{recovery_timestamp}",
+                    f"backup_image=cama-mm-python-backup:{recovery_timestamp}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        log_path.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            shell_command(checkout / "scripts" / "deploy-runtime"),
+            cwd=checkout,
+            env=deploy_environment,
+            capture_output=True,
+            text=True,
+        )
+        invocations = log_path.read_text(encoding="utf-8").splitlines()
+        assert_no_runtime_mutation(invocations)
+        assert result.returncode == 65, (result.returncode, result.stderr)
+        assert "another Cama bot runtime is already running" in result.stderr, result.stderr
 
 
 def assert_selector() -> None:
@@ -214,8 +426,26 @@ def assert_selector() -> None:
 
 if __name__ == "__main__":
     try:
-        assert_selector()
-    except (AssertionError, KeyError, subprocess.CalledProcessError) as error:
+        if sys.argv[1:] == ["--ownership-only"]:
+            assert_runtime_ownership()
+        elif sys.argv[1:]:
+            raise RuntimeError("expected no arguments or --ownership-only")
+        else:
+            assert_selector()
+            assert_runtime_ownership()
+    except (
+        AssertionError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as error:
         print(f"runtime selector validation failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    print("runtime selector validation passed (default=python, opt-in=rust, invalid=closed)")
+    if sys.argv[1:]:
+        print("runtime ownership validation passed (stable project, single owner)")
+    else:
+        print(
+            "runtime selector validation passed "
+            "(default=python, opt-in=rust, invalid=closed, single-owner enforced)"
+        )

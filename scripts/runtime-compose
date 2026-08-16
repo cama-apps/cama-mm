@@ -4,6 +4,7 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repository_root"
 readiness_manifest="$repository_root/rust/parity/cutover_readiness.tsv"
+compose_project_name=cama-mm
 
 if [ "${BOT_RUNTIME+x}" = x ]; then
   selected_runtime=$BOT_RUNTIME
@@ -39,7 +40,10 @@ case "$selected_runtime" in
       esac
     done
     export BOT_RUNTIME=python
-    exec docker compose --file docker-compose.yml "$@"
+    exec docker compose \
+      --project-name "$compose_project_name" \
+      --file docker-compose.yml \
+      "$@"
     ;;
   rust)
     mutates_runtime=false
@@ -116,6 +120,7 @@ case "$selected_runtime" in
     fi
     export BOT_RUNTIME=rust
     exec docker compose \
+      --project-name "$compose_project_name" \
       --file docker-compose.yml \
       --file docker-compose.rust.yml \
       "$@"

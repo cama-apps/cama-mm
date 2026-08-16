@@ -314,6 +314,62 @@ resolve_service_container() {
   esac
 }
 
+refuse_parallel_runtime_owners() {
+  managed_container=$1
+  managed_container_id=
+  if [ -n "$managed_container" ]; then
+    managed_container_id=$(docker inspect --format '{{.Id}}' "$managed_container" 2>/dev/null || true)
+    if [ -z "$managed_container_id" ]; then
+      echo "deployment refused: managed bot container identity could not be inspected" >&2
+      return 1
+    fi
+  fi
+
+  if ! running_bot_containers=$(docker ps \
+    --no-trunc \
+    --filter status=running \
+    --filter label=com.docker.compose.service=bot \
+    --quiet)
+  then
+    echo "deployment refused: running bot containers could not be enumerated" >&2
+    return 1
+  fi
+
+  foreign_owners=
+  for running_container in $running_bot_containers; do
+    if [ "$running_container" = "$managed_container_id" ]; then
+      continue
+    fi
+    if ! running_metadata=$(docker inspect --format \
+      '{{println .Config.User}}{{range .Config.Env}}{{println .}}{{end}}' \
+      "$running_container")
+    then
+      echo "deployment refused: runtime ownership could not be inspected for container $running_container" >&2
+      return 1
+    fi
+    running_user=$(printf '%s\n' "$running_metadata" | sed -n '1p')
+    running_runtime=$(printf '%s\n' "$running_metadata" \
+      | awk 'index($0, "BOT_RUNTIME=") == 1 { print substr($0, 13); exit }')
+    running_database_path=$(printf '%s\n' "$running_metadata" \
+      | awk 'index($0, "DB_PATH=") == 1 { print substr($0, 9); exit }')
+    case "$running_runtime" in
+      python|rust) ;;
+      *) continue ;;
+    esac
+    if [ "$running_database_path" != /app/data/cama_shuffle.db ] \
+      || [ "$running_user" != 1001:1001 ]
+    then
+      continue
+    fi
+    foreign_owners="${foreign_owners}${foreign_owners:+ }$running_container"
+  done
+
+  if [ -n "$foreign_owners" ]; then
+    echo "deployment refused: another Cama bot runtime is already running outside project cama-mm (containers: $foreign_owners)" >&2
+    return 1
+  fi
+}
+
 verify_runtime_container() {
   verified_container=$1
   verified_runtime=$2
@@ -523,6 +579,13 @@ if [ -e "$cutover_marker" ]; then
   recovery_state=$(marker_value state)
   case "$recovery_state" in
     pending|recovering)
+      if ! recovery_container=$(resolve_service_container rust); then
+        echo "deployment refused: recovery bot service could not be resolved" >&2
+        exit 1
+      fi
+      if ! refuse_parallel_runtime_owners "$recovery_container"; then
+        exit 65
+      fi
       if ! recover_pending_cutover; then
         echo "pending Rust cutover recovery failed closed" >&2
         exit 1
@@ -553,6 +616,9 @@ cd "$repository_root"
 if ! current_container=$(resolve_service_container python); then
   echo "deployment refused: current bot service could not be resolved" >&2
   exit 1
+fi
+if ! refuse_parallel_runtime_owners "$current_container"; then
+  exit 65
 fi
 previous_runtime=python
 previous_sha=unknown
