@@ -1141,6 +1141,7 @@ async fn run_serve() -> ExitCode {
         lobby_provider.curfew_service(),
         lobby_provider.live_lobby_service(),
         discord_transport.clone(),
+        lobby_provider.curfew_lobby_display(),
         discord_transport.clone(),
     );
     let survey_recovery_worker = survey_provider.recovery_worker_spec();

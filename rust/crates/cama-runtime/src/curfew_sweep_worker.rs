@@ -1,6 +1,8 @@
 //! Production worker that removes lobby members whose curfew window has
-//! started, then DMs them. Runs every minute, matching the Python
-//! `tasks.loop(minutes=1)` sweep it replaces.
+//! started, DMs them, then refreshes the lobby's Discord embed so the
+//! removal is actually visible. Runs every minute, matching the Python
+//! `tasks.loop(minutes=1)` sweep it replaces (which does the same DM +
+//! `_sync_lobby_displays` pair in `commands/lobby.py::_deliver_curfew_kick`).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -8,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cama_app::curfew_service::CurfewService;
+use cama_app::embeds::LobbyKind;
 use chrono::Utc;
 use tracing::{debug, info};
 
@@ -20,10 +23,22 @@ use crate::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 pub const CURFEW_SWEEP_WORKER_NAME: &str = "curfew_sweep";
 pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Re-render a lobby's live Discord embed after curfew removed members from
+/// it. Implemented by [`crate::lobby_provider::LobbyRegistrationProvider`].
+#[async_trait]
+pub trait CurfewLobbyDisplayPort: Send + Sync {
+    async fn refresh_curfew_lobby(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+    ) -> Result<(), String>;
+}
+
 pub struct CurfewSweepWorker {
     curfew: CurfewService,
     lobby: Arc<LiveLobbyService>,
     discord: Arc<dyn DiscordTransport>,
+    display: Arc<dyn CurfewLobbyDisplayPort>,
     guild_source: Arc<dyn FirstGamePoolGuildSource>,
     wake_interval: Duration,
 }
@@ -34,12 +49,14 @@ impl CurfewSweepWorker {
         curfew: CurfewService,
         lobby: Arc<LiveLobbyService>,
         discord: Arc<dyn DiscordTransport>,
+        display: Arc<dyn CurfewLobbyDisplayPort>,
         guild_source: Arc<dyn FirstGamePoolGuildSource>,
     ) -> Self {
         Self {
             curfew,
             lobby,
             discord,
+            display,
             guild_source,
             wake_interval: CURFEW_SWEEP_WAKE_INTERVAL,
         }
@@ -79,6 +96,24 @@ impl CurfewSweepWorker {
                 );
             }
         }
+        let affected_lobbies: BTreeSet<(i64, LobbyKind)> = kicks
+            .iter()
+            .map(|kick| (kick.guild_id, kick.lobby_kind))
+            .collect();
+        for (guild_id, lobby_kind) in affected_lobbies {
+            if let Err(error) = self
+                .display
+                .refresh_curfew_lobby(guild_id, lobby_kind)
+                .await
+            {
+                debug!(
+                    guild_id,
+                    ?lobby_kind,
+                    %error,
+                    "failed to refresh lobby display after curfew sweep"
+                );
+            }
+        }
         Ok(kicks.len())
     }
 }
@@ -89,11 +124,18 @@ pub fn curfew_sweep_worker_spec(
     curfew: CurfewService,
     lobby: Arc<LiveLobbyService>,
     discord: Arc<dyn DiscordTransport>,
+    display: Arc<dyn CurfewLobbyDisplayPort>,
     guild_source: Arc<dyn FirstGamePoolGuildSource>,
 ) -> BackgroundWorkerSpec {
     BackgroundWorkerSpec::new(
         CURFEW_SWEEP_WORKER_NAME,
-        Arc::new(CurfewSweepWorker::new(curfew, lobby, discord, guild_source)),
+        Arc::new(CurfewSweepWorker::new(
+            curfew,
+            lobby,
+            discord,
+            display,
+            guild_source,
+        )),
     )
 }
 
