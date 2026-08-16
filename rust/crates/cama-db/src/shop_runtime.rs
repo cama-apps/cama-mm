@@ -169,6 +169,7 @@ pub struct HostileLossRequest {
     pub recipient_id: Option<i64>,
     pub clamp_to_balance: bool,
     pub min_balance: Option<i64>,
+    pub protect_self: bool,
     pub metadata: Value,
     pub occurred_at: i64,
     pub mana_date: String,
@@ -1118,7 +1119,7 @@ pub(crate) fn apply_hostile_loss_in(
         &request.event_key,
     )? {
         let row = connection.query_row(
-            "SELECT requested,kind,destination,actor_id,recipient_id
+            "SELECT requested,kind,destination,actor_id,recipient_id,shieldable
              FROM hostile_loss_events WHERE event_id=?1",
             [existing.event_id],
             |row| {
@@ -1128,6 +1129,7 @@ pub(crate) fn apply_hostile_loss_in(
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )?;
@@ -1138,6 +1140,7 @@ pub(crate) fn apply_hostile_loss_in(
                 request.destination.as_str().to_owned(),
                 request.actor_id,
                 request.recipient_id,
+                i64::from(request.protect_self || request.actor_id != Some(request.victim_id)),
             )
         {
             return Err(ShopRuntimeRepositoryError::EventPayloadConflict);
@@ -1179,7 +1182,7 @@ pub(crate) fn apply_hostile_loss_in(
                 .unwrap_or_default(),
         ),
     };
-    let shieldable = request.actor_id != Some(request.victim_id);
+    let shieldable = request.protect_self || request.actor_id != Some(request.victim_id);
     let mut remaining = attempted;
     let mut details = Vec::new();
     let mut pool_keys = Vec::new();
@@ -1345,9 +1348,14 @@ pub(crate) fn apply_hostile_loss_in(
             "destination": request.destination.as_str(),
             "recipient_id": request.recipient_id,
         });
+        let ledger_source = if request.kind == "wheel_loss" {
+            "gamba"
+        } else {
+            "hostile_loss"
+        };
         set_ledger_context(
             connection,
-            Some("hostile_loss"),
+            Some(ledger_source),
             request.actor_id,
             Some("hostile_loss_event"),
             Some(&event_id.to_string()),

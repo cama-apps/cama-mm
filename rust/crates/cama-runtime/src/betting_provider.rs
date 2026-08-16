@@ -6900,6 +6900,7 @@ impl ProtectionGateway for BettingProtectionGateway {
                 .then_some(request.recipient_id),
             clamp_to_balance: request.clamp_to_balance,
             min_balance: None,
+            protect_self: false,
             metadata: json!({
                 "kind": request.kind,
                 "attempted_loss": request.attempted_loss,
@@ -6997,6 +6998,7 @@ fn apply_hostile_wheel_loss(
     recipient_id: Option<i64>,
     min_balance: Option<i64>,
     clamp_to_balance: bool,
+    protect_self: bool,
     now: i64,
 ) -> Result<cama_db::shop_runtime::HostileLossSettlement, String> {
     if requested <= 0 {
@@ -7021,6 +7023,7 @@ fn apply_hostile_wheel_loss(
             recipient_id,
             clamp_to_balance,
             min_balance,
+            protect_self,
             metadata: json!({"outcome": kind}),
             occurred_at: now,
             mana_date: mana_day_label(local),
@@ -7071,6 +7074,7 @@ fn apply_swamp_siphon(
         Some(user_id),
         Some(50),
         true,
+        false,
         unix_seconds()?.max(0),
     )?;
     Ok((settled.applied > 0).then_some(settled.applied))
@@ -7148,6 +7152,7 @@ struct WheelResolution {
     resolved: WheelValue,
     logged: i64,
     cooldown_outcome: CooldownOutcome,
+    direct_loss_settled: bool,
     extra_note: String,
     income: Option<cama_db::match_recording_repository::IncomeAwardReceipt>,
     /// Lightning is a server-wide outcome whose Neon hook needs both the
@@ -7168,6 +7173,7 @@ impl WheelResolution {
             resolved,
             logged,
             cooldown_outcome,
+            direct_loss_settled: false,
             extra_note,
             income: None,
             neon_lightning: None,
@@ -7176,6 +7182,11 @@ impl WheelResolution {
 
     fn with_lightning(mut self, total: i64, players: usize) -> Self {
         self.neon_lightning = Some((total, players));
+        self
+    }
+
+    fn with_direct_loss_settled(mut self) -> Self {
+        self.direct_loss_settled = true;
         self
     }
 
@@ -7263,21 +7274,37 @@ fn resolve_wheel_value(
                 ));
             }
             if adjusted < 0 {
-                LoanRepository::new(path)
-                    .transfer_balance_to_nonprofit_atomic(
-                        user_id,
-                        Some(guild_id),
-                        adjusted.saturating_abs(),
-                        &LedgerContext {
-                            source: Some("gamba".to_owned()),
-                            actor_id: Some(user_id),
-                            related_type: Some("wheel_spin".to_owned()),
-                            related_id: Some(event_id.to_owned()),
-                            reason: Some("gamba wheel loss reserve credit".to_owned()),
-                            metadata: Some(json!({"wedge": landed.label}).to_string()),
-                        },
+                let settlement = apply_hostile_wheel_loss(
+                    path,
+                    guild_id,
+                    user_id,
+                    user_id,
+                    adjusted.saturating_abs(),
+                    "wheel_loss",
+                    event_id,
+                    DbHostileDestination::Reserve,
+                    None,
+                    None,
+                    false,
+                    true,
+                    unix_seconds()?.max(0),
+                )?;
+                let applied = settlement.applied;
+                let shield_note = if settlement.absorbed > 0 {
+                    format!(
+                        "🌾 White Mana Shields: **{}** shield activation(s) absorbed **{}** {}.",
+                        1, settlement.absorbed, JOPACOIN_EMOTE,
                     )
-                    .map_err(|error| error.to_string())?;
+                } else {
+                    String::new()
+                };
+                return Ok(WheelResolution::new(
+                    WheelValue::Numeric(-applied),
+                    -applied,
+                    CooldownOutcome::Other,
+                    shield_note,
+                )
+                .with_direct_loss_settled());
             }
             return Ok(WheelResolution::new(
                 WheelValue::Numeric(adjusted),
@@ -7687,6 +7714,7 @@ fn resolve_recession(
             None,
             Some(cama_app::wheel::HOSTILE_LOSS_MIN_BALANCE),
             true,
+            false,
             now,
         )?;
         total = total.saturating_add(settled.applied);
@@ -7799,6 +7827,7 @@ fn resolve_hostile_mechanic(
             recipient_id,
             Some(50),
             clamp,
+            false,
             now,
         )?;
         total.set(total.get().saturating_add(result.applied));
@@ -8755,6 +8784,7 @@ fn spin_once(
         resolved,
         logged,
         cooldown_outcome,
+        direct_loss_settled,
         extra_note,
         income,
         neon_lightning,
@@ -8858,6 +8888,7 @@ fn spin_once(
         balance,
         next.next_spin_at,
         &presentation_note,
+        direct_loss_settled,
         income,
     );
     if bonus_spin {
@@ -9059,6 +9090,7 @@ fn wheel_attachment_for_option(
     .ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wheel_result_embed(
     landed_label: &str,
     resolved: WheelValue,
@@ -9066,6 +9098,7 @@ fn wheel_result_embed(
     balance: i64,
     next_spin_at: i64,
     extra_note: &str,
+    direct_loss_settled: bool,
     income: Option<cama_db::match_recording_repository::IncomeAwardReceipt>,
 ) -> InteractionEmbed {
     let (title, color, mut description) = match resolved {
@@ -9135,6 +9168,22 @@ fn wheel_result_embed(
                 )
             }
         }
+        WheelValue::Numeric(0) if direct_loss_settled && kind == WheelKind::Golden => (
+            "📉 OVEREXTENDED! 📉".to_owned(),
+            0x4a3000,
+            format!(
+                "**OVEREXTENDED**\n\nYou flew too close to the sun.\n\nLost **0** {}.\n\n*Pride goes before the fall.*",
+                JOPACOIN_EMOTE
+            ),
+        ),
+        WheelValue::Numeric(0) if direct_loss_settled => (
+            "💀 BANKRUPT! 💀".to_owned(),
+            0xed4245,
+            format!(
+                "**{landed_label}**\n\nYou lost **0** {}!\n\n*The wheel shows no mercy...*",
+                JOPACOIN_EMOTE
+            ),
+        ),
         WheelValue::Numeric(0) => (
             "🚫 LOSE A TURN 🚫".to_owned(),
             0x555555,
@@ -9733,6 +9782,7 @@ fn resolve_pending_wheel(
         resolved,
         logged,
         cooldown_outcome,
+        direct_loss_settled,
         extra_note,
         income,
         neon_lightning,
@@ -9831,6 +9881,7 @@ fn resolve_pending_wheel(
         balance,
         next.next_spin_at,
         &presentation_note,
+        direct_loss_settled,
         income,
     );
     if bonus_spin {

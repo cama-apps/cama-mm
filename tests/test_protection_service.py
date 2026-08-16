@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from commands.betting import BettingCommands
 from commands.betting_helpers.wheel_outcomes import (
     WheelOutcomeContext,
     WheelOutcomeProcessor,
@@ -16,12 +17,14 @@ from commands.betting_helpers.wheel_outcomes import (
 )
 from infrastructure.schema_manager import SchemaManager
 from repositories.buff_repository import BuffRepository
+from repositories.economy_event_repository import EconomyEventRepository
 from repositories.loan_repository import LoanRepository
 from repositories.mana_repository import ManaRepository
 from repositories.player_repository import PlayerRepository
 from repositories.protection_repository import ProtectionRepository
 from services.buff_service import BuffService
 from services.mana_service import get_today_pst
+from services.player_service import PlayerService
 from services.protection_service import ProtectionService
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
@@ -459,6 +462,183 @@ def test_self_caused_loss_bypasses_shields_and_retro(protection_stack):
     assert players.get_balance(10, TEST_GUILD_ID) == 80
     assert mana.get_white_shield_remaining(10, TEST_GUILD_ID) == 25
     assert service.reconcile_guardian(10, TEST_GUILD_ID, now - 60) == 0
+
+
+def test_explicit_self_protection_applies_aegis_to_wheel_loss(protection_stack):
+    service = protection_stack["service"]
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    _player(players, 10, 20)
+    buffs.grant_aegis(10, TEST_GUILD_ID)
+
+    result = service.apply_hostile_loss(
+        10,
+        TEST_GUILD_ID,
+        100,
+        "wheel_loss",
+        actor_id=10,
+        event_key="wheel-loss:self",
+        destination="reserve",
+        protect_self=True,
+    )
+
+    assert result.shieldable is True
+    assert (result.absorbed, result.applied) == (75, 25)
+    assert [detail.source for detail in result.details] == ["aegis"]
+    assert players.get_balance(10, TEST_GUILD_ID) == -5
+    assert protection_stack["loans"].get_nonprofit_fund(TEST_GUILD_ID) == 25
+
+
+def test_wheel_loss_gamba_debits_count_only_applied_loss(protection_stack):
+    service = protection_stack["service"]
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    volumes = EconomyEventRepository(protection_stack["db_path"])
+    _player(players, 10, 20)
+    buffs.grant_aegis(10, TEST_GUILD_ID)
+
+    wheel_loss = service.apply_hostile_loss(
+        10,
+        TEST_GUILD_ID,
+        100,
+        "wheel_loss",
+        actor_id=10,
+        event_key="wheel-loss:daily-volume",
+        destination="reserve",
+        protect_self=True,
+    )
+    red_shell_loss = service.apply_hostile_loss(
+        10,
+        TEST_GUILD_ID,
+        10,
+        "red_shell",
+        actor_id=99,
+        event_key="red-shell:daily-volume",
+        destination="reserve",
+    )
+
+    assert (wheel_loss.requested, wheel_loss.absorbed, wheel_loss.applied) == (100, 75, 25)
+    assert volumes.get_surface_daily_volumes(TEST_GUILD_ID, lookback_days=1)["gamba_debits"] == 25
+    with sqlite3.connect(protection_stack["db_path"]) as conn:
+        debit_entries = conn.execute(
+            """
+            SELECT source, related_type, related_id, delta
+            FROM economy_ledger_entries
+            WHERE guild_id = ? AND account_type = 'player' AND delta < 0
+            ORDER BY ledger_id
+            """,
+            (TEST_GUILD_ID,),
+        ).fetchall()
+    assert debit_entries[-2:] == [
+        ("gamba", "hostile_loss_event", str(wheel_loss.event_id), -25),
+        ("hostile_loss", "hostile_loss_event", str(red_shell_loss.event_id), -10),
+    ]
+
+
+async def _process_numeric_wheel_loss(
+    protection_stack,
+    *,
+    loss: int,
+    event_prefix: str,
+) -> WheelOutcomeState:
+    players = protection_stack["players"]
+    command = BettingCommands(
+        SimpleNamespace(protection_service=protection_stack["service"]),
+        betting_service=SimpleNamespace(),
+        match_service=SimpleNamespace(),
+        player_service=PlayerService(players),
+    )
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=SimpleNamespace(guild=None),
+        user_id=10,
+        guild_id=TEST_GUILD_ID,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix=event_prefix,
+    )
+    state = WheelOutcomeState(("OVEREXTENDED", -loss, "#000000"), 20)
+    await WheelOutcomeProcessor(context, state).process()
+    return state
+
+
+@pytest.mark.asyncio
+async def test_numeric_wheel_loss_consumes_aegis_and_reports_applied_loss(
+    protection_stack,
+):
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    _player(players, 10, 20)
+    buffs.grant_aegis(10, TEST_GUILD_ID)
+
+    state = await _process_numeric_wheel_loss(
+        protection_stack,
+        loss=100,
+        event_prefix="wheel:self-loss",
+    )
+
+    assert players.get_balance(10, TEST_GUILD_ID) == -5
+    assert protection_stack["loans"].get_nonprofit_fund(TEST_GUILD_ID) == 25
+    assert state.new_balance == -5
+    assert state.result_value == -25
+    assert state.log_result() == -25
+    assert (state.shield_absorbed_total, state.shielded_count) == (75, 1)
+
+
+@pytest.mark.asyncio
+async def test_numeric_wheel_loss_can_be_fully_absorbed(protection_stack):
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    _player(players, 10, 20)
+    buffs.grant_aegis(10, TEST_GUILD_ID)
+
+    state = await _process_numeric_wheel_loss(
+        protection_stack,
+        loss=50,
+        event_prefix="wheel:full-shield",
+    )
+
+    assert players.get_balance(10, TEST_GUILD_ID) == 20
+    assert protection_stack["loans"].get_nonprofit_fund(TEST_GUILD_ID) == 0
+    assert state.new_balance == 20
+    assert state.result_value == 0
+    assert state.log_result() == 0
+    assert (state.shield_absorbed_total, state.shielded_count) == (50, 1)
+
+
+@pytest.mark.asyncio
+async def test_numeric_wheel_loss_applies_fully_after_aegis_is_exhausted(
+    protection_stack,
+):
+    service = protection_stack["service"]
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    _player(players, 10, 20)
+    buffs.grant_aegis(10, TEST_GUILD_ID)
+    service.apply_hostile_loss(
+        10,
+        TEST_GUILD_ID,
+        75,
+        "red_shell",
+        actor_id=99,
+        event_key="red-shell:exhaust-aegis",
+    )
+
+    state = await _process_numeric_wheel_loss(
+        protection_stack,
+        loss=100,
+        event_prefix="wheel:exhausted-shield",
+    )
+
+    assert players.get_balance(10, TEST_GUILD_ID) == -80
+    assert protection_stack["loans"].get_nonprofit_fund(TEST_GUILD_ID) == 100
+    assert state.new_balance == -80
+    assert state.result_value == -100
+    assert state.log_result() == -100
+    assert (state.shield_absorbed_total, state.shielded_count) == (0, 0)
 
 
 def test_guardian_retro_reimburses_once(protection_stack):

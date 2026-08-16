@@ -28,6 +28,7 @@ class HostileLossKind(StrEnum):
     TRICKLE_DOWN = "trickle_down"
     HOSTILE_TAKEOVER = "hostile_takeover"
     RECESSION = "recession"
+    WHEEL_LOSS = "wheel_loss"
     DIG_SPLASH_BURN = "dig_splash_burn"
     DIG_SPLASH_STEAL = "dig_splash_steal"
     SABOTAGE = "sabotage"

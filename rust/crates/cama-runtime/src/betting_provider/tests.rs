@@ -1,9 +1,10 @@
 use super::*;
 use cama_app::match_recording::GamesMilestone;
 use cama_db::core_repositories::NewPlayer;
+use cama_db::economy_event_repository::EconomyEventRepository;
 use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
 use cama_db::schema_manager::initialize_or_migrate;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use std::io::Cursor;
 use tempfile::NamedTempFile;
 
@@ -1451,6 +1452,7 @@ fn heist_result_embed_uses_python_outcome_copy_without_generic_duplication() {
         123,
         1_800_000_000,
         &note,
+        false,
         None,
     );
     assert_eq!(embed.title.as_deref(), Some("🥇 HEIST! 🥇"));
@@ -2278,6 +2280,221 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
             .expect("read extended penalty"),
         3
     );
+}
+
+#[test]
+fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    let wedge = cama_app::wheel::WheelWedge {
+        label: "BANKRUPT".to_owned(),
+        value: WheelValue::Numeric(-20),
+        color: "#1a1a1a",
+    };
+
+    for (capacity, expected_applied) in [(5, 15), (20, 0), (0, 20)] {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(7, "spinner", Some(42)))
+            .expect("spinner");
+        players.update_balance(7, Some(42), 100).expect("balance");
+        Connection::open(database.path())
+            .expect("open database")
+            .execute(
+                "INSERT INTO manashop_buffs(
+                     discord_id,guild_id,buff_type,granted_at,expires_at,triggered,data
+                 ) VALUES(?1,?2,'aegis',0,2000000000,0,?3)",
+                params![
+                    7,
+                    42,
+                    format!(
+                        r#"{{"capacity":{capacity},"capacity_remaining":{capacity},"rate":1.0}}"#
+                    ),
+                ],
+            )
+            .expect("seed Aegis");
+
+        let event_id = format!("shielded-bankrupt-{capacity}");
+        let resolution = resolve_wheel_value(
+            database.path(),
+            42,
+            7,
+            100,
+            &wedge,
+            WheelKind::Bankrupt,
+            &ManaEffects::default(),
+            &runtime,
+            &event_id,
+            &BTreeSet::new(),
+            1.0,
+            1.0,
+            false,
+            None,
+            None,
+        )
+        .expect("resolve bankrupt loss");
+
+        assert_eq!(resolution.resolved, WheelValue::Numeric(-expected_applied));
+        assert_eq!(resolution.logged, -expected_applied);
+        assert_eq!(resolution.cooldown_outcome, CooldownOutcome::Other);
+        assert_eq!(
+            resolution.extra_note.contains("White Mana Shields"),
+            capacity > 0
+        );
+        assert_eq!(
+            players
+                .get_by_id(7, Some(42))
+                .expect("spinner lookup")
+                .expect("spinner")
+                .jopacoin_balance,
+            100 - expected_applied
+        );
+        assert_eq!(
+            LoanRepository::new(database.path())
+                .get_nonprofit_fund(Some(42))
+                .expect("reserve"),
+            expected_applied
+        );
+        assert_eq!(
+            EconomyEventRepository::new(database.path())
+                .get_surface_daily_volumes(Some(42), 1, 1_700_000_000)
+                .expect("surface volumes")
+                .gamba_debits,
+            expected_applied as f64
+        );
+
+        let retry = resolve_wheel_value(
+            database.path(),
+            42,
+            7,
+            100,
+            &wedge,
+            WheelKind::Bankrupt,
+            &ManaEffects::default(),
+            &runtime,
+            &event_id,
+            &BTreeSet::new(),
+            1.0,
+            1.0,
+            false,
+            None,
+            None,
+        )
+        .expect("retry bankrupt loss");
+        assert_eq!(retry.logged, -expected_applied);
+        assert_eq!(
+            players
+                .get_by_id(7, Some(42))
+                .expect("spinner lookup")
+                .expect("spinner")
+                .jopacoin_balance,
+            100 - expected_applied
+        );
+        assert_eq!(
+            LoanRepository::new(database.path())
+                .get_nonprofit_fund(Some(42))
+                .expect("reserve after retry"),
+            expected_applied
+        );
+        assert_eq!(
+            Connection::open(database.path())
+                .expect("open database")
+                .query_row(
+                    "SELECT COUNT(*) FROM hostile_loss_events WHERE event_key=?1",
+                    [&event_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("hostile event count"),
+            1
+        );
+    }
+}
+
+#[test]
+fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_history_identity() {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    for (kind, label, expected_title) in [
+        (WheelKind::Bankrupt, "BANKRUPT", "BANKRUPT"),
+        (WheelKind::Golden, "OVEREXTENDED", "OVEREXTENDED"),
+    ] {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(7, "spinner", Some(42)))
+            .expect("spinner");
+        players.update_balance(7, Some(42), 100).expect("balance");
+        Connection::open(database.path())
+            .expect("open database")
+            .execute(
+                "INSERT INTO manashop_buffs(
+                     discord_id,guild_id,buff_type,granted_at,expires_at,triggered,data
+                 ) VALUES(7,42,'aegis',0,2000000000,0,
+                     '{\"capacity\":20,\"capacity_remaining\":20,\"rate\":1.0}')",
+                [],
+            )
+            .expect("seed Aegis");
+        let event_id = format!("shielded-{label}-completion");
+        let settled = resolve_pending_wheel(
+            database.path(),
+            42,
+            7,
+            100,
+            kind,
+            &ManaEffects::default(),
+            &runtime,
+            &event_id,
+            &WheelOption {
+                label: label.to_owned(),
+                value: WheelValue::Numeric(-20),
+                color: "#1a1a1a",
+            },
+            1_700_000_000,
+            false,
+            false,
+            None,
+            1.0,
+            1.0,
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("resolve pending numeric loss");
+        assert!(
+            settled
+                .completion_embed
+                .title
+                .as_deref()
+                .is_some_and(|title| title.contains(expected_title))
+        );
+        assert!(
+            settled
+                .completion_embed
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("**0**") && !description.contains("LOSE A TURN")
+                })
+        );
+        let connection = Connection::open(database.path()).expect("open database");
+        let (logged, outcome_code): (i64, String) = connection
+            .query_row(
+                "SELECT result,outcome_code FROM wheel_spins WHERE event_id=?1",
+                [&event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("wheel history");
+        assert_eq!(logged, 0);
+        assert_eq!(outcome_code, label);
+    }
 }
 
 #[test]

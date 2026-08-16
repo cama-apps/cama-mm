@@ -35,6 +35,7 @@ class ProtectionService:
         recipient_id: int | None = None,
         clamp_to_balance: bool = False,
         min_balance: int | None = None,
+        protect_self: bool = False,
         metadata: Mapping[str, object] | None = None,
         occurred_at: int | None = None,
     ) -> HostileLossResult:
@@ -55,6 +56,7 @@ class ProtectionService:
             recipient_id=recipient_id,
             clamp_to_balance=clamp_to_balance,
             min_balance=min_balance,
+            protect_self=protect_self,
             metadata=metadata,
             occurred_at=occurred_at,
         )
@@ -104,6 +106,7 @@ class ProtectionService:
         recipient_id: int | None = None,
         clamp_to_balance: bool = False,
         min_balance: int | None = None,
+        protect_self: bool = False,
         metadata: Mapping[str, object] | None = None,
         occurred_at: int | None = None,
     ) -> dict[str, Any]:
@@ -140,6 +143,7 @@ class ProtectionService:
             "recipient_id": (int(recipient_id) if recipient_id is not None else None),
             "clamp_to_balance": bool(clamp_to_balance),
             "min_balance": min_balance,
+            "protect_self": bool(protect_self),
             "metadata": dict(metadata or {}),
             "occurred_at": int(occurred_at if occurred_at is not None else time.time()),
             "mana_date": get_today_pst(),
