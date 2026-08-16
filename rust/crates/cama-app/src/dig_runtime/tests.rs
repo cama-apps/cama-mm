@@ -897,6 +897,75 @@ fn paid_dig_debits_exactly_once_and_records_a_distinct_cost_ledger_entry() {
 }
 
 #[test]
+fn free_dig_commits_for_a_player_with_negative_balance() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("canonical migration");
+    let connection = Connection::open(database.path()).expect("open migrated database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match Python foreign-key behavior");
+    connection
+        .execute(
+            "INSERT INTO players
+                 (discord_id,guild_id,discord_username,jopacoin_balance)
+                 VALUES (?1,?2,?3,?4)",
+            params![-9_007_i64, 42_i64, "debtor-miner", -100_i64],
+        )
+        .expect("insert indebted player");
+    connection
+        .execute(
+            "INSERT INTO tunnels
+                 (discord_id,guild_id,depth,max_depth,total_digs,last_dig_at)
+                 VALUES (?1,?2,10,10,1,?3)",
+            params![-9_007_i64, 42_i64, 1_700_000_000_i64],
+        )
+        .expect("insert ready tunnel");
+    connection
+        .execute("DELETE FROM economy_ledger_entries", [])
+        .expect("clear setup ledger");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: -9_007,
+            guild_id: 42,
+            now: 1_700_007_200,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("free dig while indebted");
+
+    assert!(outcome.success);
+    assert_eq!(outcome.paid_dig_cost, 0);
+    let connection = Connection::open(database.path()).expect("reopen debtor database");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT p.jopacoin_balance,t.total_digs
+                 FROM players p
+                 JOIN tunnels t USING (discord_id,guild_id)
+                 WHERE p.discord_id=?1 AND p.guild_id=?2",
+                params![-9_007_i64, 42_i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("debtor Dig state"),
+        (outcome.balance_after, 2)
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2
+                   AND source='dig' AND reason='paid dig cost'",
+                params![-9_007_i64, 42_i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("no paid cost ledger"),
+        0
+    );
+}
+
+#[test]
 fn sqlite_commit_preserves_distinct_trailing_tunnel_columns() {
     let database = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(database.path()).expect("canonical migration");

@@ -1136,15 +1136,14 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         }
 
         let balance_cost = request.balance_cost.max(0);
-        if request.expected.balance < balance_cost {
-            return Err(DigRuntimeStoreError::InsufficientFunds);
-        }
-        let balance_after_cost = request
-            .expected
-            .balance
-            .checked_sub(balance_cost)
-            .ok_or(DigRuntimeStoreError::InsufficientFunds)?;
+        let mut balance_after_cost = request.expected.balance;
         if balance_cost > 0 {
+            if balance_after_cost < balance_cost {
+                return Err(DigRuntimeStoreError::InsufficientFunds);
+            }
+            balance_after_cost = balance_after_cost
+                .checked_sub(balance_cost)
+                .ok_or(DigRuntimeStoreError::InsufficientFunds)?;
             set_runtime_ledger_context(
                 &transaction,
                 discord_id,
