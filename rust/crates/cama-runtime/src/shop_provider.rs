@@ -3110,6 +3110,7 @@ fn hostile_request(
         recipient_id,
         clamp_to_balance: true,
         min_balance: Some(min_balance),
+        protect_self: false,
         metadata: json!({
             "kind": kind,
             "attempted_loss": requested,

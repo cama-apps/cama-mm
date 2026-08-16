@@ -138,6 +138,7 @@ class WheelOutcomeState:
 
     shield_absorbed_total: int = 0
     shielded_count: int = 0
+    wheel_loss_settled: bool = False
     extend_games_added: int = 0
     extend_new_total: int = 0
 
@@ -239,6 +240,7 @@ class WheelOutcomeState:
             "bomb_omb_missed": self.bomb_omb_missed,
             "shield_absorbed_total": self.shield_absorbed_total,
             "shielded_count": self.shielded_count,
+            "wheel_loss_settled": self.wheel_loss_settled,
         }
 
 
@@ -1331,27 +1333,25 @@ class WheelOutcomeProcessor:
                 self.state.pardon_consumed = True
                 return
 
-        await self._adjust_spinner(
-            value,
-            "gamba wheel loss",
-            str(self.state.result_wedge[0]),
+        wedge_label = str(self.state.result_wedge[0])
+        settled = await self.command._apply_hostile_gamba_loss(
+            victim_id=self.context.user_id,
+            guild_id=self.context.guild_id,
+            amount=abs(value),
+            actor_id=self.context.user_id,
+            event_key=f"{self.context.hostile_event_prefix}:{self.context.user_id}",
+            outcome="WHEEL_LOSS",
+            destination="reserve",
+            protect_self=True,
+            victim_balance=self.state.new_balance,
+            metadata={"wedge": wedge_label},
         )
-        await self._refresh_balance()
-        if self.command.loan_service:
-            try:
-                await asyncio.to_thread(
-                    self.command.loan_service.add_to_nonprofit_fund,
-                    self.context.guild_id,
-                    abs(value),
-                    source="gamba",
-                    actor_id=self.context.user_id,
-                    related_type="wheel_spin",
-                    related_id=str(self.state.result_wedge[0]),
-                    reason="gamba bankrupt wheel loss reserve credit",
-                    metadata={"wedge": str(self.state.result_wedge[0])},
-                )
-            except Exception:
-                logger.warning("Failed to add wheel loss to nonprofit fund")
+        self.state.new_balance = settled.victim_balance_after
+        self.state.record_shield(settled)
+        self.state.wheel_loss_settled = True
+        self.state.replace_result(
+            (wedge_label, -settled.applied, self.state.result_wedge[2])
+        )
 
     async def _leaderboard(self, *, limit: int):
         # Filter after fetching all rows so a departed raw top-N player cannot

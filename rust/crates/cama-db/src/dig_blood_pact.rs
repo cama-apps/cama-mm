@@ -155,6 +155,7 @@ impl DigBloodPactRepository {
                 recipient_id: existing.recipient_id,
                 clamp_to_balance: false,
                 min_balance: None,
+                protect_self: false,
                 metadata: Value::Null,
                 occurred_at: request.occurred_at,
                 mana_date: request.mana_date.clone(),
@@ -210,6 +211,7 @@ impl DigBloodPactRepository {
             recipient_id: Some(claim.skimmer_id),
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({
                 "origin": "dig",
                 "earning": request.earning,

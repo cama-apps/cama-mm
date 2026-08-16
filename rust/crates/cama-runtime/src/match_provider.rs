@@ -1077,6 +1077,7 @@ impl ProtectionGateway for MatchProtectionGateway {
                 .then_some(request.recipient_id),
             clamp_to_balance: request.clamp_to_balance,
             min_balance: None,
+            protect_self: false,
             metadata: json!({
                 "kind": request.kind,
                 "attempted_loss": request.attempted_loss,

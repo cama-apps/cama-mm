@@ -1664,6 +1664,7 @@ impl DigEventRuntimeService {
                     .then_some(request.discord_id),
                 clamp_to_balance: destination == HostileDestination::Burn,
                 min_balance: Some(HOSTILE_LOSS_MIN_BALANCE),
+                protect_self: false,
                 metadata: json!({
                     "event_name": resolution.event_name,
                     "strategy": splash.strategy,
