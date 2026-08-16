@@ -1,6 +1,6 @@
 //! Existing-schema reads needed to reconstruct free-dig reminder deadlines.
 //!
-//! This adapter never creates or migrates schema. Database admission must
+//! This adapter never creates or migrates schema. Database initialization must
 //! complete before it is used by the runtime.
 
 use std::collections::{BTreeMap, BTreeSet};

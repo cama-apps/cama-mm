@@ -26,11 +26,12 @@ use crate::gateway_events::{
 use crate::ids::blocking as sqlite;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
-    InteractionHandler, InteractionHandlerError, InteractionModal, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionStringSelect,
-    InteractionStringSelectOption, InteractionTextInput, InteractionTextInputStyle,
-    InteractionValue, RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton,
+    InteractionButtonStyle, InteractionEmbed, InteractionHandler, InteractionHandlerError,
+    InteractionModal, InteractionOption, InteractionRequest, InteractionResponder,
+    InteractionResponse, InteractionStringSelect, InteractionStringSelectOption,
+    InteractionTextInput, InteractionTextInputStyle, InteractionValue, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 use crate::worker::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
@@ -969,6 +970,18 @@ struct SurveyInteractionHandler {
 
 #[async_trait]
 impl InteractionHandler for SurveyInteractionHandler {
+    fn acknowledgement_policy(
+        &self,
+        request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        match request {
+            InteractionRequest::Component { custom_id, .. } if custom_id.ends_with(":text") => {
+                InteractionAcknowledgementPolicy::Modal
+            }
+            _ => InteractionAcknowledgementPolicy::Automatic,
+        }
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,
@@ -1550,6 +1563,29 @@ impl SurveyInteractionHandler {
         }
         let action = parse_response_component(&custom_id)?;
         let discord_id = signed(user_id, "respondent")?;
+        if action.kind == ResponseActionKind::Text {
+            return responder
+                .show_modal(InteractionModal {
+                    custom_id: format!(
+                        "survey:{}:question:{}:text-modal",
+                        action.survey_id,
+                        action.question_id.unwrap_or_default()
+                    ),
+                    title: "Survey response".to_owned(),
+                    inputs: vec![InteractionTextInput {
+                        custom_id: TEXT_MODAL_FIELD.to_owned(),
+                        label: "Your answer".to_owned(),
+                        style: InteractionTextInputStyle::Paragraph,
+                        required: true,
+                        placeholder: None,
+                        min_length: None,
+                        max_length: Some(1_000),
+                        value: None,
+                    }],
+                })
+                .await
+                .map_err(|error| error.to_string());
+        }
         let repository = self.state.repository.clone();
         let session = sqlite("load survey interaction session", move || {
             repository
@@ -1560,45 +1596,6 @@ impl SurveyInteractionHandler {
         .ok_or_else(|| "This survey response isn't yours.".to_owned())?;
         if session.recipient.discord_id != discord_id {
             return Err("This survey response isn't yours.".to_owned());
-        }
-        if action.kind == ResponseActionKind::Text {
-            let existing = session
-                .answers
-                .iter()
-                .find(|answer| answer.question_id == action.question_id.unwrap_or_default())
-                .and_then(|answer| {
-                    (!answer.skipped)
-                        .then(|| answer.text_value.clone())
-                        .flatten()
-                });
-            return responder
-                .show_modal(InteractionModal {
-                    custom_id: format!(
-                        "survey:{}:question:{}:text-modal",
-                        action.survey_id,
-                        action.question_id.unwrap_or_default()
-                    ),
-                    title: format!(
-                        "Question {}",
-                        session
-                            .questions
-                            .iter()
-                            .find(|question| { Some(question.question_id) == action.question_id })
-                            .map_or(1, |question| question.position)
-                    ),
-                    inputs: vec![InteractionTextInput {
-                        custom_id: TEXT_MODAL_FIELD.to_owned(),
-                        label: "Your answer".to_owned(),
-                        style: InteractionTextInputStyle::Paragraph,
-                        required: true,
-                        placeholder: None,
-                        min_length: None,
-                        max_length: Some(1_000),
-                        value: existing,
-                    }],
-                })
-                .await
-                .map_err(|error| error.to_string());
         }
         responder
             .defer(false)

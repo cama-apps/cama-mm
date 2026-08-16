@@ -1,7 +1,7 @@
 //! Existing-schema SQLite reads used by the Scout command.
 //!
-//! The Rust startup migration runner owns schema admission. This repository
-//! opens the admitted database without SQLite's create flag and performs only
+//! The Rust startup migration runner owns schema initialization. This repository
+//! opens the initialized database without SQLite's create flag and performs only
 //! the aggregate reads used by the live Scout command.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -810,12 +810,12 @@ async fn fixed_button_and_encoded_modal_survive_a_provider_restart() {
         .expect("buy modal");
     assert_eq!(
         modal.custom_id,
-        format!("{BUY_MODAL_PREFIX}{prediction_id}:yes")
+        format!("{BUY_MODAL_PREFIX}{THREAD_ID}:yes")
     );
-    assert!(modal.title.starts_with("Buy YES @ 51%"));
+    assert_eq!(modal.title, "Buy YES contracts");
 
     // Rebuild the complete provider to model a process restart. The modal ID
-    // carries the durable market key and does not depend on an in-memory view.
+    // carries the durable thread key and does not depend on an in-memory view.
     let restarted_registry = fixture.registry();
     let buy_responder = Arc::new(CapturingResponder::default());
     restarted_registry
@@ -864,7 +864,7 @@ async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate
     let prediction_id = fixture.market("Will a stale callback stay harmless?");
 
     // The first provider instance owns the interaction that was rendered
-    // before the process boundary.  The modal ID is the durable market key,
+    // before the process boundary.  The modal ID is the durable thread key,
     // not an in-memory view handle.
     let first_registry = fixture.registry();
     let first_responder = Arc::new(CapturingResponder::default());
@@ -894,7 +894,7 @@ async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate
         .expect("first-process buy modal");
     assert_eq!(
         stale_modal.custom_id,
-        format!("{BUY_MODAL_PREFIX}{prediction_id}:yes")
+        format!("{BUY_MODAL_PREFIX}{THREAD_ID}:yes")
     );
     drop(first_registry);
 
@@ -1022,8 +1022,9 @@ async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate
             .is_empty()
     );
 
-    // The fixed button itself is stale too: it must produce one private
-    // denial and never open a second modal or trigger a Discord edit.
+    // Buttons open their modal without database/network work. The durable
+    // market check happens on submit, so even a stale button is acknowledged
+    // immediately and cannot trigger a Discord edit by itself.
     let stale_button_responder = Arc::new(CapturingResponder::default());
     stale_registry
         .component_handler(BUY_YES_ID)
@@ -1044,12 +1045,8 @@ async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate
         .await
         .expect("stale fixed button is handled safely");
     let stale_button_responses = stale_button_responder.snapshot();
-    assert_eq!(stale_button_responses.immediate.len(), 1);
-    assert_eq!(
-        stale_button_responses.immediate[0].content,
-        "Market is not open for trading."
-    );
-    assert!(stale_button_responses.modals.is_empty());
+    assert!(stale_button_responses.immediate.is_empty());
+    assert_eq!(stale_button_responses.modals.len(), 1);
     assert_eq!(
         fixture.command.edits.lock().expect("terminal edits").len(),
         1,

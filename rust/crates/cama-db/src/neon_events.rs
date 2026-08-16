@@ -1,6 +1,6 @@
 //! Existing-schema persistence for Neon Terminal one-time events.
 //!
-//! Production code only opens an admitted, migrated database.  In particular,
+//! Production code only opens an initialized, migrated database. In particular,
 //! this adapter never creates or alters `neon_events`; test schema setup stays
 //! with the Rust migration authority.
 

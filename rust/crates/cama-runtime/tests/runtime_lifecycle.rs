@@ -1,35 +1,24 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cama_runtime::gateway::{DatabaseAdmissionReport, GatewayError, GatewaySession};
+use cama_runtime::gateway::{DatabaseInitializationReport, GatewayError, GatewaySession};
 use cama_runtime::{
-    BackgroundWorker, BackgroundWorkerSpec, CommandSpec, DatabaseAdmission, DiscordToken,
-    GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks, InteractionHandler,
-    InteractionHandlerError, InteractionRequest, InteractionResponder, LifecycleEvent,
-    ReconnectPolicy, RegistryBuilder, Runtime, RuntimeConfig, UsageMonitor, WorkerContext,
+    BackgroundWorker, BackgroundWorkerSpec, CommandSpec, DiscordToken, GatewaySessionEnd,
+    GatewayTransport, GlobalInteractionHooks, InteractionHandler, InteractionHandlerError,
+    InteractionRequest, InteractionResponder, LifecycleEvent, ReconnectPolicy, RegistryBuilder,
+    Runtime, RuntimeConfig, UsageMonitor, WorkerContext,
 };
 
-#[derive(Clone)]
-struct MockDatabase {
-    admissions: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl DatabaseAdmission for MockDatabase {
-    async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
-        self.admissions.fetch_add(1, Ordering::SeqCst);
-        Ok(DatabaseAdmissionReport {
-            path: path.to_path_buf(),
-            applied_migrations: 42,
-            required_migrations: 42,
-            newly_applied_migrations: 0,
-            created_tables: 0,
-            rebuilt_tables: 0,
-            historical_extra_migrations: 0,
-        })
+fn initialized_database(path: &str) -> DatabaseInitializationReport {
+    DatabaseInitializationReport {
+        path: path.into(),
+        applied_migrations: 42,
+        required_migrations: 42,
+        newly_applied_migrations: 0,
+        created_tables: 0,
+        rebuilt_tables: 0,
     }
 }
 
@@ -171,7 +160,6 @@ async fn startup_ready_registration_reconnect_and_shutdown_are_supervised() {
         })
         .expect("register command");
 
-    let admissions = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::new(AtomicUsize::new(0));
     let worker_calls = Arc::new(AtomicUsize::new(0));
     let config = RuntimeConfig {
@@ -187,9 +175,7 @@ async fn startup_ready_registration_reconnect_and_shutdown_are_supervised() {
         MockGateway {
             sessions: Arc::clone(&sessions),
         },
-        MockDatabase {
-            admissions: Arc::clone(&admissions),
-        },
+        initialized_database("/tmp/cama-runtime-test.db"),
     )
     .with_global_interaction_hooks(GlobalInteractionHooks::new(UsageMonitor::default()))
     .with_worker(
@@ -237,7 +223,6 @@ async fn startup_ready_registration_reconnect_and_shutdown_are_supervised() {
         observed.push(event);
     }
 
-    assert_eq!(admissions.load(Ordering::SeqCst), 1);
     assert_eq!(sessions.load(Ordering::SeqCst), 2);
     assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
     assert_eq!(worker_calls.load(Ordering::SeqCst), 2);
@@ -294,7 +279,6 @@ async fn shutdown_during_worker_restart_backoff_prevents_stale_restart() {
             }),
         })
         .expect("register command");
-    let admissions = Arc::new(AtomicUsize::new(0));
     let sessions = Arc::new(AtomicUsize::new(0));
     let worker_calls = Arc::new(AtomicUsize::new(0));
     let config = RuntimeConfig {
@@ -310,9 +294,7 @@ async fn shutdown_during_worker_restart_backoff_prevents_stale_restart() {
         MockGateway {
             sessions: Arc::clone(&sessions),
         },
-        MockDatabase {
-            admissions: Arc::clone(&admissions),
-        },
+        initialized_database("/tmp/cama-runtime-worker-shutdown.db"),
     )
     .with_global_interaction_hooks(GlobalInteractionHooks::new(UsageMonitor::default()))
     .with_worker(
@@ -361,7 +343,6 @@ async fn shutdown_during_worker_restart_backoff_prevents_stale_restart() {
         observed.push(event);
     }
 
-    assert_eq!(admissions.load(Ordering::SeqCst), 1);
     assert!(sessions.load(Ordering::SeqCst) >= 1);
     assert_eq!(worker_calls.load(Ordering::SeqCst), 1);
     assert!(observed.iter().any(|event| matches!(

@@ -1,203 +1,135 @@
 # CLAUDE.md
 
-## Git Commits
+Rust is the primary implementation language; Python is retained only as a legacy correctness reference.
 
-When committing, do not include the Co-Authored-By trailer.
+## Git
 
-**Before pushing**, always run `uv run --locked ruff check .` and fix any lint errors. Use `uv run --locked ruff check --fix .` for auto-fixable issues.
+- Before pushing, run the Rust formatting, lint, and test gates below.
 
-## Project Overview
+## Project
 
-Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements:
-- **Balanced team shuffling** using Glicko-2 ratings with role-aware optimization
-- **Captain's Draft mode** with coinflip, side/pick selection, and snake draft
-- **Dual rating systems**: Glicko-2 (primary) and OpenSkill Plackett-Luce (fantasy-weighted)
-- **Player registration** with OpenDota MMR integration
-- **Match recording** with rating updates, pairwise statistics, and fantasy points
-- **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy (unified for shuffle and draft)
-- **Prediction markets** for yes/no outcomes with resolution voting and payouts
-- **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
-- **Match enrichment** via OpenDota for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
-- **Dota 2 reference** commands for hero/ability lookup (via dotabase)
-- **Dig mining game** with depth layers, bosses, items, pickaxes, quests, and NPCs
-- **Pets (Camagotchi)** with hatching, care, brawls, and the altar
-- **Mafia** social deduction game
-- **Duels** between players
-- **Vanity tax** on wealth
-- **Mana** resource system with effects
-- **Trivia** (general and player-based) with image questions
-- **Wrapped** year-in-review summaries
-- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations)
-- **AI features** (optional): Flavor text generation and natural language SQL queries via the configured Groq or Cerebras LLM
+Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It provides balanced shuffling, captain drafts, rating systems, registration and OpenDota integration, match recording and enrichment, betting and prediction markets, the Jopacoin economy, Dig, pets, Mafia, duels, mana, trivia, Wrapped, image rendering, reminders, moderation, and optional AI flavor/SQL features.
+
+Production behavior lives in `rust/`. Do not add new production behavior to the Python tree. Consult Python only to recover legacy contracts such as exact user-facing copy, edge cases, database semantics, or historical behavior, then encode those contracts in Rust implementation and Rust tests.
+
+## Workspace
+
+The Rust workspace uses edition 2024 and Rust 1.94:
+
+- `rust/crates/cama-domain`: transport- and storage-independent domain policies and models.
+- `rust/crates/cama-db`: Rust-owned SQLite initialization, migrations, integrity checks, and repositories.
+- `rust/crates/cama-app`: application services and orchestration behind typed persistence, clock, randomness, AI, and Discord ports.
+- `rust/crates/cama-runtime`: production Tokio/Serenity runtime, command and component providers, workers, gateway recovery, health, and composition root.
+- `rust/xtask`: repository audits and retained parity/cutover diagnostics.
+
+Dependency direction is Domain → Database/Application → Runtime. Keep domain logic independent of Serenity and concrete storage. Keep SQLite access in `cama-db` and compose production adapters in `cama-runtime`.
 
 ## Commands
 
-**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Run from the repository root:
 
 ```bash
-# Install dependencies
-uv sync --frozen
+# Format
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 
-# Run the bot
-uv run python bot.py
+# Lint
+cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 
-# Run all tests (parallel)
-uv run --locked pytest
+# Test the complete Rust workspace
+cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
 
-# Run specific test file
-uv run --locked pytest tests/test_e2e_core.py -v
+# Test one crate or one contract
+cargo test --locked --manifest-path rust/Cargo.toml -p cama-runtime
 
-# Run single test
-uv run --locked pytest tests/test_betting_service.py::TestBettingCore::test_can_place_multiple_bets_same_team -v
+# Compile without running tests
+cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --no-run
 
-# Restart the bot — on the server only, not the (Windows) dev box
-# (use anchored pattern to avoid killing the shell itself)
-pkill -f "^uv run python bot.py$" 2>/dev/null || true; sleep 1; nohup uv run python bot.py > /tmp/bot.log 2>&1 &
+# Run the production runtime; DB_PATH defaults to cama_shuffle.db
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- serve
 
-# Check bot logs (on the server)
-tail -f /tmp/bot.log
+# Read-only operational checks
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- db-check --db-path /path/to/cama_shuffle.db
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- inventory
 ```
 
-## Architecture
+Rust tests are the default and required validation. Do not run Ruff, pytest, or other Python gates unless the task explicitly changes Python or explicitly requests a legacy differential/parity audit.
 
-**Layered Architecture:** Domain → Services → Repositories → Database
+## Architecture and conventions
 
-## Key Patterns
+### Discord providers
 
-### Repository Pattern
-All data access goes through interfaces in `repositories/interfaces.py`. Services receive repositories via constructor injection:
+- Define slash-command and component schemas with `CommandSpec`, `CommandOptionSpec`, and `ComponentRoute` in `cama-runtime`.
+- Implement behavior through `InteractionHandler` and `InteractionResponder`; keep Discord payload construction typed.
+- Discord allows one initial interaction callback. Slow component and modal-submit routes use the runtime's automatic acknowledgement coordinator. Buttons that must open a modal return `InteractionAcknowledgementPolicy::Modal`, open the modal immediately, and move database/network validation to modal submission.
+- After a deferred component update, edit the original response or send an appropriate follow-up. Never perform database, network, lock-wait, or image-render work before a modal is opened or an interaction is acknowledged.
+- Preserve the 100 top-level Discord command limit and prefer subcommands.
 
-### Guild-Aware Design (Multi-Guild Isolation)
-All data is segmented by `guild_id` to support running the bot in multiple Discord servers with complete isolation. Each guild has its own players, ratings, balances, matches, and economy.
+### Guild isolation
 
-**Composite Primary Keys:**
-Most tables use `(discord_id, guild_id)` as the composite primary key:
-- `players` - Player data is per-guild (same Discord user can have different ratings in different guilds)
-- `matches` - Matches belong to a specific guild
-- `bets`, `predictions`, `lobbies` - All guild-scoped
-- `rating_history`, `recalibration_state`, `bankruptcy_state`, `loan_state` - Per-guild tracking
+- Persistent guild data is scoped by `guild_id`; most player state uses `(discord_id, guild_id)` identity.
+- Discord IDs are converted to signed `i64` before SQLite access and must fail closed if out of range.
+- `None` remains meaningful for DM/global behavior. Do not silently borrow data across guilds.
+- Steam/account-link identity is intentionally global where the repository contract says so.
 
-**guild_id Normalization:**
-- `guild_id=None` is normalized to `0` in all repositories via `normalize_guild_id()`
-- Use `guild_id=None` or `guild_id=0` for DMs or single-guild tests
-- Commands extract guild_id via: `guild_id = interaction.guild.id if interaction.guild else None`
+### Database
 
-**Cross-Guild Exceptions:**
-These intentionally remain cross-guild:
-- `player_steam_ids` - Steam accounts are globally unique, not per-guild
-- Steam ID lookups (`get_steam_ids`, `get_discord_id_by_steam_id`) - Global for match discovery
-
-### Atomic Database Operations
-Critical operations use `BEGIN IMMEDIATE` for write locks:
-
-## Domain Models
-
-### Player (`domain/models/player.py`)
-
-### Team (`domain/models/team.py`)
-
-### Lobby (`domain/models/lobby.py`)
-
-### DraftState (`domain/models/draft.py`)
-
-## Key Services
-
-### MatchService (`services/match_service.py`)
-
-### BettingService (`services/betting_service.py`)
-
-### PredictionService (`services/prediction_service.py`)
-
-### AIService (`services/ai_service.py`)
-
-## Database Schema (Key Tables)
-
-### player_steam_ids (Multi-Steam ID Support)
+- `cama-db` owns schema initialization and ongoing migrations.
+- Preserve SQLite WAL mode, the five-second busy timeout, signed IDs, the existing migration ledger, and repository-specific coercion behavior.
+- Use `BEGIN IMMEDIATE` or an existing atomic repository operation for economic, match, voting, settlement, and other race-sensitive mutations.
+- Do not add DDL inside repositories. Extend the canonical schema/migration manager and add Rust migration and repository tests.
 
 
-## Slash Commands Quick Reference
-If you need more information on Slash Commands, read `README.md`
+### Application services
+
+- Put reusable policy in `cama-domain` and orchestration in `cama-app`.
+- Inject repositories and external capabilities through typed ports rather than reaching into the runtime from application logic.
+- Compose services/providers/workers in `cama-runtime/src/main.rs` and keep restart recovery idempotent.
+- Keep blocking SQLite, image rendering, and other CPU/blocking work off Tokio workers with the existing blocking helpers or `spawn_blocking`.
+
+### Configuration
+
+- Runtime configuration is parsed by the Rust application configuration modules and environment lookup.
+- Secrets must stay redacted in diagnostics and must not be written into tests, fixtures, or logs.
+- See `rust/README.md` for deployment, health, database-copy, and operational commands.
 
 ## Testing
 
-**All new functionality must include tests.** Run `uv run --locked pytest` before committing.
+All new behavior and regressions require Rust tests.
 
-### Test Types
-- **Unit tests**: Single method/class in isolation (`test_repositories.py`)
-- **Integration tests**: Services + repositories + DB (`test_betting_service.py`)
-- **E2E tests**: Complete workflows (`test_e2e_core.py`)
+- Domain unit tests belong beside the relevant `cama-domain` or `cama-app` module.
+- Repository and migration tests use temporary SQLite databases initialized by Rust.
+- Provider tests exercise typed interaction requests/responders without a live Discord gateway.
+- Runtime/transport tests cover acknowledgement ordering, recovery, message delivery, and Serenity payload semantics.
+- Use deterministic clocks, seeded entropy, fixtures, and fake ports. Do not add skipped or timing-flaky tests.
+- Mock external Discord, OpenDota, AI, and HTTP behavior. Tests that intentionally use loopback fixture servers may require an environment that permits local binds.
+- When fixing an interaction timeout, assert acknowledgement occurs before database, network, lock, or render work.
 
-### Key Fixtures (conftest.py)
-```python
-@pytest.fixture
-def temp_db_path():
-    """Temporary database file path (no schema)"""
+Python tests are not part of routine validation. If legacy Python behavior reveals a missing contract, reproduce it as a Rust regression test and keep the fix in Rust.
 
-@pytest.fixture
-def repo_db_path():
-    """Temporary database WITH initialized schema"""
+## Common changes
 
-@pytest.fixture
-def player_repository(repo_db_path):
-    """Ready-to-use PlayerRepository"""
+### Add or change a slash command
 
-@pytest.fixture
-def sample_players():
-    """12 Player objects for shuffler tests"""
-```
+1. Update the appropriate `*_provider.rs` command schema and handler in `cama-runtime`.
+2. Put reusable business policy in `cama-app`/`cama-domain` and persistence in `cama-db`.
+3. Register the provider in the production composition root when adding a new provider.
+4. Add provider tests for schema, permissions, visibility, acknowledgement ordering, and success/failure behavior.
+5. Verify the production registry and command-count contracts.
 
-### Conventions
-- Use `repo_db_path` fixture (not `temp_db_path`) for repository tests
-- Use `guild_id=None` or `guild_id=0` for single-guild tests
-- Import `TEST_GUILD_ID` as `from tests.conftest import TEST_GUILD_ID` (not `from conftest`)
-- Mock external APIs (OpenDota, Discord) in integration tests
-- **Do not write tests that skip.** Tests should pass or fail, not be conditionally skipped. If a test depends on external state or randomness, use mocks, fixtures, or seeded randomness to make it deterministic.
+### Add a service or repository
 
-## Configuration
-See `config.py` for the full list (50+ options). See `README.md` for high level info.
+1. Define the narrow typed port or repository API in the owning Rust crate.
+2. Implement SQLite access in `cama-db` and orchestration in `cama-app`.
+3. Wire the concrete production adapter through the runtime composition root/service container.
+4. Add atomicity, retry, guild-isolation, and restart-recovery tests as applicable.
 
-## Common Modification Patterns
+### Add a database change
 
-### Adding a New Slash Command
+1. Extend `rust/crates/cama-db/src/schema_manager.rs` and its canonical migration contract.
+2. Update affected Rust repositories and domain/application types.
+3. Add fresh-database and upgraded-database tests, including idempotent retry.
+4. Run `cama-runtime db-check` only against a disposable database when additional audit evidence is needed.
 
-**Discord caps bots at 100 top-level slash commands; we currently use 42 (asserted in `tests/test_command_tree_shape.py`). Prefer subcommands for new functionality instead of top-level commands.**
+## Collaboration
 
-1. Prefer adding subcommands to existing command groups (e.g., `/shop buy`, `/stats player`)
-2. If a new top-level command is truly needed, check the current count first
-3. Use `@app_commands.command()` decorator
-4. Inject services via `interaction.client.<service>`
-5. Add rate limiting: `@app_commands.checks.cooldown(rate, per)`
-6. Add tests in `tests/test_<feature>_commands.py`
-
-### Adding a New Service
-1. Create `services/<name>_service.py`
-2. Accept repositories via constructor injection
-3. Add interface if needed in `repositories/interfaces.py`
-4. Wire it up in `infrastructure/service_container.py` (`ServiceContainer`) — construct it there and expose it on the bot in `expose_to_bot()`. (`bot.py::_init_services()` just builds the container and calls `expose_to_bot`.)
-
-### Adding a Database Column
-1. Add migration in `infrastructure/schema_manager.py::_get_migrations()`
-2. Use `SchemaManager._add_column_if_not_exists()` (PRAGMA table_info check, then `ALTER TABLE ADD COLUMN` — SQLite has no `IF NOT EXISTS` for columns)
-3. Update repository to read/write new column
-4. Update domain model if applicable
-
-### Adding a New Repository
-1. Define interface in `repositories/interfaces.py`
-2. Implement in `repositories/<name>_repository.py`
-3. Extend `BaseRepository` for connection management
-4. Wire it up in `infrastructure/service_container.py` (`ServiceContainer`)
-
-## Parallel Agent Fleets
-
-When a task involves 2+ independent file changes, spawn parallel agents in a single message rather than working sequentially. Use `Skill(superpowers:dispatching-parallel-agents)` to coordinate.
-
-**Rules:**
-- Issue all independent tool calls in one message block -- never serialize work that can run concurrently
-- Each agent should own a distinct set of files to avoid merge conflicts
-- When multiple workstreams may touch the same files, use worktree isolation (`EnterWorktree`) to prevent conflicts
-- Recombine and verify after all agents complete
-
-**Examples of parallelizable work:**
-- Adding a new command + its tests + updating documentation
-- Modifying independent services or repositories simultaneously
-- Running exploration/search agents while planning implementation
+Parallelize genuinely independent work across distinct files when useful. Avoid concurrent edits to the same file, preserve user changes, recombine carefully, and run the complete relevant Rust checks after integration.

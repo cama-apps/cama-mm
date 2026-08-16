@@ -56,7 +56,6 @@ pub enum LifecycleEvent {
         newly_applied_migrations: usize,
         created_tables: usize,
         rebuilt_tables: usize,
-        historical_extra_migrations: usize,
     },
     Connecting {
         attempt: u32,
@@ -115,27 +114,21 @@ pub enum LifecycleEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DatabaseAdmissionReport {
+pub struct DatabaseInitializationReport {
     pub path: PathBuf,
     pub applied_migrations: usize,
     pub required_migrations: usize,
     pub newly_applied_migrations: usize,
     pub created_tables: usize,
     pub rebuilt_tables: usize,
-    pub historical_extra_migrations: usize,
-}
-
-#[async_trait]
-pub trait DatabaseAdmission: Send + Sync {
-    async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String>;
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct SqliteDatabaseAdmission {
+pub struct SqliteDatabaseInitializer {
     migration_settings: MigrationSettings,
 }
 
-impl SqliteDatabaseAdmission {
+impl SqliteDatabaseInitializer {
     #[must_use]
     pub const fn with_migration_settings(migration_settings: MigrationSettings) -> Self {
         Self { migration_settings }
@@ -145,60 +138,30 @@ impl SqliteDatabaseAdmission {
     pub const fn migration_settings(&self) -> &MigrationSettings {
         &self.migration_settings
     }
-}
 
-#[async_trait]
-impl DatabaseAdmission for SqliteDatabaseAdmission {
-    async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
+    /// Bring the SQLite schema to the version embedded in this binary and
+    /// verify the canonical runtime storage contract before services are built.
+    pub async fn initialize(&self, path: &Path) -> Result<DatabaseInitializationReport, String> {
         let path = path.to_path_buf();
         let settings = self.migration_settings.clone();
-        tokio::task::spawn_blocking(move || -> Result<DatabaseAdmissionReport, String> {
+        tokio::task::spawn_blocking(move || -> Result<DatabaseInitializationReport, String> {
             let migration = initialize_or_migrate_with_settings(&path, &settings)
                 .map_err(|error| error.to_string())?;
             let audit = audit_database(&path).map_err(|error| error.to_string())?;
             if !audit.is_compatible() {
                 return Err(audit.issues().join("; "));
             }
-            Ok(DatabaseAdmissionReport {
+            Ok(DatabaseInitializationReport {
                 path: audit.path,
                 applied_migrations: audit.applied_migration_count,
                 required_migrations: audit.required_migration_count,
                 newly_applied_migrations: migration.newly_applied.len(),
                 created_tables: migration.created_tables.len(),
                 rebuilt_tables: migration.rebuilt_tables.len(),
-                historical_extra_migrations: migration.historical_extra_migrations.len(),
             })
         })
         .await
-        .map_err(|error| format!("database admission task failed: {error}"))?
-    }
-}
-
-/// Proof that schema migration and compatibility audit completed before the
-/// production service graph was constructed.
-#[derive(Clone, Debug)]
-pub struct CompletedDatabaseAdmission {
-    report: DatabaseAdmissionReport,
-}
-
-impl CompletedDatabaseAdmission {
-    #[must_use]
-    pub const fn new(report: DatabaseAdmissionReport) -> Self {
-        Self { report }
-    }
-}
-
-#[async_trait]
-impl DatabaseAdmission for CompletedDatabaseAdmission {
-    async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
-        if path != self.report.path {
-            return Err(format!(
-                "completed database admission is for {}, not {}",
-                self.report.path.display(),
-                path.display()
-            ));
-        }
-        Ok(self.report.clone())
+        .map_err(|error| format!("database initialization task failed: {error}"))?
     }
 }
 
@@ -258,11 +221,11 @@ impl ReconnectPolicy {
     }
 }
 
-pub struct Runtime<G, D> {
+pub struct Runtime<G> {
     config: RuntimeConfig,
     registry: Arc<Registry>,
     gateway: G,
-    database: D,
+    database: DatabaseInitializationReport,
     reconnect: ReconnectPolicy,
     events: broadcast::Sender<LifecycleEvent>,
     workers: Vec<BackgroundWorkerSpec>,
@@ -271,13 +234,17 @@ pub struct Runtime<G, D> {
     raw_reaction_observers: RawReactionObservers,
 }
 
-impl<G, D> Runtime<G, D>
+impl<G> Runtime<G>
 where
     G: GatewayTransport,
-    D: DatabaseAdmission,
 {
     #[must_use]
-    pub fn new(config: RuntimeConfig, registry: Registry, gateway: G, database: D) -> Self {
+    pub fn new(
+        config: RuntimeConfig,
+        registry: Registry,
+        gateway: G,
+        database: DatabaseInitializationReport,
+    ) -> Self {
         let reconnect = ReconnectPolicy::new(config.reconnect_initial, config.reconnect_max);
         let (events, _) = broadcast::channel(128);
         Self {
@@ -300,7 +267,7 @@ where
         self
     }
 
-    /// Attach production gateway observers after the admitted service graph
+    /// Attach production gateway observers after the initialized service graph
     /// has been constructed and before the first Discord connection.
     #[must_use]
     pub fn with_gateway_event_observers(mut self, observers: GatewayEventObservers) -> Self {
@@ -334,23 +301,23 @@ where
         F: Future<Output = ()> + Send + 'static,
     {
         emit(&self.events, LifecycleEvent::Starting);
-        let admission = match self.database.admit(&self.config.db_path).await {
-            Ok(admission) => admission,
-            Err(error) => {
-                emit(&self.events, LifecycleEvent::Stopped);
-                return Err(RuntimeError::DatabaseAdmission(error));
-            }
-        };
+        if self.database.path != self.config.db_path {
+            emit(&self.events, LifecycleEvent::Stopped);
+            return Err(RuntimeError::DatabaseInitialization(format!(
+                "completed schema initialization is for {}, not {}",
+                self.database.path.display(),
+                self.config.db_path.display()
+            )));
+        }
         emit(
             &self.events,
             LifecycleEvent::DatabaseReady {
-                path: admission.path,
-                applied_migrations: admission.applied_migrations,
-                required_migrations: admission.required_migrations,
-                newly_applied_migrations: admission.newly_applied_migrations,
-                created_tables: admission.created_tables,
-                rebuilt_tables: admission.rebuilt_tables,
-                historical_extra_migrations: admission.historical_extra_migrations,
+                path: self.database.path.clone(),
+                applied_migrations: self.database.applied_migrations,
+                required_migrations: self.database.required_migrations,
+                newly_applied_migrations: self.database.newly_applied_migrations,
+                created_tables: self.database.created_tables,
+                rebuilt_tables: self.database.rebuilt_tables,
             },
         );
 
@@ -589,8 +556,8 @@ fn emit(events: &broadcast::Sender<LifecycleEvent>, event: LifecycleEvent) {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("shared database is not safe for Rust runtime use: {0}")]
-    DatabaseAdmission(String),
+    #[error("database schema initialization is not valid for this runtime: {0}")]
+    DatabaseInitialization(String),
     #[error("Discord gateway could not start: {0}")]
     Gateway(String),
 }
@@ -623,15 +590,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_admission_serializes_concurrent_clean_database_migrations() {
+    async fn sqlite_initialization_serializes_concurrent_clean_database_migrations() {
         let database = NamedTempFile::new().expect("temporary database");
-        let admission = SqliteDatabaseAdmission::default();
-        let first = admission.admit(database.path());
-        let second = admission.admit(database.path());
+        let initializer = SqliteDatabaseInitializer::default();
+        let first = initializer.initialize(database.path());
+        let second = initializer.initialize(database.path());
         let (first, second) = tokio::join!(first, second);
         let mut reports = [
-            first.expect("first admission"),
-            second.expect("second admission"),
+            first.expect("first initialization"),
+            second.expect("second initialization"),
         ];
         reports.sort_by_key(|report| report.newly_applied_migrations);
 
@@ -647,39 +614,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_admission_refuses_a_non_database_file() {
+    async fn sqlite_initialization_refuses_a_non_database_file() {
         let database = NamedTempFile::new().expect("temporary database");
         std::fs::write(database.path(), b"not a sqlite database").expect("malformed fixture");
-        let error = SqliteDatabaseAdmission::default()
-            .admit(database.path())
+        let error = SqliteDatabaseInitializer::default()
+            .initialize(database.path())
             .await
             .expect_err("malformed database must refuse startup");
         assert!(error.contains("SQLite") || error.contains("database"));
     }
 
-    struct RejectingAdmission;
-
-    #[async_trait]
-    impl DatabaseAdmission for RejectingAdmission {
-        async fn admit(&self, _path: &Path) -> Result<DatabaseAdmissionReport, String> {
-            Err("injected admission refusal".to_owned())
-        }
-    }
-
-    struct AcceptingAdmission;
-
-    #[async_trait]
-    impl DatabaseAdmission for AcceptingAdmission {
-        async fn admit(&self, path: &Path) -> Result<DatabaseAdmissionReport, String> {
-            Ok(DatabaseAdmissionReport {
-                path: path.to_path_buf(),
-                applied_migrations: 0,
-                required_migrations: 0,
-                newly_applied_migrations: 0,
-                created_tables: 0,
-                rebuilt_tables: 0,
-                historical_extra_migrations: 0,
-            })
+    fn initialized_database(path: impl Into<PathBuf>) -> DatabaseInitializationReport {
+        DatabaseInitializationReport {
+            path: path.into(),
+            applied_migrations: 1,
+            required_migrations: 1,
+            newly_applied_migrations: 0,
+            created_tables: 0,
+            rebuilt_tables: 0,
         }
     }
 
@@ -734,7 +686,7 @@ mod tests {
             config,
             RegistryBuilder::default().build(),
             ScriptedGateway { calls: 0 },
-            AcceptingAdmission,
+            initialized_database("/tmp/backoff-reset-cama.db"),
         );
         // Collect concurrently: the scripted session floods the bounded
         // broadcast channel, so a drain-at-the-end receiver would itself
@@ -786,12 +738,12 @@ mod tests {
             &mut self,
             _session: GatewaySession,
         ) -> Result<GatewaySessionEnd, GatewayError> {
-            panic!("gateway must not start after database admission failure")
+            panic!("gateway must not start after database initialization mismatch")
         }
     }
 
     #[tokio::test]
-    async fn database_admission_failure_emits_stopped_for_health_reporter() {
+    async fn mismatched_database_initialization_emits_stopped_for_health_reporter() {
         let config = RuntimeConfig {
             token: DiscordToken::parse("test-token").expect("test token"),
             db_path: "/tmp/rejected-cama.db".into(),
@@ -803,12 +755,14 @@ mod tests {
             config,
             RegistryBuilder::default().build(),
             UnreachableGateway,
-            RejectingAdmission,
+            initialized_database("/tmp/different-cama.db"),
         );
         let mut events = runtime.events().subscribe();
         assert!(matches!(
             runtime.run_until(future::pending()).await,
-            Err(RuntimeError::DatabaseAdmission(message)) if message == "injected admission refusal"
+            Err(RuntimeError::DatabaseInitialization(message))
+                if message.contains("/tmp/different-cama.db")
+                    && message.contains("/tmp/rejected-cama.db")
         ));
         assert_eq!(
             events.recv().await.expect("starting event"),

@@ -50,10 +50,10 @@ use crate::gateway_events::{
 use crate::lobby_provider::{ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionButton, InteractionHandler, InteractionHandlerError,
-    InteractionModal, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, InteractionTextInput, InteractionValue, RegistrationError,
-    RegistrationProvider, RegistryBuilder,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton, InteractionHandler,
+    InteractionHandlerError, InteractionModal, InteractionOption, InteractionRequest,
+    InteractionResponder, InteractionResponse, InteractionTextInput, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const MMR_COMPONENT_PREFIX: &str = "registration:mmr:";
@@ -653,6 +653,21 @@ enum LobbyKindKey {
 
 #[async_trait]
 impl InteractionHandler for PlayerRegistrationHandler {
+    fn acknowledgement_policy(
+        &self,
+        request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        match request {
+            InteractionRequest::Component { custom_id, .. }
+                if custom_id.starts_with(MMR_COMPONENT_PREFIX)
+                    && custom_id.contains(":button:") =>
+            {
+                InteractionAcknowledgementPolicy::Modal
+            }
+            _ => InteractionAcknowledgementPolicy::Automatic,
+        }
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,
@@ -1478,7 +1493,6 @@ impl PlayerRegistrationHandler {
     ) -> Result<(), String> {
         let InteractionRequest::Component {
             custom_id,
-            user_id,
             guild_id,
             ..
         } = request
@@ -1488,12 +1502,6 @@ impl PlayerRegistrationHandler {
         let (kind, encoded_guild, nonce) = parse_mmr_custom_id(&custom_id)?;
         if kind != "button" || guild_id != Some(encoded_guild) {
             return respond_ephemeral(&responder, "❌ This MMR prompt is no longer valid.").await;
-        }
-        let Some(state) = self.load_prompt(encoded_guild, nonce).await? else {
-            return respond_ephemeral(&responder, "❌ This MMR prompt is no longer valid.").await;
-        };
-        if !prompt_is_usable(&state, user_id, self.config.mmr_modal_retry_limit) {
-            return respond_ephemeral(&responder, "❌ Invalid MMR").await;
         }
         let mut input = InteractionTextInput::short("mmr", "Enter your MMR");
         input.required = false;

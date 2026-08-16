@@ -1,7 +1,7 @@
 //! Existing-schema SQLite persistence for one-off surveys.
 //!
 //! The adapter mirrors the Python repository's transaction boundaries. It
-//! never creates or migrates schema: startup admission remains responsible for
+//! never creates or migrates schema: startup initialization remains responsible for
 //! proving that the four survey tables and their current columns exist.
 
 use std::fmt;

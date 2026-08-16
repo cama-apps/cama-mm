@@ -1,11 +1,11 @@
 //! Rust-owned SQLite schema initialization and migration authority.
 //!
-//! The cutover runtime calls [`initialize_or_migrate`] before constructing any
-//! repositories.  The implementation embeds the final SQLite schema and the
-//! ordered migration manifest, so production startup never shells out to
-//! Python.  All schema reconciliation, one-time data backfills, and migration
-//! ledger inserts that are pending at lock acquisition commit in a single
-//! `BEGIN IMMEDIATE` transaction.
+//! Production startup calls [`initialize_or_migrate`] before constructing any
+//! repositories. The implementation embeds the canonical SQLite schema and the
+//! ordered migration manifest, so schema initialization is entirely owned by
+//! the Rust runtime. All schema reconciliation, one-time data backfills, and
+//! migration ledger inserts that are pending at lock acquisition commit in a
+//! single `BEGIN IMMEDIATE` transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -31,18 +31,17 @@ use crate::{
     json_numeric::{coerce_i64_like_python, number_f64},
 };
 
-/// Canonical schema produced by the final ordered migration set.
+/// Canonical schema produced by the current ordered migration set.
 pub const CANONICAL_SCHEMA_SQL: &str = include_str!("../../../schema/canonical_schema.sql");
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deployment settings that affect durable migration backfills.
 ///
-/// Python loaded these values from the process environment at import time, so
-/// a lift-and-shift must do the same before replaying historical ratings. An
-/// invalid integer/float keeps the Python behavior of falling back to the
-/// default; semantically invalid OpenSkill ranges still fail when the replay
-/// constructs its model.
+/// These values historically came from the Python process environment. The
+/// Rust migration path retains the same parsing defaults so historical rating
+/// replays remain deterministic. Semantically invalid OpenSkill ranges still
+/// fail when the replay constructs its model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MigrationSettings {
     pub streak_threshold: i64,
@@ -214,9 +213,9 @@ struct ReconcileReport {
 
 /// Create or upgrade a file-backed database for use by the Rust runtime.
 ///
-/// The connection matches the former Python authority: WAL journal mode,
-/// 5-second busy timeout, foreign-key enforcement disabled, and an immediate
-/// writer lock around the complete pending migration batch.
+/// The connection enforces the canonical runtime storage configuration: WAL
+/// journal mode, a 5-second busy timeout, foreign-key enforcement disabled, and
+/// an immediate writer lock around the complete pending migration batch.
 pub fn initialize_or_migrate(
     path: impl AsRef<Path>,
 ) -> Result<MigrationReport, SchemaMigrationError> {
@@ -225,9 +224,9 @@ pub fn initialize_or_migrate(
 
 /// Create or upgrade a database using explicit deployment settings.
 ///
-/// This is primarily useful for deterministic admission tests. Production
-/// callers should use [`initialize_or_migrate`], which reads the same rating
-/// environment variables as the former Python process.
+/// This is primarily useful for deterministic schema-initialization tests.
+/// Production callers should use [`initialize_or_migrate`], which reads the
+/// deployment's rating environment variables.
 pub fn initialize_or_migrate_with_settings(
     path: impl AsRef<Path>,
     settings: &MigrationSettings,
@@ -309,7 +308,7 @@ fn initialize_or_migrate_inner(
 
 /// Python-era resolved Mafia rows have no Rust delivery receipt. Mark those
 /// historical rows as already delivered once the nullable receipt columns are
-/// admitted. A Rust settlement always writes `resolution_summary` in the same
+/// initialized. A Rust settlement always writes `resolution_summary` in the same
 /// transaction as the phase transition, so a resolved row with a non-null
 /// summary and a NULL message ID remains eligible for deterministic Discord
 /// replay.

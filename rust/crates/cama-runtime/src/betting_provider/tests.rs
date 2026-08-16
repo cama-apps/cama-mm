@@ -3109,7 +3109,7 @@ async fn wheel_component_edits_public_prompt_after_resolution() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
+async fn blue_mana_sixty_jc_choice_is_acknowledged_before_render_and_settles_at_75_percent() {
     let database = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(database.path()).expect("schema");
     PlayerRepository::new(database.path())
@@ -3121,13 +3121,13 @@ async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
     .expect("configuration");
     let wedges = vec![
         cama_app::wheel::WheelWedge {
-            label: "GOOD".to_owned(),
-            value: WheelValue::Numeric(5),
+            label: "10".to_owned(),
+            value: WheelValue::Numeric(10),
             color: "#ffffff",
         },
         cama_app::wheel::WheelWedge {
-            label: "LOSE".to_owned(),
-            value: WheelValue::Numeric(0),
+            label: "60".to_owned(),
+            value: WheelValue::Numeric(60),
             color: "#000000",
         },
     ];
@@ -3150,6 +3150,7 @@ async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
         balance_before: 0,
         effects: ManaEffects {
             color: Some("Blue".to_owned()),
+            blue_gamba_reduction: 0.25,
             ..Default::default()
         },
         event_id: "blue-scry-media".to_owned(),
@@ -3198,6 +3199,10 @@ async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
             .is_empty()
     );
     assert_eq!(*responder.defers.lock().expect("defers lock"), [false]);
+    assert_eq!(
+        *responder.events.lock().expect("events lock"),
+        ["defer", "edit_original", "edit_original"]
+    );
     let edits = responder.edits.lock().expect("edits lock");
     assert_eq!(edits.len(), 2);
     assert!(edits[0].content.is_empty());
@@ -3205,9 +3210,12 @@ async fn blue_mana_scry_renders_the_selected_wedge_before_revealing_result() {
     assert_eq!(edits[0].attachments, vec![expected]);
     assert!(edits[1].content.is_empty());
     assert_eq!(edits[1].embeds.len(), 1);
-    assert_eq!(
-        edits[1].embeds[0].title.as_deref(),
-        Some("🚫 LOSE A TURN 🚫")
+    assert_eq!(edits[1].embeds[0].title.as_deref(), Some("🎉 Winner!"));
+    assert!(
+        edits[1].embeds[0]
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("**+45 JC**"))
     );
     assert!(edits[1].attachments.is_empty());
     assert_eq!(
