@@ -237,6 +237,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 - `/shop pingedash` / `/shop pingedkevin` — Paid pings of the configured targets, each on an independent 24-hour cooldown
 - `/shop avoids` — View your active soft avoids
 - `/shop deals` — View your active package deals
+- `/shop cancel-deal target:@player` — Cancel a package deal after both the target and deal have been inactive for 30 days (no refund)
 - `/shop mana` — Spend mana on color-exclusive items
 
 ### Predictions — `/predict`

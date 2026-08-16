@@ -34,7 +34,10 @@ use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::{
     ManashopRepository, PurchaseFailureReason as ManaPurchaseFailure, PurchaseRequest,
 };
-use cama_db::package_deal_repository::{PackageDealPurchaseFailureReason, PackageDealRepository};
+use cama_db::package_deal_repository::{
+    PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS, PackageDealCancellationFailureReason,
+    PackageDealPurchaseFailureReason, PackageDealRepository,
+};
 use cama_db::pairings_repository::PairingsRepository;
 use cama_db::rating_history_repository::{
     RatingHistoryRepository, RecalibrationEligibility, RecalibrationExecution,
@@ -63,6 +66,8 @@ use crate::registration::{
 
 const SHOP_RATE_LIMIT: usize = 3;
 const SHOP_RATE_PERIOD: Duration = Duration::from_secs(60);
+const PACKAGE_DEAL_CANCELLATION_RATE_LIMIT: usize = 1;
+const PACKAGE_DEAL_CANCELLATION_RATE_PERIOD: Duration = Duration::from_secs(10);
 const MANA_RATE_LIMIT: usize = 1;
 const MANA_RATE_PERIOD: Duration = Duration::from_secs(10);
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
@@ -213,6 +218,7 @@ impl ShopRegistrationProvider {
                 clock: Arc::new(SystemShopClock),
                 entropy: Mutex::new(FastrandShopEntropy::new(shop_seed())),
                 buy_rates: Mutex::new(BTreeMap::new()),
+                package_deal_cancellation_rates: Mutex::new(BTreeMap::new()),
                 mana_rates: Mutex::new(BTreeMap::new()),
                 neon: Mutex::new(neon),
             }),
@@ -305,6 +311,7 @@ struct ShopInteractionHandler {
     clock: Arc<dyn ShopClock>,
     entropy: Mutex<FastrandShopEntropy>,
     buy_rates: Mutex<BTreeMap<(i64, i64), VecDeque<Instant>>>,
+    package_deal_cancellation_rates: Mutex<BTreeMap<(i64, i64), VecDeque<Instant>>>,
     mana_rates: Mutex<BTreeMap<(i64, i64), VecDeque<Instant>>>,
     neon: Mutex<NeonDegenService>,
 }
@@ -531,6 +538,11 @@ impl ShopInteractionHandler {
             }
             "avoids" => self.avoids(context, responder).await,
             "deals" => self.deals(context, responder).await,
+            "cancel-deal" => {
+                let target = user_option(&context.options, "target")?
+                    .ok_or("missing required user option \"target\"")?;
+                self.cancel_package_deal(context, responder, target).await
+            }
             "mana" => self.mana_shop(context, responder).await,
             value => Err(format!("unsupported /shop subcommand {value:?}").into()),
         }
@@ -850,6 +862,74 @@ impl ShopInteractionHandler {
                             .description(description)
                             .color(0x2E_CC_71),
                     ),
+            )
+            .await
+            .map_err(|error| error.to_string().into())
+    }
+
+    async fn cancel_package_deal(
+        &self,
+        context: CommandContext,
+        responder: Arc<dyn InteractionResponder>,
+        target: UserOption,
+    ) -> Result<(), InteractionHandlerError> {
+        if let Some(retry) = check_rate_limit(
+            &self.package_deal_cancellation_rates,
+            (context.guild_id, context.user_id),
+            PACKAGE_DEAL_CANCELLATION_RATE_LIMIT,
+            PACKAGE_DEAL_CANCELLATION_RATE_PERIOD,
+        )? {
+            return respond_ephemeral(
+                &responder,
+                format!("This command is on cooldown. Try again in {retry}s."),
+            )
+            .await;
+        }
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let repository = self.package_deals.clone();
+        let guild_id = context.guild_id;
+        let buyer_id = context.user_id;
+        let partner_id = target.id;
+        let now = self.clock.now()?;
+        let result = match run_blocking("package deal cancellation", move || {
+            repository.cancel_deal(Some(guild_id), buyer_id, partner_id, now)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(%error, "package deal cancellation failed");
+                return responder
+                    .followup(
+                        InteractionResponse::message(
+                            "Package Deal cancellation could not be completed. Please try again.",
+                        )
+                        .ephemeral()
+                        .without_mentions(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string().into());
+            }
+        };
+        let message = match result.reason {
+            None if result.cancelled => format!(
+                "Cancelled your Package Deal with <@{partner_id}>. No jopacoin were refunded."
+            ),
+            Some(PackageDealCancellationFailureReason::Ineligible) => format!(
+                "That Package Deal can only be cancelled after the target has not played for {PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS} days and the deal has not been updated for {PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS} days."
+            ),
+            Some(PackageDealCancellationFailureReason::NotFound) | None => {
+                "You do not have an active Package Deal with that player.".to_owned()
+            }
+        };
+        responder
+            .followup(
+                InteractionResponse::message(message)
+                    .ephemeral()
+                    .without_mentions(),
             )
             .await
             .map_err(|error| error.to_string().into())
@@ -2901,6 +2981,18 @@ fn shop_subcommands(config: &ShopRuntimeConfig) -> Vec<CommandOptionSpec> {
         ),
         subcommand_spec("avoids", "View your active soft avoids", vec![]),
         subcommand_spec("deals", "View your active package deals", vec![]),
+        subcommand_spec(
+            "cancel-deal",
+            "Cancel a package deal with an inactive player",
+            vec![
+                CommandOptionSpec::new(
+                    "target",
+                    "Inactive player whose package deal you want to cancel",
+                    CommandOptionKind::User,
+                )
+                .required(true),
+            ],
+        ),
         subcommand_spec(
             "mana",
             "Spend mana on color-exclusive items",
