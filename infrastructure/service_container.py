@@ -88,6 +88,7 @@ class ServiceContainer:
         self._init_mafia_service()
         self._init_extras()
         self._init_reminder_service()
+        self._init_curfew_service()
 
         self._initialized = True
         logger.info("ServiceContainer initialization complete")
@@ -109,6 +110,7 @@ class ServiceContainer:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.buff_repository import BuffRepository
+        from repositories.curfew_repository import CurfewRepository
         from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
         from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
@@ -147,6 +149,7 @@ class ServiceContainer:
         p = self.db_path
         self._components.update({
             "player_repo": PlayerRepository(p),
+            "curfew_repo": CurfewRepository(p),
             "player_trivia_repo": PlayerTriviaRepository(p),
             "match_repo": MatchRepository(p),
             "bet_repo": BetRepository(p),
@@ -661,6 +664,16 @@ class ServiceContainer:
             pet_service=c.get("pet_service"),
         )
 
+    def _init_curfew_service(self) -> None:
+        from services.curfew_service import CurfewService
+
+        c = self._components
+        c["curfew_service"] = CurfewService(
+            player_repo=c["player_repo"],
+            curfew_repo=c["curfew_repo"],
+            lobby_service=c["lobby_service"],
+        )
+
     # ------------------------------------------------------------------
     # Bot exposure
     # ------------------------------------------------------------------
@@ -720,6 +733,7 @@ class ServiceContainer:
         bot.duel_service = c["duel_service"]
         bot.duel_flavor_service = c["duel_flavor_service"]
         bot.reminder_service = c["reminder_service"]
+        bot.curfew_service = c["curfew_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]

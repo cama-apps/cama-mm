@@ -1,0 +1,197 @@
+#!/bin/sh
+set -eu
+
+# Black-box verification for the already-running bot service.  This script
+# deliberately does not inspect repository files or the image filesystem: all
+# deployment facts come from Compose, Docker, and the process health command.
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+runtime_compose="$repository_root/scripts/runtime-compose"
+expected_data_mount="$repository_root/data"
+expected_database_path=/app/data/cama_shuffle.db
+
+fail() {
+  echo "post-deploy verification failed: $*" >&2
+  exit 1
+}
+
+if [ "${BOT_RUNTIME+x}" = x ]; then
+  expected_runtime=$BOT_RUNTIME
+else
+  fail "BOT_RUNTIME must be set to the expected running runtime"
+fi
+case "$expected_runtime" in
+  rust) ;;
+  "") fail "BOT_RUNTIME is empty; expected rust" ;;
+  *) fail "post-deploy verification currently supports BOT_RUNTIME=rust, found $expected_runtime" ;;
+esac
+
+if [ "${GIT_SHA+x}" = x ] && [ -n "$GIT_SHA" ]; then
+  expected_sha=$GIT_SHA
+else
+  fail "GIT_SHA must be set to the expected deployment revision"
+fi
+
+log_window=${POST_DEPLOY_LOG_WINDOW_SECONDS:-300}
+case "$log_window" in
+  *[!0-9]*|"") fail "POST_DEPLOY_LOG_WINDOW_SECONDS must be a positive integer" ;;
+esac
+[ "$log_window" -gt 0 ] || fail "POST_DEPLOY_LOG_WINDOW_SECONDS must be a positive integer"
+
+container_env_value() {
+  key=$1
+  printf '%s\n' "$container_environment" \
+    | awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }'
+}
+
+inspect_value() {
+  format=$1
+  if ! docker inspect --format "$format" "$container_id"; then
+    fail "Docker inspect failed for container $container_id"
+  fi
+}
+
+if ! container_ids=$(BOT_RUNTIME="$expected_runtime" "$runtime_compose" ps --quiet bot); then
+  fail "Compose could not resolve the running bot service"
+fi
+set -- $container_ids
+if [ "$#" -ne 1 ]; then
+  fail "expected exactly one running bot container, found $#"
+fi
+container_id=$1
+
+running=$(inspect_value '{{.State.Running}}')
+[ "$running" = true ] || fail "container $container_id is not running"
+
+container_environment=$(inspect_value '{{range .Config.Env}}{{println .}}{{end}}')
+actual_runtime=$(container_env_value BOT_RUNTIME)
+actual_sha=$(container_env_value GIT_SHA)
+actual_database_path=$(container_env_value DB_PATH)
+[ "$actual_runtime" = "$expected_runtime" ] \
+  || fail "BOT_RUNTIME mismatch: expected $expected_runtime, found ${actual_runtime:-<missing>}"
+[ "$actual_sha" = "$expected_sha" ] \
+  || fail "GIT_SHA mismatch: expected $expected_sha, found ${actual_sha:-<missing>}"
+[ "$actual_database_path" = "$expected_database_path" ] \
+  || fail "DB_PATH mismatch: expected $expected_database_path, found ${actual_database_path:-<missing>}"
+
+uid=$(docker exec "$container_id" id -u 2>/dev/null || true)
+[ "$uid" = 1001 ] || fail "container UID mismatch: expected 1001, found ${uid:-<missing>}"
+
+data_mount=$(inspect_value \
+  '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}')
+[ "$data_mount" = "$expected_data_mount" ] \
+  || fail "data mount mismatch: expected $expected_data_mount, found ${data_mount:-<missing>}"
+
+oci_revision=$(inspect_value '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+case "$oci_revision" in
+  ""|"<no value>")
+    echo "post-deploy verification: OCI revision label unavailable; environment and health remain authoritative" >&2
+    ;;
+  "$expected_sha")
+    ;;
+  *) fail "OCI revision label mismatch: expected $expected_sha, found $oci_revision" ;;
+esac
+
+docker_health=$(inspect_value \
+  '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
+[ "$docker_health" = healthy ] \
+  || fail "Docker health is ${docker_health:-<missing>}; expected healthy"
+
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/cama-post-deploy-verify.XXXXXX")
+cleanup() {
+  rm -rf "$temporary_directory"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ "$expected_runtime" = rust ]; then
+  health_output="$temporary_directory/health-check.txt"
+  if ! docker exec "$container_id" cama-rust health-check \
+    --db-path /app/data/cama_shuffle.db >"$health_output" 2>&1; then
+    fail "in-container cama-rust health-check failed: $(tr '\n' ' ' <"$health_output")"
+  fi
+  if ! python3 - "$expected_runtime" "$expected_sha" "$health_output" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+expected_runtime, expected_sha, output_path = sys.argv[1:]
+output = Path(output_path).read_text(encoding="utf-8").strip()
+fields = dict(re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)", output))
+if fields.get("healthy") != "true":
+    raise SystemExit(f"health-check did not report healthy=true: {output!r}")
+if fields.get("runtime") != expected_runtime:
+    raise SystemExit(
+        f"health-check runtime mismatch: expected {expected_runtime!r}, "
+        f"found {fields.get('runtime')!r}"
+    )
+if fields.get("revision") != expected_sha:
+    raise SystemExit(
+        f"health-check revision mismatch: expected {expected_sha!r}, "
+        f"found {fields.get('revision')!r}"
+    )
+PY
+  then
+    fail "in-container health-check output did not match deployment metadata"
+  fi
+
+  log_output="$temporary_directory/logs.txt"
+  if ! docker logs --since "${log_window}s" "$container_id" >"$log_output" 2>&1; then
+    fail "Docker could not read recent Rust logs"
+  fi
+  if ! python3 - "$expected_runtime" "$expected_sha" "$log_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+expected_runtime, expected_sha, log_path = sys.argv[1:]
+lines = Path(log_path).read_text(encoding="utf-8").splitlines()
+records = []
+for line_number, line in enumerate(lines, 1):
+    if not line.strip():
+        continue
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"recent Rust log line {line_number} is not JSON: {error}")
+    if not isinstance(record, dict):
+        raise SystemExit(f"recent Rust log line {line_number} is not a JSON object")
+    records.append(record)
+
+if not records:
+    raise SystemExit("no recent Rust log records were available")
+
+startup = [
+    record
+    for record in records
+    if record.get("message") == "starting Rust Discord runtime"
+]
+if not startup:
+    raise SystemExit(
+        "recent Rust logs do not expose startup runtime/revision metadata; "
+        "the structured startup logging hook is required"
+    )
+for record in startup:
+    if record.get("runtime") != expected_runtime:
+        raise SystemExit(
+            f"startup log runtime mismatch: expected {expected_runtime!r}, "
+            f"found {record.get('runtime')!r}"
+        )
+    if record.get("git_sha") != expected_sha:
+        raise SystemExit(
+            f"startup log revision mismatch: expected {expected_sha!r}, "
+            f"found {record.get('git_sha')!r}"
+        )
+
+# Any other structured record that carries deployment metadata must agree too;
+# this catches a mixed-revision container even when its startup line is old.
+for record in records:
+    if "runtime" in record or "git_sha" in record:
+        if record.get("runtime") != expected_runtime or record.get("git_sha") != expected_sha:
+            raise SystemExit("recent Rust log contains mismatched deployment metadata")
+PY
+  then
+    fail "recent Rust logs failed JSON or deployment-metadata verification"
+  fi
+fi
+
+echo "post-deploy verification passed runtime=$expected_runtime GIT_SHA=$expected_sha container=$container_id"

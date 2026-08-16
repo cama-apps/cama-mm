@@ -3,7 +3,9 @@ Tests for drawing utilities.
 """
 
 from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from PIL import Image, ImageColor
 
 from utils.drawing import (
@@ -21,6 +23,7 @@ from utils.drawing import (
 )
 from utils.drawing._common import _select_x_axis_ticks, _select_y_axis_ticks, make_projection
 from utils.drawing.gamba import _marker_radius, _select_marker_indices
+from utils.match_views import EnrichedMatchView
 
 
 class TestDrawMatchesTable:
@@ -540,6 +543,30 @@ class TestDrawAdvantageGraph:
         assert isinstance(result, BytesIO)
         img = Image.open(result)
         assert img.format == "PNG"
+
+
+@pytest.mark.asyncio
+async def test_enriched_match_view_attaches_advantage_graph_on_component_edit():
+    """The live graph page edits the original message with one named attachment."""
+    view = EnrichedMatchView(
+        MagicMock(),
+        {"radiant_gold_adv": [0, 500, 1200], "radiant_xp_adv": [0, 200, 800]},
+        match_id=42,
+    )
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+
+    await view.children[1].callback(interaction)
+
+    interaction.response.edit_message.assert_awaited_once()
+    kwargs = interaction.response.edit_message.await_args.kwargs
+    assert kwargs["attachments"][0].filename == "advantage.png"
+    assert kwargs["embed"].image.url == "attachment://advantage.png"
+    assert kwargs["embed"].footer.text == "Match #42 — Team Advantages Per Minute"
+    assert kwargs["view"] is view
+    assert view.page == 1
+    assert view.children[0].disabled is False
+    assert view.children[1].disabled is True
 
 
 class TestDrawGambaChart:

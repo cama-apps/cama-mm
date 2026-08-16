@@ -866,6 +866,24 @@ class SchemaManager:
                 "create_manashop_purchase_lifecycle",
                 self._migration_create_manashop_purchase_lifecycle,
             ),
+            (
+                "add_pending_match_completion_key",
+                self._migration_add_pending_match_completion_key,
+            ),
+            (
+                "create_draft_finalization_jobs",
+                self._migration_create_draft_finalization_jobs,
+            ),
+            (
+                "create_draft_financial_effects",
+                self._migration_create_draft_financial_effects,
+            ),
+            ("add_player_timezone_column", self._migration_add_player_timezone_column),
+            ("add_dota_play_hours_column", self._migration_add_dota_play_hours_column),
+            (
+                "create_curfew_windows_table",
+                self._migration_create_curfew_windows_table,
+            ),
         ]
 
     # --- Migrations ---
@@ -4183,6 +4201,92 @@ class SchemaManager:
             """
         )
 
+    def _migration_add_pending_match_completion_key(self, cursor) -> None:
+        """Add the idempotency key used by atomic Draft finalization."""
+        self._add_column_if_not_exists(cursor, "pending_matches", "completion_key", "TEXT")
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_matches_completion_key
+            ON pending_matches(completion_key)
+            WHERE completion_key IS NOT NULL
+            """
+        )
+
+    def _migration_create_draft_finalization_jobs(self, cursor) -> None:
+        """Create the durable progress ledger for Draft finalization recovery."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_finalization_jobs (
+                completion_key TEXT PRIMARY KEY NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                stage TEXT NOT NULL CHECK(length(stage) > 0),
+                plan_json TEXT NOT NULL
+                    CHECK(json_valid(plan_json) AND json_type(plan_json) = 'object'),
+                progress_json TEXT NOT NULL DEFAULT '{}'
+                    CHECK(json_valid(progress_json) AND json_type(progress_json) = 'object'),
+                lease_owner TEXT,
+                lease_until INTEGER,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (lease_owner IS NULL AND lease_until IS NULL)
+                    OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL)
+                ),
+                UNIQUE(guild_id, session_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_draft_finalization_jobs_incomplete
+            ON draft_finalization_jobs(stage, lease_until, updated_at)
+            """
+        )
+
+    def _migration_create_draft_financial_effects(self, cursor) -> None:
+        """Create the exact-intent ledger for durable Draft financial setup."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_financial_effects (
+                effect_key TEXT PRIMARY KEY NOT NULL,
+                completion_key TEXT NOT NULL,
+                guild_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL CHECK(session_id > 0),
+                pending_match_id INTEGER NOT NULL,
+                effect_kind TEXT NOT NULL
+                    CHECK(effect_kind IN ('seed', 'blind', 'investment', 'spectator')),
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                plan_sha256 TEXT NOT NULL
+                    CHECK(
+                        length(plan_sha256) = 64
+                        AND plan_sha256 NOT GLOB '*[^0-9a-f]*'
+                    ),
+                intended_json TEXT NOT NULL
+                    CHECK(json_valid(intended_json) AND json_type(intended_json) = 'object'),
+                status TEXT NOT NULL CHECK(status IN ('applied', 'skipped')),
+                receipt_json TEXT NOT NULL
+                    CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(completion_key, effect_kind, ordinal),
+                FOREIGN KEY(completion_key)
+                    REFERENCES draft_finalization_jobs(completion_key),
+                FOREIGN KEY(pending_match_id)
+                    REFERENCES pending_matches(pending_match_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_draft_financial_effects_completion
+            ON draft_financial_effects(completion_key, ordinal)
+            """
+        )
+
     def _migration_create_manashop_buffs_table(self, cursor) -> None:
         """24h-duration buffs from manashop ultimates (Counterspell, Aegis,
         Overgrowth, Sanctuary, Blood Pact, Dark Bargain debt). The original
@@ -4477,6 +4581,39 @@ class SchemaManager:
         """Add columns for solo ranked grinder detection."""
         self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
+
+    def _migration_add_player_timezone_column(self, cursor) -> None:
+        """Add a general per-player timezone preference (used by curfew windows and future features)."""
+        self._add_column_if_not_exists(cursor, "players", "timezone", "TEXT")
+
+    def _migration_add_dota_play_hours_column(self, cursor) -> None:
+        """Add informational (non-enforced) preferred dota play-time hours, JSON-encoded list of ints."""
+        self._add_column_if_not_exists(cursor, "players", "dota_play_hours", "TEXT")
+
+    def _migration_create_curfew_windows_table(self, cursor) -> None:
+        """Create the table of named per-player curfew windows (auto-lock/kick from lobbies)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_curfew_windows (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                name         TEXT NOT NULL,
+                start_hour   INTEGER NOT NULL,
+                start_minute INTEGER NOT NULL DEFAULT 0,
+                end_hour     INTEGER NOT NULL,
+                end_minute   INTEGER NOT NULL DEFAULT 0,
+                timezone     TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id, name)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_curfew_windows_guild_discord
+            ON player_curfew_windows(guild_id, discord_id)
+            """
+        )
 
     def _migration_create_dig_system_tables(self, cursor) -> None:
         """Create all tables for the tunnel digging minigame."""

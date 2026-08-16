@@ -995,6 +995,12 @@ class PredictionCommands(commands.Cog):
     # -- guild gamba channel discovery (for digest / announcements) ---
 
     def _gamba_channel_for_guild(self, guild: discord.Guild) -> discord.TextChannel | None:
+        from config import GAMBA_CHANNEL_ID
+
+        if GAMBA_CHANNEL_ID is not None:
+            configured = guild.get_channel(GAMBA_CHANNEL_ID)
+            if isinstance(configured, discord.TextChannel):
+                return configured
         for ch in guild.text_channels:
             name = (ch.name or "").lower()
             if "gamba" in name:

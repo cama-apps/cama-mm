@@ -1,0 +1,48 @@
+{
+  "schema": "cama.external-service-recording/v1",
+  "provider": "steam_asset_cdn",
+  "base_url": "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react",
+  "provenance": {
+    "kind": "sanitized_contract_fixture",
+    "source": "Steam CDN trivia-image cache HTTP contract",
+    "captured_at": null,
+    "live_network_used": false,
+    "notes": "Bodies are minimized synthetic byte fixtures for the public cache contract; they are not captured production images. Identifiers, hosts, and response text are non-production values."
+  },
+  "redaction": {
+    "credentials": "none present",
+    "identifiers": "fixture_hero and loopback transport only"
+  },
+  "contracts": [
+    {
+      "id": "asset-success",
+      "request": {"method": "GET", "path": "/apps/dota2/images/dota_react/heroes/fixture_hero.png?v=fixture"},
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "image/png",
+          "body": "hero_success.txt",
+          "sha256": "9349aa904b15dac763dc810c73154a7380e5c3811a58f761bad3f19295fba847"
+        }
+      ]
+    },
+    {
+      "id": "unavailable-then-success",
+      "request": {"method": "GET", "path": "/apps/dota2/images/dota_react/heroes/fixture_hero.png?v=fixture"},
+      "responses": [
+        {
+          "status": 503,
+          "content_type": "application/json",
+          "body": "service_unavailable.json",
+          "sha256": "8de7a244d95e6ed65e7099f7599055c8f05766e8880f4fbb8e823b4d2f6fb9be"
+        },
+        {
+          "status": 200,
+          "content_type": "image/png",
+          "body": "hero_success.txt",
+          "sha256": "9349aa904b15dac763dc810c73154a7380e5c3811a58f761bad3f19295fba847"
+        }
+      ]
+    }
+  ]
+}

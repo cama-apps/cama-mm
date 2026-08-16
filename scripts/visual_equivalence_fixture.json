@@ -1,0 +1,280 @@
+{
+  "chart": {
+    "market_id": 42,
+    "title": "Market 42 - fair history",
+    "snapshots": [
+      [1700000000, 32],
+      [1700001800, 47],
+      [1700005400, 41],
+      [1700010800, 63]
+    ],
+    "created_at": 1700000000,
+    "now": 1700014400
+  },
+  "animation": {
+    "name": "Client 47",
+    "value": 1337,
+    "theme": "odds_anomaly"
+  },
+  "terminal_crash": {
+    "name": "Client 47",
+    "filing_number": 5
+  },
+  "dig_neon": {
+    "terminal": {
+      "prestige": false
+    },
+    "prestige": {
+      "prestige": true
+    }
+  },
+  "pinnacle": {
+    "source_path": "../assets/dig/bosses/lantern_engine_encounter.png",
+    "boss_id": "lantern_engine",
+    "secret": true
+  },
+  "balance": {
+    "username": "Visual Balance",
+    "series": [
+      [1, 120, "bets"],
+      [2, -80, "wheel"],
+      [3, 260, "predictions"],
+      [4, 0, "tips"],
+      [5, -180, "double_or_nothing"],
+      [6, 420, "bonus"],
+      [7, 140, "dig"]
+    ],
+    "source_totals": {
+      "bets": 120,
+      "wheel": -200,
+      "predictions": 340,
+      "tips": -260,
+      "double_or_nothing": -180,
+      "bonus": 600,
+      "dig": -280
+    }
+  },
+  "gamba": {
+    "username": "Visual Gambler",
+    "degen_score": 73,
+    "degen_title": "House Favorite",
+    "series": [
+      {"event_number": 1, "cumulative": 120, "source": "bet", "outcome": "won", "leverage": 1, "profit": 120},
+      {"event_number": 2, "cumulative": -80, "source": "wheel", "outcome": "lost", "leverage": 1, "profit": -200},
+      {"event_number": 3, "cumulative": 220, "source": "bet", "outcome": "won", "leverage": 3, "profit": 300},
+      {"event_number": 4, "cumulative": -140, "source": "double_or_nothing", "outcome": "lost", "leverage": 1, "profit": -360},
+      {"event_number": 5, "cumulative": -320, "source": "bet", "outcome": "lost", "leverage": 1, "profit": -180},
+      {"event_number": 6, "cumulative": 420, "source": "wheel", "outcome": "won", "leverage": 1, "profit": 740},
+      {"event_number": 7, "cumulative": 180, "source": "bet", "outcome": "neutral", "leverage": 1, "profit": -240},
+      {"event_number": 8, "cumulative": 60, "source": "bet", "outcome": "won", "leverage": 1, "profit": -120}
+    ],
+    "stats": {
+      "total_bets": 6,
+      "win_rate": 0.5,
+      "net_pnl": 60,
+      "roi": 0.12
+    }
+  },
+  "wrapped_gamba": {
+    "title": "Gamba (All-Time)",
+    "footer": "+60 JC · 6 bets · Degen Score: 73",
+    "gamba": {
+      "username": "Visual Gambler",
+      "degen_score": 73,
+      "degen_title": "House Favorite",
+      "series": [
+        {"event_number": 1, "cumulative": 120, "source": "bet", "outcome": "won", "leverage": 1, "profit": 120},
+        {"event_number": 2, "cumulative": -80, "source": "wheel", "outcome": "lost", "leverage": 1, "profit": -200},
+        {"event_number": 3, "cumulative": 220, "source": "bet", "outcome": "won", "leverage": 3, "profit": 300},
+        {"event_number": 4, "cumulative": -140, "source": "double_or_nothing", "outcome": "lost", "leverage": 1, "profit": -360},
+        {"event_number": 5, "cumulative": -320, "source": "bet", "outcome": "lost", "leverage": 1, "profit": -180},
+        {"event_number": 6, "cumulative": 420, "source": "wheel", "outcome": "won", "leverage": 1, "profit": 740},
+        {"event_number": 7, "cumulative": 180, "source": "bet", "outcome": "neutral", "leverage": 1, "profit": -240},
+        {"event_number": 8, "cumulative": 60, "source": "bet", "outcome": "won", "leverage": 1, "profit": -120}
+      ],
+      "stats": {
+        "total_bets": 6,
+        "win_rate": 0.5,
+        "net_pnl": 60,
+        "roi": 0.12
+      }
+    }
+  },
+  "rating_history": {
+    "username": "Client 47",
+    "entries": [
+      {"rating": 1675.0, "os_mu_after": 40.5, "won": true},
+      {"rating": 1620.0, "os_mu_after": 39.1, "won": false},
+      {"rating": null, "os_mu_after": 38.7, "won": true},
+      {"rating": 1580.0, "os_mu_after": null, "won": null},
+      {"rating": 1535.0, "os_mu_after": 35.8, "won": false},
+      {"rating": 1490.0, "os_mu_after": 34.4, "won": true}
+    ]
+  },
+  "rating_distribution": {
+    "ratings": [1400.0, 1500.0, 1520.0, 1600.0, 1700.0, 1450.0],
+    "median_rating": 1510.0
+  },
+  "rating_analysis": {
+    "comparison": {
+      "matches_analyzed": 25,
+      "glicko": {
+        "brier_score": 0.21,
+        "accuracy": 0.64,
+        "log_loss": 0.61
+      },
+      "openskill": {
+        "brier_score": 0.18,
+        "accuracy": 0.72,
+        "log_loss": 0.56
+      }
+    },
+    "calibration": {
+      "glicko": [
+        [0.12, 0.18, 8],
+        [0.27, 0.31, 12],
+        [0.46, 0.42, 15],
+        [0.64, 0.71, 11],
+        [0.83, 0.78, 9]
+      ],
+      "openskill": [
+        [0.14, 0.11, 7],
+        [0.29, 0.35, 10],
+        [0.49, 0.53, 16],
+        [0.67, 0.61, 12],
+        [0.86, 0.88, 8]
+      ]
+    },
+    "trend": {
+      "window": 20,
+      "match_data": [
+        {"glicko_correct": true, "openskill_correct": false},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": false},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": false, "openskill_correct": false},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": false},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": false},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": false, "openskill_correct": false},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": false},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": true},
+        {"glicko_correct": false, "openskill_correct": true},
+        {"glicko_correct": true, "openskill_correct": false}
+      ]
+    }
+  },
+  "advantage": {
+    "match_id": 4242,
+    "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],
+    "radiant_xp_adv": [0, 200, 800, 100, 1500, 3000, 2500]
+  },
+  "pet": {
+    "species_id": "common_cama",
+    "stage": "adult",
+    "mood": "happy",
+    "seed": 7,
+    "accessory": "red_bow",
+    "components_path": "../assets/pets/components",
+    "attachment_filename": "pet_common_cama_adult_happy.png",
+    "embed_image": "attachment://pet_common_cama_adult_happy.png"
+  },
+  "wheel": {
+    "target_index": 7,
+    "size": 500,
+    "seed": 13280327,
+    "display_name": "Visual Gambler",
+    "is_bankrupt": false,
+    "is_golden": false
+  },
+  "explosion": {
+    "size": 500,
+    "seed": 12648430
+  },
+  "blame_luke": {
+    "selected_index": 4
+  },
+  "scout": {
+    "player_count": 3,
+    "total_matches": 24,
+    "player_names": ["Ada", "Linus", "Grace"],
+    "title": "SCOUT: Radiant",
+    "heroes": [
+      {"hero_id": 1, "games": 14, "wins": 9, "losses": 5, "bans": 3, "primary_role": 1},
+      {"hero_id": 2, "games": 11, "wins": 4, "losses": 7, "bans": 1, "primary_role": 2},
+      {"hero_id": 3, "games": 7, "wins": 5, "losses": 2, "bans": 0, "primary_role": 3}
+    ],
+    "portrait_mode": "cache_miss_fallback"
+  },
+  "hero_grid": {
+    "title": "Hero Grid: Visual Fixture",
+    "min_games": 2,
+    "players": [
+      {"discord_id": 101, "name": "Ada Lovelace"},
+      {"discord_id": 102, "name": "Linus Torvalds"},
+      {"discord_id": 103, "name": "Grace Hopper"},
+      {"discord_id": 104, "name": "Dennis Ritchie"}
+    ],
+    "stats": [
+      {"discord_id": 101, "hero_id": 1, "games": 12, "wins": 8},
+      {"discord_id": 101, "hero_id": 5, "games": 8, "wins": 4},
+      {"discord_id": 101, "hero_id": 6, "games": 3, "wins": 1},
+      {"discord_id": 101, "hero_id": 11, "games": 1, "wins": 1},
+      {"discord_id": 102, "hero_id": 1, "games": 6, "wins": 2},
+      {"discord_id": 102, "hero_id": 5, "games": 10, "wins": 6},
+      {"discord_id": 102, "hero_id": 6, "games": 5, "wins": 3},
+      {"discord_id": 102, "hero_id": 17, "games": 2, "wins": 1},
+      {"discord_id": 103, "hero_id": 1, "games": 4, "wins": 2},
+      {"discord_id": 103, "hero_id": 5, "games": 3, "wins": 1},
+      {"discord_id": 103, "hero_id": 6, "games": 9, "wins": 7},
+      {"discord_id": 103, "hero_id": 11, "games": 6, "wins": 2},
+      {"discord_id": 103, "hero_id": 17, "games": 3, "wins": 2},
+      {"discord_id": 104, "hero_id": 1, "games": 2, "wins": 1},
+      {"discord_id": 104, "hero_id": 5, "games": 7, "wins": 3},
+      {"discord_id": 104, "hero_id": 6, "games": 4, "wins": 2},
+      {"discord_id": 104, "hero_id": 11, "games": 8, "wins": 5},
+      {"discord_id": 104, "hero_id": 17, "games": 1, "wins": 0}
+    ]
+  },
+  "profile": {
+    "username": "Visual Profile",
+    "roles": {
+      "Carry": 50,
+      "Support": 30,
+      "Nuker": 20
+    },
+    "lanes": [
+      {"name": "Roaming", "value": 20},
+      {"name": "Safe Lane", "value": 30},
+      {"name": "Mid", "value": 25},
+      {"name": "Off Lane", "value": 15},
+      {"name": "Jungle", "value": 10}
+    ],
+    "hero_performance": [
+      {"hero_id": 1, "games": 8, "wins": 5},
+      {"hero_id": 76, "games": 6, "wins": 3},
+      {"hero_id": 39, "games": 5, "wins": 2},
+      {"hero_id": 83, "games": 4, "wins": 1}
+    ],
+    "recent_matches": [
+      {"hero_id": 76, "hero_name": "Outworld Destroyer", "kills": 12, "deaths": 3, "assists": 8, "won": true, "duration": 2400},
+      {"hero_id": 1, "hero_name": "Anti-Mage", "kills": 2, "deaths": 8, "assists": 5, "won": false, "duration": 1850},
+      {"hero_id": null, "hero_name": "Mystery Hero", "kills": 4, "deaths": 4, "assists": 7, "won": null, "duration": null}
+    ]
+  }
+}

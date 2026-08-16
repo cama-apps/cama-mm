@@ -1,0 +1,85 @@
+{
+  "schema": "cama.external-service-recording/v1",
+  "provider": "opendota",
+  "base_url": "https://api.opendota.com/api",
+  "provenance": {
+    "kind": "sanitized_contract_fixture",
+    "source": "OpenDota HTTP response contract",
+    "captured_at": null,
+    "live_network_used": false,
+    "notes": "Bodies are minimized synthetic samples of the production response shapes. Identifiers, names, error text, and credentials are non-production values."
+  },
+  "redaction": {
+    "credentials": "none present",
+    "identifiers": "account_id 12345 and fixture-player are synthetic"
+  },
+  "contracts": [
+    {
+      "id": "player-success",
+      "request": {"method": "GET", "path": "/players/12345"},
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "player_success.json",
+          "sha256": "5ff18685a3a19c702264b307a0a381dc483c7ea353f22422582b7e7c1837b457"
+        }
+      ]
+    },
+    {
+      "id": "rate-limit-then-success",
+      "request": {"method": "GET", "path": "/players/12345"},
+      "responses": [
+        {
+          "status": 429,
+          "headers": {"Retry-After": "1"},
+          "content_type": "application/json",
+          "body": "rate_limited.json",
+          "sha256": "894e8f11bf936a78f6de32f7798b5c99c9d35f36d746fdce3a498154e0fd6ce2"
+        },
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "player_success.json",
+          "sha256": "5ff18685a3a19c702264b307a0a381dc483c7ea353f22422582b7e7c1837b457"
+        }
+      ]
+    },
+    {
+      "id": "non-retryable-forbidden",
+      "request": {"method": "GET", "path": "/players/12345"},
+      "responses": [
+        {
+          "status": 403,
+          "content_type": "application/json",
+          "body": "forbidden.json",
+          "sha256": "de0f6ee0f7a66a86640d3a582e460568f49802387f08969422aeb0e6633a9955"
+        }
+      ]
+    },
+    {
+      "id": "malformed-json",
+      "request": {"method": "GET", "path": "/players/12345"},
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "malformed.txt",
+          "sha256": "c78e385dd52441b9c8d5f799b8d8576f3e490fa83bc1c5255945f884ed7e22cf"
+        }
+      ]
+    },
+    {
+      "id": "oversized-body",
+      "request": {"method": "GET", "path": "/players/12345"},
+      "responses": [
+        {
+          "status": 200,
+          "content_type": "application/json",
+          "body": "oversized.json",
+          "sha256": "d4a5619f638c99521ee836baa28e74650047dc471bec5157605f5af3186f00dd"
+        }
+      ]
+    }
+  ]
+}

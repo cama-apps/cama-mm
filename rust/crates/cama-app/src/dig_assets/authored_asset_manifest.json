@@ -1,0 +1,1740 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "path": "dig/bosses/aegis_warden_defeat.png",
+      "bytes": 305009,
+      "sha256": "17c9667ffeb90ef958f366f34b5113322294a9bece9e42528fb201354b929d03"
+    },
+    {
+      "path": "dig/bosses/aegis_warden_encounter.png",
+      "bytes": 266935,
+      "sha256": "d75ae1f765cd5ecaaf5ea5bdc3daad3eef896efab62b5d28d2d13e854bdd9b50"
+    },
+    {
+      "path": "dig/bosses/aegis_warden_victory.png",
+      "bytes": 265371,
+      "sha256": "05f79811cfe9d39e41fa930a976f7fe0f16856da6b7f8eb949feb8e726b9a972"
+    },
+    {
+      "path": "dig/bosses/bastion_below_defeat.png",
+      "bytes": 342003,
+      "sha256": "31d611611855ec52e649371c06356d93e5d630b72e40aa241e42ff150ac754d1"
+    },
+    {
+      "path": "dig/bosses/bastion_below_encounter.png",
+      "bytes": 353711,
+      "sha256": "f80a8ff0276c7819ab40e62eb55141c70135daf1a1d0b15ee6f0e50193e04368"
+    },
+    {
+      "path": "dig/bosses/bastion_below_victory.png",
+      "bytes": 333520,
+      "sha256": "f65636989ae5563badec5a4bde2b5721d34420635bd89798a5c23588752c6379"
+    },
+    {
+      "path": "dig/bosses/blightcoil_defeat.png",
+      "bytes": 288932,
+      "sha256": "f79d3369c846f14e60883cde9f55c8aac9781a8399dc9754b90ae70f976f7ac7"
+    },
+    {
+      "path": "dig/bosses/blightcoil_encounter.png",
+      "bytes": 306100,
+      "sha256": "8549bcb901cef89a473a79feeb772902f71b856f05dff1b4f857d4c9ba06671b"
+    },
+    {
+      "path": "dig/bosses/blightcoil_victory.png",
+      "bytes": 301430,
+      "sha256": "9a6db2c4fe2c28ab34e8485272dc8cbfa32c9d7707e182494c4df89a566238a8"
+    },
+    {
+      "path": "dig/bosses/brass_croupier_defeat.png",
+      "bytes": 303210,
+      "sha256": "1ff61503ef37cdfc04d072f7f332162965ed07e27cf7e6d47cf13e1d165bf829"
+    },
+    {
+      "path": "dig/bosses/brass_croupier_encounter.png",
+      "bytes": 305144,
+      "sha256": "6c9f740a97e571d63859dd6d9e0f12005b019a2a9665af645e7bdc1a9d6d8b71"
+    },
+    {
+      "path": "dig/bosses/brass_croupier_victory.png",
+      "bytes": 289682,
+      "sha256": "4e3a9461abf0afb77b6760952bdcd2223d3049f6828d6c78b1b75b8f024cb9ae"
+    },
+    {
+      "path": "dig/bosses/broodmother_defeat.png",
+      "bytes": 304985,
+      "sha256": "2255e366274fc6f9247902bf80926ff56c285f988ba44d35ac1dbc00da4b7d53"
+    },
+    {
+      "path": "dig/bosses/broodmother_encounter.png",
+      "bytes": 307881,
+      "sha256": "e5d879f58402b55b32bc27172ecae65802842eaae7ddb7241cc61a7fc5aa2928"
+    },
+    {
+      "path": "dig/bosses/broodmother_victory.png",
+      "bytes": 292449,
+      "sha256": "ce5968390135217d5a849737ead7747b9d8374ad18af3a2bc3efee82aff315d7"
+    },
+    {
+      "path": "dig/bosses/cairn_general_defeat.png",
+      "bytes": 274870,
+      "sha256": "9479823370adfb81e00bc58b1ebed3978a3d8d1c82fcf76d6017c255a486997a"
+    },
+    {
+      "path": "dig/bosses/cairn_general_encounter.png",
+      "bytes": 285289,
+      "sha256": "8fd656bf90e4445db053bb8be2856ca9f3b811f2434e640f9d053b388fb6d5e0"
+    },
+    {
+      "path": "dig/bosses/cairn_general_victory.png",
+      "bytes": 281857,
+      "sha256": "cf7dbfb175544e35dbf5e4898cd2d4203d5f3b1ad1bfc48166a1527adccbc7b5"
+    },
+    {
+      "path": "dig/bosses/chronofrost_defeat.png",
+      "bytes": 305489,
+      "sha256": "ec396ac344493f242c1187c2d8b9085c57ba1eff61180805b3bbc3486b825f9a"
+    },
+    {
+      "path": "dig/bosses/chronofrost_encounter.png",
+      "bytes": 282919,
+      "sha256": "af1f9a98da08705f33a8794767fc30268aae22828da238f4ba168328037b21b5"
+    },
+    {
+      "path": "dig/bosses/chronofrost_victory.png",
+      "bytes": 273327,
+      "sha256": "1367bfa651180a4067da359d8007066808355ac1592b9ca23c3b420b36ab3ac6"
+    },
+    {
+      "path": "dig/bosses/crystal_maiden_defeat.png",
+      "bytes": 295102,
+      "sha256": "877c4e744b372e0daba224be280503c858598ecf6a46b1db7417c35943ee466a"
+    },
+    {
+      "path": "dig/bosses/crystal_maiden_encounter.png",
+      "bytes": 287037,
+      "sha256": "37e244af32b0994db623e0f01628336e27e6f8538606bbe21a14f9649c8c4f82"
+    },
+    {
+      "path": "dig/bosses/crystal_maiden_victory.png",
+      "bytes": 268449,
+      "sha256": "b24ff56ba0d0452c935115f89d3f02627587433189ce7794bdf4131e6d8c0d60"
+    },
+    {
+      "path": "dig/bosses/crystalia_defeat.png",
+      "bytes": 337264,
+      "sha256": "42e75b0f5023e84a6924339a0018d0ddcabcba44896083b26316a0fa61b1f3eb"
+    },
+    {
+      "path": "dig/bosses/crystalia_encounter.png",
+      "bytes": 313351,
+      "sha256": "c7d285f238e53bf7d2e8115d57af1540643a90748850c8920272bd5a37b1cd49"
+    },
+    {
+      "path": "dig/bosses/crystalia_victory.png",
+      "bytes": 329747,
+      "sha256": "dd02f4bec03ae072b989a766a393b563735a959e3a0aa5d400f84343fb12b8b9"
+    },
+    {
+      "path": "dig/bosses/doom_defeat.png",
+      "bytes": 288824,
+      "sha256": "0465673720caf9033e7009526f17f3749e87c2058423be04f98a388194e2301b"
+    },
+    {
+      "path": "dig/bosses/doom_encounter.png",
+      "bytes": 266438,
+      "sha256": "08ac933f76ad02a91a092dafbaba0a6b49bc3a4a8cfda030dc9d810d01ffefc4"
+    },
+    {
+      "path": "dig/bosses/doom_victory.png",
+      "bytes": 246945,
+      "sha256": "b661f828ec7e72a723dc7634d8c3bf5b230fdb2701a6cc4752de9bb2ddf224bf"
+    },
+    {
+      "path": "dig/bosses/emberwright_defeat.png",
+      "bytes": 289376,
+      "sha256": "82c7aab71fa5fccffe583118e97ea6ea4057c3a2e973067c22b13f54530477a9"
+    },
+    {
+      "path": "dig/bosses/emberwright_encounter.png",
+      "bytes": 303872,
+      "sha256": "4f957baefcef1f0c76faac3385bec8bce993ae274cb53fef19b5d8554e38868c"
+    },
+    {
+      "path": "dig/bosses/emberwright_victory.png",
+      "bytes": 266308,
+      "sha256": "c1ff03e81d8cacb61274568fb47425e7771545931f1bea1b37a9fd8b4f362309"
+    },
+    {
+      "path": "dig/bosses/faceless_void_defeat.png",
+      "bytes": 268538,
+      "sha256": "a9a728966e27993f09fec60adc666a82306ae59122eb1889be3da57bd933588b"
+    },
+    {
+      "path": "dig/bosses/faceless_void_encounter.png",
+      "bytes": 255020,
+      "sha256": "bbdf958d1ec94e6600efd5b4fe3fe7668d873daed8c30a4ae966ce0a251bc8d5"
+    },
+    {
+      "path": "dig/bosses/faceless_void_victory.png",
+      "bytes": 258773,
+      "sha256": "2b419ee105fd2ba504420549670c13fa0849eb67fbb6dab68925a571f92f436e"
+    },
+    {
+      "path": "dig/bosses/first_digger_defeat.png",
+      "bytes": 264746,
+      "sha256": "d6d229ff50d08b72618d9bde26fb032d7e4afb97bb0a29ab4ce64506569f9de2"
+    },
+    {
+      "path": "dig/bosses/first_digger_encounter.png",
+      "bytes": 250073,
+      "sha256": "906300eef83e86c2e75d057070cf8842a27dc7f948b89daacda2b097223f8e7d"
+    },
+    {
+      "path": "dig/bosses/first_digger_victory.png",
+      "bytes": 258870,
+      "sha256": "b6dd01d0a3880aa95e3b86a76bc793b47433e840a21767e68784c68b6020cbb8"
+    },
+    {
+      "path": "dig/bosses/forgotten_king_defeat.png",
+      "bytes": 266654,
+      "sha256": "4d7712c33931a6630a21e5df57a441fadd56328827350da344ada2ae2b1cccd5"
+    },
+    {
+      "path": "dig/bosses/forgotten_king_encounter.png",
+      "bytes": 265292,
+      "sha256": "102e25644722e8239f8694fd3c97231d3f593999da17dcfadb22ff50e1fdfac3"
+    },
+    {
+      "path": "dig/bosses/forgotten_king_victory.png",
+      "bytes": 265983,
+      "sha256": "d81aa8211b9446b2c52f344897c6c44cdf1a9dfd1cb4f6c97363c206ca4972e8"
+    },
+    {
+      "path": "dig/bosses/grothak_defeat.png",
+      "bytes": 262774,
+      "sha256": "79e8b280556f491b0f5c63b3d115def2eebbeaef22275ce7263c466d99175a9c"
+    },
+    {
+      "path": "dig/bosses/grothak_encounter.png",
+      "bytes": 245171,
+      "sha256": "2f21463e8dd5b9267b81c926f80faaab64b094c511067e711802e553e477ce0b"
+    },
+    {
+      "path": "dig/bosses/grothak_victory.png",
+      "bytes": 268446,
+      "sha256": "71159ea0fac49f7cbe14e37262fdca27fcc1db817c497ec62b7c55777d331e09"
+    },
+    {
+      "path": "dig/bosses/heartspire_defeat.png",
+      "bytes": 303933,
+      "sha256": "f14b256b3b4ad7f2780c6c1cfec0edcc2eeca8153c59bcf6b35d21c2d73b4adb"
+    },
+    {
+      "path": "dig/bosses/heartspire_encounter.png",
+      "bytes": 274735,
+      "sha256": "21400a828ce180e4177cda2dcbc1810cfc0f4429e06c71ed26314891022ef4c2"
+    },
+    {
+      "path": "dig/bosses/heartspire_victory.png",
+      "bytes": 279617,
+      "sha256": "211bf9b91bf30b532865e6e84d6a523cb8c3d5b8ba29c078faf91ba96b08128e"
+    },
+    {
+      "path": "dig/bosses/hollowforged_defeat.png",
+      "bytes": 344735,
+      "sha256": "632dc0aaea37474841fac58b317fe7028be954ed0009e4ce651910336a0ca957"
+    },
+    {
+      "path": "dig/bosses/hollowforged_encounter.png",
+      "bytes": 319361,
+      "sha256": "6002f05a37a70a7f50f11e0b42410a0cfd6549936817d9202caa77a57cc84ac2"
+    },
+    {
+      "path": "dig/bosses/hollowforged_victory.png",
+      "bytes": 311011,
+      "sha256": "3e72f57503eb64d2d42916cbc81e594c15a66709ecd45843cda63ad93dfc4e72"
+    },
+    {
+      "path": "dig/bosses/lantern_engine_defeat.png",
+      "bytes": 384958,
+      "sha256": "178482151cc35f789d534cd44c34fa5f6a8f8fde209b6e23d555d55154613e8c"
+    },
+    {
+      "path": "dig/bosses/lantern_engine_encounter.png",
+      "bytes": 393965,
+      "sha256": "739220e94d14d695b30ad9aefabc5fa79739279de56954421f3d19d14648f692"
+    },
+    {
+      "path": "dig/bosses/lantern_engine_victory.png",
+      "bytes": 325041,
+      "sha256": "185b13ff777810ed9347e665843c628dbbb16419d9ddf7fab9240802a0a005ea"
+    },
+    {
+      "path": "dig/bosses/lilith_defeat.png",
+      "bytes": 294888,
+      "sha256": "c615c4579c2df347872d0590e57ce27111a0296f3f1e141f7c85628fcb0b874d"
+    },
+    {
+      "path": "dig/bosses/lilith_encounter.png",
+      "bytes": 266741,
+      "sha256": "d7016587dc840695785778047b675a0474565f9f1a000b5eb3a758218325052b"
+    },
+    {
+      "path": "dig/bosses/lilith_victory.png",
+      "bytes": 254136,
+      "sha256": "187e4867ae3268ad2072e8c4a7ccd59806e6c2697cb2335d6200b5bd7cf75447"
+    },
+    {
+      "path": "dig/bosses/lina_defeat.png",
+      "bytes": 288767,
+      "sha256": "9809f9fe7e8455abf464a662449c10153b57f1f3fa22b1ed80d6f9373117e4aa"
+    },
+    {
+      "path": "dig/bosses/lina_encounter.png",
+      "bytes": 276802,
+      "sha256": "d266ece1c1325944ca8c66c0a52a4af4d80499704f3b46929a4304772d7b3649"
+    },
+    {
+      "path": "dig/bosses/lina_victory.png",
+      "bytes": 252640,
+      "sha256": "74b9f6b9745909e8ad491305a231538aa33564ac855b0201c8cace3feeccb425"
+    },
+    {
+      "path": "dig/bosses/magmus_defeat.png",
+      "bytes": 278614,
+      "sha256": "d50d7f632990d166dd0a5d6dad61a78d4cf69218e052df7c9490b28e1a269f80"
+    },
+    {
+      "path": "dig/bosses/magmus_encounter.png",
+      "bytes": 254680,
+      "sha256": "a51c025562a88c85286ad0b31f8f9cd510c9f67362fdb60e27af9a7b739f2e87"
+    },
+    {
+      "path": "dig/bosses/magmus_victory.png",
+      "bytes": 238057,
+      "sha256": "cf3f4332bafaf3934e0cf1e95ffa20b53c2586702ad3fcbbc3b72936a44af1bc"
+    },
+    {
+      "path": "dig/bosses/nameless_defeat.png",
+      "bytes": 175461,
+      "sha256": "146e616e828abd80b5523dea486c5d046501d300f78c54122fb405207eac5445"
+    },
+    {
+      "path": "dig/bosses/nameless_encounter.png",
+      "bytes": 129200,
+      "sha256": "e09ba4ae236289cfc51540cf3043aeb31af2a67edd1456f7216aadc16f02dc0d"
+    },
+    {
+      "path": "dig/bosses/nameless_victory.png",
+      "bytes": 201084,
+      "sha256": "0c094f16b4cdafd6eccd6deb9593e85cdf37fe52102dd9e6993a15bb73d4f5aa"
+    },
+    {
+      "path": "dig/bosses/ogre_magi_defeat.png",
+      "bytes": 246628,
+      "sha256": "cc4712717a5e270605c03b424d757b697aa46db360e8f9474a78eb3a0c3be39a"
+    },
+    {
+      "path": "dig/bosses/ogre_magi_encounter.png",
+      "bytes": 252974,
+      "sha256": "6d9a3c710341b3e0f9f450921682d22797a3f2877f5dd334608e3e57ef35775a"
+    },
+    {
+      "path": "dig/bosses/ogre_magi_victory.png",
+      "bytes": 249632,
+      "sha256": "766338bd6746cdbbd6d3b489ba3938967f900a20498cc095fc3b9d843ff8ecd2"
+    },
+    {
+      "path": "dig/bosses/oracle_defeat.png",
+      "bytes": 282822,
+      "sha256": "5448c286c30b12c538d0821d5df7328ef4fd786c20b587d133ed3a422571dc6d"
+    },
+    {
+      "path": "dig/bosses/oracle_encounter.png",
+      "bytes": 208361,
+      "sha256": "1f1dd959e7708734d2c895b8893619c6fbd0633b8550804c20ea4130fc2a6f50"
+    },
+    {
+      "path": "dig/bosses/oracle_victory.png",
+      "bytes": 214415,
+      "sha256": "bc9959554e60a517b4f5e5e8aab314b26b53d47a3945cbf767820266bcf008c4"
+    },
+    {
+      "path": "dig/bosses/pale_surveyor_defeat.png",
+      "bytes": 361387,
+      "sha256": "a7aef850e19473db59ebf894956a6a09f04b6d077ba2d79d3fae0a850a799d70"
+    },
+    {
+      "path": "dig/bosses/pale_surveyor_encounter.png",
+      "bytes": 366205,
+      "sha256": "d53fb2e78712c34792f6a4cc3f07d53633798af73d144ee56f7967e1ca3985fc"
+    },
+    {
+      "path": "dig/bosses/pale_surveyor_victory.png",
+      "bytes": 329885,
+      "sha256": "d7ce44b995786bd9a880d796020bc5c08223b5dcb6891f00d80ed961777cf4ee"
+    },
+    {
+      "path": "dig/bosses/pudge_defeat.png",
+      "bytes": 241844,
+      "sha256": "41ced1c074d8e06e1ac99b4c02217868b74c2d5b8551156a2c7331b127052e58"
+    },
+    {
+      "path": "dig/bosses/pudge_encounter.png",
+      "bytes": 241468,
+      "sha256": "37215a0f1a5d9180546ed46df9aa9dfc1eb0bbd6a792072b890f63c4fb5c343e"
+    },
+    {
+      "path": "dig/bosses/pudge_victory.png",
+      "bytes": 232678,
+      "sha256": "f41a4d4f1c625e5f11f68b7cda60549dd1c829ccada75f1d95e5cea121d45412"
+    },
+    {
+      "path": "dig/bosses/rimebound_king_defeat.png",
+      "bytes": 311517,
+      "sha256": "bed788c90aeda19be99fbc903ac8948de6819fc918020d123cf26db4d7c02f78"
+    },
+    {
+      "path": "dig/bosses/rimebound_king_encounter.png",
+      "bytes": 299335,
+      "sha256": "55b4fa2a6367e30805dbbf2ff7c86732df37f92cf24b69e3fdc39a0ff75cee80"
+    },
+    {
+      "path": "dig/bosses/rimebound_king_victory.png",
+      "bytes": 307430,
+      "sha256": "e0c23bbedc0455a7d52ed76566f755674ed714b49336244cb6bbbaeda5f8d059"
+    },
+    {
+      "path": "dig/bosses/saltveil_commodore_defeat.png",
+      "bytes": 290264,
+      "sha256": "26b95f8b025b2208ce433ddb4c6323328f00164734235a0830a203ae3a440508"
+    },
+    {
+      "path": "dig/bosses/saltveil_commodore_encounter.png",
+      "bytes": 298001,
+      "sha256": "c4d3cf8a0bbdb1e975ef3c14a235d8a71a055be8c893838af8fb3d7fee4af6f8"
+    },
+    {
+      "path": "dig/bosses/saltveil_commodore_victory.png",
+      "bytes": 295000,
+      "sha256": "575ffe3546d4c87faf0abcf6136f318c45de6e961db6257fbe2a3ad7314cf8a3"
+    },
+    {
+      "path": "dig/bosses/spectre_defeat.png",
+      "bytes": 296259,
+      "sha256": "c89c63b02a4b23ad51a42aacb338533521ae62555e2751389a629ec627859ffc"
+    },
+    {
+      "path": "dig/bosses/spectre_encounter.png",
+      "bytes": 302588,
+      "sha256": "a5ef49bef4ce413169eec827069e7828c9f4be4354acea6d453d27ebc8ea27d3"
+    },
+    {
+      "path": "dig/bosses/spectre_victory.png",
+      "bytes": 286754,
+      "sha256": "38b5168a6c3730a8002e4f7277ccec2f05ae60f2e4b94dd0c94b8855ac1a8436"
+    },
+    {
+      "path": "dig/bosses/spineback_defeat.png",
+      "bytes": 227845,
+      "sha256": "93d9f577831fe0f1e1e4994acbccddd2904f37d88d9c1b533e4fbdd523163c01"
+    },
+    {
+      "path": "dig/bosses/spineback_encounter.png",
+      "bytes": 196041,
+      "sha256": "c594fdaf4cbac6afa74a78ecb47313fdf65976f2b8bdd18ee641fc9cbda9e172"
+    },
+    {
+      "path": "dig/bosses/spineback_victory.png",
+      "bytes": 222165,
+      "sha256": "c77b9c7a3dceeff6bce8d34051d4cb17c7e280513e14e0c8f443dd3f2f63c9cb"
+    },
+    {
+      "path": "dig/bosses/sporeling_defeat.png",
+      "bytes": 328228,
+      "sha256": "ba22f6fdcbb594fdd4a4d4fc59e34375d4b1957e013c64d76fbb80b393f4e44d"
+    },
+    {
+      "path": "dig/bosses/sporeling_encounter.png",
+      "bytes": 332325,
+      "sha256": "6f1342f5eae10b3b02fbc7aaab7646941c083299b20b032ccfe135f060d74e28"
+    },
+    {
+      "path": "dig/bosses/sporeling_victory.png",
+      "bytes": 298820,
+      "sha256": "c95e8ca15ff759de37cd69eadde18ee7b29a151b9e2ff8a666f18be047c34217"
+    },
+    {
+      "path": "dig/bosses/terrorblade_defeat.png",
+      "bytes": 302260,
+      "sha256": "3870151edfce412cfdea7aef2ea541d1ba2e804f6f3eb3dddd37c8ee80e13b34"
+    },
+    {
+      "path": "dig/bosses/terrorblade_encounter.png",
+      "bytes": 291780,
+      "sha256": "57379a0b7d1c410498094ea0f8a110f608fb2cdbaccefa07a85643d4e16ca440"
+    },
+    {
+      "path": "dig/bosses/terrorblade_victory.png",
+      "bytes": 265119,
+      "sha256": "e4f1d86026bdebc2d516860a705b722694e6c6a5e0c08a38430640811b3b885a"
+    },
+    {
+      "path": "dig/bosses/treant_protector_defeat.png",
+      "bytes": 316270,
+      "sha256": "f71cde0c855596940f5c0e7434286f511e0abc3fa1a14b224656513901f6b67d"
+    },
+    {
+      "path": "dig/bosses/treant_protector_encounter.png",
+      "bytes": 310259,
+      "sha256": "f8fb65f0e3fcbb0f2fcb03e0d6fbca24ad184e07ca6bb787331f14ad68a5aded"
+    },
+    {
+      "path": "dig/bosses/treant_protector_victory.png",
+      "bytes": 287632,
+      "sha256": "3341439826acf93389a8c29b52bd51296548a3d3ee0f3fc389a38d56e93d296e"
+    },
+    {
+      "path": "dig/bosses/tusk_defeat.png",
+      "bytes": 297294,
+      "sha256": "68d8479eeb8bd6adc28f8b52a550b4f25e6c82c51a1824d1cac12a35b018dc4e"
+    },
+    {
+      "path": "dig/bosses/tusk_encounter.png",
+      "bytes": 315595,
+      "sha256": "c5de40506ad42e1d9d374c28d2ab13b65ebab619e83fb9ea069bb7fd4f34bf30"
+    },
+    {
+      "path": "dig/bosses/tusk_victory.png",
+      "bytes": 312139,
+      "sha256": "74a9091d8903ec1106689863206474026a8d16e4ceb646fb9e5a1963488651cf"
+    },
+    {
+      "path": "dig/bosses/underlord_defeat.png",
+      "bytes": 251436,
+      "sha256": "66b22ecb9551c98670da8302e2d65d44c730ea39221f5ebfec7fb6bdd9469e54"
+    },
+    {
+      "path": "dig/bosses/underlord_encounter.png",
+      "bytes": 211815,
+      "sha256": "e5177f9a0df91e12091ed701ceb988c597d43ce824a71c3e46e9384baabb27c6"
+    },
+    {
+      "path": "dig/bosses/underlord_victory.png",
+      "bytes": 219810,
+      "sha256": "adadece191dff079a9bd084359610e3f075243638491e77eaaddb070763b847c"
+    },
+    {
+      "path": "dig/bosses/void_spirit_defeat.png",
+      "bytes": 306958,
+      "sha256": "54b2943eb3dafa2b696823bddce60c9dcdef88514f4cfe66a3d23931f645543b"
+    },
+    {
+      "path": "dig/bosses/void_spirit_encounter.png",
+      "bytes": 267696,
+      "sha256": "c2aa6b2b2d135625e8a257eaf27f817079526e02878430954ed5ee8ec11e028e"
+    },
+    {
+      "path": "dig/bosses/void_spirit_victory.png",
+      "bytes": 248959,
+      "sha256": "69f01acae2f3d3de4d8af41bda076cc853c0f280286c54792549481a8af30224"
+    },
+    {
+      "path": "dig/bosses/void_warden_defeat.png",
+      "bytes": 178610,
+      "sha256": "dcbd77e8a8a2f3222a684d6cb28479e3ebcadf8d2163ade561b41002d66dfba4"
+    },
+    {
+      "path": "dig/bosses/void_warden_encounter.png",
+      "bytes": 190736,
+      "sha256": "35edc18be055bd17ed27e4b53828137df4397d2bde2f8f978d6a87478ebdaf3f"
+    },
+    {
+      "path": "dig/bosses/void_warden_victory.png",
+      "bytes": 265189,
+      "sha256": "91d6f3db8ba2732749869627dd1d55208df8e146b9aba636a38f1e27f58a749f"
+    },
+    {
+      "path": "dig/bosses/weaver_defeat.png",
+      "bytes": 318911,
+      "sha256": "2fccdfd352bd5818b0ebeda40d2dfabfb83dadfa62d9f5f452e09b9d156ca8c5"
+    },
+    {
+      "path": "dig/bosses/weaver_encounter.png",
+      "bytes": 279269,
+      "sha256": "9b1c0917df9950a4380f5ec08da1853385965f6c9c69a434a6a11cef0906c045"
+    },
+    {
+      "path": "dig/bosses/weaver_victory.png",
+      "bytes": 271241,
+      "sha256": "c1a1bd96e9a3c96ed713fa47115a99d2a9a511d79c7cc217d5f201d778b7ff76"
+    },
+    {
+      "path": "dig/bosses/xalatath_defeat.png",
+      "bytes": 259690,
+      "sha256": "7ead95ab92fbd8592e2d0d3992c2bf14aa6ac672c75c4cd4dd410511f7d3fc47"
+    },
+    {
+      "path": "dig/bosses/xalatath_encounter.png",
+      "bytes": 252096,
+      "sha256": "751590f9066a45897bf1a3f61cadb6581c27ee13f6a384a2caa847b2bee575f6"
+    },
+    {
+      "path": "dig/bosses/xalatath_victory.png",
+      "bytes": 244256,
+      "sha256": "3f3786f10eb13ce0089b4a32bbdf7cda509b468d172b13de82569f5e25a5c1bd"
+    },
+    {
+      "path": "dig/events/abandoned_forge.png",
+      "bytes": 1107869,
+      "sha256": "1bcde45d17c74a0d16e4af01ad4254e7438dad30b0caa99cf0ca7d33272a61b0"
+    },
+    {
+      "path": "dig/events/abandoned_minecart.png",
+      "bytes": 928919,
+      "sha256": "327887359e44371916ebc672fb8b986a45a8fb9e0a99fbff53fc92d4bf269c9d"
+    },
+    {
+      "path": "dig/events/abyssal_fishing.png",
+      "bytes": 774484,
+      "sha256": "0880504403a1f9f144eafce7760e5f2b5da2df3fb3515643a4140da07d988b35"
+    },
+    {
+      "path": "dig/events/aegis_denial.png",
+      "bytes": 841482,
+      "sha256": "82d64b1583bc318c334d70cfa96059d4b7ca18c9043bd3bd4af31ea77cae3bd4"
+    },
+    {
+      "path": "dig/events/aegis_whisper.png",
+      "bytes": 773367,
+      "sha256": "8be47392bb4e793df5f05e53ec0dd7f5a4fe1718277fbe1d144478a46ead84a7"
+    },
+    {
+      "path": "dig/events/agh_s1.png",
+      "bytes": 1055633,
+      "sha256": "8593cc5e509cb04bafefe55262cd588479964331443ff6d9acbb3c2e1943e895"
+    },
+    {
+      "path": "dig/events/agh_s2.png",
+      "bytes": 1032539,
+      "sha256": "25c4eb5ecb421231c86925095383c79fb53b3b6a7d858edb25685b504ae2c7bb"
+    },
+    {
+      "path": "dig/events/agh_s3.png",
+      "bytes": 1018398,
+      "sha256": "273d124a801d0bb4ce55a5c4d740e7a470229d54b45b7d22f57a638c258d9da9"
+    },
+    {
+      "path": "dig/events/agh_s4.png",
+      "bytes": 1063126,
+      "sha256": "101dc6c303744ce58ccde9f89c97f2a5c9cc30c7a957f95e469bfe21ad571d99"
+    },
+    {
+      "path": "dig/events/agh_s5.png",
+      "bytes": 1144284,
+      "sha256": "a403ef6d9de9adf71fc35684db1087005a3aefe6ada67a2cce5a759205188674"
+    },
+    {
+      "path": "dig/events/aghanim_trial.png",
+      "bytes": 1146782,
+      "sha256": "0834447084e4f4cb849f4066973a2054a616f80f93a7563de7678cc8bf4350ac"
+    },
+    {
+      "path": "dig/events/ancient_elevator.png",
+      "bytes": 835077,
+      "sha256": "c29bdd34e7f615fed5c3bd80ce3702e4d0642e463d2a52403f193c6218a1f498"
+    },
+    {
+      "path": "dig/events/auls_bullet_hell.png",
+      "bytes": 967125,
+      "sha256": "0d8f57121930d004d2fcd93c452c458198334c869f51ec71234dcbb53ce5c10a"
+    },
+    {
+      "path": "dig/events/azurite_deposit.png",
+      "bytes": 917041,
+      "sha256": "3de14bb6fea291ac39af463d1d58fa8e6ab0ac9db4cde9ca8461cb56ad6d9eb2"
+    },
+    {
+      "path": "dig/events/bolas_s1.png",
+      "bytes": 921101,
+      "sha256": "af61d1baf2e8e74dad6215fd83481b2e5a04750ff4ff953a314ce92ecd2c9bec"
+    },
+    {
+      "path": "dig/events/bolas_s2.png",
+      "bytes": 856108,
+      "sha256": "391bade14aa6a16e8dafb48d9a659a70ddc948555625b4a1cace74284b5d84d7"
+    },
+    {
+      "path": "dig/events/bolas_s3.png",
+      "bytes": 907606,
+      "sha256": "d5e5663428755f4619f27e2d9ae21947221d9ab1632a1a84c0eecb216025a9eb"
+    },
+    {
+      "path": "dig/events/bolas_s4.png",
+      "bytes": 949030,
+      "sha256": "97818247b1a572fa727fa97db735801f45f6281363bcd2326095036f0bfd369f"
+    },
+    {
+      "path": "dig/events/bolas_s5.png",
+      "bytes": 1070414,
+      "sha256": "9f6bd1d43226529fec0968acceaa3bd656f86934aecc9eb06f9dc54e3fff5986"
+    },
+    {
+      "path": "dig/events/bounty_marker.png",
+      "bytes": 842319,
+      "sha256": "c47857c3fe8494adbf4aef11c81cd0d1d7acceb8f5b291402abc3b1735743f6b"
+    },
+    {
+      "path": "dig/events/bounty_rune.png",
+      "bytes": 1047023,
+      "sha256": "86b394826eee311fb4a9218b12415f363f87f180927c7395a3ecc61cc82a1993"
+    },
+    {
+      "path": "dig/events/brann_bronzebeard.png",
+      "bytes": 1006474,
+      "sha256": "12b74922f9e37b128f6132085b8ec9283a88dbc1d4132e5b6d2aedb397bef08f"
+    },
+    {
+      "path": "dig/events/branns_potion.png",
+      "bytes": 829621,
+      "sha256": "6212e80611d5789e531c6bc85154db1acb2f772d784098fbfe24cbfdc74f75ab"
+    },
+    {
+      "path": "dig/events/breach_encounter.png",
+      "bytes": 869314,
+      "sha256": "5842e8b9a5b1cbe57301ff64bf3d18206f10e9150c2511615a987c5d2a7ad8c5"
+    },
+    {
+      "path": "dig/events/buried_lunch_box.png",
+      "bytes": 895056,
+      "sha256": "9727124651db0d31adc6b265cab9a3b5d6f6aca8f16311f8ed4cdbdf359b6a84"
+    },
+    {
+      "path": "dig/events/buying_gf.png",
+      "bytes": 783198,
+      "sha256": "206e28a23a927e153ce23bfece96727d1cf991fd17876f9e951395d056770f37"
+    },
+    {
+      "path": "dig/events/campfire_rest.png",
+      "bytes": 956244,
+      "sha256": "721973439de24645fd148e437ce21fd514fe45980434a8230cf76fe3d8341031"
+    },
+    {
+      "path": "dig/events/candle_glow.png",
+      "bytes": 877716,
+      "sha256": "3ef6757ff25670ac91219f77aa5f36e4f109a661847d2ff7e7d401fc223b7251"
+    },
+    {
+      "path": "dig/events/chain_frost_cascade.png",
+      "bytes": 834663,
+      "sha256": "1488dd27291ba11b1b438e54f74f08474194803c57b908821131e7d371b2b136"
+    },
+    {
+      "path": "dig/events/charon_toll.png",
+      "bytes": 900512,
+      "sha256": "7f4e19283976693a3d3dbf240a21bafad29da2d0c67c16bc320af4d40484121b"
+    },
+    {
+      "path": "dig/events/clockwork_toll.png",
+      "bytes": 1107403,
+      "sha256": "c55522da5af977cc382fa13c3171f512577ebbc393bff25a512e41b7b7868e94"
+    },
+    {
+      "path": "dig/events/coffer_key_gamble.png",
+      "bytes": 928078,
+      "sha256": "af9159469e8dfd0a26940b2ff289856c488d2d4ea0f3092f9709b3a6136f6dc9"
+    },
+    {
+      "path": "dig/events/collapsed_armory.png",
+      "bytes": 1027640,
+      "sha256": "efa715eeb22738b661c9dfa130b26c9bb811c801487606a235fa515833bfe3c4"
+    },
+    {
+      "path": "dig/events/collapsed_armory_cache.png",
+      "bytes": 1258228,
+      "sha256": "b628348740da5164125d2d42f9578f03214142381ae29158c46f0d40da9e9ee7"
+    },
+    {
+      "path": "dig/events/collectors_roots.png",
+      "bytes": 1029490,
+      "sha256": "2195143a2a8e39c4c7e57ba4a5df34d57f8f39cc4a25f71189a95c82ddfa85e3"
+    },
+    {
+      "path": "dig/events/crawler_breakdown.png",
+      "bytes": 920495,
+      "sha256": "3caff9925e473f8bf62af7dbb9a61ab99d3241b81ee1dffabf94969fff96a88d"
+    },
+    {
+      "path": "dig/events/creeper_ambush.png",
+      "bytes": 774803,
+      "sha256": "81ba7020ba06765c24d71f9295f1e90c694f3c9db3623c6b3feed674fe69178b"
+    },
+    {
+      "path": "dig/events/crimson_drizzle.png",
+      "bytes": 916988,
+      "sha256": "500673071c3ab1e915e826f59a3c08b8e18d3138a4601ef4a24a81a46207f45c"
+    },
+    {
+      "path": "dig/events/crimson_rain_ladder.png",
+      "bytes": 899110,
+      "sha256": "8de9ce6cd24b152c81514ef385a39418cda238647b79a437b36636e5c04ebce7"
+    },
+    {
+      "path": "dig/events/crow_snipe.png",
+      "bytes": 811336,
+      "sha256": "ca47ceb0e4389d8da28179f3268efb688ff8bb8b4cceff1f7c31306e216bc642"
+    },
+    {
+      "path": "dig/events/crystal_garden.png",
+      "bytes": 1002347,
+      "sha256": "c9467e3048129514ba4419e12d0ddb69f366047f8199a73b3f5ea4224e90b6fe"
+    },
+    {
+      "path": "dig/events/crystal_golem.png",
+      "bytes": 914020,
+      "sha256": "0043fc32427a4ce90326fe1a05c131f474d4915c92dbe2b91bc57a6b16f24417"
+    },
+    {
+      "path": "dig/events/cursed_chest.png",
+      "bytes": 833807,
+      "sha256": "07be29f7cff3614a102cc8d92e5f55a7b5d5f96c6b976016c26c7028ccc268aa"
+    },
+    {
+      "path": "dig/events/damned_bottle.png",
+      "bytes": 760317,
+      "sha256": "0ac03aebb06ac7b0c6c27c5e6fa6d5546372f9959d12864847c7de161d3fb2a7"
+    },
+    {
+      "path": "dig/events/dark_rider.png",
+      "bytes": 918920,
+      "sha256": "e7f2e7d864247c64ca033d74588000a28dc3f88b9534afde6e4e37535a30a843"
+    },
+    {
+      "path": "dig/events/dead_prospectors_pack.png",
+      "bytes": 955366,
+      "sha256": "29ae9b2636baf5d1121bf1f97955dd418e15746e7b3186275ff712931a874232"
+    },
+    {
+      "path": "dig/events/delve_smuggler.png",
+      "bytes": 932808,
+      "sha256": "3be797c61bed1d6764603103fe3cde80a8890d8b7a93187b80d79c1b81011fe4"
+    },
+    {
+      "path": "dig/events/deny_the_seam.png",
+      "bytes": 854612,
+      "sha256": "615479870a30a8e802e7da0c2b645fc761fd4dd4e933a4329951381630b2f35e"
+    },
+    {
+      "path": "dig/events/dig_dog.png",
+      "bytes": 925044,
+      "sha256": "597a22598d1745ae9ab34cb55b22b69ea79fe9d8645ebdd09a5370197753443f"
+    },
+    {
+      "path": "dig/events/divine_rapier_drop.png",
+      "bytes": 783178,
+      "sha256": "0953ef85899d919451239a9e1713ef89ffaa72c70c4b4c045202e33ba3b864c5"
+    },
+    {
+      "path": "dig/events/drill_sergeant.png",
+      "bytes": 847812,
+      "sha256": "649887c1aab1bc84da88970289c4f5173726d9047fd8cc7c96fb1d5f030a91c4"
+    },
+    {
+      "path": "dig/events/earthen_cache.png",
+      "bytes": 1051181,
+      "sha256": "e76d2be7a85d99774f76560383e4daebd769097948e54882e2cf654f0afeac7f"
+    },
+    {
+      "path": "dig/events/echo_chamber.png",
+      "bytes": 879870,
+      "sha256": "6c9742347ec039ebdde2c621794620d455293bf312d2a4d5d5eede3927485681"
+    },
+    {
+      "path": "dig/events/echoing_mime.png",
+      "bytes": 790401,
+      "sha256": "1c7e90af2b4379706fe14aec42084a7cccd13dae15a4375a14eebfe26cf7f66e"
+    },
+    {
+      "path": "dig/events/ember_clearinghouse.png",
+      "bytes": 993396,
+      "sha256": "a0d3d8112232a8e1b028955c1333b8d098f2a393f09261bda9d444bbfd574fb2"
+    },
+    {
+      "path": "dig/events/enchanted_candle.png",
+      "bytes": 801748,
+      "sha256": "a3e8694f99650c99ac55315bf7012e5816781036e70139881ae94a7232633c04"
+    },
+    {
+      "path": "dig/events/enchanting_table.png",
+      "bytes": 923846,
+      "sha256": "19f3256f4fa8702c632042435585abe18ea4106e63a6cec58835a06610675adc"
+    },
+    {
+      "path": "dig/events/enderman_stare.png",
+      "bytes": 886709,
+      "sha256": "708c3266320290c82fbc304348196b7a567b82f137c61a68202aa7def3347129"
+    },
+    {
+      "path": "dig/events/enigma_blackhole.png",
+      "bytes": 815546,
+      "sha256": "dac5a363c310041a4def89d3dff66b42c616956471c98bcc4e252b6395f2f003"
+    },
+    {
+      "path": "dig/events/first_descent_cartography.png",
+      "bytes": 1309695,
+      "sha256": "99741c73b6b80e40307e391918088a79ec5e481272f2f870cbf26c12e1eae017"
+    },
+    {
+      "path": "dig/events/flare_starvation.png",
+      "bytes": 452906,
+      "sha256": "f02ada2614667eba86726ef5ff8d8a8f3a56b6380498d9c29a2900647a81bbe6"
+    },
+    {
+      "path": "dig/events/fools_vein.png",
+      "bytes": 932254,
+      "sha256": "262509954bf22109731835f8de9e00dcea9ebaa32f6c5131b3d728a41636ea28"
+    },
+    {
+      "path": "dig/events/forge_spirit.png",
+      "bytes": 901567,
+      "sha256": "cdd3472147332ab9f7ed68a4f57b87f20ecc6a8ec41642b087424229a70b09e2"
+    },
+    {
+      "path": "dig/events/fossil_argument.png",
+      "bytes": 968214,
+      "sha256": "33b9da70a9238f8b37006d83e647bf10f55aa1622f75c2f98f10141684947c38"
+    },
+    {
+      "path": "dig/events/fossil_cache.png",
+      "bytes": 1068643,
+      "sha256": "a4b983af9fdf4c7cce2cf501339bddd706f6cd3df250827a1170720adcc3e871"
+    },
+    {
+      "path": "dig/events/frayed_lifeline.png",
+      "bytes": 1083397,
+      "sha256": "b1481dbbe19b73da6b16fe295f7b96b101fe0ecfdb6c5c280ae2cafaeab56cc1"
+    },
+    {
+      "path": "dig/events/friendly_mole.png",
+      "bytes": 857704,
+      "sha256": "43974ac83bafdf005d3154837577793f12114ec0ec8b5ddfdca050921d8a9195"
+    },
+    {
+      "path": "dig/events/gamblers_rest.png",
+      "bytes": 845521,
+      "sha256": "06e69d5f38bac024a78ebd813d5eededacce8284e75b5178af557d2af6106a01"
+    },
+    {
+      "path": "dig/events/gambling_den.png",
+      "bytes": 1027481,
+      "sha256": "5a12d0711b89fe5f4ffdbf2761fc2efccdc1bc41c9a0ebfdf48397ac9a710609"
+    },
+    {
+      "path": "dig/events/gas_pocket.png",
+      "bytes": 838945,
+      "sha256": "c1a2f48a4e2691769ddc86f90e8b3cc3905e8d156cbb13c7b5067a6f49f1d818"
+    },
+    {
+      "path": "dig/events/gem_rock.png",
+      "bytes": 1007938,
+      "sha256": "729f7426b5cf5aeefb4101d477042e43846ab791406b3d66c7df26b7d0ca7e87"
+    },
+    {
+      "path": "dig/events/glyph_pulse.png",
+      "bytes": 965870,
+      "sha256": "b997d92baae0c3dd628ee7414b9c9e88570fdc4c82d741312b813a9270ca2a58"
+    },
+    {
+      "path": "dig/events/gravity_inversion.png",
+      "bytes": 819683,
+      "sha256": "ff5d279493ece5ae15bd5d081075a43e79152af69d81f181c6417795032f8c89"
+    },
+    {
+      "path": "dig/events/gravity_pocket.png",
+      "bytes": 887633,
+      "sha256": "04920362c31b498d91a2603c843ef0009ca142d1c19fe45967e58947ac1421e5"
+    },
+    {
+      "path": "dig/events/grenths_tithe.png",
+      "bytes": 972381,
+      "sha256": "228bf2ab6670e6d1f2adddaf8c32e84acfa592ff4f2eb8b97aee7e0f13fcd8f4"
+    },
+    {
+      "path": "dig/events/heat_mirage.png",
+      "bytes": 913821,
+      "sha256": "1ed528b3b6b214e313840e8377f03d948b90696585a3e24914e66d9c73a668f2"
+    },
+    {
+      "path": "dig/events/helltide_bell.png",
+      "bytes": 801015,
+      "sha256": "1541da0c539694043b2e083c23725fc38f85d7c8eea67b2dfb337dfac7a34a61"
+    },
+    {
+      "path": "dig/events/hex_cursed_shrine.png",
+      "bytes": 980894,
+      "sha256": "582e83bacf9f66d00d70a878be972664b5f6eab9b735a8b5ddcc045905c7b186"
+    },
+    {
+      "path": "dig/events/hungering_dark.png",
+      "bytes": 818273,
+      "sha256": "c451b58d5ca17837585a5f9f68514370604e0a6b91dc85e28d3d12efb9d01d98"
+    },
+    {
+      "path": "dig/events/hungry_beacon.png",
+      "bytes": 939103,
+      "sha256": "615e3c311afc03eed7034f6d4cd79e6c0f9d7bacb3f0251b443949f94d18225d"
+    },
+    {
+      "path": "dig/events/identity_thief.png",
+      "bytes": 1039427,
+      "sha256": "77d870c83558fe0bef8802a9739cec6724e54ce71693ee9922e763231f923abf"
+    },
+    {
+      "path": "dig/events/infernal_gate.png",
+      "bytes": 1046351,
+      "sha256": "9882cb073e28a7468adbcdfc61e818859cdd465be715797ba391a733bebbc903"
+    },
+    {
+      "path": "dig/events/io_tether_pact.png",
+      "bytes": 749798,
+      "sha256": "d71b8162b6480eab331685a3f96a15f1b21e1647f8e1060452ab986e2f590c81"
+    },
+    {
+      "path": "dig/events/item_goblin.png",
+      "bytes": 1020666,
+      "sha256": "99020978da9d245ee2e54084dd44fda24298b7c0a54f265ced7f9a68f6595f35"
+    },
+    {
+      "path": "dig/events/kurgal_summons.png",
+      "bytes": 756619,
+      "sha256": "c7fdc408fdad42aec3ffd3d89df411f2be9609390e79db66b1cfe5599bbf52bf"
+    },
+    {
+      "path": "dig/events/lava_surfer.png",
+      "bytes": 903650,
+      "sha256": "5307d8a0ed753fcc27d523fe11fdbfd3ff4647afb1d96667e0386b2736bcb651"
+    },
+    {
+      "path": "dig/events/lost_miner.png",
+      "bytes": 838100,
+      "sha256": "cdc5064736856d1432686f7d1880e2ab682d72aa938dc4e84ecb0d1113b4692f"
+    },
+    {
+      "path": "dig/events/lumber_collapse.png",
+      "bytes": 906390,
+      "sha256": "25ef88c7c66a62e6198aca97dc36f62cf3629a89570c96487c9fbfb7132b58e1"
+    },
+    {
+      "path": "dig/events/mages_archive.png",
+      "bytes": 890355,
+      "sha256": "bf27e130c46fdecc03a87f32a5a1daacc901daf4d6e4661bf568483045510734"
+    },
+    {
+      "path": "dig/events/magma_geyser.png",
+      "bytes": 943755,
+      "sha256": "7e743bc3ed28bc765cdde56f2f354ad7c0a8017456a56cbf742bed92462d563d"
+    },
+    {
+      "path": "dig/events/mana_fountain_crack.png",
+      "bytes": 850688,
+      "sha256": "eb61aef432a23f2e1ab6b50c13a0192c49a44a67d8d8e23ca2422f60d43f42a6"
+    },
+    {
+      "path": "dig/events/meepo_clones.png",
+      "bytes": 899356,
+      "sha256": "4576ece3778a918f1029fb0dd852cda3b3aed68b070cf831b7f1120aff030db5"
+    },
+    {
+      "path": "dig/events/memory_of_the_surface.png",
+      "bytes": 792743,
+      "sha256": "8aec603b1036906d54172fa8ef619fec1f4d5b17db1e17a5c732f10a29a90029"
+    },
+    {
+      "path": "dig/events/mob_spawner.png",
+      "bytes": 965820,
+      "sha256": "d7322cdcb3de5f9efa861551ebaca6795dded9ea4ad17dbcaac1002048e4f230"
+    },
+    {
+      "path": "dig/events/mossfire_echo.png",
+      "bytes": 911191,
+      "sha256": "9348eec0ca28ad991d774a2205ef0e66fb11e8a4afb540f261ceb6cc238ded46"
+    },
+    {
+      "path": "dig/events/mushroom_grove.png",
+      "bytes": 959238,
+      "sha256": "7bab475fe1feddd427317a5cf9a94c6beecba4ec291207dd48e48f7e47ea381c"
+    },
+    {
+      "path": "dig/events/mystery_lever.png",
+      "bytes": 1032343,
+      "sha256": "18c15b31c4d654860aa212af617375c933de4dcbaecdc8af1911ffbad54d7665"
+    },
+    {
+      "path": "dig/events/necro_s1.png",
+      "bytes": 982295,
+      "sha256": "6cb5b98fac2f3b18073ae0ff24d516d51f93a5852a4432cfe4b19232ad3a41b6"
+    },
+    {
+      "path": "dig/events/necro_s2.png",
+      "bytes": 925135,
+      "sha256": "0c53f2260e7a7a57edffb7cbd16081bd31d9cbe536ebb41f3a64c79a8ca8f944"
+    },
+    {
+      "path": "dig/events/necro_s3.png",
+      "bytes": 1008261,
+      "sha256": "a3d34146f382f43b79e71dba26f55198bbdfbde7ae81629c70614febc76eeb15"
+    },
+    {
+      "path": "dig/events/necro_s4.png",
+      "bytes": 997058,
+      "sha256": "37a35cdb75e043c6c3efce29936dcc652788133002aa331aa0681c398c303ef8"
+    },
+    {
+      "path": "dig/events/necro_s5.png",
+      "bytes": 994891,
+      "sha256": "a119901e99da275e37a022c096d5c666bd5b4d470e360f911ba5b3a5ac0ef5e9"
+    },
+    {
+      "path": "dig/events/neow_blessing.png",
+      "bytes": 1043300,
+      "sha256": "3a3d413d4a1fa5dcb792a22c2f583bb0239acbe4901d2f880e34507d955debf6"
+    },
+    {
+      "path": "dig/events/neutral_item_drop.png",
+      "bytes": 1004594,
+      "sha256": "5b5a5531a5af7f5d9375d183e05b8c8ffdf00f1b1495b2a0cc0d4626d1991e57"
+    },
+    {
+      "path": "dig/events/olympian_boon.png",
+      "bytes": 905026,
+      "sha256": "7db6af2356fc52e3e24a6f3a88bec7c2772c420374dd8c31693c37cbe9b4cb64"
+    },
+    {
+      "path": "dig/events/phantom_strike.png",
+      "bytes": 887800,
+      "sha256": "5463c12aa44905e2189d91424a6cb95ad43065c92344b29feba6cd6211a3afaa"
+    },
+    {
+      "path": "dig/events/phosphor_vein.png",
+      "bytes": 978623,
+      "sha256": "3ea62bfe035ebcec8f8c0420c3c4a572c202ba0ef5df69a1f27d34f5096dd55d"
+    },
+    {
+      "path": "dig/events/pickaxe_head_flies_off.png",
+      "bytes": 873916,
+      "sha256": "66ee854f5c1a7418943f371893eaf8081e6109c144ccefe8cedb08357ede9f68"
+    },
+    {
+      "path": "dig/events/pit_lords_toll.png",
+      "bytes": 814049,
+      "sha256": "51205ea8fc1878cf830578729f81b400041b86dba421ef60df82bfa6adf049d9"
+    },
+    {
+      "path": "dig/events/prism_trap.png",
+      "bytes": 1043622,
+      "sha256": "10d4d8ff2eff5674a688e78762cb910a422a910e37ef689fc7a748d37e446338"
+    },
+    {
+      "path": "dig/events/prospector_s_last_pack.png",
+      "bytes": 1228591,
+      "sha256": "6631eac47e73f6905ac1961ad9af907f5a133682e6a85156496cfd3a7604f705"
+    },
+    {
+      "path": "dig/events/quartermaster_s_niche.png",
+      "bytes": 1234782,
+      "sha256": "f4513decde7f1c7934ca848e146a8a96afe5dc00fed2a813a6f3f490ba56e354"
+    },
+    {
+      "path": "dig/events/red_thread_shrine.png",
+      "bytes": 937757,
+      "sha256": "c56d014885c96933b7de1d24e4bf01958e31828dbfeae48b6c683f0faecdaddb"
+    },
+    {
+      "path": "dig/events/refresher_shard.png",
+      "bytes": 845050,
+      "sha256": "48c21934838c33a3d88cd35997380bd6c0cab5033855a0bb71787f34bdffbd5c"
+    },
+    {
+      "path": "dig/events/relic_bearing_strata.png",
+      "bytes": 1297799,
+      "sha256": "22abc4412042640d8f22ccd55da096bb3f0aaacbe7ec87e9ede666d34304a463"
+    },
+    {
+      "path": "dig/events/resonance_cascade.png",
+      "bytes": 904472,
+      "sha256": "96265ee862d89476c7bcac8463bee8120a3b677c83c563d9bb53b50bdca4f926"
+    },
+    {
+      "path": "dig/events/resonator_socket.png",
+      "bytes": 966510,
+      "sha256": "558b15bd46c728f39776ae849b7541846f2a7d10d816fecade3abfed81531a9a"
+    },
+    {
+      "path": "dig/events/rhystic_tollgate.png",
+      "bytes": 886733,
+      "sha256": "d10f131efbbb3ec6921376fd5717c89f11a13e277e7652536444cfff3b918c36"
+    },
+    {
+      "path": "dig/events/riki_ambush.png",
+      "bytes": 1027442,
+      "sha256": "e7289fe3317082ce5802ace45b14b16b2fed8aac3ac5093df37121d0178953cb"
+    },
+    {
+      "path": "dig/events/rock_golem_encounter.png",
+      "bytes": 893545,
+      "sha256": "5b5b2575c2b6c6e63ffb4db8a7379ce5b1cf47556b0310c7f3f7d2f2ebb1e1c3"
+    },
+    {
+      "path": "dig/events/root_maze.png",
+      "bytes": 929088,
+      "sha256": "2110511b928b8e386b256c881526f2bcaa066a23cfcdbc437c7f3e17a6e2b00e"
+    },
+    {
+      "path": "dig/events/roshpit_gambit.png",
+      "bytes": 871312,
+      "sha256": "08e5dfada2b80dd9b66a2742775b3f0b45a3adb165726baa4de07615f036508c"
+    },
+    {
+      "path": "dig/events/ruinwager_vault.png",
+      "bytes": 929550,
+      "sha256": "8d59e04f2e391b399f06433efa4ac748925c886954cfc4d62b042dff0fbb41b6"
+    },
+    {
+      "path": "dig/events/salted_threshold.png",
+      "bytes": 1214309,
+      "sha256": "3f906b680427d4f7ff619c5a64784ee3b4e52646664a309e90113edf735cdd38"
+    },
+    {
+      "path": "dig/events/sandwich_lady.png",
+      "bytes": 924310,
+      "sha256": "3927a45844199dcb640b92f1d3e8b84e5e2f5a73130d614e3d91c2800c36e5a2"
+    },
+    {
+      "path": "dig/events/sanguine_pact.png",
+      "bytes": 802008,
+      "sha256": "774359f0009424faf043d91193219e0db4ba200ae4739b5c767f29c33febf62b"
+    },
+    {
+      "path": "dig/events/sealed_reliquary.png",
+      "bytes": 939013,
+      "sha256": "0aa08ae4183b49b51739a1faf24a8ce2a2236118a398e714a6a2d36ad236de31"
+    },
+    {
+      "path": "dig/events/second_life_ledger.png",
+      "bytes": 933840,
+      "sha256": "fbc9fba6a2bd3cf43b489b00b7db3e1262eef885e2fcc2f1ebcfdf110129fea3"
+    },
+    {
+      "path": "dig/events/shooting_star.png",
+      "bytes": 899754,
+      "sha256": "e71e9da17fdee7ef3a109bb9b043852d4bfcbd2735aee8961e6ef91aa81b746b"
+    },
+    {
+      "path": "dig/events/silken_cocoon.png",
+      "bytes": 983130,
+      "sha256": "91cfc4e8beacc20dd2bfb1c1bc462e77616649e9afff46b329e315a59d77b1d5"
+    },
+    {
+      "path": "dig/events/sirens_hollow.png",
+      "bytes": 850626,
+      "sha256": "c4e50988ef504e40f89ccebe11ca20a97df0a9d5093b9a83e350a8c2c1ef6a4c"
+    },
+    {
+      "path": "dig/events/sisyphus_boulder.png",
+      "bytes": 952970,
+      "sha256": "586cf8da7f11c347deeff5d0f54e43d54d7461ec9a4ba325de5354550aa1fd4f"
+    },
+    {
+      "path": "dig/events/smoke_ambush.png",
+      "bytes": 797301,
+      "sha256": "91a17c7070ee9ec6bb25f9b086a007504254389ebd295dc8e8c529016a4aec1e"
+    },
+    {
+      "path": "dig/events/smoke_detour.png",
+      "bytes": 744303,
+      "sha256": "5dc10fcf46170bf1e9f95e799cfc99bb9383ab0fcc1c2ab8928351e8c546e470"
+    },
+    {
+      "path": "dig/events/song_below_stone.png",
+      "bytes": 1189172,
+      "sha256": "0a1d9dcd4a9e8faa02192ce14aac90495880828f471a4e84f52fc3bb91a87cdd"
+    },
+    {
+      "path": "dig/events/sporbit_cavern.png",
+      "bytes": 945010,
+      "sha256": "365194bde7dac6f1096414158c02013707ae3a7160765ec238ad21c6fc2e62b4"
+    },
+    {
+      "path": "dig/events/spore_debt.png",
+      "bytes": 1176192,
+      "sha256": "c13ae1ee40e52470fd8e3e3ec852896e811156f6e3ae6f608c0b88cbe6535379"
+    },
+    {
+      "path": "dig/events/sporewalker.png",
+      "bytes": 934174,
+      "sha256": "af1390902bfe4f0f73b42a3d0df02018f45a3f4af0be1e39053e8f2c99a647af"
+    },
+    {
+      "path": "dig/events/strangers_lamp.png",
+      "bytes": 864064,
+      "sha256": "6d10bf3575d527f05ce4ebd7086b3fac4a377883b4ffd23d52fd5432002fa16a"
+    },
+    {
+      "path": "dig/events/sulphite_drought.png",
+      "bytes": 784281,
+      "sha256": "a2b820b678af51a2f9dc587b2168a72805a8b02771c225a768cd8c68a5d59668"
+    },
+    {
+      "path": "dig/events/surveyors_cairn.png",
+      "bytes": 1006707,
+      "sha256": "a22ac8f680e681d8417cd26dee810bf8fffa1d390ea18fb68585cf1046501ff1"
+    },
+    {
+      "path": "dig/events/syndicate_ambush.png",
+      "bytes": 952976,
+      "sha256": "2659bee7be8a1f079caefa69e1506bfac4c8b2d8a84abed2b81c81ec794e471c"
+    },
+    {
+      "path": "dig/events/techies_cache.png",
+      "bytes": 813145,
+      "sha256": "1120b8fba7b8eac45efceb0071827f59102e3580c0173085b47d83e7414fd994"
+    },
+    {
+      "path": "dig/events/the_beasts_pit.png",
+      "bytes": 848119,
+      "sha256": "4cfb688373d2dd3ba84621224c0fae9bda4531b599840df75b7b56683aece336"
+    },
+    {
+      "path": "dig/events/the_black_kings_bargain.png",
+      "bytes": 882629,
+      "sha256": "f60d5281b892420c3ce3ff74d4ba5d5738d203b09b11c1f5b830231aa4798f5c"
+    },
+    {
+      "path": "dig/events/the_deep_hunter.png",
+      "bytes": 873286,
+      "sha256": "6c5a9f34e36178754d4d10c82ef6368eb297844a910d7af9e171ad56afb38b30"
+    },
+    {
+      "path": "dig/events/the_hooked_stranger.png",
+      "bytes": 829690,
+      "sha256": "cf4c2f2436ea7dc187f22febac26284d749eab37c194e75a4088f102185f9a34"
+    },
+    {
+      "path": "dig/events/the_mothers_mark.png",
+      "bytes": 859804,
+      "sha256": "8ec8dc2211161dbbc7e6969a4534f5650473de7b2fb0e5970a64a2e838dfdef3"
+    },
+    {
+      "path": "dig/events/the_old_gods_tongue.png",
+      "bytes": 873318,
+      "sha256": "dad77fa59db2c8af2df0867f223b16b5db99e0f96738fa0428313337e6f7fc15"
+    },
+    {
+      "path": "dig/events/the_still_point.png",
+      "bytes": 794815,
+      "sha256": "d25a56120d707f0edd641f8c0210dd1c9e03a880b9f334f0d9df3f97fcdcc8fe"
+    },
+    {
+      "path": "dig/events/the_sundering.png",
+      "bytes": 812142,
+      "sha256": "da3a268725757a05d39c3bba1201bf64057a152ab8d9143be18e24eb4654c05e"
+    },
+    {
+      "path": "dig/events/the_tear.png",
+      "bytes": 838406,
+      "sha256": "16584817df1404f78d04e8978dddb4938cb3bc2f077dc897dcc6541df9a4e5fb"
+    },
+    {
+      "path": "dig/events/things_in_the_dark.png",
+      "bytes": 823421,
+      "sha256": "f8c52dcd2322fc4bc812ed6482005e8e2658e43351ad116ff3cc6a2a17cb14d9"
+    },
+    {
+      "path": "dig/events/time_walker.png",
+      "bytes": 830000,
+      "sha256": "d4dfd2db5cee7760e8263105e92ea57efd27b9bbb2ea8143dc0b3150cadaf975"
+    },
+    {
+      "path": "dig/events/titan_relic.png",
+      "bytes": 925326,
+      "sha256": "08990a4a885688cf99dedba7e75a838051157d8ea39aa423045df6b4ba6480a4"
+    },
+    {
+      "path": "dig/events/tormentor_encounter.png",
+      "bytes": 1018958,
+      "sha256": "e994e207e2eb9d2e888267688a909a0ad0cfa45de4580d1271c6c756855e5c14"
+    },
+    {
+      "path": "dig/events/tricksters_toll.png",
+      "bytes": 925303,
+      "sha256": "762beb402fd5c5b65025bbd356b7858cc990c4be5b7dbab72230daa7848a6fea"
+    },
+    {
+      "path": "dig/events/tunnel_network_breach.png",
+      "bytes": 900246,
+      "sha256": "47e4efc959118abd3bc211d03094261a0471e19e79d72f5c7d7f12f59277ccfe"
+    },
+    {
+      "path": "dig/events/turf_war.png",
+      "bytes": 979878,
+      "sha256": "5bf390a83c2c0b62b2331b8d3f11193e1fe4b621141e2503a93a6b3d48822fe4"
+    },
+    {
+      "path": "dig/events/twin_scar_altar.png",
+      "bytes": 1019228,
+      "sha256": "76191ce57e180e954cf209ed3a96f3fb4771da72fabb25acd96e1bd57dc3fc25"
+    },
+    {
+      "path": "dig/events/underground_stream.png",
+      "bytes": 822604,
+      "sha256": "e9ec492793ff633f0beca80f1bbd6115119534903b83cbf24a655c2b70f9ca85"
+    },
+    {
+      "path": "dig/events/underworld_reclaims.png",
+      "bytes": 880565,
+      "sha256": "a53552ab77741e1e1a6bf212674d700dd35703a042890d744c20d1d0de548f2f"
+    },
+    {
+      "path": "dig/events/vaal_side_area.png",
+      "bytes": 962154,
+      "sha256": "6deb56f7c513760975f324902bd30d616c7d7a944fe760bb5b4c0ceb83178d39"
+    },
+    {
+      "path": "dig/events/villager_trade.png",
+      "bytes": 884860,
+      "sha256": "15ef0852a6542c5aade9699e536dba9888ce1064e5798b168589166746d92f8a"
+    },
+    {
+      "path": "dig/events/void_whispers.png",
+      "bytes": 951777,
+      "sha256": "41b87297830abab8e3f1277342d68953a06af4b41fda1452eae612a85af544ad"
+    },
+    {
+      "path": "dig/events/volcanic_vent_gambit.png",
+      "bytes": 898447,
+      "sha256": "b847a569f05b7e725ae90e81a8fc81f3bf009e9e46f112d04cb5d6ceb6a71343"
+    },
+    {
+      "path": "dig/events/wealth_siphon.png",
+      "bytes": 982534,
+      "sha256": "bb2d719a19f66e5f0755d636f5265d0c258c91ea5159f7573ce22d4a7ae5947f"
+    },
+    {
+      "path": "dig/events/whispering_token.png",
+      "bytes": 791110,
+      "sha256": "9a27c5fef4035ea916031955155a8a30560921d827f4dfd47cfdeeb19a62ba93"
+    },
+    {
+      "path": "dig/events/wilderness_stalker.png",
+      "bytes": 809713,
+      "sha256": "6691826663d0c3e8d3b5fb0733ec98d47296c5adcb13159db38007d85b23e28d"
+    },
+    {
+      "path": "dig/events/witch_cauldron.png",
+      "bytes": 905411,
+      "sha256": "4afe0dcbdb36cfd79710f728fcc5a6cfe59a2ebcdd83e7a6efa64cc79b179704"
+    },
+    {
+      "path": "dig/events/worm_council.png",
+      "bytes": 835407,
+      "sha256": "8ddb7bc5a2085304df3193e2d617f7a5a7e3f28418bce58e92436f964ca811e2"
+    },
+    {
+      "path": "dig/events/zekvir_challenge.png",
+      "bytes": 897325,
+      "sha256": "28686cb48e9cfb752533030d11e1de70c03c6ea112e3ab95afece98b4e7bcdfa"
+    },
+    {
+      "path": "dig/events/zekvir_shadow.png",
+      "bytes": 989330,
+      "sha256": "967ac76dde041ef6d684bf7361b7c0d78597b17e31c79f6d28c674a930862d03"
+    },
+    {
+      "path": "dig/items/depth_charge.png",
+      "bytes": 29405,
+      "sha256": "5f2840dd0761742b8eebfcfc12d6e76dcf432228bf925bd8a94c0ed3115332c3"
+    },
+    {
+      "path": "dig/items/dynamite.png",
+      "bytes": 29536,
+      "sha256": "5bab12b1226c78aae8f297a7c0d22fe60a4775eae211e920016f549db5567fc9"
+    },
+    {
+      "path": "dig/items/grappling_hook.png",
+      "bytes": 26989,
+      "sha256": "efc4fc20385ce24f2669e9ccd0adbce9f97effbb606fb6e59af52fe4e9612be5"
+    },
+    {
+      "path": "dig/items/hard_hat.png",
+      "bytes": 28589,
+      "sha256": "56b2862b32ee6885c014c6239882758d62b06456e1715505c146304a7f6d398d"
+    },
+    {
+      "path": "dig/items/lantern.png",
+      "bytes": 26090,
+      "sha256": "5cd2c19d479d6cfc1255ad7c52815524e783c62ecd9eefb9c8e7f452b6a8776f"
+    },
+    {
+      "path": "dig/items/reinforcement.png",
+      "bytes": 30364,
+      "sha256": "aa8d6faf22f1c893a34b2f217e721b02b2037ec6c5ba4cb3a25660acf7dfa439"
+    },
+    {
+      "path": "dig/items/sonar_pulse.png",
+      "bytes": 34368,
+      "sha256": "7117ed50c1797216a75dc40f80cca181ea7d88e207b44ae4c98b0a04df698e76"
+    },
+    {
+      "path": "dig/items/torch.png",
+      "bytes": 22512,
+      "sha256": "b70a3ef853d634396bcbdb744a1f7fb3ac35a1238d191f5ed3c080f942710072"
+    },
+    {
+      "path": "dig/items/void_bait.png",
+      "bytes": 26918,
+      "sha256": "23ad1e099a5e259c0fbe49e9b2c5072c9265a7c4de7d78cfd64a66c43b45c9f4"
+    },
+    {
+      "path": "dig/layers/abyss.png",
+      "bytes": 20725,
+      "sha256": "ae14466ad585e17aeb812fc85db5cceefd2ed7712af390c5a83c5f0fe327a5c2"
+    },
+    {
+      "path": "dig/layers/crystal.png",
+      "bytes": 34846,
+      "sha256": "9e2208fd98f1d4514a77b925332af539c4dc539600527d418f7153096160c75d"
+    },
+    {
+      "path": "dig/layers/dirt.png",
+      "bytes": 32455,
+      "sha256": "9449380df5ef0da53303bd05a915e1937b19f09e87a3fe693eb078490492e807"
+    },
+    {
+      "path": "dig/layers/frozen_core.png",
+      "bytes": 38030,
+      "sha256": "20c541cfa304543f775a86671d14c0978177a751097f581bf8692ed0c9792677"
+    },
+    {
+      "path": "dig/layers/fungal_depths.png",
+      "bytes": 40730,
+      "sha256": "dd1f8bcb4757cd279e4a199671843db50364cbcb5a421f38bd0de9b8fde8be5e"
+    },
+    {
+      "path": "dig/layers/magma.png",
+      "bytes": 31561,
+      "sha256": "ab1b42dd781b6185e50a20ba66c0244efeb5c6a3f8de95803abc037b7331045e"
+    },
+    {
+      "path": "dig/layers/stone.png",
+      "bytes": 35351,
+      "sha256": "b19ba4fe87db3da6f88771f2555f56d374d83c7d2c0ff79d5109501f8d2c7cfa"
+    },
+    {
+      "path": "dig/layers/the_hollow.png",
+      "bytes": 13228,
+      "sha256": "8fe366bb96b7c39ca89060a8c86fe611a48d62af53201a463b84a66741014343"
+    },
+    {
+      "path": "dig/pickaxes/diamond.png",
+      "bytes": 29792,
+      "sha256": "0e4f2f6c64929d00ad3c661f8aac07a22f1bcdf3c0c1a0c744e09cd9dc589a8e"
+    },
+    {
+      "path": "dig/pickaxes/frostforged.png",
+      "bytes": 31301,
+      "sha256": "8a086cb8c9a70908d5d05b4bedc651bde170a1cab95f6c38c215966ed6086e9e"
+    },
+    {
+      "path": "dig/pickaxes/iron.png",
+      "bytes": 23715,
+      "sha256": "1c8059e747903b1f20bc50a16c5c1b80254798f546ab3a545c331f831f6bd349"
+    },
+    {
+      "path": "dig/pickaxes/obsidian.png",
+      "bytes": 23547,
+      "sha256": "f3146a6ff5e82e5bddcf03a954e0952d1201d4a7568c3953fbb44bfbb5cd8da3"
+    },
+    {
+      "path": "dig/pickaxes/stone.png",
+      "bytes": 23397,
+      "sha256": "f378709ec21d2db18ea61cb4748dd0e0922538975fa3db40e615bbe3c63d7eea"
+    },
+    {
+      "path": "dig/pickaxes/void_touched.png",
+      "bytes": 29775,
+      "sha256": "2c464b884e58de076217a2611481b66bc498663c3e8d11573320cd1fed57fb97"
+    },
+    {
+      "path": "dig/pickaxes/wooden.png",
+      "bytes": 22852,
+      "sha256": "9f970311c521f78a6462d7631309cd025d599c94c6beff0edbac7d1acc67fa91"
+    },
+    {
+      "path": "pets/altar.png",
+      "bytes": 217594,
+      "sha256": "aa1bf963c99926ad2eccf74e9e08abc0947a606656451fd484b70b6b2f0d2312"
+    },
+    {
+      "path": "pets/components/adult/back/aegis_cama_01.png",
+      "bytes": 19253,
+      "sha256": "3132b4cc803c470be80b5c2d6162ce1811e5262999d9f57a565e23d51cdd170b"
+    },
+    {
+      "path": "pets/components/adult/back/dromedary_cross_01.png",
+      "bytes": 6178,
+      "sha256": "a4011d710eb8cd2dfa7fd03b116e31cc855dae56fe28c90f9123b0f59672e4bd"
+    },
+    {
+      "path": "pets/components/adult/backdrop/any_01.png",
+      "bytes": 197900,
+      "sha256": "feb520d68cd6762512d4088858e9271b73f83fd8c064a3b6de28490028f36bfa"
+    },
+    {
+      "path": "pets/components/adult/backdrop/any_02.png",
+      "bytes": 197002,
+      "sha256": "80ed23abdc276f03ca0850376522365c21a29c539dca3fe1597f7807693e7394"
+    },
+    {
+      "path": "pets/components/adult/backdrop/any_03.png",
+      "bytes": 226505,
+      "sha256": "33e8392b2dbcebdd326fe84b75a2b44ecd0469516d2735fc51e301e3cb75f8a5"
+    },
+    {
+      "path": "pets/components/adult/creature/any_01.json",
+      "bytes": 305,
+      "sha256": "f9ab7c41331c0e47ba1c4e3b38d59936037d0f98583b571ef01c08b0f5fe2b74"
+    },
+    {
+      "path": "pets/components/adult/creature/any_01.png",
+      "bytes": 44091,
+      "sha256": "d277f58d49c20528f9b1cd4070bc453530756cd3c09a49a46e578b224a953811"
+    },
+    {
+      "path": "pets/components/adult/creature/any_02.json",
+      "bytes": 366,
+      "sha256": "204de38bc6542ac1edeaeda8d2b89622f843c282d15f0b38b61835e9e3b41ad6"
+    },
+    {
+      "path": "pets/components/adult/creature/any_02.png",
+      "bytes": 36233,
+      "sha256": "810ecd7110e6f433fd253760b72af1d677c175ce4010f6543586277ebd8b3744"
+    },
+    {
+      "path": "pets/components/adult/creature/any_03.json",
+      "bytes": 304,
+      "sha256": "0e798356e70373a40eaa5cc2c81b836e03f79e13fd2e949536fb3c9f0993b5e8"
+    },
+    {
+      "path": "pets/components/adult/creature/any_03.png",
+      "bytes": 53423,
+      "sha256": "98fc6f1de77bb09931fcadd700ef8cc0c953798606ed7ea2439783fd0e1130c5"
+    },
+    {
+      "path": "pets/components/adult/detail/courier_cama_01.png",
+      "bytes": 11861,
+      "sha256": "53df5401b6eab7a39d2fc99a34531709c8789cf21fae3d1f9971c5905c72ccdc"
+    },
+    {
+      "path": "pets/components/adult/detail/crystal_cama_01.png",
+      "bytes": 9687,
+      "sha256": "7cc5926a2c7e436b30cb5809a04167592e8238b87a189a7b04a3ef3156949e40"
+    },
+    {
+      "path": "pets/components/adult/detail/jopacama_01.png",
+      "bytes": 6849,
+      "sha256": "e761cfb627e1afd787834d3f228ac4ffb15c0d6e82269dc6f78e43624f2222c4"
+    },
+    {
+      "path": "pets/components/adult/detail/pudge_cama_01.png",
+      "bytes": 2380,
+      "sha256": "4289e4ae405bec84e785ea0bc7faa3a45d885fecf729649836a1f097e8b9c683"
+    },
+    {
+      "path": "pets/components/adult/detail/rama_01.png",
+      "bytes": 7302,
+      "sha256": "84daae41f94b90a2e312ec1801af010aa8de695f6756ee1f69a608a837722269"
+    },
+    {
+      "path": "pets/components/adult/face/any_happy_01.png",
+      "bytes": 4056,
+      "sha256": "c2abae462dfa34ca6ef252d291cb6a794fb16914995ecca5b6dffb6c5a9df11f"
+    },
+    {
+      "path": "pets/components/adult/face/any_hungry_01.png",
+      "bytes": 3922,
+      "sha256": "f2ae8a860d4000e3c35a60e478878a03fe9f66dd29d556eb69149361927f584b"
+    },
+    {
+      "path": "pets/components/adult/face/any_neutral_01.png",
+      "bytes": 3349,
+      "sha256": "08b16bcb4d10f80dc515d163fdc929076a1217682df5505029503a446ad8b874"
+    },
+    {
+      "path": "pets/components/adult/face/rama_happy_01.png",
+      "bytes": 4446,
+      "sha256": "627733c6ab9270401b0854382c93556df6d8ca166bab81a5fe8616a39ea98232"
+    },
+    {
+      "path": "pets/components/adult/front/invoker_cama_01.png",
+      "bytes": 3089,
+      "sha256": "153c31d232484414dd3c8c3e3ce976bbbef535fe217edd0ec5d11d02a1128a30"
+    },
+    {
+      "path": "pets/components/baby/creature/any_01.json",
+      "bytes": 307,
+      "sha256": "68c8fef0f322b7257916fd09fa2e508c77888afdc3feea6dd39af3dd2e6cfc5f"
+    },
+    {
+      "path": "pets/components/baby/creature/any_01.png",
+      "bytes": 38429,
+      "sha256": "15d5a6d14d4c5cf433f2c64e5f7f3d34953e005fdec82c7c685e7646f5cdd004"
+    },
+    {
+      "path": "pets/components/baby/creature/any_02.json",
+      "bytes": 306,
+      "sha256": "7083e68b76ec223affad67b418ef0d006e78a4d151338493ff79cc233b328db0"
+    },
+    {
+      "path": "pets/components/baby/creature/any_02.png",
+      "bytes": 39358,
+      "sha256": "f6e9c332c05c683b07995f5453c8c82a3e09436e9074e54a0ebd1520bc64d6c4"
+    },
+    {
+      "path": "pets/components/baby/creature/any_03.json",
+      "bytes": 307,
+      "sha256": "9786e467bb1c89599397ac2f148a162ecc6bf5d729ff0057ae34432d80db1606"
+    },
+    {
+      "path": "pets/components/baby/creature/any_03.png",
+      "bytes": 36896,
+      "sha256": "3c37cfc0fd200294da9453284e3dfb38b4eb275d1282b72a4d77bcfc71fd4398"
+    },
+    {
+      "path": "pets/components/baby/face/any_happy_01.png",
+      "bytes": 6042,
+      "sha256": "6edc8e20e40ff9835add0c889f91c5f05fff4da930bf751f5b5298a2e23dacc1"
+    },
+    {
+      "path": "pets/components/baby/face/any_hungry_01.png",
+      "bytes": 6204,
+      "sha256": "b009671e8bd585a11b95bdf557b8991a8a015ea995992c3be2e8567624cc7763"
+    },
+    {
+      "path": "pets/components/baby/face/any_neutral_01.png",
+      "bytes": 5369,
+      "sha256": "a2f0571de64506fadcbde153f0f2e8c8eb30b04b5159aa5de4a6ca89de638c91"
+    },
+    {
+      "path": "pets/egg.png",
+      "bytes": 206773,
+      "sha256": "00c1b1ea77ca63308ab81fef43b3fc9c3f70ef149a3e4452ffa40f305124984c"
+    },
+    {
+      "path": "pets/tombstone.png",
+      "bytes": 251912,
+      "sha256": "e4d1d6f03fb73c8b0a414b78eb3bf3e572ab1f113be018bc6dcbc3db56f99221"
+    }
+  ]
+}
