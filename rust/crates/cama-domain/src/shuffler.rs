@@ -403,7 +403,7 @@ impl Default for BalancedShuffler {
             role_matchup_delta_weight: 0.17,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
-            recent_match_penalty_weight: 263.0,
+            recent_match_penalty_weight: 230.0,
             soft_avoid_penalty: 160.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
@@ -3318,7 +3318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_goodness_adds_263_for_selected_last_match_player() {
+    fn test_goodness_adds_230_for_selected_last_match_player() {
         let players = (0..10)
             .map(|index| {
                 player(
@@ -3352,7 +3352,7 @@ mod tests {
                 },
             )
             .expect("recent-player shuffle");
-        assert_eq!(penalized.score - baseline.score, 263.0);
+        assert_eq!(penalized.score - baseline.score, 230.0);
     }
 
     #[test]
@@ -5024,7 +5024,7 @@ mod tests {
     fn test_config_default_value() {
         assert_eq!(
             BalancedShuffler::default().recent_match_penalty_weight,
-            263.0
+            230.0
         );
     }
 
@@ -5032,7 +5032,7 @@ mod tests {
     fn test_shuffler_uses_default_from_config() {
         assert_eq!(
             BalancedShuffler::default().recent_match_penalty_weight,
-            263.0
+            230.0
         );
     }
 
