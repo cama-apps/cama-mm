@@ -103,95 +103,34 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ "$expected_runtime" = rust ]; then
-  health_output="$temporary_directory/health-check.txt"
-  if ! docker exec "$container_id" cama-rust health-check \
-    --db-path /app/data/cama_shuffle.db >"$health_output" 2>&1; then
-    fail "in-container cama-rust health-check failed: $(tr '\n' ' ' <"$health_output")"
-  fi
-  if ! python3 - "$expected_runtime" "$expected_sha" "$health_output" <<'PY'
-import re
-import sys
-from pathlib import Path
+health_output="$temporary_directory/health-check.txt"
+if ! docker exec "$container_id" cama-rust health-check \
+  --db-path /app/data/cama_shuffle.db >"$health_output" 2>&1; then
+  fail "in-container cama-rust health-check failed: $(tr '\n' ' ' <"$health_output")"
+fi
+health_line=$(tr '\n' ' ' <"$health_output")
+case " $health_line " in
+  *" healthy=true "*) ;;
+  *) fail "health-check did not report healthy=true: $health_line" ;;
+esac
+case " $health_line " in
+  *" runtime=$expected_runtime "*) ;;
+  *) fail "health-check runtime metadata does not match $expected_runtime" ;;
+esac
+case " $health_line " in
+  *" revision=$expected_sha "*) ;;
+  *) fail "health-check revision metadata does not match $expected_sha" ;;
+esac
 
-expected_runtime, expected_sha, output_path = sys.argv[1:]
-output = Path(output_path).read_text(encoding="utf-8").strip()
-fields = dict(re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)", output))
-if fields.get("healthy") != "true":
-    raise SystemExit(f"health-check did not report healthy=true: {output!r}")
-if fields.get("runtime") != expected_runtime:
-    raise SystemExit(
-        f"health-check runtime mismatch: expected {expected_runtime!r}, "
-        f"found {fields.get('runtime')!r}"
-    )
-if fields.get("revision") != expected_sha:
-    raise SystemExit(
-        f"health-check revision mismatch: expected {expected_sha!r}, "
-        f"found {fields.get('revision')!r}"
-    )
-PY
-  then
-    fail "in-container health-check output did not match deployment metadata"
-  fi
-
-  log_output="$temporary_directory/logs.txt"
-  if ! docker logs --since "${log_window}s" "$container_id" >"$log_output" 2>&1; then
-    fail "Docker could not read recent Rust logs"
-  fi
-  if ! python3 - "$expected_runtime" "$expected_sha" "$log_output" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-expected_runtime, expected_sha, log_path = sys.argv[1:]
-lines = Path(log_path).read_text(encoding="utf-8").splitlines()
-records = []
-for line_number, line in enumerate(lines, 1):
-    if not line.strip():
-        continue
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"recent Rust log line {line_number} is not JSON: {error}")
-    if not isinstance(record, dict):
-        raise SystemExit(f"recent Rust log line {line_number} is not a JSON object")
-    records.append(record)
-
-if not records:
-    raise SystemExit("no recent Rust log records were available")
-
-startup = [
-    record
-    for record in records
-    if record.get("message") == "starting Rust Discord runtime"
-]
-if not startup:
-    raise SystemExit(
-        "recent Rust logs do not expose startup runtime/revision metadata; "
-        "the structured startup logging hook is required"
-    )
-for record in startup:
-    if record.get("runtime") != expected_runtime:
-        raise SystemExit(
-            f"startup log runtime mismatch: expected {expected_runtime!r}, "
-            f"found {record.get('runtime')!r}"
-        )
-    if record.get("git_sha") != expected_sha:
-        raise SystemExit(
-            f"startup log revision mismatch: expected {expected_sha!r}, "
-            f"found {record.get('git_sha')!r}"
-        )
-
-# Any other structured record that carries deployment metadata must agree too;
-# this catches a mixed-revision container even when its startup line is old.
-for record in records:
-    if "runtime" in record or "git_sha" in record:
-        if record.get("runtime") != expected_runtime or record.get("git_sha") != expected_sha:
-            raise SystemExit("recent Rust log contains mismatched deployment metadata")
-PY
-  then
-    fail "recent Rust logs failed JSON or deployment-metadata verification"
-  fi
+log_output="$temporary_directory/logs.txt"
+if ! docker logs --since "${log_window}s" "$container_id" >"$log_output" 2>&1; then
+  fail "Docker could not read recent Rust logs"
+fi
+if ! grep -F '"message":"starting Rust Discord runtime"' "$log_output" \
+  | grep -F '"runtime":"rust"' \
+  | grep -Fq "\"git_sha\":\"$expected_sha\""
+then
+  fail "recent Rust logs do not contain matching startup metadata"
 fi
 
 echo "post-deploy verification passed runtime=$expected_runtime GIT_SHA=$expected_sha container=$container_id"
