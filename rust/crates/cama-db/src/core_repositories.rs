@@ -14,6 +14,7 @@ use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
 use cama_domain::role_derivation::{
     DerivationFailure, FARM_PRIORITY_MINUTE, LaneStats, derive_positions,
 };
+use cama_domain::role_performance::MIN_GAMES_FOR_WINRATE;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -1903,6 +1904,18 @@ fn unix_now() -> i64 {
 /// Per-role win/loss tallies keyed by `(discord_id, assigned_role)`.
 pub type RoleRecordRows = BTreeMap<(i64, String), (u32, u32)>;
 
+/// Snapshot of how much derived-role data exists, used to confirm a backfill.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RoleCoverage {
+    pub participants: i64,
+    pub with_derived_role: i64,
+    pub with_gold_at_10: i64,
+    pub matches_seen: i64,
+    /// Distinct (player, role) pairs that have reached the minimum sample, so
+    /// the factor can lift them off the floor.
+    pub player_roles_above_minimum_sample: i64,
+}
+
 /// Outcome of a derived-role backfill, reported so skipped rows stay visible
 /// rather than silently absent.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2512,6 +2525,50 @@ impl MatchRepository {
         }
         transaction.commit()?;
         Ok(report)
+    }
+
+    /// Current derived-role coverage, for confirming a backfill did what was
+    /// expected rather than trusting the run's own counters.
+    pub fn role_coverage(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<RoleCoverage, CoreRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let connection = self.connection()?;
+        let (participants, with_role, with_gold, enriched_matches) = connection.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN derived_role IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN gold_at_10 IS NOT NULL THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT match_id)
+               FROM match_participants WHERE guild_id = ?1",
+            params![guild_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        // Players who have cleared the minimum sample in at least one role, i.e.
+        // those the factor can actually move off the floor.
+        let players_above_floor = connection.query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT discord_id FROM match_participants
+                  WHERE guild_id = ?1 AND derived_role IS NOT NULL AND won IS NOT NULL
+                  GROUP BY discord_id, derived_role HAVING COUNT(*) >= ?2
+             )",
+            params![guild_id, i64::from(MIN_GAMES_FOR_WINRATE)],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(RoleCoverage {
+            participants,
+            with_derived_role: with_role,
+            with_gold_at_10: with_gold,
+            matches_seen: enriched_matches,
+            player_roles_above_minimum_sample: players_above_floor,
+        })
     }
 
     pub fn record_match(&self, record: &MatchRecord) -> Result<i64, CoreRepositoryError> {

@@ -53,6 +53,7 @@ fn production_admin_tree_has_all_thirty_python_leaves() {
         "resetuser",
         "registeruser",
         "sync",
+        "backfillroles",
         "givecoin",
         "resetloancooldown",
         "resetbankruptcycooldown",
@@ -67,7 +68,7 @@ fn production_admin_tree_has_all_thirty_python_leaves() {
         "setprimarysteam",
         "seedherogrid",
     ];
-    assert_eq!(actual.len(), 30);
+    assert_eq!(actual.len(), 31);
     assert_eq!(
         actual.keys().cloned().collect::<BTreeSet<_>>(),
         expected.into_iter().map(str::to_owned).collect()
@@ -258,10 +259,20 @@ impl AdminLobbyControl for RecordingLobbyControl {
 struct RecordingMatchControl {
     extensions: Mutex<Vec<AdminExtendBettingRequest>>,
     seeds: Mutex<Vec<AdminSeedHeroGridRequest>>,
+    role_backfills: Mutex<Vec<i64>>,
+    role_backfill_result: Mutex<AdminRoleBackfillResult>,
 }
 
 #[async_trait]
 impl AdminMatchControl for RecordingMatchControl {
+    async fn backfill_derived_roles(
+        &self,
+        guild_id: i64,
+    ) -> Result<AdminRoleBackfillResult, String> {
+        self.role_backfills.lock().expect("lock").push(guild_id);
+        Ok(*self.role_backfill_result.lock().expect("lock"))
+    }
+
     async fn extend_betting(
         &self,
         request: AdminExtendBettingRequest,
@@ -1127,4 +1138,69 @@ async fn test_adjust_rd_rejects_invalid_rd() {
         .last();
     assert!(response.content.contains("RD must be between 0 and 350"));
     assert_eq!(fixture.rating(TARGET).1, Some(100.0));
+}
+
+#[tokio::test]
+async fn test_backfillroles_reports_derivation_counts_and_resulting_coverage() {
+    let fixture = ProviderFixture::new();
+    *fixture.matches.role_backfill_result.lock().expect("lock") = AdminRoleBackfillResult {
+        matches_scanned: 120,
+        teams_derived: 200,
+        gold_samples_written: 1_100,
+        unparsed_replays: 30,
+        ambiguous_lanes: 8,
+        incomplete_teams: 2,
+        tied_farm_priority: 0,
+        unreadable_payloads: 0,
+        participants: 1_200,
+        with_derived_role: 1_000,
+        with_gold_at_10: 1_100,
+        player_roles_above_minimum_sample: 47,
+    };
+
+    let response = fixture
+        .dispatch("backfillroles", Vec::new(), 1)
+        .await
+        .last();
+
+    assert!(response.ephemeral, "admin output stays private");
+    assert!(response.content.contains("120 match(es)"));
+    assert!(response.content.contains("derived 200 team(s)"));
+    // Skips are surfaced with their reasons rather than hidden.
+    assert!(response.content.contains("Skipped 40"));
+    assert!(response.content.contains("30 unparsed"));
+    assert!(response.content.contains("8 ambiguous lanes"));
+    // Coverage is read back from the database, which is what confirms the run.
+    assert!(response.content.contains("1000/1200 participants"));
+    assert!(response.content.contains("83.3%"));
+    assert!(response.content.contains("47 (player, role) pair(s)"));
+    assert_eq!(
+        fixture.matches.role_backfills.lock().expect("lock").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_backfillroles_requires_admin() {
+    let fixture = ProviderFixture::new();
+    let non_admin = fixture
+        .dispatch_request(admin_command(
+            "backfillroles",
+            Vec::new(),
+            1,
+            90_001,
+            Some(0),
+        ))
+        .await
+        .last();
+    assert!(non_admin.ephemeral);
+    assert!(
+        fixture
+            .matches
+            .role_backfills
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a non-admin must not trigger a database-wide scan"
+    );
 }
