@@ -34,6 +34,8 @@ pub enum CurfewServiceError {
     EqualStartAndEnd,
     #[error("Unknown timezone '{0}'. Use an IANA name like 'America/New_York'.")]
     InvalidTimezone(String),
+    #[error("{0}")]
+    InvalidDays(String),
     #[error("curfew SQLite operation failed: {0}")]
     Sqlite(String),
 }
@@ -75,6 +77,7 @@ impl CurfewService {
         end_hour: u32,
         end_minute: u32,
         timezone: Option<&str>,
+        days: Option<&str>,
     ) -> Result<CurfewWindow, CurfewServiceError> {
         if !self.repository.player_exists(discord_id, guild_id)? {
             return Err(CurfewServiceError::PlayerNotRegistered);
@@ -102,6 +105,10 @@ impl CurfewService {
         {
             return Err(CurfewServiceError::InvalidTimezone(timezone.to_owned()));
         }
+        let days = days
+            .map(cama_domain::curfew::parse_weekdays)
+            .transpose()
+            .map_err(CurfewServiceError::InvalidDays)?;
         let window = CurfewWindow {
             discord_id,
             guild_id,
@@ -111,6 +118,7 @@ impl CurfewService {
             end_hour,
             end_minute,
             timezone: timezone.map(str::to_owned),
+            days,
         };
         self.repository.add_or_replace(&window)?;
         Ok(window)

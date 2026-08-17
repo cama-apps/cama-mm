@@ -1868,6 +1868,7 @@ async fn test_join_blocked_during_active_curfew_window() {
             end_hour: end.hour(),
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
+            days: None,
         })
         .expect("seed an always-active curfew window");
 
@@ -2012,6 +2013,7 @@ async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player()
             end_hour: end.hour(),
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
+            days: None,
         })
         .expect("seed an always-active curfew window");
 
@@ -2065,6 +2067,7 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
             end_hour: end.hour(),
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
+            days: None,
         })
         .expect("seed an always-active curfew window");
 
@@ -2126,6 +2129,7 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
             end_hour: end.hour(),
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
+            days: None,
         })
         .expect("seed an always-active curfew window");
 

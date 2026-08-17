@@ -884,6 +884,10 @@ class SchemaManager:
                 "create_curfew_windows_table",
                 self._migration_create_curfew_windows_table,
             ),
+            (
+                "add_curfew_window_days_column",
+                self._migration_add_curfew_window_days_column,
+            ),
         ]
 
     # --- Migrations ---
@@ -4614,6 +4618,16 @@ class SchemaManager:
             ON player_curfew_windows(guild_id, discord_id)
             """
         )
+
+    def _migration_add_curfew_window_days_column(self, cursor) -> None:
+        """Add an optional day-of-week bitmask (bit 0=Mon...bit 6=Sun) to curfew windows.
+
+        NULL (the default, and every pre-existing window's value) means every
+        day, matching prior behavior. This column is currently written and
+        enforced only by the Rust runtime (rust/crates/cama-domain/src/curfew.rs);
+        it's added here purely to keep the schema contract in sync.
+        """
+        self._add_column_if_not_exists(cursor, "player_curfew_windows", "days", "INTEGER")
 
     def _migration_create_dig_system_tables(self, cursor) -> None:
         """Create all tables for the tunnel digging minigame."""

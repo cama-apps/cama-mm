@@ -40,6 +40,7 @@ fn window(
         end_hour,
         end_minute: 0,
         timezone: None,
+        days: None,
     }
 }
 
@@ -184,4 +185,28 @@ fn test_player_exists() {
     insert_player(&dir.path().join("curfew.db"), 1, GUILD);
     assert!(repository.player_exists(1, GUILD).unwrap());
     assert!(!repository.player_exists(999, GUILD).unwrap());
+}
+
+#[test]
+fn test_days_round_trips_and_defaults_to_none() {
+    let (_dir, repository) = fixture();
+    repository
+        .add_or_replace(&window(1, GUILD, "work", 9, 17))
+        .unwrap();
+    let mut weekend = window(1, GUILD, "weekend_sleep", 22, 6);
+    weekend.days = Some(cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
+        | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat));
+    repository.add_or_replace(&weekend).unwrap();
+
+    let windows = repository.list_for_player(1, GUILD).unwrap();
+    let work = windows.iter().find(|w| w.name == "work").unwrap();
+    assert_eq!(work.days, None);
+    let weekend = windows.iter().find(|w| w.name == "weekend_sleep").unwrap();
+    assert_eq!(
+        weekend.days,
+        Some(
+            cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
+                | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat)
+        )
+    );
 }

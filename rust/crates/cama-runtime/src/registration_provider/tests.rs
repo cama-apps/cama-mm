@@ -902,7 +902,8 @@ fn command_schema_matches_python_extension() {
             ("name", CommandOptionKind::String, true),
             ("start", CommandOptionKind::String, true),
             ("end", CommandOptionKind::String, true),
-            ("timezone", CommandOptionKind::String, false)
+            ("timezone", CommandOptionKind::String, false),
+            ("days", CommandOptionKind::String, false)
         ]
     );
     assert_eq!(
