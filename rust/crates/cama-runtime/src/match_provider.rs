@@ -3761,7 +3761,6 @@ impl MatchHandler {
         let radiant_value = radiant_team
             .get_team_value_with_off_role_value_penalty(
                 true,
-                shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
                 shuffler.off_role_flat_value_penalty,
@@ -3770,7 +3769,6 @@ impl MatchHandler {
         let dire_value = dire_team
             .get_team_value_with_off_role_value_penalty(
                 true,
-                shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
                 shuffler.off_role_flat_value_penalty,

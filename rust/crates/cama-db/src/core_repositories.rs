@@ -1486,7 +1486,11 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<Player, rusqlite::Error> {
     let roles: Option<String> = row.get(5)?;
     let mmr = python_optional_i64(row.get_ref(1)?);
     let initial_mmr = python_optional_i64(row.get_ref(2)?);
+    // Per-role records are loaded separately by the balancing path, which
+    // knows the guild and the candidate pool; a bare player read leaves them
+    // empty, which the role factor treats as no sample.
     Ok(Player {
+        role_records: std::collections::BTreeMap::new(),
         name: row.get(0)?,
         mmr,
         initial_mmr,
@@ -1892,6 +1896,9 @@ fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64)
 }
+
+/// Per-role win/loss tallies keyed by `(discord_id, assigned_role)`.
+pub type RoleRecordRows = BTreeMap<(i64, String), (u32, u32)>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchRecord {
@@ -2299,6 +2306,7 @@ impl MatchRepository {
     /// Per-role win/loss records for `discord_ids`, keyed by
     /// `(discord_id, assigned_role)`.
     ///
+    ///
     /// Only rows with a recorded `assigned_role` count. Matches recorded
     /// before roles were persisted, drafts, and admin-recorded matches carry
     /// NULL and are excluded, so they read as "no sample" rather than being
@@ -2307,7 +2315,7 @@ impl MatchRepository {
         &self,
         discord_ids: &[i64],
         guild_id: Option<i64>,
-    ) -> Result<BTreeMap<(i64, String), (u32, u32)>, CoreRepositoryError> {
+    ) -> Result<RoleRecordRows, CoreRepositoryError> {
         if discord_ids.is_empty() {
             return Ok(BTreeMap::new());
         }
@@ -8257,8 +8265,8 @@ mod tests {
         shuffler.use_glicko = true;
         shuffler.off_role_flat_penalty = 50.0;
         let (team1, team2) = shuffler.shuffle(&players).unwrap();
-        let team1_value = team1.get_team_value(true, 1.0, false, false).unwrap();
-        let team2_value = team2.get_team_value(true, 1.0, false, false).unwrap();
+        let team1_value = team1.get_team_value(true, false, false).unwrap();
+        let team2_value = team2.get_team_value(true, false, false).unwrap();
         let value_diff = (team1_value - team2_value).abs();
         assert!((7_000.0..9_000.0).contains(&team1_value));
         assert!((7_000.0..9_000.0).contains(&team2_value));

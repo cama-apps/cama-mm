@@ -185,13 +185,11 @@ impl Team {
     pub fn get_team_value(
         &self,
         use_glicko: bool,
-        off_role_multiplier: f64,
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> Result<f64, TeamError> {
         self.get_team_value_with_off_role_value_penalty(
             use_glicko,
-            off_role_multiplier,
             use_openskill,
             use_jopacoin,
             100.0,
@@ -202,7 +200,6 @@ impl Team {
     pub fn get_team_value_with_off_role_value_penalty(
         &self,
         use_glicko: bool,
-        off_role_multiplier: f64,
         use_openskill: bool,
         use_jopacoin: bool,
         off_role_flat_value_penalty: f64,
@@ -213,7 +210,15 @@ impl Team {
             .iter()
             .zip(role_assignments)
             .map(|(player, assigned_role)| {
-                let base_value = player.get_value(use_glicko, use_openskill, use_jopacoin);
+                // The role-performance multiplier replaces the flat off-role
+                // multiplier and applies to every player, on-role or not. The
+                // flat off-role value penalty still applies only off-role.
+                let base_value = player.role_adjusted_value(
+                    assigned_role,
+                    use_glicko,
+                    use_openskill,
+                    use_jopacoin,
+                );
                 if player
                     .preferred_roles
                     .as_ref()
@@ -221,11 +226,7 @@ impl Team {
                 {
                     base_value
                 } else {
-                    calculate_off_role_value(
-                        base_value,
-                        off_role_multiplier,
-                        off_role_flat_value_penalty,
-                    )
+                    calculate_off_role_value(base_value, 1.0, off_role_flat_value_penalty)
                 }
             })
             .sum())
@@ -255,14 +256,12 @@ impl Team {
         &self,
         role: &str,
         use_glicko: bool,
-        off_role_multiplier: f64,
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> Result<(&Player, f64), TeamError> {
         self.get_player_by_role_with_off_role_value_penalty(
             role,
             use_glicko,
-            off_role_multiplier,
             use_openskill,
             use_jopacoin,
             100.0,
@@ -274,7 +273,6 @@ impl Team {
         &self,
         role: &str,
         use_glicko: bool,
-        off_role_multiplier: f64,
         use_openskill: bool,
         use_jopacoin: bool,
         off_role_flat_value_penalty: f64,
@@ -283,7 +281,8 @@ impl Team {
 
         for (player, assigned_role) in self.players.iter().zip(role_assignments) {
             if assigned_role == role {
-                let base_value = player.get_value(use_glicko, use_openskill, use_jopacoin);
+                let base_value =
+                    player.role_adjusted_value(role, use_glicko, use_openskill, use_jopacoin);
                 let effective_value = if player
                     .preferred_roles
                     .as_ref()
@@ -291,11 +290,7 @@ impl Team {
                 {
                     base_value
                 } else {
-                    calculate_off_role_value(
-                        base_value,
-                        off_role_multiplier,
-                        off_role_flat_value_penalty,
-                    )
+                    calculate_off_role_value(base_value, 1.0, off_role_flat_value_penalty)
                 };
                 return Ok((player, effective_value));
             }
@@ -311,8 +306,8 @@ impl Team {
                 Ok((
                     player,
                     calculate_off_role_value(
-                        player.get_value(use_glicko, use_openskill, use_jopacoin),
-                        off_role_multiplier,
+                        player.role_adjusted_value(role, use_glicko, use_openskill, use_jopacoin),
+                        1.0,
                         off_role_flat_value_penalty,
                     ),
                 ))
@@ -352,6 +347,22 @@ mod tests {
     use super::{ROLES, Team, TeamError};
     use crate::player::Player;
 
+    /// Formula fixtures are deliberately role-neutral: an even record in every
+    /// role gives a role factor of exactly 1.0, so these tests keep measuring
+    /// the balance formula rather than the role-performance multiplier.
+    fn neutral_role_records()
+    -> std::collections::BTreeMap<String, crate::role_performance::RoleRecord> {
+        ROLES
+            .iter()
+            .map(|role| {
+                (
+                    (*role).to_owned(),
+                    crate::role_performance::RoleRecord::new(5, 5),
+                )
+            })
+            .collect()
+    }
+
     fn player(name: &str, mmr: i64, preferred_roles: &[&str]) -> Player {
         Player {
             mmr: Some(mmr),
@@ -361,6 +372,7 @@ mod tests {
                     .map(|role| (*role).to_owned())
                     .collect(),
             ),
+            role_records: neutral_role_records(),
             ..Player::new(name)
         }
     }
@@ -401,12 +413,12 @@ mod tests {
         let team = Team::new(players, None).expect("five players form a team");
 
         for error in [
-            team.get_team_value(false, 0.9, false, false)
+            team.get_team_value(false, false, false)
                 .expect_err("team value requires roles"),
             team.get_off_role_count()
                 .map(|count| count as f64)
                 .expect_err("off-role count requires roles"),
-            team.get_player_by_role("1", false, 0.9, false, false)
+            team.get_player_by_role("1", false, false, false)
                 .map(|(_, value)| value)
                 .expect_err("role lookup requires roles"),
         ] {
@@ -443,7 +455,7 @@ mod tests {
             Team::new(players.clone(), Some(role_strings())).expect("five players form a team");
         assert_eq!(
             on_role
-                .get_team_value(false, 0.9, false, false)
+                .get_team_value(false, false, false)
                 .expect("roles are assigned"),
             8_000.0
         );
@@ -456,9 +468,9 @@ mod tests {
         .expect("five players form a team");
         assert_eq!(
             off_role
-                .get_team_value_with_off_role_value_penalty(false, 0.9, false, false, 0.0)
+                .get_team_value_with_off_role_value_penalty(false, false, false, 0.0)
                 .expect("roles are assigned"),
-            7_620.0
+            8_000.0
         );
         assert_eq!(
             off_role.get_off_role_count().expect("roles are assigned"),
@@ -467,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_value_subtracts_five_percent_and_one_hundred() {
+    fn test_default_off_role_value_subtracts_only_the_flat_penalty() {
         let players = vec![
             player("P1", 3_000, &["1"]),
             player("P2", 0, &["2"]),
@@ -482,14 +494,14 @@ mod tests {
         .expect("five players form a team");
 
         assert_eq!(
-            team.get_team_value(false, 0.95, false, false)
+            team.get_team_value(false, false, false)
                 .expect("roles are assigned"),
-            2_750.0
+            2_900.0
         );
     }
 
     #[test]
-    fn test_default_off_role_role_value_subtracts_five_percent_and_one_hundred() {
+    fn test_default_off_role_role_value_subtracts_only_the_flat_penalty() {
         let players = vec![
             player("P1", 3_000, &["1"]),
             player("P2", 0, &["2"]),
@@ -504,10 +516,10 @@ mod tests {
         .expect("five players form a team");
 
         let (selected, value) = team
-            .get_player_by_role("2", false, 0.95, false, false)
+            .get_player_by_role("2", false, false, false)
             .expect("roles are assigned");
         assert_eq!(selected.name, "P1");
-        assert_eq!(value, 2_750.0);
+        assert_eq!(value, 2_900.0);
     }
 
     #[test]
@@ -527,10 +539,89 @@ mod tests {
         .expect("five players form a team");
 
         assert_eq!(
-            team.get_team_value(true, 0.95, false, true)
+            team.get_team_value(true, false, true)
                 .expect("roles are assigned"),
-            850.0
+            900.0
         );
+    }
+
+    #[test]
+    fn test_role_performance_scales_the_value_of_an_on_role_player() {
+        // A proven carry is scaled up; an unproven one falls to the floor. The
+        // multiplier now applies on-role too, which the old off-role-only
+        // multiplier never did.
+        let mut proven = player("P1", 2_000, &["1"]);
+        proven.role_records.insert(
+            "1".to_owned(),
+            crate::role_performance::RoleRecord::new(4, 0),
+        );
+        let mut unproven = player("P1", 2_000, &["1"]);
+        unproven.role_records.clear();
+
+        let build = |first: Player| {
+            Team::new(
+                vec![
+                    first,
+                    player("P2", 0, &["2"]),
+                    player("P3", 0, &["3"]),
+                    player("P4", 0, &["4"]),
+                    player("P5", 0, &["5"]),
+                ],
+                Some(ROLES.map(str::to_owned).to_vec()),
+            )
+            .expect("five players form a team")
+        };
+
+        assert_eq!(
+            build(proven)
+                .get_team_value(false, false, false)
+                .expect("roles are assigned"),
+            2_100.0
+        );
+        assert_eq!(
+            build(unproven)
+                .get_team_value(false, false, false)
+                .expect("roles are assigned"),
+            1_900.0
+        );
+    }
+
+    #[test]
+    fn test_role_performance_uses_the_assigned_role_not_the_preferred_one() {
+        // The record that matters is the one for the role being assigned, so
+        // moving the same player to another position changes their value.
+        let mut versatile = player("P1", 1_000, &["1", "2"]);
+        versatile.role_records.insert(
+            "1".to_owned(),
+            crate::role_performance::RoleRecord::new(4, 0),
+        );
+        versatile.role_records.insert(
+            "2".to_owned(),
+            crate::role_performance::RoleRecord::new(0, 4),
+        );
+        let team = Team::new(
+            vec![
+                versatile,
+                player("P2", 0, &["2"]),
+                player("P3", 0, &["3"]),
+                player("P4", 0, &["4"]),
+                player("P5", 0, &["5"]),
+            ],
+            Some(ROLES.map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        let (_, as_carry) = team
+            .get_player_by_role_with_off_role_value_penalty("1", false, false, false, 0.0)
+            .expect("roles are assigned");
+        assert_eq!(as_carry, 1_050.0);
+
+        let mut swapped = team.clone();
+        swapped.role_assignments = Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
+        let (_, as_mid) = swapped
+            .get_player_by_role_with_off_role_value_penalty("2", false, false, false, 0.0)
+            .expect("roles are assigned");
+        assert_eq!(as_mid, 950.0);
     }
 
     #[test]
@@ -549,7 +640,7 @@ mod tests {
         .expect("five players form a team");
 
         assert_eq!(
-            team.get_team_value(false, 0.95, false, false)
+            team.get_team_value(false, false, false)
                 .expect("roles are assigned"),
             0.0
         );
@@ -598,17 +689,17 @@ mod tests {
         let mut team = Team::new(players, Some(role_strings())).expect("five players form a team");
 
         let (carry, value) = team
-            .get_player_by_role("1", false, 0.5, false, false)
+            .get_player_by_role("1", false, false, false)
             .expect("roles are assigned");
         assert_eq!(carry.name, "Carry");
         assert_eq!(value, 2_000.0);
 
         team.role_assignments = Some(["3", "1", "2", "4", "5"].map(str::to_owned).to_vec());
         let (mid, value) = team
-            .get_player_by_role_with_off_role_value_penalty("1", false, 0.5, false, false, 0.0)
+            .get_player_by_role_with_off_role_value_penalty("1", false, false, false, 0.0)
             .expect("roles are assigned");
         assert_eq!(mid.name, "Mid");
-        assert_eq!(value, 900.0);
+        assert_eq!(value, 1_800.0);
     }
 
     #[test]
@@ -628,7 +719,7 @@ mod tests {
             Team::new(players.clone(), Some(role_strings())).expect("five players form a team");
         assert_eq!(
             on_role
-                .get_team_value(true, 0.9, false, true)
+                .get_team_value(true, false, true)
                 .expect("roles are assigned"),
             450.0
         );
@@ -640,9 +731,9 @@ mod tests {
         .expect("five players form a team");
         assert_eq!(
             off_role
-                .get_team_value_with_off_role_value_penalty(true, 0.9, false, true, 0.0)
+                .get_team_value_with_off_role_value_penalty(true, false, true, 0.0)
                 .expect("roles are assigned"),
-            420.0
+            450.0
         );
     }
 
@@ -661,7 +752,7 @@ mod tests {
         let team = Team::new(players, Some(role_strings())).expect("five players form a team");
 
         let (player, value) = team
-            .get_player_by_role("2", true, 0.9, false, true)
+            .get_player_by_role("2", true, false, true)
             .expect("roles are assigned");
         assert_eq!(player.name, "P2");
         assert_eq!(value, 200.0);
