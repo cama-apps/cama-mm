@@ -2,11 +2,8 @@
 //! started, DMs them, then refreshes the lobby's Discord embed so the
 //! removal is actually visible (matching the Python original's DM +
 //! `_sync_lobby_displays` pair in `commands/lobby.py::_deliver_curfew_kick`).
-//! The Python original ran this sweep every minute (`tasks.loop(minutes=1)`);
-//! the Rust port runs it every 15 seconds instead — a sweep is just an
-//! in-memory lobby scan plus one indexed SQLite lookup per populated lobby,
-//! cheap enough that there's no reason to make a kicked player wait up to a
-//! minute to find out.
+//! The 60-second wake interval is arbitrary; it could be tightened to 15
+//! seconds or some other value later if there's a reason to.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -25,7 +22,7 @@ use crate::registration::InteractionResponse;
 use crate::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
 pub const CURFEW_SWEEP_WORKER_NAME: &str = "curfew_sweep";
-pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(15);
+pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Re-render a lobby's live Discord embed after curfew removed members from
 /// it, and strip a removed player's own sword reaction so the message's
