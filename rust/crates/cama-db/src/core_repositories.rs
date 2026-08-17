@@ -2103,6 +2103,10 @@ pub struct ParticipantStatsUpdate {
     pub hero_healing: i64,
     pub lane_role: Option<i64>,
     pub lane_efficiency: Option<i64>,
+    /// Gold at ten minutes, from OpenDota's `gold_t` series. Feeds the role
+    /// derivation; absent when the replay was not parsed or the game ended
+    /// before the sample point.
+    pub gold_at_10: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2675,8 +2679,9 @@ impl MatchRepository {
              SET hero_id = ?1, kills = ?2, deaths = ?3, assists = ?4,
                  gpm = ?5, xpm = ?6, hero_damage = ?7, tower_damage = ?8,
                  last_hits = ?9, denies = ?10, net_worth = ?11,
-                 hero_healing = ?12, lane_role = ?13, lane_efficiency = ?14
-             WHERE match_id = ?15 AND discord_id = ?16",
+                 hero_healing = ?12, lane_role = ?13, lane_efficiency = ?14,
+                 gold_at_10 = ?15
+             WHERE match_id = ?16 AND discord_id = ?17",
             params![
                 update.hero_id,
                 update.kills,
@@ -2692,6 +2697,7 @@ impl MatchRepository {
                 update.hero_healing,
                 update.lane_role,
                 update.lane_efficiency,
+                update.gold_at_10,
                 match_id,
                 discord_id,
             ],
@@ -6414,6 +6420,7 @@ mod tests {
                     hero_healing: 0,
                     lane_role: None,
                     lane_efficiency: None,
+                    gold_at_10: None,
                 },
             )
             .unwrap();
@@ -6635,6 +6642,7 @@ mod tests {
                     hero_healing: 400,
                     lane_role: Some(2),
                     lane_efficiency: Some(61),
+                    gold_at_10: Some(3_100),
                 },
             )
             .unwrap();
@@ -8347,6 +8355,7 @@ mod tests {
             rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL,
             fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0,
             bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT,
+            gold_at_10 INTEGER, derived_role TEXT,
             PRIMARY KEY(match_id,discord_id)
         );
         CREATE TABLE rating_history (

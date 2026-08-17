@@ -290,6 +290,8 @@ pub struct EnrichmentParticipantUpdate {
     pub hero_healing: Option<i64>,
     pub lane_role: Option<i64>,
     pub lane_efficiency: Option<i64>,
+    /// Gold at ten minutes, used to split each lane into core and support.
+    pub gold_at_10: Option<i64>,
     pub towers_killed: Option<i64>,
     pub roshans_killed: Option<i64>,
     pub teamfight_participation: Option<f64>,
@@ -1361,8 +1363,8 @@ impl MatchRecordingRepository {
                      roshans_killed = ?16, teamfight_participation = ?17,
                      obs_placed = ?18, sen_placed = ?19, camps_stacked = ?20,
                      rune_pickups = ?21, firstblood_claimed = ?22, stuns = ?23,
-                     fantasy_points = ?24
-                 WHERE match_id = ?25 AND discord_id = ?26 AND guild_id = ?27",
+                     fantasy_points = ?24, gold_at_10 = ?25
+                 WHERE match_id = ?26 AND discord_id = ?27 AND guild_id = ?28",
                 params![
                     participant.hero_id,
                     participant.kills,
@@ -1388,6 +1390,7 @@ impl MatchRecordingRepository {
                     participant.firstblood_claimed,
                     participant.stuns,
                     participant.fantasy_points,
+                    participant.gold_at_10,
                     request.match_id,
                     participant.discord_id,
                     guild_id
