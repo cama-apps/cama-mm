@@ -2296,6 +2296,60 @@ impl MatchRepository {
         Ok(open_runtime_connection(&self.path)?)
     }
 
+    /// Per-role win/loss records for `discord_ids`, keyed by
+    /// `(discord_id, assigned_role)`.
+    ///
+    /// Only rows with a recorded `assigned_role` count. Matches recorded
+    /// before roles were persisted, drafts, and admin-recorded matches carry
+    /// NULL and are excluded, so they read as "no sample" rather than being
+    /// silently attributed to some role.
+    pub fn role_records(
+        &self,
+        discord_ids: &[i64],
+        guild_id: Option<i64>,
+    ) -> Result<BTreeMap<(i64, String), (u32, u32)>, CoreRepositoryError> {
+        if discord_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let connection = self.connection()?;
+        let placeholders = vec!["?"; discord_ids.len()].join(",");
+        let mut statement = connection.prepare(&format!(
+            "SELECT discord_id, assigned_role,
+                    SUM(CASE WHEN won THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN won THEN 0 ELSE 1 END)
+             FROM match_participants
+             WHERE guild_id = ? AND assigned_role IS NOT NULL
+               AND won IS NOT NULL AND discord_id IN ({placeholders})
+             GROUP BY discord_id, assigned_role"
+        ))?;
+        let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(discord_ids.len() + 1);
+        parameters.push(&guild_id);
+        for discord_id in discord_ids {
+            parameters.push(discord_id);
+        }
+        let rows = statement
+            .query_map(parameters.as_slice(), |row| {
+                Ok((
+                    (row.get::<_, i64>(0)?, row.get::<_, String>(1)?),
+                    (row.get::<_, i64>(2)?, row.get::<_, i64>(3)?),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, (wins, losses))| {
+                (
+                    key,
+                    (
+                        u32::try_from(wins).unwrap_or(0),
+                        u32::try_from(losses).unwrap_or(0),
+                    ),
+                )
+            })
+            .collect())
+    }
+
     pub fn record_match(&self, record: &MatchRecord) -> Result<i64, CoreRepositoryError> {
         validate_winning_team(record.winning_team)?;
         let guild_id = Self::normalize_guild_id(record.guild_id);
@@ -5137,6 +5191,96 @@ mod tests {
                 (8_204, Some("2".to_owned())),
                 (8_205, Some("1".to_owned())),
             ]
+        );
+    }
+
+    #[test]
+    fn test_role_records_aggregate_wins_and_losses_per_role() {
+        let fixture = Fixture::new();
+        let team1 = [9_101, 9_102, 9_103, 9_104, 9_105];
+        let team2 = [9_201, 9_202, 9_203, 9_204, 9_205];
+        for discord_id in team1.iter().chain(&team2) {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+        }
+        let roles = ["1", "2", "3", "4", "5"].map(str::to_owned).to_vec();
+        // 9_101 carries three times: two wins, one loss.
+        for winner in [1, 1, 2] {
+            fixture
+                .matches
+                .record_match(
+                    &MatchRecord::new(team1.to_vec(), team2.to_vec(), winner, Some(TEST_GUILD_ID))
+                        .with_roles(roles.clone(), roles.clone()),
+                )
+                .expect("record fixture match");
+        }
+        // A match with no assignment must not count toward any role.
+        fixture
+            .matches
+            .record_match(&MatchRecord::new(
+                team1.to_vec(),
+                team2.to_vec(),
+                1,
+                Some(TEST_GUILD_ID),
+            ))
+            .expect("record unassigned match");
+
+        let records = fixture
+            .matches
+            .role_records(&[9_101, 9_201], Some(TEST_GUILD_ID))
+            .expect("read role records");
+        assert_eq!(records.get(&(9_101, "1".to_owned())), Some(&(2, 1)));
+        // Same three matches from the losing side.
+        assert_eq!(records.get(&(9_201, "1".to_owned())), Some(&(1, 2)));
+        assert!(
+            records.keys().all(|(_, role)| role == "1"),
+            "only the queried players' roles should come back"
+        );
+    }
+
+    #[test]
+    fn test_role_records_are_scoped_to_the_guild() {
+        let fixture = Fixture::new();
+        let team1 = [9_301, 9_302];
+        let team2 = [9_401, 9_402];
+        for discord_id in team1.iter().chain(&team2) {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+            fixture.add_player(*discord_id, TEST_GUILD_ID_SECONDARY);
+        }
+        let roles = ["1", "2"].map(str::to_owned).to_vec();
+        fixture
+            .matches
+            .record_match(
+                &MatchRecord::new(team1.to_vec(), team2.to_vec(), 1, Some(TEST_GUILD_ID))
+                    .with_roles(roles.clone(), roles.clone()),
+            )
+            .expect("record guild match");
+
+        assert!(
+            fixture
+                .matches
+                .role_records(&[9_301], Some(TEST_GUILD_ID_SECONDARY))
+                .expect("read other guild")
+                .is_empty()
+        );
+        assert_eq!(
+            fixture
+                .matches
+                .role_records(&[9_301], Some(TEST_GUILD_ID))
+                .expect("read own guild")
+                .get(&(9_301, "1".to_owned())),
+            Some(&(1, 0))
+        );
+    }
+
+    #[test]
+    fn test_role_records_empty_input_needs_no_query() {
+        let fixture = Fixture::new();
+        assert!(
+            fixture
+                .matches
+                .role_records(&[], Some(TEST_GUILD_ID))
+                .expect("empty input")
+                .is_empty()
         );
     }
 
