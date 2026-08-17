@@ -2415,10 +2415,16 @@ impl MatchRepository {
     /// Backfill `gold_at_10` and `derived_role` from archived OpenDota
     /// payloads, for matches enriched before those columns existed.
     ///
-    /// OpenDota's `players[]` is keyed by Steam account, but enrichment already
-    /// resolved accounts to `discord_id` when it wrote `hero_id`, and heroes are
-    /// unique within a match. Joining on `hero_id` therefore recovers the
-    /// mapping without re-deriving Steam links, which may have changed since.
+    /// OpenDota's `players[]` is keyed by Steam account. We deliberately do
+    /// *not* resolve it through `player_steam_ids`, even though that mapping
+    /// exists and is unambiguous, because `hero_id` and `lane_role` are written
+    /// by a single enrichment statement from one OpenDota player object. The
+    /// derivation consumes `lane_role` and `gold_at_10` together, so pairing a
+    /// row's frozen `lane_role` with gold resolved through *today's* Steam
+    /// links would silently mismatch the two halves if a link ever moved -
+    /// producing a confident, wrong position. Joining on `hero_id`, which is
+    /// unique within a match, reuses the same mapping that produced
+    /// `lane_role`, keeping both inputs describing the same player.
     ///
     /// Rows that cannot be derived confidently are left untouched, so this is
     /// safe to re-run after the derivation improves.
