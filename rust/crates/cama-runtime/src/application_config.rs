@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use cama_app::opendota_http::{OpenDotaHttpBuildError, OpenDotaRuntimeServices};
 use cama_app::service_container::ServiceContainerOptions;
+use cama_app::shop_commands::SHOP_SOFT_AVOID_COST;
 use cama_db::schema_manager::MigrationSettings;
 
 use crate::{DiscordToken, RuntimeConfig};
@@ -562,7 +563,7 @@ impl ApplicationConfig {
                 shop_package_deal_base_cost: p.i64("SHOP_PACKAGE_DEAL_BASE_COST", 500),
                 shop_package_deal_rating_divisor: p.f64("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0),
                 shop_recalibrate_cost: p.i64("SHOP_RECALIBRATE_COST", 300),
-                shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", 750),
+                shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", SHOP_SOFT_AVOID_COST),
                 soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 160.0),
                 streak_multiplier_per_game: migration.openskill.streak_multiplier_per_game,
                 streak_threshold: migration.streak_threshold,
@@ -830,6 +831,12 @@ mod tests {
         assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
         assert_eq!(config.llm.model, DEFAULT_CEREBRAS_MODEL);
+    }
+
+    #[test]
+    fn soft_avoid_defaults_to_five_hundred() {
+        let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(config.values.shop_soft_avoid_cost, 500);
     }
 
     #[test]
