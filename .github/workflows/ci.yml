@@ -12,8 +12,16 @@ permissions:
   contents: read
 
 jobs:
-  rust:
+  rust-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - cama-domain
+          - cama-db
+          - cama-app
+          - cama-runtime
     env:
       CARGO_TARGET_DIR: rust/target
     steps:
@@ -28,14 +36,14 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci
+          shared-key: rust-ci-tests-${{ matrix.package }}
           cache-workspace-crates: true
           cache-on-failure: true
 
-      - name: Test Rust
+      - name: Test ${{ matrix.package }}
         run: >-
           cargo test --locked --manifest-path rust/Cargo.toml
-          --workspace --all-targets --all-features
+          --package ${{ matrix.package }} --all-targets --all-features
 
   rust-lint:
     runs-on: ubuntu-latest
@@ -54,7 +62,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci
+          shared-key: rust-ci-lint
           cache-workspace-crates: true
           cache-on-failure: true
 
@@ -65,6 +73,19 @@ jobs:
         run: >-
           cargo clippy --locked --manifest-path rust/Cargo.toml
           --workspace --all-targets --all-features -- -D warnings
+
+  # Preserve the existing required status while the full workspace suite runs
+  # package-by-package in parallel. Every workspace member is listed explicitly
+  # so adding a crate requires a deliberate CI update.
+  rust:
+    if: ${{ always() }}
+    needs: rust-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Rust test shard
+        env:
+          RUST_TEST_RESULT: ${{ needs.rust-tests.result }}
+        run: test "$RUST_TEST_RESULT" = success
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
@@ -92,4 +113,5 @@ jobs:
             scripts/runtime-compose \
             scripts/runtime-entrypoint \
             docker-compose.yml \
-            Dockerfile.rust
+            Dockerfile.rust \
+            | grep -v "grep -E 'setup-uv"
