@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
+use cama_domain::role_derivation::{
+    DerivationFailure, FARM_PRIORITY_MINUTE, LaneStats, derive_positions,
+};
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -1900,6 +1903,53 @@ fn unix_now() -> i64 {
 /// Per-role win/loss tallies keyed by `(discord_id, assigned_role)`.
 pub type RoleRecordRows = BTreeMap<(i64, String), (u32, u32)>;
 
+/// Outcome of a derived-role backfill, reported so skipped rows stay visible
+/// rather than silently absent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RoleBackfillReport {
+    pub matches_scanned: u64,
+    pub teams_derived: u64,
+    pub gold_samples_written: u64,
+    pub unreadable_payloads: u64,
+    pub unparsed_replays: u64,
+    pub ambiguous_lanes: u64,
+    pub incomplete_teams: u64,
+    pub tied_farm_priority: u64,
+}
+
+/// Map hero id to that player's gold at ten minutes, from an archived OpenDota
+/// match payload. Heroes are unique within a match, which makes `hero_id` a
+/// safe join key back to the participants enrichment already resolved.
+fn gold_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
+    let Some(players) = payload.get("players").and_then(serde_json::Value::as_array) else {
+        return BTreeMap::new();
+    };
+    let mut by_hero: BTreeMap<i64, i64> = BTreeMap::new();
+    let mut duplicated = Vec::new();
+    for player in players {
+        let Some(hero_id) = player.get("hero_id").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let Some(gold) = player
+            .get("gold_t")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if by_hero.insert(hero_id, gold).is_some() {
+            duplicated.push(hero_id);
+        }
+    }
+    // A duplicated hero would make the join ambiguous; drop those rather than
+    // attribute one player's farm to another.
+    for hero_id in duplicated {
+        by_hero.remove(&hero_id);
+    }
+    by_hero
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchRecord {
     pub team1_ids: Vec<i64>,
@@ -2360,6 +2410,102 @@ impl MatchRepository {
                 )
             })
             .collect())
+    }
+
+    /// Backfill `gold_at_10` and `derived_role` from archived OpenDota
+    /// payloads, for matches enriched before those columns existed.
+    ///
+    /// OpenDota's `players[]` is keyed by Steam account, but enrichment already
+    /// resolved accounts to `discord_id` when it wrote `hero_id`, and heroes are
+    /// unique within a match. Joining on `hero_id` therefore recovers the
+    /// mapping without re-deriving Steam links, which may have changed since.
+    ///
+    /// Rows that cannot be derived confidently are left untouched, so this is
+    /// safe to re-run after the derivation improves.
+    pub fn backfill_derived_roles(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<RoleBackfillReport, CoreRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let matches: Vec<(i64, String)> = connection
+            .prepare(
+                "SELECT match_id, enrichment_data FROM matches
+                  WHERE guild_id = ?1 AND enrichment_data IS NOT NULL",
+            )?
+            .query_map(params![guild_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut report = RoleBackfillReport::default();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (match_id, payload) in matches {
+            report.matches_scanned += 1;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                report.unreadable_payloads += 1;
+                continue;
+            };
+            let gold_by_hero = gold_at_ten_by_hero(&value);
+            if gold_by_hero.is_empty() {
+                report.unparsed_replays += 1;
+                continue;
+            }
+            let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
+                .prepare(
+                    "SELECT discord_id, team_number, hero_id, lane_role
+                       FROM match_participants
+                      WHERE match_id = ?1 AND guild_id = ?2 AND hero_id IS NOT NULL",
+                )?
+                .query_map(params![match_id, guild_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for (discord_id, _, hero_id, _) in &participants {
+                if let Some(gold) = gold_by_hero.get(hero_id) {
+                    transaction.execute(
+                        "UPDATE match_participants SET gold_at_10 = ?1
+                          WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                        params![gold, match_id, discord_id, guild_id],
+                    )?;
+                    report.gold_samples_written += 1;
+                }
+            }
+
+            for team_number in [1_i64, 2] {
+                let team: Vec<&(i64, i64, i64, Option<i64>)> = participants
+                    .iter()
+                    .filter(|(_, number, _, _)| *number == team_number)
+                    .collect();
+                if team.len() != 5 {
+                    report.incomplete_teams += 1;
+                    continue;
+                }
+                let stats: [LaneStats; 5] = std::array::from_fn(|index| {
+                    let (_, _, hero_id, lane_role) = team[index];
+                    LaneStats {
+                        lane_role: *lane_role,
+                        gold_at_10: gold_by_hero.get(hero_id).copied(),
+                    }
+                });
+                match derive_positions(&stats) {
+                    Ok(positions) => {
+                        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+                            transaction.execute(
+                                "UPDATE match_participants SET derived_role = ?1
+                                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                                params![positions[index], match_id, discord_id, guild_id],
+                            )?;
+                        }
+                        report.teams_derived += 1;
+                    }
+                    Err(DerivationFailure::Unparsed) => report.unparsed_replays += 1,
+                    Err(DerivationFailure::AmbiguousLanes) => report.ambiguous_lanes += 1,
+                    Err(DerivationFailure::TiedFarmPriority) => report.tied_farm_priority += 1,
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(report)
     }
 
     pub fn record_match(&self, record: &MatchRecord) -> Result<i64, CoreRepositoryError> {
@@ -5245,6 +5391,195 @@ mod tests {
                 .expect("read own guild")
                 .get(&(9_301, "1".to_owned())),
             Some(&(1, 0))
+        );
+    }
+
+    /// An archived OpenDota payload: five heroes a side, gold series long
+    /// enough to sample at ten minutes.
+    fn enrichment_payload(entries: &[(i64, i64)]) -> String {
+        let players = entries
+            .iter()
+            .map(|(hero_id, gold_at_10)| {
+                let series = (0..=12)
+                    .map(|minute| {
+                        if minute == 10 {
+                            gold_at_10.to_string()
+                        } else {
+                            "0".to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{\"hero_id\":{hero_id},\"gold_t\":[{series}]}}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"players\":[{players}]}}")
+    }
+
+    fn seed_enriched_match(fixture: &Fixture, lanes: [(i64, i64, i64); 10]) -> i64 {
+        let team1: Vec<i64> = (0..5).map(|index| 7_100 + index).collect();
+        let team2: Vec<i64> = (0..5).map(|index| 7_200 + index).collect();
+        for discord_id in team1.iter().chain(&team2) {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+        }
+        let match_id = fixture
+            .matches
+            .record_match(&MatchRecord::new(
+                team1.clone(),
+                team2.clone(),
+                1,
+                Some(TEST_GUILD_ID),
+            ))
+            .expect("record enriched match");
+
+        let connection = fixture.connection();
+        let entries: Vec<(i64, i64)> = lanes
+            .iter()
+            .map(|(hero_id, _, gold)| (*hero_id, *gold))
+            .collect();
+        connection
+            .execute(
+                "UPDATE matches SET enrichment_data = ?1 WHERE match_id = ?2",
+                params![enrichment_payload(&entries), match_id],
+            )
+            .expect("attach payload");
+        for (index, discord_id) in team1.iter().chain(&team2).enumerate() {
+            let (hero_id, lane_role, _) = lanes[index];
+            connection
+                .execute(
+                    "UPDATE match_participants SET hero_id = ?1, lane_role = ?2
+                      WHERE match_id = ?3 AND discord_id = ?4",
+                    params![hero_id, lane_role, match_id, discord_id],
+                )
+                .expect("seed participant lane data");
+        }
+        match_id
+    }
+
+    fn derived_roles(fixture: &Fixture, match_id: i64) -> Vec<(i64, Option<String>, Option<i64>)> {
+        fixture
+            .connection()
+            .prepare(
+                "SELECT discord_id, derived_role, gold_at_10 FROM match_participants
+                  WHERE match_id = ?1 ORDER BY discord_id",
+            )
+            .expect("prepare derived read")
+            .query_map(params![match_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("query derived roles")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect derived roles")
+    }
+
+    /// (hero_id, lane_role, gold_at_10) for a standard lineup on both sides.
+    const STANDARD_LANES: [(i64, i64, i64); 10] = [
+        (1, 1, 4_000),
+        (2, 2, 3_800),
+        (3, 3, 3_200),
+        (4, 3, 1_800),
+        (5, 1, 1_500),
+        (6, 1, 4_100),
+        (7, 2, 3_900),
+        (8, 3, 3_300),
+        (9, 3, 1_700),
+        (10, 1, 1_400),
+    ];
+
+    #[test]
+    fn test_backfill_derives_roles_from_archived_opendota_payloads() {
+        let fixture = Fixture::new();
+        let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+
+        let report = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("backfill");
+        assert_eq!(report.matches_scanned, 1);
+        assert_eq!(report.teams_derived, 2);
+        assert_eq!(report.gold_samples_written, 10);
+
+        let roles = derived_roles(&fixture, match_id);
+        let by_id: BTreeMap<i64, Option<String>> = roles
+            .iter()
+            .map(|(discord_id, role, _)| (*discord_id, role.clone()))
+            .collect();
+        assert_eq!(by_id[&7_100], Some("1".to_owned()));
+        assert_eq!(by_id[&7_101], Some("2".to_owned()));
+        assert_eq!(by_id[&7_102], Some("3".to_owned()));
+        assert_eq!(by_id[&7_103], Some("4".to_owned()));
+        assert_eq!(by_id[&7_104], Some("5".to_owned()));
+        // Gold is joined back by hero id, not by row order.
+        assert!(roles.iter().all(|(_, _, gold)| gold.is_some()));
+    }
+
+    #[test]
+    fn test_backfill_leaves_ambiguous_teams_untouched_and_reports_them() {
+        let fixture = Fixture::new();
+        // Radiant runs a tri-lane, which cannot be split confidently.
+        let mut lanes = STANDARD_LANES;
+        lanes[2] = (3, 1, 3_200);
+        let match_id = seed_enriched_match(&fixture, lanes);
+
+        let report = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("backfill");
+        assert_eq!(report.teams_derived, 1);
+        assert_eq!(report.ambiguous_lanes, 1);
+
+        let roles = derived_roles(&fixture, match_id);
+        let radiant_derived = roles
+            .iter()
+            .filter(|(discord_id, _, _)| *discord_id < 7_200)
+            .filter(|(_, role, _)| role.is_some())
+            .count();
+        assert_eq!(radiant_derived, 0, "ambiguous team must be left alone");
+        // Gold is still recorded even when the split is not derivable.
+        assert!(roles.iter().all(|(_, _, gold)| gold.is_some()));
+    }
+
+    #[test]
+    fn test_backfill_is_idempotent() {
+        let fixture = Fixture::new();
+        let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+        let first = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("first pass");
+        let before = derived_roles(&fixture, match_id);
+        let second = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("second pass");
+        assert_eq!(first, second);
+        assert_eq!(before, derived_roles(&fixture, match_id));
+    }
+
+    #[test]
+    fn test_backfill_skips_unparsed_replays_without_gold_series() {
+        let fixture = Fixture::new();
+        let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE matches SET enrichment_data = '{\"players\":[{\"hero_id\":1}]}'
+                  WHERE match_id = ?1",
+                params![match_id],
+            )
+            .expect("replace with unparsed payload");
+
+        let report = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("backfill");
+        assert_eq!(report.teams_derived, 0);
+        assert_eq!(report.unparsed_replays, 1);
+        assert!(
+            derived_roles(&fixture, match_id)
+                .iter()
+                .all(|(_, role, gold)| role.is_none() && gold.is_none())
         );
     }
 
