@@ -767,6 +767,139 @@ pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Ve
     render(raster)
 }
 
+/// The five Dota positions, in pentagon order starting from the top spoke.
+pub const POSITION_AXES: [(&str, &str); 5] = [
+    ("1", "Carry"),
+    ("2", "Mid"),
+    ("3", "Offlane"),
+    ("4", "Soft Sup"),
+    ("5", "Hard Sup"),
+];
+
+/// Render a five-spoke radar of win rate per played position.
+///
+/// `records` maps a position key (`"1"`..`"5"`) to that position's wins and
+/// losses. Unlike [`draw_role_graph`], the scale is fixed to 0-100% because a
+/// win rate is already a percentage with a meaningful midpoint: the 50% ring
+/// is drawn emphasised so a spoke reads as above or below even at a glance.
+///
+/// Sample size is drawn alongside each percentage, and positions below
+/// `minimum_sample` are rendered muted, because a win rate over one or two
+/// games is noise and a pentagon that hides that invites over-reading it.
+#[must_use]
+pub fn draw_position_winrate_radar(
+    records: &BTreeMap<String, (u32, u32)>,
+    title: &str,
+    minimum_sample: u32,
+) -> Cursor<Vec<u8>> {
+    let mut raster = Raster::new(400, 400, DISCORD_BG);
+    let title_width = Raster::text_width(title, 2);
+    raster.text((400 - title_width).max(0) / 2, 8, title, DISCORD_WHITE, 2);
+
+    let sample = |key: &str| records.get(key).copied().unwrap_or((0, 0));
+    let games = |key: &str| {
+        let (wins, losses) = sample(key);
+        wins + losses
+    };
+    let win_rate = |key: &str| {
+        let (wins, losses) = sample(key);
+        let played = wins + losses;
+        if played == 0 {
+            0.0
+        } else {
+            f64::from(wins) * 100.0 / f64::from(played)
+        }
+    };
+
+    let center = (200, 215);
+    let radius = 130.0;
+    for fraction in [0.25, 0.5, 0.75, 1.0] {
+        let ring = radial_points(POSITION_AXES.len(), center, radius * fraction, |_| 1.0);
+        // The 50% ring is the break-even line, so it carries more meaning than
+        // the others and is drawn brighter.
+        let colour = if (fraction - 0.5).abs() < f64::EPSILON {
+            DISCORD_GREY
+        } else {
+            DISCORD_DARKER
+        };
+        raster.polygon_outline(&ring, colour);
+    }
+    // Only the break-even ring is annotated, tucked just under the horizontal
+    // so it never sits on top of the data polygon.
+    raster.text(
+        center.0 + (radius * 0.5) as i32 + 4,
+        center.1 + 4,
+        "50%",
+        DISCORD_GREY,
+        1,
+    );
+    let outer = radial_points(POSITION_AXES.len(), center, radius, |_| 1.0);
+    for point in &outer {
+        raster.line(center, *point, DISCORD_DARKER, 1);
+    }
+
+    if POSITION_AXES.iter().all(|(key, _)| games(key) == 0) {
+        raster.text(140, 205, "No role data yet", DISCORD_GREY, 2);
+        return render(raster);
+    }
+
+    let data = radial_points(POSITION_AXES.len(), center, radius, |index| {
+        win_rate(POSITION_AXES[index].0) / 100.0
+    });
+    raster.polygon(&data, DISCORD_ACCENT.with_alpha(100));
+    raster.polygon_outline(&data, DISCORD_ACCENT);
+    for (index, point) in data.iter().enumerate() {
+        let key = POSITION_AXES[index].0;
+        // An unproven position gets a hollow marker so it cannot be mistaken
+        // for a measured result.
+        let colour = if games(key) >= minimum_sample {
+            DISCORD_ACCENT
+        } else {
+            DISCORD_GREY
+        };
+        raster.circle(*point, 4, colour);
+    }
+
+    let label_offset = 28.0;
+    for (index, (key, name)) in POSITION_AXES.iter().enumerate() {
+        let angle = std::f64::consts::TAU * index as f64 / POSITION_AXES.len() as f64
+            - std::f64::consts::FRAC_PI_2;
+        let mut label_x = f64::from(center.0) + (radius + label_offset) * angle.cos();
+        let mut label_y = f64::from(center.1) + (radius + label_offset) * angle.sin();
+        let text_width = Raster::text_width(name, 1);
+        if label_x < f64::from(center.0 - 10) {
+            label_x -= f64::from(text_width);
+        } else if (label_x - f64::from(center.0)).abs() < 10.0 {
+            label_x -= f64::from(text_width / 2);
+        }
+        if label_y < f64::from(center.1 - 10) {
+            label_y -= 7.0;
+        } else if (label_y - f64::from(center.1)).abs() < 10.0 {
+            label_y -= 3.0;
+        }
+        let x = label_x as i32;
+        let y = label_y as i32;
+        let played = games(key);
+        let name_colour = if played >= minimum_sample {
+            DISCORD_WHITE
+        } else {
+            DISCORD_GREY
+        };
+        raster.text(x, y, name, name_colour, 1);
+        let detail = if played == 0 {
+            "no games".to_owned()
+        } else if played < minimum_sample {
+            // Flagged rather than dimmed: a thin sample is exactly what the
+            // reader needs to see, not what should fade away.
+            format!("{}% ({played}) ?", win_rate(key) as i32)
+        } else {
+            format!("{}% ({played})", win_rate(key) as i32)
+        };
+        raster.text(x, y + 9, &detail, DISCORD_GREY, 1);
+    }
+    render(raster)
+}
+
 fn radial_points<F>(count: usize, center: (i32, i32), radius: f64, scale: F) -> Vec<(i32, i32)>
 where
     F: Fn(usize) -> f64,
