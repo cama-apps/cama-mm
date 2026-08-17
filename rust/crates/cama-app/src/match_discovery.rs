@@ -115,6 +115,10 @@ pub struct EnrichedParticipantStats {
     pub hero_healing: i64,
     pub lane_role: Option<i64>,
     pub lane_efficiency: Option<i64>,
+    /// Gold at ten minutes, from OpenDota's `gold_t` series. Farm priority at
+    /// this point separates cores from supports far more cleanly than final
+    /// net worth, which drifts as supports farm up and cores get shut down.
+    pub gold_at_10: Option<i64>,
     pub towers_killed: Option<i64>,
     pub roshans_killed: Option<i64>,
     pub teamfight_participation: Option<f64>,
@@ -1259,6 +1263,7 @@ impl EnrichmentWritePort for MatchRecordingRepository {
                 hero_healing: Some(update.stats.hero_healing),
                 lane_role: update.stats.lane_role,
                 lane_efficiency: update.stats.lane_efficiency,
+                gold_at_10: update.stats.gold_at_10,
                 towers_killed: update.stats.towers_killed,
                 roshans_killed: update.stats.roshans_killed,
                 teamfight_participation: update.stats.teamfight_participation,

@@ -5176,6 +5176,7 @@ impl MatchHandler {
                             hero_healing: 0,
                             lane_role: None,
                             lane_efficiency: None,
+                            gold_at_10: None,
                         },
                     )
                     .map_err(|error| error.to_string())?;
