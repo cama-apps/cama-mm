@@ -1269,6 +1269,79 @@ const WHEEL_MEDIA_UPLOAD_LIMIT: usize = 4 * 1024 * 1024;
 #[cfg(test)]
 const EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET: usize = 500_000;
 const MAX_WHEEL_LABEL_SPRITES: usize = 128;
+const MAX_CACHED_WHEEL_ATTACHMENTS: usize = 4;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CachedWheelValue {
+    Numeric(i64),
+    Mechanic(&'static str),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct WheelAttachmentCacheKey {
+    wedges: Vec<(String, CachedWheelValue, &'static str)>,
+    target_index: usize,
+    golden: bool,
+    display_name: Option<String>,
+}
+
+impl WheelAttachmentCacheKey {
+    fn new(
+        wedges: &[cama_app::wheel::WheelWedge],
+        target_index: usize,
+        golden: bool,
+        display_name: Option<&str>,
+    ) -> Self {
+        Self {
+            wedges: wedges
+                .iter()
+                .map(|wedge| {
+                    let value = match wedge.value {
+                        WheelValue::Numeric(value) => CachedWheelValue::Numeric(value),
+                        WheelValue::Mechanic(mechanic) => {
+                            CachedWheelValue::Mechanic(mechanic.code())
+                        }
+                    };
+                    (wedge.label.clone(), value, wedge.color)
+                })
+                .collect(),
+            target_index,
+            golden,
+            display_name: display_name.map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WheelAttachmentCache {
+    entries: BTreeMap<WheelAttachmentCacheKey, InteractionAttachment>,
+    order: VecDeque<WheelAttachmentCacheKey>,
+}
+
+impl WheelAttachmentCache {
+    fn get(&mut self, key: &WheelAttachmentCacheKey) -> Option<InteractionAttachment> {
+        let attachment = self.entries.get(key)?.clone();
+        if let Some(position) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.clone());
+        Some(attachment)
+    }
+
+    fn insert(&mut self, key: WheelAttachmentCacheKey, attachment: InteractionAttachment) {
+        if self.entries.contains_key(&key) {
+            if let Some(position) = self.order.iter().position(|candidate| candidate == &key) {
+                self.order.remove(position);
+            }
+        } else if self.entries.len() >= MAX_CACHED_WHEEL_ATTACHMENTS
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.entries.remove(&evicted);
+        }
+        self.entries.insert(key.clone(), attachment);
+        self.order.push_back(key);
+    }
+}
 
 fn wheel_frame_delay_ms(frame_index: usize) -> u64 {
     match frame_index {
@@ -1305,6 +1378,30 @@ fn gif_delay_centiseconds(milliseconds: u64) -> u16 {
 /// target wedge; this renderer only paints the already-resolved presentation,
 /// so it cannot influence money or outcome selection.
 fn render_wheel_attachment(
+    wedges: &[cama_app::wheel::WheelWedge],
+    target_index: usize,
+    golden: bool,
+    display_name: Option<&str>,
+) -> Result<InteractionAttachment, String> {
+    static CACHE: OnceLock<Mutex<WheelAttachmentCache>> = OnceLock::new();
+    let key = WheelAttachmentCacheKey::new(wedges, target_index, golden, display_name);
+    let cache = CACHE.get_or_init(|| Mutex::new(WheelAttachmentCache::default()));
+    if let Some(attachment) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return Ok(attachment);
+    }
+    let attachment = render_wheel_attachment_uncached(wedges, target_index, golden, display_name)?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, attachment.clone());
+    Ok(attachment)
+}
+
+fn render_wheel_attachment_uncached(
     wedges: &[cama_app::wheel::WheelWedge],
     target_index: usize,
     golden: bool,
@@ -1367,8 +1464,14 @@ fn render_wheel_attachment(
         encoder
             .set_repeat(Repeat::Finite(1))
             .map_err(|error| format!("wheel GIF repeat: {error}"))?;
-        let mut sprite_cache = WheelLabelSpriteCache::default();
-        let label_atlas = build_wheel_label_atlas(wedges, &mut sprite_cache);
+        let label_atlas = {
+            static SPRITES: OnceLock<Mutex<WheelLabelSpriteCache>> = OnceLock::new();
+            let mut sprite_cache = SPRITES
+                .get_or_init(|| Mutex::new(WheelLabelSpriteCache::default()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            build_wheel_label_atlas(wedges, &mut sprite_cache)
+        };
         for frame_index in 0..WHEEL_MEDIA_FRAME_COUNT {
             let mut pixels =
                 vec![0_u8; usize::from(WHEEL_MEDIA_SIZE) * usize::from(WHEEL_MEDIA_SIZE)];
@@ -1405,6 +1508,13 @@ fn render_wheel_attachment(
 /// animation is intentionally self-contained: Discord upload failures can
 /// fall back to the text response without touching the settled wallet state.
 fn render_explosion_attachment() -> Result<InteractionAttachment, String> {
+    static ATTACHMENT: OnceLock<Result<InteractionAttachment, String>> = OnceLock::new();
+    ATTACHMENT
+        .get_or_init(render_explosion_attachment_uncached)
+        .clone()
+}
+
+fn render_explosion_attachment_uncached() -> Result<InteractionAttachment, String> {
     let palette: &[[u8; 3]] = &[
         [5, 5, 10],
         [70, 8, 8],

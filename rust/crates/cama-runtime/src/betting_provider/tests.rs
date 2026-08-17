@@ -1995,6 +1995,34 @@ fn wheel_label_sprite_cache_is_custom_safe_and_bounded() {
 }
 
 #[test]
+fn completed_wheel_attachment_cache_is_lru_bounded() {
+    let wedges = vec![cama_app::wheel::WheelWedge {
+        label: "CACHE".to_owned(),
+        value: WheelValue::Numeric(5),
+        color: "#123456",
+    }];
+    let keys = (0..=MAX_CACHED_WHEEL_ATTACHMENTS)
+        .map(|target_index| WheelAttachmentCacheKey::new(&wedges, target_index, false, None))
+        .collect::<Vec<_>>();
+    let mut cache = WheelAttachmentCache::default();
+    for (index, key) in keys.iter().cloned().enumerate() {
+        cache.insert(
+            key,
+            InteractionAttachment::bytes("wheel.gif", vec![index as u8]),
+        );
+    }
+    assert_eq!(cache.entries.len(), MAX_CACHED_WHEEL_ATTACHMENTS);
+    assert!(!cache.entries.contains_key(&keys[0]));
+    assert_eq!(
+        cache.get(keys.last().expect("latest cache key")),
+        Some(InteractionAttachment::bytes(
+            "wheel.gif",
+            vec![MAX_CACHED_WHEEL_ATTACHMENTS as u8],
+        ))
+    );
+}
+
+#[test]
 fn wheel_label_sprite_cache_distinguishes_subpixel_geometry_keys() {
     let wedges = vec![cama_app::wheel::WheelWedge {
         label: "PHASE".to_owned(),
