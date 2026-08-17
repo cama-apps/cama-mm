@@ -399,9 +399,9 @@ impl Default for BalancedShuffler {
             use_jopacoin: false,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 500.0,
+            off_role_flat_penalty: 550.0,
             role_matchup_delta_weight: 0.17,
-            exclusion_penalty_weight: 70.0,
+            exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 230.0,
             soft_avoid_penalty: 160.0,
@@ -2676,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_500_per_player() {
+    fn test_default_off_role_goodness_adds_550_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2712,7 +2712,7 @@ mod tests {
         let (_, _, score) =
             shuffler.score_unconstrained_metrics(&[team1_metrics], &[team2_metrics], 0.0);
 
-        assert_eq!(score, 1_000.0);
+        assert_eq!(score, 1_100.0);
     }
 
     #[test]
@@ -6141,8 +6141,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_weight_is_70() {
-        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 70.0);
+    fn test_default_weight_is_80() {
+        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 80.0);
     }
 
     #[test]
