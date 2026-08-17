@@ -8,13 +8,13 @@ use crate::discord_transport::{
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::raw_reactions::RawReactionEmoji;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use cama_app::moderation::{CreateSuspension, ModerationService};
 use cama_db::core_repositories::NewPlayer;
 use cama_db::low_priority_repository::{LowPriorityRepository, SetLowPriorityInput};
 use cama_db::moderation::{
     ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::curfew::CurfewWindow;
 use chrono::Timelike;
 use tempfile::NamedTempFile;
@@ -592,8 +592,7 @@ fn registration_exposes_the_complete_lobby_command_surface() {
     }
 
     let database = tempfile::NamedTempFile::new().expect("temporary lobby database");
-    cama_db::schema_manager::initialize_or_migrate(database.path())
-        .expect("initialize Python-compatible schema");
+    initialize_or_migrate(database.path()).expect("initialize Python-compatible schema");
     let provider = LobbyRegistrationProvider::new(
         database.path(),
         LobbyRuntimeConfig {

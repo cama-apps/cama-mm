@@ -1,9 +1,8 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
 use cama_app::draft::{
@@ -12,7 +11,6 @@ use cama_app::draft::{
 };
 use cama_db::autobet_investments::AutobetInvestmentRepository;
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
@@ -25,22 +23,7 @@ use crate::registration::{
     InteractionAttachment, InteractionOption, InteractionRequest, InteractionResponseError,
     InteractionValue,
 };
-
-static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
-
-fn migrated_database() -> NamedTempFile {
-    let template = MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
-        let database = NamedTempFile::new().expect("canonical database template");
-        initialize_or_migrate(database.path()).expect("migrate canonical database template");
-        std::fs::read(database.path()).expect("read canonical database template")
-    });
-    let mut database = NamedTempFile::new().expect("temporary migrated database");
-    database
-        .as_file_mut()
-        .write_all(template)
-        .expect("copy canonical database template");
-    database
-}
+use crate::test_support::migrated_database;
 
 struct EmptyMemberSource;
 

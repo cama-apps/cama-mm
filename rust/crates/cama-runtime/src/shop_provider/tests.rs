@@ -1,10 +1,10 @@
 use super::*;
 use cama_app::shop_commands::MANA_ITEMS;
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: u64 = 9_001;
 const BUYER: u64 = 101;

@@ -3,10 +3,11 @@ use cama_app::match_recording::GamesMilestone;
 use cama_db::core_repositories::NewPlayer;
 use cama_db::economy_event_repository::EconomyEventRepository;
 use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use std::io::Cursor;
 use tempfile::NamedTempFile;
+
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 #[derive(Default)]
 struct CompositionResponder;

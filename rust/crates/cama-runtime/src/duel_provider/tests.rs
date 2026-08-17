@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -11,6 +10,7 @@ use crate::discord_transport::{
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::registration::{InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;
 const CHANNEL: i64 = 9_002;

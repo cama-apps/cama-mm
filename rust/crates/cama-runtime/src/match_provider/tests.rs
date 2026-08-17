@@ -9,7 +9,6 @@ use cama_app::ai_services::{
 use cama_app::betting_reminder_messaging::{BettingFlavorPort, FlavorKind, FlavorRequest};
 use cama_db::betting_service_repository::{BettingServiceRepositoryError, PlaceBetRequest};
 use cama_db::guild_config_repository::GuildConfigRepository;
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::guild_config::GuildConfigStore;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -18,6 +17,7 @@ use crate::discord_transport::DiscordAllowedMentions;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
 
 use super::*;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 82_001;
 const MATCH_ID: i64 = 91_001;

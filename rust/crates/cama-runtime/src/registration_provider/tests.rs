@@ -4,7 +4,6 @@ use std::sync::Mutex as StdMutex;
 use std::thread;
 
 use cama_app::opendota_http::OpenDotaHttpConfig;
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -15,6 +14,7 @@ use crate::discord_transport::{
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 #[derive(Default)]
 struct CapturedResponses {

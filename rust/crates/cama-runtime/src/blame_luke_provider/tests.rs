@@ -5,7 +5,6 @@ use cama_app::blame_luke_media::{
     BLAME_LUKE_FINAL_HOLD_MS, BLAME_LUKE_FRAME_COUNT, BLAME_LUKE_HEIGHT, BLAME_LUKE_WIDTH,
 };
 use cama_db::blame_luke::{BLAME_LUKE_COST, BlameLukeOperationIdentity};
-use cama_db::schema_manager::initialize_or_migrate;
 use gif::{ColorOutput, DecodeOptions};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -13,6 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const USER: i64 = 42;
 const GUILD: i64 = 123;

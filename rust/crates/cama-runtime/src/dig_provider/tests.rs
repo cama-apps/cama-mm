@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use async_trait::async_trait;
 use cama_app::dig_media_runtime::DigMediaRuntime;
 use cama_app::dig_runtime::{DEFAULT_DIG_ASSET_ROOT, DigRuntimeService};
 use cama_app::dig_runtime::{DigRuntimeConfig, DigRuntimeOutcome};
 use cama_app::service_container::{ServiceContainer, ServiceContainerOptions, VanityMember};
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::{NamedTempFile, tempdir};
 

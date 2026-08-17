@@ -17,6 +17,11 @@ mod registration {
     pub use cama_runtime::registration::*;
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../test_support.rs"]
+mod test_support;
+
 // Keep the source-inclusion checker as a second compile-closed target. Cargo
 // does not run its inherited unit tests because they already run through the
 // library target, but check/clippy still compile this independent inclusion.

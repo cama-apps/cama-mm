@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -8,6 +7,7 @@ use crate::admin_provider::{CorrectionWinRewardRequest, CorrectionWinRewardResul
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 
 use super::*;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use cama_domain::rating::CamaRatingSystem;
 
 const GUILD: i64 = 42_424;

@@ -3729,11 +3729,11 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::test_support::initialize_test_database as initialize_or_migrate;
     use cama_app::pet::{Clock, SeededPetRandom, SystemPetClock};
     use cama_app::pet_sqlite::SqlitePetCommandService;
     use cama_db::core_repositories::{NewPlayer, PlayerRepository};
     use cama_db::pet_repository::PetRepository;
-    use cama_db::schema_manager::initialize_or_migrate;
     use cama_domain::pet::{ADULT_AGE_SECONDS, EGG_HATCH_SECONDS, UNHATCHED_SPECIES};
     use tempfile::NamedTempFile;
 

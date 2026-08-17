@@ -3,13 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cama_db::schema_manager::initialize_or_migrate;
 use chrono::{Days, Utc};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
 use crate::registration::{InteractionMessageDelivery, Registry, RegistryBuilder};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;
 const CHANNEL: i64 = 9_002;

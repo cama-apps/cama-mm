@@ -2,13 +2,13 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cama_app::opendota_http::{OpenDotaHttpConfig, OpenDotaRuntimeServices};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use crate::registration::{InteractionResponseError, Registry};
 
 use super::*;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 fn leaf_paths(options: &[CommandOptionSpec]) -> BTreeMap<String, Vec<String>> {
     fn visit(

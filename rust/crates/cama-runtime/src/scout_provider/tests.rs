@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use cama_db::schema_manager::initialize_or_migrate;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
