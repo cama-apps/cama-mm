@@ -2043,7 +2043,8 @@ fn unix_timestamp() -> Result<i64, PredictionRepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::io::Write;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use rusqlite::{Connection, params};
@@ -2057,6 +2058,8 @@ mod tests {
     const GUILD: i64 = 101;
     const OTHER_GUILD: i64 = 202;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
     struct Fixture {
         file: NamedTempFile,
         repository: PredictionRepository,
@@ -2064,11 +2067,12 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let file = NamedTempFile::new().expect("create prediction SQLite fixture");
-            let connection = Connection::open(file.path()).expect("open prediction fixture");
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
+            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create prediction SQLite template");
+                let connection = Connection::open(file.path()).expect("open prediction template");
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL;
                      CREATE TABLE players (
                          discord_id INTEGER NOT NULL,
                          guild_id INTEGER NOT NULL DEFAULT 0,
@@ -2183,8 +2187,15 @@ mod tests {
                          related_type TEXT,
                          related_id TEXT
                      );",
-                )
-                .expect("create migrated prediction fixture schema");
+                    )
+                    .expect("create migrated prediction fixture schema template");
+                drop(connection);
+                std::fs::read(file.path()).expect("read prediction fixture schema template")
+            });
+            let mut file = NamedTempFile::new().expect("create prediction SQLite fixture");
+            file.as_file_mut()
+                .write_all(template)
+                .expect("copy prediction fixture schema template");
             let repository = PredictionRepository::new(file.path());
             Self { file, repository }
         }

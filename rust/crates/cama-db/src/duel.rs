@@ -1336,13 +1336,16 @@ fn clear_ledger_context(connection: &Connection) -> Result<(), rusqlite::Error> 
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::sync::{Arc, Barrier};
+    use std::io::Write;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
     use tempfile::NamedTempFile;
 
     const GUILD_ID: i64 = 9_001;
     const NOW: i64 = 1_000_000;
     const DAY: i64 = DAY_SECONDS;
+
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
 
     const TEST_SCHEMA: &str = "
         PRAGMA journal_mode=WAL;
@@ -1442,11 +1445,20 @@ mod tests {
     ";
 
     fn database() -> NamedTempFile {
-        let file = NamedTempFile::new().expect("create duel test database");
-        let connection = Connection::open(file.path()).expect("open duel test database");
-        connection
-            .execute_batch(TEST_SCHEMA)
-            .expect("create Python-compatible duel test schema");
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file = NamedTempFile::new().expect("create duel test database template");
+            let connection =
+                Connection::open(file.path()).expect("open duel test database template");
+            connection
+                .execute_batch(TEST_SCHEMA)
+                .expect("create Python-compatible duel test schema template");
+            drop(connection);
+            std::fs::read(file.path()).expect("read duel test database template")
+        });
+        let mut file = NamedTempFile::new().expect("create duel test database");
+        file.as_file_mut()
+            .write_all(template)
+            .expect("copy duel test database template");
         file
     }
 

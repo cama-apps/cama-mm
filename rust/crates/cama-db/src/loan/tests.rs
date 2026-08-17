@@ -1,4 +1,5 @@
-use std::sync::{Arc, Barrier};
+use std::io::Write;
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 use std::{path::Path, process::Command};
 
@@ -11,6 +12,8 @@ const TEST_GUILD_ID: i64 = 12_345;
 const OTHER_GUILD_ID: i64 = 12_346;
 const NOW: i64 = 1_700_000_000;
 
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
 struct Fixture {
     _database: NamedTempFile,
     repository: LoanRepository,
@@ -18,10 +21,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite file");
-        let connection = Connection::open(database.path()).expect("fixture connection");
-        connection
-            .execute_batch(
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let database = NamedTempFile::new().expect("temporary SQLite template");
+            let connection = Connection::open(database.path()).expect("fixture template");
+            connection
+                .execute_batch(
                 "PRAGMA journal_mode = WAL;
                  PRAGMA busy_timeout = 5000;
                  CREATE TABLE players (
@@ -149,9 +153,16 @@ impl Fixture {
                          (SELECT metadata FROM economy_ledger_context WHERE id = 1)
                      );
                  END;",
-            )
-            .expect("fixture schema");
-        drop(connection);
+                )
+                .expect("fixture schema template");
+            drop(connection);
+            std::fs::read(database.path()).expect("read loan database template")
+        });
+        let mut database = NamedTempFile::new().expect("temporary SQLite file");
+        database
+            .as_file_mut()
+            .write_all(template)
+            .expect("copy loan database template");
         let repository = LoanRepository::new(database.path());
         Self {
             _database: database,

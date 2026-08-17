@@ -4115,7 +4115,9 @@ fn upsert_match_prediction(
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::io::Write;
     use std::path::Path;
+    use std::sync::OnceLock;
 
     use cama_domain::rating::{CamaRatingSystem, TeamPlayer};
     use cama_domain::shuffler::{BalancedShuffler, PoolOptions};
@@ -4127,6 +4129,8 @@ mod tests {
     const TEST_GUILD_ID: i64 = 987_654_321;
     const TEST_GUILD_ID_SECONDARY: i64 = 987_654_322;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
     struct Fixture {
         file: NamedTempFile,
         players: PlayerRepository,
@@ -4135,12 +4139,20 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let file = NamedTempFile::new().expect("create on-disk SQLite fixture");
-            let connection = Connection::open(file.path()).expect("open fixture for schema setup");
-            connection
-                .execute_batch(TEST_SCHEMA)
-                .expect("install Python-compatible disposable schema");
-            drop(connection);
+            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create SQLite fixture template");
+                let connection =
+                    Connection::open(file.path()).expect("open fixture template for schema setup");
+                connection
+                    .execute_batch(TEST_SCHEMA)
+                    .expect("install Python-compatible disposable schema template");
+                drop(connection);
+                std::fs::read(file.path()).expect("read SQLite fixture template")
+            });
+            let mut file = NamedTempFile::new().expect("create on-disk SQLite fixture");
+            file.as_file_mut()
+                .write_all(template)
+                .expect("copy SQLite fixture template");
             Self {
                 players: PlayerRepository::new(file.path()),
                 matches: MatchRepository::new(file.path()),

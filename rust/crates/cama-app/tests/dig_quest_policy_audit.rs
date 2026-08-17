@@ -9,7 +9,9 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use cama_app::dig_loot::{
@@ -53,6 +55,23 @@ const GUILD: i64 = 83_002;
 const OTHER_GUILD: i64 = 83_003;
 const NOW: i64 = 2_000_000_000;
 
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn migrated_database() -> NamedTempFile {
+    let template = MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("temporary schema template");
+        cama_db::schema_manager::initialize_or_migrate(database.path())
+            .expect("canonical migrated schema template");
+        std::fs::read(database.path()).expect("read migrated schema template")
+    });
+    let mut database = NamedTempFile::new().expect("temporary SQLite database");
+    database
+        .as_file_mut()
+        .write_all(template)
+        .expect("copy migrated schema template");
+    database
+}
+
 fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,
@@ -62,6 +81,7 @@ fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     )?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", false)?;
+    connection.pragma_update(None, "synchronous", "OFF")?;
     Ok(connection)
 }
 
@@ -71,9 +91,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        cama_db::schema_manager::initialize_or_migrate(database.path())
-            .expect("canonical migrated schema");
+        let database = migrated_database();
         Self { database }
     }
 

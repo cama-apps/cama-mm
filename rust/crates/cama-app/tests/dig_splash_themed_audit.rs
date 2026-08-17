@@ -6,7 +6,9 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
@@ -42,6 +44,7 @@ fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     )?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", false)?;
+    connection.pragma_update(None, "synchronous", "OFF")?;
     Ok(connection)
 }
 
@@ -56,24 +59,35 @@ const GUILD: i64 = 12_345;
 const NOW: i64 = 2_000_000_000;
 const RECENT_ISO: &str = "2033-05-18T03:33:20+00:00";
 
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn migrated_database() -> NamedTempFile {
+    let template = MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("temporary schema template");
+        cama_db::schema_manager::initialize_or_migrate(database.path())
+            .expect("canonical migrated schema template");
+        std::fs::read(database.path()).expect("read migrated schema template")
+    });
+    let mut database = NamedTempFile::new().expect("temporary SQLite database");
+    database
+        .as_file_mut()
+        .write_all(template)
+        .expect("copy migrated schema template");
+    database
+}
+
 struct Fixture {
     database: NamedTempFile,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        cama_db::schema_manager::initialize_or_migrate(database.path())
-            .expect("canonical migrated schema");
+        let database = migrated_database();
         Self { database }
     }
 
     fn connection(&self) -> Connection {
-        let connection = Connection::open(self.database.path()).expect("fixture connection");
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .expect("disable foreign keys for Python-compatible fixture");
-        connection
+        open_runtime_connection(self.database.path()).expect("fixture connection")
     }
 
     fn seed_player(&self, discord_id: i64, balance: i64) {

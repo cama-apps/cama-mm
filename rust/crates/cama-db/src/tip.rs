@@ -687,7 +687,8 @@ fn unix_timestamp() -> Result<i64, TipRepositoryError> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{Arc, Barrier};
+    use std::io::Write;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use rusqlite::{Connection, params};
@@ -699,6 +700,8 @@ mod tests {
 
     const TEST_GUILD_ID: i64 = 123;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
     struct Fixture {
         file: NamedTempFile,
         repository: TipRepository,
@@ -706,11 +709,13 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let file = NamedTempFile::new().expect("create temporary SQLite file");
-            let connection = Connection::open(file.path()).expect("open temporary SQLite file");
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
+            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create temporary SQLite template");
+                let connection =
+                    Connection::open(file.path()).expect("open temporary SQLite template");
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL;
                      CREATE TABLE players (
                          discord_id          INTEGER NOT NULL,
                          guild_id            INTEGER NOT NULL DEFAULT 0,
@@ -850,9 +855,15 @@ mod tests {
                              (SELECT metadata FROM economy_ledger_context WHERE id = 1)
                          );
                      END;",
-                )
-                .expect("create Python-compatible tip schema");
-            drop(connection);
+                    )
+                    .expect("create Python-compatible tip schema template");
+                drop(connection);
+                std::fs::read(file.path()).expect("read tip schema template")
+            });
+            let mut file = NamedTempFile::new().expect("create temporary SQLite file");
+            file.as_file_mut()
+                .write_all(template)
+                .expect("copy tip schema template");
             let repository = TipRepository::new(file.path());
             Self { file, repository }
         }

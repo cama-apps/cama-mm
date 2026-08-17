@@ -1,7 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -13,6 +15,8 @@ use crate::betting_service_repository::{
 use crate::dota_bet_seed_repository::{BettingMode, BettingTeam};
 
 const DEFAULT_GUILD: i64 = 0;
+
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
 
 fn auto_history_bet(
     match_id: i64,
@@ -54,11 +58,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("temporary gambling statistics database");
-        let connection = Connection::open(file.path()).expect("open fixture");
-        connection
-            .execute_batch(
-                "CREATE TABLE players (
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file =
+                NamedTempFile::new().expect("temporary gambling statistics database template");
+            let connection = Connection::open(file.path()).expect("open fixture template");
+            connection
+                .execute_batch(
+                    "CREATE TABLE players (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      discord_username TEXT NOT NULL,
@@ -153,8 +159,15 @@ impl Fixture {
                      reason TEXT,
                      metadata TEXT
                  );",
-            )
-            .expect("create disposable schema");
+                )
+                .expect("create disposable schema template");
+            drop(connection);
+            std::fs::read(file.path()).expect("read gambling statistics database template")
+        });
+        let mut file = NamedTempFile::new().expect("temporary gambling statistics database");
+        file.as_file_mut()
+            .write_all(template)
+            .expect("copy gambling statistics database template");
         Self {
             file,
             next_pending_id: 1,

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -11,12 +13,15 @@ use crate::schema_manager::initialize_or_migrate;
 const GUILD: i64 = 4242;
 const NOW: i64 = 10_000;
 
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
 fn fixture() -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temporary betting database");
-    let connection = Connection::open(file.path()).expect("open fixture");
-    connection
-        .execute_batch(
-            "CREATE TABLE players (
+    let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+        let file = NamedTempFile::new().expect("temporary betting database template");
+        let connection = Connection::open(file.path()).expect("open fixture template");
+        connection
+            .execute_batch(
+                "CREATE TABLE players (
                  discord_id INTEGER NOT NULL,
                  guild_id INTEGER NOT NULL DEFAULT 0,
                  jopacoin_balance INTEGER DEFAULT 3,
@@ -81,8 +86,15 @@ fn fixture() -> NamedTempFile {
                  updated_at TEXT,
                  PRIMARY KEY (guild_id, investor_id, target_id)
              );",
-        )
-        .expect("create disposable schema");
+            )
+            .expect("create disposable schema template");
+        drop(connection);
+        std::fs::read(file.path()).expect("read betting database template")
+    });
+    let mut file = NamedTempFile::new().expect("temporary betting database");
+    file.as_file_mut()
+        .write_all(template)
+        .expect("copy betting database template");
     file
 }
 

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Barrier};
+use std::io::Write;
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
 use cama_domain::openskill::{CamaOpenSkillSystem, Player as OpenSkillPlayer, WinningTeam};
@@ -13,6 +14,8 @@ const ADMIN: i64 = 88_888;
 const WIN_REWARD: i64 = 10;
 const PARTICIPATION_REWARD: i64 = 5;
 const NOW: i64 = 1_786_051_200;
+
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
 
 struct Fixture {
     file: NamedTempFile,
@@ -28,12 +31,19 @@ struct SeededMatch {
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("temporary match correction database");
-        let connection = Connection::open(file.path()).expect("open correction fixture");
-        connection
-            .execute_batch(FIXTURE_SCHEMA)
-            .expect("create Python-compatible disposable schema");
-        drop(connection);
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file = NamedTempFile::new().expect("match correction database template");
+            let connection = Connection::open(file.path()).expect("open correction template");
+            connection
+                .execute_batch(FIXTURE_SCHEMA)
+                .expect("create Python-compatible disposable schema template");
+            drop(connection);
+            std::fs::read(file.path()).expect("read match correction database template")
+        });
+        let mut file = NamedTempFile::new().expect("temporary match correction database");
+        file.as_file_mut()
+            .write_all(template)
+            .expect("copy match correction database template");
         Self {
             repository: MatchCorrectionRepository::new(file.path()),
             file,
@@ -51,8 +61,9 @@ impl Fixture {
     fn seed_match_at(&self, start_id: i64, match_date: i64, winner: MatchSide) -> SeededMatch {
         let radiant_ids = (start_id..start_id + 5).collect::<Vec<_>>();
         let dire_ids = (start_id + 5..start_id + 10).collect::<Vec<_>>();
-        let connection = self.connection();
-        connection
+        let mut connection = self.connection();
+        let transaction = connection.transaction().expect("seed match transaction");
+        transaction
             .execute(
                 "INSERT INTO matches (
                      guild_id,winning_team,match_date,win_reward_jc,betting_mode,
@@ -68,7 +79,7 @@ impl Fixture {
                 ],
             )
             .expect("insert match");
-        let match_id = connection.last_insert_rowid();
+        let match_id = transaction.last_insert_rowid();
         for (team, ids) in [
             (MatchSide::Radiant, radiant_ids.as_slice()),
             (MatchSide::Dire, dire_ids.as_slice()),
@@ -81,7 +92,7 @@ impl Fixture {
                     } else {
                         PARTICIPATION_REWARD
                     };
-                connection
+                transaction
                     .execute(
                         "INSERT INTO players (
                              discord_id,guild_id,discord_username,jopacoin_balance,
@@ -100,7 +111,7 @@ impl Fixture {
                         ],
                     )
                     .expect("insert player");
-                connection
+                transaction
                     .execute(
                         "INSERT INTO match_participants (
                              match_id,discord_id,team_number,won,side,guild_id,
@@ -117,7 +128,7 @@ impl Fixture {
                         ],
                     )
                     .expect("insert participant");
-                connection
+                transaction
                     .execute(
                         "INSERT INTO rating_history (
                              discord_id,rating,rating_before,rd_before,rd_after,
@@ -143,7 +154,8 @@ impl Fixture {
                     .expect("insert rating history");
             }
         }
-        seed_pairings(&connection, &radiant_ids, &dire_ids, winner, GUILD);
+        seed_pairings(&transaction, &radiant_ids, &dire_ids, winner, GUILD);
+        transaction.commit().expect("commit seeded match");
         SeededMatch {
             match_id,
             radiant_ids,
@@ -157,8 +169,11 @@ impl Fixture {
         match_date: i64,
         winner: MatchSide,
     ) -> SeededMatch {
-        let connection = self.connection();
-        connection
+        let mut connection = self.connection();
+        let transaction = connection
+            .transaction()
+            .expect("seed replayable match transaction");
+        transaction
             .execute(
                 "INSERT INTO matches (
                      guild_id,winning_team,match_date,win_reward_jc,betting_mode,
@@ -174,21 +189,21 @@ impl Fixture {
                 ],
             )
             .expect("insert replayable match");
-        let match_id = connection.last_insert_rowid();
+        let match_id = transaction.last_insert_rowid();
         for (team, ids) in [
             (MatchSide::Radiant, teams.radiant_ids.as_slice()),
             (MatchSide::Dire, teams.dire_ids.as_slice()),
         ] {
             for &discord_id in ids {
                 let won = team == winner;
-                connection
+                transaction
                     .execute(
                         "UPDATE players SET wins=wins+?1,losses=losses+?2
                          WHERE discord_id=?3 AND guild_id=?4",
                         params![i64::from(won), i64::from(!won), discord_id, GUILD],
                     )
                     .expect("advance replay player counters");
-                connection
+                transaction
                     .execute(
                         "INSERT INTO match_participants (
                              match_id,discord_id,team_number,won,side,guild_id,
@@ -205,7 +220,7 @@ impl Fixture {
                         ],
                     )
                     .expect("insert replay participant");
-                connection
+                transaction
                     .execute(
                         "INSERT INTO rating_history (
                              discord_id,rating,rating_before,rd_before,rd_after,
@@ -224,6 +239,7 @@ impl Fixture {
                     .expect("insert replay rating history");
             }
         }
+        transaction.commit().expect("commit replayable match");
         SeededMatch {
             match_id,
             radiant_ids: teams.radiant_ids.clone(),
