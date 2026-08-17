@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 use std::{path::Path, process::Command};
@@ -7,21 +6,49 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::test_support::FastTestDatabase;
 
 const TEST_GUILD_ID: i64 = 12_345;
 const OTHER_GUILD_ID: i64 = 12_346;
 const NOW: i64 = 1_700_000_000;
 
-static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+enum FixtureDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl FixtureDatabase {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
 
 struct Fixture {
-    _database: NamedTempFile,
+    _database: FixtureDatabase,
     repository: LoanRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+        Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+            Self::template().path(),
+        )))
+    }
+
+    fn new_durable() -> Self {
+        let database = NamedTempFile::new().expect("temporary SQLite file");
+        std::fs::copy(Self::template().path(), database.path())
+            .expect("copy loan database template");
+        Self::from_database(FixtureDatabase::Durable(database))
+    }
+
+    fn template() -> &'static NamedTempFile {
+        FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
             let database = NamedTempFile::new().expect("temporary SQLite template");
             let connection = Connection::open(database.path()).expect("fixture template");
             connection
@@ -156,13 +183,11 @@ impl Fixture {
                 )
                 .expect("fixture schema template");
             drop(connection);
-            std::fs::read(database.path()).expect("read loan database template")
-        });
-        let mut database = NamedTempFile::new().expect("temporary SQLite file");
-        database
-            .as_file_mut()
-            .write_all(template)
-            .expect("copy loan database template");
+            database
+        })
+    }
+
+    fn from_database(database: FixtureDatabase) -> Self {
         let repository = LoanRepository::new(database.path());
         Self {
             _database: database,
@@ -1137,7 +1162,7 @@ fn repayment_failure_after_debits_rolls_back_every_money_surface() {
 
 #[test]
 fn concurrent_loan_requests_serialize_to_one_outstanding_loan() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_durable();
     fixture.add_player(90_003, 10);
     let repository = Arc::new(fixture.repository.clone());
     let barrier = Arc::new(Barrier::new(2));

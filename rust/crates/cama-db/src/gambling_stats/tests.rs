@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -13,10 +12,11 @@ use crate::betting_service_repository::{
     BetSettlementAdjustments, BettingServiceRepository, PlaceBetRequest,
 };
 use crate::dota_bet_seed_repository::{BettingMode, BettingTeam};
+use crate::test_support::FastTestDatabase;
 
 const DEFAULT_GUILD: i64 = 0;
 
-static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
 
 fn auto_history_bet(
     match_id: i64,
@@ -50,7 +50,7 @@ fn auto_history_bet(
 }
 
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     next_pending_id: i64,
     next_match_id: i64,
     next_time: i64,
@@ -162,12 +162,9 @@ impl Fixture {
                 )
                 .expect("create disposable schema template");
             drop(connection);
-            std::fs::read(file.path()).expect("read gambling statistics database template")
+            file
         });
-        let mut file = NamedTempFile::new().expect("temporary gambling statistics database");
-        file.as_file_mut()
-            .write_all(template)
-            .expect("copy gambling statistics database template");
+        let file = FastTestDatabase::from_template(template.path());
         Self {
             file,
             next_pending_id: 1,

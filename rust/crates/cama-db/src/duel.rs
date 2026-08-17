@@ -1336,16 +1336,32 @@ fn clear_ledger_context(connection: &Connection) -> Result<(), rusqlite::Error> 
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::io::Write;
+    use std::path::Path;
     use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
     use tempfile::NamedTempFile;
+
+    use crate::test_support::FastTestDatabase;
 
     const GUILD_ID: i64 = 9_001;
     const NOW: i64 = 1_000_000;
     const DAY: i64 = DAY_SECONDS;
 
-    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum DuelTestDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl DuelTestDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
 
     const TEST_SCHEMA: &str = "
         PRAGMA journal_mode=WAL;
@@ -1444,8 +1460,8 @@ mod tests {
         END;
     ";
 
-    fn database() -> NamedTempFile {
-        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+    fn database_template() -> &'static NamedTempFile {
+        FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
             let file = NamedTempFile::new().expect("create duel test database template");
             let connection =
                 Connection::open(file.path()).expect("open duel test database template");
@@ -1453,17 +1469,23 @@ mod tests {
                 .execute_batch(TEST_SCHEMA)
                 .expect("create Python-compatible duel test schema template");
             drop(connection);
-            std::fs::read(file.path()).expect("read duel test database template")
-        });
-        let mut file = NamedTempFile::new().expect("create duel test database");
-        file.as_file_mut()
-            .write_all(template)
+            file
+        })
+    }
+
+    fn database() -> DuelTestDatabase {
+        DuelTestDatabase::Fast(FastTestDatabase::from_template(database_template().path()))
+    }
+
+    fn durable_database() -> DuelTestDatabase {
+        let file = NamedTempFile::new().expect("create duel test database");
+        std::fs::copy(database_template().path(), file.path())
             .expect("copy duel test database template");
-        file
+        DuelTestDatabase::Durable(file)
     }
 
     fn seed_player(
-        file: &NamedTempFile,
+        file: &DuelTestDatabase,
         discord_id: i64,
         rating: Option<f64>,
         balance: i64,
@@ -1488,7 +1510,7 @@ mod tests {
             .expect("seed duel player");
     }
 
-    fn set_balance(file: &NamedTempFile, discord_id: i64, guild_id: i64, balance: i64) {
+    fn set_balance(file: &DuelTestDatabase, discord_id: i64, guild_id: i64, balance: i64) {
         let connection = Connection::open(file.path()).expect("open duel test database");
         connection
             .execute(
@@ -1499,7 +1521,7 @@ mod tests {
             .expect("set player balance");
     }
 
-    fn balance(file: &NamedTempFile, discord_id: i64, guild_id: i64) -> i64 {
+    fn balance(file: &DuelTestDatabase, discord_id: i64, guild_id: i64) -> i64 {
         Connection::open(file.path())
             .expect("open duel test database")
             .query_row(
@@ -1543,13 +1565,24 @@ mod tests {
     }
 
     struct BoundFixture {
-        file: NamedTempFile,
+        file: DuelTestDatabase,
         repository: DuelChallengeRepository,
         challenge: DuelChallenge,
     }
 
     fn bound_fixture(wager: i64, recipient_balance: i64) -> BoundFixture {
-        let file = database();
+        bound_fixture_with_database(database(), wager, recipient_balance)
+    }
+
+    fn durable_bound_fixture(wager: i64, recipient_balance: i64) -> BoundFixture {
+        bound_fixture_with_database(durable_database(), wager, recipient_balance)
+    }
+
+    fn bound_fixture_with_database(
+        file: DuelTestDatabase,
+        wager: i64,
+        recipient_balance: i64,
+    ) -> BoundFixture {
         seed_player(&file, 1, Some(1400.0), wager + 50, GUILD_ID);
         seed_player(
             &file,
@@ -1605,7 +1638,7 @@ mod tests {
         metadata: Option<String>,
     }
 
-    fn ledger_rows(file: &NamedTempFile, challenge_id: i64) -> Vec<LedgerRow> {
+    fn ledger_rows(file: &DuelTestDatabase, challenge_id: i64) -> Vec<LedgerRow> {
         let connection = Connection::open(file.path()).expect("open duel test database");
         let mut statement = connection
             .prepare(
@@ -1838,7 +1871,7 @@ mod tests {
         recipient_rating: f64,
         wager: W,
         challenger_balance: i64,
-    ) -> (NamedTempFile, Result<DuelChallenge, DuelRepositoryError>) {
+    ) -> (DuelTestDatabase, Result<DuelChallenge, DuelRepositoryError>) {
         let file = database();
         seed_player(&file, 1, Some(1400.0), challenger_balance, GUILD_ID);
         seed_player(&file, 2, Some(recipient_rating), 0, GUILD_ID);
@@ -2771,7 +2804,7 @@ mod tests {
 
     #[test]
     fn test_accept_and_decline_race_has_exactly_one_success() {
-        let fixture = bound_fixture(500, 500);
+        let fixture = durable_bound_fixture(500, 500);
         let path = fixture.file.path().to_path_buf();
         let challenge_id = fixture.challenge.challenge_id;
         let barrier = Arc::new(Barrier::new(2));
@@ -3072,7 +3105,7 @@ mod tests {
 
     #[test]
     fn test_only_one_concurrent_reminder_claim_succeeds() {
-        let fixture = bound_fixture(500, 0);
+        let fixture = durable_bound_fixture(500, 0);
         let path = fixture.file.path().to_path_buf();
         let challenge_id = fixture.challenge.challenge_id;
         let now = fixture.challenge.created_at + DAY;
@@ -3112,7 +3145,17 @@ mod tests {
     }
 
     fn accepted_fixture(accepted_at: i64) -> (BoundFixture, DuelChallenge) {
-        let fixture = bound_fixture(500, 500);
+        accepted_fixture_with(bound_fixture(500, 500), accepted_at)
+    }
+
+    fn durable_accepted_fixture(accepted_at: i64) -> (BoundFixture, DuelChallenge) {
+        accepted_fixture_with(durable_bound_fixture(500, 500), accepted_at)
+    }
+
+    fn accepted_fixture_with(
+        fixture: BoundFixture,
+        accepted_at: i64,
+    ) -> (BoundFixture, DuelChallenge) {
         let accepted = fixture
             .repository
             .accept_atomic(
@@ -3244,7 +3287,7 @@ mod tests {
 
     #[test]
     fn test_only_one_concurrent_unresolved_claim_succeeds() {
-        let (fixture, accepted) = accepted_fixture(NOW + 100);
+        let (fixture, accepted) = durable_accepted_fixture(NOW + 100);
         let path = fixture.file.path().to_path_buf();
         let challenge_id = accepted.challenge_id;
         let now = accepted.responded_at.expect("responded timestamp") + DAY;

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
@@ -7,13 +6,14 @@ use tempfile::NamedTempFile;
 
 use super::*;
 use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 9_001;
 
-static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
 
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     repository: MatchRecordingRepository,
 }
 
@@ -181,12 +181,9 @@ impl Fixture {
                 )
                 .expect("create disposable match-recording schema template");
             drop(connection);
-            std::fs::read(file.path()).expect("read match-recording schema template")
+            file
         });
-        let mut file = NamedTempFile::new().expect("temporary SQLite file");
-        file.as_file_mut()
-            .write_all(template)
-            .expect("copy match-recording schema template");
+        let file = FastTestDatabase::from_template(template.path());
         let repository = MatchRecordingRepository::new(file.path());
         Self { file, repository }
     }

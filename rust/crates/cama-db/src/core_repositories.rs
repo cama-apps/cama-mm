@@ -4115,7 +4115,6 @@ fn upsert_match_prediction(
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::io::Write;
     use std::path::Path;
     use std::sync::OnceLock;
 
@@ -4125,21 +4124,49 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::test_support::FastTestDatabase;
 
     const TEST_GUILD_ID: i64 = 987_654_321;
     const TEST_GUILD_ID_SECONDARY: i64 = 987_654_322;
 
-    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
 
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         players: PlayerRepository,
         matches: MatchRepository,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
+            let file = NamedTempFile::new().expect("create on-disk SQLite fixture");
+            std::fs::copy(Self::template().path(), file.path())
+                .expect("copy SQLite fixture template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
                 let file = NamedTempFile::new().expect("create SQLite fixture template");
                 let connection =
                     Connection::open(file.path()).expect("open fixture template for schema setup");
@@ -4147,12 +4174,11 @@ mod tests {
                     .execute_batch(TEST_SCHEMA)
                     .expect("install Python-compatible disposable schema template");
                 drop(connection);
-                std::fs::read(file.path()).expect("read SQLite fixture template")
-            });
-            let mut file = NamedTempFile::new().expect("create on-disk SQLite fixture");
-            file.as_file_mut()
-                .write_all(template)
-                .expect("copy SQLite fixture template");
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             Self {
                 players: PlayerRepository::new(file.path()),
                 matches: MatchRepository::new(file.path()),
@@ -7530,7 +7556,7 @@ mod tests {
 
     #[test]
     fn concurrent_steals_are_serialized_without_lost_updates() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_durable();
         for discord_id in [-1, -2, -3] {
             fixture.add_player(discord_id, TEST_GUILD_ID);
         }

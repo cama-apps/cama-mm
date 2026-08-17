@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
@@ -9,16 +9,31 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::test_support::FastTestDatabase;
 const GUILD: i64 = 7_777;
 const ADMIN: i64 = 88_888;
 const WIN_REWARD: i64 = 10;
 const PARTICIPATION_REWARD: i64 = 5;
 const NOW: i64 = 1_786_051_200;
 
-static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+enum FixtureDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl FixtureDatabase {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
 
 struct Fixture {
-    file: NamedTempFile,
+    file: FixtureDatabase,
     repository: MatchCorrectionRepository,
 }
 
@@ -31,19 +46,31 @@ struct SeededMatch {
 
 impl Fixture {
     fn new() -> Self {
-        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+        Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+            Self::template().path(),
+        )))
+    }
+
+    fn new_durable() -> Self {
+        let file = NamedTempFile::new().expect("temporary match correction database");
+        std::fs::copy(Self::template().path(), file.path())
+            .expect("copy match correction database template");
+        Self::from_database(FixtureDatabase::Durable(file))
+    }
+
+    fn template() -> &'static NamedTempFile {
+        FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
             let file = NamedTempFile::new().expect("match correction database template");
             let connection = Connection::open(file.path()).expect("open correction template");
             connection
                 .execute_batch(FIXTURE_SCHEMA)
                 .expect("create Python-compatible disposable schema template");
             drop(connection);
-            std::fs::read(file.path()).expect("read match correction database template")
-        });
-        let mut file = NamedTempFile::new().expect("temporary match correction database");
-        file.as_file_mut()
-            .write_all(template)
-            .expect("copy match correction database template");
+            file
+        })
+    }
+
+    fn from_database(file: FixtureDatabase) -> Self {
         Self {
             repository: MatchCorrectionRepository::new(file.path()),
             file,
@@ -657,7 +684,7 @@ fn test_bet_repository_requires_correction_capabilities() {
 
 #[test]
 fn test_match_correction_claim_has_one_concurrent_owner() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_durable();
     let seeded = fixture.seed_match(17_000);
     let match_id = seeded.match_id;
     let path = fixture.file.path().to_path_buf();
@@ -690,7 +717,7 @@ fn test_match_correction_claim_has_one_concurrent_owner() {
 
 #[test]
 fn test_concurrent_match_corrections_apply_transition_once() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_durable();
     let seeded = fixture.seed_match(17_100);
     let path = fixture.file.path().to_path_buf();
     let barrier = Arc::new(Barrier::new(2));

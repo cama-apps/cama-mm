@@ -687,7 +687,7 @@ fn unix_timestamp() -> Result<i64, TipRepositoryError> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::io::Write;
+    use std::path::Path;
     use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
@@ -697,19 +697,46 @@ mod tests {
     use super::{
         TipDirection, TipRepository, TipRepositoryError, TipTransferResult, TipVolume, UserTipStats,
     };
+    use crate::test_support::FastTestDatabase;
 
     const TEST_GUILD_ID: i64 = 123;
 
-    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
 
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         repository: TipRepository,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
+            let file = NamedTempFile::new().expect("create temporary SQLite file");
+            std::fs::copy(Self::template().path(), file.path()).expect("copy tip schema template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
                 let file = NamedTempFile::new().expect("create temporary SQLite template");
                 let connection =
                     Connection::open(file.path()).expect("open temporary SQLite template");
@@ -858,12 +885,11 @@ mod tests {
                     )
                     .expect("create Python-compatible tip schema template");
                 drop(connection);
-                std::fs::read(file.path()).expect("read tip schema template")
-            });
-            let mut file = NamedTempFile::new().expect("create temporary SQLite file");
-            file.as_file_mut()
-                .write_all(template)
-                .expect("copy tip schema template");
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = TipRepository::new(file.path());
             Self { file, repository }
         }
@@ -1693,7 +1719,9 @@ mod tests {
 
     #[test]
     fn concurrent_tips_serialize_and_cannot_overspend_sender() {
-        let fixture = atomic_fixture(100, 0);
+        let fixture = Fixture::new_durable();
+        fixture.seed_player(1, 100);
+        fixture.seed_player(2, 0);
         let repository = Arc::new(fixture.repository.clone());
         let barrier = Arc::new(Barrier::new(2));
         let handles = (0..2)

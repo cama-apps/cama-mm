@@ -2043,7 +2043,7 @@ fn unix_timestamp() -> Result<i64, PredictionRepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::path::Path;
     use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
@@ -2054,20 +2054,48 @@ mod tests {
         BookSide, CONTRACT_VALUE, ContractSide, NewLevel, Position, PredictionRepository,
         PredictionRepositoryError, quote_total,
     };
+    use crate::test_support::FastTestDatabase;
 
     const GUILD: i64 = 101;
     const OTHER_GUILD: i64 = 202;
 
-    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
 
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         repository: PredictionRepository,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
+            let file = NamedTempFile::new().expect("create prediction SQLite fixture");
+            std::fs::copy(Self::template().path(), file.path())
+                .expect("copy prediction fixture schema template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
                 let file = NamedTempFile::new().expect("create prediction SQLite template");
                 let connection = Connection::open(file.path()).expect("open prediction template");
                 connection
@@ -2190,12 +2218,11 @@ mod tests {
                     )
                     .expect("create migrated prediction fixture schema template");
                 drop(connection);
-                std::fs::read(file.path()).expect("read prediction fixture schema template")
-            });
-            let mut file = NamedTempFile::new().expect("create prediction SQLite fixture");
-            file.as_file_mut()
-                .write_all(template)
-                .expect("copy prediction fixture schema template");
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = PredictionRepository::new(file.path());
             Self { file, repository }
         }
@@ -3257,7 +3284,7 @@ mod tests {
 
     #[test]
     fn test_atomic_buy_does_not_oversell_shared_depth() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_durable();
         fixture.player(1, GUILD, 1_000);
         fixture.player(2, GUILD, 1_000);
         let market = fixture.market();

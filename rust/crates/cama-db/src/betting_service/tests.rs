@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -8,14 +7,14 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::test_support::copy_migrated_database;
+use crate::test_support::{FastTestDatabase, copy_migrated_database};
 
 const GUILD: i64 = 4242;
 const NOW: i64 = 10_000;
 
-static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
 
-fn fixture() -> NamedTempFile {
+fn fixture() -> FastTestDatabase {
     let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
         let file = NamedTempFile::new().expect("temporary betting database template");
         let connection = Connection::open(file.path()).expect("open fixture template");
@@ -89,13 +88,9 @@ fn fixture() -> NamedTempFile {
             )
             .expect("create disposable schema template");
         drop(connection);
-        std::fs::read(file.path()).expect("read betting database template")
+        file
     });
-    let mut file = NamedTempFile::new().expect("temporary betting database");
-    file.as_file_mut()
-        .write_all(template)
-        .expect("copy betting database template");
-    file
+    FastTestDatabase::from_template(template.path())
 }
 
 fn repo(path: &Path) -> BettingServiceRepository {
@@ -2891,7 +2886,7 @@ fn test_bomb_pot_player_already_in_debt_can_ante() {
 }
 
 fn settle_test_bets(
-    file: &NamedTempFile,
+    file: &FastTestDatabase,
     pending_match_id: i64,
     match_id: i64,
     mode: BettingMode,
