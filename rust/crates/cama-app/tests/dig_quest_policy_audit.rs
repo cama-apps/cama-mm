@@ -57,17 +57,28 @@ const NOW: i64 = 2_000_000_000;
 
 static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
 
-fn migrated_database() -> NamedTempFile {
-    let template = MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
+fn migrated_database_template() -> &'static [u8] {
+    MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
         let database = NamedTempFile::new().expect("temporary schema template");
         cama_db::schema_manager::initialize_or_migrate(database.path())
             .expect("canonical migrated schema template");
         std::fs::read(database.path()).expect("read migrated schema template")
-    });
+    })
+}
+
+pub(crate) fn copy_migrated_database(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, migrated_database_template())
+}
+
+pub mod test_support {
+    pub(crate) use super::copy_migrated_database;
+}
+
+fn migrated_database() -> NamedTempFile {
     let mut database = NamedTempFile::new().expect("temporary SQLite database");
     database
         .as_file_mut()
-        .write_all(template)
+        .write_all(migrated_database_template())
         .expect("copy migrated schema template");
     database
 }

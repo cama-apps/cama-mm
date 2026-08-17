@@ -1,4 +1,4 @@
-use cama_db::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use rusqlite::{Connection, params};

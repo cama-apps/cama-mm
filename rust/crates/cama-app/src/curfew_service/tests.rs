@@ -1,5 +1,5 @@
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::curfew::CurfewRepository;
-use cama_db::schema_manager::initialize_or_migrate;
 use chrono::{TimeZone, Utc};
 
 use super::*;

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 

@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use cama_db::predictions_repository::{BookSide, NewLevel, PredictionRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 

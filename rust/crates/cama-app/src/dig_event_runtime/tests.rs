@@ -1,11 +1,11 @@
 //! Migrated-SQLite application tests for the canonical event runtime.
 
 use crate::economy_event_service::EconomyEventConfig;
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::dig_event_runtime::{DigEventActorKey, DigEventRuntimeRepository};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::dig_gear::{GearService, GearSlot};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;

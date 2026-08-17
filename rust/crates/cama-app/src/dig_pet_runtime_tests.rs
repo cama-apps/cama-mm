@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cama_db::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_domain::pet::{DIG_WORK_UNITS_PER_BLOCK, PetDigWorkClaim};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;

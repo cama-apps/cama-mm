@@ -1,8 +1,8 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::dig_gear::GearSlot;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;

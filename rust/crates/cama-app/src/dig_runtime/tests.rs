@@ -1,3 +1,4 @@
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::dig_event_runtime::{
@@ -10,7 +11,6 @@ use cama_db::economy_event_repository::{
 };
 use cama_db::loan_repository::LoanRepository;
 use cama_db::manashop_rework_repository::{BuffData, GrantBuffRequest, ManashopRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, CAVE_IN_CATASTROPHIC_PCT_BY_BAND};
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::ARMOR_TIERS;
