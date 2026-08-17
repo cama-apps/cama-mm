@@ -23,6 +23,7 @@ pub mod pet_brawl;
 pub mod pet_evolution;
 pub mod player;
 pub mod playtime;
+pub mod position_estimate;
 pub mod prediction_ladder;
 pub mod rate_limiter;
 pub mod rating;
