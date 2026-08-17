@@ -377,7 +377,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 **Rating:**
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
   value adjustments (defaults: 0.95 and 100)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 500)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 550)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
 **Trivia:**
