@@ -91,6 +91,7 @@ impl Fixture {
                      firstblood_claimed INTEGER,
                      stuns REAL,
                      fantasy_points REAL,
+                     estimated_position TEXT,
                      PRIMARY KEY (match_id, discord_id)
                  );
                  CREATE TABLE wrapped_enrichment_facts (
@@ -1204,6 +1205,122 @@ fn test_exclusion_updates_apply_once_per_pending_match() {
         before[&half_increment_id] + 1
     );
     assert_eq!(after_second, after_first);
+}
+
+#[test]
+fn test_farm_stats_round_trip_through_position_estimation() {
+    let fixture = Fixture::new();
+    let (radiant, dire) = teams(34_001);
+    let all_ids = [radiant.clone(), dire.clone()].concat();
+    fixture.seed(&all_ids);
+    let match_id = fixture
+        .repository
+        .record_match_atomic(standard(&radiant, &dire, TeamSide::Radiant))
+        .expect("record match")
+        .match_id;
+
+    // Each team gets the same clean role shape as the domain heuristic's
+    // own unit tests: highest last_hits -> pos1, sole mid -> pos2,
+    // second-highest last_hits -> pos3, then the two lowest split by wards.
+    let per_team_last_hits = [220, 180, 140, 20, 25];
+    let per_team_lane_role = [1, 2, 3, 3, 1];
+    let per_team_obs_placed = [0, 0, 1, 2, 0];
+    let per_team_sen_placed = [0, 0, 0, 1, 1];
+    let participant_updates = all_ids
+        .iter()
+        .enumerate()
+        .map(|(index, discord_id)| EnrichmentParticipantUpdate {
+            discord_id: *discord_id,
+            hero_id: Some(1),
+            kills: None,
+            deaths: None,
+            assists: None,
+            gpm: None,
+            xpm: None,
+            hero_damage: None,
+            tower_damage: None,
+            last_hits: Some(per_team_last_hits[index % 5]),
+            denies: None,
+            net_worth: None,
+            hero_healing: None,
+            lane_role: Some(per_team_lane_role[index % 5]),
+            lane_efficiency: None,
+            towers_killed: None,
+            roshans_killed: None,
+            teamfight_participation: None,
+            obs_placed: Some(per_team_obs_placed[index % 5]),
+            sen_placed: Some(per_team_sen_placed[index % 5]),
+            camps_stacked: None,
+            rune_pickups: None,
+            firstblood_claimed: None,
+            stuns: None,
+            fantasy_points: None,
+        })
+        .collect::<Vec<_>>();
+    fixture
+        .repository
+        .apply_enrichment_atomic(MatchEnrichmentRequest {
+            match_id,
+            guild_id: Some(GUILD),
+            valve_match_id: 8_181_518_333,
+            duration_seconds: 2_400,
+            radiant_score: 35,
+            dire_score: 22,
+            game_mode: 2,
+            enrichment_data: None,
+            enrichment_source: Some("manual"),
+            enrichment_confidence: None,
+            participant_updates: &participant_updates,
+            wrapped_facts: &[],
+        })
+        .expect("atomic enrichment");
+
+    let farm_rows = fixture
+        .repository
+        .get_participant_farm_stats(match_id, Some(GUILD))
+        .expect("read farm stats");
+    assert_eq!(farm_rows.len(), 10);
+
+    let mut estimates = Vec::new();
+    for team_number in [1, 2] {
+        let team: Vec<ParticipantFarmStats> = farm_rows
+            .iter()
+            .filter(|row| row.team_number == team_number)
+            .map(|row| row.stats)
+            .collect();
+        assert_eq!(team.len(), 5);
+        let team_estimate = cama_domain::position_estimate::estimate_team_positions(&team)
+            .expect("clean team estimates");
+        estimates.extend(team_estimate);
+    }
+    assert_eq!(estimates.len(), 10);
+
+    let updated = fixture
+        .repository
+        .store_estimated_positions(match_id, Some(GUILD), &estimates)
+        .expect("store estimated positions");
+    assert_eq!(updated, 10);
+
+    for (discord_id, position) in &estimates {
+        let stored: String = fixture
+            .connection()
+            .query_row(
+                "SELECT estimated_position FROM match_participants
+                 WHERE match_id = ?1 AND discord_id = ?2",
+                params![match_id, discord_id],
+                |row| row.get(0),
+            )
+            .expect("read stored estimate");
+        assert_eq!(&stored, position);
+    }
+
+    // A discord_id with no matching participant row is silently skipped
+    // rather than erroring, matching apply_enrichment_atomic's tolerance.
+    let unmatched = fixture
+        .repository
+        .store_estimated_positions(match_id, Some(GUILD), &[(999_999_999, "1")])
+        .expect("unmatched discord_id does not error");
+    assert_eq!(unmatched, 0);
 }
 
 #[test]

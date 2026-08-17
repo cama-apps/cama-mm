@@ -13,6 +13,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use cama_domain::position_estimate::ParticipantFarmStats;
+
 use crate::{json_numeric::coerce_i64_like_python, open_runtime_connection};
 
 pub const DEFAULT_WIN_REWARD: i64 = 10;
@@ -86,6 +88,15 @@ pub struct ParticipantRecord {
     pub team_number: i64,
     pub won: bool,
     pub side: String,
+}
+
+/// One participant's team assignment plus the OpenDota-enrichment-derived
+/// stats [`cama_domain::position_estimate::estimate_team_positions`] needs,
+/// as already persisted on `match_participants`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchParticipantFarmRow {
+    pub team_number: i64,
+    pub stats: ParticipantFarmStats,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1246,6 +1257,69 @@ impl MatchRecordingRepository {
             )?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Farm/lane stats for every participant of a match, for feeding into
+    /// [`cama_domain::position_estimate::estimate_team_positions`]. Values
+    /// are `NULL` until OpenDota enrichment has run for the match.
+    pub fn get_participant_farm_stats(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<MatchParticipantFarmRow>, MatchRecordingRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT discord_id, team_number, lane_role, last_hits, net_worth,
+                    gpm, obs_placed, sen_placed
+             FROM match_participants
+             WHERE match_id = ?1 AND guild_id = ?2 ORDER BY discord_id",
+        )?;
+        statement
+            .query_map(
+                params![match_id, Self::normalize_guild_id(guild_id)],
+                |row| {
+                    Ok(MatchParticipantFarmRow {
+                        team_number: row.get(1)?,
+                        stats: ParticipantFarmStats {
+                            discord_id: row.get(0)?,
+                            lane_role: row.get(2)?,
+                            last_hits: row.get(3)?,
+                            net_worth: row.get(4)?,
+                            gpm: row.get(5)?,
+                            obs_placed: row.get(6)?,
+                            sen_placed: row.get(7)?,
+                        },
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Persist each `(discord_id, position)` estimate for a match. Unknown
+    /// `discord_id`s (no matching participant row) are silently skipped,
+    /// matching `apply_enrichment_atomic`'s existing tolerance for stale
+    /// input — this is best-effort derived data, not a source of truth.
+    pub fn store_estimated_positions(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+        estimates: &[(i64, &str)],
+    ) -> Result<usize, MatchRecordingRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut updated = 0;
+        for (discord_id, position) in estimates {
+            updated += transaction.execute(
+                "UPDATE match_participants
+                 SET estimated_position = ?1
+                 WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![position, match_id, discord_id, guild_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(updated)
     }
 
     pub fn rating_history(
