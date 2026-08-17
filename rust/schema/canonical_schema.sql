@@ -1103,6 +1103,7 @@ CREATE TABLE player_curfew_windows (
                 end_hour     INTEGER NOT NULL,
                 end_minute   INTEGER NOT NULL DEFAULT 0,
                 timezone     TEXT,
+                days         INTEGER,
                 created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (discord_id, guild_id, name)
             );

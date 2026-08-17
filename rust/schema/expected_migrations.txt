@@ -230,3 +230,4 @@ create_draft_financial_effects
 add_player_timezone_column
 add_dota_play_hours_column
 create_curfew_windows_table
+add_curfew_window_days_column

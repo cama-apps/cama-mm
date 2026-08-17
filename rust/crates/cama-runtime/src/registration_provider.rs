@@ -457,6 +457,11 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                         "IANA timezone name — leave blank to use your /player timezone setting",
                         CommandOptionKind::String,
                     ),
+                    CommandOptionSpec::new(
+                        "days",
+                        "Days this applies to, e.g. 'Sa,Su' or 'M T W Th F' — leave blank for every day",
+                        CommandOptionKind::String,
+                    ),
                 ],
             ),
             subcommand(
@@ -1988,6 +1993,7 @@ impl PlayerRegistrationHandler {
         let end = string_option(options, "end")
             .ok_or_else(|| "curfew add requires an end time".to_owned())?;
         let timezone = string_option(options, "timezone").map(str::to_owned);
+        let days = string_option(options, "days").map(str::to_owned);
 
         let (start_hour, start_minute) = match cama_domain::curfew::parse_clock(start) {
             Ok(parsed) => parsed,
@@ -2011,6 +2017,7 @@ impl PlayerRegistrationHandler {
                 end_hour,
                 end_minute,
                 timezone.as_deref(),
+                days.as_deref(),
             )
         })
         .await
