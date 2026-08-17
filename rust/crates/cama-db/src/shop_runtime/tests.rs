@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 9_001;
 const PROTECTION_OTHER_GUILD: i64 = 9_002;
@@ -14,13 +15,28 @@ const BUYER: i64 = 101;
 const VICTIM: i64 = 202;
 const NOW: i64 = 2_000_000_000;
 
+enum FixtureDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl FixtureDatabase {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
+
 struct Fixture {
-    database: NamedTempFile,
+    database: FixtureDatabase,
     repository: ShopRuntimeRepository,
 }
 
-impl Fixture {
-    fn new() -> Self {
+fn fixture_database(durable: bool) -> FixtureDatabase {
+    static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+    let template = TEMPLATE.get_or_init(|| {
         let database = NamedTempFile::new().expect("temporary Shop database");
         let connection = Connection::open(database.path()).expect("open Shop fixture");
         connection
@@ -102,6 +118,27 @@ impl Fixture {
             )
             .expect("create Python-shaped Shop schema");
         drop(connection);
+        database
+    });
+    if durable {
+        let database = NamedTempFile::new().expect("durable Shop database");
+        std::fs::copy(template.path(), database.path()).expect("copy Shop fixture template");
+        FixtureDatabase::Durable(database)
+    } else {
+        FixtureDatabase::Fast(FastTestDatabase::from_template(template.path()))
+    }
+}
+
+impl Fixture {
+    fn new() -> Self {
+        Self::from_database(fixture_database(false))
+    }
+
+    fn durable() -> Self {
+        Self::from_database(fixture_database(true))
+    }
+
+    fn from_database(database: FixtureDatabase) -> Self {
         Self {
             repository: ShopRuntimeRepository::new(database.path()),
             database,
@@ -605,7 +642,7 @@ fn double_or_nothing_log_failure_rolls_back_and_retry_commits_once() {
 
 #[test]
 fn concurrent_paid_ping_and_double_or_nothing_each_settle_once() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::durable();
     fixture.player(BUYER, 200);
     let repository = Arc::new(fixture.repository.clone());
     let barrier = Arc::new(Barrier::new(2));
@@ -681,7 +718,7 @@ fn concurrent_paid_ping_and_double_or_nothing_each_settle_once() {
 
 #[test]
 fn concurrent_conditional_spends_never_overdraw_or_leak_ledger_context() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::durable();
     fixture.player(BUYER, 10);
     let repository = Arc::new(fixture.repository.clone());
     let barrier = Arc::new(Barrier::new(2));

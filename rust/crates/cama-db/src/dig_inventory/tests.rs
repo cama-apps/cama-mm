@@ -1,5 +1,6 @@
 use rusqlite::{Connection, params};
-use std::sync::{Arc, Barrier};
+use std::path::Path;
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 use tempfile::NamedTempFile;
 
@@ -7,19 +8,35 @@ use super::{
     AutoBuyRequest, AutoBuySelection, AutoBuyStatus, BuyInsuranceOutcome, BuyItemOutcome,
     BuyItemRequest, DigInventoryRepository, QueueItemOutcome, SetTrapOutcome,
 };
+use crate::test_support::FastTestDatabase;
 
 const USER: i64 = 10_001;
 const GUILD: i64 = 12_345;
 const NOW: i64 = 1_000_000;
 const INVENTORY_LIMIT: usize = 5;
 
+enum FixtureDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl FixtureDatabase {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
+
 struct Fixture {
-    _file: NamedTempFile,
+    database: FixtureDatabase,
     repository: DigInventoryRepository,
 }
 
-impl Fixture {
-    fn new() -> Self {
+fn fixture_database(durable: bool) -> FixtureDatabase {
+    static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+    let template = TEMPLATE.get_or_init(|| {
         let file = NamedTempFile::new().expect("create temporary SQLite file");
         let connection = Connection::open(file.path()).expect("open temporary SQLite database");
         connection
@@ -124,15 +141,36 @@ impl Fixture {
             )
             .expect("create test-only existing schema");
         drop(connection);
-        let repository = DigInventoryRepository::new(file.path());
+        file
+    });
+    if durable {
+        let file = NamedTempFile::new().expect("durable inventory database");
+        std::fs::copy(template.path(), file.path()).expect("copy inventory fixture template");
+        FixtureDatabase::Durable(file)
+    } else {
+        FixtureDatabase::Fast(FastTestDatabase::from_template(template.path()))
+    }
+}
+
+impl Fixture {
+    fn new() -> Self {
+        Self::from_database(fixture_database(false))
+    }
+
+    fn durable() -> Self {
+        Self::from_database(fixture_database(true))
+    }
+
+    fn from_database(database: FixtureDatabase) -> Self {
+        let repository = DigInventoryRepository::new(database.path());
         Self {
-            _file: file,
+            database,
             repository,
         }
     }
 
     fn connection(&self) -> Connection {
-        Connection::open(self._file.path()).expect("open fixture database")
+        Connection::open(self.database.path()).expect("open fixture database")
     }
 
     fn register(&self, balance: i64) {
@@ -1188,7 +1226,7 @@ fn test_auto_buy_queues_owned_reserve_without_charging_or_purchase_id() {
 
 #[test]
 fn test_concurrent_buys_cannot_overdraft_or_exceed_capacity() {
-    let overdraft_fixture = Fixture::new();
+    let overdraft_fixture = Fixture::durable();
     overdraft_fixture.register(8);
     overdraft_fixture.create_tunnel(0);
     let repository = Arc::new(overdraft_fixture.repository.clone());
@@ -1230,7 +1268,7 @@ fn test_concurrent_buys_cannot_overdraft_or_exceed_capacity() {
     assert_eq!(repository.balance(USER, Some(GUILD)).unwrap(), 0);
     assert_eq!(repository.inventory(USER, Some(GUILD)).unwrap().len(), 1);
 
-    let capacity_fixture = Fixture::new();
+    let capacity_fixture = Fixture::durable();
     capacity_fixture.register(100);
     capacity_fixture.create_tunnel(0);
     for _ in 0..(INVENTORY_LIMIT - 1) {

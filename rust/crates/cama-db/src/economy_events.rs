@@ -1369,20 +1369,36 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use rusqlite::Connection;
     use tempfile::{NamedTempFile, tempdir};
 
     use super::*;
+    use crate::test_support::FastTestDatabase;
 
     const GUILD: i64 = 987_654_321;
 
-    fn fixture() -> NamedTempFile {
+    fn fixture_template() -> &'static NamedTempFile {
+        static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+        TEMPLATE.get_or_init(|| {
+            let file = NamedTempFile::new().unwrap();
+            Connection::open(file.path())
+                .unwrap()
+                .execute_batch(EXACT_SCHEMA)
+                .unwrap();
+            file
+        })
+    }
+
+    fn fixture() -> FastTestDatabase {
+        FastTestDatabase::from_template(fixture_template().path())
+    }
+
+    fn durable_fixture() -> NamedTempFile {
         let file = NamedTempFile::new().unwrap();
-        let connection = Connection::open(file.path()).unwrap();
-        connection.execute_batch(EXACT_SCHEMA).unwrap();
+        std::fs::copy(fixture_template().path(), file.path()).unwrap();
         file
     }
 
@@ -1850,7 +1866,7 @@ mod tests {
 
     #[test]
     fn concurrent_activation_has_one_winner_and_one_set_of_direct_legs() {
-        let file = fixture();
+        let file = durable_fixture();
         seed_economy(file.path());
         let path = file.path().to_path_buf();
         let barrier = Arc::new(Barrier::new(2));

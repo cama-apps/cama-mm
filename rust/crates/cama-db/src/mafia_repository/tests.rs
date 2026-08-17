@@ -1,25 +1,35 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 42_424;
 const OTHER_GUILD: i64 = 42_425;
 
+fn fixture_template() -> &'static NamedTempFile {
+    static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("temporary Mafia template");
+        Connection::open(database.path())
+            .expect("open fixture template")
+            .execute_batch(FIXTURE_SCHEMA)
+            .expect("create disposable Python-compatible schema");
+        database
+    })
+}
+
 struct Fixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
     repository: MafiaRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary Mafia database");
-        Connection::open(database.path())
-            .expect("open fixture")
-            .execute_batch(FIXTURE_SCHEMA)
-            .expect("create disposable Python-compatible schema");
+        let database = FastTestDatabase::from_template(fixture_template().path());
         let repository = MafiaRepository::new(database.path());
         Self {
             database,
