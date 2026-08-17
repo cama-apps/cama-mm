@@ -22,8 +22,8 @@ use cama_app::mana_service::Land;
 use cama_app::manashop_rework::BuffService;
 use cama_app::neon_degen::{NeonDegenService, NeonResult};
 use cama_app::shop_commands::{
-    ManaItemSpec, ManaTier, PairingRecord, SOFT_AVOID_MIN_COST, calculate_soft_avoid_cost,
-    mana_item,
+    ManaItemSpec, ManaTier, PairingRecord, calculate_soft_avoid_cost, mana_item,
+    soft_avoid_choice_name,
 };
 use cama_db::gambling_stats_repository::{
     GamblingStatsPort, GamblingStatsRepository, GamblingStatsService,
@@ -589,7 +589,6 @@ impl ShopInteractionHandler {
             .config
             .package_deal_games
             .clamp(1, PACKAGE_DEAL_MAX_GAMES);
-        let default_avoid = self.config.soft_avoid_cost.max(SOFT_AVOID_MIN_COST);
         let mut choices = vec![
             ShopChoice::new(
                 format!("Announce Balance ({} jopacoin)", self.config.announce_cost),
@@ -618,9 +617,7 @@ impl ShopInteractionHandler {
                 "double_or_nothing",
             ),
             ShopChoice::new(
-                format!(
-                    "Soft Avoid (dynamic, minimum {SOFT_AVOID_MIN_COST}, default {default_avoid} jopacoin for {SOFT_AVOID_GAMES} games)"
-                ),
+                soft_avoid_choice_name(self.config.soft_avoid_cost),
                 "soft_avoid",
             ),
             ShopChoice::new(

@@ -174,7 +174,7 @@ fn test_shop_rejects_retired_protect_hero_value() {
 }
 
 #[test]
-fn test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum() {
+fn test_shop_pricing_autocomplete_explains_soft_avoid_fallback_and_range() {
     let choices = item_autocomplete("", 10, false);
     let package = choices
         .iter()
@@ -186,8 +186,10 @@ fn test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum() {
         .unwrap();
     assert!(!package.name.contains("FREE"));
     assert!(package.name.contains("0 active"));
-    assert!(avoid.name.contains("dynamic"));
-    assert!(avoid.name.contains("minimum 250"));
+    assert_eq!(
+        avoid.name,
+        "Soft Avoid (500 before 3 shared games; 250-1000 by win rate; lasts 10 games)"
+    );
 }
 
 #[test]
@@ -603,13 +605,13 @@ fn test_handle_soft_avoid_uses_default_price_before_three_games() {
         None,
         Ok(10),
     );
-    assert_eq!(outcome.cost, SHOP_SOFT_AVOID_COST);
+    assert_eq!(outcome.cost, 500);
 }
 
 #[test]
 fn test_handle_soft_avoid_uses_default_price_with_no_pairing_data() {
     let outcome = soft_avoid_command_outcome("Target", None, None, Ok(10));
-    assert_eq!(outcome.cost, SHOP_SOFT_AVOID_COST);
+    assert_eq!(outcome.cost, 500);
     assert!(outcome.charged_atomically);
 }
 
