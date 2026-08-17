@@ -692,12 +692,37 @@ fn test_parse_match_time_sqlite_utc_correct() {
 #[derive(Clone, Default)]
 struct RecordingWriter {
     writes: Arc<Mutex<Vec<EnrichmentWrite>>>,
+    farm_stats: Arc<Mutex<Vec<PositionFarmRow>>>,
+    stored_estimates: Arc<Mutex<Vec<(i64, String)>>>,
 }
 
 impl EnrichmentWritePort for RecordingWriter {
     fn apply_enrichment_atomic(&self, write: EnrichmentWrite) -> Result<(), DiscoveryPortError> {
         self.writes.lock().expect("writes lock").push(write);
         Ok(())
+    }
+
+    fn get_participant_farm_stats(
+        &self,
+        _match_id: InternalMatchId,
+        _guild_id: GuildId,
+    ) -> Result<Vec<PositionFarmRow>, DiscoveryPortError> {
+        Ok(self.farm_stats.lock().expect("farm stats lock").clone())
+    }
+
+    fn store_estimated_positions(
+        &self,
+        _match_id: InternalMatchId,
+        _guild_id: GuildId,
+        estimates: &[(i64, &str)],
+    ) -> Result<usize, DiscoveryPortError> {
+        let mut stored = self.stored_estimates.lock().expect("stored estimates lock");
+        stored.extend(
+            estimates
+                .iter()
+                .map(|(discord_id, position)| (*discord_id, (*position).to_owned())),
+        );
+        Ok(estimates.len())
     }
 }
 
@@ -1139,6 +1164,111 @@ fn test_enrich_match_success() {
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].participant_updates[0].stats.hero_id, 1);
     assert_eq!(writes[0].participant_updates[0].stats.kills, 10);
+}
+
+#[test]
+fn test_enrich_match_estimates_and_stores_positions_on_success() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(
+        ValveMatchId(8_181_518_332),
+        vec![Ok(Some(enrichment_details(vec![enrichment_player(
+            12_345,
+        )])))],
+    );
+    let farm_member =
+        |discord_id: i64, lane_role: i64, last_hits: i64, wards: i64| PositionFarmRow {
+            team_number: if discord_id <= 5 { 1 } else { 2 },
+            stats: ParticipantFarmStats {
+                discord_id,
+                lane_role: Some(lane_role),
+                last_hits: Some(last_hits),
+                net_worth: None,
+                gpm: None,
+                obs_placed: Some(wards),
+                sen_placed: Some(0),
+            },
+        };
+    *writer.farm_stats.lock().expect("farm stats lock") = vec![
+        farm_member(1, 1, 220, 0),
+        farm_member(2, 2, 180, 0),
+        farm_member(3, 3, 140, 1),
+        farm_member(4, 3, 20, 2),
+        farm_member(5, 1, 25, 0),
+        farm_member(6, 1, 220, 0),
+        farm_member(7, 2, 180, 0),
+        farm_member(8, 3, 140, 1),
+        farm_member(9, 3, 20, 2),
+        farm_member(10, 1, 25, 0),
+    ];
+    let service =
+        MatchEnrichmentService::new(matches, players, api, writer.clone(), None::<FakeOpenSkill>);
+
+    let result = service.enrich_match(service_request());
+
+    assert!(result.success);
+    assert_eq!(result.positions_estimated, 10);
+    let stored = writer
+        .stored_estimates
+        .lock()
+        .expect("stored estimates lock");
+    assert_eq!(stored.len(), 10);
+    assert!(stored.contains(&(1, "1".to_owned())));
+    assert!(stored.contains(&(2, "2".to_owned())));
+    assert!(stored.contains(&(6, "1".to_owned())));
+    assert!(stored.contains(&(7, "2".to_owned())));
+}
+
+#[test]
+fn test_enrich_match_position_estimate_failure_does_not_fail_enrichment() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(
+        ValveMatchId(8_181_518_332),
+        vec![Ok(Some(enrichment_details(vec![enrichment_player(
+            12_345,
+        )])))],
+    );
+    // Only three rows for team 1 — not a valid five-player team, so the
+    // heuristic can't resolve it. Enrichment must still succeed.
+    *writer.farm_stats.lock().expect("farm stats lock") = vec![
+        PositionFarmRow {
+            team_number: 1,
+            stats: ParticipantFarmStats {
+                discord_id: 1,
+                lane_role: Some(1),
+                last_hits: Some(220),
+                net_worth: None,
+                gpm: None,
+                obs_placed: Some(0),
+                sen_placed: Some(0),
+            },
+        },
+        PositionFarmRow {
+            team_number: 1,
+            stats: ParticipantFarmStats {
+                discord_id: 2,
+                lane_role: Some(2),
+                last_hits: Some(180),
+                net_worth: None,
+                gpm: None,
+                obs_placed: Some(0),
+                sen_placed: Some(0),
+            },
+        },
+    ];
+    let service =
+        MatchEnrichmentService::new(matches, players, api, writer.clone(), None::<FakeOpenSkill>);
+
+    let result = service.enrich_match(service_request());
+
+    assert!(result.success);
+    assert_eq!(result.positions_estimated, 0);
+    assert!(
+        writer
+            .stored_estimates
+            .lock()
+            .expect("stored estimates lock")
+            .is_empty()
+    );
 }
 
 #[test]

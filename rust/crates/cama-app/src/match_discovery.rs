@@ -14,10 +14,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cama_db::core_repositories::MatchRepository as CoreMatchRepository;
 use cama_db::match_recording_repository::{
     EnrichmentParticipantUpdate as DbEnrichmentParticipantUpdate,
-    MatchEnrichmentRequest as DbMatchEnrichmentRequest, MatchRecordingRepository,
+    MatchEnrichmentRequest as DbMatchEnrichmentRequest,
+    MatchParticipantFarmRow as DbMatchParticipantFarmRow, MatchRecordingRepository,
     WrappedEnrichmentFactUpdate as DbWrappedEnrichmentFactUpdate,
 };
 use cama_db::opendota_player::OpenDotaPlayerRepository;
+use cama_domain::position_estimate::{ParticipantFarmStats, estimate_team_positions};
 use chrono::{DateTime, NaiveDateTime};
 use rusqlite::types::Value as SqlValue;
 
@@ -1236,6 +1238,51 @@ pub struct EnrichmentWrite {
 
 pub trait EnrichmentWritePort: Send + Sync {
     fn apply_enrichment_atomic(&self, write: EnrichmentWrite) -> Result<(), DiscoveryPortError>;
+
+    /// Farm/lane stats for every participant of a match, grouped by team,
+    /// for estimating which position each one actually played. Values are
+    /// unset until `apply_enrichment_atomic` has populated them.
+    fn get_participant_farm_stats(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+    ) -> Result<Vec<PositionFarmRow>, DiscoveryPortError>;
+
+    /// Persist `(discord_id, position)` estimates produced by
+    /// [`estimate_match_positions`].
+    fn store_estimated_positions(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+        estimates: &[(i64, &str)],
+    ) -> Result<usize, DiscoveryPortError>;
+}
+
+/// One participant's team assignment and farm stats, as read through
+/// [`EnrichmentWritePort::get_participant_farm_stats`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionFarmRow {
+    pub team_number: i64,
+    pub stats: ParticipantFarmStats,
+}
+
+/// Estimate each participant's actually-played position from a match's farm
+/// rows, grouped by `team_number`. Best-effort: a team that isn't exactly
+/// five players, or that [`estimate_team_positions`] can't confidently
+/// resolve (ambiguous mid lane, missing enrichment data), is silently
+/// omitted rather than failing the whole match — this is supplementary
+/// derived data, not a condition for enrichment to succeed.
+#[must_use]
+pub fn estimate_match_positions(rows: &[PositionFarmRow]) -> Vec<(i64, &'static str)> {
+    let mut by_team: BTreeMap<i64, Vec<ParticipantFarmStats>> = BTreeMap::new();
+    for row in rows {
+        by_team.entry(row.team_number).or_default().push(row.stats);
+    }
+    by_team
+        .into_values()
+        .filter_map(|team| estimate_team_positions(&team).ok())
+        .flatten()
+        .collect()
 }
 
 impl EnrichmentWritePort for MatchRecordingRepository {
@@ -1305,11 +1352,60 @@ impl EnrichmentWritePort for MatchRecordingRepository {
         .map(|_| ())
         .map_err(|error| DiscoveryPortError::new(error.to_string()))
     }
+
+    fn get_participant_farm_stats(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+    ) -> Result<Vec<PositionFarmRow>, DiscoveryPortError> {
+        MatchRecordingRepository::get_participant_farm_stats(self, match_id.0, Some(guild_id.0))
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row: DbMatchParticipantFarmRow| PositionFarmRow {
+                        team_number: row.team_number,
+                        stats: row.stats,
+                    })
+                    .collect()
+            })
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
+
+    fn store_estimated_positions(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+        estimates: &[(i64, &str)],
+    ) -> Result<usize, DiscoveryPortError> {
+        MatchRecordingRepository::store_estimated_positions(
+            self,
+            match_id.0,
+            Some(guild_id.0),
+            estimates,
+        )
+        .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
 }
 
 impl<T: EnrichmentWritePort + ?Sized> EnrichmentWritePort for &T {
     fn apply_enrichment_atomic(&self, write: EnrichmentWrite) -> Result<(), DiscoveryPortError> {
         (**self).apply_enrichment_atomic(write)
+    }
+
+    fn get_participant_farm_stats(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+    ) -> Result<Vec<PositionFarmRow>, DiscoveryPortError> {
+        (**self).get_participant_farm_stats(match_id, guild_id)
+    }
+
+    fn store_estimated_positions(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+        estimates: &[(i64, &str)],
+    ) -> Result<usize, DiscoveryPortError> {
+        (**self).store_estimated_positions(match_id, guild_id, estimates)
     }
 }
 
@@ -1583,6 +1679,10 @@ pub struct MatchEnrichmentServiceResult {
     pub dire_fantasy: f64,
     pub fantasy_points_calculated: bool,
     pub openskill_update: Option<OpenSkillEnrichmentResult>,
+    /// Participants for whom [`estimate_match_positions`] confidently
+    /// resolved and stored a position; always 0 when `success` is false or
+    /// a team's data didn't support an estimate.
+    pub positions_estimated: usize,
 }
 
 impl MatchEnrichmentServiceResult {
@@ -1601,6 +1701,7 @@ impl MatchEnrichmentServiceResult {
             dire_fantasy: 0.0,
             fantasy_points_calculated: false,
             openskill_update: None,
+            positions_estimated: 0,
         }
     }
 }
@@ -1804,6 +1905,7 @@ where
             dire_fantasy: result.dire_fantasy,
             fantasy_points_calculated: result.success,
             openskill_update: None,
+            positions_estimated: 0,
         };
         if service_result.success
             && let Some(openskill) = &self.openskill
@@ -1817,6 +1919,26 @@ where
                         error: Some(error.to_string()),
                     }),
             );
+        }
+        if service_result.success {
+            // Best-effort: an unreadable or ambiguous team simply yields no
+            // estimate for that team rather than failing enrichment, which
+            // already succeeded and is the part that matters.
+            let estimates = self
+                .writer
+                .get_participant_farm_stats(request.internal_match_id, normalized_guild)
+                .map(|rows| estimate_match_positions(&rows))
+                .unwrap_or_default();
+            if !estimates.is_empty() {
+                service_result.positions_estimated = self
+                    .writer
+                    .store_estimated_positions(
+                        request.internal_match_id,
+                        normalized_guild,
+                        &estimates,
+                    )
+                    .unwrap_or(0);
+            }
         }
         if !service_result.success && service_result.error.is_none() {
             service_result.error =
