@@ -1223,6 +1223,18 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         self.state.sync_ready_lobby(scope);
         self.state.sync_lobby_display(scope).await
     }
+
+    async fn remove_curfew_lobby_reaction(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+        discord_id: i64,
+    ) -> Result<(), String> {
+        let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
+        self.state
+            .remove_lobby_reaction(scope, AppUserId(discord_id))
+            .await
+    }
 }
 
 impl LobbyRegistrationProvider {
