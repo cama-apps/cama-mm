@@ -111,8 +111,8 @@ use tracing::{debug, warn};
 
 use crate::admin_provider::{
     AdminExtendBettingRequest, AdminExtendBettingResult, AdminMatchControl,
-    AdminSeedHeroGridRequest, AdminSeedHeroGridResult, CorrectionWinRewardControl,
-    CorrectionWinRewardRequest, CorrectionWinRewardResult,
+    AdminRoleBackfillResult, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
+    CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
 };
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
@@ -5293,6 +5293,41 @@ impl AdminMatchControl for MatchHandler {
         tokio::task::spawn_blocking(move || worker.seed_hero_grid_blocking(request.guild_id))
             .await
             .map_err(|error| format!("hero-grid seed task failed: {error}"))?
+    }
+
+    async fn backfill_derived_roles(
+        &self,
+        guild_id: i64,
+    ) -> Result<AdminRoleBackfillResult, String> {
+        let database_path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let matches = MatchRepository::new(&database_path);
+            let report = matches
+                .backfill_derived_roles(Some(guild_id))
+                .map_err(|error| error.to_string())?;
+            // Read coverage back from the database rather than reporting only
+            // the run's own counters, so a no-op run is distinguishable from a
+            // run whose writes did not land.
+            let coverage = matches
+                .role_coverage(Some(guild_id))
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(AdminRoleBackfillResult {
+                matches_scanned: report.matches_scanned,
+                teams_derived: report.teams_derived,
+                gold_samples_written: report.gold_samples_written,
+                unreadable_payloads: report.unreadable_payloads,
+                unparsed_replays: report.unparsed_replays,
+                ambiguous_lanes: report.ambiguous_lanes,
+                incomplete_teams: report.incomplete_teams,
+                tied_farm_priority: report.tied_farm_priority,
+                participants: coverage.participants,
+                with_derived_role: coverage.with_derived_role,
+                with_gold_at_10: coverage.with_gold_at_10,
+                player_roles_above_minimum_sample: coverage.player_roles_above_minimum_sample,
+            })
+        })
+        .await
+        .map_err(|error| format!("role backfill task failed: {error}"))?
     }
 }
 
