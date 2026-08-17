@@ -663,20 +663,25 @@ mod tests {
     }
 
     fn create_ledger(path: &Path) {
-        let connection = Connection::open(path).expect("health fixture database");
-        connection
+        let mut connection = Connection::open(path).expect("health fixture database");
+        let transaction = connection
+            .transaction()
+            .expect("health fixture transaction");
+        transaction
             .execute_batch(
                 "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT);",
             )
             .expect("migration ledger");
+        let mut insert = transaction
+            .prepare("INSERT INTO schema_migrations (name, applied_at) VALUES (?1, 'now')")
+            .expect("prepare migration ledger fixture");
         for migration in cama_db::expected_migrations() {
-            connection
-                .execute(
-                    "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, 'now')",
-                    [migration],
-                )
-                .expect("migration row");
+            insert.execute([migration]).expect("migration row");
         }
+        drop(insert);
+        transaction
+            .commit()
+            .expect("commit migration ledger fixture");
     }
 
     #[test]

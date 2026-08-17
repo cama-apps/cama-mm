@@ -5,12 +5,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
+use cama_app::dedicated_lobby_channel::{GuildId, LobbyScope, UserId};
 use cama_app::draft::{
     DRAFT_POOL_SIZE, DRAFT_TOTAL_PICKS, DraftPhase, DraftStatePersistencePort,
     SqliteDraftStatePersistence,
 };
 use cama_db::autobet_investments::AutobetInvestmentRepository;
-use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+use cama_db::core_repositories::PlayerRepository;
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
@@ -684,14 +685,10 @@ async fn populated_lobby_fixture() -> (
         )
         .await
         .expect("create lobby");
+    let service = lobby.live_lobby_service();
+    let scope = LobbyScope::new(GuildId(42), AppLobbyKind::Open);
     for user_id in 2..=10 {
-        handler
-            .handle(
-                lobby_request(user_id, "join"),
-                Arc::new(TestResponder::default()),
-            )
-            .await
-            .expect("join lobby");
+        assert!(service.join_lobby(UserId(user_id), scope).success);
     }
     let port = lobby.match_lobby_port();
     assert_eq!(
@@ -3135,18 +3132,37 @@ fn hydration_skips_unfenced_complete_state_for_recovery() {
 }
 
 fn seed_players(path: &std::path::Path, guild_id: i64, ids: &[i64], balance: i64) {
-    let repository = PlayerRepository::new(path);
+    let mut connection = Connection::open(path).expect("open draft player fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match runtime foreign-key policy");
+    let transaction = connection
+        .transaction()
+        .expect("begin draft player fixture transaction");
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO players (
+                 discord_id, guild_id, discord_username, preferred_roles,
+                 glicko_rating, glicko_rd, glicko_volatility,
+                 exclusion_count, jopacoin_balance
+             ) VALUES (?1, ?2, ?3, '[\"1\"]', ?4, 100.0, 0.06, 5, ?5)",
+        )
+        .expect("prepare draft player fixture insert");
     for id in ids {
-        let mut player = NewPlayer::new(*id, format!("P{id}"), Some(guild_id));
-        player.preferred_roles = Some(vec!["1".to_owned()]);
-        player.glicko_rating = Some(1500.0 + *id as f64);
-        player.glicko_rd = Some(100.0);
-        player.glicko_volatility = Some(0.06);
-        repository.add(&player).expect("seed player");
-        repository
-            .update_balance(*id, Some(guild_id), balance)
-            .expect("seed player balance");
+        insert
+            .execute(rusqlite::params![
+                id,
+                guild_id,
+                format!("P{id}"),
+                1500.0 + *id as f64,
+                balance,
+            ])
+            .expect("seed draft player");
     }
+    drop(insert);
+    transaction
+        .commit()
+        .expect("commit draft player fixture transaction");
 }
 
 #[test]

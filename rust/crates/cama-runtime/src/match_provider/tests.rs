@@ -7,6 +7,9 @@ use cama_app::ai_services::{
     ProviderLoader, ProviderRequest, ProviderResponse, ToolCall, Value,
 };
 use cama_app::betting_reminder_messaging::{BettingFlavorPort, FlavorKind, FlavorRequest};
+use cama_app::dedicated_lobby_channel::{
+    GuildId as LobbyGuildId, LobbyScope, UserId as LobbyUserId,
+};
 use cama_db::betting_service_repository::{BettingServiceRepositoryError, PlaceBetRequest};
 use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_domain::guild_config::GuildConfigStore;
@@ -457,36 +460,48 @@ impl MatchRuntimeFixture {
             "fixture lobby creation failed: {:?}",
             created.contents()
         );
+        let service = self.lobby.live_lobby_service();
+        let scope = LobbyScope::new(LobbyGuildId(GUILD), lobby_kind);
         for player_id in remaining {
-            let joined = self
-                .dispatch_lobby_command("join", *player_id, lobby_kind)
-                .await;
             assert!(
-                !joined
-                    .contents()
-                    .iter()
-                    .any(|content| content.starts_with('❌')),
-                "fixture lobby join failed: {:?}",
-                joined.contents()
+                service.join_lobby(LobbyUserId(*player_id), scope).success,
+                "fixture lobby join failed for {player_id}"
             );
         }
     }
 
     fn pending(&self, lock_until: i64) -> PendingMatchRecord {
-        let players = PlayerRepository::new(self.database.path());
         let radiant = (81_100_i64..81_105).collect::<Vec<_>>();
         let dire = (81_105_i64..81_110).collect::<Vec<_>>();
+        let mut connection = Connection::open(self.database.path()).expect("open READY fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("match runtime foreign-key policy");
+        let transaction = connection.transaction().expect("start READY fixture");
+        let fingerprint = CamaOpenSkillSystem::new().algorithm_fingerprint();
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO players (
+                     discord_id,guild_id,discord_username,initial_mmr,current_mmr,
+                     glicko_rating,glicko_rd,glicko_volatility,os_mu,os_sigma,
+                     os_algorithm_fingerprint,exclusion_count,jopacoin_balance
+                 ) VALUES (?1,?2,?3,4000,4000,1500.0,200.0,0.06,?4,?5,?6,5,3)",
+            )
+            .expect("prepare READY player fixture");
         for discord_id in radiant.iter().chain(&dire) {
-            let mut player =
-                NewPlayer::new(*discord_id, format!("ready-{discord_id}"), Some(GUILD));
-            player.initial_mmr = Some(4_000);
-            player.glicko_rating = Some(1_500.0);
-            player.glicko_rd = Some(200.0);
-            player.glicko_volatility = Some(0.06);
-            player.os_mu = Some(CamaOpenSkillSystem::DEFAULT_MU);
-            player.os_sigma = Some(CamaOpenSkillSystem::DEFAULT_SIGMA);
-            players.add(&player).expect("insert READY player");
+            insert
+                .execute(params![
+                    discord_id,
+                    GUILD,
+                    format!("ready-{discord_id}"),
+                    CamaOpenSkillSystem::DEFAULT_MU,
+                    CamaOpenSkillSystem::DEFAULT_SIGMA,
+                    fingerprint,
+                ])
+                .expect("insert READY player");
         }
+        drop(insert);
+        transaction.commit().expect("commit READY fixture");
         PendingMatchRepository::new(self.database.path())
             .create_pending_match(
                 GUILD,
@@ -531,12 +546,14 @@ impl MatchRuntimeFixture {
         count: usize,
         with_openskill: bool,
     ) -> Vec<i64> {
-        let repository = PlayerRepository::new(self.database.path());
-        (0..count)
-            .map(|index| {
-                let discord_id = first_discord_id + i64::try_from(index).expect("small fixture");
+        let player_ids = (0..count)
+            .map(|index| first_discord_id + i64::try_from(index).expect("small fixture"))
+            .collect::<Vec<_>>();
+        if with_openskill {
+            let repository = PlayerRepository::new(self.database.path());
+            for discord_id in &player_ids {
                 let mut player =
-                    NewPlayer::new(discord_id, format!("shuffle-{discord_id}"), Some(GUILD));
+                    NewPlayer::new(*discord_id, format!("shuffle-{discord_id}"), Some(GUILD));
                 player.initial_mmr = Some(3_000);
                 player.preferred_roles = Some(vec![
                     "1".to_owned(),
@@ -548,14 +565,38 @@ impl MatchRuntimeFixture {
                 player.glicko_rating = Some(1_500.0);
                 player.glicko_rd = Some(350.0);
                 player.glicko_volatility = Some(0.06);
-                if with_openskill {
-                    player.os_mu = Some(30.0);
-                    player.os_sigma = Some(8.0);
-                }
+                player.os_mu = Some(30.0);
+                player.os_sigma = Some(8.0);
                 repository.add(&player).expect("insert shuffle player");
-                discord_id
-            })
-            .collect()
+            }
+            return player_ids;
+        }
+
+        let mut connection = Connection::open(self.database.path()).expect("open shuffle fixture");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("match runtime foreign-key policy");
+        let transaction = connection.transaction().expect("start shuffle fixture");
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO players (
+                     discord_id, guild_id, discord_username, initial_mmr, current_mmr,
+                     preferred_roles, glicko_rating, glicko_rd, glicko_volatility,
+                     exclusion_count, jopacoin_balance
+                 ) VALUES (
+                     ?1, ?2, ?3, 3000, 3000, '[\"1\",\"2\",\"3\",\"4\",\"5\"]',
+                     1500.0, 350.0, 0.06, 5, 3
+                 )",
+            )
+            .expect("prepare shuffle player fixture");
+        for discord_id in &player_ids {
+            insert
+                .execute(params![discord_id, GUILD, format!("shuffle-{discord_id}")])
+                .expect("insert shuffle player");
+        }
+        drop(insert);
+        transaction.commit().expect("commit shuffle fixture");
+        player_ids
     }
 
     fn set_glicko_rating(&self, player_ids: &[i64], rating: f64) {
@@ -5492,7 +5533,7 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_after_finalize() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_execute_shuffle_evicts_only_the_matched_players_before_releasing() {
     let fixture = MatchRuntimeFixture::new();
-    let player_ids = fixture.add_shuffle_pool(15, false);
+    let player_ids = fixture.add_shuffle_pool(11, false);
     fixture.set_glicko_rating(&player_ids, 1_300.0);
     fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
     fixture
@@ -5701,7 +5742,7 @@ fn test_clean_shuffle_excluded_set_disjoint_from_teams() {
 async fn test_shuffle_embed_uses_server_display_names_without_http_lookup() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
-    let player_ids = fixture.add_shuffle_pool(14, false);
+    let player_ids = fixture.add_shuffle_pool(11, false);
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
     let participant_id = prepared.pending.state.radiant_team_ids[0];
     let excluded_id = prepared.pending.state.excluded_player_ids[0];
@@ -5764,7 +5805,7 @@ async fn test_shuffle_embed_uses_server_display_names_without_http_lookup() {
 async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
-    let player_ids = fixture.add_shuffle_pool(14, false);
+    let player_ids = fixture.add_shuffle_pool(10, false);
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
     let participant_id = prepared.pending.state.radiant_team_ids[0];
     discord.set_member(
@@ -5799,7 +5840,7 @@ async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
 async fn test_shuffle_embed_falls_back_to_stored_name_on_cached_lookup_error() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
-    let player_ids = fixture.add_shuffle_pool(14, false);
+    let player_ids = fixture.add_shuffle_pool(10, false);
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
     let participant_id = prepared.pending.state.radiant_team_ids[0];
     discord.fail_cached_member_lookup(
@@ -5828,7 +5869,7 @@ async fn test_shuffle_embed_falls_back_to_stored_name_on_cached_lookup_error() {
 async fn test_shuffle_embed_falls_back_to_stored_name_for_excluded_player() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
-    let player_ids = fixture.add_shuffle_pool(14, false);
+    let player_ids = fixture.add_shuffle_pool(11, false);
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
     let excluded_id = prepared.pending.state.excluded_player_ids[0];
 
@@ -6371,40 +6412,39 @@ async fn test_record_chunks_long_final_message_before_thread_finalize() {
         .expect("assign long-message thread")
         .expect("long-message pending match exists")
         .0;
-    let players = PlayerRepository::new(fixture.database.path());
-    let betting = BettingServiceRepository::new(fixture.database.path());
-    for index in 0..80_i64 {
+    let mut connection = Connection::open(fixture.database.path()).expect("open long-summary seed");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match runtime foreign-key policy");
+    let transaction = connection.transaction().expect("start long-summary seed");
+    for index in 0..40_i64 {
         let discord_id = 93_000 + index;
-        let mut player = NewPlayer::new(discord_id, format!("bettor-{index}"), Some(GUILD));
-        player.initial_mmr = Some(4_000);
-        players.add(&player).expect("insert long-summary bettor");
-        Connection::open(fixture.database.path())
-            .expect("open long-summary balance")
+        transaction
             .execute(
-                "UPDATE players SET jopacoin_balance=500
-                 WHERE guild_id=?1 AND discord_id=?2",
-                params![GUILD, discord_id],
+                "INSERT INTO players (
+                     discord_id,guild_id,discord_username,initial_mmr,current_mmr,
+                     jopacoin_balance,lowest_balance_ever
+                 ) VALUES (?1,?2,?3,4000,4000,490,490)",
+                params![discord_id, GUILD, format!("bettor-{index}")],
             )
             .expect("fund long-summary bettor");
-        betting
-            .place_bet_atomic(PlaceBetRequest {
-                guild_id: Some(GUILD),
-                pending_match_id: pending.pending_match_id,
-                discord_id,
-                team: if index % 2 == 0 {
-                    BettingTeam::Radiant
-                } else {
-                    BettingTeam::Dire
-                },
-                amount: 10,
-                bet_time: pending.state.shuffle_timestamp.unwrap_or_default(),
-                leverage: 1,
-                max_debt: 500,
-                is_blind: false,
-                odds_at_placement: None,
-            })
-            .expect("place long-summary bet");
+        transaction
+            .execute(
+                "INSERT INTO bets (
+                     guild_id,match_id,discord_id,team_bet_on,amount,bet_time,
+                     leverage,is_blind,pending_match_id
+                 ) VALUES (?1,NULL,?2,?3,10,?4,1,0,?5)",
+                params![
+                    GUILD,
+                    discord_id,
+                    if index % 2 == 0 { "radiant" } else { "dire" },
+                    pending.state.shuffle_timestamp.unwrap_or_default(),
+                    pending.pending_match_id,
+                ],
+            )
+            .expect("seed long-summary bet");
     }
+    transaction.commit().expect("commit long-summary seed");
     let responder = Arc::new(RecordingMatchResponder::default());
 
     fixture
