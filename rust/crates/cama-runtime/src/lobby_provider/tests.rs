@@ -2175,6 +2175,68 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
 }
 
 #[tokio::test]
+async fn test_lobby_creation_blocked_during_active_curfew_window() {
+    let database = database_with_players(&[(1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+        })
+        .expect("seed an always-active curfew window");
+
+    // Opening a lobby is participation, so curfew blocks it outright rather
+    // than publishing a lobby the creator is immediately refused entry to.
+    let slash = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    {
+        let captured = slash.captured.lock().expect("slash responses");
+        let response = captured.followups.last().expect("curfew rejection");
+        assert!(
+            response.content.contains("can't open a lobby"),
+            "unexpected rejection: {}",
+            response.content
+        );
+        assert!(response.content.to_lowercase().contains("sleep"));
+    }
+    // No lobby was published, and nothing was posted to the channel.
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .get_lobby(LobbyScope::new(AppGuildId(42), LobbyKind::Open))
+            .is_none()
+    );
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .sent
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
     let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
     let transport = Arc::new(RecordingTransport::default());
@@ -2238,13 +2300,23 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
                 *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
             })
     );
-    let public = state.sent.last().expect("public curfew rejection");
-    assert!(
-        public
-            .message
-            .response
-            .content
-            .to_lowercase()
-            .contains("sleep")
+    // The window's name, times, and timezone are private. The public channel
+    // message must stay generic; the specifics go out by DM.
+    let public = &state.sent.last().expect("public curfew rejection").message;
+    assert_eq!(
+        public.response.content,
+        "<@1> ❌ You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
     );
+    let lowered = public.response.content.to_lowercase();
+    assert!(!lowered.contains("sleep"), "window name leaked publicly");
+    assert!(!lowered.contains("utc"), "window timezone leaked publicly");
+
+    let (recipient, direct) = state.direct_messages.last().expect("curfew DM");
+    assert_eq!(*recipient, 1);
+    assert!(
+        direct.response.content.contains("\"sleep\""),
+        "the DM should name the window: {}",
+        direct.response.content
+    );
+    assert!(direct.response.content.contains("/player curfew remove"));
 }

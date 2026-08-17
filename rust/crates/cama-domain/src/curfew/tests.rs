@@ -241,7 +241,7 @@ mod format_days_tests {
     }
 
     #[test]
-    fn test_format_window_appends_day_clause() {
+    fn test_format_window_names_the_start_day_for_an_overnight_span() {
         let w = window_on_days(
             "weekend",
             22,
@@ -252,7 +252,23 @@ mod format_days_tests {
         );
         assert_eq!(
             format_window(&w, Some("America/New_York")),
-            "\"weekend\": 10:00 PM - 6:00 AM America/New_York on Fri, Sat"
+            "\"weekend\": 10:00 PM - 6:00 AM America/New_York starting Fri, Sat (runs into the next morning)"
+        );
+    }
+
+    #[test]
+    fn test_format_window_appends_plain_day_clause_for_a_same_day_span() {
+        let w = window_on_days(
+            "work",
+            9,
+            0,
+            17,
+            0,
+            weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Tue),
+        );
+        assert_eq!(
+            format_window(&w, Some("America/New_York")),
+            "\"work\": 9:00 AM - 5:00 PM America/New_York on Mon, Tue"
         );
     }
 }

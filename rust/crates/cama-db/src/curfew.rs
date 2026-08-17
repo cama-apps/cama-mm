@@ -166,8 +166,19 @@ fn row_to_window(row: &rusqlite::Row<'_>) -> Result<CurfewWindow, rusqlite::Erro
         end_hour: row.get(5)?,
         end_minute: row.get(6)?,
         timezone: row.get(7)?,
-        days: row.get::<_, Option<i64>>(8)?.map(|value| value as u8),
+        days: row.get::<_, Option<i64>>(8)?.and_then(valid_day_mask),
     })
+}
+
+/// Day masks are only ever written by `parse_weekdays`, which guarantees a
+/// value in `1..=0b0111_1111`. Anything else in the column is corruption, so
+/// fall back to the documented every-day default (`None`) rather than
+/// truncating into a mask that silently matches no day at all — a window that
+/// never fires again but still renders like an every-day one.
+fn valid_day_mask(value: i64) -> Option<u8> {
+    u8::try_from(value)
+        .ok()
+        .filter(|mask| *mask != 0 && *mask & !0b0111_1111 == 0)
 }
 
 #[cfg(test)]

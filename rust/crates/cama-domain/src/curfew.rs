@@ -201,7 +201,16 @@ pub fn format_window(window: &CurfewWindow, general_timezone: Option<&str>) -> S
     let tz_name = effective_timezone(window, general_timezone);
     let mut rendered = format!("\"{}\": {start} - {end} {tz_name}", window.name);
     if let Some(days) = format_days(window.days) {
-        rendered.push_str(&format!(" on {days}"));
+        // For an overnight span the selected day is the day it *starts*, and
+        // it runs into the following morning. Plain "on Sat" reads as "all day
+        // Saturday", so name the rule where it actually applies.
+        let start_minutes = window.start_hour * 60 + window.start_minute;
+        let end_minutes = window.end_hour * 60 + window.end_minute;
+        if start_minutes > end_minutes {
+            rendered.push_str(&format!(" starting {days} (runs into the next morning)"));
+        } else {
+            rendered.push_str(&format!(" on {days}"));
+        }
     }
     rendered
 }

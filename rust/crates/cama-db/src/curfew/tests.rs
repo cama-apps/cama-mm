@@ -212,3 +212,32 @@ fn test_days_round_trips_and_defaults_to_none() {
         )
     );
 }
+
+#[test]
+fn test_out_of_range_day_mask_degrades_to_every_day_instead_of_truncating() {
+    let (directory, repository) = fixture();
+    let path = directory.path().join("curfew.db");
+    repository
+        .add_or_replace(&window(1, GUILD, "corrupt", 22, 6))
+        .unwrap();
+    // 256 truncates to 0 under `as u8` — a mask that matches no weekday, so
+    // the window would silently never fire again while still rendering like
+    // an every-day one. 0 is equally invalid.
+    for stored in [256_i64, 0, -1, 128] {
+        let connection = crate::open_runtime_connection(&path).expect("open");
+        connection
+            .execute(
+                "UPDATE player_curfew_windows SET days = ?1 WHERE discord_id = 1 AND name = 'corrupt'",
+                params![stored],
+            )
+            .expect("corrupt the mask");
+        drop(connection);
+
+        let windows = repository.list_for_player(1, GUILD).unwrap();
+        let corrupt = windows.iter().find(|w| w.name == "corrupt").unwrap();
+        assert_eq!(
+            corrupt.days, None,
+            "stored day mask {stored} should fall back to the every-day default"
+        );
+    }
+}
