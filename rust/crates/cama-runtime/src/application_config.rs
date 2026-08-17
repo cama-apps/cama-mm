@@ -622,7 +622,7 @@ impl ApplicationConfig {
                 white_bankrupt_stipend: p.i64("WHITE_BANKRUPT_STIPEND", 5),
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
-                recent_match_penalty_weight: 263.0,
+                recent_match_penalty_weight: 230.0,
                 pingedkevin_cost: p.i64("PINGEDASH_COST", 10),
                 pingedkevin_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86_400),
             },
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(config.values.auto_spectator_bet_percentage, 0.01);
         assert_eq!(config.values.auto_spectator_bet_top_percentage, 0.02);
         assert_eq!(config.values.pingedash_cost, 10);
-        assert_eq!(config.values.recent_match_penalty_weight, 263.0);
+        assert_eq!(config.values.recent_match_penalty_weight, 230.0);
         assert!(!config.values.gamba_synthetic_members_enabled);
         assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
