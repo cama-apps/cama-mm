@@ -16,7 +16,7 @@ use cama_app::drawing::{
 use cama_app::match_discovery::SteamId;
 use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaRuntimeServices};
 use cama_app::opendota_player_service::{
-    OpenDotaPlayerService, RecordedHeroCatalog, SystemOpenDotaPlayerClock,
+    OpenDotaPlayerService, RecordedHeroCatalog, SystemOpenDotaPlayerClock, calculate_win_rate,
 };
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::{MatchRepository, PlayerRepository};
@@ -25,6 +25,7 @@ use cama_db::gambling_stats_repository::{
     GamblingStatsRepository, GamblingStatsService, PlayerAutoBetStats,
 };
 use cama_db::loan_repository::LoanRepository;
+use cama_db::match_recording_repository::MatchRecordingRepository;
 use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_db::pairings_repository::{PairingsRepository, PairingsService};
 use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
@@ -121,6 +122,7 @@ enum ProfileTab {
     Dota,
     Teammates,
     Heroes,
+    Roles,
 }
 
 #[derive(Clone)]
@@ -537,7 +539,7 @@ fn profile_action_rows(view_id: u64, active: ProfileTab) -> Vec<InteractionActio
 }
 
 impl ProfileTab {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::Rating,
         Self::Economy,
@@ -546,6 +548,7 @@ impl ProfileTab {
         Self::Dota,
         Self::Teammates,
         Self::Heroes,
+        Self::Roles,
     ];
 
     const fn key(self) -> &'static str {
@@ -558,6 +561,7 @@ impl ProfileTab {
             Self::Dota => "dota",
             Self::Teammates => "teammates",
             Self::Heroes => "heroes",
+            Self::Roles => "roles",
         }
     }
 
@@ -571,13 +575,14 @@ impl ProfileTab {
             Self::Dota => "Dota",
             Self::Teammates => "Teammates",
             Self::Heroes => "Heroes",
+            Self::Roles => "Roles",
         }
     }
 
     const fn row(self) -> u8 {
         match self {
             Self::Overview | Self::Rating | Self::Economy | Self::Gambling | Self::Predictions => 0,
-            Self::Dota | Self::Teammates | Self::Heroes => 1,
+            Self::Dota | Self::Teammates | Self::Heroes | Self::Roles => 1,
         }
     }
 
@@ -590,6 +595,7 @@ impl ProfileTab {
                 | Self::Economy
                 | Self::Rating
                 | Self::Teammates
+                | Self::Roles
         )
     }
 
@@ -683,6 +689,7 @@ struct ProfileDataSources {
     tips: TipRepository,
     dota: Arc<LiveDotaProfileService>,
     opendota: Arc<OpenDotaRuntimeServices>,
+    positions: MatchRecordingRepository,
 }
 
 impl ProfileDataSources {
@@ -704,6 +711,7 @@ impl ProfileDataSources {
             tips: TipRepository::new(database_path),
             dota: Arc::new(opendota.profile_player_service(database_path)),
             opendota,
+            positions: MatchRecordingRepository::new(database_path),
         }
     }
 
@@ -734,6 +742,7 @@ impl ProfileDataSources {
             ProfileTab::Dota => self.dota(target_id, guild_id, target_name),
             ProfileTab::Teammates => self.teammates(target_id, guild_id, target_name),
             ProfileTab::Heroes => self.heroes(target_id, guild_id, target_name),
+            ProfileTab::Roles => self.roles(target_id, guild_id, target_name),
         }
     }
 
@@ -1732,6 +1741,52 @@ impl ProfileDataSources {
             );
         }
         Ok(page)
+    }
+
+    fn roles(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        target_name: &str,
+    ) -> Result<ProfilePage, String> {
+        self.player(discord_id, guild_id)?;
+        let rates = self
+            .positions
+            .position_win_rates(discord_id, guild_id)
+            .map_err(|error| error.to_string())?;
+        if rates.is_empty() {
+            return Ok(ProfilePage::new(
+                format!("Profile: {target_name} > Roles"),
+                DISCORD_ORANGE,
+            )
+            .description(
+                "No estimated positions yet.\n\nPositions are estimated automatically from OpenDota data once a match is enriched.\nAsk an admin to run `/enrich match` or `/enrich discover` to add match data.",
+            ));
+        }
+        let total_games = rates
+            .iter()
+            .map(|rate| rate.wins + rate.losses)
+            .sum::<i64>();
+        let lines = rates
+            .iter()
+            .map(|rate| {
+                format!(
+                    "**Position {}:** {:.1}% ({}W-{}L)",
+                    rate.position,
+                    calculate_win_rate(rate.wins, rate.losses),
+                    rate.wins,
+                    rate.losses,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(
+            ProfilePage::new(format!("Profile: {target_name} > Roles"), DISCORD_BLUE)
+                .field("Win Rate by Position", lines, false)
+                .footer(format!(
+                    "Based on {total_games} matches with an estimated position | Positions are heuristic estimates, not the shuffler's pre-game assignment"
+                )),
+        )
     }
 }
 

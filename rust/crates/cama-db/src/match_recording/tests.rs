@@ -1324,6 +1324,74 @@ fn test_farm_stats_round_trip_through_position_estimation() {
 }
 
 #[test]
+fn test_position_win_rates_aggregates_across_matches_by_estimated_position() {
+    let fixture = Fixture::new();
+    let player = 900_001;
+    fixture.seed(&[player]);
+
+    // The player's side (radiant) wins matches 0 and 2, loses match 1.
+    // Match 3 is left without a stored estimate to prove it's excluded.
+    let winners = [
+        TeamSide::Radiant,
+        TeamSide::Dire,
+        TeamSide::Radiant,
+        TeamSide::Radiant,
+    ];
+    let mut match_ids = Vec::new();
+    for (start, winner) in [35_001, 35_011, 35_021, 35_031].into_iter().zip(winners) {
+        let radiant: Vec<i64> = std::iter::once(player).chain(start..start + 4).collect();
+        let dire: Vec<i64> = (start + 4..start + 9).collect();
+        fixture.seed(&(start..start + 9).collect::<Vec<_>>());
+        let match_id = fixture
+            .repository
+            .record_match_atomic(standard(&radiant, &dire, winner))
+            .expect("record match")
+            .match_id;
+        match_ids.push(match_id);
+    }
+    fixture
+        .repository
+        .store_estimated_positions(match_ids[0], Some(GUILD), &[(player, "1")])
+        .expect("store estimate");
+    fixture
+        .repository
+        .store_estimated_positions(match_ids[1], Some(GUILD), &[(player, "1")])
+        .expect("store estimate");
+    fixture
+        .repository
+        .store_estimated_positions(match_ids[2], Some(GUILD), &[(player, "2")])
+        .expect("store estimate");
+    // A teammate's estimate in the same match must not leak into the
+    // player's aggregate; only match_ids[3]'s own missing estimate for
+    // `player` proves that match is excluded.
+    fixture
+        .repository
+        .store_estimated_positions(match_ids[3], Some(GUILD), &[(35_031, "5")])
+        .expect("store estimate for a different player only");
+
+    let rates = fixture
+        .repository
+        .position_win_rates(player, Some(GUILD))
+        .expect("read position win rates");
+
+    assert_eq!(
+        rates,
+        vec![
+            PositionWinRate {
+                position: "1".to_owned(),
+                wins: 1,
+                losses: 1,
+            },
+            PositionWinRate {
+                position: "2".to_owned(),
+                wins: 1,
+                losses: 0,
+            },
+        ]
+    );
+}
+
+#[test]
 fn test_match_and_participants_commit_in_one_call() {
     let fixture = Fixture::new();
     let (radiant, dire) = teams(33_001);

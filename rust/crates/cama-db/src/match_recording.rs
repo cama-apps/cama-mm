@@ -99,6 +99,14 @@ pub struct MatchParticipantFarmRow {
     pub stats: ParticipantFarmStats,
 }
 
+/// A player's win/loss record at one estimated position ("1".."5").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PositionWinRate {
+    pub position: String,
+    pub wins: i64,
+    pub losses: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredMatch {
     pub match_id: i64,
@@ -1320,6 +1328,41 @@ impl MatchRecordingRepository {
         }
         transaction.commit()?;
         Ok(updated)
+    }
+
+    /// A player's wins and losses at each estimated position ("1".."5"),
+    /// ordered by position. Only matches with a stored `estimated_position`
+    /// contribute — the same OpenDota-derived estimate consumed by
+    /// [`Self::store_estimated_positions`], not the shuffler's pre-game
+    /// assignment.
+    pub fn position_win_rates(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<PositionWinRate>, MatchRecordingRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT estimated_position,
+                    SUM(CASE WHEN won THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN won THEN 0 ELSE 1 END)
+             FROM match_participants
+             WHERE discord_id = ?1 AND guild_id = ?2 AND estimated_position IS NOT NULL
+             GROUP BY estimated_position
+             ORDER BY estimated_position",
+        )?;
+        statement
+            .query_map(
+                params![discord_id, Self::normalize_guild_id(guild_id)],
+                |row| {
+                    Ok(PositionWinRate {
+                        position: row.get(0)?,
+                        wins: row.get(1)?,
+                        losses: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn rating_history(

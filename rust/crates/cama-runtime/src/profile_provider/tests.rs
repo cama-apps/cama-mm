@@ -8,6 +8,7 @@ use cama_app::opendota_http::OpenDotaHttpConfig;
 use cama_db::gambling_stats_repository::{
     AutoBetGroupStats, AutoBetPerformance, PlayerAutoBetStats,
 };
+use cama_db::match_recording_repository::{MatchRecordRequest, TeamSide};
 use cama_db::predictions_repository::{ContractSide, NewLevel, PredictionRepository};
 use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
@@ -977,7 +978,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
                 .iter()
                 .map(|button| button.label.as_str())
                 .collect::<Vec<_>>(),
-            ["Dota", "Teammates", "Heroes"]
+            ["Dota", "Teammates", "Heroes", "Roles"]
         );
         assert_eq!(
             response.components[0].buttons[0].style,
@@ -1035,7 +1036,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
     }));
 
     let captured = responder.captured.lock().expect("response capture lock");
-    assert_eq!(captured.edits.len(), 6);
+    assert_eq!(captured.edits.len(), 7);
     assert_eq!(captured.updates.len(), 2);
     let pages = captured
         .edits
@@ -1051,6 +1052,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         "Dota Stats",
         "Teammates",
         "Heroes",
+        "Roles",
     ] {
         assert!(
             pages
@@ -1625,12 +1627,83 @@ fn test_predictions_tab_resolved_loss() {
     assert!(performance.value.contains("0W-1L"));
 }
 
+fn roles_page(database: &NamedTempFile) -> ProfilePage {
+    profile_page(database, ProfileTab::Roles)
+}
+
+#[test]
+fn test_roles_tab_empty_state_prompts_enrichment() {
+    let database = migrated_player_fixture();
+    let page = roles_page(&database);
+
+    assert!(page.title.contains("Roles"));
+    assert!(
+        page.description
+            .as_deref()
+            .is_some_and(|description| { description.contains("No estimated positions yet") })
+    );
+}
+
+#[test]
+fn test_roles_tab_renders_win_rate_per_position() {
+    let database = migrated_player_fixture();
+    let repository = MatchRecordingRepository::new(database.path());
+    let mut match_ids = Vec::new();
+    for (start, winner) in [(60_001, TeamSide::Radiant), (60_011, TeamSide::Dire)] {
+        for discord_id in std::iter::once(100).chain(start..start + 4) {
+            repository
+                .add_player(discord_id, Some(42), "Filler", 1_500.0)
+                .ok();
+        }
+        for discord_id in start + 4..start + 9 {
+            repository
+                .add_player(discord_id, Some(42), "Filler", 1_500.0)
+                .ok();
+        }
+        let radiant: Vec<i64> = std::iter::once(100).chain(start..start + 4).collect();
+        let dire: Vec<i64> = (start + 4..start + 9).collect();
+        let match_id = repository
+            .record_match_atomic(MatchRecordRequest::standard(
+                Some(42),
+                &radiant,
+                &dire,
+                winner,
+            ))
+            .expect("record match")
+            .match_id;
+        match_ids.push(match_id);
+    }
+    repository
+        .store_estimated_positions(match_ids[0], Some(42), &[(100, "1")])
+        .expect("store winning estimate");
+    repository
+        .store_estimated_positions(match_ids[1], Some(42), &[(100, "1")])
+        .expect("store losing estimate");
+
+    let page = roles_page(&database);
+
+    assert!(page.title.contains("Roles"));
+    let field = page
+        .fields
+        .iter()
+        .find(|field| field.name == "Win Rate by Position")
+        .expect("win rate field");
+    assert!(field.value.contains("**Position 1:** 50.0% (1W-1L)"));
+    assert!(
+        page.footer
+            .as_deref()
+            .is_some_and(|footer| footer.contains("Based on 2 matches"))
+    );
+}
+
 #[test]
 fn exact_component_rows_and_active_style_match_python_profile_view() {
     let rows = profile_action_rows(42, ProfileTab::Predictions);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].buttons.len(), 5);
-    assert_eq!(rows[1].buttons.len(), 3);
+    // Row 1 has one more button than the Python original: "Roles" is
+    // Rust-only new behavior with no Python counterpart to keep parity with.
+    assert_eq!(rows[1].buttons.len(), 4);
     assert_eq!(
         rows.iter()
             .flat_map(|row| &row.buttons)
@@ -1645,6 +1718,7 @@ fn exact_component_rows_and_active_style_match_python_profile_view() {
             "profile:42:dota",
             "profile:42:teammates",
             "profile:42:heroes",
+            "profile:42:roles",
         ]
     );
     assert_eq!(
