@@ -1905,6 +1905,12 @@ pub struct MatchRecord {
     pub lobby_kind: Option<String>,
     pub balancing_rating_system: String,
     pub betting_mode: String,
+    /// Shuffler-assigned role per player, positionally aligned with
+    /// `team1_ids`/`team2_ids`. Empty when the assignment is unknown — drafts,
+    /// admin-recorded matches, and every match recorded before roles were
+    /// persisted — in which case `assigned_role` is stored as NULL.
+    pub team1_roles: Vec<String>,
+    pub team2_roles: Vec<String>,
 }
 
 impl MatchRecord {
@@ -1926,7 +1932,21 @@ impl MatchRecord {
             lobby_kind: None,
             balancing_rating_system: "glicko".to_owned(),
             betting_mode: "pool".to_owned(),
+            team1_roles: Vec::new(),
+            team2_roles: Vec::new(),
         }
+    }
+
+    /// Attach the shuffler's role assignment, positionally aligned with the
+    /// team ID lists. A length mismatch is ignored rather than stored, so a
+    /// partial assignment can never be misattributed to the wrong player.
+    #[must_use]
+    pub fn with_roles(mut self, team1_roles: Vec<String>, team2_roles: Vec<String>) -> Self {
+        if team1_roles.len() == self.team1_ids.len() && team2_roles.len() == self.team2_ids.len() {
+            self.team1_roles = team1_roles;
+            self.team2_roles = team2_roles;
+        }
+        self
     }
 }
 
@@ -3578,20 +3598,32 @@ fn insert_participants(
     guild_id: i64,
 ) -> Result<(), rusqlite::Error> {
     let team1_won = record.winning_team == 1;
-    for discord_id in &record.team1_ids {
+    for (index, discord_id) in record.team1_ids.iter().enumerate() {
         transaction.execute(
             "INSERT INTO match_participants
-             (match_id, discord_id, guild_id, team_number, won, side)
-             VALUES (?1, ?2, ?3, 1, ?4, 'radiant')",
-            params![match_id, discord_id, guild_id, team1_won],
+             (match_id, discord_id, guild_id, team_number, won, side, assigned_role)
+             VALUES (?1, ?2, ?3, 1, ?4, 'radiant', ?5)",
+            params![
+                match_id,
+                discord_id,
+                guild_id,
+                team1_won,
+                record.team1_roles.get(index)
+            ],
         )?;
     }
-    for discord_id in &record.team2_ids {
+    for (index, discord_id) in record.team2_ids.iter().enumerate() {
         transaction.execute(
             "INSERT INTO match_participants
-             (match_id, discord_id, guild_id, team_number, won, side)
-             VALUES (?1, ?2, ?3, 2, ?4, 'dire')",
-            params![match_id, discord_id, guild_id, !team1_won],
+             (match_id, discord_id, guild_id, team_number, won, side, assigned_role)
+             VALUES (?1, ?2, ?3, 2, ?4, 'dire', ?5)",
+            params![
+                match_id,
+                discord_id,
+                guild_id,
+                !team1_won,
+                record.team2_roles.get(index)
+            ],
         )?;
     }
     Ok(())
@@ -4209,6 +4241,19 @@ mod tests {
                     Some(guild_id),
                 ))
                 .expect("record fixture match")
+        }
+
+        fn assigned_roles(&self, match_id: i64) -> Vec<(i64, Option<String>)> {
+            self.connection()
+                .prepare(
+                    "SELECT discord_id, assigned_role FROM match_participants
+                     WHERE match_id = ?1 ORDER BY discord_id",
+                )
+                .expect("prepare assigned role read")
+                .query_map(params![match_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query assigned roles")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect assigned roles")
         }
 
         fn add_history(
@@ -5056,6 +5101,70 @@ mod tests {
     #[test]
     fn test_record_match_creates_match() {
         test_record_match();
+    }
+
+    #[test]
+    fn test_record_match_persists_the_shufflers_assigned_roles() {
+        let fixture = Fixture::new();
+        let team1 = [8_101, 8_102, 8_103, 8_104, 8_105];
+        let team2 = [8_201, 8_202, 8_203, 8_204, 8_205];
+        for discord_id in team1.iter().chain(&team2) {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+        }
+        let match_id = fixture
+            .matches
+            .record_match(
+                &MatchRecord::new(team1.to_vec(), team2.to_vec(), 1, Some(TEST_GUILD_ID))
+                    .with_roles(
+                        ["1", "2", "3", "4", "5"].map(str::to_owned).to_vec(),
+                        ["5", "4", "3", "2", "1"].map(str::to_owned).to_vec(),
+                    ),
+            )
+            .expect("record match with roles");
+
+        let stored = fixture.assigned_roles(match_id);
+        assert_eq!(
+            stored,
+            vec![
+                (8_101, Some("1".to_owned())),
+                (8_102, Some("2".to_owned())),
+                (8_103, Some("3".to_owned())),
+                (8_104, Some("4".to_owned())),
+                (8_105, Some("5".to_owned())),
+                (8_201, Some("5".to_owned())),
+                (8_202, Some("4".to_owned())),
+                (8_203, Some("3".to_owned())),
+                (8_204, Some("2".to_owned())),
+                (8_205, Some("1".to_owned())),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_match_without_roles_stores_null_rather_than_guessing() {
+        let fixture = Fixture::new();
+        let team1 = [8_301, 8_302];
+        let team2 = [8_401, 8_402];
+        for discord_id in team1.iter().chain(&team2) {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+        }
+        // Drafts and admin-recorded matches have no shuffler assignment, and a
+        // length mismatch must never be misattributed to the wrong player.
+        let match_id = fixture
+            .matches
+            .record_match(
+                &MatchRecord::new(team1.to_vec(), team2.to_vec(), 1, Some(TEST_GUILD_ID))
+                    .with_roles(vec!["1".to_owned()], vec!["2".to_owned()]),
+            )
+            .expect("record match with mismatched roles");
+
+        assert!(
+            fixture
+                .assigned_roles(match_id)
+                .iter()
+                .all(|(_, role)| role.is_none()),
+            "a mismatched assignment must store NULL for every participant"
+        );
     }
 
     #[test]
@@ -8085,7 +8194,8 @@ mod tests {
             obs_placed INTEGER, sen_placed INTEGER, camps_stacked INTEGER,
             rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL,
             fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0,
-            bonus_jc INTEGER, win_bonus_jc INTEGER, PRIMARY KEY(match_id,discord_id)
+            bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT,
+            PRIMARY KEY(match_id,discord_id)
         );
         CREATE TABLE rating_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, discord_id INTEGER, rating REAL,

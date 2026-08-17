@@ -28,6 +28,7 @@ pub mod rate_limiter;
 pub mod rating;
 pub mod rating_insights;
 pub mod region;
+pub mod role_performance;
 pub mod service_result;
 pub mod shuffler;
 pub mod streaming;
