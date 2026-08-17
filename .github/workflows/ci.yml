@@ -16,27 +16,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: rust/target
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Create locked Python environment for cross-language Rust tests
-        run: uv sync --locked
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
-          components: rustfmt, clippy
-
-      - name: Cache compiler objects
-        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -46,8 +32,31 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
 
-      - name: Lint Python
-        run: uv run --locked ruff check .
+      - name: Test Rust
+        run: >-
+          cargo test --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features
+
+  rust-lint:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: rust/target
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: rust-ci
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
@@ -57,16 +66,11 @@ jobs:
           cargo clippy --locked --manifest-path rust/Cargo.toml
           --workspace --all-targets --all-features -- -D warnings
 
-      - name: Test Rust
-        run: >-
-          cargo test --locked --manifest-path rust/Cargo.toml
-          --workspace --all-targets --all-features
-
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
   # publication, and the deploy handoff.
   runtime-images:
-    needs: rust
+    needs: [rust, rust-lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -74,6 +78,18 @@ jobs:
       - name: Verify main-only runtime image contract
         run: |
           test -f .github/workflows/release.yml
+          grep -Fq 'Stage latest runtime data' .github/workflows/release.yml
           grep -Fq 'target: runtime-prebuilt' .github/workflows/release.yml
           grep -Fq 'push: true' .github/workflows/release.yml
           grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml
+          grep -Fq 'ENV GIT_SHA=${GIT_SHA}' Dockerfile.rust
+          ! grep -E 'setup-uv|uv (run|sync)|(^|[[:space:]])python3?([[:space:]]|$)' \
+            .github/workflows/ci.yml \
+            .github/workflows/release.yml \
+            .github/workflows/deploy.yml \
+            scripts/deploy-runtime \
+            scripts/post-deploy-verify \
+            scripts/runtime-compose \
+            scripts/runtime-entrypoint \
+            docker-compose.yml \
+            Dockerfile.rust
