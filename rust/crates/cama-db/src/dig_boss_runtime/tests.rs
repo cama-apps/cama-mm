@@ -3,7 +3,7 @@ use tempfile::NamedTempFile;
 
 use super::*;
 use crate::core_repositories::{NewPlayer, PlayerRepository};
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const PLAYER: i64 = -83_001;
 const GUILD: i64 = 83_002;
@@ -14,7 +14,7 @@ const KEY: DigBossRuntimeKey = DigBossRuntimeKey {
 
 fn fixture() -> NamedTempFile {
     let database = NamedTempFile::new().expect("boss runtime database");
-    initialize_or_migrate(database.path()).expect("canonical schema");
+    copy_migrated_database(database.path()).expect("canonical schema");
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(PLAYER, "boss-runtime", Some(GUILD)))
         .expect("player");

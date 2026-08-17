@@ -311,7 +311,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use crate::core_repositories::{NewPlayer, PlayerRepository};
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
 
     use super::*;
 
@@ -330,7 +330,7 @@ mod tests {
     impl Fixture {
         fn new(target_balance: i64, skimmer_balance: i64) -> Self {
             let database = NamedTempFile::new().expect("temporary Dig Blood Pact database");
-            initialize_or_migrate(database.path()).expect("migrate canonical schema");
+            copy_migrated_database(database.path()).expect("copy canonical schema");
             let players = PlayerRepository::new(database.path());
             players
                 .add(&NewPlayer::new(TARGET, "target", Some(GUILD)))

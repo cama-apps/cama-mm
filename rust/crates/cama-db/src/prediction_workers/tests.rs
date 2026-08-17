@@ -5,7 +5,7 @@ use crate::prediction_worker_repository::{
     PredictionRefreshPublicationKind, PredictionRefreshSettings, PredictionWorkerRepository,
 };
 use crate::predictions_repository::{NewLevel, PredictionRepository};
-use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -22,8 +22,7 @@ impl Fixture {
     fn migrated() -> Self {
         let directory = tempfile::tempdir().expect("temporary database directory");
         let path = directory.path().join("cama.db");
-        initialize_or_migrate_with_settings(&path, &MigrationSettings::default())
-            .expect("migrate temporary database");
+        copy_migrated_database(&path).expect("copy migrated temporary database");
         Self {
             _directory: directory,
             path,

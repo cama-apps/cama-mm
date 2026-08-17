@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use tempfile::{NamedTempFile, TempDir};
 
 use super::*;
-use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 42;
 
@@ -25,8 +25,7 @@ impl MigratedFixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary migrated database");
         let path = directory.path().join("cama.db");
-        initialize_or_migrate_with_settings(&path, &MigrationSettings::default())
-            .expect("migrate temporary database");
+        copy_migrated_database(&path).expect("copy migrated temporary database");
         Self {
             repository: DotaBetSeedRepository::new(&path),
             _directory: directory,

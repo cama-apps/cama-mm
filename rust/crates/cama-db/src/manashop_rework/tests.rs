@@ -5,7 +5,7 @@ use std::{path::Path, process::Command};
 use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::NamedTempFile;
 
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 use super::*;
 
@@ -708,7 +708,7 @@ fn test_overgrowth_migration_backfills_missing_charges() {
 
 fn migrated_overgrowth_fixture() -> (NamedTempFile, ManashopRepository) {
     let file = NamedTempFile::new().expect("temporary migrated SQLite file");
-    initialize_or_migrate(file.path()).expect("migrate canonical SQLite schema");
+    copy_migrated_database(file.path()).expect("copy canonical SQLite schema");
     let connection = Connection::open(file.path()).expect("open migrated SQLite fixture");
     connection
         .pragma_update(None, "foreign_keys", false)

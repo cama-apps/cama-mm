@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 fn fixture() -> (tempfile::TempDir, SurveyRepository, Arc<AtomicI64>) {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("survey.db");
-    initialize_or_migrate(&path).expect("migrate");
+    copy_migrated_database(&path).expect("migrate");
     let clock = Arc::new(AtomicI64::new(1_800_000_000));
     let repository = SurveyRepository::with_clock(&path, {
         let clock = Arc::clone(&clock);

@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 4242;
 const NOW: i64 = 10_000;
@@ -187,7 +187,7 @@ fn add_pending_payload(path: &Path, pending_match_id: i64, payload: &str) {
 
 fn migrated_concurrent_fixture() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary migrated concurrent database");
-    initialize_or_migrate(file.path()).expect("migrate concurrent database");
+    copy_migrated_database(file.path()).expect("copy concurrent database");
     let connection = Connection::open(file.path()).expect("open migrated concurrent database");
     connection
         .execute_batch("PRAGMA foreign_keys=OFF")
@@ -1754,7 +1754,7 @@ fn unmapped_python_migrated_database_betting_service_interop_smoke() {
 
 fn migrated_seed_fixture(match_id: i64, pending_match_id: i64, mode: BettingMode) -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary migrated seed database");
-    initialize_or_migrate(file.path()).expect("migrate seed database");
+    copy_migrated_database(file.path()).expect("copy seed database");
     let connection = Connection::open(file.path()).expect("open migrated seed database");
     connection
         .execute_batch("PRAGMA foreign_keys=OFF")

@@ -205,7 +205,7 @@ impl AutobetInvestmentRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::NamedTempFile;
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn set_replaces_position_without_double_counting_and_enforces_cap() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("schema");
+        copy_migrated_database(database.path()).expect("schema");
         let repository = AutobetInvestmentRepository::new(database.path());
         assert_eq!(repository.set(Some(9), 1, 10, "long", 10).unwrap(), 10);
         assert_eq!(repository.set(Some(9), 1, 10, "short", 1).unwrap(), 1);
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn remove_and_target_lookup_are_guild_scoped() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("schema");
+        copy_migrated_database(database.path()).expect("schema");
         let repository = AutobetInvestmentRepository::new(database.path());
         repository.set(Some(1), 2, 20, "long", 5).unwrap();
         repository.set(Some(2), 3, 20, "short", 6).unwrap();
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn set_enforces_total_percentage_cap_without_partial_write() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("schema");
+        copy_migrated_database(database.path()).expect("schema");
         let repository = AutobetInvestmentRepository::new(database.path());
         for target_id in 201..=205 {
             repository
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn concurrent_position_updates_preserve_the_total_cap() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("schema");
+        copy_migrated_database(database.path()).expect("schema");
         let repository = AutobetInvestmentRepository::new(database.path());
         for target_id in 301..=304 {
             repository
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn autobet_attribution_schema_has_profile_columns_and_index() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("migrated schema");
+        copy_migrated_database(database.path()).expect("migrated schema");
         let connection = Connection::open(database.path()).expect("schema connection");
         let columns = connection
             .prepare("PRAGMA table_info(bets)")

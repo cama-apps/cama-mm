@@ -1881,8 +1881,8 @@ mod tests {
 
     fn linked_fixture(with_effects: bool) -> LinkedFixture {
         let file = NamedTempFile::new().expect("create financial execution fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate financial execution fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy financial execution fixture");
         insert_players_and_financial_state(file.path(), with_effects);
         link_prepared_fixture(file, pending_payload(), policy(with_effects))
     }
@@ -1987,8 +1987,7 @@ mod tests {
     #[test]
     fn legacy_unmatched_shuffle_bets_seed_frozen_and_executed_odds() {
         let file = NamedTempFile::new().expect("create legacy-odds fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate legacy-odds fixture");
+        crate::test_support::copy_migrated_database(file.path()).expect("copy legacy-odds fixture");
         insert_players_and_financial_state(file.path(), true);
         let connection = Connection::open(file.path()).expect("open legacy-odds fixture");
         connection
@@ -2049,8 +2048,8 @@ mod tests {
     #[test]
     fn house_mode_reserves_bonus_without_funding_or_claiming_first_game_pools() {
         let file = NamedTempFile::new().expect("create house financial fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate house financial fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy house financial fixture");
         insert_players_and_financial_state(file.path(), false);
         Connection::open(file.path())
             .expect("open house financial fixture")
@@ -2132,8 +2131,8 @@ mod tests {
     #[test]
     fn frozen_policy_skips_are_receipted_without_wallet_or_bet_mutation() {
         let file = NamedTempFile::new().expect("create skipped-effect fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate skipped-effect fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy skipped-effect fixture");
         insert_players_and_financial_state(file.path(), false);
         let mut financial = policy(false);
         financial.auto_blind_enabled = true;
@@ -2545,7 +2544,7 @@ mod tests {
     #[test]
     fn missing_job_is_distinct_from_financial_conflict() {
         let file = NamedTempFile::new().expect("create missing-job fixture");
-        crate::schema_manager::initialize_or_migrate(file.path()).expect("migrate missing fixture");
+        crate::test_support::copy_migrated_database(file.path()).expect("copy missing-job fixture");
         assert!(matches!(
             run_leased_financial_setup(file.path(), "draft:42:999", 1, "worker", 100),
             Err(DraftFinancialExecutionError::JobNotFound { .. })

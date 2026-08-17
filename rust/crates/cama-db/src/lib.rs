@@ -436,8 +436,8 @@ mod tests {
 
     fn assert_runtime_connection_reuses_schema_sqlite_configuration() {
         let file = NamedTempFile::new().expect("create runtime connection database");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("initialize runtime connection database");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy runtime connection database");
         let connection = open_runtime_connection(file.path()).expect("open runtime connection");
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))

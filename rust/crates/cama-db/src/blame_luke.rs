@@ -624,7 +624,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -642,7 +642,7 @@ mod tests {
         fn migrated() -> Self {
             let directory = tempfile::tempdir().expect("temporary database directory");
             let path = directory.path().join("cama.db");
-            initialize_or_migrate(&path).expect("run Rust migration authority");
+            copy_migrated_database(&path).expect("copy canonical schema");
             Self {
                 _directory: directory,
                 path,

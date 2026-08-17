@@ -325,14 +325,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{DigActionHistoryRepository, DigActionInsert};
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
 
     const GUILD: i64 = 42;
     const OTHER_GUILD: i64 = 99;
 
     fn fixture() -> (NamedTempFile, DigActionHistoryRepository) {
         let file = NamedTempFile::new().expect("temporary migrated database");
-        initialize_or_migrate(file.path()).expect("canonical migration");
+        copy_migrated_database(file.path()).expect("canonical schema");
         let repository = DigActionHistoryRepository::new(file.path().to_path_buf());
         (file, repository)
     }

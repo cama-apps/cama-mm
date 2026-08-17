@@ -161,12 +161,12 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::NeonEventRepository;
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
 
     #[test]
     fn concurrent_one_time_claim_has_exactly_one_winner() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("canonical schema");
+        copy_migrated_database(database.path()).expect("canonical schema");
         let path = database.path().to_path_buf();
         let barrier = Arc::new(Barrier::new(3));
         let handles = (0..2)

@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::match_correction_repository::{MatchCorrectionError, MatchCorrectionRepository};
-use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use crate::test_support::copy_migrated_database;
 use cama_domain::rating::CamaRatingSystem;
 
 const GUILD: i64 = 4242;
@@ -12,7 +12,7 @@ const GUILD: i64 = 4242;
 fn migrated() -> (TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cama.sqlite3");
-    initialize_or_migrate_with_settings(&path, &MigrationSettings::default()).unwrap();
+    copy_migrated_database(&path).unwrap();
     (directory, path)
 }
 

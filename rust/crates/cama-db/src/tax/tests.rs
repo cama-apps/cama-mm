@@ -1,4 +1,4 @@
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -15,7 +15,7 @@ struct Fixture {
 impl Fixture {
     fn migrated() -> Self {
         let file = NamedTempFile::new().expect("temporary tax database");
-        initialize_or_migrate(file.path()).expect("migrate tax database");
+        copy_migrated_database(file.path()).expect("migrate tax database");
         Self {
             repository: TaxRepository::new(file.path(), 10, 50),
             file,
