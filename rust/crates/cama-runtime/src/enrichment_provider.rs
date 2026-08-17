@@ -58,6 +58,9 @@ const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const GUILD_ONLY: &str = "This command can only be used in a server.";
 const ADMIN_ONLY: &str = "This command is admin-only.";
 const COMPONENT_PREFIX: &str = "enrichment:";
+/// Matches processed per `/enrich backfill` call for position estimates —
+/// bounded so one admin invocation stays fast; run again to continue.
+const POSITION_BACKFILL_LIMIT: usize = 500;
 const MATCH_VIEW_TIMEOUT: Duration = Duration::from_secs(120);
 const DISCORD_BLUE: u32 = 0x34_98_db;
 const DISCORD_GREEN: u32 = 0x2e_cc_71;
@@ -339,7 +342,7 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
         ),
         subcommand(
             "backfill",
-            "Backfill steam_id from dotabuff URLs for all players (Admin)",
+            "Backfill steam_id from dotabuff URLs, and position estimates for this server (Admin)",
             vec![],
         ),
         subcommand("config", "Show current server configuration", vec![]),
@@ -878,6 +881,28 @@ impl EnrichmentHandler {
                 "\n**Failed:** {} players (invalid dotabuff URLs)",
                 result.players_failed.len()
             ));
+        }
+        // Position backfill is guild-scoped (matches belong to a guild), so
+        // it's skipped in a DM — Steam ID backfill above stays global.
+        if let Some(guild_id) = context.guild_id {
+            let enrichment = Arc::clone(&self.enrichment);
+            let positions = run_blocking(move || {
+                enrichment.backfill_estimated_positions(
+                    cama_app::dedicated_lobby_channel::GuildId(guild_id),
+                    POSITION_BACKFILL_LIMIT,
+                )
+            })
+            .await
+            .map_err(InteractionHandlerError::from)?;
+            content.push_str(&format!(
+                "\n\n**Position estimates:** {} matches updated ({} positions) of {} checked",
+                positions.matches_updated, positions.positions_estimated, positions.matches_found
+            ));
+            if positions.matches_found == POSITION_BACKFILL_LIMIT {
+                content.push_str(
+                    "\nMore matches may still need estimates — run `/enrich backfill` again.",
+                );
+            }
         }
         responder
             .followup(InteractionResponse::message(content).ephemeral())

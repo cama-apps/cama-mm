@@ -1256,6 +1256,14 @@ pub trait EnrichmentWritePort: Send + Sync {
         guild_id: GuildId,
         estimates: &[(i64, &str)],
     ) -> Result<usize, DiscoveryPortError>;
+
+    /// Match IDs with enrichment data but no stored position estimate yet,
+    /// oldest first, for [`MatchEnrichmentService::backfill_estimated_positions`].
+    fn matches_needing_position_estimate(
+        &self,
+        guild_id: GuildId,
+        limit: usize,
+    ) -> Result<Vec<InternalMatchId>, DiscoveryPortError>;
 }
 
 /// One participant's team assignment and farm stats, as read through
@@ -1384,6 +1392,16 @@ impl EnrichmentWritePort for MatchRecordingRepository {
         )
         .map_err(|error| DiscoveryPortError::new(error.to_string()))
     }
+
+    fn matches_needing_position_estimate(
+        &self,
+        guild_id: GuildId,
+        limit: usize,
+    ) -> Result<Vec<InternalMatchId>, DiscoveryPortError> {
+        MatchRecordingRepository::matches_missing_position_estimates(self, Some(guild_id.0), limit)
+            .map(|match_ids| match_ids.into_iter().map(InternalMatchId).collect())
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
 }
 
 impl<T: EnrichmentWritePort + ?Sized> EnrichmentWritePort for &T {
@@ -1406,6 +1424,14 @@ impl<T: EnrichmentWritePort + ?Sized> EnrichmentWritePort for &T {
         estimates: &[(i64, &str)],
     ) -> Result<usize, DiscoveryPortError> {
         (**self).store_estimated_positions(match_id, guild_id, estimates)
+    }
+
+    fn matches_needing_position_estimate(
+        &self,
+        guild_id: GuildId,
+        limit: usize,
+    ) -> Result<Vec<InternalMatchId>, DiscoveryPortError> {
+        (**self).matches_needing_position_estimate(guild_id, limit)
     }
 }
 
@@ -2025,6 +2051,56 @@ where
                 .filter_map(|index| failed_by_index.get(&index).copied())
                 .collect(),
         })
+    }
+}
+
+/// Outcome of one [`MatchEnrichmentService::backfill_estimated_positions`]
+/// call. `matches_found == limit` means more candidates likely remain —
+/// call again to continue the backfill.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PositionBackfillResult {
+    pub matches_found: usize,
+    pub matches_updated: usize,
+    pub positions_estimated: usize,
+}
+
+impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O>
+where
+    W: EnrichmentWritePort,
+{
+    /// Estimate and store positions for matches that already have OpenDota
+    /// enrichment data but predate position estimation, up to `limit`
+    /// matches per call. Safe to call repeatedly: matches with no
+    /// confidently-resolvable team are simply skipped again next time, and
+    /// re-estimating an already-estimated match just overwrites it with the
+    /// same result.
+    pub fn backfill_estimated_positions(
+        &self,
+        guild_id: GuildId,
+        limit: usize,
+    ) -> Result<PositionBackfillResult, DiscoveryPortError> {
+        let match_ids = self
+            .writer
+            .matches_needing_position_estimate(guild_id, limit)?;
+        let mut result = PositionBackfillResult {
+            matches_found: match_ids.len(),
+            ..PositionBackfillResult::default()
+        };
+        for match_id in match_ids {
+            let rows = self.writer.get_participant_farm_stats(match_id, guild_id)?;
+            let estimates = estimate_match_positions(&rows);
+            if estimates.is_empty() {
+                continue;
+            }
+            let stored = self
+                .writer
+                .store_estimated_positions(match_id, guild_id, &estimates)?;
+            if stored > 0 {
+                result.matches_updated += 1;
+                result.positions_estimated += stored;
+            }
+        }
+        Ok(result)
     }
 }
 

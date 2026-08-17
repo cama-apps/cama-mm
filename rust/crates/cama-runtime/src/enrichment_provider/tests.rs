@@ -437,6 +437,70 @@ fn seed_enriched_view_match(path: &std::path::Path) {
         .expect("insert MVP participant");
 }
 
+/// One match with two clean five-player teams already enriched with
+/// farm/lane data, but no `estimated_position` yet — a candidate for
+/// `/enrich backfill`'s position-estimate step.
+fn seed_position_backfill_candidate(path: &std::path::Path) {
+    let connection = Connection::open(path).expect("open backfill fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("production foreign-key mode");
+    let team: [i64; 5] = [0, 1, 2, 3, 4];
+    let last_hits = [220, 180, 140, 20, 25];
+    let lane_role = [1, 2, 3, 3, 1];
+    let obs_placed = [0, 0, 1, 2, 0];
+    let sen_placed = [0, 0, 0, 1, 1];
+    let radiant: Vec<i64> = team.iter().map(|offset| 900 + offset).collect();
+    let dire: Vec<i64> = team.iter().map(|offset| 910 + offset).collect();
+    for discord_id in radiant.iter().chain(&dire) {
+        connection
+            .execute(
+                "INSERT INTO players(discord_id,guild_id,discord_username)
+                 VALUES (?1,?2,'Backfill Candidate')",
+                params![discord_id, GUILD as i64],
+            )
+            .expect("insert backfill player");
+    }
+    connection
+        .execute(
+            "INSERT INTO matches(
+                 match_id,guild_id,team1_players,team2_players,winning_team,match_date
+             ) VALUES (8,?1,?2,?3,1,'2024-01-15 12:00:00')",
+            params![
+                GUILD as i64,
+                serde_json::to_string(&radiant).expect("serialize radiant roster"),
+                serde_json::to_string(&dire).expect("serialize dire roster"),
+            ],
+        )
+        .expect("insert backfill match");
+    for (ids, team_number, side, won) in [
+        (&radiant, 1_i64, "radiant", 1_i64),
+        (&dire, 2_i64, "dire", 0_i64),
+    ] {
+        for (index, discord_id) in ids.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO match_participants(
+                         match_id,discord_id,guild_id,team_number,won,side,
+                         lane_role,last_hits,obs_placed,sen_placed
+                     ) VALUES (8,?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    params![
+                        discord_id,
+                        GUILD as i64,
+                        team_number,
+                        won,
+                        side,
+                        lane_role[index],
+                        last_hits[index],
+                        obs_placed[index],
+                        sen_placed[index],
+                    ],
+                )
+                .expect("insert backfill participant");
+        }
+    }
+}
+
 fn seed_discovery_match(path: &std::path::Path) {
     let connection = Connection::open(path).expect("open discovery fixture");
     connection
@@ -1565,6 +1629,72 @@ async fn live_permissions_visibility_backfill_recent_and_atomic_wipe_match_pytho
         )
         .expect("wiped Wrapped facts");
     assert_eq!(facts, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guild_backfill_also_estimates_positions_for_already_enriched_matches() {
+    let (_directory, path) = migrated();
+    seed_position_backfill_candidate(&path);
+    let provider =
+        EnrichmentRegistrationProvider::new(&path, &application_config(), offline_services())
+            .expect("compose enrichment provider");
+    let registry = registry(&provider);
+
+    let backfill = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command("enrich", "backfill", Vec::new(), ADMIN, Some(GUILD), None),
+            backfill.clone(),
+        )
+        .await
+        .expect("guild backfill response");
+
+    let captured = backfill.captured.lock().expect("response capture");
+    assert_eq!(captured.deferred, [true]);
+    let content = &captured.followups[0].content;
+    assert!(content.contains("Steam ID backfill complete"));
+    assert!(content.contains("Position estimates:"));
+    assert!(content.contains("1 matches updated (10 positions) of 1 checked"));
+    drop(captured);
+
+    let connection = Connection::open(&path).expect("inspect backfill result");
+    let estimated: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM match_participants
+             WHERE match_id = 8 AND estimated_position IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count estimated positions");
+    assert_eq!(estimated, 10);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dm_backfill_skips_position_estimates_and_stays_global() {
+    let (_directory, path) = migrated();
+    seed_position_backfill_candidate(&path);
+    let provider =
+        EnrichmentRegistrationProvider::new(&path, &application_config(), offline_services())
+            .expect("compose enrichment provider");
+    let registry = registry(&provider);
+
+    let backfill = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command("enrich", "backfill", Vec::new(), ADMIN, None, None),
+            backfill.clone(),
+        )
+        .await
+        .expect("dm backfill response");
+
+    let captured = backfill.captured.lock().expect("response capture");
+    let content = &captured.followups[0].content;
+    assert!(content.contains("Steam ID backfill complete"));
+    assert!(!content.contains("Position estimates:"));
 }
 
 #[test]

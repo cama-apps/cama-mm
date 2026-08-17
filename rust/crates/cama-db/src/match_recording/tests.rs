@@ -1323,6 +1323,118 @@ fn test_farm_stats_round_trip_through_position_estimation() {
     assert_eq!(unmatched, 0);
 }
 
+fn minimal_lane_role_update(discord_id: i64) -> EnrichmentParticipantUpdate {
+    EnrichmentParticipantUpdate {
+        discord_id,
+        hero_id: None,
+        kills: None,
+        deaths: None,
+        assists: None,
+        gpm: None,
+        xpm: None,
+        hero_damage: None,
+        tower_damage: None,
+        last_hits: None,
+        denies: None,
+        net_worth: None,
+        hero_healing: None,
+        lane_role: Some(1),
+        lane_efficiency: None,
+        towers_killed: None,
+        roshans_killed: None,
+        teamfight_participation: None,
+        obs_placed: None,
+        sen_placed: None,
+        camps_stacked: None,
+        rune_pickups: None,
+        firstblood_claimed: None,
+        stuns: None,
+        fantasy_points: None,
+    }
+}
+
+fn enrich_with_lane_roles_only(fixture: &Fixture, match_id: i64, discord_ids: &[i64]) {
+    let updates = discord_ids
+        .iter()
+        .map(|discord_id| minimal_lane_role_update(*discord_id))
+        .collect::<Vec<_>>();
+    fixture
+        .repository
+        .apply_enrichment_atomic(MatchEnrichmentRequest {
+            match_id,
+            guild_id: Some(GUILD),
+            valve_match_id: 1,
+            duration_seconds: 1,
+            radiant_score: 0,
+            dire_score: 0,
+            game_mode: 0,
+            enrichment_data: None,
+            enrichment_source: Some("manual"),
+            enrichment_confidence: None,
+            participant_updates: &updates,
+            wrapped_facts: &[],
+        })
+        .expect("apply minimal enrichment");
+}
+
+#[test]
+fn test_matches_missing_position_estimates_finds_enriched_but_unestimated_matches() {
+    let fixture = Fixture::new();
+
+    // Match A: never enriched (lane_role stays NULL) -> excluded.
+    let (radiant_a, dire_a) = teams(37_001);
+    fixture.seed(&[radiant_a.clone(), dire_a.clone()].concat());
+    fixture
+        .repository
+        .record_match_atomic(standard(&radiant_a, &dire_a, TeamSide::Radiant))
+        .expect("record match A");
+
+    // Match B: enriched, but not yet estimated -> included.
+    let (radiant_b, dire_b) = teams(37_011);
+    fixture.seed(&[radiant_b.clone(), dire_b.clone()].concat());
+    let match_b = fixture
+        .repository
+        .record_match_atomic(standard(&radiant_b, &dire_b, TeamSide::Radiant))
+        .expect("record match B")
+        .match_id;
+    let all_b: Vec<i64> = [radiant_b, dire_b].concat();
+    enrich_with_lane_roles_only(&fixture, match_b, &all_b);
+
+    // Match C: enriched and already fully estimated -> excluded.
+    let (radiant_c, dire_c) = teams(37_021);
+    fixture.seed(&[radiant_c.clone(), dire_c.clone()].concat());
+    let match_c = fixture
+        .repository
+        .record_match_atomic(standard(&radiant_c, &dire_c, TeamSide::Radiant))
+        .expect("record match C")
+        .match_id;
+    let all_c: Vec<i64> = [radiant_c, dire_c].concat();
+    enrich_with_lane_roles_only(&fixture, match_c, &all_c);
+    let estimates_c: Vec<(i64, &str)> = all_c.iter().map(|discord_id| (*discord_id, "1")).collect();
+    fixture
+        .repository
+        .store_estimated_positions(match_c, Some(GUILD), &estimates_c)
+        .expect("estimate match C");
+
+    let missing = fixture
+        .repository
+        .matches_missing_position_estimates(Some(GUILD), 100)
+        .expect("read missing matches");
+    assert_eq!(missing, vec![match_b]);
+
+    let missing_other_guild = fixture
+        .repository
+        .matches_missing_position_estimates(Some(GUILD + 1), 100)
+        .expect("read missing matches for a different guild");
+    assert!(missing_other_guild.is_empty());
+
+    let missing_limited = fixture
+        .repository
+        .matches_missing_position_estimates(Some(GUILD), 0)
+        .expect("read missing matches with a zero limit");
+    assert!(missing_limited.is_empty());
+}
+
 #[test]
 fn test_position_win_rates_aggregates_across_matches_by_estimated_position() {
     let fixture = Fixture::new();

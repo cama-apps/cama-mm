@@ -694,6 +694,8 @@ struct RecordingWriter {
     writes: Arc<Mutex<Vec<EnrichmentWrite>>>,
     farm_stats: Arc<Mutex<Vec<PositionFarmRow>>>,
     stored_estimates: Arc<Mutex<Vec<(i64, String)>>>,
+    candidate_matches: Arc<Mutex<Vec<InternalMatchId>>>,
+    farm_stats_calls: Arc<Mutex<Vec<InternalMatchId>>>,
 }
 
 impl EnrichmentWritePort for RecordingWriter {
@@ -704,9 +706,13 @@ impl EnrichmentWritePort for RecordingWriter {
 
     fn get_participant_farm_stats(
         &self,
-        _match_id: InternalMatchId,
+        match_id: InternalMatchId,
         _guild_id: GuildId,
     ) -> Result<Vec<PositionFarmRow>, DiscoveryPortError> {
+        self.farm_stats_calls
+            .lock()
+            .expect("farm stats calls lock")
+            .push(match_id);
         Ok(self.farm_stats.lock().expect("farm stats lock").clone())
     }
 
@@ -723,6 +729,18 @@ impl EnrichmentWritePort for RecordingWriter {
                 .map(|(discord_id, position)| (*discord_id, (*position).to_owned())),
         );
         Ok(estimates.len())
+    }
+
+    fn matches_needing_position_estimate(
+        &self,
+        _guild_id: GuildId,
+        limit: usize,
+    ) -> Result<Vec<InternalMatchId>, DiscoveryPortError> {
+        let candidates = self
+            .candidate_matches
+            .lock()
+            .expect("candidate matches lock");
+        Ok(candidates.iter().take(limit).copied().collect())
     }
 }
 
@@ -1261,6 +1279,93 @@ fn test_enrich_match_position_estimate_failure_does_not_fail_enrichment() {
     let result = service.enrich_match(service_request());
 
     assert!(result.success);
+    assert_eq!(result.positions_estimated, 0);
+    assert!(
+        writer
+            .stored_estimates
+            .lock()
+            .expect("stored estimates lock")
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_backfill_estimated_positions_processes_every_candidate_match() {
+    let writer = RecordingWriter::default();
+    let farm_member =
+        |discord_id: i64, lane_role: i64, last_hits: i64, wards: i64| PositionFarmRow {
+            team_number: if discord_id <= 5 { 1 } else { 2 },
+            stats: ParticipantFarmStats {
+                discord_id,
+                lane_role: Some(lane_role),
+                last_hits: Some(last_hits),
+                net_worth: None,
+                gpm: None,
+                obs_placed: Some(wards),
+                sen_placed: Some(0),
+            },
+        };
+    *writer.farm_stats.lock().expect("farm stats lock") = vec![
+        farm_member(1, 1, 220, 0),
+        farm_member(2, 2, 180, 0),
+        farm_member(3, 3, 140, 1),
+        farm_member(4, 3, 20, 2),
+        farm_member(5, 1, 25, 0),
+        farm_member(6, 1, 220, 0),
+        farm_member(7, 2, 180, 0),
+        farm_member(8, 3, 140, 1),
+        farm_member(9, 3, 20, 2),
+        farm_member(10, 1, 25, 0),
+    ];
+    *writer
+        .candidate_matches
+        .lock()
+        .expect("candidate matches lock") = vec![InternalMatchId(1), InternalMatchId(2)];
+    let service = MatchEnrichmentService::new((), (), (), writer.clone(), None::<FakeOpenSkill>);
+
+    let result = service
+        .backfill_estimated_positions(GUILD, 10)
+        .expect("backfill succeeds");
+
+    assert_eq!(result.matches_found, 2);
+    assert_eq!(result.matches_updated, 2);
+    assert_eq!(result.positions_estimated, 20);
+    assert_eq!(
+        *writer
+            .farm_stats_calls
+            .lock()
+            .expect("farm stats calls lock"),
+        vec![InternalMatchId(1), InternalMatchId(2)]
+    );
+}
+
+#[test]
+fn test_backfill_estimated_positions_skips_matches_the_heuristic_cannot_resolve() {
+    let writer = RecordingWriter::default();
+    *writer.farm_stats.lock().expect("farm stats lock") = vec![PositionFarmRow {
+        team_number: 1,
+        stats: ParticipantFarmStats {
+            discord_id: 1,
+            lane_role: Some(1),
+            last_hits: Some(220),
+            net_worth: None,
+            gpm: None,
+            obs_placed: Some(0),
+            sen_placed: Some(0),
+        },
+    }];
+    *writer
+        .candidate_matches
+        .lock()
+        .expect("candidate matches lock") = vec![InternalMatchId(1)];
+    let service = MatchEnrichmentService::new((), (), (), writer.clone(), None::<FakeOpenSkill>);
+
+    let result = service
+        .backfill_estimated_positions(GUILD, 10)
+        .expect("backfill succeeds even when nothing resolves");
+
+    assert_eq!(result.matches_found, 1);
+    assert_eq!(result.matches_updated, 0);
     assert_eq!(result.positions_estimated, 0);
     assert!(
         writer

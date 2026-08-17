@@ -1330,6 +1330,34 @@ impl MatchRecordingRepository {
         Ok(updated)
     }
 
+    /// Match IDs with at least one enriched (`lane_role` populated)
+    /// participant that's still missing `estimated_position`, oldest first.
+    /// Used to backfill positions for matches enriched before position
+    /// estimation existed. Reprocessing a match that already has some
+    /// estimates is safe and idempotent — [`Self::store_estimated_positions`]
+    /// just overwrites them.
+    pub fn matches_missing_position_estimates(
+        &self,
+        guild_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<i64>, MatchRecordingRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT match_id
+             FROM match_participants
+             WHERE guild_id = ?1 AND lane_role IS NOT NULL AND estimated_position IS NULL
+             ORDER BY match_id
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![Self::normalize_guild_id(guild_id), limit as i64],
+                |row| row.get(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// A player's wins and losses at each estimated position ("1".."5"),
     /// ordered by position. Only matches with a stored `estimated_position`
     /// contribute — the same OpenDota-derived estimate consumed by
