@@ -2708,30 +2708,6 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
-        let signed_guild_id = guild_id.0;
-        let signed_user_id = command.user_id.0;
-        let curfew = self.state.curfew.clone();
-        let active_window = tokio::task::spawn_blocking(move || {
-            curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())
-        })
-        .await
-        .map_err(|error| format!("curfew lookup task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        if let Some(window) = active_window {
-            let general_timezone = self
-                .state
-                .curfew
-                .general_timezone(signed_user_id, signed_guild_id)
-                .unwrap_or(None);
-            return followup_ephemeral(
-                &responder,
-                &format!(
-                    "❌ You're inside your {} curfew window. Use `/player curfew remove` if you'd rather queue through it.",
-                    cama_domain::curfew::format_window(&window, general_timezone.as_deref())
-                ),
-            )
-            .await;
-        }
         let kind = selected_lobby_kind(&command.options).unwrap_or(LobbyKind::Open);
         let scope = LobbyScope::new(guild_id, kind);
         if self.state.service.get_lobby(scope).is_none() {
@@ -2863,6 +2839,38 @@ impl LobbyInteractionHandler {
             .map_err(InteractionHandlerError::from)
     }
 
+    /// Format the player's currently-active curfew window, if any, for
+    /// display. Shared by every join surface (`/lobby` auto-join, `/lobby
+    /// join`, and the sword-reaction join) so none of them can slip a player
+    /// into a lobby during their own curfew.
+    async fn active_curfew_window(
+        &self,
+        scope: LobbyScope,
+        player_id: AppUserId,
+    ) -> Result<Option<String>, InteractionHandlerError> {
+        let curfew = self.state.curfew.clone();
+        let signed_guild_id = scope.guild_id.0;
+        let signed_user_id = player_id.0;
+        let active_window = tokio::task::spawn_blocking(move || {
+            curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())
+        })
+        .await
+        .map_err(|error| format!("curfew lookup task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        let Some(window) = active_window else {
+            return Ok(None);
+        };
+        let general_timezone = self
+            .state
+            .curfew
+            .general_timezone(signed_user_id, signed_guild_id)
+            .unwrap_or(None);
+        Ok(Some(cama_domain::curfew::format_window(
+            &window,
+            general_timezone.as_deref(),
+        )))
+    }
+
     async fn join_registered_player(
         &self,
         scope: LobbyScope,
@@ -2876,6 +2884,16 @@ impl LobbyInteractionHandler {
                     "⚠️ Set your preferred roles with `/player roles` to auto-join.".to_owned(),
                 ),
                 rejection: None,
+                joined_at_ns: None,
+            });
+        }
+        if let Some(window_description) = self.active_curfew_window(scope, player_id).await? {
+            return Ok(JoinPresentation {
+                joined: false,
+                warning: Some(format!(
+                    "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
+                )),
+                rejection: Some(JoinRejection::Curfew(window_description)),
                 joined_at_ns: None,
             });
         }
@@ -3127,6 +3145,7 @@ enum JoinRejection {
     RatingTooHigh,
     InFlight,
     Suspended(LobbySuspension),
+    Curfew(String),
     Storage,
 }
 
@@ -3143,7 +3162,7 @@ fn lobby_command_auto_join_warning(
             "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
                 .to_owned(),
         ),
-        Some(JoinRejection::Suspended(_)) => presentation.warning.clone(),
+        Some(JoinRejection::Suspended(_) | JoinRejection::Curfew(_)) => presentation.warning.clone(),
         None => presentation.warning.clone(),
         Some(
             JoinRejection::PendingMatch(_)
@@ -3924,6 +3943,9 @@ fn raw_rejection_message(kind: LobbyKind, rejection: &JoinRejection) -> String {
         JoinRejection::Suspended(_) => {
             "You are temporarily restricted from this matchmaking lobby.".to_owned()
         }
+        JoinRejection::Curfew(window_description) => format!(
+            "You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
+        ),
         JoinRejection::Storage => {
             let _ = kind;
             "Could not join lobby.".to_owned()
