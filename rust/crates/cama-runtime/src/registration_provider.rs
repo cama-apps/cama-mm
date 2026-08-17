@@ -459,7 +459,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     ),
                     CommandOptionSpec::new(
                         "days",
-                        "Days this applies to, e.g. 'Sa,Su' or 'M T W Th F' — leave blank for every day",
+                        "Nights it starts, e.g. 'Sa,Su' — overnight spans run into the next morning; blank = every day",
                         CommandOptionKind::String,
                     ),
                 ],
