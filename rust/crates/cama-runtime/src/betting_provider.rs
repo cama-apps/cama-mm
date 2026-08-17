@@ -63,6 +63,7 @@ use cama_db::shop_runtime::{
 };
 use cama_db::tip_repository::TipRepository;
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
+use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
@@ -1268,6 +1269,79 @@ const WHEEL_MEDIA_UPLOAD_LIMIT: usize = 4 * 1024 * 1024;
 #[cfg(test)]
 const EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET: usize = 500_000;
 const MAX_WHEEL_LABEL_SPRITES: usize = 128;
+const MAX_CACHED_WHEEL_ATTACHMENTS: usize = 4;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CachedWheelValue {
+    Numeric(i64),
+    Mechanic(&'static str),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct WheelAttachmentCacheKey {
+    wedges: Vec<(String, CachedWheelValue, &'static str)>,
+    target_index: usize,
+    golden: bool,
+    display_name: Option<String>,
+}
+
+impl WheelAttachmentCacheKey {
+    fn new(
+        wedges: &[cama_app::wheel::WheelWedge],
+        target_index: usize,
+        golden: bool,
+        display_name: Option<&str>,
+    ) -> Self {
+        Self {
+            wedges: wedges
+                .iter()
+                .map(|wedge| {
+                    let value = match wedge.value {
+                        WheelValue::Numeric(value) => CachedWheelValue::Numeric(value),
+                        WheelValue::Mechanic(mechanic) => {
+                            CachedWheelValue::Mechanic(mechanic.code())
+                        }
+                    };
+                    (wedge.label.clone(), value, wedge.color)
+                })
+                .collect(),
+            target_index,
+            golden,
+            display_name: display_name.map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WheelAttachmentCache {
+    entries: BTreeMap<WheelAttachmentCacheKey, InteractionAttachment>,
+    order: VecDeque<WheelAttachmentCacheKey>,
+}
+
+impl WheelAttachmentCache {
+    fn get(&mut self, key: &WheelAttachmentCacheKey) -> Option<InteractionAttachment> {
+        let attachment = self.entries.get(key)?.clone();
+        if let Some(position) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.clone());
+        Some(attachment)
+    }
+
+    fn insert(&mut self, key: WheelAttachmentCacheKey, attachment: InteractionAttachment) {
+        if self.entries.contains_key(&key) {
+            if let Some(position) = self.order.iter().position(|candidate| candidate == &key) {
+                self.order.remove(position);
+            }
+        } else if self.entries.len() >= MAX_CACHED_WHEEL_ATTACHMENTS
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.entries.remove(&evicted);
+        }
+        self.entries.insert(key.clone(), attachment);
+        self.order.push_back(key);
+    }
+}
 
 fn wheel_frame_delay_ms(frame_index: usize) -> u64 {
     match frame_index {
@@ -1304,6 +1378,30 @@ fn gif_delay_centiseconds(milliseconds: u64) -> u16 {
 /// target wedge; this renderer only paints the already-resolved presentation,
 /// so it cannot influence money or outcome selection.
 fn render_wheel_attachment(
+    wedges: &[cama_app::wheel::WheelWedge],
+    target_index: usize,
+    golden: bool,
+    display_name: Option<&str>,
+) -> Result<InteractionAttachment, String> {
+    static CACHE: OnceLock<Mutex<WheelAttachmentCache>> = OnceLock::new();
+    let key = WheelAttachmentCacheKey::new(wedges, target_index, golden, display_name);
+    let cache = CACHE.get_or_init(|| Mutex::new(WheelAttachmentCache::default()));
+    if let Some(attachment) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return Ok(attachment);
+    }
+    let attachment = render_wheel_attachment_uncached(wedges, target_index, golden, display_name)?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, attachment.clone());
+    Ok(attachment)
+}
+
+fn render_wheel_attachment_uncached(
     wedges: &[cama_app::wheel::WheelWedge],
     target_index: usize,
     golden: bool,
@@ -1366,8 +1464,14 @@ fn render_wheel_attachment(
         encoder
             .set_repeat(Repeat::Finite(1))
             .map_err(|error| format!("wheel GIF repeat: {error}"))?;
-        let mut sprite_cache = WheelLabelSpriteCache::default();
-        let label_atlas = build_wheel_label_atlas(wedges, &mut sprite_cache);
+        let label_atlas = {
+            static SPRITES: OnceLock<Mutex<WheelLabelSpriteCache>> = OnceLock::new();
+            let mut sprite_cache = SPRITES
+                .get_or_init(|| Mutex::new(WheelLabelSpriteCache::default()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            build_wheel_label_atlas(wedges, &mut sprite_cache)
+        };
         for frame_index in 0..WHEEL_MEDIA_FRAME_COUNT {
             let mut pixels =
                 vec![0_u8; usize::from(WHEEL_MEDIA_SIZE) * usize::from(WHEEL_MEDIA_SIZE)];
@@ -1404,6 +1508,13 @@ fn render_wheel_attachment(
 /// animation is intentionally self-contained: Discord upload failures can
 /// fall back to the text response without touching the settled wallet state.
 fn render_explosion_attachment() -> Result<InteractionAttachment, String> {
+    static ATTACHMENT: OnceLock<Result<InteractionAttachment, String>> = OnceLock::new();
+    ATTACHMENT
+        .get_or_init(render_explosion_attachment_uncached)
+        .clone()
+}
+
+fn render_explosion_attachment_uncached() -> Result<InteractionAttachment, String> {
     let palette: &[[u8; 3]] = &[
         [5, 5, 10],
         [70, 8, 8],
@@ -1659,6 +1770,33 @@ fn build_wheel_label_atlas(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WheelPixelGeometry {
+    distance: f64,
+    angle: f64,
+}
+
+fn wheel_pixel_geometry() -> &'static [WheelPixelGeometry] {
+    static GEOMETRY: OnceLock<Vec<WheelPixelGeometry>> = OnceLock::new();
+    GEOMETRY.get_or_init(|| {
+        let size = i32::from(WHEEL_MEDIA_SIZE);
+        let center = size / 2;
+        let mut geometry = Vec::with_capacity(usize::from(WHEEL_MEDIA_SIZE).pow(2));
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x - center;
+                let dy = y - center;
+                geometry.push(WheelPixelGeometry {
+                    distance: ((dx * dx + dy * dy) as f64).sqrt(),
+                    angle: (f64::from(dx).atan2(f64::from(-dy)) + std::f64::consts::TAU)
+                        .rem_euclid(std::f64::consts::TAU),
+                });
+            }
+        }
+        geometry
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_wheel_frame(
     pixels: &mut [u8],
@@ -1686,64 +1824,50 @@ fn draw_wheel_frame(
         draw_terminal_status(pixels, frame_index, display_name);
     }
 
-    // Pillow paints several translucent glow rings. A palette GIF cannot
-    // preserve alpha here, so use thin, nested gold rings over the same dark
-    // background; the silhouette and spacing match the Python composition.
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x - center;
-            let dy = y - center;
-            let distance = ((dx * dx + dy * dy) as f64).sqrt();
+    let reveal_winner = frame_index == WHEEL_MEDIA_FRAME_COUNT.saturating_sub(1);
+    // Pixel distance and angle depend only on the fixed 500px canvas. Cache
+    // them once instead of recalculating sqrt/atan2 for every animation frame.
+    // The same pass also paints the outer glow rings before skipping pixels
+    // outside the wheel face.
+    for (index, geometry) in wheel_pixel_geometry().iter().enumerate() {
+        let distance = geometry.distance;
+        if distance > f64::from(radius) {
             if (f64::from(radius + 3)..=f64::from(radius + 4)).contains(&distance)
                 || (f64::from(radius + 8)..=f64::from(radius + 9)).contains(&distance)
                 || (f64::from(radius + 13)..=f64::from(radius + 14)).contains(&distance)
             {
-                pixels[usize::try_from(y * size + x).unwrap_or_default()] = 11;
+                pixels[index] = 11;
             }
+            continue;
         }
-    }
-
-    let reveal_winner = frame_index == WHEEL_MEDIA_FRAME_COUNT.saturating_sub(1);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x - center;
-            let dy = y - center;
-            let distance = ((dx * dx + dy * dy) as f64).sqrt();
-            let index = usize::try_from(y * size + x).unwrap_or_default();
-            if distance > f64::from(radius) {
-                continue;
-            }
-            if distance <= f64::from(inner_radius) {
-                pixels[index] = if distance >= f64::from(inner_radius - 4) {
-                    1
-                } else {
-                    3
-                };
-                continue;
-            }
-            if distance >= f64::from(radius - 2) {
-                pixels[index] = 5;
-                continue;
-            }
-            let angle = (f64::from(dx).atan2(f64::from(-dy)) + std::f64::consts::TAU)
-                .rem_euclid(std::f64::consts::TAU);
-            let rotated = (angle + rotation).rem_euclid(std::f64::consts::TAU);
-            let wedge = (rotated / slice).floor() as usize % wedge_count;
-            let from_boundary = (rotated % slice).min(slice - (rotated % slice));
-            if from_boundary * distance <= 1.25 {
-                pixels[index] = if reveal_winner && wedge == target_index {
-                    8
-                } else {
-                    5
-                };
-            } else if reveal_winner && wedge == target_index {
-                pixels[index] = bright_wedge_indices
-                    .get(wedge)
-                    .copied()
-                    .unwrap_or(wedge_indices[wedge]);
+        if distance <= f64::from(inner_radius) {
+            pixels[index] = if distance >= f64::from(inner_radius - 4) {
+                1
             } else {
-                pixels[index] = wedge_indices[wedge];
-            }
+                3
+            };
+            continue;
+        }
+        if distance >= f64::from(radius - 2) {
+            pixels[index] = 5;
+            continue;
+        }
+        let rotated = (geometry.angle + rotation).rem_euclid(std::f64::consts::TAU);
+        let wedge = (rotated / slice).floor() as usize % wedge_count;
+        let from_boundary = (rotated % slice).min(slice - (rotated % slice));
+        if from_boundary * distance <= 1.25 {
+            pixels[index] = if reveal_winner && wedge == target_index {
+                8
+            } else {
+                5
+            };
+        } else if reveal_winner && wedge == target_index {
+            pixels[index] = bright_wedge_indices
+                .get(wedge)
+                .copied()
+                .unwrap_or(wedge_indices[wedge]);
+        } else {
+            pixels[index] = wedge_indices[wedge];
         }
     }
     draw_wheel_labels(pixels, label_atlas, rotation);
@@ -3648,11 +3772,9 @@ impl BettingInteractionHandler {
             if rows.len() > 15 {
                 lines.push(format!("... +{} more", rows.len() - 15));
             }
-            embed = embed.field(
-                format!("{label} Bets ({})", rows.len()),
-                lines.join("\n"),
-                false,
-            );
+            for (name, value) in bounded_bet_team_fields(label, rows.len(), &lines) {
+                embed = embed.field(name, value, false);
+            }
         }
         let summary_name = if mode == BettingMode::Pool {
             "Pool Summary"
@@ -5832,6 +5954,43 @@ impl BettingInteractionHandler {
             now.saturating_duration_since(*oldest),
         ))
     }
+}
+
+fn bounded_bet_team_fields(
+    label: &str,
+    total_rows: usize,
+    lines: &[String],
+) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        let line = truncate_field(line, FIELD_VALUE_LIMIT);
+        let separator_chars = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && current.chars().count() + separator_chars + line.chars().count() > FIELD_VALUE_LIMIT
+        {
+            values.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(&line);
+    }
+    if !current.is_empty() {
+        values.push(current);
+    }
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let name = if index == 0 {
+                format!("{label} Bets ({total_rows})")
+            } else {
+                format!("{label} Bets (cont.)")
+            };
+            (name, value)
+        })
+        .collect()
 }
 
 /// Match Python's `int(retry_after)` response formatting: durations are

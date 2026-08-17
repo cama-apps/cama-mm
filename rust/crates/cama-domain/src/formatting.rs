@@ -595,8 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn python_round_decimals_matches_cpython_vectors() {
-        // Pinned against CPython round(value, n).
+    fn round_decimals_handles_binary_ties_and_precision() {
         let cases4 = [
             (0.96625_f64, 0.9663_f64),
             (0.94375, 0.9437),
@@ -612,7 +611,7 @@ mod tests {
                 "round({value}, 4)"
             );
         }
-        // rating uncertainty vectors: round(min(rd / 350 * 100, 100), 1)
+        // Rating uncertainty vectors: round(min(rd / 350 * 100, 100), 1).
         let cases1 = [
             (31.325_f64, 8.9_f64),
             (45.675, 13.1),

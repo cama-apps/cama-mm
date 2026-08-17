@@ -507,7 +507,8 @@ const fn activity_name(activity: PetActivity) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, mpsc};
+    use std::path::Path;
+    use std::sync::{Arc, OnceLock, mpsc};
     use std::thread;
 
     use cama_domain::pet::ADULT_AGE_SECONDS;
@@ -516,13 +517,30 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{PetEvolutionRepository, adoption_evolution_window};
+    use crate::test_support::FastTestDatabase;
 
     const T0: i64 = 1_800_000_000;
     const DAY: i64 = 86_400;
     const TEST_GUILD_ID: i64 = 987_654_321;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         repository: PetEvolutionRepository,
     }
 
@@ -551,11 +569,26 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
             let file = NamedTempFile::new().expect("create temporary SQLite file");
-            let connection = Connection::open(file.path()).expect("open temporary SQLite file");
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
+            std::fs::copy(Self::template().path(), file.path())
+                .expect("copy pet evolution schema template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create temporary SQLite template");
+                let connection =
+                    Connection::open(file.path()).expect("open temporary SQLite template");
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL;
                      CREATE TABLE pets (
                          pet_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                          discord_id             INTEGER NOT NULL,
@@ -600,9 +633,14 @@ mod tests {
                          ON pets(evolved_at, pet_id)
                          WHERE evolved_at IS NOT NULL
                            AND evolution_announced_at IS NULL;",
-                )
-                .expect("create Python-compatible pet evolution schema");
-            drop(connection);
+                    )
+                    .expect("create Python-compatible pet evolution schema template");
+                drop(connection);
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = PetEvolutionRepository::new(file.path());
             Self { file, repository }
         }
@@ -932,7 +970,7 @@ mod tests {
 
         #[test]
         fn test_activity_cannot_commit_between_score_snapshot_and_calling_claim() {
-            let fixture = Fixture::new();
+            let fixture = Fixture::new_durable();
             let due = T0 + 7 * DAY;
             let pet_id = fixture.insert_pet(PetSeed {
                 due,

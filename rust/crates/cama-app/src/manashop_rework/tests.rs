@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cama_db::manashop_rework_repository::{
     BuffData, DarkBargainStatus, GrantBuffRequest, ManashopRepository,
 };
+use rusqlite::{Connection, params};
 
 use super::*;
 
@@ -68,10 +69,9 @@ impl Fixture {
                      reason TEXT,
                      metadata TEXT
                  );";
-        run_python(
-            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.commit(); c.close()",
-            &[path.to_str().expect("UTF-8 fixture path"), schema],
-        );
+        Connection::open(&path)
+            .and_then(|connection| connection.execute_batch(schema))
+            .expect("initialize manashop fixture schema");
         Self {
             repository: ManashopRepository::new(&path),
             path,
@@ -83,15 +83,16 @@ impl Fixture {
     }
 
     fn register(&self, discord_id: i64, guild_id: i64, balance: i64) {
-        run_python(
-            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(int(sys.argv[2]),int(sys.argv[3]),'player',int(sys.argv[4]))); c.commit(); c.close()",
-            &[
-                self.path.to_str().expect("UTF-8 fixture path"),
-                &discord_id.to_string(),
-                &guild_id.to_string(),
-                &balance.to_string(),
-            ],
-        );
+        Connection::open(&self.path)
+            .and_then(|connection| {
+                connection.execute(
+                    "INSERT INTO players \
+                     (discord_id, guild_id, discord_username, jopacoin_balance) \
+                     VALUES (?1, ?2, 'player', ?3)",
+                    params![discord_id, guild_id, balance],
+                )
+            })
+            .expect("register manashop fixture player");
     }
 
     fn grant_raw(
@@ -127,16 +128,6 @@ impl Drop for Fixture {
             let _ = std::fs::remove_file(candidate);
         }
     }
-}
-
-fn run_python(script: &str, arguments: &[&str]) {
-    let status = crate::test_support::parity_python()
-        .arg("-c")
-        .arg(script)
-        .args(arguments)
-        .status()
-        .expect("run Python fixture helper");
-    assert!(status.success(), "Python fixture helper failed");
 }
 
 #[derive(Default)]

@@ -11,7 +11,6 @@ use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::pet_brawl_repository::PetBrawlRepository;
 use cama_db::pet_eating_repository::{EatAdultPetRequest, PetEatingRepository};
 use cama_db::pet_repository::PetRepository;
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::pet::{ADULT_AGE_SECONDS, EGG_HATCH_SECONDS, Pet};
 use rusqlite::{Connection, params};
@@ -22,6 +21,7 @@ use crate::discord_transport::DiscordAllowedMentions;
 use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 
 use super::*;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 70_701;
 const OTHER_GUILD: i64 = 70_702;

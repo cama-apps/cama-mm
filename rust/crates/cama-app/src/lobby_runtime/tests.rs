@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::readycheck_repository::ReadycheckRepository;
-use cama_db::schema_manager::initialize_or_migrate;
 use tempfile::NamedTempFile;
 use tokio::sync::Notify;
 

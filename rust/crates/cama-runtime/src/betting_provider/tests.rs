@@ -3,10 +3,11 @@ use cama_app::match_recording::GamesMilestone;
 use cama_db::core_repositories::NewPlayer;
 use cama_db::economy_event_repository::EconomyEventRepository;
 use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use std::io::Cursor;
 use tempfile::NamedTempFile;
+
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 #[derive(Default)]
 struct CompositionResponder;
@@ -36,6 +37,31 @@ fn invalid_leverage_tier_is_rejected_before_repository_work() {
     assert!(is_valid_leverage_tier(10));
     assert!(!is_valid_leverage_tier(4));
     assert!(!is_valid_leverage_tier(0));
+}
+
+#[test]
+fn bets_team_rows_split_at_discords_field_value_limit() {
+    let lines = (1..=15)
+        .map(|index| format!("Bettor #{index} • {}", "x".repeat(90)))
+        .collect::<Vec<_>>();
+
+    let fields = bounded_bet_team_fields("🔴 Dire", 15, &lines);
+
+    assert!(fields.len() > 1);
+    assert_eq!(fields[0].0, "🔴 Dire Bets (15)");
+    assert_eq!(fields[1].0, "🔴 Dire Bets (cont.)");
+    assert!(
+        fields
+            .iter()
+            .all(|(_, value)| value.chars().count() <= FIELD_VALUE_LIMIT)
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .flat_map(|(_, value)| value.lines())
+            .collect::<Vec<_>>(),
+        lines.iter().map(String::as_str).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1966,6 +1992,34 @@ fn wheel_label_sprite_cache_is_custom_safe_and_bounded() {
     assert!(cache.entries.len() <= MAX_WHEEL_LABEL_SPRITES);
     assert_eq!(cache.misses, wedges.len());
     assert!(atlas.sprites.len() > MAX_WHEEL_LABEL_SPRITES);
+}
+
+#[test]
+fn completed_wheel_attachment_cache_is_lru_bounded() {
+    let wedges = vec![cama_app::wheel::WheelWedge {
+        label: "CACHE".to_owned(),
+        value: WheelValue::Numeric(5),
+        color: "#123456",
+    }];
+    let keys = (0..=MAX_CACHED_WHEEL_ATTACHMENTS)
+        .map(|target_index| WheelAttachmentCacheKey::new(&wedges, target_index, false, None))
+        .collect::<Vec<_>>();
+    let mut cache = WheelAttachmentCache::default();
+    for (index, key) in keys.iter().cloned().enumerate() {
+        cache.insert(
+            key,
+            InteractionAttachment::bytes("wheel.gif", vec![index as u8]),
+        );
+    }
+    assert_eq!(cache.entries.len(), MAX_CACHED_WHEEL_ATTACHMENTS);
+    assert!(!cache.entries.contains_key(&keys[0]));
+    assert_eq!(
+        cache.get(keys.last().expect("latest cache key")),
+        Some(InteractionAttachment::bytes(
+            "wheel.gif",
+            vec![MAX_CACHED_WHEEL_ATTACHMENTS as u8],
+        ))
+    );
 }
 
 #[test]

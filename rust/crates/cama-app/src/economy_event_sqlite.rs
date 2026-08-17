@@ -419,10 +419,10 @@ fn db_effects(effects: &crate::economy_event_service::EconomyEventEffects) -> db
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::copy_migrated_database as initialize_or_migrate;
     use cama_db::economy_event_repository::{
         EconomyEventRepository, EventDirection, EventDraft, EventEffects,
     };
-    use cama_db::schema_manager::initialize_or_migrate;
     use tempfile::NamedTempFile;
 
     use super::{EconomyEventConfig, SqliteEconomyEventService};

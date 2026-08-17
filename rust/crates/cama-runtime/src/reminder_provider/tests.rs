@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use cama_app::reminders::ReminderClock;
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
@@ -10,6 +9,7 @@ use crate::discord_transport::{
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::registration::{InteractionResponseError, RegistryBuilder};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 use super::*;
 

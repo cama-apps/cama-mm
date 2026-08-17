@@ -7,7 +7,9 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use cama_app::dig_loot::{
@@ -19,7 +21,7 @@ use cama_app::dig_loot::{
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_splash::strengthen_dig_event_penalty;
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, MAIN_DB, OpenFlags, params};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
@@ -55,6 +57,7 @@ fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     )?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", false)?;
+    connection.pragma_update(None, "synchronous", "OFF")?;
     Ok(connection)
 }
 
@@ -72,24 +75,75 @@ const ACTOR: i64 = 81_001;
 const GUILD: i64 = 81_002;
 const NOW: i64 = 2_000_000_000;
 
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+static NEXT_FAST_DATABASE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn migrated_database_template() -> &'static NamedTempFile {
+    MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("temporary schema template");
+        cama_db::schema_manager::initialize_or_migrate(database.path())
+            .expect("canonical migrated schema template");
+        database
+    })
+}
+
+pub(crate) fn copy_migrated_database(path: &Path) -> std::io::Result<()> {
+    std::fs::copy(migrated_database_template().path(), path).map(|_| ())
+}
+
+pub(crate) struct FastTestDatabase {
+    path: PathBuf,
+    _keeper: Connection,
+}
+
+impl FastTestDatabase {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) fn fast_migrated_database() -> FastTestDatabase {
+    let id = NEXT_FAST_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+    let path = PathBuf::from(format!(
+        "file:cama-reward-audit-test-{}-{id}?mode=memory&cache=shared",
+        std::process::id()
+    ));
+    let mut keeper = Connection::open(&path).expect("open shared-memory audit database");
+    keeper
+        .restore(
+            MAIN_DB,
+            migrated_database_template().path(),
+            None::<fn(rusqlite::backup::Progress)>,
+        )
+        .expect("restore shared-memory audit database");
+    FastTestDatabase {
+        path,
+        _keeper: keeper,
+    }
+}
+
+pub mod test_support {
+    pub(crate) use super::{FastTestDatabase, copy_migrated_database, fast_migrated_database};
+}
+
+fn migrated_database() -> NamedTempFile {
+    let database = NamedTempFile::new().expect("temporary SQLite database");
+    copy_migrated_database(database.path()).expect("copy migrated schema template");
+    database
+}
+
 struct Fixture {
     database: NamedTempFile,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        cama_db::schema_manager::initialize_or_migrate(database.path())
-            .expect("canonical migrated schema");
+        let database = migrated_database();
         Self { database }
     }
 
     fn connection(&self) -> Connection {
-        let connection = Connection::open(self.database.path()).expect("fixture connection");
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .expect("disable legacy foreign keys");
-        connection
+        open_runtime_connection(self.database.path()).expect("fixture connection")
     }
 
     fn seed_player(&self, discord_id: i64, balance: i64) {

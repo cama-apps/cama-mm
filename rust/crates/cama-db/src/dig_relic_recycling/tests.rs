@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -260,62 +258,4 @@ fn signed_ids_and_none_guild_are_isolated() {
             .len(),
         1
     );
-}
-
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_relic_recycling_interop_smoke() {
-    let file = NamedTempFile::new().expect("interop database");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\nfrom repositories.dig_repository import DigRepository\np=sys.argv[1]; SchemaManager(p).initialize(); r=DigRepository(p)\nr.create_tunnel(-73001,0,'recycle-interop')\nids=[r.add_artifact(-73001,0,x,is_relic=True) for x in ('crystal_compass','obsidian_shield','mycelium_link')]\nopen(sys.argv[2],'w').write(','.join(map(str,ids)))",
-        ])
-        .arg(file.path())
-        .arg(format!("{}.ids", file.path().display()))
-        .output()
-        .expect("Python schema initialization");
-    assert!(
-        initialize.status.success(),
-        "Python init failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let ids_path = format!("{}.ids", file.path().display());
-    let ids = std::fs::read_to_string(&ids_path)
-        .expect("read row ids")
-        .split(',')
-        .map(|value| value.parse::<i64>().expect("numeric row id"))
-        .collect::<Vec<_>>();
-    DigRelicRecyclingRepository::new(file.path())
-        .atomic_recycle_relics(
-            RelicOwner {
-                discord_id: -73_001,
-                guild_id: None,
-            },
-            &ids,
-            "mole_claws",
-            1_786_051_200,
-        )
-        .expect("Rust recycle");
-    let verify = Command::new(python)
-        .current_dir(root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1]); rows=c.execute(\"SELECT artifact_id,found_at,is_relic,equipped FROM dig_artifacts WHERE discord_id=-73001 AND guild_id=0 ORDER BY id\").fetchall(); assert rows==[('mole_claws',1786051200,1,0)]; assert c.execute('PRAGMA quick_check').fetchone()[0]=='ok'; c.close()",
-        ])
-        .arg(file.path())
-        .output()
-        .expect("Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
-    let _ = std::fs::remove_file(ids_path);
 }

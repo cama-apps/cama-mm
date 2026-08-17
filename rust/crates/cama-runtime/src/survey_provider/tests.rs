@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use cama_db::schema_manager::initialize_or_migrate;
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 use super::*;
 

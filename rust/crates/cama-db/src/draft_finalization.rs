@@ -1593,8 +1593,7 @@ mod tests {
 
     fn fixture() -> NamedTempFile {
         let file = NamedTempFile::new().expect("create migrated fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("initialize migrated fixture");
+        crate::test_support::copy_migrated_database(file.path()).expect("copy migrated fixture");
         file
     }
 

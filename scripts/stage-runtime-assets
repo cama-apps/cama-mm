@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+stage_dir="$repository_root/.cama-build"
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/cama-runtime-assets.XXXXXX")
+cleanup() {
+  rm -rf "$temporary_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+for required_command in curl jq unzip; do
+  command -v "$required_command" >/dev/null 2>&1 || {
+    echo "$required_command is required to stage runtime assets" >&2
+    exit 69
+  }
+done
+
+metadata="$temporary_dir/dotabase.json"
+curl -fsSL https://pypi.org/pypi/dotabase/json -o "$metadata"
+dotabase_version=$(jq -er '.info.version' "$metadata")
+dotabase_url=$(jq -er --arg version "$dotabase_version" \
+  'first(.releases[$version][] | select(.packagetype == "sdist") | .url)' \
+  "$metadata")
+dotabase_sha=$(jq -er --arg version "$dotabase_version" \
+  'first(.releases[$version][] | select(.packagetype == "sdist") | .digests.sha256)' \
+  "$metadata")
+
+dotabase_archive="$temporary_dir/dotabase.tar.gz"
+curl -fsSL "$dotabase_url" -o "$dotabase_archive"
+printf '%s  %s\n' "$dotabase_sha" "$dotabase_archive" | sha256sum -c -
+dotabase_member=$(tar -tzf "$dotabase_archive" \
+  | awk '/\/dotabase\/dotabase[.]db$/ { print; exit }')
+case "$dotabase_member" in
+  ""|/*|*../*) echo "Dotabase archive has no safe database member" >&2; exit 65 ;;
+esac
+
+mkdir -p "$stage_dir/fonts"
+tar -xOf "$dotabase_archive" "$dotabase_member" >"$stage_dir/dotabase.db"
+printf '%s\n' "$dotabase_version" >"$stage_dir/dotabase.version"
+[ -s "$stage_dir/dotabase.db" ] || {
+  echo "staged Dotabase database is empty" >&2
+  exit 65
+}
+
+# These are data-only font bytes pinned to the renderer's checked-in hash
+# manifest. No package is installed and no interpreter is involved.
+font_archive="$temporary_dir/fonts.zip"
+curl -fsSL \
+  https://files.pythonhosted.org/packages/3e/f3/c5195b1ae57ef85339fd7285dfb603b22c8b4e79114bae5f4f0fcf688677/matplotlib-3.10.8-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+  -o "$font_archive"
+printf '%s  %s\n' \
+  3ab4aabc72de4ff77b3ec33a6d78a68227bf1123465887f9905ba79184a1cc04 \
+  "$font_archive" \
+  | sha256sum -c -
+for font in \
+  DejaVuSans.ttf \
+  DejaVuSans-Bold.ttf \
+  DejaVuSansMono.ttf \
+  DejaVuSansMono-Bold.ttf
+do
+  unzip -p "$font_archive" "matplotlib/mpl-data/fonts/ttf/$font" \
+    >"$stage_dir/fonts/$font"
+done
+unzip -p "$font_archive" matplotlib/mpl-data/fonts/ttf/LICENSE_DEJAVU \
+  >"$stage_dir/fonts/LICENSE_DEJAVU"
+(
+  cd "$stage_dir/fonts"
+  sha256sum -c "$repository_root/assets/fonts/dejavu.sha256"
+)
+
+echo "staged Dotabase $dotabase_version and verified renderer fonts"

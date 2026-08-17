@@ -1449,10 +1449,9 @@ mod tests {
     }
 
     #[test]
-    fn normal_cdf_matches_python_normaldist_exactly() {
-        // Pinned against CPython statistics.NormalDist().cdf. The former
-        // approximation drifted up to ~4e-8; the exact erf agrees to 1e-15,
-        // letting xtask's parity tolerance return to the strict default.
+    fn normal_cdf_matches_reference_values() {
+        // The former approximation drifted up to ~4e-8; the exact erf agrees
+        // with these reference values to 1e-15.
         let cases = [
             (0.0_f64, 0.5_f64),
             (0.1, 0.539_827_837_277_029),

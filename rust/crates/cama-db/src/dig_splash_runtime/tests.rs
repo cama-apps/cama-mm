@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 6_201;
 const ACTOR: i64 = 6_202;
@@ -17,7 +17,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary splash database");
-        initialize_or_migrate(database.path()).expect("canonical schema");
+        copy_migrated_database(database.path()).expect("canonical schema");
         Self { database }
     }
 

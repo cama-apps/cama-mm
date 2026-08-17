@@ -1,6 +1,5 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::{path::Path, process::Command};
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -488,85 +487,4 @@ fn forward_mutation_preserves_entry_metadata_and_changes_phase_atomically() {
     assert_eq!(entry.status.as_deref(), Some("phase1_defeated"));
     assert_eq!(entry.wager, PersistedWager::Integer(150));
     assert_eq!(entry.risk_tier.as_deref(), Some("reckless"));
-}
-
-/// Cross-language smoke: Python owns schema initialization and fixture
-/// insertion, Rust commits a guarded carry settlement, then Python verifies
-/// the JSON, balance, and ledger transaction.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_carry_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'carry-interop',2000))\nc.execute(\"INSERT INTO tunnels (discord_id,guild_id,depth,pinnacle_phase,boss_progress,tunnel_name) VALUES (?,?,?,?,?,?)\",(-70001,0,350,2,sys.argv[2],'interop'))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .arg(PINNACLE_CARRY)
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = DigCarryWagerRepository::new(database.path());
-    let interop_key = CarryTunnelKey {
-        discord_id: -70_001,
-        guild_id: None,
-    };
-    let snapshot = repository
-        .snapshot(interop_key)
-        .expect("read migrated database")
-        .expect("interop tunnel");
-    let outcome = repository
-        .settle_atomic(AtomicCarrySettlement {
-            key: interop_key,
-            expected_depth: snapshot.depth,
-            expected_pinnacle_phase: snapshot.pinnacle_phase,
-            expected_boss_progress: &snapshot.boss_progress,
-            depth_after: 347,
-            pinnacle_phase_after: 2,
-            requested_balance_delta: -100,
-            mutation: CarryProgressMutation::Clear {
-                boundary: 350,
-                status_after: None,
-            },
-            ledger_related_type: "boss_retreat",
-            ledger_related_id: "350",
-            ledger_reason: "forfeited half carried wager on retreat",
-            ledger_metadata: r#"{"boundary":350,"loss":3}"#,
-        })
-        .expect("Rust settlement");
-    assert!(matches!(
-        outcome,
-        CarrySettlementOutcome::Applied {
-            balance_after: 1_900,
-            actual_balance_delta: -100,
-            ..
-        }
-    ));
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\ndepth,raw=c.execute('SELECT depth,boss_progress FROM tunnels WHERE discord_id=-70001 AND guild_id=0').fetchone()\ne=json.loads(raw)['350']\nassert depth==347 and 'carried_wager' not in e and 'carried_risk_tier' not in e\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0').fetchone()[0]==1900\nassert c.execute(\"SELECT COUNT(*) FROM economy_ledger_entries WHERE account_id=-70001 AND source='dig' AND delta=-100\").fetchone()[0]==1\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()[0]==0\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

@@ -158,9 +158,8 @@ pub mod wrapped_repository;
 
 /// The ordered migration contract embedded in the Rust runtime.
 ///
-/// The initial manifest was exported from Python's
-/// `SchemaManager._get_migrations`; `xtask parity` continues to verify that
-/// historical bridge while it remains part of CI.
+/// The initial manifest was exported from the retired Python runtime. Rust now
+/// owns this manifest and validates it through its schema tests.
 pub const EXPECTED_MIGRATIONS_TEXT: &str = include_str!("../../../schema/expected_migrations.txt");
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -436,8 +435,8 @@ mod tests {
 
     fn assert_runtime_connection_reuses_schema_sqlite_configuration() {
         let file = NamedTempFile::new().expect("create runtime connection database");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("initialize runtime connection database");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy runtime connection database");
         let connection = open_runtime_connection(file.path()).expect("open runtime connection");
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -455,7 +454,7 @@ mod tests {
 
     fn compatible_database(extra_legacy_migration: bool) -> NamedTempFile {
         let file = NamedTempFile::new().expect("create temporary SQLite file");
-        let connection = Connection::open(file.path()).expect("open temporary SQLite database");
+        let mut connection = Connection::open(file.path()).expect("open temporary SQLite database");
         connection
             .execute_batch(
                 "
@@ -548,8 +547,11 @@ mod tests {
                 ",
             )
             .expect("create compatibility schema");
+        let transaction = connection
+            .transaction()
+            .expect("seed compatibility migration ledger");
         for migration in expected_migrations() {
-            connection
+            transaction
                 .execute(
                     "INSERT INTO schema_migrations(name) VALUES (?)",
                     [migration],
@@ -557,13 +559,16 @@ mod tests {
                 .expect("insert required migration");
         }
         if extra_legacy_migration {
-            connection
+            transaction
                 .execute(
                     "INSERT INTO schema_migrations(name) VALUES ('retired_legacy_migration')",
                     [],
                 )
                 .expect("insert historical migration");
         }
+        transaction
+            .commit()
+            .expect("commit compatibility migration ledger");
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .expect("checkpoint test database");

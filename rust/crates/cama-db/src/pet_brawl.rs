@@ -1202,7 +1202,8 @@ fn write_hunger_anchor(
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
-    use std::sync::{Arc, Barrier};
+    use std::path::Path;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use rusqlite::{Connection, OptionalExtension, params};
@@ -1212,14 +1213,29 @@ mod tests {
         BrawlSettlement, PetBrawlRepository, PetBrawlRepositoryError, SweepResult,
         read_living_hunger,
     };
+    use crate::test_support::FastTestDatabase;
 
     const GUILD_ID: i64 = 123_456;
     const NOW: i64 = 1_800_000_000;
     const DAY: i64 = 86_400;
     const DECAY: i64 = 20;
 
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        file: NamedTempFile,
+        database: FixtureDatabase,
         repository: PetBrawlRepository,
     }
 
@@ -1248,8 +1264,9 @@ mod tests {
         }
     }
 
-    impl Fixture {
-        fn new() -> Self {
+    fn fixture_database(durable: bool) -> FixtureDatabase {
+        static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+        let template = TEMPLATE.get_or_init(|| {
             let file = NamedTempFile::new().expect("create temporary SQLite database");
             let connection = Connection::open(file.path()).expect("open fixture database");
             connection
@@ -1402,12 +1419,36 @@ mod tests {
                 )
                 .expect("create Python-compatible pet-brawl schema");
             drop(connection);
-            let repository = PetBrawlRepository::new(file.path());
-            Self { file, repository }
+            file
+        });
+        if durable {
+            let file = NamedTempFile::new().expect("durable pet-brawl database");
+            std::fs::copy(template.path(), file.path()).expect("copy pet-brawl fixture template");
+            FixtureDatabase::Durable(file)
+        } else {
+            FixtureDatabase::Fast(FastTestDatabase::from_template(template.path()))
+        }
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::from_database(fixture_database(false))
+        }
+
+        fn durable() -> Self {
+            Self::from_database(fixture_database(true))
+        }
+
+        fn from_database(database: FixtureDatabase) -> Self {
+            let repository = PetBrawlRepository::new(database.path());
+            Self {
+                database,
+                repository,
+            }
         }
 
         fn connection(&self) -> Connection {
-            Connection::open(self.file.path()).expect("open fixture database")
+            Connection::open(self.database.path()).expect("open fixture database")
         }
 
         fn seed_player(&self, discord_id: i64, balance: i64) {
@@ -2462,7 +2503,7 @@ mod tests {
 
     #[test]
     fn invariant_concurrent_create_serializes_cross_role_guard() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::durable();
         let pet_a = fixture.insert_pet(100, PetSeed::default());
         fixture.insert_pet(200, PetSeed::default());
         let repository = Arc::new(fixture.repository.clone());

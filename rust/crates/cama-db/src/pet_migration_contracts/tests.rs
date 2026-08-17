@@ -608,12 +608,3 @@ fn test_reminder_preferences_pet_column() {
     .expect("columns");
     assert!(columns.contains_key("pet_enabled"));
 }
-
-#[test]
-#[ignore = "explicit read-only audit of a disposable Python-migrated database"]
-fn unmapped_python_migrated_database_pet_migration_contract_smoke() {
-    let path = std::env::var("CAMA_RUST_PET_MIGRATION_DB")
-        .expect("set CAMA_RUST_PET_MIGRATION_DB to a disposable migrated database");
-    let audit = audit_existing_schema(path).expect("audit Python-migrated schema");
-    assert!(audit.is_compatible(), "{audit:?}");
-}

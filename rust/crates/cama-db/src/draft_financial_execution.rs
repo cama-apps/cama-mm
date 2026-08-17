@@ -1703,14 +1703,29 @@ mod tests {
         DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DraftFinancialSetupPolicy,
     };
     use crate::draft_state::DraftStateRepository;
+    use crate::test_support::{FastTestDatabase, fast_migrated_database};
 
     const GUILD_ID: i64 = 42;
     const SHUFFLE_AT: i64 = 1_700_000_000;
     const LEASE_NOW: i64 = 100;
     const LEASE_UNTIL: i64 = 500;
 
+    enum FinancialTestDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FinancialTestDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct LinkedFixture {
-        _file: NamedTempFile,
+        _file: FinancialTestDatabase,
         path: PathBuf,
         repository: DraftFinalizationRepository,
         completion_key: String,
@@ -1844,7 +1859,7 @@ mod tests {
     }
 
     fn link_prepared_fixture(
-        file: NamedTempFile,
+        file: FinancialTestDatabase,
         payload: String,
         financial: DraftFinancialSetupPolicy,
     ) -> LinkedFixture {
@@ -1880,9 +1895,23 @@ mod tests {
     }
 
     fn linked_fixture(with_effects: bool) -> LinkedFixture {
+        linked_fixture_with_database(
+            FinancialTestDatabase::Fast(fast_migrated_database()),
+            with_effects,
+        )
+    }
+
+    fn durable_linked_fixture(with_effects: bool) -> LinkedFixture {
         let file = NamedTempFile::new().expect("create financial execution fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate financial execution fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy financial execution fixture");
+        linked_fixture_with_database(FinancialTestDatabase::Durable(file), with_effects)
+    }
+
+    fn linked_fixture_with_database(
+        file: FinancialTestDatabase,
+        with_effects: bool,
+    ) -> LinkedFixture {
         insert_players_and_financial_state(file.path(), with_effects);
         link_prepared_fixture(file, pending_payload(), policy(with_effects))
     }
@@ -1986,9 +2015,7 @@ mod tests {
 
     #[test]
     fn legacy_unmatched_shuffle_bets_seed_frozen_and_executed_odds() {
-        let file = NamedTempFile::new().expect("create legacy-odds fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate legacy-odds fixture");
+        let file = FinancialTestDatabase::Fast(fast_migrated_database());
         insert_players_and_financial_state(file.path(), true);
         let connection = Connection::open(file.path()).expect("open legacy-odds fixture");
         connection
@@ -2048,9 +2075,7 @@ mod tests {
 
     #[test]
     fn house_mode_reserves_bonus_without_funding_or_claiming_first_game_pools() {
-        let file = NamedTempFile::new().expect("create house financial fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate house financial fixture");
+        let file = FinancialTestDatabase::Fast(fast_migrated_database());
         insert_players_and_financial_state(file.path(), false);
         Connection::open(file.path())
             .expect("open house financial fixture")
@@ -2131,9 +2156,7 @@ mod tests {
 
     #[test]
     fn frozen_policy_skips_are_receipted_without_wallet_or_bet_mutation() {
-        let file = NamedTempFile::new().expect("create skipped-effect fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("migrate skipped-effect fixture");
+        let file = FinancialTestDatabase::Fast(fast_migrated_database());
         insert_players_and_financial_state(file.path(), false);
         let mut financial = policy(false);
         financial.auto_blind_enabled = true;
@@ -2343,7 +2366,7 @@ mod tests {
 
     #[test]
     fn concurrent_same_revision_execution_converges_on_one_commit_and_one_replay() {
-        let fixture = linked_fixture(true);
+        let fixture = durable_linked_fixture(true);
         let barrier = Arc::new(Barrier::new(3));
         let mut handles = Vec::new();
         for _ in 0..2 {
@@ -2544,8 +2567,7 @@ mod tests {
 
     #[test]
     fn missing_job_is_distinct_from_financial_conflict() {
-        let file = NamedTempFile::new().expect("create missing-job fixture");
-        crate::schema_manager::initialize_or_migrate(file.path()).expect("migrate missing fixture");
+        let file = FinancialTestDatabase::Fast(fast_migrated_database());
         assert!(matches!(
             run_leased_financial_setup(file.path(), "draft:42:999", 1, "worker", 100),
             Err(DraftFinancialExecutionError::JobNotFound { .. })

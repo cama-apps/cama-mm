@@ -1,25 +1,30 @@
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
 use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 9_001;
 
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     repository: MatchRecordingRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("temporary SQLite file");
-        let connection = Connection::open(file.path()).expect("open fixture database");
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode = WAL;
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file = NamedTempFile::new().expect("temporary SQLite template");
+            let connection = Connection::open(file.path()).expect("open fixture template");
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL;
                  PRAGMA foreign_keys = OFF;
                  CREATE TABLE players (
                      discord_id INTEGER NOT NULL,
@@ -173,9 +178,12 @@ impl Fixture {
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      UNIQUE(guild_id, player1_id, player2_id)
                  );",
-            )
-            .expect("create disposable match-recording schema");
-        drop(connection);
+                )
+                .expect("create disposable match-recording schema template");
+            drop(connection);
+            file
+        });
+        let file = FastTestDatabase::from_template(template.path());
         let repository = MatchRecordingRepository::new(file.path());
         Self { file, repository }
     }
@@ -185,16 +193,22 @@ impl Fixture {
     }
 
     fn seed(&self, ids: &[i64]) {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().expect("seed players transaction");
         for discord_id in ids {
-            self.repository
-                .add_player(
-                    *discord_id,
-                    Some(GUILD),
-                    &format!("Player{discord_id}"),
-                    1_500.0,
+            transaction
+                .execute(
+                    "INSERT INTO players (
+                         discord_id, guild_id, discord_username, wins, losses,
+                         glicko_rating, glicko_rd, glicko_volatility,
+                         jopacoin_balance, lowest_balance_ever, updated_at
+                     ) VALUES (?1, ?2, ?3, 0, 0, 1500.0, 350.0, 0.06, 3, 3,
+                               CURRENT_TIMESTAMP)",
+                    params![discord_id, GUILD, format!("Player{discord_id}")],
                 )
                 .expect("seed player");
         }
+        transaction.commit().expect("commit seeded players");
     }
 
     fn player(&self, discord_id: i64) -> PlayerRecord {

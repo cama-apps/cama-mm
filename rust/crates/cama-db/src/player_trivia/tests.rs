@@ -5,7 +5,7 @@ use std::thread;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 use super::*;
 
@@ -22,7 +22,7 @@ impl Fixture {
     fn migrated() -> Self {
         let directory = tempfile::tempdir().expect("temporary database directory");
         let path = directory.path().join("cama.db");
-        initialize_or_migrate(&path).expect("run Rust migration authority");
+        copy_migrated_database(&path).expect("copy canonical schema");
         let repository = PlayerTriviaRepository::new(&path);
         let fixture = Self {
             _directory: directory,

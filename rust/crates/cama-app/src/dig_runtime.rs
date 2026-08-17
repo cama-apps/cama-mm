@@ -1273,6 +1273,7 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
             pickaxe_tier: tunnel.pickaxe_tier,
             prestige_level: tunnel.prestige_level,
             luminosity: tunnel.luminosity,
+            hard_hat_charges: tunnel.hard_hat_charges,
             tunnel_name: tunnel.tunnel_name,
             route_state: tunnel.route_state,
         }))

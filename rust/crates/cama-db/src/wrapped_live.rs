@@ -588,7 +588,7 @@ impl WrappedLiveRepository {
 
 #[cfg(test)]
 mod tests {
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
     use rusqlite::Connection;
     use tempfile::NamedTempFile;
 
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn migrated_sqlite_projects_annual_summary_and_compact_enrichment() {
         let file = NamedTempFile::new().unwrap();
-        initialize_or_migrate(file.path()).unwrap();
+        copy_migrated_database(file.path()).unwrap();
         let connection = Connection::open(file.path()).unwrap();
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn player_aggregate_preserves_python_null_kda_semantics() {
         let file = NamedTempFile::new().unwrap();
-        initialize_or_migrate(file.path()).unwrap();
+        copy_migrated_database(file.path()).unwrap();
         let connection = Connection::open(file.path()).unwrap();
         connection
             .pragma_update(None, "foreign_keys", false)

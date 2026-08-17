@@ -1167,8 +1167,8 @@ impl TriviaRandom for SeededTriviaRandom {
 mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    use crate::test_support::initialize_test_database as initialize_or_migrate;
     use cama_app::trivia_questions::{AbilityData, Difficulty, HeroData, ItemData, TriviaQuestion};
-    use cama_db::schema_manager::initialize_or_migrate;
     use chrono::Timelike;
     use rusqlite::Connection;
     use tempfile::NamedTempFile;

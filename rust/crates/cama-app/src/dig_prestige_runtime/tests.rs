@@ -1,12 +1,11 @@
 use std::collections::BTreeSet;
 
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use serde_json::json;
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -112,7 +111,7 @@ fn capped_catalog_entry_changes_the_exact_python_sample_pool() {
 }
 
 #[test]
-fn different_users_and_levels_match_python_vectors() {
+fn different_users_and_levels_produce_stable_choices() {
     let pool = PRESTIGE_PERKS.into_iter().collect::<Vec<_>>();
     let first = prestige_perk_choices(&pool, 123, 5);
     let other_user = prestige_perk_choices(&pool, 456, 5);
@@ -438,13 +437,12 @@ impl PrestigeRelicEntropy for FixedRelicEntropy {
 }
 
 struct SqliteFixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
 }
 
 impl SqliteFixture {
     fn new(prestige_level: i64, perks: &[&str]) -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        initialize_or_migrate(database.path()).expect("canonical migrated schema");
+        let database = fast_migrated_database();
         let fixture = Self { database };
         let connection = fixture.connection();
         connection

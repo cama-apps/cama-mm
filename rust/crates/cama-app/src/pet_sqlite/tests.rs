@@ -1,7 +1,7 @@
 use super::*;
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::core_repositories::NewPlayer;
 use cama_db::pet_eating_repository::{EatAdultPetRequest, PetEatingRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::pet::{ADULT_AGE_SECONDS, EGG_HATCH_SECONDS, PetStage};
 use rusqlite::params;
 use tempfile::NamedTempFile;
