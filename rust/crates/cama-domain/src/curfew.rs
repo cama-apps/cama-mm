@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 
 pub const DEFAULT_TIMEZONE: &str = "America/New_York";
@@ -24,6 +24,75 @@ pub struct CurfewWindow {
     pub end_minute: u32,
     /// Overrides the player's general timezone if set.
     pub timezone: Option<String>,
+    /// Which days of the week this window applies to, as a bitmask (bit 0 =
+    /// Monday ... bit 6 = Sunday, see [`weekday_bit`]). `None` — the default,
+    /// and what every window had before this field existed — means every
+    /// day. For an overnight span the day picked is the *start* day: e.g.
+    /// selecting Friday on a 22:00-06:00 window covers Friday night through
+    /// Saturday morning, not Saturday night.
+    pub days: Option<u8>,
+}
+
+/// The bitmask flag for a single weekday (Monday = bit 0 ... Sunday = bit 6).
+#[must_use]
+pub fn weekday_bit(day: Weekday) -> u8 {
+    1 << day.num_days_from_monday()
+}
+
+const WEEKDAY_ABBREVIATIONS: [(Weekday, &str); 7] = [
+    (Weekday::Mon, "Mon"),
+    (Weekday::Tue, "Tue"),
+    (Weekday::Wed, "Wed"),
+    (Weekday::Thu, "Thu"),
+    (Weekday::Fri, "Fri"),
+    (Weekday::Sat, "Sat"),
+    (Weekday::Sun, "Sun"),
+];
+
+/// Parse a comma/space-separated list of day tokens (case-insensitive) into a
+/// weekday bitmask. Accepts the short forms M/T/W/Th/F/Sa/Su as well as
+/// ordinary 3-letter and full weekday names. Returns an error naming the bad
+/// token, or if no day was given at all.
+pub fn parse_weekdays(text: &str) -> Result<u8, String> {
+    let mut mask = 0u8;
+    for token in text
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let day = match token.to_lowercase().as_str() {
+            "m" | "mon" | "monday" => Weekday::Mon,
+            "t" | "tu" | "tue" | "tues" | "tuesday" => Weekday::Tue,
+            "w" | "wed" | "weds" | "wednesday" => Weekday::Wed,
+            "th" | "thu" | "thur" | "thurs" | "thursday" => Weekday::Thu,
+            "f" | "fri" | "friday" => Weekday::Fri,
+            "sa" | "sat" | "saturday" => Weekday::Sat,
+            "su" | "sun" | "sunday" => Weekday::Sun,
+            other => {
+                return Err(format!(
+                    "Unknown day '{other}'. Use M, T, W, Th, F, Sa, Su (or full names)."
+                ));
+            }
+        };
+        mask |= weekday_bit(day);
+    }
+    if mask == 0 {
+        return Err("Give at least one day, e.g. 'Sa,Su'.".to_owned());
+    }
+    Ok(mask)
+}
+
+/// Render a day-of-week bitmask for display, e.g. `"Mon, Wed, Fri"`. Returns
+/// `None` for an unset (every-day) mask so callers can omit the clause.
+#[must_use]
+pub fn format_days(days: Option<u8>) -> Option<String> {
+    let mask = days?;
+    let names: Vec<&str> = WEEKDAY_ABBREVIATIONS
+        .iter()
+        .filter(|(day, _)| mask & weekday_bit(*day) != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// Parse a 24-hour "HH:MM" string into (hour, minute). Returns `Err` on bad format.
@@ -87,12 +156,17 @@ pub fn is_within_window(
     if start_minutes == end_minutes {
         return false;
     }
+    let day_selected = |day: Weekday| window.days.is_none_or(|mask| mask & weekday_bit(day) != 0);
+    let today = moment.weekday();
     if start_minutes < end_minutes {
         // Same-day span, e.g. 09:00-17:00.
-        start_minutes <= minutes_now && minutes_now < end_minutes
+        day_selected(today) && start_minutes <= minutes_now && minutes_now < end_minutes
     } else {
-        // Overnight span, e.g. 22:00-06:00.
-        minutes_now >= start_minutes || minutes_now < end_minutes
+        // Overnight span, e.g. 22:00-06:00. The day picked is the *start*
+        // day: it covers from start_minutes through midnight, and its
+        // early-morning tail spills into the following calendar day.
+        (day_selected(today) && minutes_now >= start_minutes)
+            || (day_selected(today.pred()) && minutes_now < end_minutes)
     }
 }
 
@@ -125,7 +199,20 @@ pub fn format_window(window: &CurfewWindow, general_timezone: Option<&str>) -> S
     let start = format_clock(window.start_hour, window.start_minute);
     let end = format_clock(window.end_hour, window.end_minute);
     let tz_name = effective_timezone(window, general_timezone);
-    format!("\"{}\": {start} - {end} {tz_name}", window.name)
+    let mut rendered = format!("\"{}\": {start} - {end} {tz_name}", window.name);
+    if let Some(days) = format_days(window.days) {
+        // For an overnight span the selected day is the day it *starts*, and
+        // it runs into the following morning. Plain "on Sat" reads as "all day
+        // Saturday", so name the rule where it actually applies.
+        let start_minutes = window.start_hour * 60 + window.start_minute;
+        let end_minutes = window.end_hour * 60 + window.end_minute;
+        if start_minutes > end_minutes {
+            rendered.push_str(&format!(" starting {days} (runs into the next morning)"));
+        } else {
+            rendered.push_str(&format!(" on {days}"));
+        }
+    }
+    rendered
 }
 
 /// Return whether `timezone` is a real IANA zone name.

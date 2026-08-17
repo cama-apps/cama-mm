@@ -61,7 +61,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let window = service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
             .unwrap();
 
         assert_eq!(window.name, "work");
@@ -77,7 +77,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let window = service
-            .add_window(1, GUILD, "  work  ", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "  work  ", 9, 0, 17, 0, None, None)
             .unwrap();
 
         assert_eq!(window.name, "work");
@@ -89,7 +89,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "   ", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "   ", 9, 0, 17, 0, None, None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::EmptyName));
     }
@@ -101,7 +101,7 @@ mod add_window {
 
         let long_name = "x".repeat(41);
         let error = service
-            .add_window(1, GUILD, &long_name, 9, 0, 17, 0, None)
+            .add_window(1, GUILD, &long_name, 9, 0, 17, 0, None, None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::NameTooLong));
     }
@@ -112,7 +112,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 24, 0, 17, 0, None)
+            .add_window(1, GUILD, "work", 24, 0, 17, 0, None, None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::InvalidHour));
     }
@@ -123,7 +123,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 9, 0, 9, 0, None)
+            .add_window(1, GUILD, "work", 9, 0, 9, 0, None, None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::EqualStartAndEnd));
     }
@@ -134,7 +134,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, Some("Not/AZone"))
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, Some("Not/AZone"), None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::InvalidTimezone(_)));
     }
@@ -144,7 +144,7 @@ mod add_window {
         let (_dir, service, _repository) = fixture();
 
         let error = service
-            .add_window(999, GUILD, "work", 9, 0, 17, 0, None)
+            .add_window(999, GUILD, "work", 9, 0, 17, 0, None, None)
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::PlayerNotRegistered));
     }
@@ -154,11 +154,11 @@ mod add_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
             .unwrap();
 
         service
-            .add_window(1, GUILD, "work", 8, 0, 16, 0, None)
+            .add_window(1, GUILD, "work", 8, 0, 16, 0, None, None)
             .unwrap();
 
         let windows = repository.list_for_player(1, GUILD).unwrap();
@@ -175,7 +175,7 @@ mod remove_and_list_windows {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
             .unwrap();
 
         assert!(service.remove_window(1, GUILD, "work").unwrap());
@@ -193,10 +193,10 @@ mod remove_and_list_windows {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
             .unwrap();
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
             .unwrap();
 
         let names: std::collections::BTreeSet<String> = service
@@ -232,7 +232,7 @@ mod active_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
             .unwrap();
 
         let matched = service
@@ -247,7 +247,7 @@ mod active_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
             .unwrap();
 
         assert!(
@@ -269,7 +269,7 @@ mod active_window {
             )
             .unwrap();
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
             .unwrap();
         // 10:30pm JST is 1:30pm UTC.
         let utc_now = Utc.with_ymd_and_hms(2026, 1, 1, 13, 30, 0).unwrap();
@@ -368,6 +368,7 @@ mod sweep {
                 end_hour,
                 end_minute: 0,
                 timezone: Some("America/New_York".to_owned()),
+                days: None,
             })
             .unwrap();
     }

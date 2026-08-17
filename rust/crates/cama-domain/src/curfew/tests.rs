@@ -19,6 +19,21 @@ fn window(
         end_hour,
         end_minute,
         timezone: timezone.map(str::to_owned),
+        days: None,
+    }
+}
+
+fn window_on_days(
+    name: &str,
+    start_hour: u32,
+    start_minute: u32,
+    end_hour: u32,
+    end_minute: u32,
+    days: u8,
+) -> CurfewWindow {
+    CurfewWindow {
+        days: Some(days),
+        ..window(name, start_hour, start_minute, end_hour, end_minute, None)
     }
 }
 
@@ -105,6 +120,156 @@ mod is_within_window {
             .unwrap()
             .with_timezone(&Utc);
         assert!(is_within_window(&w, None, moment));
+    }
+}
+
+mod day_of_week {
+    use super::*;
+
+    // 2026-01-01 is a Thursday, 01-02 a Friday, 01-03 a Saturday, 01-04 a Sunday.
+
+    #[test]
+    fn test_same_day_span_active_on_selected_day() {
+        let w = window_on_days("work", 9, 0, 17, 0, weekday_bit(Weekday::Fri));
+        assert!(is_within_window(&w, None, ny(2026, 1, 2, 12, 0)));
+    }
+
+    #[test]
+    fn test_same_day_span_inactive_on_unselected_day() {
+        let w = window_on_days("work", 9, 0, 17, 0, weekday_bit(Weekday::Fri));
+        assert!(!is_within_window(&w, None, ny(2026, 1, 3, 12, 0)));
+    }
+
+    #[test]
+    fn test_overnight_span_active_from_start_day_evening() {
+        // Friday 22:00-06:00, picking only Friday.
+        let w = window_on_days("sleep", 22, 0, 6, 0, weekday_bit(Weekday::Fri));
+        assert!(is_within_window(&w, None, ny(2026, 1, 2, 23, 0)));
+    }
+
+    #[test]
+    fn test_overnight_span_active_into_next_calendar_day_morning() {
+        // The Friday-picked window's early-morning tail lands on Saturday.
+        let w = window_on_days("sleep", 22, 0, 6, 0, weekday_bit(Weekday::Fri));
+        assert!(is_within_window(&w, None, ny(2026, 1, 3, 3, 0)));
+    }
+
+    #[test]
+    fn test_overnight_span_inactive_the_evening_before_start_day() {
+        let w = window_on_days("sleep", 22, 0, 6, 0, weekday_bit(Weekday::Fri));
+        assert!(!is_within_window(&w, None, ny(2026, 1, 1, 23, 0)));
+    }
+
+    #[test]
+    fn test_overnight_span_inactive_the_evening_after_the_tail_day() {
+        // Saturday night is not covered by a window picked for Friday.
+        let w = window_on_days("sleep", 22, 0, 6, 0, weekday_bit(Weekday::Fri));
+        assert!(!is_within_window(&w, None, ny(2026, 1, 3, 23, 0)));
+    }
+
+    #[test]
+    fn test_none_days_matches_every_day() {
+        let w = window("sleep", 22, 0, 6, 0, None);
+        assert!(is_within_window(&w, None, ny(2026, 1, 1, 23, 0)));
+        assert!(is_within_window(&w, None, ny(2026, 1, 3, 23, 0)));
+    }
+}
+
+mod parse_weekdays_tests {
+    use super::*;
+
+    #[test]
+    fn test_parses_short_forms() {
+        assert_eq!(
+            parse_weekdays("M T W Th F Sa Su"),
+            Ok(weekday_bit(Weekday::Mon)
+                | weekday_bit(Weekday::Tue)
+                | weekday_bit(Weekday::Wed)
+                | weekday_bit(Weekday::Thu)
+                | weekday_bit(Weekday::Fri)
+                | weekday_bit(Weekday::Sat)
+                | weekday_bit(Weekday::Sun))
+        );
+    }
+
+    #[test]
+    fn test_accepts_comma_separated_and_mixed_case() {
+        assert_eq!(
+            parse_weekdays("sa,SU"),
+            Ok(weekday_bit(Weekday::Sat) | weekday_bit(Weekday::Sun))
+        );
+    }
+
+    #[test]
+    fn test_accepts_full_names() {
+        assert_eq!(
+            parse_weekdays("Monday, wednesday"),
+            Ok(weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Wed))
+        );
+    }
+
+    #[test]
+    fn test_duplicate_tokens_collapse() {
+        assert_eq!(parse_weekdays("M M"), Ok(weekday_bit(Weekday::Mon)));
+    }
+
+    #[test]
+    fn test_rejects_unknown_token() {
+        assert!(parse_weekdays("Blursday").is_err());
+    }
+
+    #[test]
+    fn test_rejects_empty_input() {
+        assert!(parse_weekdays("").is_err());
+        assert!(parse_weekdays("   ").is_err());
+    }
+}
+
+mod format_days_tests {
+    use super::*;
+
+    #[test]
+    fn test_none_renders_nothing() {
+        assert_eq!(format_days(None), None);
+    }
+
+    #[test]
+    fn test_renders_selected_days_in_week_order() {
+        let mask =
+            weekday_bit(Weekday::Sat) | weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Wed);
+        assert_eq!(format_days(Some(mask)), Some("Mon, Wed, Sat".to_owned()));
+    }
+
+    #[test]
+    fn test_format_window_names_the_start_day_for_an_overnight_span() {
+        let w = window_on_days(
+            "weekend",
+            22,
+            0,
+            6,
+            0,
+            weekday_bit(Weekday::Fri) | weekday_bit(Weekday::Sat),
+        );
+        assert_eq!(
+            format_window(&w, Some("America/New_York")),
+            "\"weekend\": 10:00 PM - 6:00 AM America/New_York starting Fri, Sat (runs into the next morning)"
+        );
+    }
+
+    #[test]
+    fn test_format_window_appends_plain_day_clause_for_a_same_day_span() {
+        let w = window_on_days(
+            "work",
+            9,
+            0,
+            17,
+            0,
+            weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Tue),
+        );
+        assert_eq!(
+            format_window(&w, Some("America/New_York")),
+            "\"work\": 9:00 AM - 5:00 PM America/New_York on Mon, Tue"
+        );
     }
 }
 

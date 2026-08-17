@@ -40,6 +40,7 @@ fn window(
         end_hour,
         end_minute: 0,
         timezone: None,
+        days: None,
     }
 }
 
@@ -184,4 +185,59 @@ fn test_player_exists() {
     insert_player(&dir.path().join("curfew.db"), 1, GUILD);
     assert!(repository.player_exists(1, GUILD).unwrap());
     assert!(!repository.player_exists(999, GUILD).unwrap());
+}
+
+#[test]
+fn test_days_round_trips_and_defaults_to_none() {
+    let (_dir, repository) = fixture();
+    repository
+        .add_or_replace(&window(1, GUILD, "work", 9, 17))
+        .unwrap();
+    let mut weekend = window(1, GUILD, "weekend_sleep", 22, 6);
+    weekend.days = Some(
+        cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
+            | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat),
+    );
+    repository.add_or_replace(&weekend).unwrap();
+
+    let windows = repository.list_for_player(1, GUILD).unwrap();
+    let work = windows.iter().find(|w| w.name == "work").unwrap();
+    assert_eq!(work.days, None);
+    let weekend = windows.iter().find(|w| w.name == "weekend_sleep").unwrap();
+    assert_eq!(
+        weekend.days,
+        Some(
+            cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
+                | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat)
+        )
+    );
+}
+
+#[test]
+fn test_out_of_range_day_mask_degrades_to_every_day_instead_of_truncating() {
+    let (directory, repository) = fixture();
+    let path = directory.path().join("curfew.db");
+    repository
+        .add_or_replace(&window(1, GUILD, "corrupt", 22, 6))
+        .unwrap();
+    // 256 truncates to 0 under `as u8` — a mask that matches no weekday, so
+    // the window would silently never fire again while still rendering like
+    // an every-day one. 0 is equally invalid.
+    for stored in [256_i64, 0, -1, 128] {
+        let connection = crate::open_runtime_connection(&path).expect("open");
+        connection
+            .execute(
+                "UPDATE player_curfew_windows SET days = ?1 WHERE discord_id = 1 AND name = 'corrupt'",
+                params![stored],
+            )
+            .expect("corrupt the mask");
+        drop(connection);
+
+        let windows = repository.list_for_player(1, GUILD).unwrap();
+        let corrupt = windows.iter().find(|w| w.name == "corrupt").unwrap();
+        assert_eq!(
+            corrupt.days, None,
+            "stored day mask {stored} should fall back to the every-day default"
+        );
+    }
 }
