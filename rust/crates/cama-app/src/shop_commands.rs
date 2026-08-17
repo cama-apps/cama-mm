@@ -22,9 +22,9 @@ pub const SHOP_JOPA_COIN_COST: i64 = 10_000;
 pub const SHOP_NEW_MYSTERY_GIFT_COST: i64 = 20_000;
 pub const SHOP_DOUBLE_OR_NOTHING_COST: i64 = 50;
 pub const SHOP_RECALIBRATE_COST: i64 = 300;
-pub const SHOP_SOFT_AVOID_COST: i64 = 750;
-pub const SOFT_AVOID_MIN_COST: i64 = 300;
-pub const SOFT_AVOID_WINRATE_COST_SCALE: i64 = 1_500;
+pub const SHOP_SOFT_AVOID_COST: i64 = 500;
+pub const SOFT_AVOID_MIN_COST: i64 = 250;
+pub const SOFT_AVOID_WINRATE_COST_SCALE: i64 = 1_000;
 pub const SOFT_AVOID_MIN_TEAMMATE_GAMES: i64 = 3;
 pub const SOFT_AVOID_GAMES: i64 = 10;
 pub const PACKAGE_DEAL_MAX_GAMES: i64 = 10;
@@ -587,9 +587,7 @@ pub fn item_autocomplete(
             value: "double_or_nothing",
         },
         OwnedChoice {
-            name: format!(
-                "Soft Avoid (dynamic, minimum {SOFT_AVOID_MIN_COST}, default {SHOP_SOFT_AVOID_COST} jopacoin for {SOFT_AVOID_GAMES} games)"
-            ),
+            name: soft_avoid_choice_name(SHOP_SOFT_AVOID_COST),
             value: "soft_avoid",
         },
         OwnedChoice {
@@ -847,6 +845,14 @@ pub fn recalibration_purchase(
         recalibrated: recalibration_succeeded,
         refund,
     }
+}
+
+#[must_use]
+pub fn soft_avoid_choice_name(configured_default: i64) -> String {
+    let default_cost = configured_default.max(SOFT_AVOID_MIN_COST);
+    format!(
+        "Soft Avoid ({default_cost} before {SOFT_AVOID_MIN_TEAMMATE_GAMES} shared games; {SOFT_AVOID_MIN_COST}-{SOFT_AVOID_WINRATE_COST_SCALE} by win rate; lasts {SOFT_AVOID_GAMES} games)"
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

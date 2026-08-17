@@ -357,6 +357,10 @@ pub struct BalancedShuffler {
     pub region_split_penalty: f64,
     role_assignment_provider: Arc<dyn RoleAssignmentProvider>,
     diagnostics: Arc<DiagnosticCounters>,
+    /// Uniformly selects among equally-scored ten-player matchups, mirroring
+    /// Python's `random.choice(best_matchups)`. Injectable so tests stay
+    /// deterministic; the default draws real entropy.
+    tie_breaker: Arc<dyn Fn(usize) -> usize + Send + Sync>,
 }
 
 impl Clone for BalancedShuffler {
@@ -381,6 +385,7 @@ impl Clone for BalancedShuffler {
             region_split_penalty: self.region_split_penalty,
             role_assignment_provider: Arc::clone(&self.role_assignment_provider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
+            tie_breaker: Arc::clone(&self.tie_breaker),
         }
     }
 }
@@ -394,9 +399,9 @@ impl Default for BalancedShuffler {
             use_jopacoin: false,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 500.0,
+            off_role_flat_penalty: 550.0,
             role_matchup_delta_weight: 0.17,
-            exclusion_penalty_weight: 70.0,
+            exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 230.0,
             soft_avoid_penalty: 160.0,
@@ -407,6 +412,13 @@ impl Default for BalancedShuffler {
             region_split_penalty: 500.0,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
+            tie_breaker: Arc::new(|count| {
+                if count <= 1 {
+                    0
+                } else {
+                    fastrand::usize(..count)
+                }
+            }),
         }
     }
 }
@@ -464,6 +476,17 @@ impl BalancedShuffler {
         provider: Arc<dyn RoleAssignmentProvider>,
     ) -> Self {
         self.role_assignment_provider = provider;
+        self
+    }
+
+    /// Replace the tied-matchup selector. Tests inject `|_| 0` to pin the
+    /// pre-randomization first-split behavior.
+    #[must_use]
+    pub fn with_tie_breaker(
+        mut self,
+        tie_breaker: Arc<dyn Fn(usize) -> usize + Send + Sync>,
+    ) -> Self {
+        self.tie_breaker = tie_breaker;
         self
     }
 
@@ -1108,7 +1131,11 @@ impl BalancedShuffler {
         let splits = unique_team_splits();
         let mut context = ScoringContext::default();
         let rd_priority = self.calculate_rd_priority(&refs);
-        let mut best: Option<(Team, Team)> = None;
+        // Python collects every matchup tied at the best score and picks one
+        // with `random.choice`, so equally-balanced pools do not produce the
+        // same teams on every shuffle. Mirror that instead of keeping the
+        // first minimal split.
+        let mut best_matchups: Vec<(Team, Team)> = Vec::new();
         let mut best_score = f64::INFINITY;
         for (team1_indices, team2_indices) in splits {
             let team1_refs = pick_refs(&refs, &team1_indices);
@@ -1131,10 +1158,17 @@ impl BalancedShuffler {
             )?;
             if scored.score < best_score {
                 best_score = scored.score;
-                best = Some((scored.team1, scored.team2));
+                best_matchups.clear();
+                best_matchups.push((scored.team1, scored.team2));
+            } else if scored.score == best_score {
+                best_matchups.push((scored.team1, scored.team2));
             }
         }
-        best.ok_or(ShufflerError::NoMatchupEvaluated)
+        if best_matchups.is_empty() {
+            return Err(ShufflerError::NoMatchupEvaluated);
+        }
+        let chosen = (self.tie_breaker)(best_matchups.len()).min(best_matchups.len() - 1);
+        Ok(best_matchups.swap_remove(chosen))
     }
 
     /// Score a Draft command's eight non-captain pool without materializing
@@ -2642,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_500_per_player() {
+    fn test_default_off_role_goodness_adds_550_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2678,7 +2712,7 @@ mod tests {
         let (_, _, score) =
             shuffler.score_unconstrained_metrics(&[team1_metrics], &[team2_metrics], 0.0);
 
-        assert_eq!(score, 1_000.0);
+        assert_eq!(score, 1_100.0);
     }
 
     #[test]
@@ -6107,8 +6141,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_weight_is_70() {
-        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 70.0);
+    fn test_default_weight_is_80() {
+        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 80.0);
     }
 
     #[test]
@@ -6545,5 +6579,40 @@ mod tests {
             .expect("early-exit beam");
         assert!(result.pool_score < 150.0);
         assert_eq!(shuffler.diagnostics().draft_pool_scores_evaluated, 1);
+    }
+
+    #[test]
+    fn test_tied_matchups_are_collected_and_selected_by_tie_breaker() {
+        // Ten identical players: every one of the 126 splits scores the same,
+        // so Python's `random.choice(best_matchups)` has 126 candidates. The
+        // injected selectors must therefore be able to produce different
+        // teams, proving ties are collected rather than first-split-wins.
+        let players: Vec<Player> = (0..10)
+            .map(|index| Player {
+                mmr: Some(1_500),
+                glicko_rating: Some(1_500.0),
+                preferred_roles: role_list(&["1", "2", "3", "4", "5"]),
+                ..Player::new(format!("Twin{index}"))
+            })
+            .collect();
+        let first = BalancedShuffler::default()
+            .with_tie_breaker(Arc::new(|_| 0))
+            .shuffle(&players)
+            .expect("first-tie shuffle");
+        let last = BalancedShuffler::default()
+            .with_tie_breaker(Arc::new(|count| count - 1))
+            .shuffle(&players)
+            .expect("last-tie shuffle");
+        let names = |team: &Team| -> Vec<String> {
+            team.players
+                .iter()
+                .map(|player| player.name.clone())
+                .collect()
+        };
+        assert_ne!(
+            names(&first.0),
+            names(&last.0),
+            "tie breaker index must select among distinct tied matchups"
+        );
     }
 }

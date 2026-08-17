@@ -1645,9 +1645,11 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
     assert!(sent.iter().any(|sent| {
         sent.channel_id == 9
             && sent.message.response.content == announcement
-            && sent.message.response.content.ends_with(
-                "Only players who confirmed ready will be included; everyone else will sit out.",
-            )
+            && sent
+                .message
+                .response
+                .content
+                .ends_with("You can `/shuffle` now; only ready players will be included.")
     }));
     assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")) .all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())
@@ -1961,5 +1963,76 @@ async fn test_join_allowed_when_curfew_service_unwired() {
         lobby_snapshot(&provider, LobbyKind::Open)
             .players
             .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player() {
+    // Regression test: a curfew kick must not just mutate in-memory lobby
+    // state, it must also re-render the lobby's live Discord embed —
+    // otherwise players still show up as queued even though they were
+    // actually removed. Mirrors Python's
+    // `_deliver_curfew_kick` -> `_sync_lobby_displays` pair.
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+        })
+        .expect("seed an always-active curfew window");
+
+    let edits_before = transport.edit_count();
+    let lobby = provider.live_lobby_service();
+    let kicks = provider.curfew_service().sweep(&lobby, &[42], now);
+    assert_eq!(kicks.len(), 1);
+    for kick in &kicks {
+        provider
+            .curfew_lobby_display()
+            .refresh_curfew_lobby(kick.guild_id, kick.lobby_kind)
+            .await
+            .expect("refresh lobby display after curfew kick");
+    }
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert!(
+        transport.edit_count() > edits_before,
+        "the lobby's Discord message must be edited after a curfew kick, not just mutated in memory"
     );
 }

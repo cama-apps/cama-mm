@@ -25,11 +25,11 @@ use cama_runtime::registration::InteractionResponseError;
 use cama_runtime::{
     AdminMatchCorrectionRuntime, AdminRegistrationProvider, AdminRuntimePorts,
     AdvancedStatsRegistrationProvider, ApplicationConfig, AskRegistrationProvider,
-    BlameLukeRegistrationProvider, CommandSpec, CompletedDatabaseAdmission, DatabaseAdmission,
-    DigBonusRuntime, DigRegistrationProvider, DiscordToken, DotaInfoRegistrationProvider,
-    DraftRegistrationProvider, DuelRegistrationProvider, EnrichmentRegistrationProvider,
-    GatewayEventObservers, GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks,
-    HealthReporter, InfoRegistrationProvider, InteractionAllowedMentions, InteractionHandler,
+    BlameLukeRegistrationProvider, CommandSpec, DigBonusRuntime, DigRegistrationProvider,
+    DiscordToken, DotaInfoRegistrationProvider, DraftRegistrationProvider,
+    DuelRegistrationProvider, EnrichmentRegistrationProvider, GatewayEventObservers,
+    GatewaySessionEnd, GatewayTransport, GlobalInteractionHooks, HealthReporter,
+    InfoRegistrationProvider, InteractionAllowedMentions, InteractionHandler,
     InteractionHandlerError, InteractionRequest, InteractionResponder, InteractionResponse,
     LifecycleEvent, LobbyRegistrationProvider, LobbyRuntimeConfig, MafiaRegistrationProvider,
     ManaRegistrationProvider, MatchRegistrationProvider, PetRegistrationProvider,
@@ -37,7 +37,7 @@ use cama_runtime::{
     PredictionRuntimePorts, ProfileRegistrationProvider, RatingAnalysisRegistrationProvider,
     RawReactionObservers, RegistryBuilder, ReminderRegistrationProvider, Runtime, RuntimeConfig,
     ScoutRegistrationProvider, SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider,
-    SqliteDatabaseAdmission, SurveyRegistrationProvider, TaxRegistrationProvider,
+    SqliteDatabaseInitializer, SurveyRegistrationProvider, TaxRegistrationProvider,
     TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
     WrappedRegistrationProvider, check_health, curfew_sweep_worker_spec, dig_weather_worker_spec,
     duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
@@ -492,13 +492,17 @@ async fn run_health_smoke_inner(path: PathBuf) -> Result<(), String> {
         })
         .map_err(|error| format!("could not register health-smoke command: {error}"))?;
     let responder = Arc::new(HealthSmokeResponder::default());
+    let database_initialization = SqliteDatabaseInitializer::default()
+        .initialize(&database_path)
+        .await
+        .map_err(|error| format!("could not initialize database schema: {error}"))?;
     let runtime = Runtime::new(
         config,
         registry.build(),
         HealthSmokeGateway {
             responder: Arc::clone(&responder),
         },
-        SqliteDatabaseAdmission::default(),
+        database_initialization,
     );
     let health_events = runtime.events().subscribe();
     let health_task = tokio::spawn(async move { health_reporter.run(health_events).await });
@@ -584,27 +588,26 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let database_admission = match SqliteDatabaseAdmission::with_migration_settings(
+    let database_initialization = match SqliteDatabaseInitializer::with_migration_settings(
         application_config.migration_settings(),
     )
-    .admit(&config.db_path)
+    .initialize(&config.db_path)
     .await
     {
         Ok(report) => report,
         Err(error) => {
-            error!(%error, "Rust database migration/admission refused startup");
+            error!(%error, "Rust database schema initialization refused startup");
             return ExitCode::from(1);
         }
     };
     info!(
-        db_path = %database_admission.path.display(),
-        applied_migrations = database_admission.applied_migrations,
-        required_migrations = database_admission.required_migrations,
-        newly_applied_migrations = database_admission.newly_applied_migrations,
-        created_tables = database_admission.created_tables,
-        rebuilt_tables = database_admission.rebuilt_tables,
-        historical_extra_migrations = database_admission.historical_extra_migrations,
-        "Rust database migration and compatibility admission complete"
+        db_path = %database_initialization.path.display(),
+        applied_migrations = database_initialization.applied_migrations,
+        required_migrations = database_initialization.required_migrations,
+        newly_applied_migrations = database_initialization.newly_applied_migrations,
+        created_tables = database_initialization.created_tables,
+        rebuilt_tables = database_initialization.rebuilt_tables,
+        "Rust database schema initialization and integrity check complete"
     );
 
     // Build the concrete OpenDota transport before any gateway connection.
@@ -1141,6 +1144,7 @@ async fn run_serve() -> ExitCode {
         lobby_provider.curfew_service(),
         lobby_provider.live_lobby_service(),
         discord_transport.clone(),
+        lobby_provider.curfew_lobby_display(),
         discord_transport.clone(),
     );
     let survey_recovery_worker = survey_provider.recovery_worker_spec();
@@ -1165,7 +1169,7 @@ async fn run_serve() -> ExitCode {
         config,
         registry,
         SerenityGateway::with_discord_transport(discord_transport),
-        CompletedDatabaseAdmission::new(database_admission),
+        database_initialization,
     )
     .with_gateway_event_observers(gateway_observers)
     .with_global_interaction_hooks(global_interaction_hooks)

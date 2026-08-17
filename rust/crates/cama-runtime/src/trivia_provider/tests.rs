@@ -524,6 +524,17 @@ async fn migrated_provider_runs_command_correct_answer_and_game_over_with_sqlite
         *command_responses.deferred.lock().expect("command deferral"),
         [false]
     );
+    let first_question_has_image = provider
+        .handler
+        .state
+        .sessions_lock()
+        .expect("first session")
+        .get(&(FLOW_USER, FLOW_GUILD))
+        .expect("active first question")
+        .current
+        .question
+        .image_url
+        .is_some();
     {
         let command_followups = command_responses
             .followups
@@ -531,7 +542,10 @@ async fn migrated_provider_runs_command_correct_answer_and_game_over_with_sqlite
             .expect("command follow-ups");
         assert_eq!(command_followups.len(), 1);
         assert_eq!(command_followups[0].components.len(), 2);
-        assert_eq!(command_followups[0].attachments.len(), 1);
+        assert_eq!(
+            command_followups[0].attachments.len(),
+            usize::from(first_question_has_image)
+        );
     }
 
     let first_correct = provider

@@ -164,6 +164,30 @@ pub enum InteractionRequest {
     },
 }
 
+/// Controls whether the Discord transport may acknowledge an interaction
+/// while its handler is still running.
+///
+/// Most component and modal-submit handlers use an automatic deferred update,
+/// matching discord.py's `safe_defer(..., thinking=False)` pattern. Buttons
+/// whose initial response must be a modal opt out because Discord rejects a
+/// modal after any other acknowledgement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InteractionAcknowledgementPolicy {
+    #[default]
+    Automatic,
+    Modal,
+}
+
+/// State of the one allowed initial Discord interaction response.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InteractionInitialResponseState {
+    #[default]
+    NotStarted,
+    Attempting,
+    Accepted,
+    Rejected,
+}
+
 impl InteractionRequest {
     #[must_use]
     pub fn root_name(&self) -> &str {
@@ -669,11 +693,21 @@ pub trait InteractionResponder: Send + Sync {
         ))
     }
 
-    /// Whether this interaction has already received its initial response.
-    /// Production responders update this only after Discord accepts the
-    /// response; test responders may override it to exercise global policy.
+    /// Whether an initial response has been attempted or accepted.
+    ///
+    /// Treating an in-flight or rejected attempt as done prevents a second
+    /// initial callback after Discord reports an expired interaction token.
     fn response_is_done(&self) -> bool {
         false
+    }
+
+    /// Detailed initial-response state used by shared failure recovery.
+    fn initial_response_state(&self) -> InteractionInitialResponseState {
+        if self.response_is_done() {
+            InteractionInitialResponseState::Accepted
+        } else {
+            InteractionInitialResponseState::NotStarted
+        }
     }
 
     async fn followup_with_receipt(
@@ -756,6 +790,17 @@ impl From<&str> for InteractionHandlerError {
 
 #[async_trait]
 pub trait InteractionHandler: Send + Sync {
+    /// Select the transport acknowledgement policy for this request.
+    ///
+    /// Override this only for component buttons that call `show_modal`; modal
+    /// submissions themselves should retain automatic acknowledgement.
+    fn acknowledgement_policy(
+        &self,
+        _request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        InteractionAcknowledgementPolicy::Automatic
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,

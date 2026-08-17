@@ -1,10 +1,11 @@
-//! SQLite migration authority, compatibility checks, and repositories for the
-//! Rust lift-and-shift runtime.
+//! SQLite schema initialization, integrity checks, and repositories for the
+//! Rust runtime.
 //!
-//! The Rust startup schema manager now owns migration during the runtime
-//! cutover. Repository connections still use the shared SQLite compatibility
-//! policy, and the audit proves that every declared migration has been applied.
-//! Historical ledger rows that are no longer declared remain tolerated.
+//! The startup schema manager owns creation and migration before repository
+//! construction. Repository connections use the canonical SQLite configuration,
+//! and the audit verifies database integrity plus the schema contract embedded
+//! in the running build. Historical ledger rows that are no longer declared
+//! remain tolerated.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -141,6 +142,8 @@ pub mod soft_avoid_repository;
 pub mod survey;
 #[path = "tax.rs"]
 pub mod tax_repository;
+#[cfg(test)]
+mod test_support;
 #[path = "tip.rs"]
 pub mod tip_repository;
 #[path = "trivia_commands.rs"]
@@ -153,9 +156,11 @@ pub mod wrapped_live;
 #[path = "wrapped.rs"]
 pub mod wrapped_repository;
 
-/// The migration names exported from Python's `SchemaManager._get_migrations`.
+/// The ordered migration contract embedded in the Rust runtime.
 ///
-/// `xtask parity` verifies this file against the Python source on every CI run.
+/// The initial manifest was exported from Python's
+/// `SchemaManager._get_migrations`; `xtask parity` continues to verify that
+/// historical bridge while it remains part of CI.
 pub const EXPECTED_MIGRATIONS_TEXT: &str = include_str!("../../../schema/expected_migrations.txt");
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -239,7 +244,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "wheel_spins",
 ];
 
-/// A non-mutating report describing whether Rust can safely consume a database.
+/// A non-mutating report of database integrity and the required Rust schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseAudit {
     pub path: PathBuf,
@@ -255,7 +260,7 @@ pub struct DatabaseAudit {
 }
 
 impl DatabaseAudit {
-    /// Whether the database matches the Python runtime's current storage contract.
+    /// Whether the database satisfies the Rust runtime's storage contract.
     #[must_use]
     pub fn is_compatible(&self) -> bool {
         self.quick_check.eq_ignore_ascii_case("ok")
@@ -266,7 +271,7 @@ impl DatabaseAudit {
             && self.missing_tables.is_empty()
     }
 
-    /// Human-readable incompatibilities suitable for a preflight log.
+    /// Human-readable integrity or schema issues suitable for startup logs.
     #[must_use]
     pub fn issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -283,7 +288,7 @@ impl DatabaseAudit {
             ));
         }
         if self.foreign_keys_enabled {
-            issues.push("foreign key enforcement is enabled, unlike Python".to_owned());
+            issues.push("foreign key enforcement is enabled, expected disabled".to_owned());
         }
         if self.user_version != 0 {
             issues.push(format!(
@@ -311,16 +316,15 @@ impl DatabaseAudit {
 pub enum AuditError {
     #[error("database path does not exist or is not a file: {0}")]
     MissingDatabase(PathBuf),
-    #[error("SQLite compatibility check failed: {0}")]
+    #[error("SQLite integrity/schema audit failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
 
 /// Open an existing database for normal repository reads and writes.
 ///
 /// Schema creation and migration are handled by the startup schema manager,
-/// never by repository construction. The explicit foreign-key pragma
-/// compensates for rusqlite's bundled SQLite default so repository behavior
-/// matches the former Python runtime (`OFF`).
+/// never by repository construction. The explicit foreign-key pragma enforces
+/// the canonical runtime setting (`OFF`) regardless of bundled SQLite defaults.
 pub(crate) fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,
@@ -343,7 +347,8 @@ pub fn expected_migrations() -> Vec<&'static str> {
         .collect()
 }
 
-/// Audit an existing SQLite database without performing logical writes.
+/// Audit an existing SQLite database for integrity and required schema state
+/// without performing logical writes.
 ///
 /// SQLite may still coordinate through an existing `-shm` sidecar when the
 /// database is in WAL mode. The database itself is opened with `READ_ONLY` and
@@ -359,9 +364,8 @@ pub fn audit_database(path: impl AsRef<Path>) -> Result<DatabaseAudit, AuditErro
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     connection.busy_timeout(Duration::from_secs(5))?;
-    // Bundled SQLite enables foreign keys by default at compile time, while
-    // Python's runtime intentionally leaves them disabled. This is a
-    // connection-local setting and does not mutate database contents.
+    // Enforce the canonical runtime setting despite bundled SQLite's default.
+    // This is connection-local and does not mutate database contents.
     connection.pragma_update(None, "foreign_keys", false)?;
     connection.pragma_update(None, "query_only", true)?;
     audit_connection(path, &connection)

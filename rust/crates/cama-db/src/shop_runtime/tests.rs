@@ -751,6 +751,7 @@ fn test_protection_guardian_halves_current_loss_and_spends_absorbed_capacity() {
             recipient_id: None,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -824,6 +825,7 @@ fn test_protection_aegis_capacity_reduces_both_sides_of_player_transfer() {
             recipient_id: Some(BUYER),
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -871,6 +873,7 @@ fn test_protection_aegis_capacity_reduces_both_sides_of_player_transfer() {
                 recipient_id: Some(BUYER),
                 clamp_to_balance: false,
                 min_balance: None,
+                protect_self: false,
                 metadata: json!({}),
                 occurred_at: NOW,
                 mana_date: "2033-05-18".to_owned(),
@@ -922,6 +925,7 @@ fn test_protection_shared_sanctuary_pool_is_consumed_by_caster_and_ally() {
         recipient_id: None,
         clamp_to_balance: false,
         min_balance: None,
+        protect_self: false,
         metadata: json!({}),
         occurred_at: NOW,
         mana_date: "2033-05-18".to_owned(),
@@ -1004,6 +1008,7 @@ fn test_protection_hostile_loss_batch_preserves_order_pools_destinations_and_fai
             recipient_id,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({"order": order}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -1208,6 +1213,7 @@ fn test_protection_reprieve_then_guardian_compound_in_documented_order() {
             recipient_id: None,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -1289,6 +1295,7 @@ fn test_protection_self_caused_loss_bypasses_shields_and_retro() {
             recipient_id: None,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -1315,6 +1322,40 @@ fn test_protection_self_caused_loss_bypasses_shields_and_retro() {
 }
 
 #[test]
+fn hostile_retry_rejects_a_changed_self_protection_semantic() {
+    let fixture = Fixture::new();
+    fixture.player(VICTIM, 100);
+    let request = HostileLossRequest {
+        victim_id: VICTIM,
+        guild_id: GUILD,
+        requested: 20,
+        kind: "wheel_loss".to_owned(),
+        actor_id: Some(VICTIM),
+        event_key: "wheel-loss:self-payload".to_owned(),
+        destination: HostileDestination::Reserve,
+        recipient_id: None,
+        clamp_to_balance: false,
+        min_balance: None,
+        protect_self: false,
+        metadata: json!({}),
+        occurred_at: NOW,
+        mana_date: "2033-05-18".to_owned(),
+    };
+    fixture
+        .repository
+        .apply_hostile_loss(&request)
+        .expect("initial self loss");
+    let changed_semantics = HostileLossRequest {
+        protect_self: true,
+        ..request
+    };
+    assert!(matches!(
+        fixture.repository.apply_hostile_loss(&changed_semantics),
+        Err(ShopRuntimeRepositoryError::EventPayloadConflict)
+    ));
+}
+
+#[test]
 fn test_protection_reprieve_retro_uses_rolling_pool_and_is_idempotent() {
     let fixture = Fixture::new();
     fixture.player(VICTIM, 100);
@@ -1331,6 +1372,7 @@ fn test_protection_reprieve_retro_uses_rolling_pool_and_is_idempotent() {
             recipient_id: None,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW - 100,
             mana_date: "2033-05-18".to_owned(),
@@ -1434,6 +1476,7 @@ fn test_protection_min_balance_short_circuits_before_spending_pool() {
             recipient_id: None,
             clamp_to_balance: true,
             min_balance: Some(50),
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -1570,6 +1613,7 @@ fn test_protection_is_guild_isolated() {
             recipient_id: None,
             clamp_to_balance: false,
             min_balance: None,
+            protect_self: false,
             metadata: json!({}),
             occurred_at: NOW,
             mana_date: "2033-05-18".to_owned(),
@@ -1637,6 +1681,7 @@ fn hostile_transfer_consumes_protection_once_and_attributes_both_ledger_sides() 
         recipient_id: Some(BUYER),
         clamp_to_balance: true,
         min_balance: Some(50),
+        protect_self: false,
         metadata: json!({"oracle": "python"}),
         occurred_at: NOW,
         mana_date: "2033-05-18".to_owned(),
@@ -1699,6 +1744,7 @@ fn hostile_batch_uses_per_request_savepoints_and_detects_conflicting_retry() {
         recipient_id: None,
         clamp_to_balance: true,
         min_balance: Some(50),
+        protect_self: false,
         metadata: json!({}),
         occurred_at: NOW,
         mana_date: "2033-05-18".to_owned(),
@@ -2144,6 +2190,7 @@ fn python_migrated_database_shop_runtime_interop_smoke() {
         recipient_id: Some(-77_001),
         clamp_to_balance: true,
         min_balance: Some(50),
+        protect_self: false,
         metadata: json!({}),
         occurred_at: NOW,
         mana_date: "2033-05-18".to_owned(),

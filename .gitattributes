@@ -1,0 +1,6 @@
+/rust/crates/cama-app/src/dig_*_catalog.json text eol=lf
+/rust/crates/cama-app/src/dig_assets/authored_asset_manifest.json text eol=lf
+/assets/pets/components/**/*.json text eol=lf
+/rust/crates/cama-app/tests/fixtures/**/*.json text eol=lf
+/rust/crates/cama-app/tests/fixtures/**/*.sql text eol=lf
+/rust/crates/cama-app/tests/fixtures/**/*.txt text eol=lf

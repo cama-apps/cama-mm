@@ -1167,10 +1167,10 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("{label} task failed: {error}"))?
-        .map_err(|error| format!("{label} failed: {error}"))
+    crate::ids::blocking(label, move || {
+        operation().map_err(|error| format!("{label} failed: {error}"))
+    })
+    .await
 }
 
 #[cfg(test)]

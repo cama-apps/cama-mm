@@ -18,6 +18,7 @@ use crate::open_runtime_connection;
 
 pub const PACKAGE_DEAL_MAX_GAMES: i64 = 10;
 pub const PACKAGE_DEAL_NO_ACTIVE_COST: i64 = 1;
+pub const PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS: i64 = 30;
 pub const SHOP_PACKAGE_DEAL_BASE_COST: i64 = 500;
 pub const SHOP_PACKAGE_DEAL_RATING_DIVISOR: f64 = 10.0;
 pub const DEFAULT_PACKAGE_DEAL_RATING: f64 = 1_500.0;
@@ -62,6 +63,18 @@ pub struct PackageDealPurchaseResult {
     pub deal: Option<PackageDeal>,
     pub cost: i64,
     pub active_deal_count: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageDealCancellationFailureReason {
+    NotFound,
+    Ineligible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageDealCancellationResult {
+    pub cancelled: bool,
+    pub reason: Option<PackageDealCancellationFailureReason>,
 }
 
 #[derive(Debug, Error)]
@@ -441,6 +454,75 @@ impl PackageDealRepository {
         Ok(connection.execute(&sql, params_from_iter(values))?)
     }
 
+    /// Cancel an active package deal owned by `buyer_id`.
+    pub fn cancel_deal(
+        &self,
+        guild_id: Option<i64>,
+        buyer_id: i64,
+        partner_id: i64,
+        now: i64,
+    ) -> Result<PackageDealCancellationResult, PackageDealRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let cutoff = now.saturating_sub(
+            PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS
+                .saturating_mul(24)
+                .saturating_mul(60)
+                .saturating_mul(60),
+        );
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deal = transaction
+            .query_row(
+                "SELECT pd.id, pd.updated_at,
+                        CASE
+                            WHEN target.discord_id IS NULL THEN 0
+                            WHEN COALESCE(
+                                CAST(strftime('%s', target.last_match_date) AS INTEGER),
+                                CAST(strftime('%s', target.created_at) AS INTEGER)
+                            ) <= ?1 THEN 1
+                            ELSE 0
+                        END AS target_inactive
+                 FROM package_deals AS pd
+                 LEFT JOIN players AS target
+                   ON target.guild_id = pd.guild_id
+                  AND target.discord_id = pd.partner_discord_id
+                 WHERE pd.guild_id = ?2
+                   AND pd.buyer_discord_id = ?3
+                   AND pd.partner_discord_id = ?4
+                   AND pd.games_remaining > 0",
+                params![cutoff, guild_id, buyer_id, partner_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((deal_id, updated_at, target_inactive)) = deal else {
+            transaction.commit()?;
+            return Ok(PackageDealCancellationResult {
+                cancelled: false,
+                reason: Some(PackageDealCancellationFailureReason::NotFound),
+            });
+        };
+        if !target_inactive || updated_at > cutoff {
+            transaction.commit()?;
+            return Ok(PackageDealCancellationResult {
+                cancelled: false,
+                reason: Some(PackageDealCancellationFailureReason::Ineligible),
+            });
+        }
+
+        transaction.execute("DELETE FROM package_deals WHERE id = ?1", params![deal_id])?;
+        transaction.commit()?;
+        Ok(PackageDealCancellationResult {
+            cancelled: true,
+            reason: None,
+        })
+    }
+
     /// Delete consumed rows while leaving the immutable purchase log intact.
     pub fn delete_expired_deals(
         &self,
@@ -603,9 +685,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        PACKAGE_DEAL_NO_ACTIVE_COST, PackageDealPurchaseFailureReason, PackageDealRepository,
-        PackageDealRepositoryError, SHOP_PACKAGE_DEAL_BASE_COST, SHOP_PACKAGE_DEAL_RATING_DIVISOR,
-        calculate_package_deal_cost,
+        PACKAGE_DEAL_NO_ACTIVE_COST, PackageDealCancellationFailureReason,
+        PackageDealPurchaseFailureReason, PackageDealRepository, PackageDealRepositoryError,
+        SHOP_PACKAGE_DEAL_BASE_COST, SHOP_PACKAGE_DEAL_RATING_DIVISOR, calculate_package_deal_cost,
     };
 
     const GUILD_ID: i64 = 123;
@@ -630,6 +712,8 @@ mod tests {
                          discord_username    TEXT NOT NULL,
                          jopacoin_balance     INTEGER DEFAULT 3,
                          lowest_balance_ever INTEGER,
+                         last_match_date     TIMESTAMP,
+                         created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                          updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                          PRIMARY KEY (discord_id, guild_id)
                      );
@@ -1136,6 +1220,248 @@ mod tests {
             .unwrap();
         assert_eq!(deals.len(), 1);
         assert_eq!(deals[0].partner_discord_id, 300);
+    }
+
+    #[test]
+    fn cancel_deal_at_thirty_day_inactivity_boundary_keeps_purchase_history() {
+        const NOW: i64 = 2_000_000_000;
+        const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
+        let cutoff = NOW - THIRTY_DAYS;
+        let fixture = Fixture::new();
+        fixture.seed_player(PARTNER_ID, GUILD_ID, 1_000);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players
+                 SET last_match_date = datetime(?1, 'unixepoch')
+                 WHERE discord_id = ?2 AND guild_id = ?3",
+                params![cutoff, PARTNER_ID, GUILD_ID],
+            )
+            .unwrap();
+        let deal = fixture
+            .repository
+            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 7, 1)
+            .unwrap();
+        fixture
+            .connection()
+            .execute(
+                "UPDATE package_deals SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![cutoff, deal.id],
+            )
+            .unwrap();
+
+        let result = fixture
+            .repository
+            .cancel_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, NOW)
+            .unwrap();
+
+        assert!(result.cancelled);
+        assert_eq!(result.reason, None);
+        assert!(
+            fixture
+                .repository
+                .get_user_deals(Some(GUILD_ID), BUYER_ID)
+                .unwrap()
+                .is_empty()
+        );
+        let purchases = fixture
+            .repository
+            .get_purchases_involving_player(Some(GUILD_ID), BUYER_ID, 0, i64::MAX)
+            .unwrap();
+        assert_eq!(
+            purchases
+                .iter()
+                .map(|purchase| (purchase.jc_spent, purchase.games_committed))
+                .collect::<Vec<_>>(),
+            vec![(1, 7)]
+        );
+    }
+
+    #[test]
+    fn cancel_deal_rejects_target_active_inside_thirty_days() {
+        const NOW: i64 = 2_000_000_000;
+        const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
+        let cutoff = NOW - THIRTY_DAYS;
+        let fixture = Fixture::new();
+        fixture.seed_player(PARTNER_ID, GUILD_ID, 1_000);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players
+                 SET last_match_date = datetime(?1, 'unixepoch')
+                 WHERE discord_id = ?2 AND guild_id = ?3",
+                params![cutoff + 1, PARTNER_ID, GUILD_ID],
+            )
+            .unwrap();
+        let deal = fixture
+            .repository
+            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 7, 1)
+            .unwrap();
+        fixture
+            .connection()
+            .execute(
+                "UPDATE package_deals SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![cutoff, deal.id],
+            )
+            .unwrap();
+
+        let result = fixture
+            .repository
+            .cancel_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, NOW)
+            .unwrap();
+
+        assert!(!result.cancelled);
+        assert_eq!(
+            result.reason,
+            Some(PackageDealCancellationFailureReason::Ineligible)
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_user_deals(Some(GUILD_ID), BUYER_ID)
+                .unwrap()
+                .iter()
+                .map(|active| active.id)
+                .collect::<Vec<_>>(),
+            vec![deal.id]
+        );
+    }
+
+    #[test]
+    fn cancel_deal_rejects_recent_deal_with_inactive_target() {
+        const NOW: i64 = 2_000_000_000;
+        const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
+        let cutoff = NOW - THIRTY_DAYS;
+        let fixture = Fixture::new();
+        fixture.seed_player(PARTNER_ID, GUILD_ID, 1_000);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players
+                 SET last_match_date = datetime(?1, 'unixepoch')
+                 WHERE discord_id = ?2 AND guild_id = ?3",
+                params![cutoff, PARTNER_ID, GUILD_ID],
+            )
+            .unwrap();
+        let deal = fixture
+            .repository
+            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 7, 1)
+            .unwrap();
+        fixture
+            .connection()
+            .execute(
+                "UPDATE package_deals SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![cutoff + 1, deal.id],
+            )
+            .unwrap();
+
+        let result = fixture
+            .repository
+            .cancel_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, NOW)
+            .unwrap();
+
+        assert!(!result.cancelled);
+        assert_eq!(
+            result.reason,
+            Some(PackageDealCancellationFailureReason::Ineligible)
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_user_deals(Some(GUILD_ID), BUYER_ID)
+                .unwrap()
+                .iter()
+                .map(|active| active.id)
+                .collect::<Vec<_>>(),
+            vec![deal.id]
+        );
+    }
+
+    #[test]
+    fn cancel_deal_uses_registration_time_when_target_has_not_played() {
+        const NOW: i64 = 2_000_000_000;
+        const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
+        let cutoff = NOW - THIRTY_DAYS;
+
+        for (registered_after_cutoff, expected_cancelled) in [(0, true), (1, false)] {
+            let fixture = Fixture::new();
+            fixture.seed_player(PARTNER_ID, GUILD_ID, 1_000);
+            fixture
+                .connection()
+                .execute(
+                    "UPDATE players
+                     SET last_match_date = NULL, created_at = datetime(?1, 'unixepoch')
+                     WHERE discord_id = ?2 AND guild_id = ?3",
+                    params![cutoff + registered_after_cutoff, PARTNER_ID, GUILD_ID],
+                )
+                .unwrap();
+            let deal = fixture
+                .repository
+                .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 7, 1)
+                .unwrap();
+            fixture
+                .connection()
+                .execute(
+                    "UPDATE package_deals SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                    params![cutoff, deal.id],
+                )
+                .unwrap();
+
+            let result = fixture
+                .repository
+                .cancel_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, NOW)
+                .unwrap();
+
+            assert_eq!(result.cancelled, expected_cancelled);
+            assert_eq!(
+                result.reason,
+                if expected_cancelled {
+                    None
+                } else {
+                    Some(PackageDealCancellationFailureReason::Ineligible)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_deal_rejects_missing_target_player_row() {
+        const NOW: i64 = 2_000_000_000;
+        const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
+        let cutoff = NOW - THIRTY_DAYS;
+        let fixture = Fixture::new();
+        let deal = fixture
+            .repository
+            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, 7, 1)
+            .unwrap();
+        fixture
+            .connection()
+            .execute(
+                "UPDATE package_deals SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![cutoff, deal.id],
+            )
+            .unwrap();
+
+        let result = fixture
+            .repository
+            .cancel_deal(Some(GUILD_ID), BUYER_ID, PARTNER_ID, NOW)
+            .unwrap();
+
+        assert!(!result.cancelled);
+        assert_eq!(
+            result.reason,
+            Some(PackageDealCancellationFailureReason::Ineligible)
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_user_deals(Some(GUILD_ID), BUYER_ID)
+                .unwrap()
+                .iter()
+                .map(|active| active.id)
+                .collect::<Vec<_>>(),
+            vec![deal.id]
+        );
     }
 
     #[test]

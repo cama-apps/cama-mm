@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  runtime-image:
+    # Ubuntu 24.04 emits binaries requiring GLIBC_2.39, newer than the Debian
+    # Bookworm runtime image. Build on 22.04 so the artifact runs on Bookworm.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TARGET_DIR: rust/target
+      RUST_RUNTIME_IMAGE: ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache compiler objects
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: rust-release
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Build release runtime
+        run: >-
+          cargo build --locked --manifest-path rust/Cargo.toml
+          --release --package cama-runtime --bin cama-rust
+
+      - name: Stage runtime binary
+        run: |
+          mkdir -p .cama-build
+          cp rust/target/release/cama-rust .cama-build/cama-rust
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Rust runtime image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile.rust
+          target: runtime-prebuilt
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=cama-rust-runtime
+          cache-to: type=gha,mode=max,scope=cama-rust-runtime
+
+      - name: Smoke published runtime image
+        run: |
+          docker pull "$RUST_RUNTIME_IMAGE"
+          docker run --rm "$RUST_RUNTIME_IMAGE" catalog-check

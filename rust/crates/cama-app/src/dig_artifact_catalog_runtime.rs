@@ -471,11 +471,11 @@ mod tests {
         .into_iter()
         .find(|path| path.is_file())
         .expect("artifact snapshot generator");
-        let output = std::process::Command::new("python3")
+        let output = crate::test_support::parity_python()
             .arg(script)
             .arg("--check")
             .output()
-            .expect("python3 is required for the artifact snapshot drift gate");
+            .expect("Python is required for the artifact snapshot drift gate");
         assert!(
             output.status.success(),
             "canonical Dig artifact snapshot is stale: {}",

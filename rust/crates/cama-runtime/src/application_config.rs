@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use cama_app::opendota_http::{OpenDotaHttpBuildError, OpenDotaRuntimeServices};
 use cama_app::service_container::ServiceContainerOptions;
+use cama_app::shop_commands::SHOP_SOFT_AVOID_COST;
 use cama_db::schema_manager::MigrationSettings;
 
 use crate::{DiscordToken, RuntimeConfig};
@@ -313,6 +314,35 @@ impl ApplicationConfig {
         Self::from_lookup(|name| env::var(name).ok())
     }
 
+    /// The env-configured Glicko system shared by every rating-mutating path.
+    ///
+    /// Python's module-level constants make its default-constructed
+    /// `CamaRatingSystem` env-configured; the Rust default bakes compile-time
+    /// constants, so production paths must construct through here or silently
+    /// ignore deployment overrides such as `MAX_RATING_SWING_PER_GAME`.
+    pub fn glicko_rating_system(
+        &self,
+    ) -> Result<cama_domain::rating::CamaRatingSystem, &'static str> {
+        use cama_domain::rating::{CamaRatingSystem, RatingConfig};
+        Ok(CamaRatingSystem::with_config(
+            self.values.initial_glicko_rd,
+            0.06,
+            RatingConfig {
+                calibration_rd_threshold: self.values.calibration_rd_threshold,
+                initial_rd: self.values.initial_glicko_rd,
+                max_rating_swing_per_game: self.values.max_rating_swing_per_game,
+                base_rating_delta_multiplier: self.values.base_rating_delta_multiplier,
+                max_rd_contraction_per_game: self.values.max_rd_contraction_per_game,
+                new_player_mmr_discount: self.migration.new_player_mmr_discount,
+                rd_decay_constant: self.values.rd_decay_constant,
+                rd_decay_grace_period_days: i32::try_from(self.values.rd_decay_grace_period_days)
+                    .map_err(|_| "RD_DECAY_GRACE_PERIOD_DAYS")?,
+                streak_threshold: self.values.streak_threshold,
+                streak_multiplier_per_game: self.values.streak_multiplier_per_game,
+            },
+        ))
+    }
+
     pub fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, crate::ConfigError> {
@@ -422,7 +452,7 @@ impl ApplicationConfig {
                 enrichment_min_player_match: p.i64("ENRICHMENT_MIN_PLAYER_MATCH", 10),
                 enrichment_retry_delays: p
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
-                exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 70.0),
+                exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 80.0),
                 first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 100),
                 gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
@@ -465,7 +495,7 @@ impl ApplicationConfig {
                 new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 5),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
                 off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 100.0),
-                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 500.0),
+                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 550.0),
                 off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.95),
                 openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
                 openskill_performance_strength: migration.openskill.performance_strength,
@@ -533,7 +563,7 @@ impl ApplicationConfig {
                 shop_package_deal_base_cost: p.i64("SHOP_PACKAGE_DEAL_BASE_COST", 500),
                 shop_package_deal_rating_divisor: p.f64("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0),
                 shop_recalibrate_cost: p.i64("SHOP_RECALIBRATE_COST", 300),
-                shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", 750),
+                shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", SHOP_SOFT_AVOID_COST),
                 soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 160.0),
                 streak_multiplier_per_game: migration.openskill.streak_multiplier_per_game,
                 streak_threshold: migration.streak_threshold,
@@ -774,9 +804,9 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::process::Command;
 
     use super::*;
+    use crate::test_support::parity_python;
 
     fn parse(values: &[(&str, &str)]) -> ApplicationConfig {
         let values = values
@@ -804,6 +834,12 @@ mod tests {
     }
 
     #[test]
+    fn soft_avoid_defaults_to_five_hundred() {
+        let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(config.values.shop_soft_avoid_cost, 500);
+    }
+
+    #[test]
     fn dota_match_rewards_ignore_environment_overrides() {
         let config = parse(&[
             ("DISCORD_BOT_TOKEN", "token"),
@@ -828,7 +864,7 @@ mod tests {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.new_player_exclusion_boost, 5);
         assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
-        assert_eq!(config.values.off_role_flat_penalty, 500.0);
+        assert_eq!(config.values.off_role_flat_penalty, 550.0);
         assert_eq!(config.values.soft_avoid_penalty, 160.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);
@@ -1005,8 +1041,8 @@ mod tests {
     fn catalog_has_exactly_one_entry_for_every_config_py_environment_key() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
         assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
-        let config_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let config_path = repository_root.join("config.py");
         let script = r#"
 import ast, pathlib, sys
 tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
@@ -1021,7 +1057,7 @@ for node in ast.walk(tree):
         keys.add(node.args[0].value)
 print('\n'.join(sorted(keys)))
 "#;
-        let output = Command::new("python3")
+        let output = parity_python(&repository_root)
             .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
             .output()
             .expect("Python is available to the Rust test suite");
@@ -1040,8 +1076,8 @@ print('\n'.join(sorted(keys)))
 
     #[test]
     fn every_catalog_key_is_consumed_by_a_typed_configuration_field() {
-        let config_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config.py");
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let config_path = repository_root.join("config.py");
         let script = r#"
 import ast, pathlib, sys
 tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
@@ -1084,7 +1120,7 @@ overrides.update({
 })
 print('\n'.join(f'{key}\t{value}' for key, value in sorted(overrides.items())))
 "#;
-        let output = Command::new("python3")
+        let output = parity_python(&repository_root)
             .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
             .output()
             .expect("Python is available to the Rust test suite");

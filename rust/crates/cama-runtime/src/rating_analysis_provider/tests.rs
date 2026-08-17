@@ -468,7 +468,12 @@ async fn migrated_sqlite_backfill_sends_start_first_and_persists_configured_seed
 fn production_backfill_without_reset_is_rejected_before_touching_sqlite() {
     let (_directory, path) = migrated();
     let mut port = ProductionMatchPort {
-        repository: RatingAnalysisRepository::new(&path, CamaOpenSkillSystem::new(), 500),
+        repository: RatingAnalysisRepository::new(
+            &path,
+            CamaOpenSkillSystem::new(),
+            cama_domain::rating::CamaRatingSystem::default(),
+            500,
+        ),
         history: Vec::new(),
     };
     let error = port

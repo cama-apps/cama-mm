@@ -1,7 +1,7 @@
 //! Existing-schema persistence for reminder preferences and one-shot lobby watches.
 //!
 //! Repository construction never creates or migrates schema. The runtime's
-//! database admission owns migration before this adapter is published.
+//! database initialization owns migration before this adapter is published.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

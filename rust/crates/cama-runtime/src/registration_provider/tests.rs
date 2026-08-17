@@ -414,6 +414,8 @@ fn config() -> PlayerRegistrationConfig {
         lobby_ready_cooldown: Duration::from_secs(60),
         lobby_channel_id: None,
         low_skill_lobby_channel_id: None,
+        rating_system: cama_domain::rating::CamaRatingSystem::default(),
+        openskill: cama_domain::openskill::CamaOpenSkillSystem::default(),
     }
 }
 
@@ -1884,8 +1886,7 @@ async fn exact_threshold_sends_one_python_ready_embed_instead_of_a_rally() {
         Some("All You Can Feed now has 10 players!")
     );
     assert!(response.embeds[0].fields.iter().any(|field| {
-        field.name == "Next Step"
-            && field.value == "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+        field.name == "Next Step" && field.value == "Run `/readycheck` before `/shuffle`."
     }));
     assert!(
         response.embeds[0].fields.iter().any(|field| {
@@ -2156,7 +2157,7 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
         .handle(
             InteractionRequest::Component {
                 interaction_id: 502,
-                custom_id: button_id,
+                custom_id: button_id.clone(),
                 user_id: 400,
                 user_display_name: "Registration Player 400".to_owned(),
                 guild_id: Some(42),
@@ -2167,9 +2168,35 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
             blocked.clone(),
         )
         .await
+        .expect("retry exhaustion modal");
+    let blocked_modal_id = blocked.captured.lock().expect("blocked modal").modals[0]
+        .custom_id
+        .clone();
+    let blocked_submit = Arc::new(CapturingResponder::default());
+    registry(&restarted)
+        .component_handler(&blocked_modal_id)
+        .expect("blocked modal handler")
+        .handle(
+            InteractionRequest::Modal {
+                interaction_id: 503,
+                custom_id: blocked_modal_id,
+                user_id: 400,
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                fields: BTreeMap::from([("mmr".to_owned(), "4000".to_owned())]),
+            },
+            blocked_submit.clone(),
+        )
+        .await
         .expect("retry exhaustion response");
     assert_eq!(
-        blocked.captured.lock().expect("blocked response").immediate[0].content,
+        blocked_submit
+            .captured
+            .lock()
+            .expect("blocked response")
+            .immediate[0]
+            .content,
         "❌ Invalid MMR"
     );
     assert_eq!(
@@ -2211,9 +2238,35 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
             expired.clone(),
         )
         .await
+        .expect("expired prompt modal");
+    let expired_modal_id = expired.captured.lock().expect("expired modal").modals[0]
+        .custom_id
+        .clone();
+    let expired_submit = Arc::new(CapturingResponder::default());
+    registry(&restarted)
+        .component_handler(&expired_modal_id)
+        .expect("expired modal handler")
+        .handle(
+            InteractionRequest::Modal {
+                interaction_id: 602,
+                custom_id: expired_modal_id,
+                user_id: 401,
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                fields: BTreeMap::from([("mmr".to_owned(), "4000".to_owned())]),
+            },
+            expired_submit.clone(),
+        )
+        .await
         .expect("expired prompt response");
     assert_eq!(
-        expired.captured.lock().expect("expired response").immediate[0].content,
+        expired_submit
+            .captured
+            .lock()
+            .expect("expired response")
+            .immediate[0]
+            .content,
         "❌ Invalid MMR"
     );
 }

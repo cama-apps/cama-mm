@@ -237,6 +237,7 @@ Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 - `/shop pingedash` / `/shop pingedkevin` — Paid pings of the configured targets, each on an independent 24-hour cooldown
 - `/shop avoids` — View your active soft avoids
 - `/shop deals` — View your active package deals
+- `/shop cancel-deal target:@player` — Cancel a package deal after both the target and deal have been inactive for 30 days (no refund)
 - `/shop mana` — Spend mana on color-exclusive items
 
 ### Predictions — `/predict`
@@ -376,7 +377,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 **Rating:**
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
   value adjustments (defaults: 0.95 and 100)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 500)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 550)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
 **Trivia:**

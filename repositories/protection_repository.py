@@ -224,6 +224,7 @@ class ProtectionRepository(BaseRepository):
         recipient_id: int | None,
         clamp_to_balance: bool,
         min_balance: int | None,
+        protect_self: bool,
         metadata: dict,
         occurred_at: int,
         mana_date: str,
@@ -244,6 +245,7 @@ class ProtectionRepository(BaseRepository):
                 recipient_id=recipient_id,
                 clamp_to_balance=clamp_to_balance,
                 min_balance=min_balance,
+                protect_self=protect_self,
                 metadata=metadata,
                 occurred_at=occurred_at,
                 mana_date=mana_date,
@@ -300,6 +302,7 @@ class ProtectionRepository(BaseRepository):
         recipient_id: int | None,
         clamp_to_balance: bool,
         min_balance: int | None,
+        protect_self: bool,
         metadata: dict,
         occurred_at: int,
         mana_date: str,
@@ -318,6 +321,7 @@ class ProtectionRepository(BaseRepository):
                 destination.value,
                 actor_id,
                 recipient_id,
+                int(protect_self or actor_id != victim_id),
             )
             actual = (
                 int(existing["requested"]),
@@ -325,6 +329,7 @@ class ProtectionRepository(BaseRepository):
                 existing["destination"],
                 existing["actor_id"],
                 existing["recipient_id"],
+                int(existing["shieldable"]),
             )
             if actual != expected:
                 raise ValueError("event_key already exists with a different payload")
@@ -364,7 +369,7 @@ class ProtectionRepository(BaseRepository):
             ).fetchone()
             destination_before = int(reserve["total_collected"] or 0) if reserve else 0
 
-        shieldable = actor_id != victim_id
+        shieldable = protect_self or actor_id != victim_id
         remaining = attempted
         details: list[ProtectionDetail] = []
         pool_keys: list[str] = []
@@ -533,7 +538,9 @@ class ProtectionRepository(BaseRepository):
             }
             self._set_economy_ledger_context(
                 cursor,
-                source="hostile_loss",
+                source=(
+                    "gamba" if kind is HostileLossKind.WHEEL_LOSS else "hostile_loss"
+                ),
                 actor_id=actor_id,
                 related_type="hostile_loss_event",
                 related_id=event_id,

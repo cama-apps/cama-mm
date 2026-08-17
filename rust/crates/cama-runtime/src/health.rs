@@ -1,7 +1,7 @@
 //! Lifecycle-backed health state for the production container.
 //!
 //! A process check is not sufficient for a Discord bot: the process can still
-//! exist while database admission failed, the gateway is disconnected, or a
+//! exist while database initialization failed, the gateway is disconnected, or a
 //! required worker crashed. The runtime therefore writes a small atomic state
 //! file beside the SQLite database and refreshes it on a bounded heartbeat.
 
@@ -145,7 +145,7 @@ impl HealthSnapshot {
                     self.database_ready = false;
                     self.status = HealthStatus::Degraded;
                     self.last_error = Some(bounded_error(format!(
-                        "database admission completed for {}, expected {}",
+                        "database initialization completed for {}, expected {}",
                         path.display(),
                         self.database_path.display()
                     )));
@@ -452,7 +452,7 @@ fn check_health_for_deployment(
             maximum: maximum_age,
         });
     }
-    verify_database_ledger(&database_path, snapshot.required_migrations)?;
+    verify_database_ledger(&database_path)?;
 
     #[cfg(target_os = "linux")]
     if !Path::new("/proc").join(snapshot.pid.to_string()).exists() {
@@ -482,7 +482,7 @@ pub fn health_path(database_path: &Path) -> PathBuf {
     database_path.with_file_name(file_name)
 }
 
-fn verify_database_ledger(path: &Path, required_migrations: usize) -> Result<(), HealthError> {
+fn verify_database_ledger(path: &Path) -> Result<(), HealthError> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -491,17 +491,21 @@ fn verify_database_ledger(path: &Path, required_migrations: usize) -> Result<(),
     connection
         .busy_timeout(Duration::from_secs(2))
         .map_err(HealthError::Database)?;
-    let applied: i64 = connection
-        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
-            row.get(0)
-        })
+    let mut statement = connection
+        .prepare("SELECT name FROM schema_migrations")
         .map_err(HealthError::Database)?;
-    let applied = usize::try_from(applied).map_err(|_| HealthError::MigrationCount(applied))?;
-    if applied < required_migrations {
-        return Err(HealthError::MigrationLedger {
-            applied,
-            required: required_migrations,
-        });
+    let applied = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(HealthError::Database)?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(HealthError::Database)?;
+    let missing = cama_db::expected_migrations()
+        .into_iter()
+        .filter(|migration| !applied.contains(*migration))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(HealthError::MigrationLedger { missing });
     }
     let quick_check: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
@@ -615,10 +619,8 @@ pub enum HealthError {
     MissingProcess(u32),
     #[error("health database probe failed: {0}")]
     Database(rusqlite::Error),
-    #[error("migration ledger has {applied} rows, expected at least {required}")]
-    MigrationLedger { applied: usize, required: usize },
-    #[error("migration ledger returned an invalid row count: {0}")]
-    MigrationCount(i64),
+    #[error("migration ledger is missing required migrations: {}", .missing.join(", "))]
+    MigrationLedger { missing: Vec<String> },
     #[error("SQLite quick_check failed: {0}")]
     IntegrityCheck(String),
 }
@@ -629,7 +631,7 @@ mod tests {
 
     use super::*;
 
-    fn admitted(snapshot: &mut HealthSnapshot) {
+    fn database_initialized(snapshot: &mut HealthSnapshot) {
         snapshot
             .apply(LifecycleEvent::DatabaseReady {
                 path: snapshot.database_path.clone(),
@@ -638,7 +640,6 @@ mod tests {
                 newly_applied_migrations: 2,
                 created_tables: 2,
                 rebuilt_tables: 0,
-                historical_extra_migrations: 0,
             })
             .expect("database event");
     }
@@ -661,25 +662,25 @@ mod tests {
             .expect("worker registration event");
     }
 
-    fn create_ledger(path: &Path, rows: usize) {
+    fn create_ledger(path: &Path) {
         let connection = Connection::open(path).expect("health fixture database");
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT);",
             )
             .expect("migration ledger");
-        for index in 0..rows {
+        for migration in cama_db::expected_migrations() {
             connection
                 .execute(
                     "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, 'now')",
-                    [format!("migration_{index}")],
+                    [migration],
                 )
                 .expect("migration row");
         }
     }
 
     #[test]
-    fn only_admitted_ready_runtime_is_healthy() {
+    fn only_initialized_ready_runtime_is_healthy() {
         let directory = tempdir().expect("temporary directory");
         let mut snapshot =
             HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
@@ -694,7 +695,7 @@ mod tests {
             .expect("ready event");
         assert!(!snapshot.is_healthy());
 
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         synchronize_commands(&mut snapshot);
         assert!(!snapshot.is_healthy());
         register_workers(&mut snapshot, &[]);
@@ -702,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_migration_contract_and_mismatched_admission_are_rejected() {
+    fn zero_migration_contract_and_mismatched_initialization_are_rejected() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("cama.db");
         let mut snapshot = HealthSnapshot::starting(database.clone()).expect("starting state");
@@ -714,7 +715,6 @@ mod tests {
                 newly_applied_migrations: 0,
                 created_tables: 0,
                 rebuilt_tables: 0,
-                historical_extra_migrations: 0,
             })
             .expect("empty database event");
         register_workers(&mut snapshot, &[]);
@@ -735,7 +735,6 @@ mod tests {
                 newly_applied_migrations: 2,
                 created_tables: 2,
                 rebuilt_tables: 0,
-                historical_extra_migrations: 0,
             })
             .expect("mismatched database event");
         assert!(!snapshot.database_ready);
@@ -753,7 +752,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let mut snapshot =
             HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -808,7 +807,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let mut snapshot =
             HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -848,7 +847,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let mut snapshot =
             HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -875,7 +874,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let mut snapshot =
             HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &["prediction refresh", "reminders"]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -951,10 +950,10 @@ mod tests {
     fn persisted_ready_state_passes_fresh_ledger_probe() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("cama.db");
-        create_ledger(&database, 2);
+        create_ledger(&database);
         let reporter = HealthReporter::initialize(&database).expect("health reporter");
         let mut snapshot = reporter.snapshot.clone();
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -971,13 +970,64 @@ mod tests {
     }
 
     #[test]
+    fn ledger_probe_rejects_a_same_size_ledger_missing_a_required_migration() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("cama.db");
+        create_ledger(&database);
+        let missing = cama_db::expected_migrations()[0];
+        let connection = Connection::open(&database).expect("health fixture database");
+        connection
+            .execute("DELETE FROM schema_migrations WHERE name = ?1", [missing])
+            .expect("remove required migration");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (name, applied_at) VALUES ('retired_historical_migration', 'now')",
+                [],
+            )
+            .expect("insert historical replacement");
+        let row_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("migration row count");
+        assert_eq!(
+            usize::try_from(row_count).expect("valid migration row count"),
+            cama_db::expected_migrations().len()
+        );
+        drop(connection);
+
+        assert!(matches!(
+            verify_database_ledger(&database),
+            Err(HealthError::MigrationLedger { missing: actual })
+                if actual == [missing]
+        ));
+    }
+
+    #[test]
+    fn ledger_probe_tolerates_historical_extra_migrations() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("cama.db");
+        create_ledger(&database);
+        let connection = Connection::open(&database).expect("health fixture database");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (name, applied_at) VALUES ('retired_historical_migration', 'now')",
+                [],
+            )
+            .expect("insert historical migration");
+        drop(connection);
+
+        verify_database_ledger(&database).expect("required migration ledger");
+    }
+
+    #[test]
     fn health_probe_rejects_a_marker_from_another_runtime_or_revision() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("cama.db");
-        create_ledger(&database, 2);
+        create_ledger(&database);
         let reporter = HealthReporter::initialize(&database).expect("health reporter");
         let mut snapshot = reporter.snapshot.clone();
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {
@@ -1020,10 +1070,10 @@ mod tests {
     fn stale_and_stopped_states_are_rejected() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("cama.db");
-        create_ledger(&database, 2);
+        create_ledger(&database);
         let reporter = HealthReporter::initialize(&database).expect("health reporter");
         let mut snapshot = reporter.snapshot.clone();
-        admitted(&mut snapshot);
+        database_initialized(&mut snapshot);
         register_workers(&mut snapshot, &[]);
         snapshot
             .apply(LifecycleEvent::Ready {

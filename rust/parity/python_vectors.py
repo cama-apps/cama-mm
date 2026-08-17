@@ -97,6 +97,32 @@ def _openskill_team(raw: str) -> list[tuple[float, float]]:
     return [tuple(map(float, player.split(","))) for player in raw.split(";")]
 
 
+def _glicko_team(raw: str) -> list[tuple[float, float, float]]:
+    players = [tuple(map(float, player.split(","))) for player in raw.split(";")]
+    if any(len(player) != 3 for player in players):
+        raise ValueError("Glicko vector players must be rating,rd,volatility")
+    return players
+
+
+def _team_multipliers(raw: str, team_sizes: tuple[int, int]) -> dict[int, float]:
+    """Parse per-player values as two ;-separated teams keyed by 1-based ID."""
+    if raw == "none":
+        return {}
+    groups = raw.split(";")
+    if len(groups) != len(team_sizes):
+        raise ValueError("per-player vector values must contain one group per team")
+    multipliers: dict[int, float] = {}
+    player_id = 1
+    for group, size in zip(groups, team_sizes, strict=True):
+        values = [float(value) for value in group.split(",")]
+        if len(values) != size:
+            raise ValueError("per-player vector values must match the team size")
+        for value in values:
+            multipliers[player_id] = value
+            player_id += 1
+    return multipliers
+
+
 def _pet_evolution_scores(raw: str) -> dict[PetInstinct, int]:
     values = [int(value) for value in raw.split(",")]
     if len(values) != len(PetInstinct):
@@ -560,6 +586,58 @@ def _evaluate(operation: str, arguments: list[str]) -> object:
     if operation == "openskill_predict":
         return CamaOpenSkillSystem().os_predict_win_probability(
             _openskill_team(arguments[0]), _openskill_team(arguments[1])
+        )
+    if operation == "glicko_match_update":
+        system = CamaRatingSystem()
+        team1_inputs = _glicko_team(arguments[0])
+        team2_inputs = _glicko_team(arguments[1])
+        team1 = [
+            (system.create_player_from_rating(rating, rd, volatility), index + 1)
+            for index, (rating, rd, volatility) in enumerate(team1_inputs)
+        ]
+        team2 = [
+            (
+                system.create_player_from_rating(rating, rd, volatility),
+                len(team1) + index + 1,
+            )
+            for index, (rating, rd, volatility) in enumerate(team2_inputs)
+        ]
+        sizes = (len(team1), len(team2))
+        team1_updated, team2_updated = system.update_ratings_after_match(
+            team1,
+            team2,
+            int(arguments[2]),
+            streak_multipliers=_team_multipliers(arguments[3], sizes),
+            gain_multipliers=_team_multipliers(arguments[4], sizes),
+            base_rating_delta_multiplier=_optional_float(arguments[5]),
+        )
+        return ";".join(
+            f"{_format(rating)},{_format(rd)}"
+            for rating, rd, _volatility, _player_id in team1_updated + team2_updated
+        )
+    if operation == "openskill_match_update":
+        team1_inputs = _openskill_team(arguments[0])
+        team2_inputs = _openskill_team(arguments[1])
+        sizes = (len(team1_inputs), len(team2_inputs))
+        fantasy = _team_multipliers(arguments[3], sizes)
+        team1_data = [
+            (index + 1, mu, sigma, fantasy.get(index + 1))
+            for index, (mu, sigma) in enumerate(team1_inputs)
+        ]
+        team2_data = [
+            (sizes[0] + index + 1, mu, sigma, fantasy.get(sizes[0] + index + 1))
+            for index, (mu, sigma) in enumerate(team2_inputs)
+        ]
+        results = CamaOpenSkillSystem().update_ratings_after_match(
+            team1_data,
+            team2_data,
+            int(arguments[2]),
+            streak_multipliers=_team_multipliers(arguments[4], sizes),
+            gain_multipliers=_team_multipliers(arguments[5], sizes),
+        )
+        return ";".join(
+            f"{_format(results[player_id][0])},{_format(results[player_id][1])}"
+            for player_id in range(1, sizes[0] + sizes[1] + 1)
         )
     raise ValueError(f"unknown vector operation {operation!r}")
 

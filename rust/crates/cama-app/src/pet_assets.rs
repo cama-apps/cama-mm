@@ -550,52 +550,78 @@ fn draw_ground(image: &mut RasterImage, species_id: &str, geometry: Geometry, pa
 
 fn draw_back(image: &mut RasterImage, species_id: &str, geometry: Geometry, palette: Palette) {
     let center = geometry.center_x;
-    image.polygon(
-        &[
-            (center - 82, geometry.head_y - 18),
-            (center - 45, geometry.head_y - 90),
-            (center - 28, geometry.head_y - 16),
-        ],
-        palette.dark,
-    );
-    image.polygon(
-        &[
-            (center + 28, geometry.head_y - 16),
-            (center + 45, geometry.head_y - 90),
-            (center + 82, geometry.head_y - 18),
-        ],
-        palette.dark,
-    );
-    image.line(
-        (center + geometry.body_rx - 5, geometry.body_y),
-        (center + geometry.body_rx + 52, geometry.body_y - 48),
-        palette.dark,
-        13,
-    );
-    if species_id == "sunspun_cama" {
-        for index in 0..16 {
-            let angle = f64::from(index) * std::f64::consts::TAU / 16.0;
-            let start = (
-                center + (69.0 * angle.cos()) as i32,
-                geometry.head_y + (69.0 * angle.sin()) as i32,
-            );
-            let end = (
-                center + (106.0 * angle.cos()) as i32,
-                geometry.head_y + (106.0 * angle.sin()) as i32,
-            );
-            image.line(start, end, palette.accent, 7);
-        }
-    }
-    if species_id == "embergear_cama" {
-        image.ellipse(
+    match species_id {
+        "aegis_cama" => image.ellipse(
             (
-                center + 77,
-                geometry.body_y - 75,
-                center + 105,
-                geometry.body_y - 47,
+                center - geometry.body_rx,
+                geometry.body_y - geometry.body_ry - 42,
+                center + geometry.body_rx,
+                geometry.body_y + 18,
             ),
-            Rgba(255, 91, 34, 175),
-        );
+            Rgba(252, 206, 74, 255),
+        ),
+        "dromedary_cross" => image.ellipse(
+            (
+                center - geometry.body_rx + 18,
+                geometry.body_y - geometry.body_ry - 50,
+                center + geometry.body_rx - 18,
+                geometry.body_y + 12,
+            ),
+            palette.light,
+        ),
+        "embergear_cama" => {
+            for (x, y, radius, color) in [
+                (
+                    center + geometry.body_rx + 12,
+                    geometry.body_y,
+                    18,
+                    Rgba(96, 82, 82, 190),
+                ),
+                (
+                    center + geometry.body_rx + 34,
+                    geometry.body_y - 18,
+                    13,
+                    Rgba(82, 74, 82, 155),
+                ),
+                (
+                    center + geometry.body_rx + 51,
+                    geometry.body_y - 31,
+                    9,
+                    Rgba(70, 66, 78, 115),
+                ),
+            ] {
+                image.ellipse((x - radius, y - radius, x + radius, y + radius), color);
+            }
+        }
+        "sunspun_cama" => {
+            image.ellipse(
+                (
+                    center - geometry.body_rx - 24,
+                    geometry.body_y - geometry.body_ry - 30,
+                    center + geometry.body_rx + 24,
+                    geometry.body_y + geometry.body_ry + 24,
+                ),
+                Rgba(255, 184, 72, 45),
+            );
+            for index in 0..16 {
+                let angle = f64::from(index) * std::f64::consts::TAU / 16.0;
+                let start = (
+                    center + (95.0 * angle.cos()) as i32,
+                    geometry.body_y + (72.0 * angle.sin()) as i32,
+                );
+                let end = (
+                    center + (120.0 * angle.cos()) as i32,
+                    geometry.body_y + (94.0 * angle.sin()) as i32,
+                );
+                image.line(
+                    start,
+                    end,
+                    Rgba(palette.accent.0, palette.accent.1, palette.accent.2, 155),
+                    3,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -822,19 +848,27 @@ fn draw_accessory(image: &mut RasterImage, accessory: &str, stage: PetStage) {
             );
         }
         "top_hat" => {
+            let headwear_y = geometry.head_y - geometry.head_rx;
             image.fill_rect(
                 center - 42,
-                geometry.head_y - 102,
+                headwear_y - 4,
                 center + 42,
-                geometry.head_y - 90,
+                headwear_y + 7,
                 Rgba(25, 24, 32, 255),
             );
             image.fill_rect(
                 center - 28,
-                geometry.head_y - 150,
+                headwear_y - 42,
                 center + 28,
-                geometry.head_y - 91,
+                headwear_y,
                 Rgba(35, 34, 43, 255),
+            );
+            image.fill_rect(
+                center - 28,
+                headwear_y - 12,
+                center + 28,
+                headwear_y - 6,
+                Rgba(150, 30, 40, 255),
             );
         }
         _ => {

@@ -1,6 +1,6 @@
 //! Existing-schema Steam-account persistence for OpenDota player lookups.
 //!
-//! The Rust runtime consumes the Python-compatible migrated schema. Production
+//! The Rust runtime consumes the initialized canonical schema. Production
 //! methods in this module only open an already-migrated database through
 //! [`crate::open_runtime_connection`]. Every multi-statement write uses
 //! `BEGIN IMMEDIATE`; DDL exists solely in the child test fixture.

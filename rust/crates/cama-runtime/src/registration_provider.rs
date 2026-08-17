@@ -33,6 +33,8 @@ use cama_db::registration_repository::{
     MmrPromptState, RegistrationRepository, STEAM_ACCOUNT_ID_UPPER_BOUND, SetRolesOutcome,
 };
 use cama_domain::formatting::{escape_discord_text, format_role_display};
+use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::CamaRatingSystem;
 use cama_domain::region::{
     CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
 };
@@ -48,17 +50,17 @@ use crate::gateway_events::{
 use crate::lobby_provider::{ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionButton, InteractionHandler, InteractionHandlerError,
-    InteractionModal, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, InteractionTextInput, InteractionValue, RegistrationError,
-    RegistrationProvider, RegistryBuilder,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton, InteractionHandler,
+    InteractionHandlerError, InteractionModal, InteractionOption, InteractionRequest,
+    InteractionResponder, InteractionResponse, InteractionTextInput, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const MMR_COMPONENT_PREFIX: &str = "registration:mmr:";
 const REFER_COOLDOWN: Duration = Duration::from_secs(5);
 const NEON_DELETE_DELAY: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlayerRegistrationConfig {
     pub mmr_modal_retry_limit: i64,
     pub mmr_modal_timeout: Duration,
@@ -68,6 +70,8 @@ pub struct PlayerRegistrationConfig {
     pub lobby_ready_cooldown: Duration,
     pub lobby_channel_id: Option<i64>,
     pub low_skill_lobby_channel_id: Option<i64>,
+    pub rating_system: CamaRatingSystem,
+    pub openskill: CamaOpenSkillSystem,
 }
 
 impl PlayerRegistrationConfig {
@@ -91,6 +95,14 @@ impl PlayerRegistrationConfig {
                 config.values.lobby_ready_cooldown_seconds.max(0) as u64,
             ),
             lobby_channel_id: config.channels.lobby,
+            // Registration seeds must use the env-configured systems; the
+            // config surface is fail-soft like the rest of `Values`, so the
+            // single pathological overflow error falls back to defaults.
+            rating_system: config
+                .glicko_rating_system()
+                .unwrap_or_else(|_| CamaRatingSystem::default()),
+            openskill: CamaOpenSkillSystem::with_config(config.migration.openskill.clone())
+                .unwrap_or_default(),
             low_skill_lobby_channel_id: config.channels.low_skill_lobby,
         }
     }
@@ -319,7 +331,7 @@ impl RegistrationProvider for PlayerRegistrationProvider {
     }
 }
 
-fn player_command_options() -> Vec<CommandOptionSpec> {
+pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
     let mut options = vec![
         subcommand(
             "register",
@@ -641,6 +653,21 @@ enum LobbyKindKey {
 
 #[async_trait]
 impl InteractionHandler for PlayerRegistrationHandler {
+    fn acknowledgement_policy(
+        &self,
+        request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        match request {
+            InteractionRequest::Component { custom_id, .. }
+                if custom_id.starts_with(MMR_COMPONENT_PREFIX)
+                    && custom_id.contains(":button:") =>
+            {
+                InteractionAcknowledgementPolicy::Modal
+            }
+            _ => InteractionAcknowledgementPolicy::Automatic,
+        }
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,
@@ -799,11 +826,7 @@ impl PlayerRegistrationHandler {
             event.lobby_kind.display_name()
         ))
         .color(0x2e_cc_71)
-        .field(
-            "Next Step",
-            "Run `/readycheck` before `/shuffle` to confirm everyone is ready.",
-            false,
-        );
+        .field("Next Step", "Run `/readycheck` before `/shuffle`.", false);
         if let (Some(channel), Some(message)) = (event.lobby_channel_id, event.lobby_message_id) {
             embed = embed.field(
                 "",
@@ -1347,11 +1370,15 @@ impl PlayerRegistrationHandler {
             exclusion_count: self.config.new_player_exclusion_boost,
             added_at: now_seconds(),
         };
-        tokio::task::spawn_blocking(move || register_player(&mut repository, &mut api, input))
-            .await
-            .map_err(|error| {
-                RegisterPlayerError::Repository(format!("registration task failed: {error}"))
-            })?
+        let rating_system = self.config.rating_system;
+        let openskill = self.config.openskill.clone();
+        tokio::task::spawn_blocking(move || {
+            register_player(&mut repository, &mut api, input, &rating_system, &openskill)
+        })
+        .await
+        .map_err(|error| {
+            RegisterPlayerError::Repository(format!("registration task failed: {error}"))
+        })?
     }
 
     async fn best_effort_infer_region(
@@ -1462,7 +1489,6 @@ impl PlayerRegistrationHandler {
     ) -> Result<(), String> {
         let InteractionRequest::Component {
             custom_id,
-            user_id,
             guild_id,
             ..
         } = request
@@ -1472,12 +1498,6 @@ impl PlayerRegistrationHandler {
         let (kind, encoded_guild, nonce) = parse_mmr_custom_id(&custom_id)?;
         if kind != "button" || guild_id != Some(encoded_guild) {
             return respond_ephemeral(&responder, "❌ This MMR prompt is no longer valid.").await;
-        }
-        let Some(state) = self.load_prompt(encoded_guild, nonce).await? else {
-            return respond_ephemeral(&responder, "❌ This MMR prompt is no longer valid.").await;
-        };
-        if !prompt_is_usable(&state, user_id, self.config.mmr_modal_retry_limit) {
-            return respond_ephemeral(&responder, "❌ Invalid MMR").await;
         }
         let mut input = InteractionTextInput::short("mmr", "Enter your MMR");
         input.required = false;

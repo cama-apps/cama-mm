@@ -1035,7 +1035,8 @@ pub fn draw_rating_history_chart(
 }
 
 fn mu_to_display(mu: f64) -> f64 {
-    ((mu - 25.0) * 50.0).max(0.0).round()
+    // Python parity: `int(round(x))` is banker's rounding (mu 25.25 -> 12).
+    ((mu - 25.0) * 50.0).max(0.0).round_ties_even()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2887,12 +2888,17 @@ pub fn draw_rating_distribution_with_median(
 
     raster.line((LEFT, TOP), (LEFT, BOTTOM), SPINE, 1);
     raster.line((LEFT, BOTTOM), (RIGHT, BOTTOM), SPINE, 1);
-    let tick_count = ((histogram_span / 50.0) as usize).max(1);
-    for index in 0..=tick_count {
-        let value = histogram_start + index as f64 / tick_count as f64 * histogram_span;
+    for value in rating_axis_ticks(axis_start, axis_end, 7) {
         let x = rating_x(value);
+        let label = format!("{value:.0}");
         raster.line((x, BOTTOM), (x, BOTTOM + 4), SPINE, 1);
-        raster.text(x - 12, BOTTOM + 8, &format!("{value:.0}"), DISCORD_GREY, 1);
+        raster.text(
+            x - Raster::text_width(&label, 1) / 2,
+            BOTTOM + 8,
+            &label,
+            DISCORD_GREY,
+            1,
+        );
     }
     raster.text(300, 366, "Rating", DISCORD_GREY, 1);
     raster.text(8, 188, "Density", DISCORD_GREY, 1);
@@ -2982,6 +2988,37 @@ pub fn draw_rating_distribution_with_median(
         2,
     );
     render(raster)
+}
+
+fn rating_axis_ticks(start: f64, end: f64, target_intervals: usize) -> Vec<f64> {
+    let span = end - start;
+    if !start.is_finite() || !end.is_finite() || span <= 0.0 {
+        return Vec::new();
+    }
+    let rough_step = span / target_intervals.max(1) as f64;
+    let magnitude = 10_f64.powf(rough_step.log10().floor());
+    let normalized = rough_step / magnitude;
+    let multiplier = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    let step = magnitude * multiplier;
+    let mut value = (start / step).ceil() * step;
+    let mut ticks = Vec::new();
+    while value <= end + step * 1e-9 && ticks.len() <= target_intervals + 1 {
+        ticks.push(if value.abs() < step * 1e-9 {
+            0.0
+        } else {
+            value
+        });
+        value += step;
+    }
+    ticks
 }
 
 /// Shapiro-Wilk/Royston normality probability used by scipy for samples up to

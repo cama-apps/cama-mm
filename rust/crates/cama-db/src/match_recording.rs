@@ -890,6 +890,10 @@ impl MatchRecordingRepository {
             .map_err(Into::into)
     }
 
+    /// WARNING — test-double only, never wire to production. The flat
+    /// `principal / 5` fee diverges from the real loan policy
+    /// (`loan_repository::LoanRepository`), which is what `cama-runtime`
+    /// uses. Only `MatchRecordingService` tests reach this path.
     pub fn issue_loan_atomic(
         &self,
         discord_id: i64,
@@ -987,6 +991,11 @@ impl MatchRecordingRepository {
             .map_err(Into::into)
     }
 
+    /// WARNING — test-double only, never wire to production. The rating
+    /// update below is a fixed ±32 stub, not Glicko-2; the production match
+    /// recording path is `core_repositories::MatchRepository::
+    /// record_match_core_atomic`. Only `MatchRecordingService` (itself
+    /// constructed exclusively in tests) reaches this function.
     pub fn record_match_atomic(
         &self,
         request: MatchRecordRequest<'_>,

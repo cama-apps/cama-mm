@@ -314,6 +314,62 @@ resolve_service_container() {
   esac
 }
 
+refuse_parallel_runtime_owners() {
+  managed_container=$1
+  managed_container_id=
+  if [ -n "$managed_container" ]; then
+    managed_container_id=$(docker inspect --format '{{.Id}}' "$managed_container" 2>/dev/null || true)
+    if [ -z "$managed_container_id" ]; then
+      echo "deployment refused: managed bot container identity could not be inspected" >&2
+      return 1
+    fi
+  fi
+
+  if ! running_bot_containers=$(docker ps \
+    --no-trunc \
+    --filter status=running \
+    --filter label=com.docker.compose.service=bot \
+    --quiet)
+  then
+    echo "deployment refused: running bot containers could not be enumerated" >&2
+    return 1
+  fi
+
+  foreign_owners=
+  for running_container in $running_bot_containers; do
+    if [ "$running_container" = "$managed_container_id" ]; then
+      continue
+    fi
+    if ! running_metadata=$(docker inspect --format \
+      '{{println .Config.User}}{{range .Config.Env}}{{println .}}{{end}}' \
+      "$running_container")
+    then
+      echo "deployment refused: runtime ownership could not be inspected for container $running_container" >&2
+      return 1
+    fi
+    running_user=$(printf '%s\n' "$running_metadata" | sed -n '1p')
+    running_runtime=$(printf '%s\n' "$running_metadata" \
+      | awk 'index($0, "BOT_RUNTIME=") == 1 { print substr($0, 13); exit }')
+    running_database_path=$(printf '%s\n' "$running_metadata" \
+      | awk 'index($0, "DB_PATH=") == 1 { print substr($0, 9); exit }')
+    case "$running_runtime" in
+      python|rust) ;;
+      *) continue ;;
+    esac
+    if [ "$running_database_path" != /app/data/cama_shuffle.db ] \
+      || [ "$running_user" != 1001:1001 ]
+    then
+      continue
+    fi
+    foreign_owners="${foreign_owners}${foreign_owners:+ }$running_container"
+  done
+
+  if [ -n "$foreign_owners" ]; then
+    echo "deployment refused: another Cama bot runtime is already running outside project cama-mm (containers: $foreign_owners)" >&2
+    return 1
+  fi
+}
+
 verify_runtime_container() {
   verified_container=$1
   verified_runtime=$2
@@ -523,6 +579,13 @@ if [ -e "$cutover_marker" ]; then
   recovery_state=$(marker_value state)
   case "$recovery_state" in
     pending|recovering)
+      if ! recovery_container=$(resolve_service_container rust); then
+        echo "deployment refused: recovery bot service could not be resolved" >&2
+        exit 1
+      fi
+      if ! refuse_parallel_runtime_owners "$recovery_container"; then
+        exit 65
+      fi
       if ! recover_pending_cutover; then
         echo "pending Rust cutover recovery failed closed" >&2
         exit 1
@@ -553,6 +616,9 @@ cd "$repository_root"
 if ! current_container=$(resolve_service_container python); then
   echo "deployment refused: current bot service could not be resolved" >&2
   exit 1
+fi
+if ! refuse_parallel_runtime_owners "$current_container"; then
+  exit 65
 fi
 previous_runtime=python
 previous_sha=unknown
@@ -621,9 +687,39 @@ if [ "$selected_runtime" = rust ] && [ ! -f "$database_path" ]; then
   exit 65
 fi
 
-# Build every artifact while the old runtime still owns the database. The
-# write-free downtime begins only after these potentially long builds finish.
-GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+# Prepare every artifact while the old runtime still owns the database. CI
+# publishes Rust images by immutable commit SHA, so normal production deploys
+# only pull, verify, and retag that artifact. A local build remains available
+# for manual/emergency deployments that omit RUST_RUNTIME_IMAGE.
+if [ "$selected_runtime" = rust ] && [ -n "${RUST_RUNTIME_IMAGE-}" ]; then
+  if ! docker pull "$RUST_RUNTIME_IMAGE"; then
+    echo "could not pull Rust runtime image $RUST_RUNTIME_IMAGE" >&2
+    exit 1
+  fi
+  image_revision=$(docker image inspect \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$RUST_RUNTIME_IMAGE" 2>/dev/null || true)
+  if [ "$image_revision" != "$deploy_sha" ]; then
+    echo "Rust runtime image revision mismatch: expected $deploy_sha, found ${image_revision:-missing}" >&2
+    exit 65
+  fi
+  if ! target_images=$(BOT_RUNTIME=rust "$runtime_compose" config --images); then
+    echo "could not resolve the Rust runtime image target" >&2
+    exit 1
+  fi
+  set -- $target_images
+  if [ "$#" -ne 1 ]; then
+    echo "expected exactly one Rust runtime image target, found $#" >&2
+    exit 65
+  fi
+  if ! docker tag "$RUST_RUNTIME_IMAGE" "$1"; then
+    echo "could not stage Rust runtime image $RUST_RUNTIME_IMAGE as $1" >&2
+    exit 1
+  fi
+  echo "using prebuilt Rust runtime image: $RUST_RUNTIME_IMAGE"
+else
+  GIT_SHA="$deploy_sha" BOT_RUNTIME="$selected_runtime" "$runtime_compose" build bot
+fi
 backup_path=
 backup_image=
 backup_container_path=

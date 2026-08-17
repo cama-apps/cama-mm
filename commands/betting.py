@@ -377,6 +377,7 @@ class BettingCommands(commands.Cog):
         recipient_id: int | None = None,
         clamp_to_balance: bool = False,
         min_balance: int | None = None,
+        protect_self: bool = False,
         victim_balance: int | None = None,
         legacy_aggregate_transfer: bool = False,
         metadata: dict | None = None,
@@ -406,6 +407,7 @@ class BettingCommands(commands.Cog):
                     recipient_id=recipient_id,
                     clamp_to_balance=clamp_to_balance,
                     min_balance=min_balance,
+                    protect_self=protect_self,
                     metadata={"outcome": outcome, **(metadata or {})},
                 )
             )
@@ -1433,10 +1435,11 @@ class BettingCommands(commands.Cog):
         result_value = outcome_state.result_value
         new_balance = outcome_state.new_balance
         garnished_amount = outcome_state.garnished_amount
-        # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
+        # A literal zero wedge is "Lose a Turn". A fully shielded numeric loss
+        # also resolves to zero, but retains the normal wheel cooldown.
         if bonus_spin:
             next_spin_time = await regular_next_spin_time()
-        elif result_value == 0:
+        elif result_value == 0 and not outcome_state.wheel_loss_settled:
             # Apply the 1-week penalty cooldown for "Lose a Turn"
             # Set the spin time forward so the effective cooldown is the penalty duration
             penalty_spin_time = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)

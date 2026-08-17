@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cama_db::manashop_rework_repository::{
@@ -131,12 +130,7 @@ impl Drop for Fixture {
 }
 
 fn run_python(script: &str, arguments: &[&str]) {
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let status = Command::new(repository_root.join(".venv/bin/python"))
-        .current_dir(repository_root)
+    let status = crate::test_support::parity_python()
         .arg("-c")
         .arg(script)
         .args(arguments)

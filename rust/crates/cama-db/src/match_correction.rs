@@ -451,17 +451,20 @@ impl MatchCorrectionRepository {
             guild_id,
             new_winning_team,
             &CamaOpenSkillSystem::default(),
+            &CamaRatingSystem::default(),
         )
     }
 
-    /// Production variant retaining deployment-provided OpenSkill policy.
-    /// Glicko streak/base/gain inputs still come from the recorded match rows.
+    /// Production variant retaining deployment-provided OpenSkill and Glicko
+    /// policy (Python reads the same env-derived constants at import time).
+    /// Streak/base/gain inputs still come from the recorded match rows.
     pub fn prepare_rating_correction_configured(
         &self,
         match_id: i64,
         guild_id: Option<i64>,
         new_winning_team: MatchSide,
         openskill: &CamaOpenSkillSystem,
+        rating_system: &CamaRatingSystem,
     ) -> Result<Vec<RatingCorrection>, MatchCorrectionError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let connection = self.connection()?;
@@ -492,7 +495,6 @@ impl MatchCorrectionRepository {
                 match_id,
                 20,
             )?;
-        let rating_system = CamaRatingSystem::default();
         let mut streaks = HashMap::new();
         let mut gain_multipliers = HashMap::new();
         let mut streak_metadata = BTreeMap::new();
@@ -1626,8 +1628,13 @@ impl MatchCorrectionRepository {
         guild_id: Option<i64>,
     ) -> Result<OpenSkillReplaySummary, MatchCorrectionError> {
         let system = CamaOpenSkillSystem::default();
-        self.replay_openskill_atomic_configured(guild_id, &system, NEW_PLAYER_MMR_DISCOUNT)
-            .map(|(summary, _)| summary)
+        self.replay_openskill_atomic_configured(
+            guild_id,
+            &system,
+            &CamaRatingSystem::default(),
+            NEW_PLAYER_MMR_DISCOUNT,
+        )
+        .map(|(summary, _)| summary)
     }
 
     /// Configured production replay used by the lift-and-shift runtime.
@@ -1638,6 +1645,7 @@ impl MatchCorrectionRepository {
         &self,
         guild_id: Option<i64>,
         system: &CamaOpenSkillSystem,
+        rating_system: &CamaRatingSystem,
         new_player_mmr_discount: i32,
     ) -> Result<(OpenSkillReplaySummary, usize), MatchCorrectionError> {
         let guild_id = Self::normalize_guild_id(guild_id);
@@ -1662,7 +1670,6 @@ impl MatchCorrectionRepository {
         let total_matches = matches.len();
         let participants = load_replay_participants(&transaction, guild_id)?;
         let events = load_replay_events(&transaction, guild_id)?;
-        let rating_system = CamaRatingSystem::default();
         let mut current = players
             .iter()
             .map(|player| {
@@ -1746,7 +1753,7 @@ impl MatchCorrectionRepository {
             let threshold =
                 recorded_streak_threshold(optional_integer(replay_match.streak_threshold));
             let streak_multipliers = match replay_streak_multipliers(
-                &rating_system,
+                rating_system,
                 &all_ids,
                 &radiant_ids,
                 replay_match.winning_team,

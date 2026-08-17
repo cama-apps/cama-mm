@@ -246,7 +246,7 @@ fn runtime_config() -> ShopRuntimeConfig {
 }
 
 #[test]
-fn command_schema_preserves_all_six_python_shop_leaves() {
+fn command_schema_preserves_all_seven_python_shop_leaves() {
     let commands = shop_subcommands(&runtime_config());
     let names = commands
         .iter()
@@ -254,7 +254,15 @@ fn command_schema_preserves_all_six_python_shop_leaves() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec!["buy", "pingedash", "pingedkevin", "avoids", "deals", "mana"]
+        vec![
+            "buy",
+            "pingedash",
+            "pingedkevin",
+            "avoids",
+            "deals",
+            "cancel-deal",
+            "mana",
+        ]
     );
     let buy = commands
         .iter()
@@ -265,6 +273,13 @@ fn command_schema_preserves_all_six_python_shop_leaves() {
         buy.options[1].description,
         "User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)"
     );
+    let cancel = commands
+        .iter()
+        .find(|command| command.name == "cancel-deal")
+        .expect("cancel-deal command");
+    assert_eq!(cancel.options.len(), 1);
+    assert_eq!(cancel.options[0].name, "target");
+    assert!(cancel.options[0].required);
 }
 
 #[test]
@@ -434,6 +449,30 @@ async fn autocomplete_filters_python_catalog_and_surfaces_recalibration_cooldown
         vec![CommandOptionChoice::String {
             name: "Recalibrate (ON COOLDOWN)".to_owned(),
             value: "recalibrate_cooldown".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn autocomplete_explains_shared_soft_avoid_pricing() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(autocomplete("soft avoid"), responder.clone())
+        .await
+        .expect("shop autocomplete");
+    let choices = responder.autocomplete.lock().expect("autocomplete");
+    assert_eq!(choices.len(), 1);
+    assert_eq!(
+        choices[0],
+        vec![CommandOptionChoice::String {
+            name: "Soft Avoid (500 before 3 shared games; 250-1000 by win rate; lasts 10 games)"
+                .to_owned(),
+            value: "soft_avoid".to_owned(),
         }]
     );
 }
@@ -973,6 +1012,292 @@ async fn avoid_and_package_purchases_are_private_listable_and_restart_durable() 
                 .is_some_and(|description| description.contains(&format!("<@{TARGET}>")))
         );
     }
+}
+
+#[tokio::test]
+async fn cancel_package_deal_is_private_and_removes_eligible_deal_without_refund() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    fixture.player(TARGET, 1_000);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET last_match_date='2000-01-01 00:00:00'
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+        )
+        .expect("seed inactive target");
+    let repository = PackageDealRepository::new(&fixture.path);
+    let deal = repository
+        .create_or_extend_deal(
+            Some(i64::try_from(GUILD).unwrap()),
+            i64::try_from(BUYER).unwrap(),
+            i64::try_from(TARGET).unwrap(),
+            7,
+            1,
+        )
+        .expect("seed package deal");
+    fixture
+        .connection()
+        .execute(
+            "UPDATE package_deals SET created_at=1,updated_at=1 WHERE id=?1",
+            params![deal.id],
+        )
+        .expect("age package deal");
+
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_200),
+            responder.clone(),
+        )
+        .await
+        .expect("cancel package deal");
+
+    assert_eq!(responder.defers.lock().expect("defers").as_slice(), [true]);
+    let followups = responder.followups.lock().expect("followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert!(followups[0].content.contains("No jopacoin were refunded"));
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM package_deals WHERE id=?1",
+                params![deal.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1_000
+    );
+}
+
+#[tokio::test]
+async fn cancel_package_deal_ineligible_explains_both_thirty_day_guards() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    fixture.player(TARGET, 1_000);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET last_match_date='2000-01-01 00:00:00'
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+        )
+        .expect("seed inactive target");
+    let repository = PackageDealRepository::new(&fixture.path);
+    let deal = repository
+        .create_or_extend_deal(
+            Some(i64::try_from(GUILD).unwrap()),
+            i64::try_from(BUYER).unwrap(),
+            i64::try_from(TARGET).unwrap(),
+            7,
+            1,
+        )
+        .expect("seed recent package deal");
+
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_201),
+            responder.clone(),
+        )
+        .await
+        .expect("reject package deal cancellation");
+
+    assert_eq!(responder.defers.lock().expect("defers").as_slice(), [true]);
+    let followups = responder.followups.lock().expect("followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert!(
+        followups[0]
+            .content
+            .contains("target has not played for 30 days")
+    );
+    assert!(
+        followups[0]
+            .content
+            .contains("deal has not been updated for 30 days")
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM package_deals WHERE id=?1",
+                params![deal.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancel_package_deal_aborts_before_mutation_when_private_defer_fails() {
+    let fixture = Fixture::migrated();
+    fixture.player(TARGET, 1_000);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET last_match_date='2000-01-01 00:00:00'
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+        )
+        .unwrap();
+    let deal = PackageDealRepository::new(&fixture.path)
+        .create_or_extend_deal(
+            Some(i64::try_from(GUILD).unwrap()),
+            i64::try_from(BUYER).unwrap(),
+            i64::try_from(TARGET).unwrap(),
+            7,
+            1,
+        )
+        .unwrap();
+    fixture
+        .connection()
+        .execute(
+            "UPDATE package_deals SET created_at=1,updated_at=1 WHERE id=?1",
+            params![deal.id],
+        )
+        .unwrap();
+    let responder = Arc::new(Responder::with_failed_defer());
+
+    let result = fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_202),
+            responder.clone(),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(responder.defers.lock().expect("defers").as_slice(), [true]);
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM package_deals WHERE id=?1",
+                params![deal.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancel_package_deal_repository_failure_gets_private_followup() {
+    let fixture = Fixture::migrated();
+    fixture
+        .connection()
+        .execute(
+            "ALTER TABLE package_deals RENAME TO unavailable_package_deals",
+            [],
+        )
+        .unwrap();
+    let responder = Arc::new(Responder::default());
+
+    fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_203),
+            responder.clone(),
+        )
+        .await
+        .expect("controlled repository failure");
+
+    assert_eq!(responder.defers.lock().expect("defers").as_slice(), [true]);
+    let followups = responder.followups.lock().expect("followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert!(followups[0].content.contains("could not be completed"));
+}
+
+#[tokio::test]
+async fn cancel_package_deal_has_one_per_ten_seconds_cooldown() {
+    let fixture = Fixture::migrated();
+    fixture.player(TARGET, 1_000);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET last_match_date='2000-01-01 00:00:00'
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+        )
+        .unwrap();
+    let deal = PackageDealRepository::new(&fixture.path)
+        .create_or_extend_deal(
+            Some(i64::try_from(GUILD).unwrap()),
+            i64::try_from(BUYER).unwrap(),
+            i64::try_from(TARGET).unwrap(),
+            7,
+            1,
+        )
+        .unwrap();
+    fixture
+        .connection()
+        .execute(
+            "UPDATE package_deals SET created_at=1,updated_at=1 WHERE id=?1",
+            params![deal.id],
+        )
+        .unwrap();
+    let registry = fixture.registry();
+    let handler = registry.command_handler("shop").unwrap();
+    handler
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_204),
+            Arc::new(Responder::default()),
+        )
+        .await
+        .unwrap();
+    let responder = Arc::new(Responder::default());
+
+    handler
+        .handle(
+            command("cancel-deal", vec![user("target", TARGET)], 22_205),
+            responder.clone(),
+        )
+        .await
+        .expect("cooldown response");
+
+    let immediate = responder.immediate.lock().expect("immediate");
+    assert_eq!(immediate.len(), 1);
+    assert!(immediate[0].ephemeral);
+    assert!(immediate[0].content.contains("cooldown"));
+    assert!(responder.defers.lock().expect("defers").is_empty());
 }
 
 #[tokio::test]

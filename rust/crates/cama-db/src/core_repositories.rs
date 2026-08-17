@@ -1239,8 +1239,12 @@ impl PlayerRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let victim_balance = required_balance(&transaction, victim_discord_id, guild_id, "victim")?;
         let thief_balance = required_balance(&transaction, thief_discord_id, guild_id, "thief")?;
-        let victim_new_balance = victim_balance - amount;
-        let thief_new_balance = thief_balance + amount;
+        let victim_new_balance = victim_balance.checked_sub(amount).ok_or_else(|| {
+            CoreRepositoryError::InvalidInput("steal amount overflows victim balance".to_owned())
+        })?;
+        let thief_new_balance = thief_balance.checked_add(amount).ok_or_else(|| {
+            CoreRepositoryError::InvalidInput("steal amount overflows thief balance".to_owned())
+        })?;
         if let Some(context) = context {
             install_balance_ledger_context(
                 &transaction,
@@ -1645,97 +1649,17 @@ fn decode_i64_array(json: &str) -> Result<Vec<i64>, CoreRepositoryError> {
 }
 
 fn encode_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape_json_string(value)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{body}]")
+    // Python writes this column with `json.dumps` and reads it with
+    // `json.loads`, which accepts any standard JSON formatting; delegating
+    // to serde_json keeps every escaping edge case (control characters,
+    // unicode escapes, surrogate pairs) covered by one battle-tested
+    // implementation instead of a hand-rolled escaper.
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn decode_string_array(json: &str) -> Result<Vec<String>, CoreRepositoryError> {
-    let value = json.trim();
-    let Some(body) = value
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    else {
-        return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-    };
-    let mut result = Vec::new();
-    let bytes = body.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b',')
-        {
-            cursor += 1;
-        }
-        if cursor == bytes.len() {
-            break;
-        }
-        if bytes[cursor] != b'"' {
-            return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-        }
-        cursor += 1;
-        let mut item = String::new();
-        let mut closed = false;
-        while cursor < bytes.len() {
-            match bytes[cursor] {
-                b'"' => {
-                    cursor += 1;
-                    closed = true;
-                    break;
-                }
-                b'\\' => {
-                    cursor += 1;
-                    if cursor >= bytes.len() {
-                        return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-                    }
-                    match bytes[cursor] {
-                        b'"' => item.push('"'),
-                        b'\\' => item.push('\\'),
-                        b'n' => item.push('\n'),
-                        b'r' => item.push('\r'),
-                        b't' => item.push('\t'),
-                        _ => return Err(CoreRepositoryError::InvalidJson(json.to_owned())),
-                    }
-                    cursor += 1;
-                }
-                byte if byte.is_ascii() => {
-                    item.push(char::from(byte));
-                    cursor += 1;
-                }
-                _ => {
-                    let remainder = std::str::from_utf8(&bytes[cursor..])
-                        .map_err(|_| CoreRepositoryError::InvalidJson(json.to_owned()))?;
-                    let character = remainder
-                        .chars()
-                        .next()
-                        .ok_or_else(|| CoreRepositoryError::InvalidJson(json.to_owned()))?;
-                    item.push(character);
-                    cursor += character.len_utf8();
-                }
-            }
-        }
-        if !closed {
-            return Err(CoreRepositoryError::InvalidJson(json.to_owned()));
-        }
-        result.push(item);
-    }
-    Ok(result)
-}
-
-fn escape_json_string(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| match character {
-            '"' => "\\\"".chars().collect::<Vec<_>>(),
-            '\\' => "\\\\".chars().collect(),
-            '\n' => "\\n".chars().collect(),
-            '\r' => "\\r".chars().collect(),
-            '\t' => "\\t".chars().collect(),
-            other => vec![other],
-        })
-        .collect()
+    serde_json::from_str::<Vec<String>>(json)
+        .map_err(|_| CoreRepositoryError::InvalidJson(json.to_owned()))
 }
 
 fn parse_enrichment_json(raw: &str) -> Result<EnrichmentJsonValue, CoreRepositoryError> {
@@ -7629,8 +7553,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let root = manifest.ancestors().nth(3).unwrap();
-        let output = std::process::Command::new(root.join(".venv/bin/python"))
-            .current_dir(root)
+        let output = crate::test_support::parity_python(root)
             .args(["-c", "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()", file.path().to_str().unwrap()])
             .output()
             .expect("run Python schema authority");
@@ -8235,4 +8158,26 @@ mod tests {
             match_id INTEGER, created_at INTEGER NOT NULL
         );
     "#;
+
+    #[test]
+    fn string_array_codec_round_trips_python_json_bytes() {
+        // Bytes exactly as CPython json.dumps writes them (incl. a control
+        // character, named escapes, and a surrogate-pair \uXXXX emoji).
+        let python_written =
+            r#"["a\u0001b", "tab\tnewline\n", "quote\"back\\", "emoji\ud83d\ude00"]"#;
+        let decoded = decode_string_array(python_written).expect("decode Python-written column");
+        assert_eq!(
+            decoded,
+            [
+                "a\u{1}b".to_owned(),
+                "tab\tnewline\n".to_owned(),
+                "quote\"back\\".to_owned(),
+                "emoji\u{1F600}".to_owned(),
+            ]
+        );
+        // Rust-encoded bytes must round-trip through our own decoder (and are
+        // standard JSON, which Python's json.loads accepts).
+        let encoded = encode_string_array(&decoded);
+        assert_eq!(decode_string_array(&encoded).expect("round trip"), decoded);
+    }
 }

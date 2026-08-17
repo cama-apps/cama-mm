@@ -38,14 +38,15 @@ use tracing::{debug, warn};
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
 use crate::gamba_guild_source::GambaGuildSource;
+use crate::ids::signed_id;
 use crate::prediction_workers::PredictionDiscordPort;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
-    InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionModal,
-    InteractionOption, InteractionRequest, InteractionResponder, InteractionResponse,
-    InteractionTextInput, InteractionValue, RegistrationError, RegistrationProvider,
-    RegistryBuilder,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
+    InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
+    InteractionHandlerError, InteractionModal, InteractionOption, InteractionRequest,
+    InteractionResponder, InteractionResponse, InteractionTextInput, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 trait PredictionVanityTaxPort: Send + Sync {
@@ -679,6 +680,20 @@ struct CommandContext {
 
 #[async_trait]
 impl InteractionHandler for PredictionInteractionHandler {
+    fn acknowledgement_policy(
+        &self,
+        request: &InteractionRequest,
+    ) -> InteractionAcknowledgementPolicy {
+        match request {
+            InteractionRequest::Component { custom_id, .. }
+                if matches!(custom_id.as_str(), BUY_YES_ID | BUY_NO_ID) =>
+            {
+                InteractionAcknowledgementPolicy::Modal
+            }
+            _ => InteractionAcknowledgementPolicy::Automatic,
+        }
+    }
+
     async fn handle(
         &self,
         request: InteractionRequest,
@@ -781,9 +796,6 @@ impl PredictionInteractionHandler {
                     member_permissions: None,
                     options: Vec::new(),
                 };
-                if !self.require_gamba(&context, &responder).await? {
-                    return Ok(());
-                }
                 match custom_id.as_str() {
                     BUY_YES_ID => {
                         self.open_buy_modal(context, ContractSide::Yes, responder)
@@ -793,20 +805,37 @@ impl PredictionInteractionHandler {
                         self.open_buy_modal(context, ContractSide::No, responder)
                             .await
                     }
-                    MY_POSITION_ID => self.position_card(context, responder).await,
+                    MY_POSITION_ID => {
+                        if !self.require_gamba(&context, &responder).await? {
+                            return Ok(());
+                        }
+                        self.position_card(context, responder).await
+                    }
                     _ => respond_ephemeral(&responder, "Could not identify market.").await,
                 }
             }
             InteractionRequest::Modal {
                 custom_id,
                 user_id,
+                guild_id,
+                channel_id,
                 fields,
                 ..
             } => {
-                let (prediction_id, side) = parse_buy_modal_id(&custom_id)?;
+                let (thread_id, side) = parse_buy_modal_id(&custom_id)?;
                 self.buy_submit(
-                    prediction_id,
-                    signed_id(user_id, "user")?,
+                    thread_id,
+                    CommandContext {
+                        user_id: signed_id(user_id, "user")?,
+                        guild_id: guild_id
+                            .map(|value| signed_id(value, "guild"))
+                            .transpose()?,
+                        channel_id: channel_id
+                            .map(|value| signed_id(value, "channel"))
+                            .transpose()?,
+                        member_permissions: None,
+                        options: Vec::new(),
+                    },
                     side,
                     fields
                         .get("contracts")
@@ -851,6 +880,39 @@ impl PredictionInteractionHandler {
         })
         .await?;
         respond_ephemeral(responder, WRONG_CHANNEL_MESSAGE).await?;
+        Ok(false)
+    }
+
+    async fn require_gamba_after_defer(
+        &self,
+        command: &CommandContext,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<bool, String> {
+        let valid = match (command.guild_id, command.channel_id) {
+            (Some(guild_id), Some(channel_id)) => self
+                .command_discord
+                .prediction_channel_is_gamba(guild_id, channel_id)
+                .await
+                .unwrap_or(false),
+            _ => false,
+        };
+        if valid {
+            return Ok(true);
+        }
+        let repository = self.predictions.clone();
+        let user_id = command.user_id;
+        let guild_id = command.guild_id;
+        spawn_sqlite("gamba channel penalty", move || {
+            repository.debit_gamba_channel_penalty(user_id, guild_id)
+        })
+        .await?;
+        followup(
+            responder,
+            InteractionResponse::message(WRONG_CHANNEL_MESSAGE)
+                .ephemeral()
+                .without_mentions(),
+        )
+        .await?;
         Ok(false)
     }
 
@@ -1210,109 +1272,19 @@ impl PredictionInteractionHandler {
         side: ContractSide,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        let Some(market) = self.market_for_component(command.channel_id).await? else {
+        let Some(thread_id) = command.channel_id else {
             return respond_ephemeral(&responder, "Could not identify market.").await;
-        };
-        if market.status != "open" {
-            return respond_ephemeral(&responder, "Market is not open for trading.").await;
-        }
-        let prediction_id = market.prediction_id;
-        let repository = self.predictions.clone();
-        let user_id = command.user_id;
-        let guild_id = command.guild_id;
-        let maximum = self.config.max_contracts_per_trade;
-        let (book, wallet) = spawn_sqlite("prepare prediction buy", move || {
-            let book = repository.get_book(prediction_id)?;
-            let wallet = repository.player_wallet(user_id, guild_id)?;
-            Ok::<_, PredictionRepositoryError>((book, wallet))
-        })
-        .await?;
-        let (unit_price, available) = match side {
-            ContractSide::Yes => {
-                let Some(first) = book.yes_asks.first() else {
-                    return respond_ephemeral(
-                        &responder,
-                        "No asks available right now (book consumed). Wait for next refresh.",
-                    )
-                    .await;
-                };
-                (
-                    first.0,
-                    book.yes_asks.iter().map(|level| level.1).sum::<i64>(),
-                )
-            }
-            ContractSide::No => {
-                let Some(first) = book.yes_bids.first() else {
-                    return respond_ephemeral(
-                        &responder,
-                        "No NO asks available right now (book consumed). Wait for next refresh.",
-                    )
-                    .await;
-                };
-                (
-                    100 - first.0,
-                    book.yes_bids.iter().map(|level| level.1).sum::<i64>(),
-                )
-            }
-        };
-        let Some(balance) = wallet else {
-            return respond_ephemeral(
-                &responder,
-                "You must be registered to trade. Use `/player register` first.",
-            )
-            .await;
-        };
-        if balance <= 0 {
-            return respond_ephemeral(&responder, "You have no jopacoins to trade with.").await;
-        }
-        let effective_max = available.min(maximum);
-        let mut quoted_price = unit_price;
-        let sample_cost = if effective_max >= 5 {
-            let repository = self.predictions.clone();
-            match spawn_sqlite("quote prediction sample buy", move || {
-                repository.quote_buy_contracts_with_max(prediction_id, side, 5, maximum)
-            })
-            .await
-            {
-                Ok(quote) => {
-                    quoted_price = quote.fills.first().map_or(unit_price, |fill| match side {
-                        ContractSide::Yes => fill.0,
-                        ContractSide::No => 100 - fill.0,
-                    });
-                    Some(quote.total)
-                }
-                Err(_) => {
-                    return respond_ephemeral(
-                        &responder,
-                        "The order book changed. Please try again.",
-                    )
-                    .await;
-                }
-            }
-        } else {
-            None
         };
         let side_label = side_name(side).to_ascii_uppercase();
         let mut input = InteractionTextInput::short("contracts", "Contracts to buy (numbers only)");
-        input.label = format!("How many? ({balance} jopa available)");
-        input.placeholder = Some(sample_cost.map_or_else(
-            || format!("max {effective_max} at top of book"),
-            |cost| {
-                format!(
-                    "e.g. 5  →  costs {cost} jopa, wins {} if {side_label}",
-                    5_i64.saturating_mul(self.config.contract_value)
-                )
-            },
-        ));
+        input.label = "How many contracts?".to_owned();
+        input.placeholder = Some("Enter a positive whole number".to_owned());
         input.min_length = Some(1);
         input.max_length = Some(6);
         responder
             .show_modal(InteractionModal {
-                custom_id: format!("{BUY_MODAL_PREFIX}{prediction_id}:{}", side_name(side)),
-                title: format!("Buy {side_label} @ {quoted_price}%")
-                    .chars()
-                    .take(45)
-                    .collect(),
+                custom_id: format!("{BUY_MODAL_PREFIX}{thread_id}:{}", side_name(side)),
+                title: format!("Buy {side_label} contracts"),
                 inputs: vec![input],
             })
             .await
@@ -1321,8 +1293,8 @@ impl PredictionInteractionHandler {
 
     async fn buy_submit(
         &self,
-        prediction_id: i64,
-        user_id: i64,
+        thread_id: i64,
+        command: CommandContext,
         side: ContractSide,
         raw_contracts: &str,
         responder: Arc<dyn InteractionResponder>,
@@ -1338,6 +1310,32 @@ impl PredictionInteractionHandler {
             .defer(true)
             .await
             .map_err(|error| error.to_string())?;
+        if command.channel_id != Some(thread_id) {
+            return followup(
+                &responder,
+                InteractionResponse::message("This market form is no longer valid.").ephemeral(),
+            )
+            .await;
+        }
+        if !self.require_gamba_after_defer(&command, &responder).await? {
+            return Ok(());
+        }
+        let Some(market) = self.market_for_component(Some(thread_id)).await? else {
+            return followup(
+                &responder,
+                InteractionResponse::message("Could not identify market.").ephemeral(),
+            )
+            .await;
+        };
+        if market.status != "open" {
+            return followup(
+                &responder,
+                InteractionResponse::message("Market is not open for trading.").ephemeral(),
+            )
+            .await;
+        }
+        let prediction_id = market.prediction_id;
+        let user_id = command.user_id;
         let repository = self.predictions.clone();
         let maximum = self.config.max_contracts_per_trade;
         let trade = tokio::task::spawn_blocking(move || {
@@ -2524,10 +2522,6 @@ fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
     })
 }
 
-fn signed_id(value: u64, kind: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {kind} ID exceeds SQLite INTEGER"))
-}
-
 fn rate_to_bps(rate: f64) -> i64 {
     if rate.is_finite() {
         (rate.clamp(0.0, 1.0) * BASIS_POINTS as f64).round() as i64
@@ -2542,10 +2536,10 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(function)
-        .await
-        .map_err(|error| format!("{operation} task failed: {error}"))?
-        .map_err(|error| error.to_string())
+    crate::ids::blocking(operation, move || {
+        function().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 async fn respond_ephemeral(

@@ -779,7 +779,7 @@ fn test_lobby_ready_notification_recommends_readycheck_before_shuffle() {
     ));
     assert_eq!(
         lobby_ready_next_step(),
-        "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+        "Run `/readycheck` before `/shuffle`."
     );
 }
 
@@ -883,7 +883,10 @@ fn test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_channel(
         )),
         None
     );
-    assert_eq!(READYCHECK_COMPLETE_MESSAGE.matches("/shuffle").count(), 1);
+    assert_eq!(
+        READYCHECK_COMPLETE_MESSAGE,
+        "✅ **🍽️ All You Can Feed: 10+ players are ready.** You can `/shuffle` now; only ready players will be included."
+    );
 }
 
 #[test]

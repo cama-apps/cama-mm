@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::CamaRatingSystem;
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
@@ -68,11 +69,12 @@ pub enum RatingAnalysisRepositoryError {
 }
 
 /// Bounded adapter over the migrated production schema. It never creates or
-/// upgrades tables; startup admission remains the sole migration authority.
+/// upgrades tables; startup initialization remains the sole migration authority.
 #[derive(Clone, Debug)]
 pub struct RatingAnalysisRepository {
     path: PathBuf,
     openskill: CamaOpenSkillSystem,
+    rating_system: CamaRatingSystem,
     new_player_mmr_discount: i32,
 }
 
@@ -81,11 +83,13 @@ impl RatingAnalysisRepository {
     pub fn new(
         path: impl AsRef<Path>,
         openskill: CamaOpenSkillSystem,
+        rating_system: CamaRatingSystem,
         new_player_mmr_discount: i32,
     ) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             openskill,
+            rating_system,
             new_player_mmr_discount,
         }
     }
@@ -102,6 +106,7 @@ impl RatingAnalysisRepository {
             .replay_openskill_atomic_configured(
                 guild_id,
                 &self.openskill,
+                &self.rating_system,
                 self.new_player_mmr_discount,
             )
             .map_err(|error| RatingAnalysisRepositoryError::Replay(error.to_string()))?;

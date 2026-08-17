@@ -71,6 +71,7 @@ def build_wheel_result_embed(
     bomb_omb_missed: bool = False,
     shield_absorbed_total: int = 0,
     shielded_count: int = 0,
+    wheel_loss_settled: bool = False,
     bankruptcy_penalty: int = 0,
     vanity_tax: int = 0,
 ) -> discord.Embed:
@@ -462,7 +463,7 @@ def build_wheel_result_embed(
         if garnished > 0:
             description += f"\n\n*{garnished} {JOPACOIN_EMOTE} went to debt repayment.*"
 
-    elif isinstance(value, int) and value < 0:
+    elif isinstance(value, int) and (value < 0 or wheel_loss_settled):
         if is_golden:
             # OVEREXTENDED — golden wheel's penalty wedge
             title = "📉 OVEREXTENDED! 📉"

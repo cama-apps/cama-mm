@@ -5,7 +5,7 @@
 //! restarts a fully failed client session with bounded backoff.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ use serenity::all::{
 use serenity::cache::Cache;
 use serenity::gateway::{ConnectionStage, ShardManager};
 use serenity::http::Http;
+use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use crate::admin_provider::{AdminCommandSyncResult, AdminDiscordControl, AdminDiscordHealth};
@@ -66,9 +67,10 @@ use crate::raw_reactions::{
     RawReactionEmoji, RawReactionEvent, RawReactionKind, RawReactionObservers,
 };
 use crate::registration::{
-    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionActionRow,
-    InteractionAllowedMentions, InteractionAttachment, InteractionAttachmentPolicy,
-    InteractionButtonStyle, InteractionEmbed, InteractionHandler, InteractionMessageDelivery,
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec,
+    InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAllowedMentions,
+    InteractionAttachment, InteractionAttachmentPolicy, InteractionButtonStyle, InteractionEmbed,
+    InteractionHandler, InteractionInitialResponseState, InteractionMessageDelivery,
     InteractionMessageReceipt, InteractionModal, InteractionOption, InteractionRequest,
     InteractionResponder, InteractionResponse, InteractionResponseError, InteractionTextInputStyle,
     InteractionValue, Registry,
@@ -83,6 +85,7 @@ use crate::wrapped_provider::{WrappedDiscordPort, WrappedDiscordProfile};
 
 const WRAPPED_AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
 const WRAPPED_AVATAR_TIMEOUT: Duration = Duration::from_secs(10);
+const COMPONENT_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
 static WRAPPED_AVATAR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 #[derive(Clone, Default)]
@@ -1374,11 +1377,11 @@ impl SerenityHandler {
             warn!(command = %command.data.name, "unregistered Discord command received");
             return;
         };
-        let responder: Arc<dyn InteractionResponder> = Arc::new(CommandResponder {
+        let responder = coordinated_responder(Arc::new(CommandResponder {
             interaction: command,
             http: context.http,
             acknowledged: AtomicBool::new(false),
-        });
+        }));
         run_command_handler(
             handler,
             request,
@@ -1413,11 +1416,11 @@ impl SerenityHandler {
             warn!(command = %command.data.name, "unregistered Discord autocomplete received");
             return;
         };
-        let responder: Arc<dyn InteractionResponder> = Arc::new(CommandResponder {
+        let responder = coordinated_responder(Arc::new(CommandResponder {
             interaction: command,
             http: context.http,
             acknowledged: AtomicBool::new(false),
-        });
+        }));
         if let Err(error) = handler.handle(request, Arc::clone(&responder)).await {
             warn!(%error, "autocomplete handler failed");
             if !responder.response_is_done() {
@@ -1427,13 +1430,10 @@ impl SerenityHandler {
     }
 
     async fn dispatch_component(&self, context: Context, component: ComponentInteraction) {
-        let Some(handler) = self.registry.component_handler(&component.data.custom_id) else {
-            warn!(custom_id = %component.data.custom_id, "unregistered component received");
-            return;
-        };
+        let custom_id = component.data.custom_id.clone();
         let request = InteractionRequest::Component {
             interaction_id: component.id.get(),
-            custom_id: component.data.custom_id.clone(),
+            custom_id: custom_id.clone(),
             user_id: component.user.id.get(),
             user_display_name: component
                 .member
@@ -1449,19 +1449,25 @@ impl SerenityHandler {
                 .map(|permissions| permissions.bits()),
             values: component_values(&component.data.kind),
         };
-        let responder: Arc<dyn InteractionResponder> = Arc::new(ComponentResponder {
+        let responder = coordinated_responder(Arc::new(ComponentResponder {
             interaction: component,
             http: context.http,
             acknowledged: AtomicBool::new(false),
-        });
+        }));
+        let Some(handler) = self.registry.component_handler(&custom_id) else {
+            warn!(%custom_id, "unregistered component received");
+            let _ = responder
+                .respond(
+                    InteractionResponse::message("This control is no longer active.").ephemeral(),
+                )
+                .await;
+            return;
+        };
         run_component_handler(handler, request, responder).await;
     }
 
     async fn dispatch_modal(&self, context: Context, modal: ModalInteraction) {
-        let Some(handler) = self.registry.component_handler(&modal.data.custom_id) else {
-            warn!(custom_id = %modal.data.custom_id, "unregistered modal received");
-            return;
-        };
+        let custom_id = modal.data.custom_id.clone();
         let fields = modal
             .data
             .components
@@ -1477,7 +1483,7 @@ impl SerenityHandler {
             .collect();
         let request = InteractionRequest::Modal {
             interaction_id: modal.id.get(),
-            custom_id: modal.data.custom_id.clone(),
+            custom_id: custom_id.clone(),
             user_id: modal.user.id.get(),
             guild_id: modal.guild_id.map(|id| id.get()),
             channel_id: Some(modal.channel_id.get()),
@@ -1488,11 +1494,18 @@ impl SerenityHandler {
                 .map(|permissions| permissions.bits()),
             fields,
         };
-        let responder: Arc<dyn InteractionResponder> = Arc::new(ModalResponder {
+        let responder = coordinated_responder(Arc::new(ModalResponder {
             interaction: modal,
             http: context.http,
             acknowledged: AtomicBool::new(false),
-        });
+        }));
+        let Some(handler) = self.registry.component_handler(&custom_id) else {
+            warn!(%custom_id, "unregistered modal received");
+            let _ = responder
+                .respond(InteractionResponse::message("This form is no longer active.").ephemeral())
+                .await;
+            return;
+        };
         run_component_handler(handler, request, responder).await;
     }
 }
@@ -1546,10 +1559,7 @@ async fn run_command_handler(
             return;
         }
         error!(%handler_error, "interaction handler failed without global policy");
-        if let Err(error) = responder
-            .followup(InteractionResponse::message("Something went wrong.").ephemeral())
-            .await
-        {
+        if let Err(error) = report_handler_failure(&responder).await {
             error!(%error, "failed to report interaction handler failure");
         }
     }
@@ -1560,13 +1570,80 @@ async fn run_component_handler(
     request: InteractionRequest,
     responder: Arc<dyn InteractionResponder>,
 ) {
-    if let Err(handler_error) = handler.handle(request, Arc::clone(&responder)).await {
-        error!(%handler_error, "component interaction handler failed");
-        if let Err(error) = responder
-            .followup(InteractionResponse::message("Something went wrong.").ephemeral())
-            .await
+    run_component_handler_with_deadline(
+        handler,
+        request,
+        responder,
+        COMPONENT_ACKNOWLEDGEMENT_DEADLINE,
+    )
+    .await;
+}
+
+async fn run_component_handler_with_deadline(
+    handler: Arc<dyn InteractionHandler>,
+    request: InteractionRequest,
+    responder: Arc<dyn InteractionResponder>,
+    acknowledgement_deadline: Duration,
+) {
+    let acknowledgement_policy = handler.acknowledgement_policy(&request);
+    let handler_future = handler.handle(request, Arc::clone(&responder));
+    tokio::pin!(handler_future);
+
+    let result = if acknowledgement_policy == InteractionAcknowledgementPolicy::Automatic {
+        tokio::select! {
+            result = &mut handler_future => result,
+            () = tokio::time::sleep(acknowledgement_deadline) => {
+                if responder.initial_response_state()
+                    == InteractionInitialResponseState::NotStarted
+                    && let Err(error) = responder.defer(false).await
+                {
+                    warn!(%error, "automatic component acknowledgement failed");
+                }
+                handler_future.await
+            }
+        }
+    } else {
+        handler_future.await
+    };
+
+    match result {
+        Err(handler_error) => {
+            error!(%handler_error, "component interaction handler failed");
+            if let Err(error) = report_handler_failure(&responder).await {
+                error!(%error, "failed to report component interaction handler failure");
+            }
+        }
+        Ok(())
+            if responder.initial_response_state()
+                == InteractionInitialResponseState::NotStarted =>
         {
-            error!(%error, "failed to report component interaction handler failure");
+            if let Err(error) = responder
+                .respond(
+                    InteractionResponse::message("This control is no longer active.").ephemeral(),
+                )
+                .await
+            {
+                warn!(%error, "failed to acknowledge inactive component control");
+            }
+        }
+        Ok(()) => {}
+    }
+}
+
+/// Deliver the generic failure copy through whichever channel the interaction
+/// can still accept: the initial response when the handler failed before
+/// acknowledging, a followup otherwise. Discord rejects a followup on an
+/// unacknowledged interaction, which previously left the user with only the
+/// client-side "This interaction failed" notice.
+async fn report_handler_failure(
+    responder: &Arc<dyn InteractionResponder>,
+) -> Result<(), InteractionResponseError> {
+    let message = InteractionResponse::message("Something went wrong.").ephemeral();
+    match responder.initial_response_state() {
+        InteractionInitialResponseState::NotStarted => responder.respond(message).await,
+        InteractionInitialResponseState::Accepted => responder.followup(message).await,
+        InteractionInitialResponseState::Attempting | InteractionInitialResponseState::Rejected => {
+            Ok(())
         }
     }
 }
@@ -1919,6 +1996,211 @@ impl InteractionResponder for CommandResponder {
                 .await
                 .map_err(response_error),
         }
+    }
+}
+
+const INITIAL_RESPONSE_NOT_STARTED: u8 = 0;
+const INITIAL_RESPONSE_ATTEMPTING: u8 = 1;
+const INITIAL_RESPONSE_ACCEPTED: u8 = 2;
+const INITIAL_RESPONSE_REJECTED: u8 = 3;
+
+enum InitialResponseClaim {
+    Send,
+    AlreadyAccepted,
+}
+
+/// Coordinates the single initial callback shared by the handler and the
+/// acknowledgement watchdog.
+///
+/// This is the Rust equivalent of checking `interaction.response.is_done()`
+/// around discord.py's safe defer/respond helpers, with an explicit in-flight
+/// state so two concurrent callbacks can never be sent.
+struct CoordinatedResponder {
+    inner: Arc<dyn InteractionResponder>,
+    initial_state: AtomicU8,
+    initial_settled: Notify,
+}
+
+fn coordinated_responder(inner: Arc<dyn InteractionResponder>) -> Arc<dyn InteractionResponder> {
+    Arc::new(CoordinatedResponder {
+        inner,
+        initial_state: AtomicU8::new(INITIAL_RESPONSE_NOT_STARTED),
+        initial_settled: Notify::new(),
+    })
+}
+
+impl CoordinatedResponder {
+    fn state(&self) -> InteractionInitialResponseState {
+        match self.initial_state.load(Ordering::Acquire) {
+            INITIAL_RESPONSE_ATTEMPTING => InteractionInitialResponseState::Attempting,
+            INITIAL_RESPONSE_ACCEPTED => InteractionInitialResponseState::Accepted,
+            INITIAL_RESPONSE_REJECTED => InteractionInitialResponseState::Rejected,
+            _ => InteractionInitialResponseState::NotStarted,
+        }
+    }
+
+    async fn claim_initial(&self) -> Result<InitialResponseClaim, InteractionResponseError> {
+        loop {
+            let settled = self.initial_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            match self.initial_state.load(Ordering::Acquire) {
+                INITIAL_RESPONSE_NOT_STARTED => {
+                    if self
+                        .initial_state
+                        .compare_exchange(
+                            INITIAL_RESPONSE_NOT_STARTED,
+                            INITIAL_RESPONSE_ATTEMPTING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return Ok(InitialResponseClaim::Send);
+                    }
+                }
+                INITIAL_RESPONSE_ATTEMPTING => settled.await,
+                INITIAL_RESPONSE_ACCEPTED => {
+                    return Ok(InitialResponseClaim::AlreadyAccepted);
+                }
+                INITIAL_RESPONSE_REJECTED => {
+                    return Err(InteractionResponseError::new(
+                        "the initial interaction response was already rejected",
+                    ));
+                }
+                _ => unreachable!("invalid interaction response state"),
+            }
+        }
+    }
+
+    fn finish_initial(
+        &self,
+        result: Result<(), InteractionResponseError>,
+    ) -> Result<(), InteractionResponseError> {
+        self.initial_state.store(
+            if result.is_ok() {
+                INITIAL_RESPONSE_ACCEPTED
+            } else {
+                INITIAL_RESPONSE_REJECTED
+            },
+            Ordering::Release,
+        );
+        self.initial_settled.notify_waiters();
+        result
+    }
+}
+
+#[async_trait]
+impl InteractionResponder for CoordinatedResponder {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.respond(response).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => self.inner.followup(response).await,
+        }
+    }
+
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.defer(ephemeral).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => Ok(()),
+        }
+    }
+
+    async fn defer_thinking(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.defer_thinking(ephemeral).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => Ok(()),
+        }
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.followup(response).await
+    }
+
+    async fn show_modal(&self, modal: InteractionModal) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.show_modal(modal).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => Err(InteractionResponseError::new(
+                "cannot open a modal after acknowledging the interaction",
+            )),
+        }
+    }
+
+    async fn autocomplete(
+        &self,
+        choices: Vec<CommandOptionChoice>,
+    ) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.autocomplete(choices).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => Err(InteractionResponseError::new(
+                "autocomplete interaction was already acknowledged",
+            )),
+        }
+    }
+
+    fn response_is_done(&self) -> bool {
+        self.state() != InteractionInitialResponseState::NotStarted
+    }
+
+    fn initial_response_state(&self) -> InteractionInitialResponseState {
+        self.state()
+    }
+
+    async fn followup_with_receipt(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<Option<InteractionMessageReceipt>, InteractionResponseError> {
+        self.inner.followup_with_receipt(response).await
+    }
+
+    async fn update(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        match self.claim_initial().await? {
+            InitialResponseClaim::Send => {
+                let result = self.inner.update(response).await;
+                self.finish_initial(result)
+            }
+            InitialResponseClaim::AlreadyAccepted => self.inner.edit_original(response).await,
+        }
+    }
+
+    async fn edit_original(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.edit_original(response).await
+    }
+
+    async fn edit_message(
+        &self,
+        receipt: InteractionMessageReceipt,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.edit_message(receipt, response).await
+    }
+
+    async fn delete_message(
+        &self,
+        receipt: InteractionMessageReceipt,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.delete_message(receipt).await
     }
 }
 
@@ -4212,6 +4494,25 @@ impl DiscordTransport for SerenityDiscordTransport {
         }))
     }
 
+    fn cached_guild_member_display_name(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Option<String>, String> {
+        if guild_id == 0 || user_id == 0 {
+            return Ok(None);
+        }
+        let context = self.context()?;
+        let guild_id = GuildId::new(guild_id);
+        let user_id = UserId::new(user_id);
+        Ok(context.cache.guild(guild_id).and_then(|guild| {
+            guild
+                .members
+                .get(&user_id)
+                .map(|member| member.display_name().to_owned())
+        }))
+    }
+
     async fn channel_parent_id(
         &self,
         guild_id: u64,
@@ -4449,6 +4750,237 @@ mod tests {
     use std::thread::JoinHandle;
 
     struct WireTestHandler;
+
+    #[derive(Default)]
+    struct RecordingInteractionResponder {
+        events: Mutex<Vec<&'static str>>,
+        reject_initial: AtomicBool,
+        initial_delay_ms: AtomicU64,
+    }
+
+    impl RecordingInteractionResponder {
+        fn record(&self, event: &'static str) -> Result<(), InteractionResponseError> {
+            self.events.lock().expect("events lock").push(event);
+            if self.reject_initial.load(Ordering::Acquire)
+                && matches!(event, "respond" | "defer" | "update" | "show_modal")
+            {
+                Err(InteractionResponseError::new("Unknown interaction"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.events.lock().expect("events lock").clone()
+        }
+
+        async fn record_initial(
+            &self,
+            event: &'static str,
+        ) -> Result<(), InteractionResponseError> {
+            let delay = self.initial_delay_ms.load(Ordering::Acquire);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            self.record(event)
+        }
+    }
+
+    #[async_trait]
+    impl InteractionResponder for RecordingInteractionResponder {
+        async fn respond(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.record_initial("respond").await
+        }
+
+        async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
+            self.record_initial("defer").await
+        }
+
+        async fn followup(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.record("followup")
+        }
+
+        async fn show_modal(
+            &self,
+            _modal: InteractionModal,
+        ) -> Result<(), InteractionResponseError> {
+            self.record_initial("show_modal").await
+        }
+
+        async fn update(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.record_initial("update").await
+        }
+
+        async fn edit_original(
+            &self,
+            _response: InteractionResponse,
+        ) -> Result<(), InteractionResponseError> {
+            self.record("edit_original")
+        }
+    }
+
+    struct DelayedUpdateHandler;
+
+    #[async_trait]
+    impl InteractionHandler for DelayedUpdateHandler {
+        async fn handle(
+            &self,
+            _request: InteractionRequest,
+            responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), InteractionHandlerError> {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            responder
+                .update(InteractionResponse::message("complete"))
+                .await
+                .map_err(|error| error.to_string().into())
+        }
+    }
+
+    struct DelayedModalHandler;
+
+    #[async_trait]
+    impl InteractionHandler for DelayedModalHandler {
+        fn acknowledgement_policy(
+            &self,
+            _request: &InteractionRequest,
+        ) -> InteractionAcknowledgementPolicy {
+            InteractionAcknowledgementPolicy::Modal
+        }
+
+        async fn handle(
+            &self,
+            _request: InteractionRequest,
+            responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), InteractionHandlerError> {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            responder
+                .show_modal(InteractionModal {
+                    custom_id: "test:modal".to_owned(),
+                    title: "Test".to_owned(),
+                    inputs: Vec::new(),
+                })
+                .await
+                .map_err(|error| error.to_string().into())
+        }
+    }
+
+    struct SilentComponentHandler;
+
+    #[async_trait]
+    impl InteractionHandler for SilentComponentHandler {
+        async fn handle(
+            &self,
+            _request: InteractionRequest,
+            _responder: Arc<dyn InteractionResponder>,
+        ) -> Result<(), InteractionHandlerError> {
+            Ok(())
+        }
+    }
+
+    fn component_request() -> InteractionRequest {
+        InteractionRequest::Component {
+            interaction_id: 1,
+            custom_id: "test:component".to_owned(),
+            user_id: 2,
+            user_display_name: "Tester".to_owned(),
+            guild_id: Some(3),
+            channel_id: Some(4),
+            member_permissions: None,
+            values: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_component_update_is_automatically_deferred_then_edited() {
+        let inner = Arc::new(RecordingInteractionResponder::default());
+        let responder = coordinated_responder(inner.clone());
+        run_component_handler_with_deadline(
+            Arc::new(DelayedUpdateHandler),
+            component_request(),
+            responder,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(inner.events(), ["defer", "edit_original"]);
+    }
+
+    #[tokio::test]
+    async fn modal_policy_never_runs_the_automatic_defer_watchdog() {
+        let inner = Arc::new(RecordingInteractionResponder::default());
+        let responder = coordinated_responder(inner.clone());
+        run_component_handler_with_deadline(
+            Arc::new(DelayedModalHandler),
+            component_request(),
+            responder,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(inner.events(), ["show_modal"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_initial_callbacks_send_only_one_discord_response() {
+        let inner = Arc::new(RecordingInteractionResponder::default());
+        inner.initial_delay_ms.store(10, Ordering::Release);
+        let responder = coordinated_responder(inner.clone());
+        let (defer, update) = tokio::join!(
+            responder.defer(false),
+            responder.update(InteractionResponse::message("complete")),
+        );
+        defer.expect("defer coordination");
+        update.expect("update coordination");
+
+        let events = inner.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(**event, "defer" | "update"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_initial_response_is_not_retried_by_failure_reporting() {
+        let inner = Arc::new(RecordingInteractionResponder::default());
+        inner.reject_initial.store(true, Ordering::Release);
+        let responder = coordinated_responder(inner.clone());
+        responder
+            .respond(InteractionResponse::message("late"))
+            .await
+            .expect_err("initial response is rejected");
+
+        report_handler_failure(&responder)
+            .await
+            .expect("rejected response is not retried");
+        assert_eq!(inner.events(), ["respond"]);
+    }
+
+    #[tokio::test]
+    async fn successful_silent_handler_receives_stale_control_response() {
+        let inner = Arc::new(RecordingInteractionResponder::default());
+        let responder = coordinated_responder(inner.clone());
+        run_component_handler_with_deadline(
+            Arc::new(SilentComponentHandler),
+            component_request(),
+            responder,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(inner.events(), ["respond"]);
+    }
 
     #[test]
     fn configured_gamba_channel_id_is_accepted() {

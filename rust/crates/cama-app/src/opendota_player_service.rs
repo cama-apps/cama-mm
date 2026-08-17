@@ -886,7 +886,9 @@ const fn is_fresh(now: i64, cached_at: i64) -> bool {
 }
 
 fn round_tenth(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
+    // Python parity: `round(x, 1)` (ties to even on the exact value); the
+    // scale-and-round form rendered 6.25% as 6.3 where Python shows 6.2.
+    cama_domain::formatting::python_round_decimals(value, 1)
 }
 
 #[cfg(test)]

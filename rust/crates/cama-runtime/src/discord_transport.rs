@@ -425,6 +425,17 @@ pub trait DiscordTransport: Send + Sync {
         user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String>;
 
+    /// Resolve a guild-specific display name without falling back to Discord
+    /// HTTP. Callers that run during message refreshes can use this to avoid
+    /// repeated member requests when the member is absent from cache.
+    fn cached_guild_member_display_name(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// Resolve a channel's thread parent when the interaction happened in a
     /// thread. Older transports return `None`, preserving source compatibility.
     async fn channel_parent_id(

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -4326,6 +4326,10 @@ struct PublicationProbeDiscord {
     unpin_started: AtomicBool,
     unpin_gate: tokio::sync::Semaphore,
     next_message_id: AtomicU64,
+    members: Mutex<BTreeMap<(u64, u64), crate::discord_transport::DiscordGuildMemberSnapshot>>,
+    member_lookups: Mutex<Vec<(u64, u64)>>,
+    cached_member_lookups: Mutex<Vec<(u64, u64)>>,
+    failed_cached_member_lookups: Mutex<BTreeSet<(u64, u64)>>,
 }
 
 impl Default for PublicationProbeDiscord {
@@ -4350,11 +4354,50 @@ impl Default for PublicationProbeDiscord {
             unpin_started: AtomicBool::new(false),
             unpin_gate: tokio::sync::Semaphore::new(0),
             next_message_id: AtomicU64::new(1),
+            members: Mutex::new(BTreeMap::new()),
+            member_lookups: Mutex::new(Vec::new()),
+            cached_member_lookups: Mutex::new(Vec::new()),
+            failed_cached_member_lookups: Mutex::new(BTreeSet::new()),
         }
     }
 }
 
 impl PublicationProbeDiscord {
+    fn set_member(&self, guild_id: u64, user_id: u64, display_name: &str) {
+        self.members.lock().expect("publication members").insert(
+            (guild_id, user_id),
+            crate::discord_transport::DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.to_owned(),
+                presence: crate::discord_transport::DiscordPresence::Unknown,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            },
+        );
+    }
+
+    fn member_lookups(&self) -> Vec<(u64, u64)> {
+        self.member_lookups
+            .lock()
+            .expect("publication member lookups")
+            .clone()
+    }
+
+    fn cached_member_lookups(&self) -> Vec<(u64, u64)> {
+        self.cached_member_lookups
+            .lock()
+            .expect("publication cached member lookups")
+            .clone()
+    }
+
+    fn fail_cached_member_lookup(&self, guild_id: u64, user_id: u64) {
+        self.failed_cached_member_lookups
+            .lock()
+            .expect("failed publication cached member lookups")
+            .insert((guild_id, user_id));
+    }
+
     fn fail_sends_to(&self, channel_ids: impl IntoIterator<Item = u64>) {
         self.failed_send_channels
             .lock()
@@ -4632,10 +4675,44 @@ impl DiscordTransport for PublicationProbeDiscord {
 
     async fn guild_member(
         &self,
-        _guild_id: u64,
-        _user_id: u64,
+        guild_id: u64,
+        user_id: u64,
     ) -> Result<Option<crate::discord_transport::DiscordGuildMemberSnapshot>, String> {
-        Ok(None)
+        self.member_lookups
+            .lock()
+            .expect("publication member lookups")
+            .push((guild_id, user_id));
+        Ok(self
+            .members
+            .lock()
+            .expect("publication members")
+            .get(&(guild_id, user_id))
+            .cloned())
+    }
+
+    fn cached_guild_member_display_name(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Option<String>, String> {
+        self.cached_member_lookups
+            .lock()
+            .expect("publication cached member lookups")
+            .push((guild_id, user_id));
+        if self
+            .failed_cached_member_lookups
+            .lock()
+            .expect("failed publication cached member lookups")
+            .contains(&(guild_id, user_id))
+        {
+            return Err("cached member lookup failed".to_owned());
+        }
+        Ok(self
+            .members
+            .lock()
+            .expect("publication members")
+            .get(&(guild_id, user_id))
+            .map(|member| member.display_name.clone()))
     }
 }
 
@@ -5618,6 +5695,190 @@ fn test_clean_shuffle_excluded_set_disjoint_from_teams() {
             .collect::<BTreeSet<_>>(),
         player_ids.into_iter().collect()
     );
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_uses_server_display_names_without_http_lookup() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(14, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let participant_id = prepared.pending.state.radiant_team_ids[0];
+    let excluded_id = prepared.pending.state.excluded_player_ids[0];
+    discord.set_member(
+        u64::try_from(GUILD).expect("fixture guild ID"),
+        u64::try_from(participant_id).expect("fixture player ID"),
+        "Participant Server Name",
+    );
+    discord.set_member(
+        u64::try_from(GUILD).expect("fixture guild ID"),
+        u64::try_from(excluded_id).expect("fixture player ID"),
+        "Excluded Server Name",
+    );
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let teams = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
+        .expect("teams field");
+    let balance = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "📊 Balance")
+        .expect("balance field");
+
+    assert!(teams.value.contains("Participant Server Name"));
+    assert!(!teams.value.contains(&format!("shuffle-{participant_id}")));
+    assert!(balance.value.contains("**Excluded:**"));
+    assert!(balance.value.contains("Excluded Server Name"));
+    assert!(!balance.value.contains(&format!("Unknown({excluded_id})")));
+    assert!(discord.member_lookups().is_empty());
+    let expected_lookups = prepared
+        .pending
+        .state
+        .participant_ids()
+        .into_iter()
+        .chain(prepared.pending.state.excluded_player_ids.iter().copied())
+        .map(|player_id| {
+            (
+                u64::try_from(GUILD).expect("fixture guild ID"),
+                u64::try_from(player_id).expect("fixture player ID"),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let cached_lookups = discord.cached_member_lookups();
+    assert_eq!(cached_lookups.len(), expected_lookups.len());
+    assert_eq!(
+        cached_lookups.into_iter().collect::<BTreeSet<_>>(),
+        expected_lookups
+    );
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(14, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let participant_id = prepared.pending.state.radiant_team_ids[0];
+    discord.set_member(
+        u64::try_from(GUILD).expect("fixture guild ID"),
+        u64::try_from(participant_id).expect("fixture player ID"),
+        "Deleted Player Server Name",
+    );
+    assert!(
+        PlayerRepository::new(fixture.database.path())
+            .delete(participant_id, Some(GUILD))
+            .expect("delete player row")
+    );
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let teams = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
+        .expect("teams field");
+
+    assert!(teams.value.contains("Deleted Player Server Name"));
+    assert!(!teams.value.contains(&format!("Unknown({participant_id})")));
+    assert!(discord.member_lookups().is_empty());
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_falls_back_to_stored_name_on_cached_lookup_error() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(14, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let participant_id = prepared.pending.state.radiant_team_ids[0];
+    discord.fail_cached_member_lookup(
+        u64::try_from(GUILD).expect("fixture guild ID"),
+        u64::try_from(participant_id).expect("fixture player ID"),
+    );
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let teams = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
+        .expect("teams field");
+
+    assert!(teams.value.contains(&format!("shuffle-{participant_id}")));
+    assert!(!teams.value.contains(&format!("Unknown({participant_id})")));
+    assert!(discord.member_lookups().is_empty());
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_falls_back_to_stored_name_for_excluded_player() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(14, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let excluded_id = prepared.pending.state.excluded_player_ids[0];
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let balance = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "📊 Balance")
+        .expect("balance field");
+
+    assert!(balance.value.contains(&format!("shuffle-{excluded_id}")));
+    assert!(!balance.value.contains(&format!("Unknown({excluded_id})")));
+    assert!(discord.member_lookups().is_empty());
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_skips_discord_lookup_for_invalid_excluded_ids() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let players = PlayerRepository::new(fixture.database.path());
+    players
+        .add(&NewPlayer::new(0, "zero-id-player", Some(GUILD)))
+        .expect("add zero-ID player");
+    players
+        .add(&NewPlayer::new(-1, "negative-id-player", Some(GUILD)))
+        .expect("add negative-ID player");
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let mut prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    prepared.pending.state.excluded_player_ids = vec![0, -1];
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let balance = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "📊 Balance")
+        .expect("balance field");
+
+    assert!(balance.value.contains("zero-id-player"));
+    assert!(balance.value.contains("negative-id-player"));
+    assert!(discord.member_lookups().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6668,6 +6929,7 @@ fn generated_match_reward_retry_recovers_base_and_blood_pact_without_second_paym
         player_ids: &players,
         gross: 100,
         apply_bankruptcy_penalty: true,
+        apply_vanity_tax: true,
         source: "match_streaming_bonus",
         related_type: "match",
         related_id: MATCH_ID,

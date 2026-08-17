@@ -1975,6 +1975,7 @@ def _hostile_loss_result(
     absorbed: int = 0,
     victim_balance_before: int = 100,
     destination_balance_after: int | None = None,
+    protect_self: bool = False,
     **_kwargs,
 ) -> HostileLossResult:
     """Build the backend result returned by a ProtectionService test double."""
@@ -1996,7 +1997,7 @@ def _hostile_loss_result(
         victim_balance_after=victim_balance_before - applied,
         destination_balance_before=None,
         destination_balance_after=destination_balance_after,
-        shieldable=actor_id != victim_id,
+        shieldable=protect_self or actor_id != victim_id,
         duplicate=False,
     )
 
@@ -2010,6 +2011,95 @@ def _edited_wheel_embed(interaction):
 async def _inline_to_thread(function, /, *args, **kwargs):
     """Run command collaborators inline so mock side effects fail synchronously."""
     return function(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("is_golden", "wedge_label"),
+    [(False, "BANKRUPT"), (True, "OVEREXTENDED")],
+)
+@pytest.mark.asyncio
+async def test_fully_absorbed_numeric_loss_keeps_wheel_outcome_and_cooldown(
+    is_golden,
+    wedge_label,
+):
+    bot = MagicMock()
+    protection_service = _make_wheel_protection_service()
+    _attach_wheel_protection(bot, protection_service)
+    spinner_id = 7250
+    spinner_balance = 100
+    player_service = _make_wheel_player_service(spinner_balance=spinner_balance)
+    player_service.get_leaderboard.return_value = (
+        [
+            SimpleNamespace(
+                name="Spinner",
+                discord_id=spinner_id,
+                jopacoin_balance=spinner_balance,
+            )
+        ]
+        if is_golden
+        else []
+    )
+    player_service.get_total_positive_balance.return_value = spinner_balance
+    player_service.get_leaderboard_bottom.return_value = []
+    loan_service = MagicMock()
+    interaction = _make_wheel_interaction(spinner_id)
+    commands = BettingCommands(
+        bot,
+        MagicMock(),
+        MagicMock(),
+        player_service,
+        loan_service=loan_service,
+    )
+    wedge = (wedge_label, -50, "#4a3000")
+    wedge_source = (
+        "commands.betting.compute_live_golden_wedges"
+        if is_golden
+        else "commands.betting.get_wheel_wedges"
+    )
+
+    def settle(*args, **kwargs):
+        return _hostile_loss_result(
+            *args,
+            **kwargs,
+            absorbed=50,
+            victim_balance_before=spinner_balance,
+            destination_balance_after=0,
+        )
+
+    protection_service.apply_hostile_loss.side_effect = settle
+    now = 1_700_000_000
+    with (
+        patch(wedge_source, return_value=[wedge]),
+        patch("commands.betting.time.time", return_value=now),
+        patch("commands.betting.random.randint", return_value=0),
+        patch("commands.betting.random.random", return_value=1.0),
+        patch("commands.betting.asyncio.to_thread", new=_inline_to_thread),
+        patch("commands.betting.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()),
+    ):
+        await commands.gamba.callback(commands, interaction)
+
+    player_service.set_last_wheel_spin.assert_called_once_with(spinner_id, 123, now)
+    loan_service.add_to_nonprofit_fund.assert_not_called()
+    loss_call = protection_service.apply_hostile_loss.call_args
+    assert loss_call.args[:4] == (spinner_id, 123, 50, "wheel_loss")
+    assert loss_call.kwargs["destination"] == "reserve"
+    assert loss_call.kwargs["protect_self"] is True
+
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["result"] == 0
+    assert log_kwargs["outcome_code"] == wedge_label
+
+    embed = _edited_wheel_embed(interaction)
+    assert wedge_label in embed.title
+    assert "LOSE A TURN" not in embed.title
+    assert "lost **0**" in embed.description.lower()
+    shield_field = next(
+        field for field in embed.fields if field.name == "🌾 White Mana Shields"
+    )
+    assert "**50**" in shield_field.value
+    next_spin = next(field for field in embed.fields if field.name == "Next Spin")
+    assert next_spin.value == f"<t:{now + WHEEL_COOLDOWN_SECONDS}:R>"
 
 
 @pytest.mark.asyncio

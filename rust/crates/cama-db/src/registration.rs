@@ -16,6 +16,8 @@ use crate::open_runtime_connection;
 
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
 
+pub type PlayHoursWithTimezone = (Option<String>, Option<Vec<i64>>);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterPlayerRequest<'a> {
     pub discord_id: i64,
@@ -547,7 +549,7 @@ impl RegistrationRepository {
     pub fn play_hours_for_guild(
         &self,
         guild_id: Option<i64>,
-    ) -> Result<Vec<(Option<String>, Option<Vec<i64>>)>, RegistrationRepositoryError> {
+    ) -> Result<Vec<PlayHoursWithTimezone>, RegistrationRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare("SELECT timezone, dota_play_hours FROM players WHERE guild_id=?1")?;
@@ -659,30 +661,15 @@ fn steam_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, ru
         .optional()
 }
 
+// Python writes and reads this column with `json`, so both directions
+// delegate to serde_json rather than a hand-rolled escaper that would drift
+// from `core_repositories`' codec for the same column.
 fn encode_roles(roles: &[String]) -> String {
-    let body = roles
-        .iter()
-        .map(|role| format!("\"{}\"", role.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
+    serde_json::to_string(roles).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn decode_roles(raw: &str) -> Vec<String> {
-    raw.strip_prefix('[')
-        .and_then(|body| body.strip_suffix(']'))
-        .map(|body| {
-            body.split(',')
-                .filter_map(|value| {
-                    value
-                        .trim()
-                        .strip_prefix('"')
-                        .and_then(|value| value.strip_suffix('"'))
-                        .map(|value| value.replace("\\\"", "\"").replace("\\\\", "\\"))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 #[cfg(test)]

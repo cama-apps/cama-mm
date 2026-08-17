@@ -1,7 +1,7 @@
 //! Existing-schema SQLite reads for the Hero Grid command.
 //!
 //! The runtime schema manager owns startup migration. This adapter only opens
-//! an admitted database through [`crate::open_runtime_connection`]; production
+//! an initialized database through [`crate::open_runtime_connection`]; production
 //! code in this module never creates a database, table, index, or migration.
 
 use std::collections::{BTreeMap, BTreeSet};

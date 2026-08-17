@@ -650,6 +650,10 @@ struct GeneratedRewardBatch<'a> {
     player_ids: &'a [i64],
     gross: i64,
     apply_bankruptcy_penalty: bool,
+    /// Python parity: only `_award_with_penalties` batches (win, exclusion,
+    /// streaming) carry vanity-tax rates; `award_participation` (including
+    /// the bomb-pot bonus) never does.
+    apply_vanity_tax: bool,
     source: &'a str,
     related_type: &'a str,
     related_id: i64,
@@ -765,7 +769,9 @@ impl ProductionMatchRewardControl {
                 garnishment_rate: self.garnishment_rate,
                 apply_bankruptcy_penalty: batch.apply_bankruptcy_penalty,
                 bankruptcy_kept_rate: self.bankruptcy_kept_rate,
-                vanity_tax_rate: if vanity_taxable_ids.contains(discord_id) {
+                vanity_tax_rate: if batch.apply_vanity_tax
+                    && vanity_taxable_ids.contains(discord_id)
+                {
                     self.vanity_tax_rate
                 } else {
                     0.0
@@ -1071,6 +1077,7 @@ impl ProtectionGateway for MatchProtectionGateway {
                 .then_some(request.recipient_id),
             clamp_to_balance: request.clamp_to_balance,
             min_balance: None,
+            protect_self: false,
             metadata: json!({
                 "kind": request.kind,
                 "attempted_loss": request.attempted_loss,
@@ -2185,6 +2192,7 @@ impl MatchHandler {
                     player_ids: &player_ids,
                     gross: amount,
                     apply_bankruptcy_penalty: true,
+                    apply_vanity_tax: true,
                     source: "match_streaming_bonus",
                     related_type: "match",
                     related_id: match_id,
@@ -3297,6 +3305,7 @@ impl MatchHandler {
                         0
                     }),
                 apply_bankruptcy_penalty: false,
+                apply_vanity_tax: false,
                 source: "match_participation",
                 related_type: "match",
                 related_id: match_id,
@@ -3323,6 +3332,7 @@ impl MatchHandler {
                     player_ids: winners,
                     gross: self.config.bomb_pot_participation_bonus,
                     apply_bankruptcy_penalty: false,
+                    apply_vanity_tax: false,
                     source: "match_participation",
                     related_type: "match",
                     related_id: match_id,
@@ -3383,6 +3393,7 @@ impl MatchHandler {
                 player_ids: &pending.state.excluded_player_ids,
                 gross: self.config.jopacoin_exclusion_reward,
                 apply_bankruptcy_penalty: true,
+                apply_vanity_tax: true,
                 source: "match_exclusion",
                 related_type: "match",
                 related_id: match_id,
@@ -4286,6 +4297,7 @@ impl MatchHandler {
                 player_ids: &player_ids,
                 gross: self.config.streaming_bonus,
                 apply_bankruptcy_penalty: true,
+                apply_vanity_tax: true,
                 source: "shuffle_streaming_bonus",
                 related_type: "pending_match",
                 related_id: prepared.pending.pending_match_id,
@@ -4419,9 +4431,13 @@ impl MatchHandler {
             .collect::<Vec<_>>();
         let players_repository = self.players.clone();
         let guild_id = pending.guild_id;
-        let player_ids = participant_ids.clone();
+        let mut player_ids = participant_ids.clone();
+        player_ids.extend(&pending.state.excluded_player_ids);
+        player_ids.sort_unstable();
+        player_ids.dedup();
+        let player_ids_for_query = player_ids.clone();
         let players = tokio::task::spawn_blocking(move || {
-            players_repository.get_by_ids(&player_ids, Some(guild_id))
+            players_repository.get_by_ids(&player_ids_for_query, Some(guild_id))
         })
         .await
         .map_err(|error| format!("shuffle embed player task failed: {error}"))?
@@ -4430,12 +4446,40 @@ impl MatchHandler {
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player)))
             .collect::<BTreeMap<_, _>>();
+        let mut display_names = BTreeMap::new();
+        if let Some(guild_id) = u64::try_from(pending.guild_id)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+        {
+            for player_id in player_ids {
+                let Ok(user_id) = u64::try_from(player_id) else {
+                    continue;
+                };
+                if user_id == 0 {
+                    continue;
+                }
+                match self
+                    .discord
+                    .cached_guild_member_display_name(guild_id, user_id)
+                {
+                    Ok(Some(display_name)) => {
+                        display_names.insert(player_id, display_name);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug!(%error, guild_id, player_id, "shuffle player name lookup failed");
+                    }
+                }
+            }
+        }
         let line = |player_id: i64, role: &str| {
             let player = players_by_id.get(&player_id);
-            let name = player.map_or_else(
-                || format!("Unknown({player_id})"),
-                |player| player.name.clone(),
-            );
+            let name = display_names.get(&player_id).cloned().unwrap_or_else(|| {
+                player.map_or_else(
+                    || format!("Unknown({player_id})"),
+                    |player| player.name.clone(),
+                )
+            });
             let on_role = player
                 .and_then(|player| player.preferred_roles.as_ref())
                 .is_some_and(|roles| roles.iter().any(|preferred| preferred == role));
@@ -4616,10 +4660,12 @@ impl MatchHandler {
                 .excluded_player_ids
                 .iter()
                 .map(|player_id| {
-                    players_by_id.get(player_id).map_or_else(
-                        || format!("Unknown({player_id})"),
-                        |player| player.name.clone(),
-                    )
+                    display_names.get(player_id).cloned().unwrap_or_else(|| {
+                        players_by_id.get(player_id).map_or_else(
+                            || format!("Unknown({player_id})"),
+                            |player| player.name.clone(),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>()
                 .join(", ");

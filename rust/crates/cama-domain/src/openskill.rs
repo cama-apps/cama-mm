@@ -707,26 +707,12 @@ fn validate_player_ids(
     Ok(())
 }
 
-// Numerical Recipes' erfc approximation.  Its maximum absolute error is
-// about 1.2e-7; update posteriors do not use this approximation, only the
-// user-facing Bradley-Terry prediction.
-fn normal_cdf(value: f64) -> f64 {
-    0.5 * erfc(-value / std::f64::consts::SQRT_2)
-}
-
-fn erfc(value: f64) -> f64 {
-    let z = value.abs();
-    let t = 1.0 / (1.0 + 0.5 * z);
-    let polynomial = t
-        * (1.000_023_68
-            + t * (0.374_091_96
-                + t * (0.096_784_18
-                    + t * (-0.186_288_06
-                        + t * (0.278_868_07
-                            + t * (-1.135_203_98
-                                + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
-    let answer = t * (-z * z - 1.265_512_23 + polynomial).exp();
-    if value >= 0.0 { answer } else { 2.0 - answer }
+// Python parity: `statistics.NormalDist().cdf(x)` evaluates
+// `0.5 * (1 + erf(x / sqrt(2)))` with a correctly-rounded `erf`. The former
+// Numerical Recipes erfc approximation drifted up to ~4e-8 from Python and
+// forced a widened parity tolerance on the persisted win probabilities.
+pub(crate) fn normal_cdf(value: f64) -> f64 {
+    0.5 * (1.0 + libm::erf(value / std::f64::consts::SQRT_2))
 }
 
 fn python_json_number(value: f64) -> String {
@@ -1460,5 +1446,29 @@ mod tests {
             ),
             Err(OpenSkillError::DuplicatePlayerId(1))
         );
+    }
+
+    #[test]
+    fn normal_cdf_matches_python_normaldist_exactly() {
+        // Pinned against CPython statistics.NormalDist().cdf. The former
+        // approximation drifted up to ~4e-8; the exact erf agrees to 1e-15,
+        // letting xtask's parity tolerance return to the strict default.
+        let cases = [
+            (0.0_f64, 0.5_f64),
+            (0.1, 0.539_827_837_277_029),
+            (-0.35, 0.363_169_348_824_380_96),
+            (1.75, 0.959_940_843_136_182_9),
+            (-2.5, 0.006_209_665_325_776_139),
+            (4.9, 0.999_999_520_816_723_4),
+            (-4.9, 4.791_832_765_903_203e-7),
+            (0.674_489_750_196_081_7, 0.75),
+        ];
+        for (value, expected) in cases {
+            let observed = normal_cdf(value);
+            assert!(
+                (observed - expected).abs() <= 1e-15,
+                "cdf({value}) = {observed}, expected {expected}"
+            );
+        }
     }
 }

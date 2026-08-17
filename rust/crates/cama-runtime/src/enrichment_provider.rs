@@ -88,6 +88,8 @@ type HeroCatalog = TriviaDataRegistry<DotabaseSqliteSource>;
 pub enum EnrichmentProviderBuildError {
     #[error("invalid OpenSkill runtime configuration: {0}")]
     OpenSkill(#[from] OpenSkillError),
+    #[error("invalid Glicko runtime configuration: {0}")]
+    InvalidRatingConfig(&'static str),
 }
 
 /// Result of Python-compatible post-record OpenDota discovery.
@@ -158,6 +160,9 @@ impl EnrichmentRegistrationProvider {
         let path = database_path.as_ref();
         let system = CamaOpenSkillSystem::with_config(config.migration.openskill.clone())?;
         system.calibrate_win_probability(0.5, None)?;
+        let rating_system = config
+            .glicko_rating_system()
+            .map_err(EnrichmentProviderBuildError::InvalidRatingConfig)?;
         let correction = MatchCorrectionRepository::new(path);
         match correction.list_pending_openskill_replays() {
             Ok(jobs) => {
@@ -178,6 +183,7 @@ impl EnrichmentRegistrationProvider {
                     match correction.replay_openskill_atomic_configured(
                         Some(job.guild_id),
                         &system,
+                        &rating_system,
                         config.migration.new_player_mmr_discount,
                     ) {
                         Ok((summary, _)) if summary.errors.is_empty() => {
@@ -214,6 +220,7 @@ impl EnrichmentRegistrationProvider {
             completion: MatchDiscoveryRepository::new(path),
             correction,
             system,
+            rating_system,
             new_player_mmr_discount: config.migration.new_player_mmr_discount,
         };
         let make_enrichment = || {
@@ -439,6 +446,7 @@ struct ConfiguredOpenSkillReplay {
     completion: MatchDiscoveryRepository,
     correction: MatchCorrectionRepository,
     system: CamaOpenSkillSystem,
+    rating_system: cama_domain::rating::CamaRatingSystem,
     new_player_mmr_discount: i32,
 }
 
@@ -467,6 +475,7 @@ impl OpenSkillEnrichmentPort for ConfiguredOpenSkillReplay {
             .replay_openskill_atomic_configured(
                 guild_id,
                 &self.system,
+                &self.rating_system,
                 self.new_player_mmr_discount,
             )
             .map_err(|error| {
@@ -1887,10 +1896,10 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| format!("enrichment blocking task failed: {error}"))?
-        .map_err(|error| error.to_string())
+    crate::ids::blocking("enrichment blocking", move || {
+        operation().map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {

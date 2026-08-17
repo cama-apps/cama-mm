@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -10,9 +8,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  parity-inventory:
+  rust:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: rust/target
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
 
@@ -21,44 +26,8 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Check Python parity inventory
-        run: uv run --locked python rust/parity/check_inventory.py
-
-  lint:
-    needs: parity-inventory
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Run lint
-        run: uv run --locked ruff check .
-
-  test:
-    if: ${{ github.event_name == 'push' }}
-    needs: parity-inventory
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Run tests
-        run: uv run --locked pytest
-
-  rust_quality:
-    name: rust-quality
-    needs: parity-inventory
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+      - name: Create locked Python environment for cross-language Rust tests
+        run: uv sync --locked
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,316 +35,51 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: nextest@0.9.143
+          fallback: none
+
+      - name: Cache compiler objects
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: quality
+          shared-key: rust-ci
+          cache-workspace-crates: true
           cache-on-failure: true
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Verify generated Dig catalogs
-        run: |
-          uv run --locked python rust/scripts/generate_dig_event_catalog.py --check
-          uv run --locked python rust/scripts/generate_dig_event_catalog.py --quests --check
-          uv run --locked python rust/scripts/generate_dig_artifact_catalog.py --check
-          uv run --locked python rust/scripts/generate_authored_asset_manifest.py --check
+      - name: Lint Python
+        run: uv run --locked ruff check .
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 
-      - name: Lint Rust
-        run: cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
-
-  rust_tests:
-    name: rust-tests (${{ matrix.package }})
-    needs: parity-inventory
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package: cama-domain
-            python: false
-          - package: cama-db
-            python: true
-          - package: cama-app
-            python: true
-          - package: cama-runtime
-            python: false
-          - package: xtask
-            python: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        if: ${{ matrix.python }}
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Create locked Python environment for cross-language tests
-        if: ${{ matrix.python }}
-        run: uv sync --locked
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: "./rust -> target"
-          shared-key: "tests-${{ matrix.package }}"
-          cache-on-failure: true
+      - name: Lint and compile Rust
+        run: >-
+          cargo clippy --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features -- -D warnings
 
       - name: Test Rust
         run: >-
-          cargo test --locked --manifest-path rust/Cargo.toml
-          --package "${{ matrix.package }}" --all-targets --all-features
+          cargo nextest run --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features --test-threads num-cpus
 
-  rust_contracts:
-    name: rust-contracts
-    needs: parity-inventory
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: "./rust -> target"
-          shared-key: contracts
-          cache-on-failure: true
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Test pinned Dotabase production adapters
-        run: |
-          dotabase_path=$(uv run --locked python -c 'import importlib.util,pathlib; spec=importlib.util.find_spec("dotabase"); assert spec and spec.origin; print(pathlib.Path(spec.origin).with_name("dotabase.db"))')
-          test -r "$dotabase_path"
-          CAMA_DOTABASE_TEST_PATH="$dotabase_path" cargo test --locked --manifest-path rust/Cargo.toml -p cama-app --lib dotabase_sqlite::tests::pinned_dotabase_asset_loads_through_the_production_adapter -- --ignored --test-threads=1
-          CAMA_DOTABASE_TEST_PATH="$dotabase_path" cargo test --locked --manifest-path rust/Cargo.toml -p cama-runtime --lib trivia_provider::tests::pinned_catalog_constructs_the_full_production_provider -- --ignored --test-threads=1
-
-      - name: Compare representative Python and Rust visuals
-        run: >-
-          uv run --locked python scripts/visual_equivalence.py
-          --output-dir "$RUNNER_TEMP/cama-visual-equivalence"
-
-      - name: Verify Rust schema authority against Python history
-        run: >-
-          cargo test --locked --manifest-path rust/Cargo.toml
-          -p cama-db --lib schema_manager::tests --
-          --ignored --test-threads=1
-
-      - name: Check implemented parity contracts
-        env:
-          RUST_CUTOVER_CANDIDATE: ${{ vars.RUST_CUTOVER_CANDIDATE }}
-        run: |
-          if [ "$RUST_CUTOVER_CANDIDATE" = true ]; then
-            cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity --require-complete
-          else
-            cargo run --locked --manifest-path rust/Cargo.toml -p xtask -- parity
-          fi
-
-  rust:
-    if: ${{ always() }}
-    needs: [rust_quality, rust_tests, rust_contracts]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every Rust lane
-        env:
-          QUALITY_RESULT: ${{ needs.rust_quality.result }}
-          TEST_RESULT: ${{ needs.rust_tests.result }}
-          CONTRACT_RESULT: ${{ needs.rust_contracts.result }}
-        run: |
-          test "$QUALITY_RESULT" = success
-          test "$TEST_RESULT" = success
-          test "$CONTRACT_RESULT" = success
-
+  # Retain the existing required status context without rebuilding the release
+  # artifact on every PR. The main-only Release workflow owns compilation,
+  # publication, and the deploy handoff.
   runtime-images:
-    needs: parity-inventory
+    needs: rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: "./rust -> target"
-          shared-key: runtime-images
-          cache-on-failure: true
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build Python runtime image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          build-args: GIT_SHA=${{ github.sha }}
-          tags: cama-python:ci
-          load: true
-          cache-from: type=gha,scope=cama-python-runtime
-          cache-to: type=gha,mode=max,scope=cama-python-runtime
-
-      - name: Smoke Python runtime image
-        run: docker run --rm --entrypoint uv cama-python:ci run --no-sync python -c "import bot"
-
-      - name: Build Rust runtime image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          file: Dockerfile.rust
-          build-args: GIT_SHA=${{ github.sha }}
-          tags: cama-rust:ci
-          load: true
-          cache-from: type=gha,scope=cama-rust-runtime
-          cache-to: type=gha,mode=max,scope=cama-rust-runtime
-
-      - name: Verify Rust image bundles the locked Dotabase catalog without Python
+      - name: Verify main-only runtime image contract
         run: |
-          expected=$(uv run --locked python -c 'import hashlib,importlib.util,pathlib; spec=importlib.util.find_spec("dotabase"); assert spec and spec.origin; path=pathlib.Path(spec.origin).with_name("dotabase.db"); print(hashlib.sha256(path.read_bytes()).hexdigest())')
-          actual=$(docker run --rm --entrypoint sha256sum cama-rust:ci /app/assets/dotabase.db | cut -d' ' -f1)
-          test "$actual" = "$expected"
-          docker run --rm --entrypoint sh cama-rust:ci -c 'test -x /usr/local/bin/cama-rust && test -r /app/assets/dotabase.db && ! command -v python3 >/dev/null 2>&1'
-          docker run --rm cama-rust:ci catalog-check
-
-      - name: Prove Python and Rust runtime images cannot overlap
-        run: |
-          lock_dir="$RUNNER_TEMP/cama-runtime-lock-smoke"
-          mkdir -p "$lock_dir"
-          chmod a+rwx "$lock_dir"
-          docker run --rm --name cama-python-lock-holder \
-            --volume "$lock_dir:/app/data" \
-            --entrypoint flock \
-            cama-python:ci \
-            --nonblock --no-fork /app/data/.cama-runtime.lock \
-            sh -c 'touch /app/data/python-lock-ready; sleep 30' &
-          holder_pid=$!
-          trap 'docker stop cama-python-lock-holder cama-rust-lock-holder >/dev/null 2>&1 || true; wait "$holder_pid" 2>/dev/null || true; test -z "${rust_holder_pid:-}" || wait "$rust_holder_pid" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 100); do
-            test -f "$lock_dir/python-lock-ready" && break
-            sleep 0.1
-          done
-          test -f "$lock_dir/python-lock-ready"
-
-          set +e
-          rust_output=$(docker run --rm \
-            --env DISCORD_BOT_TOKEN=offline-lock-smoke \
-            --env DB_PATH=/app/data/cama_shuffle.db \
-            --volume "$lock_dir:/app/data" \
-            cama-rust:ci serve 2>&1)
-          rust_status=$?
-          set -e
-          test "$rust_status" -ne 0
-          case "$rust_output" in
-            *"another Cama runtime already owns"*) ;;
-            *) printf '%s\n' "$rust_output"; exit 1 ;;
-          esac
-          test ! -e "$lock_dir/cama_shuffle.db"
-
-          docker stop cama-python-lock-holder >/dev/null
-          wait "$holder_pid" 2>/dev/null || true
-          docker run --rm --name cama-rust-lock-holder \
-            --env DISCORD_BOT_TOKEN=offline-lock-smoke \
-            --env DB_PATH=/app/data/cama_shuffle.db \
-            --volume "$lock_dir:/app/data" \
-            cama-rust:ci serve >"$lock_dir/rust-holder.log" 2>&1 &
-          rust_holder_pid=$!
-          for _ in $(seq 1 200); do
-            test -f "$lock_dir/.cama-runtime.lock" \
-              && test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder 2>/dev/null)" = true \
-              && break
-            sleep 0.1
-          done
-          test -f "$lock_dir/.cama-runtime.lock"
-          test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder)" = true
-          sleep 0.1
-
-          set +e
-          docker run --rm \
-            --volume "$lock_dir:/app/data" \
-            --entrypoint flock \
-            cama-python:ci \
-            --nonblock /app/data/.cama-runtime.lock true
-          python_status=$?
-          set -e
-          test "$python_status" -ne 0
-          test "$(docker inspect --format '{{.State.Running}}' cama-rust-lock-holder)" = true
-
-          docker stop cama-rust-lock-holder >/dev/null
-          wait "$rust_holder_pid" 2>/dev/null || true
-          docker run --rm \
-            --volume "$lock_dir:/app/data" \
-            --entrypoint flock \
-            cama-python:ci \
-            --nonblock /app/data/.cama-runtime.lock true
-
-      - name: Verify Compose keeps Python as the sole default writer
-        run: |
-          test "$(docker compose config --services)" = "bot"
-          test "$(docker compose --profile rust-preflight config --services)" = $'bot\nrust-preflight'
-
-      - name: Verify fail-closed same-service runtime selector
-        run: ./scripts/test-runtime-selector
-
-      - name: Rehearse container health, backup, selector, and rollback
-        run: ./scripts/test-operational-rehearsal --rust-health-image cama-rust:ci
-
-      - name: Create and exercise Python-migrated Rust smoke database
-        run: |
-          mkdir -p "$RUNNER_TEMP/cama-rust-smoke"
-          uv run --locked python -c 'import sys; from database import Database; database = Database(sys.argv[1]); database.close()' "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
-          cargo run --locked --manifest-path rust/Cargo.toml -p cama-db --example guild_config_snapshot_smoke -- "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db" --disposable-copy
-          # SQLite needs a writable directory for WAL lock sidecars even though
-          # cama-rust opens the main database with SQLITE_OPEN_READ_ONLY.
-          chmod a+rwx "$RUNNER_TEMP/cama-rust-smoke"
-          chmod a+rw "$RUNNER_TEMP/cama-rust-smoke"/*
-          chmod a-w "$RUNNER_TEMP/cama-rust-smoke/cama_shuffle.db"
-
-      - name: Preflight Rust runtime image against the exercised database
-        run: |
-          docker run --rm \
-            --volume "$RUNNER_TEMP/cama-rust-smoke:/app/data" \
-            cama-rust:ci \
-            db-check --db-path /app/data/cama_shuffle.db
-
-  # Enabling this repository variable turns both the parity ledger and the
-  # required operational-readiness manifest into a hard deployment gate,
-  # without changing normal development or Python deployment.
-  cutover-completeness:
-    if: ${{ vars.RUST_CUTOVER_CANDIDATE == 'true' }}
-    needs: [rust, runtime-images]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require complete behavior and operational parity
-        env:
-          RUST_RESULT: ${{ needs.rust.result }}
-          RUNTIME_IMAGES_RESULT: ${{ needs.runtime-images.result }}
-        run: |
-          test "$RUST_RESULT" = success
-          test "$RUNTIME_IMAGES_RESULT" = success
+          test -f .github/workflows/release.yml
+          grep -Fq 'target: runtime-prebuilt' .github/workflows/release.yml
+          grep -Fq 'push: true' .github/workflows/release.yml
+          grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml

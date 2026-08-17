@@ -261,8 +261,10 @@ fn runtime_sqlite_providers_cross_a_blocking_boundary() {
             source.contains("async fn"),
             "{file} has no async entrypoint"
         );
+        // The shared `crate::ids::blocking` helper wraps `spawn_blocking`;
+        // providers that route through it still cross the boundary.
         assert!(
-            source.contains("spawn_blocking"),
+            source.contains("spawn_blocking") || source.contains("ids::blocking"),
             "{file} has async SQLite-facing code without spawn_blocking"
         );
     }

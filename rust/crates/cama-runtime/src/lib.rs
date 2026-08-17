@@ -1,7 +1,7 @@
 //! Production runtime boundary for the Rust lift-and-shift.
 //!
 //! Domain/application code stays independent of the Discord SDK. This crate
-//! owns process configuration, database admission, gateway supervision, and
+//! owns process configuration, database schema initialization, gateway supervision, and
 //! conversion between Discord interactions and the typed registration API.
 
 pub mod admin_match_correction;
@@ -30,6 +30,7 @@ pub mod gateway;
 pub mod gateway_events;
 pub mod global_hooks;
 pub mod health;
+pub(crate) mod ids;
 pub mod info_provider;
 pub mod inventory;
 pub mod lobby_provider;
@@ -38,6 +39,7 @@ pub mod mana_provider;
 pub mod manashop_debt_worker;
 pub mod match_provider;
 pub(crate) mod pet_death_delivery;
+pub(crate) mod pet_flavor_runtime;
 pub mod pet_provider;
 pub mod pet_sweep_worker;
 pub mod pin_helpers;
@@ -60,6 +62,9 @@ pub mod trivia_provider;
 pub mod vanity_tax_observer;
 pub mod worker;
 pub mod wrapped_provider;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use admin_match_correction::{AdminMatchCorrectionBuildError, AdminMatchCorrectionRuntime};
 pub use admin_provider::{
@@ -86,8 +91,8 @@ pub use command_tree_contract::{
 };
 pub use config::{ConfigError, DiscordToken, RuntimeConfig};
 pub use curfew_sweep_worker::{
-    CURFEW_SWEEP_WAKE_INTERVAL, CURFEW_SWEEP_WORKER_NAME, CurfewSweepWorker,
-    curfew_sweep_worker_spec,
+    CURFEW_SWEEP_WAKE_INTERVAL, CURFEW_SWEEP_WORKER_NAME, CurfewLobbyDisplayPort,
+    CurfewSweepWorker, curfew_sweep_worker_spec,
 };
 pub use dig_bonus_runtime::{
     BettingDigBonusWheelPort, DigBonusDiscordPort, DigBonusRewardSource, DigBonusRuntime,
@@ -126,8 +131,8 @@ pub use first_game_pool_worker::{
 };
 pub use gamba_guild_source::{GambaDestination, GambaGuildSource};
 pub use gateway::{
-    CompletedDatabaseAdmission, DatabaseAdmission, GatewaySessionEnd, GatewayTransport,
-    LifecycleEvent, ReconnectPolicy, Runtime, RuntimeError, SqliteDatabaseAdmission,
+    DatabaseInitializationReport, GatewaySessionEnd, GatewayTransport, LifecycleEvent,
+    ReconnectPolicy, Runtime, RuntimeError, SqliteDatabaseInitializer,
 };
 pub use gateway_events::{
     GatewayEventObserver, GatewayEventObservers, GatewayMember, GatewayObserverFailure,
