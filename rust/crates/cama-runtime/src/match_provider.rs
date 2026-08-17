@@ -3059,6 +3059,13 @@ impl MatchHandler {
         match_record.lobby_kind = pending.state.lobby_kind.clone();
         match_record.balancing_rating_system = pending.state.balancing_rating_system.clone();
         match_record.betting_mode = pending.state.betting_mode.clone();
+        // The shuffler's role assignment lives only in the pending payload,
+        // which is deleted immediately after this record commits. Copy it into
+        // the permanent match row or it is lost for good.
+        let match_record = match_record.with_roles(
+            pending.state.radiant_roles.clone(),
+            pending.state.dire_roles.clone(),
+        );
         let mut core = CoreMatchRecord::new(match_record, now.to_rfc3339());
         core.pending_match_id = Some(pending.pending_match_id);
         core.winning_ids = winners.clone();
