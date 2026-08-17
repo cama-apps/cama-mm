@@ -400,7 +400,7 @@ impl Default for BalancedShuffler {
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
             off_role_flat_penalty: 550.0,
-            role_matchup_delta_weight: 0.17,
+            role_matchup_delta_weight: 0.18,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 230.0,
@@ -5229,8 +5229,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_seventeen() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.17);
+    fn test_default_role_matchup_delta_weight_is_point_eighteen() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {

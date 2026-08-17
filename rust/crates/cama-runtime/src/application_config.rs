@@ -554,7 +554,7 @@ impl ApplicationConfig {
                 recalibration_initial_rd: p.f64("RECALIBRATION_INITIAL_RD", 350.0),
                 recalibration_initial_volatility: p.f64("RECALIBRATION_INITIAL_VOLATILITY", 0.06),
                 region_split_penalty: p.f64("REGION_SPLIT_PENALTY", 500.0),
-                role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.17),
+                role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
                 shop_announce_cost: p.i64("SHOP_ANNOUNCE_COST", 10),
                 shop_announce_target_cost: p.i64("SHOP_ANNOUNCE_TARGET_COST", 100),
                 shop_double_or_nothing_cost: p.i64("SHOP_DOUBLE_OR_NOTHING_COST", 50),
