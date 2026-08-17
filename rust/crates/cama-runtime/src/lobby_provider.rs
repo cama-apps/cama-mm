@@ -3174,7 +3174,9 @@ fn lobby_command_auto_join_warning(
             "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
                 .to_owned(),
         ),
-        Some(JoinRejection::Suspended(_) | JoinRejection::Curfew(_)) => presentation.warning.clone(),
+        Some(JoinRejection::Suspended(_) | JoinRejection::Curfew(_)) => {
+            presentation.warning.clone()
+        }
         None => presentation.warning.clone(),
         Some(
             JoinRejection::PendingMatch(_)

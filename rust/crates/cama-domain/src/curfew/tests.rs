@@ -235,7 +235,8 @@ mod format_days_tests {
 
     #[test]
     fn test_renders_selected_days_in_week_order() {
-        let mask = weekday_bit(Weekday::Sat) | weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Wed);
+        let mask =
+            weekday_bit(Weekday::Sat) | weekday_bit(Weekday::Mon) | weekday_bit(Weekday::Wed);
         assert_eq!(format_days(Some(mask)), Some("Mon, Wed, Sat".to_owned()));
     }
 
