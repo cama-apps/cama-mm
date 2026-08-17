@@ -418,7 +418,7 @@ async fn paid_ping_delivers_after_lapsed_defer_and_mentions_only_configured_targ
 }
 
 #[tokio::test]
-async fn autocomplete_filters_python_catalog_and_surfaces_recalibration_cooldown() {
+async fn autocomplete_filters_catalog_without_waiting_on_recalibration_state() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 1_000);
     fixture
@@ -447,8 +447,8 @@ async fn autocomplete_filters_python_catalog_and_surfaces_recalibration_cooldown
     assert_eq!(
         choices[0],
         vec![CommandOptionChoice::String {
-            name: "Recalibrate (ON COOLDOWN)".to_owned(),
-            value: "recalibrate_cooldown".to_owned(),
+            name: "Recalibrate (300 jopacoin)".to_owned(),
+            value: "recalibrate".to_owned(),
         }]
     );
 }
