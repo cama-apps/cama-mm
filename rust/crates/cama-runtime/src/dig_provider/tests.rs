@@ -17,7 +17,7 @@ use super::{
     DigAbandonViewAdmission, DigBonusDispatchPort, DigBossNeonVictory, DigChannelSnapshot,
     DigDiscordPort, DigEventPendingDeliveryQuery, DigPrestigeViewAdmission, DigPublicHistory,
     DigPublicHistoryMessage, DigPublicSendFailure, DigRegistrationProvider,
-    DigRuntimeBloodPactSnapshot, JOPACOIN_EMOTE,
+    DigRuntimeBloodPactSnapshot, DigRuntimeFlavorSnapshot, JOPACOIN_EMOTE,
 };
 use crate::application_config::ApplicationConfig;
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
@@ -2944,6 +2944,13 @@ async fn provider_go_route_event_and_info_use_typed_app_service() {
     );
 
     let info_responder = Arc::new(TestResponder::default());
+    Connection::open(database.path())
+        .expect("open hard-hat info fixture")
+        .execute(
+            "UPDATE tunnels SET hard_hat_charges=2 WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("seed hard-hat charges");
     provider
         .handler
         .handle(
@@ -2961,6 +2968,12 @@ async fn provider_go_route_event_and_info_use_typed_app_service() {
                 .fields
                 .iter()
                 .any(|field| field.name == "Depth")
+        );
+        assert!(
+            info[0].embeds[0]
+                .fields
+                .iter()
+                .any(|field| { field.name == "Protection" && field.value == "Hard Hat (2)" })
         );
     }
 
@@ -3963,6 +3976,108 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
             .custom_id
             .contains(&USER.to_string())
     );
+}
+
+#[tokio::test]
+async fn paid_confirmation_recovers_pending_dig_without_committing_another() {
+    let (database, provider, _discord) = fixture();
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0xdec0_1001,
+                CHANNEL as i64,
+                "Pending Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("commit pending Dig");
+    assert!(execution.delivery.is_some());
+    let before = DigRuntimeService::sqlite(database.path())
+        .snapshot(USER as i64, GUILD as i64)
+        .expect("snapshot before paid confirmation");
+    let token = provider
+        .handler
+        .create_paid_view(USER as i64, GUILD as i64, super::unix_now())
+        .expect("create paid view");
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:paid:confirm:{token}"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("recover pending Dig instead of charging");
+
+    let after = DigRuntimeService::sqlite(database.path())
+        .snapshot(USER as i64, GUILD as i64)
+        .expect("snapshot after paid confirmation");
+    assert_eq!(after.balance, before.balance);
+    assert_eq!(
+        after.tunnel.as_ref().map(|tunnel| tunnel.total_digs),
+        before.tunnel.as_ref().map(|tunnel| tunnel.total_digs)
+    );
+    assert!(
+        responder
+            .original_edits
+            .lock()
+            .expect("paid recovery edit")
+            .iter()
+            .any(|response| response
+                .content
+                .contains("you were not charged for another dig"))
+    );
+}
+
+#[tokio::test]
+async fn missing_flavor_receipt_falls_back_to_terminal_delivery() {
+    let (database, provider, _discord) = fixture();
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0xdec0_1002,
+                CHANNEL as i64,
+                "Flavorless Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("commit Dig before flavor failure");
+    let pending = execution.delivery.expect("pending delivery");
+    Connection::open(database.path())
+        .expect("open flavor failure fixture")
+        .execute_batch(
+            "CREATE TRIGGER reject_flavor_receipt
+             BEFORE INSERT ON dig_actions
+             WHEN NEW.action_type='dig_flavor_bonus'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected flavor receipt failure');
+             END;",
+        )
+        .expect("install flavor receipt failure");
+
+    let prepared = provider
+        .handler
+        .prepare_delivery(&pending)
+        .await
+        .expect("missing flavor receipt is fail-soft");
+
+    assert_eq!(prepared.flavor, DigRuntimeFlavorSnapshot::Skipped);
+    assert!(prepared.blood_pact.is_terminal());
 }
 
 #[tokio::test(start_paused = true)]
