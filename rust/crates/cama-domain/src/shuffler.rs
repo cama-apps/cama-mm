@@ -765,15 +765,15 @@ impl BalancedShuffler {
                 .preferred_roles
                 .as_ref()
                 .is_some_and(|preferred| preferred.contains(assigned_role));
+            // Role-performance scaling replaces the flat off-role multiplier
+            // and applies to every assignment; the flat value penalty still
+            // applies only off-role.
+            let base_value = (base_value * player.role_factor_for(assigned_role)).max(0.0);
             let effective_value = if on_role {
                 base_value
             } else {
                 off_role_count += 1;
-                calculate_off_role_value(
-                    base_value,
-                    self.off_role_multiplier,
-                    self.off_role_flat_value_penalty,
-                )
+                calculate_off_role_value(base_value, 1.0, self.off_role_flat_value_penalty)
             };
             team_value += effective_value;
             if let Ok(index) = assigned_role.parse::<usize>()
@@ -2588,10 +2588,27 @@ mod tests {
         Some(roles.iter().map(|role| (*role).to_owned()).collect())
     }
 
+    /// Role-neutral by construction: an even record in every role yields a
+    /// role factor of exactly 1.0, keeping these fixtures focused on the
+    /// balance formula instead of the role-performance multiplier.
+    fn neutral_role_records()
+    -> std::collections::BTreeMap<String, crate::role_performance::RoleRecord> {
+        crate::team::ROLES
+            .iter()
+            .map(|role| {
+                (
+                    (*role).to_owned(),
+                    crate::role_performance::RoleRecord::new(5, 5),
+                )
+            })
+            .collect()
+    }
+
     fn player(name: impl Into<String>, value: i64, roles: &[&str]) -> Player {
         Player {
             mmr: Some(value),
             preferred_roles: role_list(roles),
+            role_records: neutral_role_records(),
             ..Player::new(name)
         }
     }
@@ -2671,8 +2688,8 @@ mod tests {
         let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
         let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
 
-        assert_eq!(metrics.team_value, 2_750.0);
-        assert_eq!(metrics.role_values, [0.0, 2_750.0, 0.0, 0.0, 0.0]);
+        assert_eq!(metrics.team_value, 2_900.0);
+        assert_eq!(metrics.role_values, [0.0, 2_900.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -4608,10 +4625,10 @@ mod tests {
             .collect();
         assert_eq!(all_names, names(&players));
         let value1 = team1
-            .get_team_value(false, 1.0, false, false)
+            .get_team_value(false, false, false)
             .expect("roles assigned");
         let value2 = team2
-            .get_team_value(false, 1.0, false, false)
+            .get_team_value(false, false, false)
             .expect("roles assigned");
         assert!((value1 - value2).abs() <= 100.0);
     }
@@ -5592,7 +5609,7 @@ mod tests {
         (0..14)
             .map(|index| Player {
                 discord_id: Some(index + 1),
-                glicko_rating: Some(uniform(&mut random, 850.0, 2_750.0)),
+                glicko_rating: Some(uniform(&mut random, 850.0, 2_900.0)),
                 glicko_rd: if index % 5 == 0 {
                     None
                 } else {
@@ -6195,10 +6212,10 @@ mod tests {
         .shuffle(&players)
         .expect("jopacoin shuffle");
         let value1 = team1
-            .get_team_value(true, 0.9, false, true)
+            .get_team_value(true, false, true)
             .expect("roles assigned");
         let value2 = team2
-            .get_team_value(true, 0.9, false, true)
+            .get_team_value(true, false, true)
             .expect("roles assigned");
         assert!((value1 - value2).abs() <= 500.0);
     }
