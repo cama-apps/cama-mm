@@ -1,8 +1,12 @@
 //! Production worker that removes lobby members whose curfew window has
 //! started, DMs them, then refreshes the lobby's Discord embed so the
-//! removal is actually visible. Runs every minute, matching the Python
-//! `tasks.loop(minutes=1)` sweep it replaces (which does the same DM +
+//! removal is actually visible (matching the Python original's DM +
 //! `_sync_lobby_displays` pair in `commands/lobby.py::_deliver_curfew_kick`).
+//! The Python original ran this sweep every minute (`tasks.loop(minutes=1)`);
+//! the Rust port runs it every 15 seconds instead — a sweep is just an
+//! in-memory lobby scan plus one indexed SQLite lookup per populated lobby,
+//! cheap enough that there's no reason to make a kicked player wait up to a
+//! minute to find out.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -21,7 +25,7 @@ use crate::registration::InteractionResponse;
 use crate::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
 pub const CURFEW_SWEEP_WORKER_NAME: &str = "curfew_sweep";
-pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(60);
+pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Re-render a lobby's live Discord embed after curfew removed members from
 /// it. Implemented by [`crate::lobby_provider::LobbyRegistrationProvider`].

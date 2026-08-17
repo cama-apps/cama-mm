@@ -1966,6 +1966,7 @@ async fn test_join_allowed_when_curfew_service_unwired() {
     );
 }
 
+
 #[tokio::test]
 async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player() {
     // Regression test: a curfew kick must not just mutate in-memory lobby
@@ -2034,5 +2035,132 @@ async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player()
     assert!(
         transport.edit_count() > edits_before,
         "the lobby's Discord message must be edited after a curfew kick, not just mutated in memory"
+    );
+}
+
+#[tokio::test]
+async fn test_auto_join_blocked_during_active_curfew_window() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+        })
+        .expect("seed an always-active curfew window");
+
+    // `/lobby` on an already-created lobby takes the auto-join path
+    // (`join_registered_player`), not the explicit `/join` command's own
+    // curfew check — this must be blocked too.
+    let slash = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    {
+        let captured = slash.captured.lock().expect("slash responses");
+        let response = captured.followups.last().expect("curfew rejection");
+        assert!(response.content.to_lowercase().contains("sleep"));
+    }
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+        })
+        .expect("seed an always-active curfew window");
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Add,
+            lobby_message_id,
+            1,
+            "Sleepy",
+        ))
+        .await
+        .expect("raw curfew rejection");
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let state = transport.state.lock().expect("transport state");
+    assert!(
+        state
+            .removed_reactions
+            .iter()
+            .any(|(_, message_id, emoji, user_id)| {
+                *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
+            })
+    );
+    let public = state.sent.last().expect("public curfew rejection");
+    assert!(
+        public
+            .message
+            .response
+            .content
+            .to_lowercase()
+            .contains("sleep")
     );
 }
