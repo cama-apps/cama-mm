@@ -63,6 +63,7 @@ use cama_db::shop_runtime::{
 };
 use cama_db::tip_repository::TipRepository;
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
+use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
@@ -3648,11 +3649,9 @@ impl BettingInteractionHandler {
             if rows.len() > 15 {
                 lines.push(format!("... +{} more", rows.len() - 15));
             }
-            embed = embed.field(
-                format!("{label} Bets ({})", rows.len()),
-                lines.join("\n"),
-                false,
-            );
+            for (name, value) in bounded_bet_team_fields(label, rows.len(), &lines) {
+                embed = embed.field(name, value, false);
+            }
         }
         let summary_name = if mode == BettingMode::Pool {
             "Pool Summary"
@@ -5832,6 +5831,43 @@ impl BettingInteractionHandler {
             now.saturating_duration_since(*oldest),
         ))
     }
+}
+
+fn bounded_bet_team_fields(
+    label: &str,
+    total_rows: usize,
+    lines: &[String],
+) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        let line = truncate_field(line, FIELD_VALUE_LIMIT);
+        let separator_chars = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && current.chars().count() + separator_chars + line.chars().count() > FIELD_VALUE_LIMIT
+        {
+            values.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(&line);
+    }
+    if !current.is_empty() {
+        values.push(current);
+    }
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let name = if index == 0 {
+                format!("{label} Bets ({total_rows})")
+            } else {
+                format!("{label} Bets (cont.)")
+            };
+            (name, value)
+        })
+        .collect()
 }
 
 /// Match Python's `int(retry_after)` response formatting: durations are

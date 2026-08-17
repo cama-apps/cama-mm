@@ -39,6 +39,31 @@ fn invalid_leverage_tier_is_rejected_before_repository_work() {
 }
 
 #[test]
+fn bets_team_rows_split_at_discords_field_value_limit() {
+    let lines = (1..=15)
+        .map(|index| format!("Bettor #{index} • {}", "x".repeat(90)))
+        .collect::<Vec<_>>();
+
+    let fields = bounded_bet_team_fields("🔴 Dire", 15, &lines);
+
+    assert!(fields.len() > 1);
+    assert_eq!(fields[0].0, "🔴 Dire Bets (15)");
+    assert_eq!(fields[1].0, "🔴 Dire Bets (cont.)");
+    assert!(
+        fields
+            .iter()
+            .all(|(_, value)| value.chars().count() <= FIELD_VALUE_LIMIT)
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .flat_map(|(_, value)| value.lines())
+            .collect::<Vec<_>>(),
+        lines.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn investment_target_validation_rejects_self_short_and_unregistered_targets() {
     assert_eq!(
         validate_investment_target(1, 1, "short", true, true),
