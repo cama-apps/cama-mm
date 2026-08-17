@@ -35,4 +35,3 @@ pub mod team;
 pub mod team_balancing;
 pub mod timezone;
 pub mod tip_service;
-pub mod wheel;

@@ -1,5 +1,4 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 use crate::prediction_worker_repository::{
     PredictionRefreshPublicationKind, PredictionRefreshSettings, PredictionWorkerRepository,
@@ -7,7 +6,7 @@ use crate::prediction_worker_repository::{
 use crate::predictions_repository::{NewLevel, PredictionRepository};
 use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 
 use super::build_levels;
 
@@ -300,155 +299,5 @@ fn empty_digest_advances_cursor_without_creating_publication() {
             )
             .unwrap(),
         "900"
-    );
-}
-
-/// Python creates a disposable current-schema prediction market, Rust refreshes
-/// it and queues the durable Discord publications, and production Python reads
-/// the refreshed market, order book, fair-history row, and app-kv outbox.
-///
-/// This is intentionally ignored with the other repository-environment
-/// interop tests: it must never point at the development database, and it
-/// requires the repository's Python environment.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_prediction_worker_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            r#"
-import sys
-from infrastructure.schema_manager import SchemaManager
-from repositories.prediction_repository import PredictionRepository
-
-p = sys.argv[1]
-SchemaManager(p).initialize()
-r = PredictionRepository(p)
-pid = r.create_orderbook_prediction(
-    42,
-    99,
-    'Will Python read the Rust refresh?',
-    50,
-    500,
-    [
-        ('yes_ask', 52, 50),
-        ('yes_ask', 53, 50),
-        ('yes_ask', 54, 50),
-        ('yes_bid', 48, 50),
-        ('yes_bid', 47, 50),
-        ('yes_bid', 46, 50),
-    ],
-)
-r.update_prediction_discord_ids(
-    pid,
-    thread_id=700 + pid,
-    embed_message_id=800,
-    channel_message_id=900,
-)
-with r.connection() as connection:
-    connection.execute(
-        'UPDATE predictions SET last_refresh_at=100,created_at=100 WHERE prediction_id=?',
-        (pid,),
-    )
-    connection.execute(
-        'UPDATE prediction_fair_snapshots SET snapshot_at=100 WHERE market_id=?',
-        (pid,),
-    )
-    connection.execute(
-        'INSERT INTO prediction_trades '
-        '(prediction_id,discord_id,action,contracts,jopacoins,vwap_x100,last_fill_price,trade_time) '
-        'VALUES (?,?,?,?,?,?,?,?)',
-        (pid, 7, 'buy_yes', 4, 20, 5300, 53, 150),
-    )
-print(pid)
-"#,
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let prediction_id = String::from_utf8(initialize.stdout)
-        .expect("Python prediction identifier")
-        .trim()
-        .parse::<i64>()
-        .expect("numeric prediction identifier");
-
-    let repository = PredictionWorkerRepository::new(database.path());
-    let outcome = repository
-        .refresh_market_and_queue(prediction_id, 200, 3, &settings(100))
-        .expect("Rust refresh against Python schema")
-        .expect("due prediction market");
-    assert_eq!(
-        (outcome.old_price, outcome.new_price, outcome.trade_count),
-        (50, 53, 1)
-    );
-    assert_eq!(repository.pending_refresh_publications().unwrap().len(), 2);
-
-    let verify = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            r#"
-import json
-import sys
-from repositories.prediction_repository import PredictionRepository
-
-pid = int(sys.argv[2])
-r = PredictionRepository(sys.argv[1])
-market = r.get_prediction(pid)
-assert market is not None
-assert (
-    market['status'],
-    market['current_price'],
-    market['prev_price'],
-    market['last_refresh_at'],
-) == ('open', 53, 50, 200), market
-snapshot = r.get_market_snapshot(pid, recent_limit=5)
-assert snapshot['book']['current_price'] == 53
-assert snapshot['book']['yes_asks'] == [
-    (52, 50), (53, 50), (57, 10), (58, 10), (59, 10),
-    (60, 8), (61, 6), (62, 4), (63, 2),
-], snapshot['book']['yes_asks']
-assert snapshot['book']['yes_bids'] == [
-    (49, 10), (48, 60), (47, 60), (46, 58),
-    (45, 6), (44, 4), (43, 2),
-], snapshot['book']['yes_bids']
-assert snapshot['recent_trades'][0]['trade_time'] == 150
-assert r.get_fair_history(pid, 42) == [(100, 50), (200, 53)]
-with r.connection() as connection:
-    rows = connection.execute(
-        "SELECT key,value FROM app_kv "
-        "WHERE guild_id=42 AND (key LIKE 'prediction_refresh_embed:%' "
-        "OR key LIKE 'prediction_refresh_summary:%') ORDER BY key",
-    ).fetchall()
-assert len(rows) == 2, rows
-assert rows[0][0] == f'prediction_refresh_embed:{pid}'
-assert rows[0][1].isdigit(), rows
-summary = json.loads(rows[1][1])
-assert summary['prediction_id'] == pid
-assert summary['thread_id'] == 700 + pid
-assert '53' in summary['content'], summary
-print('prediction refresh is Python-readable')
-"#,
-        ])
-        .arg(database.path())
-        .arg(prediction_id.to_string())
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }

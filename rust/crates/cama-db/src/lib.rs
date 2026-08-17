@@ -158,9 +158,8 @@ pub mod wrapped_repository;
 
 /// The ordered migration contract embedded in the Rust runtime.
 ///
-/// The initial manifest was exported from Python's
-/// `SchemaManager._get_migrations`; `xtask parity` continues to verify that
-/// historical bridge while it remains part of CI.
+/// The initial manifest was exported from the retired Python runtime. Rust now
+/// owns this manifest and validates it through its schema tests.
 pub const EXPECTED_MIGRATIONS_TEXT: &str = include_str!("../../../schema/expected_migrations.txt");
 
 const REQUIRED_TABLES: &[&str] = &[

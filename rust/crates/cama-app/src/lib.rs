@@ -10,7 +10,6 @@ pub mod admin_moderation_commands;
 pub mod ai_http;
 pub mod ai_query_sqlite;
 pub mod ai_services;
-pub mod all_commands_guild_id;
 pub mod ask;
 pub mod balance_history_service;
 pub mod bankruptcy;

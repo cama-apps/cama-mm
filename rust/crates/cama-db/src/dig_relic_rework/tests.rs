@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -148,50 +147,4 @@ fn test_relic_cap_migration_leaves_exactly_six_untouched() {
     assert_eq!(report, RelicCapRepairReport::default());
     assert_eq!(equipped_ids(file.path(), 5), ids);
     assert_eq!(trim_notice(file.path(), 5), 0);
-}
-
-/// Python creates the migrated schema and post-migration over-cap state. Rust
-/// reapplies only the bounded data repair; Python verifies newest-six retention,
-/// the one-shot notice, row preservation, and database integrity. This stronger
-/// smoke is outside the 24-node parity mapping.
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn unmapped_python_migrated_database_dig_relic_rework_interop_smoke() {
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sys\nfrom infrastructure.schema_manager import SchemaManager\nfrom repositories.dig_repository import DigRepository\np=sys.argv[1]\nSchemaManager(p).initialize()\nr=DigRepository(p)\nr.create_tunnel(-72001,0,'relic-interop')\nr.update_tunnel(-72001,0,prestige_level=9)\nfor rid in ('mole_claws','magma_heart','crystal_compass','echo_stone','spore_cloak','frozen_clock','midas_splinter','deaths_door'):\n i=r.add_artifact(-72001,0,rid,is_relic=True); r.equip_relic(int(i),-72001,0,True)",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("initialize Python-migrated database");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let report = DigRelicReworkRepository::new(file.path())
-        .repair_relic_loadout_cap()
-        .expect("repair Python state");
-    assert_eq!(report.unequipped_relics, 2);
-    let verify = Command::new(python)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nrows=c.execute(\"SELECT id,equipped FROM dig_artifacts WHERE discord_id=-72001 AND guild_id=0 ORDER BY id\").fetchall()\nassert len(rows)==8\nassert [r[0] for r in rows if r[1]] == [r[0] for r in rows][-6:]\nassert c.execute(\"SELECT relic_trim_notice FROM tunnels WHERE discord_id=-72001 AND guild_id=0\").fetchone()==(1,)\nassert c.execute(\"PRAGMA quick_check\").fetchone()[0]=='ok'\nc.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("verify Rust repair from Python");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

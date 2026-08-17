@@ -1472,54 +1472,6 @@ mod tests {
     /// `CAMA_ECONOMY_EVENT_DB_COPY=/path/to/copy cargo test -p cama-db
     /// economy_event_repository::tests::upgraded_dev_clone_repository_smoke
     /// -- --ignored --exact`.
-    #[test]
-    #[ignore = "requires an explicitly disposable, Python-upgraded database copy"]
-    fn upgraded_dev_clone_repository_smoke() {
-        const SENTINEL_GUILD: i64 = 9_223_372_036_854_000_001;
-        let path = std::env::var("CAMA_ECONOMY_EVENT_DB_COPY")
-            .expect("CAMA_ECONOMY_EVENT_DB_COPY must name a disposable copy");
-        let repository = EconomyEventRepository::new(path);
-
-        let balance = repository
-            .capture_balance_sheet(Some(SENTINEL_GUILD))
-            .unwrap();
-        assert_eq!(balance, BalanceSheet::default());
-        let policy = repository
-            .ensure_policy_state(
-                Some(SENTINEL_GUILD),
-                PolicyMode::Normal,
-                0.02,
-                0.02,
-                4_102_444_800,
-            )
-            .unwrap();
-        assert_eq!(policy.mode, PolicyMode::Normal);
-        repository
-            .save_snapshot(Some(SENTINEL_GUILD), "9999-12-31", &balance, 4_102_444_800)
-            .unwrap();
-        let mut event = draft("9999-12-31");
-        event.direction = EventDirection::Neutral;
-        event.effects = EventEffects::default();
-        event.monetary_stock_before = 0;
-        let activated = repository
-            .activate_event_atomic(Some(SENTINEL_GUILD), &event)
-            .unwrap();
-        let retried = repository
-            .activate_event_atomic(Some(SENTINEL_GUILD), &event)
-            .unwrap();
-        assert!(activated.created);
-        assert!(!retried.created);
-        assert_eq!(activated.event.event_id, retried.event.event_id);
-        assert!(
-            repository
-                .mark_event_announced(
-                    Some(SENTINEL_GUILD),
-                    activated.event.event_id,
-                    4_102_444_801,
-                )
-                .unwrap()
-        );
-    }
 
     #[test]
     fn policy_recovery_start_is_stable_and_guild_scoped() {

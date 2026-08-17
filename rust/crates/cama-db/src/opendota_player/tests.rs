@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
@@ -1090,58 +1089,6 @@ fn stronger_primary_replacement_retains_membership_and_is_atomic_on_conflict() {
     assert_eq!(
         fixture.repository.get_steam_id(-70_002).expect("rollback"),
         None
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_opendota_player_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,dotabuff_url) VALUES (?,?,?,?)\",(-70001,4242,'interop','https://dotabuff.com/players/765'))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = OpenDotaPlayerRepository::new(database.path());
-    assert_eq!(
-        repository
-            .get_all_with_dotabuff_no_steam_id()
-            .expect("Python-shaped backfill row")[0]
-            .discord_id,
-        -70_001
-    );
-    repository
-        .set_steam_id(-70_001, 765, 1_700_000_000)
-        .expect("Rust account link");
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\np=c.execute(\"SELECT steam_id FROM players WHERE discord_id=-70001 AND guild_id=4242\").fetchone()\nj=c.execute(\"SELECT steam_id,is_primary,added_at FROM player_steam_ids WHERE discord_id=-70001\").fetchone()\nassert p==(765,),p\nassert j==(765,1,1700000000),j\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }
 

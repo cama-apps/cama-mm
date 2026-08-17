@@ -111,7 +111,7 @@ fn capped_catalog_entry_changes_the_exact_python_sample_pool() {
 }
 
 #[test]
-fn different_users_and_levels_match_python_vectors() {
+fn different_users_and_levels_produce_stable_choices() {
     let pool = PRESTIGE_PERKS.into_iter().collect::<Vec<_>>();
     let first = prestige_perk_choices(&pool, 123, 5);
     let other_user = prestige_perk_choices(&pool, 456, 5);

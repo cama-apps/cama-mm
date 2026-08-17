@@ -4,7 +4,6 @@ members = [
     "crates/cama-db",
     "crates/cama-domain",
     "crates/cama-runtime",
-    "xtask",
 ]
 resolver = "3"
 

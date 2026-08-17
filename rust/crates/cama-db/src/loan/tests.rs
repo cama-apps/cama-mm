@@ -1,6 +1,6 @@
+use std::path::Path;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
-use std::{path::Path, process::Command};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use tempfile::NamedTempFile;
@@ -1310,53 +1310,5 @@ fn absent_nonprofit_row_reads_as_zero() {
             .get_nonprofit_fund(Some(OTHER_GUILD_ID))
             .unwrap(),
         0
-    );
-}
-
-/// Manual side-by-side smoke: Python owns schema creation, Rust only opens the
-/// resulting existing file, and Python then observes Rust's committed cycle.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when uv/Python are available"]
-fn python_migrated_database_supports_rust_loan_cycle() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'interop',10))\nc.commit()\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = LoanRepository::new(database.path());
-    repository
-        .execute_loan_atomic_at(-70_001, None, 50, 10, 0, 100, NOW)
-        .unwrap();
-    repository.execute_repayment_atomic(-70_001, None).unwrap();
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0').fetchone()[0] == 0\nassert c.execute('SELECT total_collected FROM nonprofit_fund WHERE guild_id=0').fetchone()[0] == 10\nassert c.execute('SELECT outstanding_principal,outstanding_fee,total_fees_paid FROM loan_state WHERE discord_id=-70001 AND guild_id=0').fetchone() == (0,0,10)\nassert [r[0] for r in c.execute(\"SELECT source FROM economy_ledger_entries WHERE source IN ('loan','loan_repayment') ORDER BY ledger_id\")] == ['loan','loan_repayment','loan_repayment']\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }

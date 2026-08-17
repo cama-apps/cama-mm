@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -467,66 +465,5 @@ fn signed_ids_and_none_guild_normalize_without_cross_guild_writes() {
             .artifacts(key(Some(OTHER_GUILD)))
             .expect("other artifacts")
             .is_empty()
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_prestige4_interop_smoke() {
-    let file = NamedTempFile::new().expect("interop database");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]; SchemaManager(p).initialize(); c=sqlite3.connect(p)\nc.execute(\"INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(-71001,0,'p4',5000)\")\nc.execute(\"INSERT INTO tunnels(discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,tunnel_name) VALUES(-71001,0,150,150,4,?,'interop')\",('{\\\"150\\\":{\\\"boss_id\\\":\\\"blightcoil\\\",\\\"status\\\":\\\"phase1_defeated\\\"}}',))\nc.commit(); c.close()",
-        ])
-        .arg(file.path())
-        .output()
-        .expect("Python schema initialization");
-    assert!(
-        initialize.status.success(),
-        "Python init failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let repository = DigPrestige4Repository::new(file.path());
-    let interop_key = key(None);
-    let snapshot = repository
-        .tunnel_snapshot(interop_key)
-        .expect("snapshot")
-        .expect("tunnel");
-    repository
-        .complete_boss_victory(BossVictoryRequest {
-            expected: &snapshot,
-            boss_id: "blightcoil",
-            depth_after: 150,
-            max_depth_after: 150,
-            boss_progress_after: r#"{"150":{"boss_id":"blightcoil","status":"defeated"}}"#,
-            balance_delta: 20,
-            echo_window_seconds: 86_400,
-            detail_json: r#"{"won":true}"#,
-            now: 1_000,
-        })
-        .expect("Rust victory");
-    repository
-        .grant_artifact_unique(interop_key, "weeping_fang", true, 1_001)
-        .expect("Rust carve");
-    let verify = Command::new(python)
-        .current_dir(root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-71001 AND guild_id=0').fetchone()==(5020,)\nassert json.loads(c.execute('SELECT boss_progress FROM tunnels WHERE discord_id=-71001 AND guild_id=0').fetchone()[0])['150']['status']=='defeated'\nassert c.execute(\"SELECT artifact_id,is_relic,equipped FROM dig_artifacts WHERE discord_id=-71001 AND guild_id=0\").fetchone()==('weeping_fang',1,0)\nassert c.execute(\"SELECT COUNT(*) FROM dig_actions WHERE action_type='boss_fight'\").fetchone()==(1,)\nassert c.execute(\"SELECT COUNT(*) FROM economy_ledger_entries WHERE source='dig' AND delta=20\").fetchone()==(1,)\nc.close()",
-        ])
-        .arg(file.path())
-        .output()
-        .expect("Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }

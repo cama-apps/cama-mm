@@ -20,7 +20,9 @@ The Rust workspace uses edition 2024 and Rust 1.94:
 - `rust/crates/cama-db`: Rust-owned SQLite initialization, migrations, integrity checks, and repositories.
 - `rust/crates/cama-app`: application services and orchestration behind typed persistence, clock, randomness, AI, and Discord ports.
 - `rust/crates/cama-runtime`: production Tokio/Serenity runtime, command and component providers, workers, gateway recovery, health, and composition root.
-- `rust/xtask`: repository audits and retained parity/cutover diagnostics.
+
+Repository-wide architecture audits run as `cama-runtime` tests; there is no
+separate `xtask` crate or cross-language parity gate.
 
 Dependency direction is Domain → Database/Application → Runtime. Keep domain logic independent of Serenity and concrete storage. Keep SQLite access in `cama-db` and compose production adapters in `cama-runtime`.
 

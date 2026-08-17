@@ -7591,34 +7591,6 @@ mod tests {
     }
 
     #[test]
-    fn python_migrated_database_interop_smoke() {
-        let file = NamedTempFile::new().unwrap();
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest.ancestors().nth(3).unwrap();
-        let output = crate::test_support::parity_python(root)
-            .args(["-c", "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()", file.path().to_str().unwrap()])
-            .output()
-            .expect("run Python schema authority");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let players = PlayerRepository::new(file.path());
-        players
-            .add(&NewPlayer::new(-9_223_372_036_854_000_000, "Signed", None))
-            .unwrap();
-        assert_eq!(
-            players
-                .get_by_id(-9_223_372_036_854_000_000, None)
-                .unwrap()
-                .unwrap()
-                .name,
-            "Signed"
-        );
-    }
-
-    #[test]
     fn test_full_match_workflow_10_players() {
         let fixture = Fixture::new();
         let player_ids = (20_001..20_011).collect::<Vec<_>>();

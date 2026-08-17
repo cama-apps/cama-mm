@@ -946,48 +946,6 @@ fn test_add_bounty_is_guild_isolated() {
     );
 }
 
-/// Manual cross-language smoke: Python creates and seeds a fully migrated
-/// disposable database, Rust reads that state and writes through the same
-/// existing schema, then Python verifies the resulting rows. Never point this
-/// at the live/root database.
-#[test]
-#[ignore = "requires CAMA_MAFIA_INTEROP_DB pointing at a disposable Python-migrated database"]
-fn interop_python_seeded_mafia_repository_roundtrip() {
-    let path = std::env::var("CAMA_MAFIA_INTEROP_DB").expect("interop database path");
-    let repository = MafiaRepository::new(path);
-    let game = repository
-        .get_game_for_date(Some(GUILD), "2099-08-11")
-        .expect("read Python game")
-        .expect("seeded Python game");
-    assert_eq!(game.phase, MafiaPhase::Night);
-    assert_eq!(game.twist_event, Some(MafiaTwist::BloodMoon));
-    assert!(
-        repository
-            .claim_phase_reminder(Some(GUILD), game.game_id, 1, MafiaPhase::Night)
-            .expect("claim reminder")
-    );
-    repository
-        .set_phase(game.game_id, MafiaPhase::Day, Some(9_999), None)
-        .expect("advance phase");
-    repository
-        .set_thread_ids(
-            game.game_id,
-            ThreadIds {
-                mafia_thread_id: Some(111_111),
-                discussion_thread_id: Some(222_222),
-                setup_message_id: Some(333_333),
-                ..ThreadIds::default()
-            },
-        )
-        .expect("write thread ids");
-    assert_eq!(
-        repository
-            .add_bounty(game.game_id, Some(GUILD), 1, 99, 10, 500)
-            .expect("stake bounty"),
-        AddBountyResult::Added
-    );
-}
-
 const FIXTURE_SCHEMA: &str = r#"
 PRAGMA foreign_keys=OFF;
 CREATE TABLE players (

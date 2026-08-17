@@ -1,10 +1,8 @@
-//! Rust-side architecture contracts corresponding to Python's static layer checks.
+//! Rust-side repository architecture contracts.
 //!
-//! These tests deliberately exercise the Rust workspace boundaries rather than
-//! importing or re-running the Python checks.  Source-shape assertions here are
-//! limited to contracts that cannot be observed through a public API (crate
-//! dependency direction, module exports, and the blocking boundary); database
-//! tests below also execute the real migrated-schema adapters.
+//! Source-shape assertions here are limited to contracts that cannot be
+//! observed through a public API (crate dependency direction, module exports,
+//! and the blocking boundary); database tests also execute the real adapters.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -20,10 +18,11 @@ use cama_db::schema_manager::initialize_or_migrate;
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
 use tempfile::NamedTempFile;
 
-use super::repository_root;
-
 fn root() -> PathBuf {
-    repository_root().expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("workspace root")
 }
 
 fn read(relative: &str) -> String {

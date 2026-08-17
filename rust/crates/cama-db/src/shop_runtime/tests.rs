@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
@@ -2180,73 +2179,5 @@ fn double_or_nothing_cost_equal_to_balance_is_rejected() {
             )
             .unwrap(),
         25
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn python_migrated_database_shop_runtime_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]; SchemaManager(p).initialize(); c=sqlite3.connect(p)\nc.executemany('INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(?,?,?,?)',[(-77001,0,'buyer',100),(-77002,0,'victim',100)])\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("initialize Python Shop schema");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let repository = ShopRuntimeRepository::new(database.path());
-    repository
-        .verify_schema()
-        .expect("admit Python Shop schema");
-    assert!(
-        repository
-            .purchase_paid_ping(PaidPingKind::Dash, -77_001, 0, 10, NOW, 60)
-            .unwrap()
-            .success
-    );
-    let request = HostileLossRequest {
-        victim_id: -77_002,
-        guild_id: 0,
-        requested: 20,
-        kind: "soul_harvest".to_owned(),
-        actor_id: Some(-77_001),
-        event_key: "interop:soul".to_owned(),
-        destination: HostileDestination::Player,
-        recipient_id: Some(-77_001),
-        clamp_to_balance: true,
-        min_balance: Some(50),
-        protect_self: false,
-        metadata: json!({}),
-        occurred_at: NOW,
-        mana_date: "2033-05-18".to_owned(),
-    };
-    assert_eq!(repository.apply_hostile_loss(&request).unwrap().applied, 20);
-    assert!(repository.apply_hostile_loss(&request).unwrap().duplicate);
-
-    let verify = Command::new(python)
-        .current_dir(root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nassert c.execute('SELECT jopacoin_balance,last_pingedash FROM players WHERE discord_id=-77001 AND guild_id=0').fetchone()==(110,2000000000)\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-77002 AND guild_id=0').fetchone()[0]==80\nassert c.execute(\"SELECT COUNT(*) FROM hostile_loss_events WHERE event_key='interop:soul'\").fetchone()[0]==1\nsources=[r[0] for r in c.execute(\"SELECT source FROM economy_ledger_entries WHERE account_id IN (-77001,-77002) AND source IN ('pingedash','hostile_loss') ORDER BY ledger_id\")]\nassert sources==['pingedash','hostile_loss','hostile_loss'],sources\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()[0]==0\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("verify Rust Shop writes from Python");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }

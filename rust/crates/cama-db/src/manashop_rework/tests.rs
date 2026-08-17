@@ -1,6 +1,5 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::{path::Path, process::Command};
 
 use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::NamedTempFile;
@@ -890,79 +889,4 @@ fn test_slow_drip_stamp_seen_preserves_gross_cap_and_refreshes_anchor() {
             last_claim_at: NOW + 2,
         }
     );
-}
-
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn python_migrated_database_manashop_interop_smoke() {
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'interop',400))\nc.execute(\"INSERT INTO player_mana (discord_id,guild_id,current_land,assigned_date,consumed_today) VALUES (?,?,?,?,0)\",(-70001,0,'Mountain','2026-05-09'))\nc.commit(); c.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .status()
-        .expect("initialize Python-migrated database");
-    assert!(initialize.success());
-
-    let repository = ManashopRepository::new(file.path());
-    let purchase = repository
-        .try_purchase_item_atomic(PurchaseRequest {
-            purchase_id: "rust-interop-purchase",
-            discord_id: -70_001,
-            guild_id: Some(0),
-            item_id: "wildfire",
-            used_date: "2026-05-09",
-            cost: 150,
-            tap_mana: true,
-            now: NOW,
-        })
-        .expect("Rust purchase against Python schema");
-    assert!(purchase.success);
-    assert!(
-        repository
-            .mark_item_purchase_applying_atomic("rust-interop-purchase", NOW + 1)
-            .unwrap()
-    );
-    assert!(
-        repository
-            .complete_item_purchase_atomic("rust-interop-purchase", NOW + 2)
-            .unwrap()
-    );
-    repository
-        .grant_buff(GrantBuffRequest {
-            discord_id: -70_001,
-            guild_id: Some(0),
-            buff_type: "blood_pact",
-            target_id: Some(-70_002),
-            granted_at: NOW,
-            expires_at: NOW + 3_600,
-            data: Some(&BuffData {
-                skimmed_total: Some(0),
-                cap: Some(150),
-                skim_rate: Some(0.25),
-                ..BuffData::default()
-            }),
-        })
-        .expect("Rust buff against Python schema");
-    repository
-        .add_slow_drip_claim(-70_001, Some(0), "2026-05-09", 30, NOW)
-        .expect("Rust slow-drip write against Python schema");
-
-    let verify = Command::new(python)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nb=c.execute(\"SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0\").fetchone()[0]\nm=c.execute(\"SELECT consumed_today FROM player_mana WHERE discord_id=-70001 AND guild_id=0\").fetchone()[0]\np=c.execute(\"SELECT status FROM manashop_purchases WHERE purchase_id='rust-interop-purchase'\").fetchone()[0]\nu=c.execute(\"SELECT COUNT(*) FROM manashop_daily_uses WHERE purchase_id='rust-interop-purchase'\").fetchone()[0]\ns=c.execute(\"SELECT claimed_today FROM slow_drip_claims WHERE discord_id=-70001 AND guild_id=0\").fetchone()[0]\nd=json.loads(c.execute(\"SELECT data FROM manashop_buffs WHERE discord_id=-70001 AND buff_type='blood_pact'\").fetchone()[0])\nassert (b,m,p,u,s,d['cap'],d['skim_rate']) == (250,1,'completed',1,30,150,0.25)",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .status()
-        .expect("verify Rust writes from Python");
-    assert!(verify.success());
 }

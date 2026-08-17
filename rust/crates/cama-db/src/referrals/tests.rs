@@ -1,6 +1,4 @@
 use std::collections::BTreeSet;
-use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -749,73 +747,5 @@ fn concurrent_pending_match_retries_credit_each_beneficiary_once() {
     assert_eq!(
         fixture.repository.balance(201, Some(GUILD)).unwrap(),
         Some(103)
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_referrals_interop_smoke() {
-    let file = NamedTempFile::new().expect("interop database");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]; SchemaManager(p).initialize(); c=sqlite3.connect(p)\nc.execute(\"INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(-72001,0,'referrer',10)\")\nc.commit(); c.close()",
-        ])
-        .arg(file.path())
-        .output()
-        .expect("Python schema initialization");
-    assert!(
-        initialize.status.success(),
-        "Python init failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = ReferralRepository::new(file.path());
-    repository
-        .create_referral(-72_001, -72_002, None)
-        .expect("Rust enrollment");
-    let connection = Connection::open(file.path()).expect("seed referred account");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match Python foreign-key mode");
-    connection
-        .execute(
-            "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
-             VALUES(-72002,0,'referred',20),(-72003,0,'opponent',30)",
-            [],
-        )
-        .expect("seed match accounts");
-    drop(connection);
-    let outcome = repository
-        .record_match_with_referrals(RecordReferralMatchRequest {
-            guild_id: None,
-            radiant_ids: &[-72_002],
-            dire_ids: &[-72_003],
-            winning_side: MatchSide::Radiant,
-            pending_match_id: 8_001,
-            recorded_at: NOW,
-        })
-        .expect("Rust match settlement");
-    assert_eq!(outcome.rewards.len(), 1);
-
-    let verify = Command::new(python)
-        .current_dir(root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row\nm=c.execute('SELECT match_id,jc_changes FROM matches WHERE guild_id=0 AND pending_match_id=8001').fetchone(); assert m is not None\nr=c.execute('SELECT rewarded_match_id,reward_amount,rewarded_at FROM referrals WHERE guild_id=0 AND referred_id=-72002').fetchone(); assert tuple(r)==(m['match_id'],100,1786051200)\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-72001 AND guild_id=0').fetchone()[0]==110\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-72002 AND guild_id=0').fetchone()[0]==120\nassert json.loads(m['jc_changes'])=={'-72002':{'referral':100},'-72001':{'referral':100}}\nrows=c.execute(\"SELECT account_id,delta,source,related_id,metadata FROM economy_ledger_entries WHERE source='referral_reward' ORDER BY ledger_id\").fetchall(); assert [(x['account_id'],x['delta'],x['related_id']) for x in rows]==[(-72002,100,'-72002'),(-72001,100,'-72002')]\nassert json.loads(rows[0]['metadata'])['beneficiary_role']=='referred'; assert json.loads(rows[1]['metadata'])['beneficiary_role']=='referrer'\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()[0]==0\nc.close()",
-        ])
-        .arg(file.path())
-        .output()
-        .expect("Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }
