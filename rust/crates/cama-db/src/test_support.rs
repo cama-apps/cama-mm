@@ -7,20 +7,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::{Connection, MAIN_DB};
 use tempfile::NamedTempFile;
 
-static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
 static NEXT_FAST_DATABASE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn migrated_database_template() -> &'static [u8] {
+fn migrated_database_template() -> &'static NamedTempFile {
     MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
         let database = NamedTempFile::new().expect("temporary migrated database template");
         crate::schema_manager::initialize_or_migrate(database.path())
             .expect("initialize migrated database template");
-        std::fs::read(database.path()).expect("read migrated database template")
+        database
     })
 }
 
 pub(crate) fn copy_migrated_database(path: &Path) -> std::io::Result<()> {
-    std::fs::write(path, migrated_database_template())
+    std::fs::copy(migrated_database_template().path(), path).map(|_| ())
 }
 
 /// An isolated shared-memory database restored from a file-backed template.
@@ -52,6 +52,10 @@ impl FastTestDatabase {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+}
+
+pub(crate) fn fast_migrated_database() -> FastTestDatabase {
+    FastTestDatabase::from_template(migrated_database_template().path())
 }
 
 pub(crate) fn parity_python(root: &Path) -> Command {

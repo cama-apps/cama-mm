@@ -322,17 +322,14 @@ fn map_action_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigActionRow> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use tempfile::NamedTempFile;
-
     use super::{DigActionHistoryRepository, DigActionInsert};
-    use crate::test_support::copy_migrated_database;
+    use crate::test_support::{FastTestDatabase, fast_migrated_database};
 
     const GUILD: i64 = 42;
     const OTHER_GUILD: i64 = 99;
 
-    fn fixture() -> (NamedTempFile, DigActionHistoryRepository) {
-        let file = NamedTempFile::new().expect("temporary migrated database");
-        copy_migrated_database(file.path()).expect("canonical schema");
+    fn fixture() -> (FastTestDatabase, DigActionHistoryRepository) {
+        let file = fast_migrated_database();
         let repository = DigActionHistoryRepository::new(file.path().to_path_buf());
         (file, repository)
     }
