@@ -24,6 +24,10 @@ impl Fixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary SQLite database");
         initialize_or_migrate(database.path()).expect("canonical migrated schema");
+        Connection::open(database.path())
+            .expect("open disposable event database")
+            .pragma_update(None, "journal_mode", "MEMORY")
+            .expect("use in-memory rollback journal");
         Self { database }
     }
 
@@ -896,15 +900,18 @@ fn all_203_authored_events_and_every_visible_choice_settle_on_migrated_sqlite() 
         assert!(!choices.is_empty(), "{} has no live choice", event.id);
 
         for choice in choices {
-            let connection = fixture.connection();
-            connection
+            let mut connection = fixture.connection();
+            let transaction = connection
+                .transaction()
+                .expect("reset authored event transaction");
+            transaction
                 .execute(
                     "UPDATE players SET jopacoin_balance=10000
                       WHERE discord_id=?1 AND guild_id=?2",
                     params![ACTOR, GUILD],
                 )
                 .expect("reset event balance");
-            connection
+            transaction
                 .execute(
                     "UPDATE tunnels SET depth=50, max_depth=50, luminosity=100,
                          prestige_level=10, prestige_perks='[]', boss_progress='{}',
@@ -914,13 +921,14 @@ fn all_203_authored_events_and_every_visible_choice_settle_on_migrated_sqlite() 
                 )
                 .expect("reset event tunnel");
             for table in ["dig_inventory", "dig_gear", "dig_artifacts"] {
-                connection
+                transaction
                     .execute(
                         &format!("DELETE FROM {table} WHERE discord_id=?1 AND guild_id=?2"),
                         params![ACTOR, GUILD],
                     )
                     .expect("clear prior event reward");
             }
+            transaction.commit().expect("commit authored event reset");
             drop(connection);
 
             let event_key = format!("catalog:{}:{choice}", event.id);
