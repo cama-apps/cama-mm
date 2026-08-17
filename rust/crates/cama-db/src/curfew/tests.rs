@@ -194,8 +194,10 @@ fn test_days_round_trips_and_defaults_to_none() {
         .add_or_replace(&window(1, GUILD, "work", 9, 17))
         .unwrap();
     let mut weekend = window(1, GUILD, "weekend_sleep", 22, 6);
-    weekend.days = Some(cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
-        | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat));
+    weekend.days = Some(
+        cama_domain::curfew::weekday_bit(chrono::Weekday::Fri)
+            | cama_domain::curfew::weekday_bit(chrono::Weekday::Sat),
+    );
     repository.add_or_replace(&weekend).unwrap();
 
     let windows = repository.list_for_player(1, GUILD).unwrap();

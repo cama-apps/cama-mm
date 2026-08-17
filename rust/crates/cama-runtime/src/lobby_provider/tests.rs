@@ -1967,7 +1967,6 @@ async fn test_join_allowed_when_curfew_service_unwired() {
     );
 }
 
-
 #[tokio::test]
 async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player() {
     // Regression test: a curfew kick must not just mutate in-memory lobby
@@ -2067,7 +2066,12 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
     .expect("Discord message id");
     provider
         .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, lobby_message_id, 1, "Sleepy"))
+        .observe(raw_sword(
+            RawReactionKind::Add,
+            lobby_message_id,
+            1,
+            "Sleepy",
+        ))
         .await
         .expect("player joins via sword reaction");
     assert!(
