@@ -1,14 +1,13 @@
 //! Migrated-SQLite application tests for the canonical event runtime.
 
 use crate::economy_event_service::EconomyEventConfig;
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::dig_event_runtime::{DigEventActorKey, DigEventRuntimeRepository};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use cama_domain::dig_gear::{GearService, GearSlot};
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -17,17 +16,12 @@ const GUILD: i64 = 42;
 const NOW: i64 = 1_700_000_000;
 
 struct Fixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        initialize_or_migrate(database.path()).expect("canonical migrated schema");
-        Connection::open(database.path())
-            .expect("open disposable event database")
-            .pragma_update(None, "journal_mode", "MEMORY")
-            .expect("use in-memory rollback journal");
+        let database = fast_migrated_database();
         Self { database }
     }
 

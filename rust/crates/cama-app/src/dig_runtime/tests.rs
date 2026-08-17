@@ -1,4 +1,4 @@
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::dig_event_runtime::{
@@ -17,7 +17,6 @@ use cama_domain::dig_gear::ARMOR_TIERS;
 use cama_domain::pet::DIG_WORK_UNITS_PER_BLOCK;
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use tempfile::NamedTempFile;
 
 use crate::dig_loot::{LootEntropy, SeededLootEntropy};
 use crate::economy_event_service::EconomyEventConfig;
@@ -50,9 +49,8 @@ fn seed_runtime_pet(connection: &Connection, now: i64, work_units: i64) -> i64 {
     connection.last_insert_rowid()
 }
 
-fn live_event_fixture() -> (NamedTempFile, SqliteDigRuntimeStore, DigRuntimeSnapshot) {
-    let database = NamedTempFile::new().expect("temporary event picker database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+fn live_event_fixture() -> (FastTestDatabase, SqliteDigRuntimeStore, DigRuntimeSnapshot) {
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(8_701, "live-event-picker", Some(8_702)))
         .expect("seed event picker player");
@@ -73,7 +71,7 @@ fn live_event_fixture() -> (NamedTempFile, SqliteDigRuntimeStore, DigRuntimeSnap
     (database, store, snapshot)
 }
 
-fn set_live_picker_quest(database: &NamedTempFile, step: i64) {
+fn set_live_picker_quest(database: &FastTestDatabase, step: i64) {
     DigEventRuntimeRepository::new(database.path())
         .apply_quest_mutation(
             DigEventActorKey {
@@ -296,8 +294,7 @@ fn first_dig_is_atomic_and_deterministic() {
 
 #[test]
 fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "delivery-test", Some(9)))
         .expect("seed player");
@@ -468,7 +465,7 @@ fn sqlite_blood_pact_delivery_reconciles_after_effect_before_snapshot() {
 
 #[test]
 fn sqlite_blood_pact_delivery_skips_cave_reward() {
-    let database = NamedTempFile::new().expect("Blood Pact cave database");
+    let database = fast_migrated_database();
     let actor = 61_111;
     let guild = 61_113;
     let start = 1_900_121_000;
@@ -568,8 +565,7 @@ fn sqlite_blood_pact_changed_earning_retry_is_rejected() {
 
 #[test]
 fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "delivery-rebind", Some(9)))
         .expect("seed player");
@@ -642,8 +638,7 @@ fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
 
 #[test]
 fn sqlite_delivery_outbox_invalid_detail_rolls_back_actor_and_action() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "delivery-rollback", Some(9)))
         .expect("seed player");
@@ -749,8 +744,7 @@ fn stale_snapshot_is_rejected_by_cas() {
 
 #[test]
 fn migrated_sqlite_store_commits_and_reloads_the_full_stage() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -802,8 +796,7 @@ fn migrated_sqlite_store_commits_and_reloads_the_full_stage() {
 
 #[test]
 fn paid_dig_debits_exactly_once_and_records_a_distinct_cost_ledger_entry() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -898,8 +891,7 @@ fn paid_dig_debits_exactly_once_and_records_a_distinct_cost_ledger_entry() {
 
 #[test]
 fn free_dig_commits_for_a_player_with_negative_balance() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -967,8 +959,7 @@ fn free_dig_commits_for_a_player_with_negative_balance() {
 
 #[test]
 fn sqlite_commit_preserves_distinct_trailing_tunnel_columns() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1032,8 +1023,7 @@ fn sqlite_commit_preserves_distinct_trailing_tunnel_columns() {
 
 #[test]
 fn admin_tunnel_mutations_report_missing_and_preserve_permanent_depth() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1094,8 +1084,7 @@ fn admin_tunnel_mutations_report_missing_and_preserve_permanent_depth() {
 
 #[test]
 fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(-9_004, "flex-test", Some(42)))
         .expect("insert player through the canonical repository");
@@ -1158,8 +1147,7 @@ fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
 
 #[test]
 fn test_dig_atomic_balance_update_records_dig_context() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1266,8 +1254,7 @@ fn test_dig_atomic_balance_update_records_dig_context() {
 
 #[test]
 fn test_dig_atomic_paid_cost_rejects_insufficient_funds() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1342,8 +1329,7 @@ fn test_dig_atomic_paid_cost_rejects_insufficient_funds() {
 
 #[test]
 fn test_miner_respec_records_sink_context_and_action() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1490,8 +1476,7 @@ fn test_miner_respec_records_sink_context_and_action() {
 
 #[test]
 fn migrated_sqlite_defense_and_weather_actions_use_app_boundary() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(9_001, "defense-test", Some(42)))
         .expect("insert player");
@@ -1530,8 +1515,7 @@ fn migrated_sqlite_defense_and_weather_actions_use_app_boundary() {
 
 #[test]
 fn first_dig_defers_weather_and_second_dig_returns_stable_typed_effects() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(9_005, "weather-test", Some(42)))
         .expect("insert player");
@@ -1589,8 +1573,7 @@ fn first_dig_defers_weather_and_second_dig_returns_stable_typed_effects() {
 
 #[test]
 fn test_weather_effects_in_dig_result_live_sqlite_second_dig() {
-    let database = NamedTempFile::new().expect("temporary weather result database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(9_006, "weather-result-test", Some(42)))
         .expect("insert weather result player");
@@ -1654,8 +1637,7 @@ fn test_weather_effects_in_dig_result_live_sqlite_second_dig() {
 
 #[test]
 fn sqlite_pet_work_first_dig_is_settled_and_claimed_atomically() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "pet-dig", Some(9)))
         .expect("insert player");
@@ -1695,8 +1677,7 @@ fn sqlite_pet_work_first_dig_is_settled_and_claimed_atomically() {
 
 #[test]
 fn sqlite_pet_work_cave_in_does_not_consume_the_offer() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "pet-cave", Some(9)))
         .expect("insert player");
@@ -1762,8 +1743,7 @@ fn sqlite_pet_work_cave_in_does_not_consume_the_offer() {
 
 #[test]
 fn sqlite_pet_work_conflict_rolls_back_the_whole_commit() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(7, "pet-conflict", Some(9)))
         .expect("insert player");
@@ -1905,7 +1885,7 @@ fn live_prestige_luminosity_drain(
     guild_id: i64,
     depth: i64,
 ) -> LivePrestigeLuminosityDrain {
-    let database = NamedTempFile::new().expect("prestige drain database");
+    let database = fast_migrated_database();
     let seed_now = 1_900_300_000;
     seed_live_runtime_tunnel(
         &database,
@@ -2018,8 +1998,7 @@ fn find_non_cave_dig_time_for_depth(discord_id: i64, guild_id: i64, start: i64, 
         .expect("deterministic non-cave prestige drain seed")
 }
 
-fn seed_cap_tunnel(database: &NamedTempFile, depth: i64, luminosity: i64) {
-    initialize_or_migrate(database.path()).expect("canonical migration");
+fn seed_cap_tunnel(database: &FastTestDatabase, depth: i64, luminosity: i64) {
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(50_001, "cap-test", Some(50_002)))
         .expect("seed player");
@@ -2044,12 +2023,12 @@ fn seed_cap_tunnel(database: &NamedTempFile, depth: i64, luminosity: i64) {
 }
 
 fn live_blood_pact_delivery_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     DigRuntimeService<SqliteDigRuntimeStore>,
     super::DigRuntimeExecution,
     i64,
 ) {
-    let database = NamedTempFile::new().expect("Blood Pact delivery database");
+    let database = fast_migrated_database();
     let actor = 61_101;
     let skimmer = 61_102;
     let guild = 61_103;
@@ -2122,7 +2101,7 @@ fn live_blood_pact_delivery_fixture() -> (
 
 #[test]
 fn test_dig_at_cap_is_rejected() {
-    let database = NamedTempFile::new().expect("cap database");
+    let database = fast_migrated_database();
     seed_cap_tunnel(&database, super::PRESTIGE_HARD_CAP, 77);
     let service = DigRuntimeService::sqlite(database.path());
     let before = Connection::open(database.path()).expect("open cap database");
@@ -2204,7 +2183,7 @@ fn test_dig_at_cap_is_rejected() {
 
 #[test]
 fn test_dig_one_below_cap_allowed() {
-    let database = NamedTempFile::new().expect("cap database");
+    let database = fast_migrated_database();
     seed_cap_tunnel(&database, super::PRESTIGE_HARD_CAP - 1, 100);
     let service = DigRuntimeService::sqlite(database.path());
     let result = service
@@ -2234,8 +2213,7 @@ fn test_dig_one_below_cap_allowed() {
 
 #[test]
 fn test_helltide_modifier_taxes_dig_yield() {
-    fn seed(database: &NamedTempFile) {
-        initialize_or_migrate(database.path()).expect("canonical migration");
+    fn seed(database: &FastTestDatabase) {
         PlayerRepository::new(database.path())
             .add(&NewPlayer::new(51_001, "helltide-test", Some(51_002)))
             .expect("seed player");
@@ -2259,7 +2237,7 @@ fn test_helltide_modifier_taxes_dig_yield() {
             .expect("seed tunnel");
     }
 
-    let baseline_db = NamedTempFile::new().expect("baseline database");
+    let baseline_db = fast_migrated_database();
     seed(&baseline_db);
     let baseline = DigRuntimeService::sqlite(baseline_db.path())
         .dig(DigRuntimeRequest {
@@ -2271,7 +2249,7 @@ fn test_helltide_modifier_taxes_dig_yield() {
         })
         .expect("baseline dig");
 
-    let helltide_db = NamedTempFile::new().expect("helltide database");
+    let helltide_db = fast_migrated_database();
     seed(&helltide_db);
     DigGuildModifierRepository::new(helltide_db.path())
         .set_modifier_at(
@@ -2330,8 +2308,7 @@ fn test_slow_drip_tracks_gross_cap_but_credits_scaled_reward() {
     const ACTOR: i64 = 52_001;
     const GUILD: i64 = 52_002;
     const NOW: i64 = 1_700_000_000;
-    let database = NamedTempFile::new().expect("slow drip database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(ACTOR, "slow-drip-test", Some(GUILD)))
         .expect("seed player");
@@ -2501,8 +2478,7 @@ fn test_parked_boss_reopens_after_slow_drip_before_cooldown() {
     const GUILD: i64 = 52_102;
     const LAST_DIG: i64 = 1_700_000_000;
     const NOW: i64 = LAST_DIG + 10;
-    let database = NamedTempFile::new().expect("parked boss database");
-    initialize_or_migrate(database.path()).expect("canonical migration");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(ACTOR, "parked-boss", Some(GUILD)))
         .expect("seed player");
@@ -2583,7 +2559,7 @@ fn test_broken_gear_is_not_an_applicable_gear_nick_target() {
     let guild = 62_022;
     let seed_now = 1_900_091_000;
     let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, false);
-    let database = NamedTempFile::new().expect("broken-gear cave database");
+    let database = fast_migrated_database();
     seed_live_cave_in_fixture(
         &database,
         actor,
@@ -2643,7 +2619,7 @@ fn test_gear_nick_reports_newly_broken_piece() {
     let guild = 62_002;
     let seed_now = 1_900_090_000;
     let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, true);
-    let database = NamedTempFile::new().expect("gear-nick cave database");
+    let database = fast_migrated_database();
     seed_live_cave_in_fixture(
         &database,
         actor,
@@ -2717,7 +2693,7 @@ fn test_catastrophic_cave_in_reports_newly_broken_piece() {
     let guild = 62_012;
     let seed_now = 1_900_090_500;
     let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(true), None, false);
-    let database = NamedTempFile::new().expect("catastrophic gear cave database");
+    let database = fast_migrated_database();
     seed_live_cave_in_fixture(
         &database,
         actor,
@@ -2824,7 +2800,7 @@ fn test_force_cave_in_at_deep() {
     let guild = 62_032;
     let seed_now = 1_900_091_500;
     let roll = find_live_cave_roll(actor, guild, seed_now, 180, None, None, false);
-    let database = NamedTempFile::new().expect("deep cave database");
+    let database = fast_migrated_database();
     seed_live_cave_in_fixture(
         &database, actor, guild, seed_now, roll.now, 180, 100, None, None,
     );
@@ -2877,7 +2853,7 @@ fn test_catastrophic_overrides_to_milestone() {
     // test catches an audit field that accidentally records final depth
     // delta instead of Python's ordinary rolled loss.
     let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), Some(15), false);
-    let database = NamedTempFile::new().expect("milestone cave database");
+    let database = fast_migrated_database();
     seed_live_cave_in_fixture(
         &database, actor, guild, seed_now, roll.now, 240, 100, None, None,
     );
@@ -2979,7 +2955,7 @@ fn test_insurance_protects_catastrophic_depth() {
     let guild = 62_052;
     let seed_now = 1_900_092_500;
     let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), None, false);
-    let database = NamedTempFile::new().expect("insured cave database");
+    let database = fast_migrated_database();
     let insured_until = roll.now + 86_400;
     seed_live_cave_in_fixture(
         &database,
@@ -3144,7 +3120,7 @@ fn find_live_cave_roll(
 
 #[allow(clippy::too_many_arguments)]
 fn seed_live_cave_in_fixture(
-    database: &NamedTempFile,
+    database: &FastTestDatabase,
     discord_id: i64,
     guild_id: i64,
     seed_now: i64,
@@ -3215,7 +3191,7 @@ fn seed_live_cave_in_fixture(
 }
 
 fn seed_live_runtime_tunnel(
-    database: &NamedTempFile,
+    database: &FastTestDatabase,
     discord_id: i64,
     guild_id: i64,
     now: i64,
@@ -3223,7 +3199,6 @@ fn seed_live_runtime_tunnel(
     total_digs: i64,
     last_dig_at: Option<i64>,
 ) {
-    initialize_or_migrate(database.path()).expect("canonical migration");
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(discord_id, "batch-one", Some(guild_id)))
         .expect("seed player");
@@ -3241,7 +3216,7 @@ fn seed_live_runtime_tunnel(
 }
 
 fn grant_overgrowth(
-    database: &NamedTempFile,
+    database: &FastTestDatabase,
     discord_id: i64,
     guild_id: i64,
     now: i64,
@@ -3361,7 +3336,7 @@ fn find_non_cave_dig_time_with_jc(
 }
 
 fn seed_two_weather_rows(
-    database: &NamedTempFile,
+    database: &FastTestDatabase,
     guild_id: i64,
     game_date: &str,
     active_layer: &str,
@@ -3395,7 +3370,7 @@ fn seed_two_weather_rows(
 }
 
 fn seed_active_mana(
-    database: &NamedTempFile,
+    database: &FastTestDatabase,
     discord_id: i64,
     guild_id: i64,
     game_date: &str,
@@ -3412,7 +3387,7 @@ fn seed_active_mana(
         .expect("seed active Mana");
 }
 
-fn latest_dig_detail(database: &NamedTempFile, actor: i64, guild: i64) -> Value {
+fn latest_dig_detail(database: &FastTestDatabase, actor: i64, guild: i64) -> Value {
     let raw = Connection::open(database.path())
         .expect("Dig detail connection")
         .query_row(
@@ -3444,8 +3419,8 @@ fn mana_base_yield_variance_and_steady_bonus_share_live_entropy() {
 
 #[test]
 fn sqlite_forest_mana_makes_free_dig_ready_at_exact_3570_seconds() {
-    let control = NamedTempFile::new().expect("control cooldown database");
-    let forest = NamedTempFile::new().expect("Forest cooldown database");
+    let control = fast_migrated_database();
+    let forest = fast_migrated_database();
     let actor = 60_081;
     let guild = 60_082;
     let now = 1_900_080_000;
@@ -3484,7 +3459,7 @@ fn sqlite_forest_mana_makes_free_dig_ready_at_exact_3570_seconds() {
 }
 
 fn assert_stamina_cooldown_boundary(mutations: &str, expected_seconds: i64) {
-    let database = NamedTempFile::new().expect("stamina cooldown database");
+    let database = fast_migrated_database();
     let actor = 60_087;
     let guild = 60_088;
     let last_dig_at = 1_900_083_000;
@@ -3557,7 +3532,7 @@ fn event_chance_composes_ascension_weather_and_route_multiplicatively() {
 
 #[test]
 fn sqlite_live_event_gate_multiplies_ascension_weather_and_route_factors() {
-    let database = NamedTempFile::new().expect("event multiplier database");
+    let database = fast_migrated_database();
     let actor = 60_111;
     let guild = 60_112;
     let now = 1_900_086_006;
@@ -3616,8 +3591,8 @@ fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_restless() {
 
 #[test]
 fn sqlite_configured_minigame_scale_applies_to_first_and_normal_dig() {
-    let first_control = NamedTempFile::new().expect("first control database");
-    let first_scaled = NamedTempFile::new().expect("first scaled database");
+    let first_control = fast_migrated_database();
+    let first_scaled = fast_migrated_database();
     let first_actor = 60_087;
     let first_guild = 60_088;
     let first_now = 1_900_083_500;
@@ -3665,8 +3640,8 @@ fn sqlite_configured_minigame_scale_applies_to_first_and_normal_dig() {
     );
     assert!(first_control_outcome.first_dig);
 
-    let normal_control = NamedTempFile::new().expect("normal control database");
-    let normal_scaled = NamedTempFile::new().expect("normal scaled database");
+    let normal_control = fast_migrated_database();
+    let normal_scaled = fast_migrated_database();
     let normal_actor = 60_095;
     let normal_guild = 60_096;
     let normal_now = 1_900_084_750;
@@ -3738,8 +3713,8 @@ fn sqlite_configured_minigame_scale_applies_to_first_and_normal_dig() {
 
 #[test]
 fn sqlite_blue_mana_tax_is_one_net_reward_sink_without_a_second_ledger() {
-    let control = NamedTempFile::new().expect("control Blue-tax database");
-    let blue = NamedTempFile::new().expect("Blue-tax database");
+    let control = fast_migrated_database();
+    let blue = fast_migrated_database();
     let actor = 60_089;
     let guild = 60_090;
     let now = 1_900_084_000;
@@ -3818,8 +3793,8 @@ fn sqlite_blue_mana_tax_is_one_net_reward_sink_without_a_second_ledger() {
 
 #[test]
 fn sqlite_normal_dig_applies_vanity_tax_to_gross_and_audits_net() {
-    let control = NamedTempFile::new().expect("control vanity-tax database");
-    let taxable = NamedTempFile::new().expect("taxable vanity-tax database");
+    let control = fast_migrated_database();
+    let taxable = fast_migrated_database();
     let actor = 60_111;
     let guild = 60_112;
     let now = 1_900_110_000;
@@ -3908,11 +3883,10 @@ fn sqlite_normal_dig_applies_vanity_tax_to_gross_and_audits_net() {
 
 #[test]
 fn sqlite_first_dig_is_exempt_from_vanity_tax() {
-    let database = NamedTempFile::new().expect("first-Dig vanity-tax database");
+    let database = fast_migrated_database();
     let actor = 60_113;
     let guild = 60_114;
     let now = 1_900_113_000;
-    initialize_or_migrate(database.path()).expect("first-Dig migration");
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(actor, "first-vanity", Some(guild)))
         .expect("first-Dig player");
@@ -3980,7 +3954,7 @@ fn vanity_tax_manual_override_taxability_is_deterministic() {
 
 #[test]
 fn sqlite_vanity_tax_rolls_back_on_audit_failure_without_duplicate_ledger() {
-    let database = NamedTempFile::new().expect("vanity-tax rollback database");
+    let database = fast_migrated_database();
     let actor = 60_118;
     let guild = 60_119;
     let now = 1_900_118_000;
@@ -4041,8 +4015,8 @@ fn sqlite_vanity_tax_rolls_back_on_audit_failure_without_duplicate_ledger() {
 
 #[test]
 fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
-    let control = NamedTempFile::new().expect("control bankruptcy database");
-    let penalized = NamedTempFile::new().expect("penalized bankruptcy database");
+    let control = fast_migrated_database();
+    let penalized = fast_migrated_database();
     let actor = 60_099;
     let guild = 60_100;
     let now = 1_900_085_500;
@@ -4118,8 +4092,8 @@ fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
 
 #[test]
 fn sqlite_blue_paid_cave_refund_is_atomic_and_not_counted_as_dig_income() {
-    let control = NamedTempFile::new().expect("control paid-cave database");
-    let blue = NamedTempFile::new().expect("Blue paid-cave database");
+    let control = fast_migrated_database();
+    let blue = fast_migrated_database();
     let actor = 60_093;
     let guild = 60_094;
     let now = 1_900_084_500;
@@ -4212,9 +4186,9 @@ fn sqlite_blue_paid_cave_refund_is_atomic_and_not_counted_as_dig_income() {
 
 #[test]
 fn sqlite_plains_tithe_deducts_only_after_fail_soft_reserve_credit() {
-    let control = NamedTempFile::new().expect("control Plains database");
-    let plains = NamedTempFile::new().expect("Plains database");
-    let failing = NamedTempFile::new().expect("failing Plains database");
+    let control = fast_migrated_database();
+    let plains = fast_migrated_database();
+    let failing = fast_migrated_database();
     let actor = 60_097;
     let guild = 60_098;
     let now = 1_900_085_000;
@@ -4271,8 +4245,8 @@ fn sqlite_plains_tithe_deducts_only_after_fail_soft_reserve_credit() {
 
 #[test]
 fn sqlite_temp_yield_buff_composes_once_and_expires() {
-    let control = NamedTempFile::new().expect("control yield-buff database");
-    let boosted = NamedTempFile::new().expect("boosted yield-buff database");
+    let control = fast_migrated_database();
+    let boosted = fast_migrated_database();
     let actor = 60_083;
     let guild = 60_084;
     let now = 1_900_081_000;
@@ -4338,8 +4312,8 @@ fn sqlite_temp_yield_buff_composes_once_and_expires() {
 
 #[test]
 fn sqlite_relic_yield_uses_post_drain_luminosity() {
-    let control = NamedTempFile::new().expect("control luminosity-yield database");
-    let coal = NamedTempFile::new().expect("Deepveined Coal database");
+    let control = fast_migrated_database();
+    let coal = fast_migrated_database();
     let actor = 60_085;
     let guild = 60_086;
     let now = 1_900_082_000;
@@ -4402,8 +4376,8 @@ fn sqlite_relic_yield_uses_post_drain_luminosity() {
 
 #[test]
 fn sqlite_overgrowth_adds_ten_and_consumes_one_charge_exactly_once() {
-    let control = NamedTempFile::new().expect("control Overgrowth database");
-    let boosted = NamedTempFile::new().expect("boosted Overgrowth database");
+    let control = fast_migrated_database();
+    let boosted = fast_migrated_database();
     let actor = 60_091;
     let guild = 60_092;
     let now = 1_900_090_000;
@@ -4457,8 +4431,8 @@ fn sqlite_overgrowth_adds_ten_and_consumes_one_charge_exactly_once() {
 
 #[test]
 fn sqlite_cave_in_consumes_overgrowth_without_adding_ten() {
-    let control = NamedTempFile::new().expect("control cave database");
-    let boosted = NamedTempFile::new().expect("Overgrowth cave database");
+    let control = fast_migrated_database();
+    let boosted = fast_migrated_database();
     let actor = 60_093;
     let guild = 60_094;
     let now = 1_900_091_000;
@@ -4518,7 +4492,7 @@ fn sqlite_cave_in_consumes_overgrowth_without_adding_ten() {
 
 #[test]
 fn sqlite_overgrowth_spend_rolls_back_when_later_commit_leg_fails() {
-    let database = NamedTempFile::new().expect("Overgrowth rollback database");
+    let database = fast_migrated_database();
     let actor = 60_095;
     let guild = 60_096;
     let now = 1_900_092_000;
@@ -4568,7 +4542,7 @@ fn sqlite_overgrowth_spend_rolls_back_when_later_commit_leg_fails() {
 
 #[test]
 fn sqlite_vanished_overgrowth_charge_rejects_whole_dig_stage() {
-    let database = NamedTempFile::new().expect("Overgrowth conflict database");
+    let database = fast_migrated_database();
     let actor = 60_097;
     let guild = 60_098;
     let now = 1_900_093_000;
@@ -4621,7 +4595,7 @@ fn sqlite_vanished_overgrowth_charge_rejects_whole_dig_stage() {
 
 #[test]
 fn sqlite_cave_in_does_not_persist_an_artifact() {
-    let database = NamedTempFile::new().expect("cave artifact database");
+    let database = fast_migrated_database();
     let actor = 60_101;
     let guild = 60_102;
     let now = 1_900_100_000;
@@ -4651,7 +4625,7 @@ fn sqlite_cave_in_does_not_persist_an_artifact() {
 
 #[test]
 fn sqlite_successful_artifact_persists_and_increments_current_run_artifacts_once() {
-    let database = NamedTempFile::new().expect("successful artifact database");
+    let database = fast_migrated_database();
     let actor = 61_001;
     let guild = 61_002;
     let seed_now = 1_900_100_000;
@@ -4746,7 +4720,7 @@ fn sqlite_successful_artifact_persists_and_increments_current_run_artifacts_once
 
 #[test]
 fn sqlite_artifact_commit_conflict_persists_neither_artifact_nor_counter() {
-    let database = NamedTempFile::new().expect("artifact rollback database");
+    let database = fast_migrated_database();
     let actor = 61_101;
     let guild = 61_102;
     let now = 1_900_110_000;
@@ -4814,7 +4788,7 @@ fn sqlite_artifact_commit_conflict_persists_neither_artifact_nor_counter() {
 
 #[test]
 fn sqlite_luminosity_refill_updates_timestamp_and_applies_torch_after_drain() {
-    let database = NamedTempFile::new().expect("luminosity database");
+    let database = fast_migrated_database();
     let discord_id = 60_001;
     let guild_id = 60_002;
     let now = 1_900_000_000;
@@ -4885,7 +4859,7 @@ fn sqlite_luminosity_refill_updates_timestamp_and_applies_torch_after_drain() {
 
 #[test]
 fn sqlite_queued_charges_stack_and_boss_prep_items_are_not_consumed() {
-    let database = NamedTempFile::new().expect("queued-item database");
+    let database = fast_migrated_database();
     let discord_id = 60_003;
     let guild_id = 60_004;
     let now = 1_900_010_000;
@@ -4984,8 +4958,8 @@ fn sqlite_queued_charges_stack_and_boss_prep_items_are_not_consumed() {
 
 #[test]
 fn sqlite_cave_probability_uses_luminosity_perk_buff_stats_and_mana_modifiers() {
-    let control_db = NamedTempFile::new().expect("control cave database");
-    let modified_db = NamedTempFile::new().expect("modified cave database");
+    let control_db = fast_migrated_database();
+    let modified_db = fast_migrated_database();
     let actor = 60_021;
     let guild = 60_022;
     let now = 1_900_015_000;
@@ -5083,7 +5057,7 @@ fn sqlite_cave_probability_uses_luminosity_perk_buff_stats_and_mana_modifiers() 
 
 #[test]
 fn sqlite_catastrophic_cave_in_does_not_resurrect_cleared_multidig_buff() {
-    let database = NamedTempFile::new().expect("catastrophic cave database");
+    let database = fast_migrated_database();
     let actor = 60_091;
     let guild = 60_092;
     let seed_now = 1_900_083_000;
@@ -5155,8 +5129,8 @@ fn sqlite_catastrophic_cave_in_does_not_resurrect_cleared_multidig_buff() {
 
 #[test]
 fn sqlite_queued_grapple_and_hard_hat_are_visible_to_cave_consequences() {
-    let hard_hat_db = NamedTempFile::new().expect("hard-hat cave database");
-    let grapple_db = NamedTempFile::new().expect("grapple cave database");
+    let hard_hat_db = fast_migrated_database();
+    let grapple_db = fast_migrated_database();
     let hard_hat_actor = 60_023;
     let grapple_actor = 60_024;
     let guild = 60_025;
@@ -5256,7 +5230,7 @@ fn sqlite_queued_grapple_and_hard_hat_are_visible_to_cave_consequences() {
 
 #[test]
 fn sqlite_blocked_cooldown_does_not_initialize_weather() {
-    let database = NamedTempFile::new().expect("cooldown database");
+    let database = fast_migrated_database();
     let discord_id = 60_005;
     let guild_id = 60_006;
     let now = 1_900_020_000;
@@ -5293,7 +5267,7 @@ fn sqlite_blocked_cooldown_does_not_initialize_weather() {
 
 #[test]
 fn sqlite_first_dig_requires_unstarted_tunnel_and_persists_streak() {
-    let database = NamedTempFile::new().expect("first-dig database");
+    let database = fast_migrated_database();
     let discord_id = 60_007;
     let guild_id = 60_008;
     let now = 1_900_030_000;
@@ -5351,8 +5325,8 @@ fn sqlite_first_dig_requires_unstarted_tunnel_and_persists_streak() {
 
 #[test]
 fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
-    let reduced_db = NamedTempFile::new().expect("reduced injury database");
-    let normal_db = NamedTempFile::new().expect("normal injury database");
+    let reduced_db = fast_migrated_database();
+    let normal_db = fast_migrated_database();
     let actor = 60_009;
     let guild = 60_010;
     let now = 1_900_040_000;
@@ -5402,8 +5376,8 @@ fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
     );
     drop(reduced_connection);
 
-    let slower_db = NamedTempFile::new().expect("slower injury database");
-    let slower_control_db = NamedTempFile::new().expect("slower injury control database");
+    let slower_db = fast_migrated_database();
+    let slower_control_db = fast_migrated_database();
     seed_live_runtime_tunnel(&slower_db, actor, guild, now, 10, 1, Some(now - 3_600));
     seed_live_runtime_tunnel(
         &slower_control_db,
@@ -5485,7 +5459,7 @@ fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
 
 #[test]
 fn sqlite_first_dig_pet_work_respects_live_boss_boundary_cap() {
-    let database = NamedTempFile::new().expect("first pet boundary database");
+    let database = fast_migrated_database();
     let actor = 7;
     let guild = 9;
     let now = 1_900_050_000;
@@ -5518,7 +5492,7 @@ fn sqlite_first_dig_pet_work_respects_live_boss_boundary_cap() {
 
 #[test]
 fn sqlite_queued_reinforcement_does_not_cap_current_cave_loss() {
-    let database = NamedTempFile::new().expect("reinforcement database");
+    let database = fast_migrated_database();
     let actor = 60_013;
     let guild = 60_014;
     let now = 1_900_060_000;
@@ -5565,8 +5539,8 @@ fn sqlite_queued_reinforcement_does_not_cap_current_cave_loss() {
 
 #[test]
 fn sqlite_broken_equipped_pickaxe_does_not_reduce_luminosity_drain() {
-    let active_db = NamedTempFile::new().expect("active pickaxe database");
-    let broken_db = NamedTempFile::new().expect("broken pickaxe database");
+    let active_db = fast_migrated_database();
+    let broken_db = fast_migrated_database();
     let actor = 60_015;
     let guild = 60_016;
     let now = 1_900_070_000;

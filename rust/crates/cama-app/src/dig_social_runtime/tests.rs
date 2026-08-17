@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use cama_db::predictions_repository::{BookSide, NewLevel, PredictionRepository};
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -57,9 +56,8 @@ impl DigSocialEntropy for ScriptedEntropy {
     }
 }
 
-fn fixture(helper_tunnel: bool, target_depth: i64) -> NamedTempFile {
-    let database = NamedTempFile::new().expect("social application database");
-    initialize_or_migrate(database.path()).expect("migrated social application schema");
+fn fixture(helper_tunnel: bool, target_depth: i64) -> FastTestDatabase {
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("social fixture DB");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -112,7 +110,7 @@ fn scripted_help(
     )
 }
 
-fn balance(database: &NamedTempFile, discord_id: i64) -> i64 {
+fn balance(database: &FastTestDatabase, discord_id: i64) -> i64 {
     Connection::open(database.path())
         .expect("balance DB")
         .query_row(
@@ -420,7 +418,7 @@ fn gift_validation_errors_match_python_copy() {
     );
 }
 
-fn sabotage_fixture(target_depth: i64) -> NamedTempFile {
+fn sabotage_fixture(target_depth: i64) -> FastTestDatabase {
     let database = fixture(true, target_depth);
     Connection::open(database.path())
         .unwrap()

@@ -9,9 +9,9 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use cama_app::dig_loot::{
@@ -20,7 +20,7 @@ use cama_app::dig_loot::{
     canonical_eligible_quest_event_ids, canonical_quest_catalog, canonical_quest_for_event,
     resolve_canonical_quest_finale,
 };
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, MAIN_DB, OpenFlags, params};
 use tempfile::NamedTempFile;
 
 pub use cama_app::{
@@ -55,31 +55,60 @@ const GUILD: i64 = 83_002;
 const OTHER_GUILD: i64 = 83_003;
 const NOW: i64 = 2_000_000_000;
 
-static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+static NEXT_FAST_DATABASE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn migrated_database_template() -> &'static [u8] {
+fn migrated_database_template() -> &'static NamedTempFile {
     MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
         let database = NamedTempFile::new().expect("temporary schema template");
         cama_db::schema_manager::initialize_or_migrate(database.path())
             .expect("canonical migrated schema template");
-        std::fs::read(database.path()).expect("read migrated schema template")
+        database
     })
 }
 
 pub(crate) fn copy_migrated_database(path: &Path) -> std::io::Result<()> {
-    std::fs::write(path, migrated_database_template())
+    std::fs::copy(migrated_database_template().path(), path).map(|_| ())
+}
+
+pub(crate) struct FastTestDatabase {
+    path: PathBuf,
+    _keeper: Connection,
+}
+
+impl FastTestDatabase {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) fn fast_migrated_database() -> FastTestDatabase {
+    let id = NEXT_FAST_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+    let path = PathBuf::from(format!(
+        "file:cama-quest-audit-test-{}-{id}?mode=memory&cache=shared",
+        std::process::id()
+    ));
+    let mut keeper = Connection::open(&path).expect("open shared-memory audit database");
+    keeper
+        .restore(
+            MAIN_DB,
+            migrated_database_template().path(),
+            None::<fn(rusqlite::backup::Progress)>,
+        )
+        .expect("restore shared-memory audit database");
+    FastTestDatabase {
+        path,
+        _keeper: keeper,
+    }
 }
 
 pub mod test_support {
-    pub(crate) use super::copy_migrated_database;
+    pub(crate) use super::{FastTestDatabase, copy_migrated_database, fast_migrated_database};
 }
 
 fn migrated_database() -> NamedTempFile {
-    let mut database = NamedTempFile::new().expect("temporary SQLite database");
-    database
-        .as_file_mut()
-        .write_all(migrated_database_template())
-        .expect("copy migrated schema template");
+    let database = NamedTempFile::new().expect("temporary SQLite database");
+    copy_migrated_database(database.path()).expect("copy migrated schema template");
     database
 }
 

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, copy_migrated_database, fast_migrated_database};
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_domain::dig_gear::GearSlot;
 use rusqlite::{Connection, params};
@@ -12,13 +12,11 @@ use super::*;
 const USER: i64 = 82_001;
 const GUILD: i64 = 82_002;
 
-fn fixture(balance: i64, depth: i64, prestige: i64) -> NamedTempFile {
-    let database = NamedTempFile::new().expect("temporary DB");
-    initialize_or_migrate(database.path()).expect("canonical schema");
-    PlayerRepository::new(database.path())
+fn seed_fixture(path: &std::path::Path, balance: i64, depth: i64, prestige: i64) {
+    PlayerRepository::new(path)
         .add(&NewPlayer::new(USER, "gear runtime miner", Some(GUILD)))
         .expect("player");
-    let connection = Connection::open(database.path()).expect("fixture DB");
+    let connection = Connection::open(path).expect("fixture DB");
     connection
         .execute(
             "UPDATE players SET jopacoin_balance=?1 WHERE discord_id=?2 AND guild_id=?3",
@@ -55,6 +53,18 @@ fn fixture(balance: i64, depth: i64, prestige: i64) -> NamedTempFile {
             params![USER, GUILD],
         )
         .expect("artifacts");
+}
+
+fn fixture(balance: i64, depth: i64, prestige: i64) -> FastTestDatabase {
+    let database = fast_migrated_database();
+    seed_fixture(database.path(), balance, depth, prestige);
+    database
+}
+
+fn durable_fixture(balance: i64, depth: i64, prestige: i64) -> NamedTempFile {
+    let database = NamedTempFile::new().expect("temporary DB");
+    copy_migrated_database(database.path()).expect("canonical schema");
+    seed_fixture(database.path(), balance, depth, prestige);
     database
 }
 
@@ -381,8 +391,7 @@ fn trim_notice_is_one_shot_and_audited_once() {
 
 #[test]
 fn missing_tunnel_returns_typed_rejection_without_writes() {
-    let database = NamedTempFile::new().expect("temporary DB");
-    initialize_or_migrate(database.path()).expect("schema");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(USER, "no tunnel", Some(GUILD)))
         .expect("player");
@@ -400,8 +409,8 @@ fn missing_tunnel_returns_typed_rejection_without_writes() {
     );
 }
 
-fn set_owned_weapon(database: &NamedTempFile, tier: i64, durability: i64) {
-    let connection = Connection::open(database.path()).expect("weapon DB");
+fn set_owned_weapon(database: &std::path::Path, tier: i64, durability: i64) {
+    let connection = Connection::open(database).expect("weapon DB");
     connection
         .execute(
             "UPDATE tunnels SET pickaxe_tier=?1 WHERE discord_id=?2 AND guild_id=?3",
@@ -452,8 +461,7 @@ fn shop_projects_all_consumables_descriptions_and_every_paid_gear_row() {
 
 #[test]
 fn shop_succeeds_before_first_dig_and_filters_owned_pickaxe_rungs() {
-    let database = NamedTempFile::new().expect("temporary DB");
-    initialize_or_migrate(database.path()).expect("schema");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(USER, "shopper", Some(GUILD)))
         .expect("player");
@@ -469,7 +477,7 @@ fn shop_succeeds_before_first_dig_and_filters_owned_pickaxe_rungs() {
 #[test]
 fn broken_high_tier_weapon_is_owned_for_shop_progression() {
     let database = fixture(10_000, 300, 5);
-    set_owned_weapon(&database, 7, 0);
+    set_owned_weapon(database.path(), 7, 0);
     let shop = DigGearRuntimeService::sqlite(database.path())
         .shop(USER, GUILD)
         .expect("shop")
@@ -480,7 +488,7 @@ fn broken_high_tier_weapon_is_owned_for_shop_progression() {
 
 fn assert_shop_player_state(depth: i64, tier: i64, expected_upgrade_tiers: &[u8]) {
     let database = fixture(10_000, depth, 5);
-    set_owned_weapon(&database, tier, 20);
+    set_owned_weapon(database.path(), tier, 20);
     let shop = DigGearRuntimeService::sqlite(database.path())
         .shop(USER, GUILD)
         .expect("shop")
@@ -521,7 +529,7 @@ fn shop_succeeds_for_deep_tier_seven_player_state() {
 #[test]
 fn buy_next_pickaxe_tier_succeeds() {
     let database = fixture(10_000, 30, 0);
-    set_owned_weapon(&database, 0, 20);
+    set_owned_weapon(database.path(), 0, 20);
     let outcome = DigGearRuntimeService::sqlite(database.path())
         .execute(
             USER,
@@ -537,7 +545,7 @@ fn buy_next_pickaxe_tier_succeeds() {
 #[test]
 fn pickaxe_purchase_debits_exactly_and_updates_legacy_and_equipped_weapon() {
     let database = fixture(10_000, 25, 0);
-    set_owned_weapon(&database, 0, 20);
+    set_owned_weapon(database.path(), 0, 20);
     let outcome = DigGearRuntimeService::sqlite(database.path())
         .execute(
             USER,
@@ -574,7 +582,7 @@ fn pickaxe_purchase_debits_exactly_and_updates_legacy_and_equipped_weapon() {
 #[test]
 fn insufficient_pickaxe_funds_reject_without_any_state_change() {
     let database = fixture(14, 25, 0);
-    set_owned_weapon(&database, 0, 20);
+    set_owned_weapon(database.path(), 0, 20);
     let service = DigGearRuntimeService::sqlite(database.path());
     let before = service.panel(USER, GUILD).expect("before").unwrap();
     let outcome = service
@@ -596,7 +604,7 @@ fn insufficient_pickaxe_funds_reject_without_any_state_change() {
 #[test]
 fn skip_pickaxe_tier_names_the_required_next_rung() {
     let database = fixture(10_000, 80, 0);
-    set_owned_weapon(&database, 0, 20);
+    set_owned_weapon(database.path(), 0, 20);
     let outcome = DigGearRuntimeService::sqlite(database.path())
         .execute(
             USER,
@@ -615,7 +623,7 @@ fn skip_pickaxe_tier_names_the_required_next_rung() {
 #[test]
 fn current_or_lower_pickaxe_tier_is_rejected() {
     let database = fixture(10_000, 80, 0);
-    set_owned_weapon(&database, 2, 20);
+    set_owned_weapon(database.path(), 2, 20);
     let outcome = DigGearRuntimeService::sqlite(database.path())
         .execute(
             USER,
@@ -633,7 +641,7 @@ fn current_or_lower_pickaxe_tier_is_rejected() {
 #[test]
 fn broken_high_tier_pickaxe_cannot_be_replaced_by_lower_tier() {
     let database = fixture(10_000, 300, 5);
-    set_owned_weapon(&database, 7, 0);
+    set_owned_weapon(database.path(), 7, 0);
     let service = DigGearRuntimeService::sqlite(database.path());
     let before = service.panel(USER, GUILD).expect("before").unwrap();
     let outcome = service
@@ -653,8 +661,7 @@ fn broken_high_tier_pickaxe_cannot_be_replaced_by_lower_tier() {
 
 #[test]
 fn pickaxe_purchase_without_tunnel_is_rejected() {
-    let database = NamedTempFile::new().expect("temporary DB");
-    initialize_or_migrate(database.path()).expect("schema");
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(USER, "no tunnel", Some(GUILD)))
         .expect("player");
@@ -672,7 +679,7 @@ fn pickaxe_purchase_without_tunnel_is_rejected() {
 #[test]
 fn pickaxe_purchase_uses_all_time_depth_after_prestige_reset() {
     let database = fixture(10_000, 0, 1);
-    set_owned_weapon(&database, 3, 20);
+    set_owned_weapon(database.path(), 3, 20);
     Connection::open(database.path())
         .expect("max depth DB")
         .execute(
@@ -694,7 +701,7 @@ fn pickaxe_purchase_uses_all_time_depth_after_prestige_reset() {
 #[test]
 fn pickaxe_audit_failure_rolls_back_wallet_legacy_tier_and_equipped_row() {
     let database = fixture(10_000, 25, 0);
-    set_owned_weapon(&database, 0, 20);
+    set_owned_weapon(database.path(), 0, 20);
     Connection::open(database.path())
         .expect("trigger DB")
         .execute_batch(
@@ -732,8 +739,8 @@ fn pickaxe_audit_failure_rolls_back_wallet_legacy_tier_and_equipped_row() {
 
 #[test]
 fn concurrent_pickaxe_buys_admit_exactly_one_upgrade_and_debit() {
-    let database = fixture(100, 25, 0);
-    set_owned_weapon(&database, 0, 20);
+    let database = durable_fixture(100, 25, 0);
+    set_owned_weapon(database.path(), 0, 20);
     let path = database.path().to_path_buf();
     let barrier = Arc::new(Barrier::new(2));
     let handles = (0..2)

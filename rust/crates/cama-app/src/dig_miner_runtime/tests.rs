@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -36,9 +35,8 @@ impl TunnelNameEntropy for ScriptedNameEntropy {
     }
 }
 
-fn fixture(balance: i64) -> NamedTempFile {
-    let database = NamedTempFile::new().expect("miner app database");
-    initialize_or_migrate(database.path()).expect("migrated miner app schema");
+fn fixture(balance: i64) -> FastTestDatabase {
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).unwrap();
     connection
         .pragma_update(None, "foreign_keys", false)

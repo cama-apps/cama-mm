@@ -1,10 +1,9 @@
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 use crate::boss_multi_tier::{
@@ -22,9 +21,8 @@ fn key() -> PlayerKey {
     PlayerKey::new(PLAYER, Some(GUILD))
 }
 
-fn fixture() -> NamedTempFile {
-    let database = NamedTempFile::new().expect("boss app database");
-    initialize_or_migrate(database.path()).expect("canonical schema");
+fn fixture() -> FastTestDatabase {
+    let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(PLAYER, "boss-app", Some(GUILD)))
         .expect("player");
@@ -56,7 +54,7 @@ fn fixture() -> NamedTempFile {
     database
 }
 
-fn set_phase_two(database: &NamedTempFile, pending_event_id: &str) {
+fn set_phase_two(database: &FastTestDatabase, pending_event_id: &str) {
     Connection::open(database.path())
         .expect("phase DB")
         .execute(
@@ -76,7 +74,7 @@ fn set_phase_two(database: &NamedTempFile, pending_event_id: &str) {
         .expect("phase two");
 }
 
-fn pending_phase_event(database: &NamedTempFile) -> Option<String> {
+fn pending_phase_event(database: &FastTestDatabase) -> Option<String> {
     let raw = Connection::open(database.path())
         .expect("phase DB")
         .query_row(
@@ -94,7 +92,7 @@ fn pending_phase_event(database: &NamedTempFile) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn set_pinnacle(database: &NamedTempFile, phase: u8, status: &str, pending_event: Option<&str>) {
+fn set_pinnacle(database: &FastTestDatabase, phase: u8, status: &str, pending_event: Option<&str>) {
     let mut progress = Map::new();
     for boundary in crate::dig_bosses::BOSS_BOUNDARIES {
         progress.insert(boundary.to_string(), Value::String("defeated".to_owned()));
@@ -141,7 +139,7 @@ fn pinnacle_request(now: i64) -> DigBossRuntimeRequest {
     }
 }
 
-fn pinnacle_runtime(database: &NamedTempFile) -> DigBossRuntimeService {
+fn pinnacle_runtime(database: &FastTestDatabase) -> DigBossRuntimeService {
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
     DigBossRuntimeService::sqlite(config)

@@ -1,8 +1,7 @@
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -12,13 +11,12 @@ const NOW: i64 = 2_000_000_000;
 const RECENT_ISO: &str = "2033-05-18T03:33:20+00:00";
 
 struct Fixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        initialize_or_migrate(database.path()).expect("canonical migrated schema");
+        let database = fast_migrated_database();
         Self { database }
     }
 

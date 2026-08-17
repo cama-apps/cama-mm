@@ -1,9 +1,8 @@
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -11,9 +10,8 @@ const USER: i64 = 84_001;
 const GUILD: i64 = 84_002;
 const NOW: i64 = 1_800_000_000;
 
-fn fixture(depth: Option<i64>) -> NamedTempFile {
-    let database = NamedTempFile::new().unwrap();
-    initialize_or_migrate(database.path()).unwrap();
+fn fixture(depth: Option<i64>) -> FastTestDatabase {
+    let database = fast_migrated_database();
     let connection = Connection::open(database.path()).unwrap();
     connection
         .pragma_update(None, "foreign_keys", false)

@@ -1,12 +1,11 @@
 use std::collections::BTreeSet;
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
-use tempfile::NamedTempFile;
 
 use super::*;
 
@@ -438,13 +437,12 @@ impl PrestigeRelicEntropy for FixedRelicEntropy {
 }
 
 struct SqliteFixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
 }
 
 impl SqliteFixture {
     fn new(prestige_level: i64, perks: &[&str]) -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        initialize_or_migrate(database.path()).expect("canonical migrated schema");
+        let database = fast_migrated_database();
         let fixture = Self { database };
         let connection = fixture.connection();
         connection

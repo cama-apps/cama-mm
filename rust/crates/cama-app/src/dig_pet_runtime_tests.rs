@@ -3,10 +3,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_domain::pet::{DIG_WORK_UNITS_PER_BLOCK, PetDigWorkClaim};
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
 use crate::dig_loot::{LootEntropy, SeededLootEntropy};
 use crate::dig_runtime::{
@@ -115,14 +114,13 @@ impl DigRuntimeStore for TestStore {
 }
 
 struct Fixture {
-    database: NamedTempFile,
+    database: FastTestDatabase,
     store: TestStore,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary migrated database");
-        initialize_or_migrate(database.path()).expect("canonical migration");
+        let database = fast_migrated_database();
         let store = TestStore::new(database.path().to_path_buf());
         let fixture = Self { database, store };
         fixture
