@@ -2,3 +2,9 @@
 # Keep native development artifacts separate from Docker/Windows-owned output.
 # CI explicitly overrides this with CARGO_TARGET_DIR=rust/target.
 target-dir = "rust/target-native"
+
+[env]
+# The runtime tests create many independent SQLite databases. On developer
+# machines, saturating every CPU makes those tests contend heavily on storage;
+# four workers is materially faster and remains overridable per invocation.
+RUST_TEST_THREADS = { value = "4", force = false }

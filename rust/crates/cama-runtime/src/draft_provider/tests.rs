@@ -1,8 +1,9 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Semaphore;
 
 use cama_app::draft::{
@@ -24,6 +25,22 @@ use crate::registration::{
     InteractionAttachment, InteractionOption, InteractionRequest, InteractionResponseError,
     InteractionValue,
 };
+
+static MIGRATED_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn migrated_database() -> NamedTempFile {
+    let template = MIGRATED_DATABASE_TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("canonical database template");
+        initialize_or_migrate(database.path()).expect("migrate canonical database template");
+        std::fs::read(database.path()).expect("read canonical database template")
+    });
+    let mut database = NamedTempFile::new().expect("temporary migrated database");
+    database
+        .as_file_mut()
+        .write_all(template)
+        .expect("copy canonical database template");
+    database
+}
 
 struct EmptyMemberSource;
 
@@ -458,8 +475,7 @@ fn provider_fixture() -> (
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -598,8 +614,7 @@ fn provider_fixture_with_scheduler(
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -657,8 +672,7 @@ async fn populated_lobby_fixture() -> (
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("lobby database");
-    initialize_or_migrate(database.path()).expect("migrate lobby database");
+    let database = migrated_database();
     seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
     let drafts = Arc::new(DraftStateManager::default());
     let discord = Arc::new(NullDiscord::default());
@@ -824,8 +838,7 @@ async fn persistent_completion_fixture() -> (
 
 #[test]
 fn provider_recreation_hydrates_state_phase_message_and_deadline() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -1041,8 +1054,7 @@ fn provider_recreation_hydrates_state_phase_message_and_deadline() {
 
 #[test]
 fn draft_ready_observer_hydrates_active_rows_idempotently() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -1113,8 +1125,7 @@ fn draft_ready_observer_hydrates_active_rows_idempotently() {
 
 #[test]
 fn draft_ready_observer_ignores_foreign_guild_rows_before_transport() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -2830,9 +2841,7 @@ async fn pre_job_finalizing_row_is_left_for_explicit_manual_recovery() {
 #[tokio::test]
 async fn sqlite_persistence_constructor_rejects_split_pending_database() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
-    let separate_persistence = NamedTempFile::new().expect("create separate persistence database");
-    cama_db::schema_manager::initialize_or_migrate(separate_persistence.path())
-        .expect("migrate separate persistence database");
+    let separate_persistence = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         _ => None,
@@ -3091,8 +3100,7 @@ async fn hydration_restore_failure_releases_new_reservation_and_session_lock() {
 
 #[test]
 fn hydration_skips_unfenced_complete_state_for_recovery() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         _ => None,
