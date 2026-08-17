@@ -28,13 +28,22 @@ pub const CURFEW_SWEEP_WORKER_NAME: &str = "curfew_sweep";
 pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Re-render a lobby's live Discord embed after curfew removed members from
-/// it. Implemented by [`crate::lobby_provider::LobbyRegistrationProvider`].
+/// it, and strip a removed player's own sword reaction so the message's
+/// reactions stop implying they're still queued. Implemented by
+/// [`crate::lobby_provider::LobbyRegistrationProvider`].
 #[async_trait]
 pub trait CurfewLobbyDisplayPort: Send + Sync {
     async fn refresh_curfew_lobby(
         &self,
         guild_id: i64,
         lobby_kind: LobbyKind,
+    ) -> Result<(), String>;
+
+    async fn remove_curfew_lobby_reaction(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+        discord_id: i64,
     ) -> Result<(), String>;
 }
 
@@ -97,6 +106,19 @@ impl CurfewSweepWorker {
                     discord_id = kick.discord_id,
                     %error,
                     "failed to DM user about curfew kick"
+                );
+            }
+            if let Err(error) = self
+                .display
+                .remove_curfew_lobby_reaction(kick.guild_id, kick.lobby_kind, kick.discord_id)
+                .await
+            {
+                debug!(
+                    discord_id = kick.discord_id,
+                    guild_id = kick.guild_id,
+                    lobby_kind = ?kick.lobby_kind,
+                    %error,
+                    "failed to remove sword reaction after curfew kick"
                 );
             }
         }
