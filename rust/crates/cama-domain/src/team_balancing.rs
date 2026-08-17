@@ -43,7 +43,7 @@ impl Default for TeamBalancingService {
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
             off_role_flat_penalty: 550.0,
-            role_matchup_delta_weight: 1.0,
+            role_matchup_delta_weight: 0.18,
         }
     }
 }
