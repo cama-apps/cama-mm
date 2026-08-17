@@ -20,7 +20,10 @@ use crate::discord_transport::DiscordAllowedMentions;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
 
 use super::*;
-use crate::test_support::initialize_test_database as initialize_or_migrate;
+use crate::test_support::{
+    FastTestDatabase, fast_database, initialize_test_database as initialize_or_migrate,
+    migrated_database,
+};
 
 const GUILD: i64 = 82_001;
 const MATCH_ID: i64 = 91_001;
@@ -346,8 +349,22 @@ fn production_test_config() -> ApplicationConfig {
     config
 }
 
+enum MatchTestDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl MatchTestDatabase {
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
+
 struct MatchRuntimeFixture {
-    database: NamedTempFile,
+    database: MatchTestDatabase,
     lobby: crate::lobby_provider::LobbyRegistrationProvider,
     drafts: Arc<cama_app::draft::DraftStateManager>,
     provider: MatchRegistrationProvider,
@@ -358,11 +375,39 @@ impl MatchRuntimeFixture {
         Self::new_with_discord(Arc::new(PublicationDiscord::default()))
     }
 
+    fn new_durable() -> Self {
+        Self::new_durable_with_discord(Arc::new(PublicationDiscord::default()))
+    }
+
     fn new_with_discord(discord: Arc<dyn DiscordTransport>) -> Self {
-        Self::new_with_config_and_discord(production_test_config(), discord)
+        Self::new_with_database_config_and_discord(
+            MatchTestDatabase::Fast(fast_database()),
+            production_test_config(),
+            discord,
+        )
+    }
+
+    fn new_durable_with_discord(discord: Arc<dyn DiscordTransport>) -> Self {
+        Self::new_with_database_config_and_discord(
+            MatchTestDatabase::Durable(migrated_database()),
+            production_test_config(),
+            discord,
+        )
     }
 
     fn new_with_config_and_discord(
+        config: ApplicationConfig,
+        discord: Arc<dyn DiscordTransport>,
+    ) -> Self {
+        Self::new_with_database_config_and_discord(
+            MatchTestDatabase::Fast(fast_database()),
+            config,
+            discord,
+        )
+    }
+
+    fn new_with_database_config_and_discord(
+        database: MatchTestDatabase,
         config: ApplicationConfig,
         discord: Arc<dyn DiscordTransport>,
     ) -> Self {
@@ -370,8 +415,6 @@ impl MatchRuntimeFixture {
         use cama_app::draft::DraftStateManager;
         use cama_app::service_container::ServiceContainer;
 
-        let database = NamedTempFile::new().expect("temporary production match database");
-        initialize_or_migrate(database.path()).expect("migrate production match fixture");
         let drafts = Arc::new(DraftStateManager::default());
         let lobby = LobbyRegistrationProvider::new(
             database.path(),
@@ -1423,7 +1466,7 @@ fn match_easter_egg_collector_keeps_milestones_when_pairing_lookup_fails() {
 
 #[test]
 fn committed_easter_streak_payload_survives_crash_retry_after_best_update() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let pending = fixture.pending(unix_seconds() + 120);
     let winner = pending.state.radiant_team_ids[0];
     let streak_data = BTreeMap::from([(
@@ -1501,7 +1544,7 @@ fn committed_easter_streak_payload_survives_crash_retry_after_best_update() {
 
 #[test]
 fn easter_streak_persistence_failure_leaves_personal_best_unmutated() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let pending = fixture.pending(unix_seconds() + 120);
     let winner = pending.state.radiant_team_ids[0];
     let streak_data = BTreeMap::from([(
@@ -1554,7 +1597,7 @@ fn easter_streak_persistence_failure_leaves_personal_best_unmutated() {
 
 #[test]
 fn persisted_easter_streak_payload_survives_best_update_failure() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let pending = fixture.pending(unix_seconds() + 120);
     let winner = pending.state.radiant_team_ids[0];
     let records = vec![WinStreakRecord {
@@ -2108,7 +2151,7 @@ impl crate::gateway_events::GuildMemberPageSource for NoReadyMembers {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_recovery_rearms_uncommitted_pending_match_from_absolute_deadline() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let pending = fixture.pending(unix_seconds() + 120);
     let context = ReadyRecoveryContext::new(
         Arc::<[u64]>::from([u64::try_from(GUILD).expect("guild snowflake")]),
@@ -2138,7 +2181,7 @@ async fn ready_recovery_rearms_uncommitted_pending_match_from_absolute_deadline(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_pending() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let mut pending = fixture.pending(unix_seconds() + 120);
     let players = PlayerRepository::new(fixture.database.path());
     for discord_id in [81_110_i64, 81_111] {
@@ -2326,7 +2369,7 @@ async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_
 
 #[test]
 fn record_retry_recovers_settled_bet_snapshot_without_double_pay() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let pending = fixture.pending(unix_seconds() + 120);
     let winning_bettor = 82_201_i64;
     let losing_bettor = 82_202_i64;
@@ -2712,7 +2755,7 @@ fn settled_bet_summary_survives_snapshot_write_failure_with_protection() {
 
 #[test]
 fn production_reward_saga_recovers_partial_payout_without_compensation_or_double_pay() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let mut pending = fixture.pending(unix_seconds() + 120);
     let excluded_id = 81_120_i64;
     pending.state.excluded_player_ids = vec![excluded_id];
@@ -3148,7 +3191,7 @@ async fn extended_betting_is_persisted_to_the_pending_match_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extended_betting_survives_a_fresh_repository_after_restart() {
-    let fixture = MatchRuntimeFixture::new();
+    let fixture = MatchRuntimeFixture::new_durable();
     let original_lock = unix_seconds() + 600;
     let pending = fixture.pending(original_lock);
     fixture
@@ -6835,7 +6878,7 @@ async fn test_abort_announcement_filters_fake_negative_player_ids() {
 async fn test_concurrent_abort_finalizations_only_announce_once() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     discord.block_sends_to([42]);
-    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let fixture = MatchRuntimeFixture::new_durable_with_discord(discord.clone());
     let pending = PendingMatchRepository::new(fixture.database.path())
         .create_pending_match(
             GUILD,

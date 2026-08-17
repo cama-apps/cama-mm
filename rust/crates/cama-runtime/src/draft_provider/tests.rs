@@ -13,7 +13,6 @@ use cama_app::draft::{
 use cama_db::autobet_investments::AutobetInvestmentRepository;
 use cama_db::core_repositories::PlayerRepository;
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
 
 use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
@@ -24,7 +23,7 @@ use crate::registration::{
     InteractionAttachment, InteractionOption, InteractionRequest, InteractionResponseError,
     InteractionValue,
 };
-use crate::test_support::migrated_database;
+use crate::test_support::{FastTestDatabase, fast_database, migrated_database};
 
 struct EmptyMemberSource;
 
@@ -454,12 +453,12 @@ impl DiscordTransport for FailingSendDiscord {
 }
 
 fn provider_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = migrated_database();
+    let database = fast_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -593,12 +592,12 @@ impl DraftNeonObserver for RecordingNeonObserver {
 fn provider_fixture_with_scheduler(
     reminders: Arc<dyn DraftReminderScheduler>,
 ) -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = migrated_database();
+    let database = fast_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -650,13 +649,13 @@ fn lobby_request(user_id: u64, name: &str) -> InteractionRequest {
 }
 
 async fn populated_lobby_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     LobbyRegistrationProvider,
     MatchLobbyPort,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = migrated_database();
+    let database = fast_database();
     seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
     let drafts = Arc::new(DraftStateManager::default());
     let discord = Arc::new(NullDiscord::default());
@@ -746,7 +745,7 @@ fn state_for_draft() -> DraftState {
 }
 
 async fn persistent_completion_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<SqliteDraftStatePersistence>,
