@@ -53,6 +53,10 @@ jobs:
       # CI failures already report assertion locations, while debug line tables
       # materially increase cold compile time and artifact size.
       CARGO_PROFILE_TEST_DEBUG: "0"
+      # The pinned compiler contains the experimental parallel frontend. Match
+      # the four cores on public Linux runners without changing tool versions.
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-Zthreads=4"
     steps:
       - uses: actions/checkout@v7
 
