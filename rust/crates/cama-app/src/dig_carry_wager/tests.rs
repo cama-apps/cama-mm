@@ -11,6 +11,28 @@ use super::*;
 const ACTOR: i64 = 20_001;
 const GUILD: i64 = 12_345;
 
+#[test]
+fn persisted_boss_boundary_uses_only_canonical_statuses_and_boundaries() {
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":"active"}"#),
+        Some(25)
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":{"status":"phase1_defeated"}}"#),
+        Some(25)
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":"pending"}"#),
+        None,
+        "unknown statuses must not send /dig go into a boss service that rejects them"
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(12, r#"{"13":"active"}"#),
+        None,
+        "noncanonical boundaries must not be treated as boss encounters"
+    );
+}
+
 #[derive(Clone, Debug)]
 struct MemoryPort {
     state: Arc<Mutex<MemoryState>>,

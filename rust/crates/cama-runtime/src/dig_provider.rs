@@ -2897,14 +2897,23 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let now = unix_now();
-            let result = self
+            let result = match self
                 .resume_boss(
                     user_id,
                     guild_id,
                     option_index.expect("validated option index"),
                     now,
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return responder
+                        .followup(boss_error_response(error))
+                        .await
+                        .map_err(|error| error.to_string());
+                }
+            };
             if boss_resume_is_resolved(&result) {
                 self.reconcile_resolved_boss(user_id, guild_id, now).await;
             }

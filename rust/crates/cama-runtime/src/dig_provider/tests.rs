@@ -949,6 +949,31 @@ fn boss_failure_uses_python_error_embed() {
     assert_eq!(embed.color, Some(0xFF_A5_00));
 }
 
+#[tokio::test]
+async fn stale_namespaced_boss_duel_is_reported_to_the_player() {
+    let (_database, provider, _discord) = fixture();
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:duel:{USER}:{GUILD}:0"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss choice is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    let embed = &followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("Boss Fight Error"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("there is no active duel to resume")
+    );
+}
+
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
 #[test]
 fn failed_event_uses_python_error_embed() {
