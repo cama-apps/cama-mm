@@ -1177,35 +1177,127 @@ impl EnrichmentHandler {
             .map_err(response_error)
     }
 
-    /// Re-enrich matches whose stored payload predates OpenDota parsing the
-    /// replay.
+    /// Re-enrich every match whose stored payload predates OpenDota parsing
+    /// the replay, draining the queue rather than stopping at a fixed batch.
     ///
-    /// Enrichment runs soon after a match is recorded, but OpenDota fills
-    /// `lane_role` and the per-minute series only once the replay is parsed,
-    /// minutes to hours later. The stored snapshot is never refreshed, so
-    /// those matches stay starved of data that does exist upstream. This
-    /// re-runs the ordinary enrichment path against them, which rewrites the
-    /// payload and re-derives played positions on the way through.
+    /// Work proceeds in chunks so progress stays visible and each chunk's
+    /// writes commit as they go. The attempt counter makes the sweep
+    /// resumable: a run cut short by a restart or an expired interaction token
+    /// leaves the processed matches marked, so re-running continues rather
+    /// than repeating. That also bounds the loop - every iteration either
+    /// marks progress or finds the queue empty.
     async fn handle_refresh_parsed(
         &self,
         guild_id: i64,
         dry_run: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        // Each candidate is a rate-limited OpenDota round trip, so the batch
-        // is sized to finish inside the interaction token rather than to drain
-        // the backlog in one go.
-        const BATCH: usize = 25;
+        /// Matches per chunk. Small enough that a cancelled run loses little,
+        /// large enough that per-chunk overhead is irrelevant beside the
+        /// network calls.
+        const CHUNK: usize = 25;
         const MAX_ATTEMPTS: i64 = 1;
-        let matches = self.matches.clone();
-        let candidates = run_blocking(move || {
-            matches
-                .matches_missing_parsed_stats(Some(guild_id), BATCH, MAX_ATTEMPTS)
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .map_err(InteractionHandlerError::from)?;
-        if candidates.is_empty() {
+        /// Backstop against a pathological loop; far above any real backlog.
+        const MAX_TOTAL: usize = 5_000;
+
+        let mut processed = 0_usize;
+        let mut refreshed = 0_usize;
+        let mut errors: Vec<(i64, String)> = Vec::new();
+        let mut previewed = 0_usize;
+
+        loop {
+            let matches = self.matches.clone();
+            let candidates = run_blocking(move || {
+                matches
+                    .matches_missing_parsed_stats(Some(guild_id), CHUNK, MAX_ATTEMPTS)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(InteractionHandlerError::from)?;
+            if candidates.is_empty() || processed >= MAX_TOTAL {
+                break;
+            }
+
+            if dry_run {
+                // A preview writes nothing, so the queue would never drain.
+                // Report the first chunk and stop.
+                previewed = candidates.len();
+                processed += previewed;
+                break;
+            }
+
+            if processed == 0 {
+                responder
+                    .followup(
+                        InteractionResponse::message(
+                            "Re-enriching matches missing parsed stats. This runs until the backlog is clear.",
+                        )
+                        .ephemeral(),
+                    )
+                    .await
+                    .map_err(response_error)?;
+            }
+
+            let enrichment = Arc::clone(&self.enrichment);
+            let matches = self.matches.clone();
+            let chunk_size = candidates.len();
+            let chunk_errors = run_blocking(move || {
+                let mut chunk_errors = Vec::new();
+                for (match_id, valve_match_id) in candidates {
+                    // Counted before the attempt so a panic or error cannot
+                    // leave the match pinned at the head of every future sweep.
+                    let _ = matches.mark_parsed_refresh_attempt(match_id, Some(guild_id));
+                    // Keep whatever provenance the match already carries: this
+                    // is a data refresh, not a re-identification, and
+                    // relabelling an auto-discovered match as manual would
+                    // lose its confidence.
+                    let (existing_source, existing_confidence) = matches
+                        .enrichment_provenance(match_id, Some(guild_id))
+                        .unwrap_or((None, None));
+                    let result = enrichment.enrich_match(EnrichMatchRequest {
+                        internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
+                        valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
+                        guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
+                        source: existing_source
+                            .as_deref()
+                            .and_then(EnrichmentSource::from_stored)
+                            .unwrap_or(EnrichmentSource::Manual),
+                        confidence: existing_confidence,
+                        // Already linked to this Valve id; re-running is a data
+                        // refresh, not a re-identification.
+                        skip_validation: true,
+                        opendota_match_data: None,
+                    });
+                    if !result.success {
+                        chunk_errors.push((
+                            match_id,
+                            result.error.unwrap_or_else(|| "Unknown".to_owned()),
+                        ));
+                    }
+                }
+                Ok::<_, String>(chunk_errors)
+            })
+            .await
+            .map_err(InteractionHandlerError::from)?;
+
+            processed += chunk_size;
+            refreshed += chunk_size - chunk_errors.len();
+            errors.extend(chunk_errors);
+
+            // Progress is best-effort: once the interaction token expires this
+            // edit fails, but the sweep keeps going and its writes still land.
+            let _ = responder
+                .edit_original(
+                    InteractionResponse::message(format!(
+                        "Refreshing parsed stats... {refreshed} refreshed, {} error(s), {processed} processed so far.",
+                        errors.len()
+                    ))
+                    .ephemeral(),
+                )
+                .await;
+        }
+
+        if processed == 0 {
             return responder
                 .followup(
                     InteractionResponse::message(
@@ -1217,83 +1309,26 @@ impl EnrichmentHandler {
                 .map_err(response_error);
         }
 
-        responder
-            .followup(
-                InteractionResponse::message(format!(
-                    "Found {} match(es) missing parsed stats. {}",
-                    candidates.len(),
-                    if dry_run {
-                        "Previewing..."
-                    } else {
-                        "Re-enriching..."
-                    }
-                ))
-                .ephemeral(),
-            )
-            .await
-            .map_err(response_error)?;
-
-        let enrichment = Arc::clone(&self.enrichment);
-        let matches = self.matches.clone();
-        let processed = candidates.len();
-        let (refreshed, errors) = run_blocking(move || {
-            let mut refreshed = Vec::new();
-            let mut errors = Vec::new();
-            for (match_id, valve_match_id) in candidates {
-                if dry_run {
-                    refreshed.push((match_id, valve_match_id));
-                    continue;
-                }
-                // Counted before the attempt so a panic or error cannot leave
-                // the match pinned at the head of every future sweep.
-                let _ = matches.mark_parsed_refresh_attempt(match_id, Some(guild_id));
-                // Keep whatever provenance the match already carries: this is a
-                // data refresh, not a re-identification, and relabelling an
-                // auto-discovered match as manual would lose its confidence.
-                let (existing_source, existing_confidence) = matches
-                    .enrichment_provenance(match_id, Some(guild_id))
-                    .unwrap_or((None, None));
-                let result = enrichment.enrich_match(EnrichMatchRequest {
-                    internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
-                    valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
-                    guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
-                    source: existing_source
-                        .as_deref()
-                        .and_then(EnrichmentSource::from_stored)
-                        .unwrap_or(EnrichmentSource::Manual),
-                    confidence: existing_confidence,
-                    // The match is already linked to this Valve id; re-running
-                    // is a data refresh, not a re-identification.
-                    skip_validation: true,
-                    opendota_match_data: None,
-                });
-                if result.success {
-                    refreshed.push((match_id, valve_match_id));
-                } else {
-                    errors.push((
-                        match_id,
-                        result.error.unwrap_or_else(|| "Unknown".to_owned()),
-                    ));
-                }
-            }
-            Ok::<_, String>((refreshed, errors))
-        })
-        .await
-        .map_err(InteractionHandlerError::from)?;
-
-        let mut lines = vec![
-            format!(
-                "**Parsed Stats Refresh {}**",
-                if dry_run { "(DRY RUN)" } else { "Complete" }
-            ),
-            String::new(),
-            format!("Matches processed: {processed}"),
-            format!("Successfully refreshed: {}", refreshed.len()),
-            format!("Errors: {}", errors.len()),
-        ];
-        if processed == 100 {
-            lines
-                .push("Capped at 100 per run - re-run to continue through the backlog.".to_owned());
+        let mut lines = if dry_run {
+            vec![
+                "**Parsed Stats Refresh (DRY RUN)**".to_owned(),
+                String::new(),
+                format!("{previewed} match(es) would be refreshed in the first chunk."),
+                "A preview writes nothing, so the full backlog is not counted here.".to_owned(),
+            ]
+        } else {
+            vec![
+                "**Parsed Stats Refresh Complete**".to_owned(),
+                String::new(),
+                format!("Matches processed: {processed}"),
+                format!("Successfully refreshed: {refreshed}"),
+                format!("Errors: {}", errors.len()),
+            ]
+        };
+        if processed >= MAX_TOTAL {
+            lines.push(format!(
+                "Stopped at the {MAX_TOTAL} match safety limit - re-run to continue."
+            ));
         }
         if !errors.is_empty() {
             lines.extend([String::new(), "**Errors:**".to_owned()]);
@@ -1304,19 +1339,15 @@ impl EnrichmentHandler {
                     .map(|(match_id, error)| format!("  #{match_id}: {error}")),
             );
         }
-        lines.extend([
-            String::new(),
-            "Run `/admin backfillroles` afterwards to derive positions from the refreshed data."
-                .to_owned(),
-        ]);
+        if !dry_run {
+            lines.extend([
+                String::new(),
+                "Run `/admin backfillroles` afterwards to derive positions from the refreshed data."
+                    .to_owned(),
+            ]);
+        }
         responder
-            .followup(
-                InteractionResponse::message(lines.join(
-                    "
-",
-                ))
-                .ephemeral(),
-            )
+            .followup(InteractionResponse::message(lines.join("\n")).ephemeral())
             .await
             .map_err(response_error)
     }
