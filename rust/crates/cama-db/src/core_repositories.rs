@@ -2390,13 +2390,13 @@ impl MatchRepository {
         let connection = self.connection()?;
         let placeholders = vec!["?"; discord_ids.len()].join(",");
         let mut statement = connection.prepare(&format!(
-            "SELECT discord_id, assigned_role,
+            "SELECT discord_id, derived_role,
                     SUM(CASE WHEN won THEN 1 ELSE 0 END),
                     SUM(CASE WHEN won THEN 0 ELSE 1 END)
              FROM match_participants
-             WHERE guild_id = ? AND assigned_role IS NOT NULL
+             WHERE guild_id = ? AND derived_role IS NOT NULL
                AND won IS NOT NULL AND discord_id IN ({placeholders})
-             GROUP BY discord_id, assigned_role"
+             GROUP BY discord_id, derived_role"
         ))?;
         let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(discord_ids.len() + 1);
         parameters.push(&guild_id);
@@ -2569,6 +2569,22 @@ impl MatchRepository {
             matches_seen: enriched_matches,
             player_roles_above_minimum_sample: players_above_floor,
         })
+    }
+
+    /// One player's win/loss per derived position, keyed by role ("1".."5").
+    ///
+    /// Only matches whose position could be derived confidently are counted,
+    /// so an absent role means no sample rather than zero wins.
+    pub fn player_role_records(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<BTreeMap<String, (u32, u32)>, CoreRepositoryError> {
+        Ok(self
+            .role_records(&[discord_id], guild_id)?
+            .into_iter()
+            .map(|((_, role), record)| (role, record))
+            .collect())
     }
 
     pub fn record_match(&self, record: &MatchRecord) -> Result<i64, CoreRepositoryError> {
@@ -5379,6 +5395,22 @@ mod tests {
         );
     }
 
+    /// Write the played-role column the factor actually reads.
+    fn seed_derived_roles(fixture: &Fixture, match_id: i64, team1: &[i64], team2: &[i64]) {
+        let connection = fixture.connection();
+        for team in [team1, team2] {
+            for (index, discord_id) in team.iter().enumerate() {
+                connection
+                    .execute(
+                        "UPDATE match_participants SET derived_role = ?1
+                          WHERE match_id = ?2 AND discord_id = ?3",
+                        params![(index + 1).to_string(), match_id, discord_id],
+                    )
+                    .expect("seed derived role");
+            }
+        }
+    }
+
     #[test]
     fn test_role_records_aggregate_wins_and_losses_per_role() {
         let fixture = Fixture::new();
@@ -5387,16 +5419,18 @@ mod tests {
         for discord_id in team1.iter().chain(&team2) {
             fixture.add_player(*discord_id, TEST_GUILD_ID);
         }
-        let roles = ["1", "2", "3", "4", "5"].map(str::to_owned).to_vec();
         // 9_101 carries three times: two wins, one loss.
         for winner in [1, 1, 2] {
-            fixture
+            let match_id = fixture
                 .matches
-                .record_match(
-                    &MatchRecord::new(team1.to_vec(), team2.to_vec(), winner, Some(TEST_GUILD_ID))
-                        .with_roles(roles.clone(), roles.clone()),
-                )
+                .record_match(&MatchRecord::new(
+                    team1.to_vec(),
+                    team2.to_vec(),
+                    winner,
+                    Some(TEST_GUILD_ID),
+                ))
                 .expect("record fixture match");
+            seed_derived_roles(&fixture, match_id, &team1, &team2);
         }
         // A match with no assignment must not count toward any role.
         fixture
@@ -5431,14 +5465,16 @@ mod tests {
             fixture.add_player(*discord_id, TEST_GUILD_ID);
             fixture.add_player(*discord_id, TEST_GUILD_ID_SECONDARY);
         }
-        let roles = ["1", "2"].map(str::to_owned).to_vec();
-        fixture
+        let match_id = fixture
             .matches
-            .record_match(
-                &MatchRecord::new(team1.to_vec(), team2.to_vec(), 1, Some(TEST_GUILD_ID))
-                    .with_roles(roles.clone(), roles.clone()),
-            )
+            .record_match(&MatchRecord::new(
+                team1.to_vec(),
+                team2.to_vec(),
+                1,
+                Some(TEST_GUILD_ID),
+            ))
             .expect("record guild match");
+        seed_derived_roles(&fixture, match_id, &team1, &team2);
 
         assert!(
             fixture
@@ -5644,6 +5680,73 @@ mod tests {
                 .iter()
                 .all(|(_, role, gold)| role.is_none() && gold.is_none())
         );
+    }
+
+    #[test]
+    #[ignore = "measurement, not a contract"]
+    fn measure_role_records_cost_at_league_scale() {
+        let fixture = Fixture::new();
+        // 60 players, 800 matches, 10 participants each = 8000 participant rows,
+        // comfortably past a few years of a busy inhouse league.
+        let players: Vec<i64> = (0..60).map(|index| 20_000 + index).collect();
+        for discord_id in &players {
+            fixture.add_player(*discord_id, TEST_GUILD_ID);
+        }
+        let roles = ["1", "2", "3", "4", "5"].map(str::to_owned).to_vec();
+        let connection = fixture.connection();
+        connection.execute_batch("BEGIN").unwrap();
+        for match_index in 0..800_i64 {
+            let offset = (match_index % 6) as usize * 10;
+            let team1: Vec<i64> = players[offset..offset + 5].to_vec();
+            let team2: Vec<i64> = players[offset + 5..offset + 10].to_vec();
+            let match_id = match_index + 1;
+            connection
+                .execute(
+                    "INSERT INTO matches(match_id, team1_players, team2_players, winning_team, guild_id)
+                     VALUES(?1, '[]', '[]', 1, ?2)",
+                    params![match_id, TEST_GUILD_ID],
+                )
+                .unwrap();
+            for (team_number, team) in [(1_i64, &team1), (2, &team2)] {
+                for (index, discord_id) in team.iter().enumerate() {
+                    connection
+                        .execute(
+                            "INSERT INTO match_participants
+                             (match_id, discord_id, guild_id, team_number, won, derived_role)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![
+                                match_id,
+                                discord_id,
+                                TEST_GUILD_ID,
+                                team_number,
+                                team_number == 1,
+                                roles[index]
+                            ],
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        connection.execute_batch("COMMIT").unwrap();
+        drop(connection);
+
+        let pool: Vec<i64> = players[..10].to_vec();
+        // Warm the page cache so this measures the query, not first-touch IO.
+        let _ = fixture
+            .matches
+            .role_records(&pool, Some(TEST_GUILD_ID))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let iterations = 50;
+        for _ in 0..iterations {
+            let records = fixture
+                .matches
+                .role_records(&pool, Some(TEST_GUILD_ID))
+                .unwrap();
+            assert!(!records.is_empty());
+        }
+        let per_call = started.elapsed() / iterations;
+        println!("role_records over 8000 participant rows: {per_call:?} per shuffle-sized call");
     }
 
     #[test]

@@ -977,7 +977,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
                 .iter()
                 .map(|button| button.label.as_str())
                 .collect::<Vec<_>>(),
-            ["Dota", "Teammates", "Heroes"]
+            ["Dota", "Teammates", "Heroes", "Roles"]
         );
         assert_eq!(
             response.components[0].buttons[0].style,
@@ -1035,7 +1035,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
     }));
 
     let captured = responder.captured.lock().expect("response capture lock");
-    assert_eq!(captured.edits.len(), 6);
+    assert_eq!(captured.edits.len(), 7);
     assert_eq!(captured.updates.len(), 2);
     let pages = captured
         .edits
@@ -1051,6 +1051,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         "Dota Stats",
         "Teammates",
         "Heroes",
+        "Roles",
     ] {
         assert!(
             pages
@@ -1630,7 +1631,7 @@ fn exact_component_rows_and_active_style_match_python_profile_view() {
     let rows = profile_action_rows(42, ProfileTab::Predictions);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].buttons.len(), 5);
-    assert_eq!(rows[1].buttons.len(), 3);
+    assert_eq!(rows[1].buttons.len(), 4);
     assert_eq!(
         rows.iter()
             .flat_map(|row| &row.buttons)
@@ -1645,6 +1646,7 @@ fn exact_component_rows_and_active_style_match_python_profile_view() {
             "profile:42:dota",
             "profile:42:teammates",
             "profile:42:heroes",
+            "profile:42:roles",
         ]
     );
     assert_eq!(
