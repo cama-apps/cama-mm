@@ -93,6 +93,7 @@ use cama_domain::rating::{
 use cama_domain::region::{
     PlayerRegionInput, region_split_mismatches, resolve_region, summarize_region,
 };
+use cama_domain::role_performance::RoleRecord;
 use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
@@ -3642,6 +3643,28 @@ impl MatchHandler {
             }
             if let Some(sigma) = player.os_sigma {
                 player.os_sigma = Some(self.openskill.apply_sigma_decay(sigma, days_since));
+            }
+        }
+
+        // Per-role win/loss drives the role-performance multiplier. Loaded
+        // once for the whole pool: the factor varies by assigned role, but the
+        // underlying record does not, so the search can reuse it across every
+        // candidate arrangement.
+        let mut records_by_player: BTreeMap<i64, BTreeMap<String, RoleRecord>> = BTreeMap::new();
+        for ((discord_id, role), (wins, losses)) in MatchRepository::new(&self.database_path)
+            .role_records(&request.player_ids, Some(request.guild_id))
+            .map_err(|error| error.to_string())?
+        {
+            records_by_player
+                .entry(discord_id)
+                .or_default()
+                .insert(role, RoleRecord::new(wins, losses));
+        }
+        for player in &mut players {
+            if let Some(player_id) = player.discord_id
+                && let Some(records) = records_by_player.remove(&player_id)
+            {
+                player.role_records = records;
             }
         }
 

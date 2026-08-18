@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use cama_domain::role_derivation::{LaneStats, derive_positions};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -1397,6 +1400,7 @@ impl MatchRecordingRepository {
                 ],
             )?;
         }
+        store_derived_roles(&transaction, request.match_id, guild_id)?;
         let (participant_count, fantasy_count) = transaction.query_row(
             "SELECT COUNT(*),
                     SUM(CASE WHEN fantasy_points IS NOT NULL THEN 1 ELSE 0 END)
@@ -2029,3 +2033,52 @@ fn decode_ids(raw: &str) -> Vec<i64> {
 #[cfg(test)]
 #[path = "match_recording/tests.rs"]
 mod tests;
+
+/// Derive and store each team's played positions for one match, inside the
+/// caller's transaction.
+///
+/// Runs in the same transaction that writes `lane_role` and `gold_at_10`, so
+/// the derivation can never read a stale half of its own inputs. A team that
+/// cannot be resolved confidently is skipped, leaving `derived_role` NULL,
+/// which reads downstream as "no sample" rather than a guess.
+fn store_derived_roles(
+    transaction: &Transaction<'_>,
+    match_id: i64,
+    guild_id: i64,
+) -> Result<(), rusqlite::Error> {
+    let participants: Vec<(i64, i64, Option<i64>, Option<i64>)> = transaction
+        .prepare(
+            "SELECT discord_id, team_number, lane_role, gold_at_10
+               FROM match_participants
+              WHERE match_id = ?1 AND guild_id = ?2",
+        )?
+        .query_map(params![match_id, guild_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for team_number in [1_i64, 2] {
+        let team: Vec<&(i64, i64, Option<i64>, Option<i64>)> = participants
+            .iter()
+            .filter(|(_, number, _, _)| *number == team_number)
+            .collect();
+        if team.len() != 5 {
+            continue;
+        }
+        let stats: [LaneStats; 5] = std::array::from_fn(|index| LaneStats {
+            lane_role: team[index].2,
+            gold_at_10: team[index].3,
+        });
+        let Ok(positions) = derive_positions(&stats) else {
+            continue;
+        };
+        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+            transaction.execute(
+                "UPDATE match_participants SET derived_role = ?1
+                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![positions[index], match_id, discord_id, guild_id],
+            )?;
+        }
+    }
+    Ok(())
+}
