@@ -3784,6 +3784,7 @@ impl MatchHandler {
         let radiant_value = radiant_team
             .get_team_value_with_off_role_value_penalty(
                 true,
+                shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
                 shuffler.off_role_flat_value_penalty,
@@ -3792,6 +3793,7 @@ impl MatchHandler {
         let dire_value = dire_team
             .get_team_value_with_off_role_value_penalty(
                 true,
+                shuffler.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
                 shuffler.off_role_flat_value_penalty,
@@ -5339,7 +5341,7 @@ impl AdminMatchControl for MatchHandler {
                 teams_derived: report.teams_derived,
                 gold_samples_written: report.gold_samples_written,
                 unreadable_payloads: report.unreadable_payloads,
-                unparsed_replays: report.unparsed_replays,
+                unparsed_teams: report.unparsed_teams,
                 ambiguous_lanes: report.ambiguous_lanes,
                 incomplete_teams: report.incomplete_teams,
                 tied_farm_priority: report.tied_farm_priority,

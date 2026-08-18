@@ -2039,8 +2039,10 @@ mod tests;
 ///
 /// Runs in the same transaction that writes `lane_role` and `gold_at_10`, so
 /// the derivation can never read a stale half of its own inputs. A team that
-/// cannot be resolved confidently is skipped, leaving `derived_role` NULL,
-/// which reads downstream as "no sample" rather than a guess.
+/// cannot be resolved confidently has `derived_role` cleared, which reads
+/// downstream as "no sample" rather than a guess - and, because re-enrichment
+/// can revise its own inputs, clearing rather than skipping is what lets a
+/// second pass correct an earlier reading.
 fn store_derived_roles(
     transaction: &Transaction<'_>,
     match_id: i64,
@@ -2069,14 +2071,16 @@ fn store_derived_roles(
             lane_role: team[index].2,
             gold_at_10: team[index].3,
         });
-        let Ok(positions) = derive_positions(&stats) else {
-            continue;
-        };
+        let derived = derive_positions(&stats);
         for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+            // Cleared on failure rather than left alone: re-enrichment can
+            // correct lane or gold data, and a stale position from the earlier
+            // reading would otherwise keep feeding role records forever.
+            let role = derived.as_ref().ok().map(|positions| positions[index]);
             transaction.execute(
                 "UPDATE match_participants SET derived_role = ?1
                   WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
-                params![positions[index], match_id, discord_id, guild_id],
+                params![role, match_id, discord_id, guild_id],
             )?;
         }
     }

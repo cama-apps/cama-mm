@@ -93,6 +93,7 @@ impl TeamBalancingService {
     ) -> Result<f64, TeamError> {
         team.get_team_value_with_off_role_value_penalty(
             self.use_glicko,
+            self.off_role_multiplier,
             use_openskill,
             use_jopacoin,
             self.off_role_flat_value_penalty,
@@ -162,6 +163,7 @@ impl TeamBalancingService {
             team.get_player_by_role_with_off_role_value_penalty(
                 role,
                 self.use_glicko,
+                self.off_role_multiplier,
                 use_openskill,
                 use_jopacoin,
                 self.off_role_flat_value_penalty,

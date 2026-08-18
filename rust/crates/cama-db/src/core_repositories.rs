@@ -1920,14 +1920,102 @@ pub struct RoleCoverage {
 /// rather than silently absent.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RoleBackfillReport {
+    /// Per match.
     pub matches_scanned: u64,
-    pub teams_derived: u64,
-    pub gold_samples_written: u64,
+    /// Per match: the stored payload was not valid JSON.
     pub unreadable_payloads: u64,
-    pub unparsed_replays: u64,
+    /// Per team, so these four reconcile against `matches_scanned * 2`.
+    pub teams_derived: u64,
+    pub unparsed_teams: u64,
     pub ambiguous_lanes: u64,
     pub incomplete_teams: u64,
     pub tied_farm_priority: u64,
+    /// Per participant.
+    pub gold_samples_written: u64,
+}
+
+/// Derive and store one match's positions inside `transaction`.
+fn backfill_one_match(
+    transaction: &Transaction<'_>,
+    match_id: i64,
+    guild_id: i64,
+    report: &mut RoleBackfillReport,
+) -> Result<(), rusqlite::Error> {
+    report.matches_scanned += 1;
+    let payload: Option<String> = transaction
+        .query_row(
+            "SELECT enrichment_data FROM matches WHERE match_id = ?1 AND guild_id = ?2",
+            params![match_id, guild_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+        report.unreadable_payloads += 1;
+        return Ok(());
+    };
+    let gold_by_hero = gold_at_ten_by_hero(&value);
+
+    let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
+        .prepare(
+            "SELECT discord_id, team_number, hero_id, lane_role
+               FROM match_participants
+              WHERE match_id = ?1 AND guild_id = ?2 AND hero_id IS NOT NULL",
+        )?
+        .query_map(params![match_id, guild_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (discord_id, _, hero_id, _) in &participants {
+        if let Some(gold) = gold_by_hero.get(hero_id) {
+            transaction.execute(
+                "UPDATE match_participants SET gold_at_10 = ?1
+                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![gold, match_id, discord_id, guild_id],
+            )?;
+            report.gold_samples_written += 1;
+        }
+    }
+
+    for team_number in [1_i64, 2] {
+        let team: Vec<&(i64, i64, i64, Option<i64>)> = participants
+            .iter()
+            .filter(|(_, number, _, _)| *number == team_number)
+            .collect();
+        if team.len() != 5 {
+            report.incomplete_teams += 1;
+            continue;
+        }
+        let stats: [LaneStats; 5] = std::array::from_fn(|index| {
+            let (_, _, hero_id, lane_role) = team[index];
+            LaneStats {
+                lane_role: *lane_role,
+                gold_at_10: gold_by_hero.get(hero_id).copied(),
+            }
+        });
+        let derived = derive_positions(&stats);
+        match derived {
+            Ok(_) => report.teams_derived += 1,
+            Err(DerivationFailure::Unparsed) => report.unparsed_teams += 1,
+            Err(DerivationFailure::AmbiguousLanes) => report.ambiguous_lanes += 1,
+            Err(DerivationFailure::TiedFarmPriority) => report.tied_farm_priority += 1,
+        }
+        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+            // On failure the column is cleared, not left alone: a stale value
+            // from a looser derivation would keep feeding role records forever.
+            let role = derived.as_ref().ok().map(|positions| positions[index]);
+            transaction.execute(
+                "UPDATE match_participants SET derived_role = ?1
+                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![role, match_id, discord_id, guild_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Map hero id to that player's gold at ten minutes, from an archived OpenDota
@@ -1976,7 +2064,12 @@ pub struct MatchRecord {
     pub balancing_rating_system: String,
     pub betting_mode: String,
     /// Shuffler-assigned role per player, positionally aligned with
-    /// `team1_ids`/`team2_ids`. Empty when the assignment is unknown — drafts,
+    /// `team1_ids`/`team2_ids`.
+    ///
+    /// Captured for the record only. Nothing reads it today - the rating
+    /// factor uses `derived_role`, the position actually played - but the
+    /// assignment was previously destroyed when the pending match row was
+    /// deleted, and keeping it makes assigned-versus-played answerable later. Empty when the assignment is unknown — drafts,
     /// admin-recorded matches, and every match recorded before roles were
     /// persisted — in which case `assigned_role` is stored as NULL.
     pub team1_roles: Vec<String>,
@@ -2371,13 +2464,13 @@ impl MatchRepository {
     }
 
     /// Per-role win/loss records for `discord_ids`, keyed by
-    /// `(discord_id, assigned_role)`.
+    /// `(discord_id, derived_role)`.
     ///
-    ///
-    /// Only rows with a recorded `assigned_role` count. Matches recorded
-    /// before roles were persisted, drafts, and admin-recorded matches carry
-    /// NULL and are excluded, so they read as "no sample" rather than being
-    /// silently attributed to some role.
+    /// Counts the position a player *actually played*, derived from OpenDota
+    /// lane and ten-minute farm data - not the shuffler's pre-game assignment,
+    /// which players routinely rearrange in lobby. Rows whose position could
+    /// not be derived confidently carry NULL and are excluded, so they read as
+    /// "no sample" rather than being attributed to some role.
     pub fn role_records(
         &self,
         discord_ids: &[i64],
@@ -2439,91 +2532,41 @@ impl MatchRepository {
     /// unique within a match, reuses the same mapping that produced
     /// `lane_role`, keeping both inputs describing the same player.
     ///
-    /// Rows that cannot be derived confidently are left untouched, so this is
-    /// safe to re-run after the derivation improves.
+    /// A team that cannot be derived confidently has its `derived_role`
+    /// cleared rather than left as-is, so a re-run after the derivation
+    /// tightens actually converges instead of preserving a stale position.
+    ///
+    /// Payloads are read in batches and each batch commits separately: an
+    /// enrichment payload is the entire OpenDota response, so loading them all
+    /// at once would be gigabytes on a busy league, and one long
+    /// `BEGIN IMMEDIATE` would lock every other writer out past the five-second
+    /// busy timeout.
     pub fn backfill_derived_roles(
         &self,
         guild_id: Option<i64>,
     ) -> Result<RoleBackfillReport, CoreRepositoryError> {
+        const BATCH: usize = 100;
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
-        let matches: Vec<(i64, String)> = connection
+        // Ids only: cheap to hold, and the payloads are fetched per batch.
+        let match_ids: Vec<i64> = connection
             .prepare(
-                "SELECT match_id, enrichment_data FROM matches
-                  WHERE guild_id = ?1 AND enrichment_data IS NOT NULL",
+                "SELECT match_id FROM matches
+                  WHERE guild_id = ?1 AND enrichment_data IS NOT NULL
+                  ORDER BY match_id",
             )?
-            .query_map(params![guild_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![guild_id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut report = RoleBackfillReport::default();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for (match_id, payload) in matches {
-            report.matches_scanned += 1;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
-                report.unreadable_payloads += 1;
-                continue;
-            };
-            let gold_by_hero = gold_at_ten_by_hero(&value);
-            if gold_by_hero.is_empty() {
-                report.unparsed_replays += 1;
-                continue;
+        for chunk in match_ids.chunks(BATCH) {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for match_id in chunk {
+                backfill_one_match(&transaction, *match_id, guild_id, &mut report)?;
             }
-            let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
-                .prepare(
-                    "SELECT discord_id, team_number, hero_id, lane_role
-                       FROM match_participants
-                      WHERE match_id = ?1 AND guild_id = ?2 AND hero_id IS NOT NULL",
-                )?
-                .query_map(params![match_id, guild_id], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for (discord_id, _, hero_id, _) in &participants {
-                if let Some(gold) = gold_by_hero.get(hero_id) {
-                    transaction.execute(
-                        "UPDATE match_participants SET gold_at_10 = ?1
-                          WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
-                        params![gold, match_id, discord_id, guild_id],
-                    )?;
-                    report.gold_samples_written += 1;
-                }
-            }
-
-            for team_number in [1_i64, 2] {
-                let team: Vec<&(i64, i64, i64, Option<i64>)> = participants
-                    .iter()
-                    .filter(|(_, number, _, _)| *number == team_number)
-                    .collect();
-                if team.len() != 5 {
-                    report.incomplete_teams += 1;
-                    continue;
-                }
-                let stats: [LaneStats; 5] = std::array::from_fn(|index| {
-                    let (_, _, hero_id, lane_role) = team[index];
-                    LaneStats {
-                        lane_role: *lane_role,
-                        gold_at_10: gold_by_hero.get(hero_id).copied(),
-                    }
-                });
-                match derive_positions(&stats) {
-                    Ok(positions) => {
-                        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
-                            transaction.execute(
-                                "UPDATE match_participants SET derived_role = ?1
-                                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
-                                params![positions[index], match_id, discord_id, guild_id],
-                            )?;
-                        }
-                        report.teams_derived += 1;
-                    }
-                    Err(DerivationFailure::Unparsed) => report.unparsed_replays += 1,
-                    Err(DerivationFailure::AmbiguousLanes) => report.ambiguous_lanes += 1,
-                    Err(DerivationFailure::TiedFarmPriority) => report.tied_farm_priority += 1,
-                }
-            }
+            transaction.commit()?;
         }
-        transaction.commit()?;
         Ok(report)
     }
 
@@ -5640,6 +5683,43 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_clears_a_role_that_no_longer_derives() {
+        let fixture = Fixture::new();
+        let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+        fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("first pass");
+        assert!(
+            derived_roles(&fixture, match_id)
+                .iter()
+                .all(|(_, role, _)| role.is_some())
+        );
+
+        // Re-enrichment corrects the lane data into a shape that no longer
+        // resolves. The stale positions must not survive.
+        fixture
+            .connection()
+            .execute(
+                "UPDATE match_participants SET lane_role = 2 WHERE match_id = ?1",
+                params![match_id],
+            )
+            .expect("revise lanes");
+        let report = fixture
+            .matches
+            .backfill_derived_roles(Some(TEST_GUILD_ID))
+            .expect("second pass");
+
+        assert_eq!(report.teams_derived, 0);
+        assert!(
+            derived_roles(&fixture, match_id)
+                .iter()
+                .all(|(_, role, _)| role.is_none()),
+            "a position that no longer derives must be cleared, not preserved"
+        );
+    }
+
+    #[test]
     fn test_backfill_is_idempotent() {
         let fixture = Fixture::new();
         let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
@@ -5674,7 +5754,7 @@ mod tests {
             .backfill_derived_roles(Some(TEST_GUILD_ID))
             .expect("backfill");
         assert_eq!(report.teams_derived, 0);
-        assert_eq!(report.unparsed_replays, 1);
+        assert_eq!(report.unparsed_teams, 2);
         assert!(
             derived_roles(&fixture, match_id)
                 .iter()
@@ -8760,8 +8840,8 @@ mod tests {
         shuffler.use_glicko = true;
         shuffler.off_role_flat_penalty = 50.0;
         let (team1, team2) = shuffler.shuffle(&players).unwrap();
-        let team1_value = team1.get_team_value(true, false, false).unwrap();
-        let team2_value = team2.get_team_value(true, false, false).unwrap();
+        let team1_value = team1.get_team_value(true, 1.0, false, false).unwrap();
+        let team2_value = team2.get_team_value(true, 1.0, false, false).unwrap();
         let value_diff = (team1_value - team2_value).abs();
         assert!((7_000.0..9_000.0).contains(&team1_value));
         assert!((7_000.0..9_000.0).contains(&team2_value));
