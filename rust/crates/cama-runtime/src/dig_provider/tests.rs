@@ -974,6 +974,47 @@ async fn stale_namespaced_boss_duel_is_reported_to_the_player() {
     );
 }
 
+#[tokio::test]
+async fn stale_carried_boss_fight_is_reported_as_expired() {
+    let (database, provider, _discord) = fixture();
+    Connection::open(database.path())
+        .expect("stale boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,1,1,0,'{}',0,0,100,0,'Stale Boss Button')",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("non-boss tunnel");
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:fight:carried:{USER}:{GUILD}"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss fight is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    assert!(
+        responder
+            .responses
+            .lock()
+            .expect("boss responses")
+            .is_empty()
+    );
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        "This boss encounter is no longer active. Use `/dig go` to continue."
+    );
+}
+
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
 #[test]
 fn failed_event_uses_python_error_embed() {

@@ -15,14 +15,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cama_app::ai_services::AIService;
 use cama_app::boss_duel::RiskTier;
-use cama_app::boss_multi_tier::{EntropyPort, PausedBossDuel, ResolvedFight};
+use cama_app::boss_multi_tier::{BossServiceError, EntropyPort, PausedBossDuel, ResolvedFight};
 use cama_app::dig_abandon_runtime::DigAbandonRuntimeService;
 use cama_app::dig_assets::{BossIdentity, BossScene};
 use cama_app::dig_boss_runtime::{
     DigBossBrokenGear, DigBossEncounterInfo, DigBossGearDrop, DigBossPrestigeRelicDrop,
-    DigBossResolvedOutcome, DigBossRetreatOutcome, DigBossRuntimeConfig, DigBossRuntimeRequest,
-    DigBossRuntimeResult as DigBossCallResult, DigBossRuntimeService, DigBossScoutOutcome,
-    DigBossStartOutcome, DigPinnacleResolved,
+    DigBossResolvedOutcome, DigBossRetreatOutcome, DigBossRuntimeConfig, DigBossRuntimeError,
+    DigBossRuntimeRequest, DigBossRuntimeResult as DigBossCallResult, DigBossRuntimeService,
+    DigBossScoutOutcome, DigBossStartOutcome, DigPinnacleResolved,
 };
 use cama_app::dig_bosses::{
     PINNACLE_DEPTH, PINNACLE_SECRET_PHASE_CHANCE, luminosity_combat_penalty, pinnacle_by_id,
@@ -2818,7 +2818,25 @@ impl DigInteractionHandler {
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            let info = self.boss_encounter(user_id, guild_id, unix_now()).await?;
+            let info = match self.boss_encounter(user_id, guild_id, unix_now()).await {
+                Ok(info) => info,
+                Err(DigBossRuntimeError::Policy(
+                    BossServiceError::MissingTunnel | BossServiceError::NotAtBossBoundary,
+                )) => {
+                    let response = InteractionResponse::message(
+                        "This boss encounter is no longer active. Use `/dig go` to continue.",
+                    )
+                    .ephemeral();
+                    if mode == Some("carried") {
+                        return responder
+                            .followup(response)
+                            .await
+                            .map_err(|error| error.to_string());
+                    }
+                    return respond(&responder, response).await;
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             if let (Some(wager), Some(risk_tier)) = (info.carried_wager, info.carried_risk_tier) {
                 if mode != Some("carried") {
                     responder
@@ -3626,24 +3644,25 @@ impl DigInteractionHandler {
         user_id: i64,
         guild_id: i64,
         now: i64,
-    ) -> Result<DigBossEncounterInfo, String> {
+    ) -> Result<DigBossEncounterInfo, DigBossRuntimeError> {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let entropy = self.state.boss_entropy.clone();
-        blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
-                .encounter(
-                    DigBossRuntimeRequest {
-                        discord_id: user_id,
-                        guild_id,
-                        now,
-                    },
-                    entropy,
-                )
-                .map_err(|error| error.to_string())
+        tokio::task::spawn_blocking(move || {
+            configured_boss_runtime(path, decay, vanity_tax).encounter(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                entropy,
+            )
         })
         .await
+        .map_err(|error| {
+            DigBossRuntimeError::Infrastructure(format!("Dig SQLite task failed: {error}"))
+        })?
     }
 
     async fn render_boss_encounter(
@@ -3652,7 +3671,10 @@ impl DigInteractionHandler {
         guild_id: i64,
         now: i64,
     ) -> Result<InteractionResponse, String> {
-        let info = self.boss_encounter(user_id, guild_id, now).await?;
+        let info = self
+            .boss_encounter(user_id, guild_id, now)
+            .await
+            .map_err(|error| error.to_string())?;
         let media = Arc::clone(&self.state.media);
         blocking(move || Ok(boss_encounter_response(&info, user_id, guild_id, &media))).await
     }
@@ -4857,7 +4879,8 @@ impl DigInteractionHandler {
         let boss_info = if delivery.render.kind == DigRuntimeRenderKind::Boss {
             Some(
                 self.boss_encounter(delivery.discord_id, delivery.guild_id, unix_now())
-                    .await?,
+                    .await
+                    .map_err(|error| error.to_string())?,
             )
         } else {
             None
