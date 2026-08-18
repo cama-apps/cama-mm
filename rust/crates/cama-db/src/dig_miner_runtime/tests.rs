@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const USER: i64 = -93_001;
 const GUILD: i64 = 93_002;
@@ -13,7 +13,7 @@ const NOW: i64 = 1_900_000_000;
 
 fn fixture(balance: i64) -> NamedTempFile {
     let database = NamedTempFile::new().expect("miner runtime database");
-    initialize_or_migrate(database.path()).expect("migrated miner schema");
+    copy_migrated_database(database.path()).expect("migrated miner schema");
     let connection = Connection::open(database.path()).unwrap();
     connection
         .pragma_update(None, "foreign_keys", false)

@@ -213,7 +213,16 @@ impl Team {
             .iter()
             .zip(role_assignments)
             .map(|(player, assigned_role)| {
-                let base_value = player.get_value(use_glicko, use_openskill, use_jopacoin);
+                // Role-performance scaling applies to everyone; the off-role
+                // multiplier and flat penalty stack on top for a player outside
+                // their preferences. The two are not redundant - a player can
+                // be off-preference yet have a strong record in the role.
+                let base_value = player.role_adjusted_value(
+                    assigned_role,
+                    use_glicko,
+                    use_openskill,
+                    use_jopacoin,
+                );
                 if player
                     .preferred_roles
                     .as_ref()
@@ -283,7 +292,8 @@ impl Team {
 
         for (player, assigned_role) in self.players.iter().zip(role_assignments) {
             if assigned_role == role {
-                let base_value = player.get_value(use_glicko, use_openskill, use_jopacoin);
+                let base_value =
+                    player.role_adjusted_value(role, use_glicko, use_openskill, use_jopacoin);
                 let effective_value = if player
                     .preferred_roles
                     .as_ref()
@@ -311,7 +321,7 @@ impl Team {
                 Ok((
                     player,
                     calculate_off_role_value(
-                        player.get_value(use_glicko, use_openskill, use_jopacoin),
+                        player.role_adjusted_value(role, use_glicko, use_openskill, use_jopacoin),
                         off_role_multiplier,
                         off_role_flat_value_penalty,
                     ),
@@ -352,8 +362,25 @@ mod tests {
     use super::{ROLES, Team, TeamError};
     use crate::player::Player;
 
+    /// Role-neutral by construction: an even record in every role yields a
+    /// role factor of exactly 1.0, keeping these fixtures focused on the
+    /// balance formula instead of the role-performance multiplier.
+    fn neutral_role_records()
+    -> std::collections::BTreeMap<String, crate::role_performance::RoleRecord> {
+        ROLES
+            .iter()
+            .map(|role| {
+                (
+                    (*role).to_owned(),
+                    crate::role_performance::RoleRecord::new(5, 5),
+                )
+            })
+            .collect()
+    }
+
     fn player(name: &str, mmr: i64, preferred_roles: &[&str]) -> Player {
         Player {
+            role_records: neutral_role_records(),
             mmr: Some(mmr),
             preferred_roles: Some(
                 preferred_roles
@@ -665,5 +692,117 @@ mod tests {
             .expect("roles are assigned");
         assert_eq!(player.name, "P2");
         assert_eq!(value, 200.0);
+    }
+
+    #[test]
+    fn test_role_performance_scales_the_value_of_an_on_role_player() {
+        // A proven carry is scaled up; an unproven one falls to the floor. The
+        // multiplier now applies on-role too, which the old off-role-only
+        // multiplier never did.
+        let mut proven = player("P1", 2_000, &["1"]);
+        proven.role_records.insert(
+            "1".to_owned(),
+            crate::role_performance::RoleRecord::new(4, 0),
+        );
+        let mut unproven = player("P1", 2_000, &["1"]);
+        unproven.role_records.clear();
+
+        let build = |first: Player| {
+            Team::new(
+                vec![
+                    first,
+                    player("P2", 0, &["2"]),
+                    player("P3", 0, &["3"]),
+                    player("P4", 0, &["4"]),
+                    player("P5", 0, &["5"]),
+                ],
+                Some(ROLES.map(str::to_owned).to_vec()),
+            )
+            .expect("five players form a team")
+        };
+
+        assert_eq!(
+            build(proven)
+                .get_team_value(false, 1.0, false, false)
+                .expect("roles are assigned"),
+            2_100.0
+        );
+        assert_eq!(
+            build(unproven)
+                .get_team_value(false, 1.0, false, false)
+                .expect("roles are assigned"),
+            1_900.0
+        );
+    }
+
+    #[test]
+    fn test_role_performance_uses_the_assigned_role_not_the_preferred_one() {
+        // The record that matters is the one for the role being assigned, so
+        // moving the same player to another position changes their value.
+        let mut versatile = player("P1", 1_000, &["1", "2"]);
+        versatile.role_records.insert(
+            "1".to_owned(),
+            crate::role_performance::RoleRecord::new(4, 0),
+        );
+        versatile.role_records.insert(
+            "2".to_owned(),
+            crate::role_performance::RoleRecord::new(0, 4),
+        );
+        let team = Team::new(
+            vec![
+                versatile,
+                player("P2", 0, &["2"]),
+                player("P3", 0, &["3"]),
+                player("P4", 0, &["4"]),
+                player("P5", 0, &["5"]),
+            ],
+            Some(ROLES.map(str::to_owned).to_vec()),
+        )
+        .expect("five players form a team");
+
+        let (_, as_carry) = team
+            .get_player_by_role_with_off_role_value_penalty("1", false, 1.0, false, false, 0.0)
+            .expect("roles are assigned");
+        assert_eq!(as_carry, 1_050.0);
+
+        let mut swapped = team.clone();
+        swapped.role_assignments = Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
+        let (_, as_mid) = swapped
+            .get_player_by_role_with_off_role_value_penalty("2", false, 1.0, false, false, 0.0)
+            .expect("roles are assigned");
+        assert_eq!(as_mid, 950.0);
+    }
+
+    #[test]
+    fn test_negative_jopacoin_balances_stay_ordered_on_role() {
+        // Debtors must remain separable: if both clamped to zero the shuffler
+        // could no longer split a heavy debtor from a light one across teams.
+        let team_of = |balance: i64| {
+            let mut first = player("P1", 0, &["1"]);
+            first.jopacoin_balance = balance;
+            Team::new(
+                vec![
+                    first,
+                    player("P2", 0, &["2"]),
+                    player("P3", 0, &["3"]),
+                    player("P4", 0, &["4"]),
+                    player("P5", 0, &["5"]),
+                ],
+                Some(ROLES.map(str::to_owned).to_vec()),
+            )
+            .expect("five players form a team")
+        };
+
+        let heavy = team_of(-5_000)
+            .get_team_value(true, 1.0, false, true)
+            .expect("roles are assigned");
+        let light = team_of(-100)
+            .get_team_value(true, 1.0, false, true)
+            .expect("roles are assigned");
+        assert!(
+            heavy < light,
+            "a 5,000 debt must score below a 100 debt, got {heavy} and {light}"
+        );
+        assert!(heavy < 0.0, "the debt must survive scoring, got {heavy}");
     }
 }

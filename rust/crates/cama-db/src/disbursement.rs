@@ -662,13 +662,13 @@ fn unix_seconds() -> i64 {
 mod tests {
     use super::*;
     use crate::core_repositories::{NewPlayer, PlayerRepository};
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
     use tempfile::NamedTempFile;
 
     #[test]
     fn proposal_vote_reset_and_completion_are_durable_and_idempotent() {
         let database = NamedTempFile::new().expect("temporary database");
-        initialize_or_migrate(database.path()).expect("schema");
+        copy_migrated_database(database.path()).expect("schema");
         let players = PlayerRepository::new(database.path());
         players
             .add(&NewPlayer::new(1, "one", Some(7)))

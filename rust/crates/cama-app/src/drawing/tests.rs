@@ -1333,3 +1333,69 @@ fn rating_distribution_explicit_median_controls_the_live_marker() {
         "None must suppress both the median marker and its legend entry"
     );
 }
+
+fn position_records(entries: [(u32, u32); 5]) -> BTreeMap<String, (u32, u32)> {
+    POSITION_AXES
+        .iter()
+        .zip(entries)
+        .map(|((key, _), record)| ((*key).to_owned(), record))
+        .collect()
+}
+
+#[test]
+fn test_position_radar_renders_a_five_spoke_chart() {
+    let records = position_records([(6, 4), (3, 7), (5, 5), (8, 2), (1, 9)]);
+    let image = draw_position_winrate_radar(&records, "Roles: Player", 3);
+    let decoded = assert_rgba_png(&image, Some((400, 400)));
+    assert!(decoded.contains(DISCORD_ACCENT));
+}
+
+#[test]
+fn test_position_radar_reports_no_data_when_nothing_is_played() {
+    let empty = position_records([(0, 0); 5]);
+    let image = draw_position_winrate_radar(&empty, "Roles: Player", 3);
+    let decoded = assert_rgba_png(&image, Some((400, 400)));
+    // The rings still draw, but no data polygon is filled.
+    assert!(!decoded.contains(DISCORD_ACCENT));
+}
+
+#[test]
+fn test_position_radar_distinguishes_an_unproven_position_from_a_measured_one() {
+    // Same 100% win rate, different sample: one game versus ten.
+    let thin = position_records([(1, 0), (0, 0), (0, 0), (0, 0), (0, 0)]);
+    let proven = position_records([(10, 0), (0, 0), (0, 0), (0, 0), (0, 0)]);
+    let thin_image = draw_position_winrate_radar(&thin, "Roles: Player", 3);
+    let proven_image = draw_position_winrate_radar(&proven, "Roles: Player", 3);
+    assert_ne!(
+        thin_image.get_ref(),
+        proven_image.get_ref(),
+        "a one-game 100% must not render identically to a ten-game 100%"
+    );
+}
+
+#[test]
+fn test_position_radar_shape_follows_win_rate_not_games_played() {
+    // Identical win rates at different volumes produce the same polygon; only
+    // the sample annotations differ, so the shape reads as performance.
+    let low = position_records([(3, 3), (3, 3), (3, 3), (3, 3), (3, 3)]);
+    let high = position_records([(30, 30), (30, 30), (30, 30), (30, 30), (30, 30)]);
+    let low_image = draw_position_winrate_radar(&low, "Roles: Player", 3);
+    let high_image = draw_position_winrate_radar(&high, "Roles: Player", 3);
+    assert_rgba_png(&low_image, Some((400, 400)));
+    assert_rgba_png(&high_image, Some((400, 400)));
+}
+
+#[test]
+fn test_position_radar_leaves_the_archetype_graph_untouched() {
+    // The two charts are separate: this one is fixed to five positions and a
+    // 0-100 scale, the archetype graph keeps its dynamic scale and Python
+    // visual-parity contract.
+    assert_eq!(POSITION_AXES.len(), 5);
+    let records = position_records([(6, 4), (3, 7), (5, 5), (8, 2), (1, 9)]);
+    let positions = draw_position_winrate_radar(&records, "Roles", 3);
+    let archetypes = draw_role_graph(
+        &BTreeMap::from([("Carry".to_owned(), 60.0), ("Nuker".to_owned(), 40.0)]),
+        "Roles",
+    );
+    assert_ne!(positions.get_ref(), archetypes.get_ref());
+}

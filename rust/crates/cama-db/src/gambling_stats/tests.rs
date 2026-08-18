@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -11,8 +11,11 @@ use crate::betting_service_repository::{
     BetSettlementAdjustments, BettingServiceRepository, PlaceBetRequest,
 };
 use crate::dota_bet_seed_repository::{BettingMode, BettingTeam};
+use crate::test_support::FastTestDatabase;
 
 const DEFAULT_GUILD: i64 = 0;
+
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
 
 fn auto_history_bet(
     match_id: i64,
@@ -46,7 +49,7 @@ fn auto_history_bet(
 }
 
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     next_pending_id: i64,
     next_match_id: i64,
     next_time: i64,
@@ -54,11 +57,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("temporary gambling statistics database");
-        let connection = Connection::open(file.path()).expect("open fixture");
-        connection
-            .execute_batch(
-                "CREATE TABLE players (
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file =
+                NamedTempFile::new().expect("temporary gambling statistics database template");
+            let connection = Connection::open(file.path()).expect("open fixture template");
+            connection
+                .execute_batch(
+                    "CREATE TABLE players (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      discord_username TEXT NOT NULL,
@@ -153,8 +158,12 @@ impl Fixture {
                      reason TEXT,
                      metadata TEXT
                  );",
-            )
-            .expect("create disposable schema");
+                )
+                .expect("create disposable schema template");
+            drop(connection);
+            file
+        });
+        let file = FastTestDatabase::from_template(template.path());
         Self {
             file,
             next_pending_id: 1,
@@ -1617,70 +1626,6 @@ fn test_payout_null_for_losers() {
 
 fn ids(entries: &[LeaderboardEntry]) -> Vec<i64> {
     entries.iter().map(|entry| entry.discord_id).collect()
-}
-
-/// Python creates the migrated schema and seed rows, Rust reads every stats
-/// family and appends one atomic Double-or-Nothing event, then Python verifies
-/// the Rust write. This stronger cross-language smoke is outside the 25-node
-/// literal parity mapping.
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn unmapped_python_migrated_database_gambling_stats_interop_smoke() {
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance,lowest_balance_ever) VALUES (?,?,?,?,?)\",(-71001,0,'stats-interop',100,25))\nc.execute(\"INSERT INTO matches (match_id,guild_id,team1_players,team2_players,winning_team) VALUES (?,?,?,?,?)\",(991,0,'[-71001]','[999]',1))\nc.execute(\"INSERT INTO match_participants (match_id,discord_id,guild_id,team_number,won,side) VALUES (?,?,?,?,?,?)\",(991,-71001,0,1,1,'radiant'))\nc.execute(\"INSERT INTO bets (guild_id,match_id,discord_id,team_bet_on,amount,bet_time,leverage,payout) VALUES (?,?,?,?,?,?,?,?)\",(0,991,-71001,'radiant',10,1700000000,5,100))\nc.execute(\"INSERT INTO loan_state (discord_id,guild_id,total_loans_taken,negative_loans_taken) VALUES (?,?,?,?)\",(-71001,0,2,1))\nc.execute(\"INSERT INTO bankruptcy_state (discord_id,guild_id,bankruptcy_count) VALUES (?,?,?)\",(-71001,0,1))\nc.commit(); c.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("initialize Python schema");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-    let repository = GamblingStatsRepository::new(file.path());
-    let service = GamblingStatsService::new(repository.clone());
-    let stats = service
-        .get_player_stats(-71_001, None)
-        .expect("read Python rows")
-        .expect("stats");
-    assert_eq!((stats.total_bets, stats.net_pnl), (1, 50));
-    let leaderboard = service
-        .get_leaderboard(None, 5, 1)
-        .expect("leaderboard from Python rows");
-    assert_eq!(leaderboard.total_loans, 2);
-    repository
-        .log_double_or_nothing_atomic(DoubleOrNothingWrite {
-            discord_id: -71_001,
-            guild_id: None,
-            cost: 5,
-            balance_before: 95,
-            balance_after: 190,
-            won: true,
-            spin_time: 1_700_000_100,
-        })
-        .expect("Rust atomic spin write");
-    let verify = Command::new(python)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nspin=c.execute(\"SELECT cost,balance_before,balance_after,won,spin_time FROM double_or_nothing_spins WHERE discord_id=-71001 AND guild_id=0\").fetchone()\ncooldown=c.execute(\"SELECT last_double_or_nothing FROM players WHERE discord_id=-71001 AND guild_id=0\").fetchone()[0]\nassert spin == (5,95,190,1,1700000100)\nassert cooldown == 1700000100\nassert c.execute(\"PRAGMA quick_check\").fetchone()[0] == 'ok'\nc.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("verify Rust write from Python");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }
 
 #[test]

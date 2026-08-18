@@ -126,7 +126,7 @@ struct EconomyFixture {
 impl EconomyFixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary migrated Mafia database");
-        cama_db::schema_manager::initialize_or_migrate(database.path())
+        crate::test_support::initialize_test_database(database.path())
             .expect("initialize full migrated SQLite schema");
         Self {
             repository: MafiaRepository::new(database.path()),
@@ -354,7 +354,7 @@ async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
 #[test]
 fn migrated_python_resolved_games_are_baselined_without_ready_replay() {
     let database = NamedTempFile::new().expect("historical database");
-    cama_db::schema_manager::initialize_or_migrate(database.path())
+    crate::test_support::initialize_test_database(database.path())
         .expect("initialize historical schema");
     let connection = Connection::open(database.path()).expect("open historical schema");
     connection
@@ -818,7 +818,7 @@ struct MediaFixture {
 
 fn media_fixture() -> MediaFixture {
     let database = NamedTempFile::new().expect("media database");
-    cama_db::schema_manager::initialize_or_migrate(database.path())
+    crate::test_support::initialize_test_database(database.path())
         .expect("initialize media schema");
     let connection = Connection::open(database.path()).expect("open media schema");
     connection
@@ -2064,7 +2064,7 @@ fn economy_config() -> ApplicationConfig {
 #[tokio::test]
 async fn provider_composes_registration_ready_observer_worker_and_live_info_command() {
     let database = NamedTempFile::new().expect("composition database");
-    cama_db::schema_manager::initialize_or_migrate(database.path())
+    crate::test_support::initialize_test_database(database.path())
         .expect("initialize composition schema");
     let mut container = ServiceContainer::new(database.path(), ServiceContainerOptions::default());
     container.initialize();

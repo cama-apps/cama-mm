@@ -93,6 +93,7 @@ use cama_domain::rating::{
 use cama_domain::region::{
     PlayerRegionInput, region_split_mismatches, resolve_region, summarize_region,
 };
+use cama_domain::role_performance::RoleRecord;
 use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
@@ -111,8 +112,8 @@ use tracing::{debug, warn};
 
 use crate::admin_provider::{
     AdminExtendBettingRequest, AdminExtendBettingResult, AdminMatchControl,
-    AdminSeedHeroGridRequest, AdminSeedHeroGridResult, CorrectionWinRewardControl,
-    CorrectionWinRewardRequest, CorrectionWinRewardResult,
+    AdminRoleBackfillResult, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
+    CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
 };
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
@@ -3059,6 +3060,13 @@ impl MatchHandler {
         match_record.lobby_kind = pending.state.lobby_kind.clone();
         match_record.balancing_rating_system = pending.state.balancing_rating_system.clone();
         match_record.betting_mode = pending.state.betting_mode.clone();
+        // The shuffler's role assignment lives only in the pending payload,
+        // which is deleted immediately after this record commits. Copy it into
+        // the permanent match row or it is lost for good.
+        let match_record = match_record.with_roles(
+            pending.state.radiant_roles.clone(),
+            pending.state.dire_roles.clone(),
+        );
         let mut core = CoreMatchRecord::new(match_record, now.to_rfc3339());
         core.pending_match_id = Some(pending.pending_match_id);
         core.winning_ids = winners.clone();
@@ -3635,6 +3643,28 @@ impl MatchHandler {
             }
             if let Some(sigma) = player.os_sigma {
                 player.os_sigma = Some(self.openskill.apply_sigma_decay(sigma, days_since));
+            }
+        }
+
+        // Per-role win/loss drives the role-performance multiplier. Loaded
+        // once for the whole pool: the factor varies by assigned role, but the
+        // underlying record does not, so the search can reuse it across every
+        // candidate arrangement.
+        let mut records_by_player: BTreeMap<i64, BTreeMap<String, RoleRecord>> = BTreeMap::new();
+        for ((discord_id, role), (wins, losses)) in MatchRepository::new(&self.database_path)
+            .role_records(&request.player_ids, Some(request.guild_id))
+            .map_err(|error| error.to_string())?
+        {
+            records_by_player
+                .entry(discord_id)
+                .or_default()
+                .insert(role, RoleRecord::new(wins, losses));
+        }
+        for player in &mut players {
+            if let Some(player_id) = player.discord_id
+                && let Some(records) = records_by_player.remove(&player_id)
+            {
+                player.role_records = records;
             }
         }
 
@@ -5171,6 +5201,7 @@ impl MatchHandler {
                             hero_healing: 0,
                             lane_role: None,
                             lane_efficiency: None,
+                            gold_at_10: None,
                         },
                     )
                     .map_err(|error| error.to_string())?;
@@ -5287,6 +5318,41 @@ impl AdminMatchControl for MatchHandler {
         tokio::task::spawn_blocking(move || worker.seed_hero_grid_blocking(request.guild_id))
             .await
             .map_err(|error| format!("hero-grid seed task failed: {error}"))?
+    }
+
+    async fn backfill_derived_roles(
+        &self,
+        guild_id: i64,
+    ) -> Result<AdminRoleBackfillResult, String> {
+        let database_path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let matches = MatchRepository::new(&database_path);
+            let report = matches
+                .backfill_derived_roles(Some(guild_id))
+                .map_err(|error| error.to_string())?;
+            // Read coverage back from the database rather than reporting only
+            // the run's own counters, so a no-op run is distinguishable from a
+            // run whose writes did not land.
+            let coverage = matches
+                .role_coverage(Some(guild_id))
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(AdminRoleBackfillResult {
+                matches_scanned: report.matches_scanned,
+                teams_derived: report.teams_derived,
+                gold_samples_written: report.gold_samples_written,
+                unreadable_payloads: report.unreadable_payloads,
+                unparsed_teams: report.unparsed_teams,
+                ambiguous_lanes: report.ambiguous_lanes,
+                incomplete_teams: report.incomplete_teams,
+                tied_farm_priority: report.tied_farm_priority,
+                participants: coverage.participants,
+                with_derived_role: coverage.with_derived_role,
+                with_gold_at_10: coverage.with_gold_at_10,
+                player_roles_above_minimum_sample: coverage.player_roles_above_minimum_sample,
+            })
+        })
+        .await
+        .map_err(|error| format!("role backfill task failed: {error}"))?
     }
 }
 

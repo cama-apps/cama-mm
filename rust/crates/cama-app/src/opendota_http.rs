@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+use cama_domain::role_derivation::FARM_PRIORITY_MINUTE;
 use chrono::Utc;
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Map, Value};
@@ -933,6 +934,11 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
             hero_healing: field_i64(object, "hero_healing").unwrap_or(0),
             lane_role: field_i64(object, "lane_role"),
             lane_efficiency: field_i64(object, "lane_efficiency_pct"),
+            gold_at_10: object
+                .get("gold_t")
+                .and_then(Value::as_array)
+                .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
+                .and_then(Value::as_i64),
             towers_killed: field_i64(object, "towers_killed"),
             roshans_killed: field_i64(object, "roshans_killed"),
             teamfight_participation: field_f64(object, "teamfight_participation"),

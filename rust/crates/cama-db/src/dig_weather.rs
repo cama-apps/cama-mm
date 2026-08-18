@@ -545,7 +545,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Barrier};
 
-    use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+    use crate::test_support::copy_migrated_database;
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
@@ -564,8 +564,7 @@ mod tests {
         fn migrated() -> Self {
             let directory = tempfile::tempdir().expect("temporary database directory");
             let path = directory.path().join("cama.db");
-            initialize_or_migrate_with_settings(&path, &MigrationSettings::default())
-                .expect("migrate temporary database");
+            copy_migrated_database(&path).expect("copy migrated database");
             Self {
                 _directory: directory,
                 path,

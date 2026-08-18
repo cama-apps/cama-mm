@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::pet_repository::PetRepository;
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::game_date::get_game_date;
 use cama_domain::pet::WARNING_HUNGER;
 use rusqlite::Connection;

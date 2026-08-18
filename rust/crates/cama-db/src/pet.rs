@@ -2043,7 +2043,8 @@ fn json_string(value: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::fmt;
-    use std::sync::{Arc, Barrier};
+    use std::io::Write;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use cama_domain::pet::{Pet, RefundNotice, RefundPayout};
@@ -2063,6 +2064,8 @@ mod tests {
     const WEEK: &str = "2026-W30";
     const TODAY: &str = "2026-07-26";
     const TEST_GUILD_ID: i64 = 987_654_321;
+
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
 
     struct Fixture {
         file: NamedTempFile,
@@ -2129,11 +2132,13 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let file = NamedTempFile::new().expect("create temporary SQLite file");
-            let connection = Connection::open(file.path()).expect("open temporary SQLite file");
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
+            let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create temporary SQLite template");
+                let connection =
+                    Connection::open(file.path()).expect("open temporary SQLite template");
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL;
                      CREATE TABLE players (
                          discord_id       INTEGER NOT NULL,
                          guild_id         INTEGER NOT NULL DEFAULT 0,
@@ -2301,9 +2306,15 @@ mod tests {
                          announced_at         INTEGER,
                          PRIMARY KEY(guild_id, week_key)
                      );",
-                )
-                .expect("create Python-compatible pet repository schema");
-            drop(connection);
+                    )
+                    .expect("create Python-compatible pet repository schema template");
+                drop(connection);
+                std::fs::read(file.path()).expect("read pet repository schema template")
+            });
+            let mut file = NamedTempFile::new().expect("create temporary SQLite file");
+            file.as_file_mut()
+                .write_all(template)
+                .expect("copy pet repository schema template");
             let repository = PetRepository::new(file.path());
             Self { file, repository }
         }

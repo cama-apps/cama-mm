@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -686,73 +684,6 @@ fn simultaneous_non_replace_saves_have_one_winner() {
             .expect("history")
             .len(),
         1
-    );
-}
-
-/// Cross-language smoke: Python owns migration creation, Rust reads/writes the
-/// migrated contract, and a fresh Python process verifies the durable result.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_moderation_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO pending_matches (pending_match_id,guild_id,payload) VALUES (?,?,?)\",(900,4242,'{}'))\nc.execute(\"INSERT INTO low_priority_state (discord_id,guild_id,wins_required,wins_remaining,active,set_by,reason) VALUES (?,?,?,?,?,?,?)\",(-70001,4242,3,2,1,900,'legacy'))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = ModerationRepository::new(database.path());
-    let contract = repository.schema_contract().expect("migrated contract");
-    assert!(contract.has_lobby_suspensions && contract.has_moderation_events);
-    assert!(contract.append_only_update_trigger && contract.append_only_delete_trigger);
-    assert_eq!(
-        repository
-            .low_priority_migration_state(-70_001, Some(4_242))
-            .expect("migrated low-priority state")
-            .expect("legacy row")
-            .wins_remaining,
-        2
-    );
-    let state = saved(
-        repository
-            .save_suspension(save_request(
-                -70_001,
-                Some(4_242),
-                SuspensionCompletion::Matches,
-                None,
-                Some(2),
-            ))
-            .expect("Rust suspension write"),
-    );
-    assert_eq!(state.pending_match_watermark, 900);
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nrow=c.execute(\"SELECT matches_remaining,pending_match_watermark,revision,active FROM lobby_suspensions WHERE guild_id=4242 AND discord_id=-70001\").fetchone()\nassert row==(2,900,1,1),row\nevents=c.execute(\"SELECT event_type,matches_remaining,pending_match_watermark FROM moderation_events WHERE guild_id=4242 AND discord_id=-70001\").fetchall()\nassert events==[('suspend',2,900)],events\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }
 

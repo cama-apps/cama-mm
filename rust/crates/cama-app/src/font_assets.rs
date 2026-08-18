@@ -145,24 +145,19 @@ mod tests {
     #[test]
     fn rust_image_retains_only_the_checked_font_assets() {
         let dockerfile = include_str!("../../../../Dockerfile.rust");
-        let python_dockerfile = include_str!("../../../../Dockerfile");
-        assert!(dockerfile.contains("COPY assets/fonts/dejavu.sha256 /build/dejavu.sha256"));
-        assert!(dockerfile.contains("sha256sum -c /build/dejavu.sha256"));
-        assert!(dockerfile.contains("/build/font-assets/ /app/assets/fonts/"));
-        assert!(dockerfile.contains("LICENSE_DEJAVU"));
-        assert!(
-            python_dockerfile.contains("COPY assets/fonts/dejavu.sha256 /tmp/cama-dejavu.sha256")
-        );
-        assert!(python_dockerfile.contains("sha256sum -c /tmp/cama-dejavu.sha256"));
-        assert!(python_dockerfile.contains("/usr/share/fonts/truetype/dejavu/$font"));
+        let staging = include_str!("../../../../scripts/stage-runtime-assets");
+        assert!(dockerfile.contains("COPY --chown=appuser:appuser .cama-build/fonts/"));
+        assert!(staging.contains("assets/fonts/dejavu.sha256"));
+        assert!(staging.contains("sha256sum -c"));
+        assert!(staging.contains("LICENSE_DEJAVU"));
         assert!(
             !dockerfile.contains("fonts-dejavu-core"),
             "Rust image must not fall back to an unpinned host font package"
         );
         for face in DejaVuFace::ALL {
             assert!(
-                dockerfile.contains(face.file_name()),
-                "Dockerfile retains {}",
+                staging.contains(face.file_name()),
+                "asset staging retains {}",
                 face.file_name()
             );
         }

@@ -12,22 +12,45 @@ permissions:
   contents: read
 
 jobs:
-  rust:
+  rust-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - cama-domain
+          - cama-db
+          - cama-app
+          - cama-runtime
     env:
       CARGO_TARGET_DIR: rust/target
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
-          enable-cache: true
+          toolchain: 1.94.0
 
-      - name: Create locked Python environment for cross-language Rust tests
-        run: uv sync --locked
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: rust-ci-tests-${{ matrix.package }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Test ${{ matrix.package }}
+        run: >-
+          cargo test --locked --manifest-path rust/Cargo.toml
+          --package ${{ matrix.package }} --all-targets --all-features
+
+  rust-lint:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: rust/target
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,25 +58,13 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
-        with:
-          tool: nextest@0.9.143
-          fallback: none
-
-      - name: Cache compiler objects
-        uses: mozilla-actions/sccache-action@v0.0.10
-
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci
+          shared-key: rust-ci-lint
           cache-workspace-crates: true
           cache-on-failure: true
-
-      - name: Lint Python
-        run: uv run --locked ruff check .
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
@@ -63,16 +74,24 @@ jobs:
           cargo clippy --locked --manifest-path rust/Cargo.toml
           --workspace --all-targets --all-features -- -D warnings
 
-      - name: Test Rust
-        run: >-
-          cargo nextest run --locked --manifest-path rust/Cargo.toml
-          --workspace --all-targets --all-features --test-threads num-cpus
+  # Preserve the existing required status while the full workspace suite runs
+  # package-by-package in parallel. Every workspace member is listed explicitly
+  # so adding a crate requires a deliberate CI update.
+  rust:
+    if: ${{ always() }}
+    needs: rust-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Rust test shard
+        env:
+          RUST_TEST_RESULT: ${{ needs.rust-tests.result }}
+        run: test "$RUST_TEST_RESULT" = success
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
   # publication, and the deploy handoff.
   runtime-images:
-    needs: rust
+    needs: [rust, rust-lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -80,6 +99,19 @@ jobs:
       - name: Verify main-only runtime image contract
         run: |
           test -f .github/workflows/release.yml
+          grep -Fq 'Stage latest runtime data' .github/workflows/release.yml
           grep -Fq 'target: runtime-prebuilt' .github/workflows/release.yml
           grep -Fq 'push: true' .github/workflows/release.yml
           grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml
+          grep -Fq 'ENV GIT_SHA=${GIT_SHA}' Dockerfile.rust
+          ! grep -E 'setup-uv|uv (run|sync)|(^|[[:space:]])python3?([[:space:]]|$)' \
+            .github/workflows/ci.yml \
+            .github/workflows/release.yml \
+            .github/workflows/deploy.yml \
+            scripts/deploy-runtime \
+            scripts/post-deploy-verify \
+            scripts/runtime-compose \
+            scripts/runtime-entrypoint \
+            docker-compose.yml \
+            Dockerfile.rust \
+            | grep -v "grep -E 'setup-uv"

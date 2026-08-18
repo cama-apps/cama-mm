@@ -160,7 +160,7 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::NamedTempFile;
 
-    use crate::schema_manager::initialize_or_migrate;
+    use crate::test_support::copy_migrated_database;
 
     use super::*;
 
@@ -170,7 +170,7 @@ mod tests {
 
     fn fixture() -> (NamedTempFile, DigGuildModifierRepository) {
         let database = NamedTempFile::new().unwrap();
-        initialize_or_migrate(database.path()).unwrap();
+        copy_migrated_database(database.path()).unwrap();
         let repository = DigGuildModifierRepository::new(database.path());
         (database, repository)
     }

@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const HELPER: i64 = -81_001;
 const TARGET: i64 = -81_002;
@@ -14,7 +14,7 @@ const NOW: i64 = 1_900_000_000;
 
 fn fixture() -> NamedTempFile {
     let database = NamedTempFile::new().expect("social database");
-    initialize_or_migrate(database.path()).expect("migrated social schema");
+    copy_migrated_database(database.path()).expect("migrated social schema");
     let connection = Connection::open(database.path()).expect("social fixture DB");
     connection
         .pragma_update(None, "foreign_keys", false)

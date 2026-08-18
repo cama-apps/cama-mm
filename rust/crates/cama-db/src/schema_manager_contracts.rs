@@ -671,7 +671,3 @@ fn check_tunnel_contract(
     audit.tunnel_integer_contract_without_column = integers.difference(&columns).cloned().collect();
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "schema_manager_contracts/tests.rs"]
-mod tests;

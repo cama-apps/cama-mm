@@ -279,6 +279,7 @@ pub struct DigRuntimeTunnelInfo {
     pub pickaxe_tier: i64,
     pub prestige_level: i64,
     pub luminosity: i64,
+    pub hard_hat_charges: i64,
     pub tunnel_name: String,
     pub route_state: Option<String>,
 }

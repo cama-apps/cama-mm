@@ -1,11 +1,11 @@
 use super::*;
 use cama_app::service_container::{ServiceContainer, ServiceContainerOptions};
 use cama_app::trivia_questions::{AbilityData, HeroData, ItemData};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use crate::registration::{InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const FLOW_GUILD: i64 = 91_001;
 const FLOW_CHANNEL: i64 = 91_002;

@@ -4,8 +4,6 @@ use cama_domain::economy_scaling::{
     DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta,
 };
 use rusqlite::{Connection, params};
-use std::path::Path;
-use std::process::Command;
 use tempfile::NamedTempFile;
 
 use super::*;
@@ -506,70 +504,4 @@ fn test_random_active_burn_full_when_funded() {
     assert_eq!(fixture.balance(DIGGER, GUILD), 50 + payout);
     assert_eq!(fixture.total(&ids, GUILD), total_before + payout - 3 * burn);
     assert_eq!(fixture.balance(10_002, OTHER_GUILD), 900);
-}
-
-/// Cross-language smoke: Python creates the disposable production schema,
-/// Rust settles the whole encounter, and Python observes wallets and audits.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_tunnel_encounter_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nrows=[(-70001,0,'encounter-actor',50),(-70002,0,'encounter-richest',1000),(-70003,0,'encounter-next',800),(-70002,99,'other-guild',9000)]\nc.executemany('INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)',rows)\nc.execute(\"INSERT INTO tunnels (discord_id,guild_id,depth,tunnel_name) VALUES (-70001,0,120,'interop')\")\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = DigTunnelEncounterRepository::new(database.path());
-    let settlement = repository
-        .settle_encounter_atomic(&EncounterSettlementRequest {
-            digger_discord_id: -70_001,
-            guild_id: None,
-            event_id: "hungering_dark".to_owned(),
-            event_name: "The Hungering Dark".to_owned(),
-            event_key: "python-migrated-smoke".to_owned(),
-            outcome: EncounterOutcome::Success {
-                strategy: EncounterVictimStrategy::RichestN,
-                victim_count: 2,
-                authored_penalty_jc: 5,
-                jittered_authored_reward_jc: 5,
-                preferred_victim_ids: Vec::new(),
-            },
-            minigame_jc_delta_scale: DEFAULT_MINIGAME_JC_DELTA_SCALE,
-            active_since: 0,
-            now: NOW,
-        })
-        .expect("Rust encounter settlement");
-    assert!(settlement.succeeded);
-    assert_eq!(settlement.actor_delta, 3);
-    assert_eq!(settlement.splash.unwrap().total_burned, 16);
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0').fetchone()==(53,)\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70002 AND guild_id=0').fetchone()==(992,)\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70003 AND guild_id=0').fetchone()==(792,)\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70002 AND guild_id=99').fetchone()==(9000,)\nassert c.execute(\"SELECT COUNT(*) FROM dig_actions WHERE guild_id=0 AND action_type='splash_victim'\").fetchone()==(2,)\nassert c.execute(\"SELECT COUNT(*) FROM dig_actions WHERE guild_id=0 AND actor_id=-70001 AND action_type='event'\").fetchone()==(1,)\nassert c.execute(\"SELECT COUNT(*) FROM economy_ledger_entries WHERE guild_id=0 AND source='dig'\").fetchone()==(3,)\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()==(0,)\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

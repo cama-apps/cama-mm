@@ -3,7 +3,7 @@ use tempfile::NamedTempFile;
 
 use super::*;
 use crate::manashop_rework_repository::ManashopRepository;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 9_001;
 const PLAYER: i64 = 42;
@@ -18,7 +18,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary mana protection database");
-        initialize_or_migrate(database.path()).expect("migrate temporary database");
+        copy_migrated_database(database.path()).expect("copy migrated temporary database");
         let fixture = Self { database };
         let connection = fixture.connection();
         connection

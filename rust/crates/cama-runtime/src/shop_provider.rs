@@ -488,7 +488,6 @@ impl InteractionHandler for ShopInteractionHandler {
             }
             InteractionRequest::Autocomplete {
                 name,
-                user_id,
                 guild_id,
                 focused_option,
                 focused_value,
@@ -498,23 +497,17 @@ impl InteractionHandler for ShopInteractionHandler {
                 if name != "shop" || focused_option != "item" {
                     return Err("shop autocomplete received an unsupported option".into());
                 }
-                let Some(guild_id) = guild_id else {
+                if guild_id.is_none() {
                     return responder
                         .autocomplete(Vec::new())
                         .await
                         .map_err(|error| error.to_string().into());
-                };
+                }
                 let (subcommand, _) = subcommand(&options)?;
                 if subcommand != "buy" {
                     return Err("shop item autocomplete is only valid for /shop buy".into());
                 }
-                self.autocomplete(
-                    signed_id(user_id, "user")?,
-                    signed_id(guild_id, "guild")?,
-                    &focused_value,
-                    responder,
-                )
-                .await
+                self.autocomplete(&focused_value, responder).await
             }
             InteractionRequest::Component { .. } | InteractionRequest::Modal { .. } => {
                 Err("shop extension received an unsupported interaction".into())
@@ -550,24 +543,15 @@ impl ShopInteractionHandler {
 
     async fn autocomplete(
         &self,
-        user_id: i64,
-        guild_id: i64,
         current: &str,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let recalibration = self.recalibration.clone();
-        let now = self.clock.now()?;
-        let on_cooldown = tokio::task::spawn_blocking(move || {
-            recalibration
-                .get_state_at(user_id, Some(guild_id), now)
-                .map(|state| state.is_on_cooldown)
-                .unwrap_or(false)
-        })
-        .await
-        .map_err(|error| format!("shop autocomplete task failed: {error}"))?;
         let current = current.to_ascii_lowercase();
         let choices = self
-            .item_choices(on_cooldown)
+            // Autocomplete must answer inside Discord's short callback window.
+            // Keep this path storage-free; the purchase handler performs the
+            // authoritative recalibration cooldown check after selection.
+            .item_choices(false)
             .into_iter()
             .filter(|choice| {
                 current.is_empty() || choice.name.to_ascii_lowercase().contains(&current)

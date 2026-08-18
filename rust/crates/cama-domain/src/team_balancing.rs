@@ -189,10 +189,22 @@ mod tests {
     use crate::player::Player;
     use crate::team::{ROLES, Team};
 
+    /// Role-neutral fixtures: an even record in every role gives a factor of
+    /// exactly 1.0, so these tests measure the balance formula rather than the
+    /// role-performance multiplier.
     fn player(name: &str, mmr: i64, role: &str) -> Player {
         Player {
             mmr: Some(mmr),
             preferred_roles: Some(vec![role.to_owned()]),
+            role_records: ROLES
+                .iter()
+                .map(|role| {
+                    (
+                        (*role).to_owned(),
+                        crate::role_performance::RoleRecord::new(5, 5),
+                    )
+                })
+                .collect(),
             ..Player::new(name)
         }
     }

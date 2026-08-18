@@ -1,6 +1,9 @@
 //! Player data and rating-selection policy used by team balancing.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
+
+use crate::role_performance::{RoleRecord, role_factor};
 
 /// OpenSkill's display origin. Model `mu` values are allowed below this value.
 pub const OPENSKILL_MIN_MU: f64 = 25.0;
@@ -41,6 +44,10 @@ pub struct Player {
     pub solo_grinder_checked_at: Option<String>,
     pub preferred_region: Option<String>,
     pub inferred_region: Option<String>,
+    /// Win/loss record per role this player has been assigned, keyed by role
+    /// ("1".."5"). Absent roles mean no recorded sample, which the role factor
+    /// treats as unproven. Empty for players loaded outside team balancing.
+    pub role_records: BTreeMap<String, RoleRecord>,
 }
 
 impl Player {
@@ -82,6 +89,37 @@ impl Player {
         }
 
         self.mmr.map_or(0.0, |mmr| mmr as f64)
+    }
+
+    /// The rating multiplier for being assigned `role`, from this player's win
+    /// rate in that role.
+    ///
+    /// Replaces the flat off-role multiplier: a player assigned a role they
+    /// rarely play has no recorded sample and lands on the floor by itself,
+    /// while a proven specialist is scaled up.
+    #[must_use]
+    pub fn role_factor_for(&self, role: &str) -> f64 {
+        role_factor(self.role_records.get(role).copied().unwrap_or_default())
+    }
+
+    /// This player's effective value when assigned `role`, after the
+    /// role-performance multiplier.
+    ///
+    /// Deliberately unclamped. In jopacoin mode `get_value` returns a balance
+    /// that can be negative, and clamping here would collapse every debtor to
+    /// zero - the shuffler could no longer tell a player 5,000 in the hole
+    /// from one 100 down. The off-role path still clamps, via
+    /// [`crate::team::calculate_off_role_value`], because a flat penalty can
+    /// otherwise drive a value arbitrarily negative.
+    #[must_use]
+    pub fn role_adjusted_value(
+        &self,
+        role: &str,
+        use_glicko: bool,
+        use_openskill: bool,
+        use_jopacoin: bool,
+    ) -> f64 {
+        self.get_value(use_glicko, use_openskill, use_jopacoin) * self.role_factor_for(role)
     }
 }
 

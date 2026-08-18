@@ -678,9 +678,11 @@ fn unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::{Arc, Barrier};
+    use std::path::Path;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
+    use crate::test_support::FastTestDatabase;
     use rusqlite::{Connection, params};
     use tempfile::NamedTempFile;
 
@@ -694,13 +696,28 @@ mod tests {
     const BUYER_ID: i64 = 100;
     const PARTNER_ID: i64 = 200;
 
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         repository: PackageDealRepository,
     }
 
-    impl Fixture {
-        fn new() -> Self {
+    fn fixture_database(durable: bool) -> FixtureDatabase {
+        static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+        let template = TEMPLATE.get_or_init(|| {
             let file = NamedTempFile::new().expect("create temporary SQLite file");
             let connection = Connection::open(file.path()).expect("open temporary SQLite file");
             connection
@@ -815,6 +832,28 @@ mod tests {
                 )
                 .expect("create Python-compatible package-deal schema");
             drop(connection);
+            file
+        });
+        if durable {
+            let file = NamedTempFile::new().expect("durable package-deal database");
+            std::fs::copy(template.path(), file.path())
+                .expect("copy package-deal fixture template");
+            FixtureDatabase::Durable(file)
+        } else {
+            FixtureDatabase::Fast(FastTestDatabase::from_template(template.path()))
+        }
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::from_database(fixture_database(false))
+        }
+
+        fn durable() -> Self {
+            Self::from_database(fixture_database(true))
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = PackageDealRepository::new(file.path());
             Self { file, repository }
         }
@@ -973,7 +1012,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_paid_top_ups_charge_once_and_stop_at_ten() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::durable();
         fixture.seed_player(BUYER_ID, GUILD_ID, 1_000);
         fixture
             .repository
@@ -1024,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_first_purchases_only_charge_introductory_price_once() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::durable();
         fixture.seed_player(BUYER_ID, GUILD_ID, 2_000);
         let repository = Arc::new(fixture.repository.clone());
         let barrier = Arc::new(Barrier::new(2));

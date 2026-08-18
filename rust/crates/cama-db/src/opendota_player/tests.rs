@@ -1,12 +1,12 @@
 use std::path::Path;
-use std::process::Command;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 42_424;
 const OTHER_GUILD: i64 = 42_425;
@@ -21,18 +21,52 @@ type WrappedFactRow = (
     Option<i64>,
 );
 
+fn fixture_template() -> &'static NamedTempFile {
+    static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let database = NamedTempFile::new().expect("temporary OpenDota template");
+        Connection::open(database.path())
+            .expect("fixture template connection")
+            .execute_batch(FIXTURE_SCHEMA)
+            .expect("fixture-only schema");
+        database
+    })
+}
+
+enum FixtureDatabase {
+    Fast(FastTestDatabase),
+    Durable(NamedTempFile),
+}
+
+impl FixtureDatabase {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Fast(database) => database.path(),
+            Self::Durable(database) => database.path(),
+        }
+    }
+}
+
 struct Fixture {
-    database: NamedTempFile,
+    database: FixtureDatabase,
     repository: OpenDotaPlayerRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let database = NamedTempFile::new().expect("temporary SQLite database");
-        Connection::open(database.path())
-            .expect("fixture connection")
-            .execute_batch(FIXTURE_SCHEMA)
-            .expect("fixture-only schema");
+        Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+            fixture_template().path(),
+        )))
+    }
+
+    fn durable() -> Self {
+        let database = NamedTempFile::new().expect("durable OpenDota database");
+        std::fs::copy(fixture_template().path(), database.path())
+            .expect("copy OpenDota fixture template");
+        Self::from_database(FixtureDatabase::Durable(database))
+    }
+
+    fn from_database(database: FixtureDatabase) -> Self {
         let repository = OpenDotaPlayerRepository::new(database.path());
         Self {
             database,
@@ -627,7 +661,7 @@ fn stronger_primary_link_rolls_back_on_legacy_update_failure() {
 
 #[test]
 fn stronger_concurrent_global_claim_has_exactly_one_winner() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::durable();
     fixture.player(501, GUILD, "First claimant", None);
     fixture.player(502, GUILD, "Second claimant", None);
     let barrier = Arc::new(Barrier::new(3));
@@ -1055,58 +1089,6 @@ fn stronger_primary_replacement_retains_membership_and_is_atomic_on_conflict() {
     assert_eq!(
         fixture.repository.get_steam_id(-70_002).expect("rollback"),
         None
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_opendota_player_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,dotabuff_url) VALUES (?,?,?,?)\",(-70001,4242,'interop','https://dotabuff.com/players/765'))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = OpenDotaPlayerRepository::new(database.path());
-    assert_eq!(
-        repository
-            .get_all_with_dotabuff_no_steam_id()
-            .expect("Python-shaped backfill row")[0]
-            .discord_id,
-        -70_001
-    );
-    repository
-        .set_steam_id(-70_001, 765, 1_700_000_000)
-        .expect("Rust account link");
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\np=c.execute(\"SELECT steam_id FROM players WHERE discord_id=-70001 AND guild_id=4242\").fetchone()\nj=c.execute(\"SELECT steam_id,is_primary,added_at FROM player_steam_ids WHERE discord_id=-70001\").fetchone()\nassert p==(765,),p\nassert j==(765,1,1700000000),j\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }
 

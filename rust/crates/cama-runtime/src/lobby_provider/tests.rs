@@ -8,13 +8,13 @@ use crate::discord_transport::{
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::raw_reactions::RawReactionEmoji;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use cama_app::moderation::{CreateSuspension, ModerationService};
 use cama_db::core_repositories::NewPlayer;
 use cama_db::low_priority_repository::{LowPriorityRepository, SetLowPriorityInput};
 use cama_db::moderation::{
     ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
-use cama_db::schema_manager::initialize_or_migrate;
 use cama_domain::curfew::CurfewWindow;
 use chrono::Timelike;
 use tempfile::NamedTempFile;
@@ -158,6 +158,7 @@ struct RecordingState {
     edits: Vec<(u64, u64, DiscordMessage)>,
     deleted: Vec<(u64, u64)>,
     threads: Vec<(u64, u64, String, u64)>,
+    thread_members: Vec<(u64, u64)>,
     archived: Vec<(u64, String, bool)>,
     unpinned: Vec<(u64, u64)>,
     removed_reactions: Vec<(u64, u64, DiscordEmoji, u64)>,
@@ -177,6 +178,7 @@ impl Default for RecordingState {
             edits: Vec::new(),
             deleted: Vec::new(),
             threads: Vec::new(),
+            thread_members: Vec::new(),
             archived: Vec::new(),
             unpinned: Vec::new(),
             removed_reactions: Vec::new(),
@@ -312,6 +314,15 @@ impl DiscordTransport for RecordingTransport {
             thread_id,
         ));
         Ok(thread_id)
+    }
+
+    async fn add_thread_member(&self, thread_id: u64, member_id: u64) -> Result<(), String> {
+        self.state
+            .lock()
+            .expect("transport state")
+            .thread_members
+            .push((thread_id, member_id));
+        Ok(())
     }
 
     async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
@@ -581,8 +592,7 @@ fn registration_exposes_the_complete_lobby_command_surface() {
     }
 
     let database = tempfile::NamedTempFile::new().expect("temporary lobby database");
-    cama_db::schema_manager::initialize_or_migrate(database.path())
-        .expect("initialize Python-compatible schema");
+    initialize_or_migrate(database.path()).expect("initialize Python-compatible schema");
     let provider = LobbyRegistrationProvider::new(
         database.path(),
         LobbyRuntimeConfig {
@@ -846,6 +856,54 @@ async fn live_slash_creation_persists_and_restart_reuses_the_existing_discord_me
         1,
         "restart must reuse the persisted message/thread instead of duplicating the lobby"
     );
+}
+
+#[tokio::test]
+async fn slash_join_uses_only_the_private_confirmation_message() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Joiner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    let observer = Arc::new(RecordingJoinObserver::default());
+    provider
+        .set_join_observer(observer.clone())
+        .expect("install join observer");
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let messages_before_join = transport.sent_messages().len();
+
+    let responder = dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Joiner",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let captured = responder.captured.lock().expect("responses");
+    assert_eq!(captured.followups.len(), 1);
+    assert_eq!(
+        captured.followups[0].content,
+        "✅ Joined 🍽️ All You Can Feed!"
+    );
+    assert!(captured.followups[0].ephemeral);
+    assert_eq!(transport.sent_messages().len(), messages_before_join);
+    assert_eq!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .thread_members,
+        [(21_000, 20)]
+    );
+    assert_eq!(observer.confirmed.lock().expect("join observer").len(), 2);
 }
 
 #[tokio::test]

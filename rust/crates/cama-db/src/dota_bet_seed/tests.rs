@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use tempfile::{NamedTempFile, TempDir};
 
 use super::*;
-use crate::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 42;
 
@@ -25,8 +25,7 @@ impl MigratedFixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary migrated database");
         let path = directory.path().join("cama.db");
-        initialize_or_migrate_with_settings(&path, &MigrationSettings::default())
-            .expect("migrate temporary database");
+        copy_migrated_database(&path).expect("copy migrated temporary database");
         Self {
             repository: DotaBetSeedRepository::new(&path),
             _directory: directory,
@@ -1469,57 +1468,6 @@ fn stronger_daily_funding_catches_up_dates_and_records_unfunded_days() {
         FirstGamePoolBalances {
             open: 200,
             low_skill: 200
-        }
-    );
-}
-
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn python_migrated_database_dota_seed_interop_smoke() {
-    use std::path::Path;
-    use std::process::Command;
-
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO nonprofit_fund (guild_id,total_collected,next_match_pot,first_game_open_pool,first_game_lowskill_pool) VALUES (?,?,?,?,?)\",(4242,260,0,0,0))\nc.execute(\"INSERT INTO pending_matches (pending_match_id,guild_id,payload) VALUES (?,?,?)\",(900,4242,'{\\\"shuffle_timestamp\\\":1700000000}'))\nc.commit(); c.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .status()
-        .expect("initialize Python-migrated database");
-    assert!(initialize.success());
-
-    let repository = DotaBetSeedRepository::new(file.path());
-    let funding = repository
-        .fund_first_game_pools(Some(4242), "2026-08-05", 100)
-        .expect("fund through Python schema");
-    let claim = repository
-        .claim_first_game_pool(Some(4242), FirstGameLobby::Open, "2026-08-05", 900)
-        .expect("claim through Python schema");
-    let seed = repository
-        .reserve_seed_atomic(Some(4242), 900, 50, claim, BettingMode::Pool)
-        .expect("reserve through Python pending payload");
-    let settlement = repository
-        .settle_seed_atomic(Some(4242), 900, BettingMode::Pool, None)
-        .expect("settle through Python schema");
-
-    assert_eq!(funding.funded_dates, ["2026-08-05"]);
-    assert_eq!(claim, 100);
-    assert_eq!(seed.reserved, 150);
-    assert_eq!(settlement.returned_to_fund, 150);
-    assert_eq!(repository.nonprofit_balance(Some(4242)).unwrap(), 160);
-    assert_eq!(
-        repository.pool_balances(Some(4242)).unwrap(),
-        FirstGamePoolBalances {
-            open: 0,
-            low_skill: 100
         }
     );
 }

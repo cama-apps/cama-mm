@@ -4075,8 +4075,8 @@ mod tests {
     #[test]
     fn authoritative_draft_state_round_trips_every_field_through_sqlite() {
         let fixture = NamedTempFile::new().expect("create draft persistence fixture");
-        cama_db::schema_manager::initialize_or_migrate(fixture.path())
-            .expect("initialize draft persistence fixture");
+        crate::test_support::copy_migrated_database(fixture.path())
+            .expect("copy draft persistence fixture");
         let persistence = SqliteDraftStatePersistence::new(fixture.path());
 
         let mut state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::LowSkill, 0);
@@ -4234,8 +4234,8 @@ mod tests {
         ));
 
         let fixture = NamedTempFile::new().expect("create malformed-row fixture");
-        cama_db::schema_manager::initialize_or_migrate(fixture.path())
-            .expect("initialize malformed-row fixture");
+        crate::test_support::copy_migrated_database(fixture.path())
+            .expect("copy malformed-row fixture");
         Connection::open(fixture.path())
             .expect("open malformed-row fixture")
             .execute(
@@ -4404,8 +4404,8 @@ mod tests {
     #[test]
     fn sqlite_adapter_atomically_links_and_recovers_the_exact_typed_plan() {
         let fixture = NamedTempFile::new().expect("create typed-link fixture");
-        cama_db::schema_manager::initialize_or_migrate(fixture.path())
-            .expect("initialize typed-link fixture");
+        crate::test_support::copy_migrated_database(fixture.path())
+            .expect("copy typed-link fixture");
         let persistence = SqliteDraftStatePersistence::new(fixture.path());
         let mut state = DraftState::with_session(TEST_GUILD_ID, LobbyKind::Open, 0);
         state.phase = DraftPhase::Complete;
@@ -4493,8 +4493,8 @@ mod tests {
     #[test]
     fn sqlite_adapter_v2_link_returns_the_frozen_financial_plan() {
         let fixture = NamedTempFile::new().expect("create v2 typed-link fixture");
-        cama_db::schema_manager::initialize_or_migrate(fixture.path())
-            .expect("initialize v2 typed-link fixture");
+        crate::test_support::copy_migrated_database(fixture.path())
+            .expect("copy v2 typed-link fixture");
         let connection = Connection::open(fixture.path()).expect("open v2 typed-link fixture");
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -4717,8 +4717,8 @@ mod tests {
     #[test]
     fn atomic_pending_link_rejects_typed_envelope_before_committing() {
         let fixture = NamedTempFile::new().expect("create malformed-link fixture");
-        cama_db::schema_manager::initialize_or_migrate(fixture.path())
-            .expect("initialize malformed-link fixture");
+        crate::test_support::copy_migrated_database(fixture.path())
+            .expect("copy malformed-link fixture");
         let malformed = json!({
             "schema_version": DRAFT_STATE_SCHEMA_VERSION,
             "guild_id": TEST_GUILD_ID,

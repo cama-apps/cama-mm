@@ -2515,7 +2515,7 @@ impl LobbyInteractionHandler {
                     command.user_id,
                     &player.name,
                     &command.user_display_name,
-                    false,
+                    JoinThreadActivity::Command,
                     join.joined_at_ns.expect("successful join has commit time"),
                 )
                 .await;
@@ -2686,7 +2686,7 @@ impl LobbyInteractionHandler {
                 command.user_id,
                 &player.name,
                 &command.user_display_name,
-                false,
+                JoinThreadActivity::Command,
                 join.joined_at_ns.expect("successful join has commit time"),
             )
             .await;
@@ -2770,7 +2770,7 @@ impl LobbyInteractionHandler {
                 command.user_id,
                 &player.name,
                 &command.user_display_name,
-                false,
+                JoinThreadActivity::Silent,
                 result
                     .joined_at_ns
                     .expect("successful join has commit time"),
@@ -3024,7 +3024,7 @@ impl LobbyInteractionHandler {
         player_id: AppUserId,
         player_name: &str,
         display_name: &str,
-        raw_reaction: bool,
+        thread_activity: JoinThreadActivity,
         joined_at_ns: i64,
     ) -> Option<ConfirmedLobbyJoin> {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
@@ -3032,12 +3032,19 @@ impl LobbyInteractionHandler {
         }
         self.sync_readycheck_with_lobby(scope).await;
         let lobby = self.state.service.get_lobby(scope)?;
-        if let Some(thread_id) = lobby.message_ids.thread_id {
-            let content = if raw_reaction {
-                format!("✅ <@{}> joined {}!", player_id.0, scope.kind.label())
-            } else {
-                format!("✅ <@{}> joined the lobby!", player_id.0)
-            };
+        if let Some(thread_id) = lobby.message_ids.thread_id
+            && let Some(content) = match thread_activity {
+                JoinThreadActivity::Command => {
+                    Some(format!("✅ <@{}> joined the lobby!", player_id.0))
+                }
+                JoinThreadActivity::RawReaction => Some(format!(
+                    "✅ <@{}> joined {}!",
+                    player_id.0,
+                    scope.kind.label()
+                )),
+                JoinThreadActivity::Silent => None,
+            }
+        {
             let thread_id = to_u64(thread_id.0).ok();
             let player_snowflake = u64::try_from(player_id.0).ok();
             if let (Some(thread_id), Some(player_snowflake)) = (thread_id, player_snowflake) {
@@ -3062,6 +3069,17 @@ impl LobbyInteractionHandler {
                     "lobby join publication has invalid persisted Discord IDs"
                 );
             }
+        } else if matches!(thread_activity, JoinThreadActivity::Silent)
+            && let Some(thread_id) = lobby.message_ids.thread_id
+            && let (Ok(thread_id), Ok(player_snowflake)) =
+                (to_u64(thread_id.0), u64::try_from(player_id.0))
+            && let Err(error) = self
+                .state
+                .transport
+                .add_thread_member(thread_id, player_snowflake)
+                .await
+        {
+            debug!(%error, ?scope, "could not subscribe slash-command joiner to lobby thread");
         }
 
         let (Ok(guild_id), Ok(player_snowflake)) =
@@ -3172,6 +3190,13 @@ struct JoinPresentation {
     warning: Option<String>,
     rejection: Option<JoinRejection>,
     joined_at_ns: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum JoinThreadActivity {
+    Command,
+    RawReaction,
+    Silent,
 }
 
 enum JoinRejection {
@@ -3847,7 +3872,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                         user_id,
                         &player.name,
                         resolved_display_name.as_deref().unwrap_or(&player.name),
-                        true,
+                        JoinThreadActivity::RawReaction,
                         outcome
                             .joined_at_ns
                             .expect("successful join has commit time"),

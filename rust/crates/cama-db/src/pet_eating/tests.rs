@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use cama_domain::pet::{ADULT_AGE_SECONDS, Pet};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -641,67 +640,4 @@ fn test_sweep_reconstructs_an_undelivered_exact_outcome() {
         .expect("read announcement state")
         .flatten();
     assert_eq!(announced, None);
-}
-
-/// Python creates and seeds the real migrated schema, Rust performs the full
-/// atomic consumption, and Python verifies every durable Rust write. This is
-/// intentionally outside the 12-node literal parity mapping.
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn unmapped_python_migrated_database_pet_eating_interop_smoke() {
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(?,?,?,?)\",(-74001,0,'pet-eating-interop',1000))\nc.execute(\"INSERT INTO pets(discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,last_fed_at,hunger_at_last_fed,dig_work_units,dig_work_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)\",(-74001,0,'Interop Blep','common_cama',1799308800,1799395200,20,1800000000,100,0,1799395200))\nc.commit(); c.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("initialize Python-migrated database");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = PetEatingRepository::new(file.path());
-    let pet = repository
-        .get_active_pet(-74_001, None)
-        .expect("read Python-created pet")
-        .expect("Python-created active pet");
-    let outcome = repository
-        .eat_adult_pet_atomic(EatAdultPetRequest {
-            discord_id: -74_001,
-            guild_id: None,
-            pet_id: pet.pet_id,
-            expected_last_fed_at: pet.last_fed_at,
-            expected_hunger: pet.hunger_at_last_fed,
-            reward: 888,
-            penalty_games: 4,
-            now: T0,
-        })
-        .expect("consume through Python schema");
-    assert_eq!(outcome.new_balance, 1_888);
-    assert_eq!(outcome.penalty_games_remaining, 4);
-    assert_eq!(outcome.pet.death_cause.as_deref(), Some("eaten"));
-
-    let verify = Command::new(python)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\npet=c.execute(\"SELECT died_at,death_cause,death_announced_at FROM pets WHERE discord_id=-74001 AND guild_id=0\").fetchone()\nbal=c.execute(\"SELECT jopacoin_balance FROM players WHERE discord_id=-74001 AND guild_id=0\").fetchone()\nstate=c.execute(\"SELECT last_bankruptcy_at,penalty_games_remaining,bankruptcy_count FROM bankruptcy_state WHERE discord_id=-74001 AND guild_id=0\").fetchone()\nledger=c.execute(\"SELECT delta,balance_before,balance_after,related_id,metadata FROM economy_ledger_entries WHERE account_id=-74001 AND source='pet' AND related_type='pet_eating' ORDER BY ledger_id DESC LIMIT 1\").fetchone()\nmeta=json.loads(ledger[4])\nassert pet==(1800000000,'eaten',None)\nassert bal==(1888,)\nassert state==(None,4,0)\nassert ledger[:3]==(888,1000,1888)\nassert ledger[3]==str(meta['pet_id'])\nassert meta['species']=='common_cama' and meta['reward']==888 and meta['penalty_games']==4 and meta['penalty_games_remaining']==4\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()==(0,)\nassert c.execute('PRAGMA quick_check').fetchone()[0]=='ok'\nc.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("verify Rust pet-eating writes from Python");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

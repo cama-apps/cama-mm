@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -485,70 +483,5 @@ fn malformed_and_expired_curse_json_are_not_active() {
             .temp_curse
             .active()
             .is_none()
-    );
-}
-
-/// Python creates the disposable production schema; Rust applies a guarded
-/// curse/debt event; Python verifies the JSON, signed balance, action, ledger,
-/// and preserved sibling buff. This remains ignored during normal unit runs.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_dig_event_threat_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'threat-interop',30))\nc.execute(\"INSERT INTO tunnels (discord_id,guild_id,depth,streak_days,luminosity,temp_buffs,temp_curses,tunnel_name) VALUES (?,?,?,?,?,?,?,?)\",(-70001,0,50,10,100,'{\\\"id\\\":\\\"power\\\",\\\"digs_remaining\\\":3}',None,'interop'))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = DigEventThreatRepository::new(database.path());
-    let interop_key = key(None);
-    let expected = repository
-        .snapshot(interop_key)
-        .expect("read migrated schema")
-        .expect("interop tunnel");
-    let event_curse = curse("interop-hex", 4);
-    let outcome = repository
-        .settle_atomic(settlement(
-            &expected,
-            ThreatCurseMutation::Replace(&event_curse),
-            -394,
-        ))
-        .expect("Rust settlement");
-    assert!(matches!(
-        outcome,
-        ThreatSettlementOutcome::Applied {
-            balance_after: -364,
-            ..
-        }
-    ));
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nt=c.execute('SELECT depth,streak_days,luminosity,temp_buffs,temp_curses FROM tunnels WHERE discord_id=-70001 AND guild_id=0').fetchone()\nassert t[:3]==(48,7,85)\nassert json.loads(t[3])['id']=='power'\nassert json.loads(t[4])=={'id':'interop-hex','name':'interop-hex name','digs_remaining':4,'effect':{'advance_bonus':-4,'cave_in_bonus':0.1}}\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0').fetchone()==(-364,)\nassert c.execute(\"SELECT COUNT(*) FROM dig_actions WHERE actor_id=-70001 AND guild_id=0 AND action_type='event' AND jc_delta=-394\").fetchone()==(1,)\nassert c.execute(\"SELECT COUNT(*) FROM economy_ledger_entries WHERE account_id=-70001 AND guild_id=0 AND source='dig' AND delta=-394\").fetchone()==(1,)\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()==(0,)\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }

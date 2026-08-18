@@ -107,6 +107,29 @@ pub trait AdminMatchControl: Send + Sync {
         &self,
         request: AdminSeedHeroGridRequest,
     ) -> Result<AdminSeedHeroGridResult, String>;
+
+    async fn backfill_derived_roles(
+        &self,
+        guild_id: i64,
+    ) -> Result<AdminRoleBackfillResult, String>;
+}
+
+/// Result of a derived-role backfill, paired with the coverage that exists
+/// afterwards so the run can be confirmed rather than taken on trust.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AdminRoleBackfillResult {
+    pub matches_scanned: u64,
+    pub teams_derived: u64,
+    pub gold_samples_written: u64,
+    pub unreadable_payloads: u64,
+    pub unparsed_teams: u64,
+    pub ambiguous_lanes: u64,
+    pub incomplete_teams: u64,
+    pub tied_farm_priority: u64,
+    pub participants: i64,
+    pub with_derived_role: i64,
+    pub with_gold_at_10: i64,
+    pub player_roles_above_minimum_sample: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -815,6 +838,7 @@ impl AdminHandler {
             "resetuser" => self.reset_user(context, responder).await,
             "registeruser" => self.register_user(context, responder).await,
             "sync" => self.sync(context, responder).await,
+            "backfillroles" => self.backfill_roles(context, responder).await,
             "givecoin" => self.give_coin(context, responder).await,
             "resetloancooldown" => self.reset_loan_cooldown(context, responder).await,
             "resetbankruptcycooldown" => self.reset_bankruptcy_cooldown(context, responder).await,
@@ -1146,6 +1170,68 @@ impl AdminHandler {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => warn!(%error, "admin registration region inference write failed"),
             Err(error) => warn!(%error, "admin registration region inference task failed"),
+        }
+    }
+
+    async fn backfill_roles(
+        &self,
+        context: AdminCommandContext,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        if let Some(retry) = self.rate_limit(&context, "backfillroles", 1, Duration::from_secs(300))
+        {
+            return respond_ephemeral(
+                &responder,
+                format!("⏳ Please wait {retry}s before running `/admin backfillroles` again."),
+            )
+            .await;
+        }
+        if !self.require_admin(&context, &responder).await? {
+            return Ok(());
+        }
+        let guild_id = context.guild_id;
+        // Scans every enriched match, so acknowledge before any database work.
+        defer(&responder, true).await?;
+        match self.ports.matches.backfill_derived_roles(guild_id).await {
+            Ok(result) => {
+                // Every skip reason here is per team, so the total reconciles
+                // against the teams actually examined.
+                let skipped = result.unparsed_teams
+                    + result.ambiguous_lanes
+                    + result.incomplete_teams
+                    + result.tied_farm_priority;
+                let coverage = if result.participants == 0 {
+                    0.0
+                } else {
+                    result.with_derived_role as f64 * 100.0 / result.participants as f64
+                };
+                respond_ephemeral(
+                    &responder,
+                    format!(
+                        "✅ Role backfill complete.\n\
+                         **Scanned:** {} match(es), {} unreadable, wrote {} gold sample(s).\n\
+                         **Teams:** {} derived, {skipped} skipped ({} unparsed, {} ambiguous lanes, {} incomplete, {} tied farm).\n\
+                         **Coverage:** {}/{} participants have a role ({coverage:.1}%), {} have 10-minute gold.\n\
+                         **Above minimum sample:** {} (player, role) pair(s) can move off the 0.95 floor.",
+                        result.matches_scanned,
+                        result.unreadable_payloads,
+                        result.gold_samples_written,
+                        result.teams_derived,
+                        result.unparsed_teams,
+                        result.ambiguous_lanes,
+                        result.incomplete_teams,
+                        result.tied_farm_priority,
+                        result.with_derived_role,
+                        result.participants,
+                        result.with_gold_at_10,
+                        result.player_roles_above_minimum_sample,
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                respond_ephemeral(&responder, format!("❌ Role backfill failed: {error}")).await
+            }
         }
     }
 
@@ -3104,6 +3190,11 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             ],
         ),
         subcommand("sync", "Force sync commands (Admin only)", vec![]),
+        subcommand(
+            "backfillroles",
+            "Derive played roles from stored OpenDota data and report coverage (Admin only)",
+            vec![],
+        ),
         subcommand(
             "givecoin",
             "Give jopacoin to a user or reserve (Admin only)",

@@ -1,12 +1,12 @@
 use std::sync::Mutex as StdMutex;
 
 use cama_app::mana_service::DailyAssignment;
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
 use crate::registration::{InteractionResponseError, InteractionValue, Registry};
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;
 const CHANNEL: i64 = 9_002;

@@ -5,15 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
+use cama_app::dedicated_lobby_channel::{GuildId, LobbyScope, UserId};
 use cama_app::draft::{
     DRAFT_POOL_SIZE, DRAFT_TOTAL_PICKS, DraftPhase, DraftStatePersistencePort,
     SqliteDraftStatePersistence,
 };
 use cama_db::autobet_investments::AutobetInvestmentRepository;
-use cama_db::core_repositories::{NewPlayer, PlayerRepository};
-use cama_db::schema_manager::initialize_or_migrate;
+use cama_db::core_repositories::PlayerRepository;
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
 
 use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
@@ -24,6 +23,7 @@ use crate::registration::{
     InteractionAttachment, InteractionOption, InteractionRequest, InteractionResponseError,
     InteractionValue,
 };
+use crate::test_support::{FastTestDatabase, fast_database, migrated_database};
 
 struct EmptyMemberSource;
 
@@ -453,13 +453,12 @@ impl DiscordTransport for FailingSendDiscord {
 }
 
 fn provider_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = fast_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -593,13 +592,12 @@ impl DraftNeonObserver for RecordingNeonObserver {
 fn provider_fixture_with_scheduler(
     reminders: Arc<dyn DraftReminderScheduler>,
 ) -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = fast_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -651,14 +649,13 @@ fn lobby_request(user_id: u64, name: &str) -> InteractionRequest {
 }
 
 async fn populated_lobby_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     LobbyRegistrationProvider,
     MatchLobbyPort,
     Arc<DraftStateManager>,
     Arc<NullDiscord>,
 ) {
-    let database = NamedTempFile::new().expect("lobby database");
-    initialize_or_migrate(database.path()).expect("migrate lobby database");
+    let database = fast_database();
     seed_players(database.path(), 42, &(1..=10).collect::<Vec<_>>(), 100);
     let drafts = Arc::new(DraftStateManager::default());
     let discord = Arc::new(NullDiscord::default());
@@ -687,14 +684,10 @@ async fn populated_lobby_fixture() -> (
         )
         .await
         .expect("create lobby");
+    let service = lobby.live_lobby_service();
+    let scope = LobbyScope::new(GuildId(42), AppLobbyKind::Open);
     for user_id in 2..=10 {
-        handler
-            .handle(
-                lobby_request(user_id, "join"),
-                Arc::new(TestResponder::default()),
-            )
-            .await
-            .expect("join lobby");
+        assert!(service.join_lobby(UserId(user_id), scope).success);
     }
     let port = lobby.match_lobby_port();
     assert_eq!(
@@ -752,7 +745,7 @@ fn state_for_draft() -> DraftState {
 }
 
 async fn persistent_completion_fixture() -> (
-    NamedTempFile,
+    FastTestDatabase,
     DraftRegistrationProvider,
     Arc<DraftStateManager>,
     Arc<SqliteDraftStatePersistence>,
@@ -824,8 +817,7 @@ async fn persistent_completion_fixture() -> (
 
 #[test]
 fn provider_recreation_hydrates_state_phase_message_and_deadline() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -1041,8 +1033,7 @@ fn provider_recreation_hydrates_state_phase_message_and_deadline() {
 
 #[test]
 fn draft_ready_observer_hydrates_active_rows_idempotently() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -1113,8 +1104,7 @@ fn draft_ready_observer_hydrates_active_rows_idempotently() {
 
 #[test]
 fn draft_ready_observer_ignores_foreign_guild_rows_before_transport() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some("9001".to_owned()),
@@ -2830,9 +2820,7 @@ async fn pre_job_finalizing_row_is_left_for_explicit_manual_recovery() {
 #[tokio::test]
 async fn sqlite_persistence_constructor_rejects_split_pending_database() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
-    let separate_persistence = NamedTempFile::new().expect("create separate persistence database");
-    cama_db::schema_manager::initialize_or_migrate(separate_persistence.path())
-        .expect("migrate separate persistence database");
+    let separate_persistence = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         _ => None,
@@ -3091,8 +3079,7 @@ async fn hydration_restore_failure_releases_new_reservation_and_session_lock() {
 
 #[test]
 fn hydration_skips_unfenced_complete_state_for_recovery() {
-    let database = NamedTempFile::new().expect("draft database");
-    initialize_or_migrate(database.path()).expect("migrate draft database");
+    let database = migrated_database();
     let config = ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         _ => None,
@@ -3144,18 +3131,37 @@ fn hydration_skips_unfenced_complete_state_for_recovery() {
 }
 
 fn seed_players(path: &std::path::Path, guild_id: i64, ids: &[i64], balance: i64) {
-    let repository = PlayerRepository::new(path);
+    let mut connection = Connection::open(path).expect("open draft player fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match runtime foreign-key policy");
+    let transaction = connection
+        .transaction()
+        .expect("begin draft player fixture transaction");
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO players (
+                 discord_id, guild_id, discord_username, preferred_roles,
+                 glicko_rating, glicko_rd, glicko_volatility,
+                 exclusion_count, jopacoin_balance
+             ) VALUES (?1, ?2, ?3, '[\"1\"]', ?4, 100.0, 0.06, 5, ?5)",
+        )
+        .expect("prepare draft player fixture insert");
     for id in ids {
-        let mut player = NewPlayer::new(*id, format!("P{id}"), Some(guild_id));
-        player.preferred_roles = Some(vec!["1".to_owned()]);
-        player.glicko_rating = Some(1500.0 + *id as f64);
-        player.glicko_rd = Some(100.0);
-        player.glicko_volatility = Some(0.06);
-        repository.add(&player).expect("seed player");
-        repository
-            .update_balance(*id, Some(guild_id), balance)
-            .expect("seed player balance");
+        insert
+            .execute(rusqlite::params![
+                id,
+                guild_id,
+                format!("P{id}"),
+                1500.0 + *id as f64,
+                balance,
+            ])
+            .expect("seed draft player");
     }
+    drop(insert);
+    transaction
+        .commit()
+        .expect("commit draft player fixture transaction");
 }
 
 #[test]

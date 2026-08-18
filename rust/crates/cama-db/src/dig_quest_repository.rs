@@ -356,8 +356,9 @@ fn json_value_as_python_string(value: Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
     use tempfile::NamedTempFile;
+
+    use crate::test_support::copy_migrated_database;
 
     const PLAYER: i64 = 1;
     const GUILD: i64 = 9_001;
@@ -371,11 +372,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let file = NamedTempFile::new().expect("temp database");
-            let connection = Connection::open(file.path()).expect("open temp database");
-            connection
-                .execute_batch(include_str!("../../../schema/canonical_schema.sql"))
-                .expect("load canonical migrated schema");
-            drop(connection);
+            copy_migrated_database(file.path()).expect("copy canonical migrated schema");
             Self {
                 repository: DigQuestRepository::new(file.path()),
                 _file: file,

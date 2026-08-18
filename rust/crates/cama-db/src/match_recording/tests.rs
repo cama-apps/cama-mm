@@ -1,25 +1,30 @@
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
 use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 9_001;
 
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     repository: MatchRecordingRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("temporary SQLite file");
-        let connection = Connection::open(file.path()).expect("open fixture database");
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode = WAL;
+        let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+            let file = NamedTempFile::new().expect("temporary SQLite template");
+            let connection = Connection::open(file.path()).expect("open fixture template");
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL;
                  PRAGMA foreign_keys = OFF;
                  CREATE TABLE players (
                      discord_id INTEGER NOT NULL,
@@ -81,6 +86,8 @@ impl Fixture {
                      hero_healing INTEGER,
                      lane_role INTEGER,
                      lane_efficiency INTEGER,
+                     gold_at_10 INTEGER,
+                     derived_role TEXT,
                      towers_killed INTEGER,
                      roshans_killed INTEGER,
                      teamfight_participation REAL,
@@ -173,9 +180,12 @@ impl Fixture {
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      UNIQUE(guild_id, player1_id, player2_id)
                  );",
-            )
-            .expect("create disposable match-recording schema");
-        drop(connection);
+                )
+                .expect("create disposable match-recording schema template");
+            drop(connection);
+            file
+        });
+        let file = FastTestDatabase::from_template(template.path());
         let repository = MatchRecordingRepository::new(file.path());
         Self { file, repository }
     }
@@ -185,16 +195,22 @@ impl Fixture {
     }
 
     fn seed(&self, ids: &[i64]) {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().expect("seed players transaction");
         for discord_id in ids {
-            self.repository
-                .add_player(
-                    *discord_id,
-                    Some(GUILD),
-                    &format!("Player{discord_id}"),
-                    1_500.0,
+            transaction
+                .execute(
+                    "INSERT INTO players (
+                         discord_id, guild_id, discord_username, wins, losses,
+                         glicko_rating, glicko_rd, glicko_volatility,
+                         jopacoin_balance, lowest_balance_ever, updated_at
+                     ) VALUES (?1, ?2, ?3, 0, 0, 1500.0, 350.0, 0.06, 3, 3,
+                               CURRENT_TIMESTAMP)",
+                    params![discord_id, GUILD, format!("Player{discord_id}")],
                 )
                 .expect("seed player");
         }
+        transaction.commit().expect("commit seeded players");
     }
 
     fn player(&self, discord_id: i64) -> PlayerRecord {
@@ -324,6 +340,7 @@ fn fantasy_update(discord_id: i64, fantasy_points: f64) -> EnrichmentParticipant
         hero_healing: None,
         lane_role: None,
         lane_efficiency: None,
+        gold_at_10: None,
         towers_killed: None,
         roshans_killed: None,
         teamfight_participation: None,
@@ -1235,6 +1252,7 @@ fn test_match_and_participants_commit_in_one_call() {
             hero_healing: Some(500),
             lane_role: Some(1),
             lane_efficiency: Some(80),
+            gold_at_10: None,
             towers_killed: Some(2),
             roshans_killed: Some(1),
             teamfight_participation: Some(0.75),
@@ -2318,4 +2336,141 @@ fn test_garnishment_uses_correct_guild_balance() {
         .expect("credit positive guild");
     assert_eq!(indebted[0].garnished, 30);
     assert_eq!(positive[0].garnished, 0);
+}
+
+/// (lane_role, gold_at_10) for a standard lineup, applied to each side.
+const ENRICHMENT_LANES: [(i64, i64); 5] =
+    [(1, 4_000), (2, 3_800), (3, 3_200), (3, 1_800), (1, 1_500)];
+
+fn lane_participant_updates(all_ids: &[i64]) -> Vec<EnrichmentParticipantUpdate> {
+    all_ids
+        .iter()
+        .enumerate()
+        .map(|(index, discord_id)| {
+            let (lane_role, gold_at_10) = ENRICHMENT_LANES[index % 5];
+            EnrichmentParticipantUpdate {
+                discord_id: *discord_id,
+                hero_id: Some(discord_id % 100 + 1),
+                kills: None,
+                deaths: None,
+                assists: None,
+                gpm: None,
+                xpm: None,
+                hero_damage: None,
+                tower_damage: None,
+                last_hits: None,
+                denies: None,
+                net_worth: None,
+                hero_healing: None,
+                lane_role: Some(lane_role),
+                lane_efficiency: None,
+                gold_at_10: Some(gold_at_10),
+                towers_killed: None,
+                roshans_killed: None,
+                teamfight_participation: None,
+                obs_placed: None,
+                sen_placed: None,
+                camps_stacked: None,
+                rune_pickups: None,
+                firstblood_claimed: None,
+                stuns: None,
+                fantasy_points: None,
+            }
+        })
+        .collect()
+}
+
+fn enrich_with_lanes(
+    fixture: &Fixture,
+    match_id: i64,
+    updates: &[EnrichmentParticipantUpdate],
+) -> usize {
+    fixture
+        .repository
+        .apply_enrichment_atomic(MatchEnrichmentRequest {
+            match_id,
+            guild_id: Some(GUILD),
+            valve_match_id: 9_000_000_001,
+            duration_seconds: 2_100,
+            radiant_score: 30,
+            dire_score: 20,
+            game_mode: 2,
+            enrichment_data: Some(r#"{"stub":true}"#),
+            enrichment_source: Some("manual"),
+            enrichment_confidence: None,
+            participant_updates: updates,
+            wrapped_facts: &[],
+        })
+        .expect("atomic enrichment")
+}
+
+fn stored_derived_roles(fixture: &Fixture, match_id: i64) -> Vec<(i64, Option<String>)> {
+    fixture
+        .connection()
+        .prepare(
+            "SELECT discord_id, derived_role FROM match_participants
+              WHERE match_id = ?1 AND guild_id = ?2 ORDER BY discord_id",
+        )
+        .expect("prepare derived read")
+        .query_map(params![match_id, GUILD], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("query derived roles")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect derived roles")
+}
+
+#[test]
+fn test_enrichment_derives_played_roles_in_the_same_transaction() {
+    let fixture = Fixture::new();
+    let radiant: Vec<i64> = (0..5).map(|index| 4_100 + index).collect();
+    let dire: Vec<i64> = (0..5).map(|index| 4_200 + index).collect();
+    let all_ids = [radiant.clone(), dire.clone()].concat();
+    fixture.seed(&all_ids);
+    let match_id = fixture
+        .repository
+        .record_match_atomic(standard(&radiant, &dire, TeamSide::Radiant))
+        .expect("record match")
+        .match_id;
+
+    // New matches must get a played role without waiting for a backfill pass.
+    enrich_with_lanes(&fixture, match_id, &lane_participant_updates(&all_ids));
+
+    let roles = stored_derived_roles(&fixture, match_id);
+    let by_id: std::collections::BTreeMap<i64, Option<String>> = roles.into_iter().collect();
+    for base in [4_100_i64, 4_200] {
+        assert_eq!(by_id[&base], Some("1".to_owned()));
+        assert_eq!(by_id[&(base + 1)], Some("2".to_owned()));
+        assert_eq!(by_id[&(base + 2)], Some("3".to_owned()));
+        assert_eq!(by_id[&(base + 3)], Some("4".to_owned()));
+        assert_eq!(by_id[&(base + 4)], Some("5".to_owned()));
+    }
+}
+
+#[test]
+fn test_enrichment_leaves_roles_null_when_lanes_are_ambiguous() {
+    let fixture = Fixture::new();
+    let radiant: Vec<i64> = (0..5).map(|index| 4_300 + index).collect();
+    let dire: Vec<i64> = (0..5).map(|index| 4_400 + index).collect();
+    let all_ids = [radiant.clone(), dire.clone()].concat();
+    fixture.seed(&all_ids);
+    let match_id = fixture
+        .repository
+        .record_match_atomic(standard(&radiant, &dire, TeamSide::Radiant))
+        .expect("record match")
+        .match_id;
+
+    // Two mids on every side: unresolvable, so nothing is written rather than
+    // a guess being stored.
+    let mut updates = lane_participant_updates(&all_ids);
+    for update in &mut updates {
+        update.lane_role = Some(2);
+    }
+    enrich_with_lanes(&fixture, match_id, &updates);
+
+    assert!(
+        stored_derived_roles(&fixture, match_id)
+            .iter()
+            .all(|(_, role)| role.is_none())
+    );
 }

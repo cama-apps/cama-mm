@@ -246,6 +246,12 @@ pub trait DiscordTransport: Send + Sync {
         name: &str,
     ) -> Result<u64, String>;
 
+    /// Add one user to an existing public or private thread without posting a
+    /// mention solely to subscribe them.
+    async fn add_thread_member(&self, _thread_id: u64, _member_id: u64) -> Result<(), String> {
+        Err("Discord transport does not support thread membership".to_owned())
+    }
+
     /// Create a private thread and add the requested users to it.
     ///
     /// The default is an explicit failure.  Private Mafia conversations must

@@ -3,134 +3,15 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repository_root"
-readiness_manifest="$repository_root/rust/parity/cutover_readiness.tsv"
-compose_project_name=cama-mm
 
-if [ "${BOT_RUNTIME+x}" = x ]; then
-  selected_runtime=$BOT_RUNTIME
-else
-  selected_runtime=python
-fi
-
-case "$selected_runtime" in
-  python)
-    for argument in "$@"; do
-      case "$argument" in
-        up|start|restart|run|create)
-          cutover_marker="$repository_root/data/.cama-rust-cutover"
-          if [ -e "$cutover_marker" ]; then
-            marker_state=$(awk -F= '$1 == "state" { print substr($0, 7); exit }' "$cutover_marker")
-            previous_runtime=$(
-              awk -F= '$1 == "previous_runtime" { print substr($0, 18); exit }' \
-                "$cutover_marker"
-            )
-            previous_revision=$(
-              awk -F= '$1 == "previous_revision" { print substr($0, 19); exit }' \
-                "$cutover_marker"
-            )
-            if [ "${CAMA_DEPLOY_RECOVERY-}" != true ] || \
-              [ "$marker_state:$previous_runtime:$previous_revision" != \
-                "recovering:python:${GIT_SHA-}" ]
-            then
-              echo "Python runtime refused: the one-way Rust cutover marker exists" >&2
-              exit 65
-            fi
-          fi
-          ;;
-      esac
-    done
-    export BOT_RUNTIME=python
-    exec docker compose \
-      --project-name "$compose_project_name" \
-      --file docker-compose.yml \
-      "$@"
-    ;;
-  rust)
-    mutates_runtime=false
-    disposable_preflight=false
-    if [ "$#" -eq 10 ] && \
-      [ "$1" = run ] && \
-      [ "$2" = --rm ] && \
-      [ "$3" = --no-deps ] && \
-      [ "$4" = bot ] && \
-      [ "$5" = db-admit ] && \
-      [ "$6" = --db-path ] && \
-      [ "$8" = --source-db ] && \
-      [ "$9" = /app/data/cama_shuffle.db ] && \
-      [ "${10}" = --disposable-copy ]
-    then
-      case "$7" in
-        /app/data/backups/rust-preflight-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.db)
-          disposable_preflight=true
-          ;;
-      esac
-    fi
-    for argument in "$@"; do
-      case "$argument" in
-        up|start|restart|run|create) mutates_runtime=true ;;
-      esac
-    done
-    if [ "$mutates_runtime" = true ]; then
-      recovery_allowed=false
-      cutover_marker="$repository_root/data/.cama-rust-cutover"
-      if [ -e "$cutover_marker" ]; then
-        marker_state=$(awk -F= '$1 == "state" { print substr($0, 7); exit }' "$cutover_marker")
-        marker_revision=$(
-          awk -F= '$1 == "revision" { print substr($0, 10); exit }' "$cutover_marker"
-        )
-        marker_backup_ready=$(
-          awk -F= '$1 == "backup_ready" { print substr($0, 14); exit }' \
-            "$cutover_marker"
-        )
-        previous_runtime=$(
-          awk -F= '$1 == "previous_runtime" { print substr($0, 18); exit }' \
-            "$cutover_marker"
-        )
-        previous_revision=$(
-          awk -F= '$1 == "previous_revision" { print substr($0, 19); exit }' \
-            "$cutover_marker"
-        )
-        if [ "${CAMA_DEPLOY_RECOVERY-}" = true ] && \
-          [ "$marker_state:$previous_runtime:$previous_revision" = \
-            "recovering:rust:${GIT_SHA-}" ]
-        then
-          recovery_allowed=true
-        elif [ "$marker_state" != pending ] || \
-          { [ "$marker_backup_ready" != true ] && \
-            [ "$disposable_preflight" != true ]; } || \
-          [ -z "${GIT_SHA-}" ] || \
-          [ "$marker_revision" != "${GIT_SHA-}" ]
-        then
-          echo "Rust runtime mutation refused: cutover transaction is not backup-ready for this revision" >&2
-          exit 65
-        fi
-      fi
-      if [ "$recovery_allowed" != true ]; then
-        if [ "${RUST_CUTOVER_CANDIDATE-}" != true ]; then
-          echo "Rust runtime mutation refused: RUST_CUTOVER_CANDIDATE=true is required" >&2
-          exit 65
-        fi
-        if ! awk -F '\t' 'NR > 1 && $2 != "complete" { failed=1 } END { exit failed }' \
-          "$readiness_manifest"
-        then
-          echo "Rust runtime mutation refused: cutover_readiness.tsv still has open gates" >&2
-          exit 65
-        fi
-      fi
-    fi
-    export BOT_RUNTIME=rust
-    exec docker compose \
-      --project-name "$compose_project_name" \
-      --file docker-compose.yml \
-      --file docker-compose.rust.yml \
-      "$@"
-    ;;
-  "")
-    echo "BOT_RUNTIME is set but empty; expected python or rust" >&2
-    exit 64
-    ;;
-  *)
-    echo "invalid BOT_RUNTIME=$selected_runtime; expected python or rust" >&2
-    exit 64
-    ;;
+case "${BOT_RUNTIME-rust}" in
+  rust) ;;
+  "") echo "BOT_RUNTIME is empty; only rust is supported" >&2; exit 64 ;;
+  *) echo "BOT_RUNTIME=${BOT_RUNTIME} is unsupported; runtime is Rust-only" >&2; exit 64 ;;
 esac
+
+export BOT_RUNTIME=rust
+exec docker compose \
+  --project-name cama-mm \
+  --file docker-compose.yml \
+  "$@"

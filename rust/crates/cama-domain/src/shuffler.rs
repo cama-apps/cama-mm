@@ -765,6 +765,8 @@ impl BalancedShuffler {
                 .preferred_roles
                 .as_ref()
                 .is_some_and(|preferred| preferred.contains(assigned_role));
+            // Unclamped: jopacoin balances go negative and must stay ordered.
+            let base_value = base_value * player.role_factor_for(assigned_role);
             let effective_value = if on_role {
                 base_value
             } else {
@@ -2588,8 +2590,25 @@ mod tests {
         Some(roles.iter().map(|role| (*role).to_owned()).collect())
     }
 
+    /// Role-neutral by construction: an even record in every role yields a
+    /// role factor of exactly 1.0, keeping these fixtures focused on the
+    /// balance formula instead of the role-performance multiplier.
+    fn neutral_role_records()
+    -> std::collections::BTreeMap<String, crate::role_performance::RoleRecord> {
+        crate::team::ROLES
+            .iter()
+            .map(|role| {
+                (
+                    (*role).to_owned(),
+                    crate::role_performance::RoleRecord::new(5, 5),
+                )
+            })
+            .collect()
+    }
+
     fn player(name: impl Into<String>, value: i64, roles: &[&str]) -> Player {
         Player {
+            role_records: neutral_role_records(),
             mmr: Some(value),
             preferred_roles: role_list(roles),
             ..Player::new(name)
