@@ -2543,40 +2543,88 @@ impl MatchRepository {
     /// busy timeout.
     /// Matches that were enriched before OpenDota finished parsing the replay.
     ///
-    /// OpenDota serves basic match data immediately but only fills `lane_role`
-    /// and the per-minute series once the replay is parsed, which lands minutes
-    /// to hours later. Enrichment runs soon after a match is recorded, so it
-    /// routinely stores a pre-parse snapshot and never looks again - leaving
-    /// the position derivation permanently starved on data that does exist
-    /// upstream. Re-running enrichment for these picks up the parsed payload.
+    /// OpenDota serves basic match data immediately but fills `lane_role` and
+    /// the per-minute series only once the replay is parsed, minutes to hours
+    /// later. Enrichment runs soon after a match is recorded, so it routinely
+    /// stores a pre-parse snapshot and never looks again.
     ///
-    /// Ordered oldest first so a capped sweep makes steady progress rather
-    /// than revisiting the same recent matches.
+    /// `max_attempts` bounds how often a match is retried. Some matches can
+    /// never be completed - a participant with no linked Steam account is
+    /// never matched by OpenDota, and a replay OpenDota never parses has
+    /// nothing to fetch - so selecting purely on "still missing data" would
+    /// hand back the same oldest rows forever. Counting attempts lets a sweep
+    /// make real progress and lets a caller retry later by raising the bound.
+    ///
+    /// Ordered by attempts then id, so untried matches come first.
     pub fn matches_missing_parsed_stats(
         &self,
         guild_id: Option<i64>,
         limit: usize,
+        max_attempts: i64,
     ) -> Result<Vec<(i64, i64)>, CoreRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT m.match_id, m.valve_match_id
                FROM matches AS m
               WHERE m.guild_id = ?1 AND m.valve_match_id IS NOT NULL
+                AND m.parsed_refresh_attempts < ?3
                 AND EXISTS (
                     SELECT 1 FROM match_participants AS mp
                      WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
                        AND (mp.lane_role IS NULL OR mp.gold_at_10 IS NULL)
                 )
-              ORDER BY m.match_id ASC
+              ORDER BY m.parsed_refresh_attempts ASC, m.match_id ASC
               LIMIT ?2",
         )?;
         let rows = statement
             .query_map(
-                params![Self::normalize_guild_id(guild_id), limit as i64],
+                params![
+                    Self::normalize_guild_id(guild_id),
+                    limit as i64,
+                    max_attempts
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Record that a refresh was attempted, whether or not it yielded data.
+    ///
+    /// Counted on attempt rather than on failure: a re-enrich that succeeds
+    /// but still leaves an unmatched participant NULL would otherwise be
+    /// selected again forever.
+    pub fn mark_parsed_refresh_attempt(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<(), CoreRepositoryError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE matches SET parsed_refresh_attempts = parsed_refresh_attempts + 1
+              WHERE match_id = ?1 AND guild_id = ?2",
+            params![match_id, Self::normalize_guild_id(guild_id)],
+        )?;
+        Ok(())
+    }
+
+    /// The stored enrichment provenance for a match, so a refresh can put it
+    /// back rather than relabelling an auto-discovered match as manual.
+    pub fn enrichment_provenance(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<(Option<String>, Option<f64>), CoreRepositoryError> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                "SELECT enrichment_source, enrichment_confidence FROM matches
+                  WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, Self::normalize_guild_id(guild_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.unwrap_or((None, None)))
     }
 
     pub fn backfill_derived_roles(
@@ -5744,7 +5792,7 @@ mod tests {
 
         let candidates = fixture
             .matches
-            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
             .expect("query");
         assert_eq!(candidates, vec![(stale, 222)]);
     }
@@ -5767,9 +5815,62 @@ mod tests {
         assert!(
             fixture
                 .matches
-                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
                 .expect("query")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_stops_returning_an_exhausted_match() {
+        let fixture = Fixture::new();
+        let stale = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "UPDATE matches SET valve_match_id = 777 WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("link");
+        connection
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("clear");
+        drop(connection);
+
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .expect("first sweep")
+                .len(),
+            1
+        );
+        // A re-enrich that leaves an unmatched participant NULL must not pin
+        // the sweep on the same row forever.
+        fixture
+            .matches
+            .mark_parsed_refresh_attempt(stale, Some(TEST_GUILD_ID))
+            .expect("mark");
+        assert!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .expect("second sweep")
+                .is_empty()
+        );
+        // Raising the bound retries it, which is how a later sweep picks up
+        // replays OpenDota has parsed since.
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 2)
+                .expect("retry sweep")
+                .len(),
+            1
         );
     }
 
@@ -5794,7 +5895,7 @@ mod tests {
         }
         let capped = fixture
             .matches
-            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2)
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2, 1)
             .expect("query");
         assert_eq!(capped.len(), 2);
         // Oldest first, so a repeated sweep works through the backlog rather
@@ -9057,7 +9158,7 @@ mod tests {
             guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool',
             pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0,
             win_reward_jc INTEGER, jc_changes TEXT,
-            lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open','lowskill'))
+            lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open','lowskill')), parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX uq_matches_guild_pending_match ON matches(guild_id,pending_match_id) WHERE pending_match_id IS NOT NULL;
         CREATE TABLE match_participants (
