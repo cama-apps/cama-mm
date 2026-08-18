@@ -1346,8 +1346,75 @@ fn position_records(entries: [(u32, u32); 5]) -> BTreeMap<String, (u32, u32)> {
 fn test_position_radar_renders_a_five_spoke_chart() {
     let records = position_records([(6, 4), (3, 7), (5, 5), (8, 2), (1, 9)]);
     let image = draw_position_winrate_radar(&records, "Roles: Player", 3);
-    let decoded = assert_rgba_png(&image, Some((400, 400)));
-    assert!(decoded.contains(DISCORD_ACCENT));
+    assert_rgba_png(&image, Some((400, 400)));
+}
+
+#[test]
+fn test_position_radar_damps_a_thin_sample_instead_of_spiking_on_it() {
+    // A 2-0 record is the pathological case: drawn raw it reaches the outer
+    // ring and dominates the shape on almost no evidence.
+    let thin = position_records([(10, 10), (10, 10), (10, 10), (2, 0), (10, 10)]);
+    let matched = position_records([(10, 10), (10, 10), (10, 10), (20, 0), (10, 10)]);
+    let flat = position_records([(10, 10); 5]);
+
+    let thin_image = draw_position_winrate_radar(&thin, "R", 3);
+    let matched_image = draw_position_winrate_radar(&matched, "R", 3);
+    let flat_image = draw_position_winrate_radar(&flat, "R", 3);
+
+    // It must still move off the break-even shape...
+    assert_ne!(thin_image.get_ref(), flat_image.get_ref());
+    // ...but nowhere near as far as the same rate backed by real evidence.
+    assert_ne!(thin_image.get_ref(), matched_image.get_ref());
+}
+
+#[test]
+fn test_position_radar_places_an_unplayed_position_at_break_even() {
+    // Zero games must not read as "never wins": an unplayed spoke sits on the
+    // 50% ring, where a 0-for-20 spoke would sit at the origin.
+    let unplayed = position_records([(10, 10), (10, 10), (10, 10), (10, 10), (0, 0)]);
+    let never_won = position_records([(10, 10), (10, 10), (10, 10), (10, 10), (0, 20)]);
+    assert_ne!(
+        draw_position_winrate_radar(&unplayed, "R", 3).get_ref(),
+        draw_position_winrate_radar(&never_won, "R", 3).get_ref()
+    );
+}
+
+#[test]
+fn test_performance_colour_runs_red_through_neutral_to_green() {
+    // Shrinkage means a plotted rate never quite reaches 0 or 100, so the
+    // gradient is checked at the function rather than hunting exact pixels.
+    let neutral = performance_colour(50.0);
+    assert_eq!(neutral, DISCORD_GREY);
+
+    let winning = performance_colour(90.0);
+    let losing = performance_colour(10.0);
+    assert!(
+        winning.0[1] > winning.0[0],
+        "above even odds should read green, got {winning:?}"
+    );
+    assert!(
+        losing.0[0] > losing.0[1],
+        "below even odds should read red, got {losing:?}"
+    );
+    // Further from even odds means further from neutral.
+    assert!(performance_colour(100.0).0[1] >= winning.0[1]);
+    assert!(performance_colour(0.0).0[0] >= losing.0[0]);
+}
+
+#[test]
+fn test_shrunk_win_rate_pulls_thin_samples_toward_even_odds() {
+    assert_eq!(shrunk_win_rate(0, 0), None);
+    // 2-0 is 100% raw but only 70% once the missing evidence is priced in.
+    let thin = shrunk_win_rate(2, 0).expect("played");
+    assert!((thin - 70.0).abs() < 1e-9, "got {thin}");
+    // The same rate over 20 games barely moves.
+    let solid = shrunk_win_rate(20, 0).expect("played");
+    assert!(solid > 85.0, "got {solid}");
+    // An even record stays exactly even at any volume.
+    for games in [2_u32, 10, 100] {
+        let even = shrunk_win_rate(games, games).expect("played");
+        assert!((even - 50.0).abs() < 1e-9, "got {even}");
+    }
 }
 
 #[test]
@@ -1356,7 +1423,8 @@ fn test_position_radar_reports_no_data_when_nothing_is_played() {
     let image = draw_position_winrate_radar(&empty, "Roles: Player", 3);
     let decoded = assert_rgba_png(&image, Some((400, 400)));
     // The rings still draw, but no data polygon is filled.
-    assert!(!decoded.contains(DISCORD_ACCENT));
+    assert!(!decoded.contains(DISCORD_GREEN));
+    assert!(!decoded.contains(DISCORD_RED));
 }
 
 #[test]
