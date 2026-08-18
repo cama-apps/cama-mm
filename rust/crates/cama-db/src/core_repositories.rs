@@ -2541,6 +2541,44 @@ impl MatchRepository {
     /// at once would be gigabytes on a busy league, and one long
     /// `BEGIN IMMEDIATE` would lock every other writer out past the five-second
     /// busy timeout.
+    /// Matches that were enriched before OpenDota finished parsing the replay.
+    ///
+    /// OpenDota serves basic match data immediately but only fills `lane_role`
+    /// and the per-minute series once the replay is parsed, which lands minutes
+    /// to hours later. Enrichment runs soon after a match is recorded, so it
+    /// routinely stores a pre-parse snapshot and never looks again - leaving
+    /// the position derivation permanently starved on data that does exist
+    /// upstream. Re-running enrichment for these picks up the parsed payload.
+    ///
+    /// Ordered oldest first so a capped sweep makes steady progress rather
+    /// than revisiting the same recent matches.
+    pub fn matches_missing_parsed_stats(
+        &self,
+        guild_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, i64)>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT m.match_id, m.valve_match_id
+               FROM matches AS m
+              WHERE m.guild_id = ?1 AND m.valve_match_id IS NOT NULL
+                AND EXISTS (
+                    SELECT 1 FROM match_participants AS mp
+                     WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
+                       AND (mp.lane_role IS NULL OR mp.gold_at_10 IS NULL)
+                )
+              ORDER BY m.match_id ASC
+              LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                params![Self::normalize_guild_id(guild_id), limit as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn backfill_derived_roles(
         &self,
         guild_id: Option<i64>,
@@ -5601,7 +5639,13 @@ mod tests {
         let team1: Vec<i64> = (0..5).map(|index| 7_100 + index).collect();
         let team2: Vec<i64> = (0..5).map(|index| 7_200 + index).collect();
         for discord_id in team1.iter().chain(&team2) {
-            fixture.add_player(*discord_id, TEST_GUILD_ID);
+            // Tolerated so a test can seed more than one match from the same
+            // roster; the fixture reuses a fixed set of ids.
+            let _ = fixture.players.add(&NewPlayer::new(
+                *discord_id,
+                format!("Player {discord_id}"),
+                Some(TEST_GUILD_ID),
+            ));
         }
         let match_id = fixture
             .matches
@@ -5666,6 +5710,97 @@ mod tests {
         (9, 3, 1_700),
         (10, 1, 1_400),
     ];
+
+    #[test]
+    fn test_matches_missing_parsed_stats_selects_only_stale_enrichments() {
+        let fixture = Fixture::new();
+        let parsed = seed_enriched_match(&fixture, STANDARD_LANES);
+        // A match enriched before OpenDota parsed the replay: linked to a
+        // Valve id, but with no lane or farm data on its participants.
+        let stale = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        for (match_id, valve) in [(parsed, 111_i64), (stale, 222)] {
+            connection
+                .execute(
+                    "UPDATE matches SET valve_match_id = ?1 WHERE match_id = ?2",
+                    params![valve, match_id],
+                )
+                .expect("link valve id");
+        }
+        connection
+            .execute(
+                "UPDATE match_participants SET gold_at_10 = 3000 WHERE match_id = ?1",
+                params![parsed],
+            )
+            .expect("parsed has farm data");
+        connection
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("stale has neither");
+        drop(connection);
+
+        let candidates = fixture
+            .matches
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+            .expect("query");
+        assert_eq!(candidates, vec![(stale, 222)]);
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_ignores_matches_with_no_valve_id() {
+        let fixture = Fixture::new();
+        // Never linked to a Dota match, so there is nothing to re-fetch. These
+        // belong to discovery, not to the refresh sweep.
+        let unlinked = seed_enriched_match(&fixture, STANDARD_LANES);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![unlinked],
+            )
+            .expect("clear stats");
+
+        assert!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_respects_its_cap() {
+        let fixture = Fixture::new();
+        for index in 0..5 {
+            let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+            let connection = fixture.connection();
+            connection
+                .execute(
+                    "UPDATE matches SET valve_match_id = ?1 WHERE match_id = ?2",
+                    params![900 + index, match_id],
+                )
+                .expect("link");
+            connection
+                .execute(
+                    "UPDATE match_participants SET lane_role = NULL WHERE match_id = ?1",
+                    params![match_id],
+                )
+                .expect("clear");
+        }
+        let capped = fixture
+            .matches
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2)
+            .expect("query");
+        assert_eq!(capped.len(), 2);
+        // Oldest first, so a repeated sweep works through the backlog rather
+        // than revisiting the same recent matches.
+        assert!(capped[0].0 < capped[1].0);
+    }
 
     #[test]
     fn test_backfill_derives_roles_from_archived_opendota_payloads() {
