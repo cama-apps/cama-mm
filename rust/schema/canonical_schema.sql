@@ -838,7 +838,7 @@ CREATE TABLE match_participants (
                 discord_id INTEGER,
                 team_number INTEGER,
                 won BOOLEAN,
-                side TEXT, hero_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER, last_hits INTEGER, denies INTEGER, gpm INTEGER, xpm INTEGER, hero_damage INTEGER, tower_damage INTEGER, net_worth INTEGER, hero_healing INTEGER, lane_role INTEGER, lane_efficiency INTEGER, towers_killed INTEGER, roshans_killed INTEGER, teamfight_participation REAL, obs_placed INTEGER, sen_placed INTEGER, camps_stacked INTEGER, rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL, fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0, bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT, gold_at_10 INTEGER, derived_role TEXT,
+                side TEXT, hero_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER, last_hits INTEGER, denies INTEGER, gpm INTEGER, xpm INTEGER, hero_damage INTEGER, tower_damage INTEGER, net_worth INTEGER, hero_healing INTEGER, lane_role INTEGER, lane_efficiency INTEGER, towers_killed INTEGER, roshans_killed INTEGER, teamfight_participation REAL, obs_placed INTEGER, sen_placed INTEGER, camps_stacked INTEGER, rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL, fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0, bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT, gold_at_10 INTEGER, derived_role TEXT, last_hits_at_10 INTEGER,
                 FOREIGN KEY (match_id) REFERENCES matches(match_id),
                 PRIMARY KEY (match_id, discord_id)
             );
@@ -864,7 +864,7 @@ CREATE TABLE matches (
                 match_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 dotabuff_match_id TEXT,
                 notes TEXT
-            , valve_match_id INTEGER, duration_seconds INTEGER, radiant_score INTEGER, dire_score INTEGER, game_mode INTEGER, enrichment_data TEXT, enrichment_source TEXT, enrichment_confidence REAL, lobby_type TEXT DEFAULT 'shuffle', balancing_rating_system TEXT DEFAULT 'glicko', guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool', pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0, win_reward_jc INTEGER, jc_changes TEXT, lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open', 'lowskill')));
+            , valve_match_id INTEGER, duration_seconds INTEGER, radiant_score INTEGER, dire_score INTEGER, game_mode INTEGER, enrichment_data TEXT, enrichment_source TEXT, enrichment_confidence REAL, lobby_type TEXT DEFAULT 'shuffle', balancing_rating_system TEXT DEFAULT 'glicko', guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool', pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0, win_reward_jc INTEGER, jc_changes TEXT, lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open', 'lowskill')), parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0);
 
 -- table: moderation_events
 CREATE TABLE moderation_events (

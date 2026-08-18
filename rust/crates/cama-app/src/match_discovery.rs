@@ -119,6 +119,12 @@ pub struct EnrichedParticipantStats {
     /// this point separates cores from supports far more cleanly than final
     /// net worth, which drifts as supports farm up and cores get shut down.
     pub gold_at_10: Option<i64>,
+    /// Creep score at ten minutes, from OpenDota's `lh_t` series. Prefer
+    /// this over `gold_at_10` for splitting lane-mates into core/support —
+    /// last hits move only from creeps and denies, so an early kill, bounty
+    /// rune, or tower assist can't inflate a support's reading the way it
+    /// can with gold.
+    pub last_hits_at_10: Option<i64>,
     pub towers_killed: Option<i64>,
     pub roshans_killed: Option<i64>,
     pub teamfight_participation: Option<f64>,
@@ -394,6 +400,17 @@ impl EnrichmentSource {
         match self {
             Self::Manual => "manual",
             Self::Auto => "auto",
+        }
+    }
+
+    /// Recover the source from its stored spelling, so a refresh can preserve
+    /// a match's provenance instead of relabelling it.
+    #[must_use]
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            _ => None,
         }
     }
 }
@@ -1264,6 +1281,7 @@ impl EnrichmentWritePort for MatchRecordingRepository {
                 lane_role: update.stats.lane_role,
                 lane_efficiency: update.stats.lane_efficiency,
                 gold_at_10: update.stats.gold_at_10,
+                last_hits_at_10: update.stats.last_hits_at_10,
                 towers_killed: update.stats.towers_killed,
                 roshans_killed: update.stats.roshans_killed,
                 teamfight_participation: update.stats.teamfight_participation,

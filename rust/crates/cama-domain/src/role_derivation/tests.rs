@@ -64,7 +64,7 @@ fn test_unparsed_replay_is_rejected_rather_than_guessed() {
     assert_eq!(derive_positions(&team), Err(DerivationFailure::Unparsed));
 
     let mut team = standard_team();
-    team[2].gold_at_10 = None;
+    team[2].last_hits_at_10 = None;
     assert_eq!(derive_positions(&team), Err(DerivationFailure::Unparsed));
 }
 
@@ -116,8 +116,58 @@ fn test_two_roamers_is_rejected() {
 #[test]
 fn test_identical_farm_in_a_lane_is_rejected_rather_than_coin_flipped() {
     let mut team = standard_team();
-    team[0].gold_at_10 = Some(2_500);
-    team[4].gold_at_10 = Some(2_500);
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    assert_eq!(
+        derive_positions(&team),
+        Err(DerivationFailure::TiedFarmPriority)
+    );
+}
+
+#[test]
+fn test_ward_count_breaks_a_farm_tie_toward_the_higher_warder_as_support() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(2); // fewer wards -> carry
+    team[4] = team[4].with_wards(14); // more wards -> hard support
+
+    assert_eq!(derive_positions(&team), Ok(["1", "2", "3", "4", "5"]));
+}
+
+#[test]
+fn test_ward_count_tie_break_is_symmetric_in_input_order() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(14); // more wards -> hard support
+    team[4] = team[4].with_wards(2); // fewer wards -> carry
+
+    assert_eq!(derive_positions(&team), Ok(["5", "2", "3", "4", "1"]));
+}
+
+#[test]
+fn test_ward_tie_after_a_farm_tie_is_still_rejected() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(6);
+    team[4] = team[4].with_wards(6);
+
+    assert_eq!(
+        derive_positions(&team),
+        Err(DerivationFailure::TiedFarmAndWardPriority)
+    );
+}
+
+#[test]
+fn test_missing_ward_data_on_a_farm_tie_is_rejected_not_guessed() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(14);
+    // team[4].wards stays None: only one side of the tie has ward data.
+
     assert_eq!(
         derive_positions(&team),
         Err(DerivationFailure::TiedFarmPriority)
@@ -144,14 +194,14 @@ fn test_every_accepted_result_is_a_permutation_of_one_through_five() {
 }
 
 #[test]
-fn test_gold_at_ten_reads_the_tenth_minute_sample() {
-    let series: Vec<i64> = (0..=15).map(|minute| minute * 100).collect();
-    assert_eq!(gold_at_ten(&series), Some(1_000));
+fn test_last_hits_at_ten_reads_the_tenth_minute_sample() {
+    let series: Vec<i64> = (0..=15).map(|minute| minute * 4).collect();
+    assert_eq!(last_hits_at_ten(&series), Some(40));
 }
 
 #[test]
-fn test_gold_at_ten_is_absent_for_a_game_shorter_than_the_sample() {
-    let series: Vec<i64> = (0..8).map(|minute| minute * 100).collect();
-    assert_eq!(gold_at_ten(&series), None);
-    assert_eq!(gold_at_ten(&[]), None);
+fn test_last_hits_at_ten_is_absent_for_a_game_shorter_than_the_sample() {
+    let series: Vec<i64> = (0..8).map(|minute| minute * 4).collect();
+    assert_eq!(last_hits_at_ten(&series), None);
+    assert_eq!(last_hits_at_ten(&[]), None);
 }

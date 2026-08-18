@@ -378,7 +378,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 200+ op
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
   value adjustments, applied on top of the role win-rate factor
   (defaults: 0.95 and 100)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 550)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 610)
 - `ROLE_MATCHUP_DELTA_WEIGHT` - Weight applied to the lane matchup and role
   parity deltas when scoring teams (default: 0.18)
 - `EXCLUSION_PENALTY_WEIGHT` - Goodness penalty per excluded player (default: 80)

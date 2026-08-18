@@ -42,7 +42,7 @@ impl Default for TeamBalancingService {
             use_glicko: true,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 550.0,
+            off_role_flat_penalty: 610.0,
             role_matchup_delta_weight: 0.18,
         }
     }
@@ -289,6 +289,28 @@ mod tests {
                 .calculate_matchup_score(&swapped_team1, &team1, false, false)
                 .expect("roles are assigned"),
             100.0
+        );
+    }
+
+    #[test]
+    fn test_default_off_role_goodness_adds_610_per_player() {
+        let (team1, _) = fixture_teams();
+        let mut team1_with_swapped_cores = team1.clone();
+        team1_with_swapped_cores.role_assignments =
+            Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
+        let service = TeamBalancingService {
+            use_glicko: false,
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            ..TeamBalancingService::default()
+        };
+
+        assert_eq!(
+            service
+                .calculate_matchup_score(&team1_with_swapped_cores, &team1, false, false)
+                .expect("roles are assigned"),
+            1_220.0
         );
     }
 

@@ -3,14 +3,28 @@
 //!
 //! Valve's API does not report position, so every site that shows one derives
 //! it. OpenDota gives us the *lane* (itself inferred from replay positioning);
-//! splitting each lane into core and support is ours to do, and gold at ten
-//! minutes is the cleanest signal for it — by the end of a game a support may
-//! have farmed up and a shut-down carry may be poor.
+//! splitting each lane into core and support is ours to do. Creep score at
+//! ten minutes is the signal for it — by the end of a game a support may have
+//! farmed up and a shut-down carry may be poor, so a fixed-time snapshot is
+//! needed either way. Last hits are used rather than gold at the same minute
+//! because last hits move only from creeps and denies: an early kill, bounty
+//! rune, or tower assist can inflate a support's ten-minute gold without
+//! reflecting who actually had lane priority, and creep score has no such
+//! failure mode.
 //!
 //! The derivation is deliberately strict: anything that does not resolve to a
 //! clean permutation of 1-5 returns [`None`]. A missing role reads as "no
 //! sample", which is recoverable; a wrong role silently corrupts a win rate
 //! forever.
+//!
+//! When two lane-mates have identical creep score at ten minutes, ward count
+//! (`obs_placed + sen_placed`) breaks the tie: it is a role trait that holds
+//! across the whole game rather than a farm reading with a right minute to
+//! take, so the full-game total is used directly, no time-slicing needed.
+//! This is a fallback, not a blend — wards are consulted only when farm
+//! carries no information at all, never averaged against it, since a
+//! weighted score would need an arbitrary weight and could override a clean
+//! farm read for no principled reason.
 
 /// OpenDota `lane_role` values, as rendered by the match embeds.
 pub const LANE_ROAM: i64 = 0;
@@ -27,17 +41,29 @@ pub const FARM_PRIORITY_MINUTE: usize = 10;
 pub struct LaneStats {
     /// OpenDota's inferred lane. `None` when the replay was never parsed.
     pub lane_role: Option<i64>,
-    /// Total gold at [`FARM_PRIORITY_MINUTE`], from OpenDota's `gold_t` series.
-    pub gold_at_10: Option<i64>,
+    /// Creep score at [`FARM_PRIORITY_MINUTE`], from OpenDota's `lh_t` series.
+    pub last_hits_at_10: Option<i64>,
+    /// Full-game `obs_placed + sen_placed`, consulted only to break a tie on
+    /// `last_hits_at_10` within a lane. `None` when not (yet) captured —
+    /// this does not make the whole player `Unparsed`, since it is only
+    /// needed in the rare case a tie is actually hit.
+    pub wards: Option<i64>,
 }
 
 impl LaneStats {
     #[must_use]
-    pub const fn new(lane_role: i64, gold_at_10: i64) -> Self {
+    pub const fn new(lane_role: i64, last_hits_at_10: i64) -> Self {
         Self {
             lane_role: Some(lane_role),
-            gold_at_10: Some(gold_at_10),
+            last_hits_at_10: Some(last_hits_at_10),
+            wards: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_wards(mut self, wards: i64) -> Self {
+        self.wards = Some(wards);
+        self
     }
 }
 
@@ -47,14 +73,19 @@ impl LaneStats {
 /// many, which is what makes the accept rate actionable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DerivationFailure {
-    /// The replay was not parsed, so lane or gold data is missing.
+    /// The replay was not parsed, so lane or last-hits data is missing.
     Unparsed,
     /// Lane occupancy did not match a shape we can split confidently — a
     /// tri-lane, a lane swap, two mids, and so on.
     AmbiguousLanes,
-    /// Two players in the same lane had identical gold, so core and support
-    /// cannot be separated without guessing.
+    /// Two players in the same lane had identical creep score at ten
+    /// minutes, and at least one of them has no ward count to fall back on,
+    /// so core and support cannot be separated without guessing.
     TiedFarmPriority,
+    /// Two players in the same lane had identical creep score at ten
+    /// minutes *and* identical ward counts, so the fallback signal did not
+    /// resolve it either.
+    TiedFarmAndWardPriority,
 }
 
 /// Derive the five positions for one team, in the same order as `team`.
@@ -62,20 +93,22 @@ pub enum DerivationFailure {
 /// Two lane shapes are accepted, covering the standard modern configurations:
 ///
 /// - `2` safe, `1` mid, `2` off — the safe and off lanes each split into a
-///   core and a support by gold at ten minutes.
+///   core and a support by creep score at ten minutes.
 /// - `2` safe, `1` mid, `1` off, `1` roaming or jungling — the solo offlaner
 ///   is position 3 and the roamer is position 4.
 ///
 /// Anything else returns the reason it was rejected.
 pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], DerivationFailure> {
     let mut lanes = [0_i64; 5];
-    let mut gold = [0_i64; 5];
+    let mut last_hits = [0_i64; 5];
+    let mut wards = [None; 5];
     for (index, stats) in team.iter().enumerate() {
-        let (Some(lane), Some(player_gold)) = (stats.lane_role, stats.gold_at_10) else {
+        let (Some(lane), Some(player_last_hits)) = (stats.lane_role, stats.last_hits_at_10) else {
             return Err(DerivationFailure::Unparsed);
         };
         lanes[index] = lane;
-        gold[index] = player_gold;
+        last_hits[index] = player_last_hits;
+        wards[index] = stats.wards;
     }
 
     let indices_in =
@@ -95,13 +128,13 @@ pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], Deri
     positions[mid[0]] = "2";
 
     // Safe lane: the farmed player is the carry, their partner the hard support.
-    let (carry, hard_support) = split_by_farm(&safe, &gold)?;
+    let (carry, hard_support) = split_by_farm(&safe, &last_hits, &wards)?;
     positions[carry] = "1";
     positions[hard_support] = "5";
 
     match (off.len(), roaming.len()) {
         (2, 0) => {
-            let (offlaner, soft_support) = split_by_farm(&off, &gold)?;
+            let (offlaner, soft_support) = split_by_farm(&off, &last_hits, &wards)?;
             positions[offlaner] = "3";
             positions[soft_support] = "4";
         }
@@ -118,23 +151,40 @@ pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], Deri
     Ok(positions)
 }
 
-/// Split a two-player lane into (higher gold, lower gold).
-fn split_by_farm(lane: &[usize], gold: &[i64; 5]) -> Result<(usize, usize), DerivationFailure> {
+/// Split a two-player lane into (core, support): the higher-last-hits player
+/// first. A tie falls back to ward count — the higher-ward player is the
+/// support — since ward-buying is a role trait that holds all game, unlike
+/// farm, which needs a specific minute to be read at. A further tie (or
+/// missing ward data to break the first one) still fails rather than guess.
+fn split_by_farm(
+    lane: &[usize],
+    last_hits: &[i64; 5],
+    wards: &[Option<i64>; 5],
+) -> Result<(usize, usize), DerivationFailure> {
     let (first, second) = (lane[0], lane[1]);
-    match gold[first].cmp(&gold[second]) {
-        std::cmp::Ordering::Greater => Ok((first, second)),
-        std::cmp::Ordering::Less => Ok((second, first)),
-        std::cmp::Ordering::Equal => Err(DerivationFailure::TiedFarmPriority),
+    match last_hits[first].cmp(&last_hits[second]) {
+        std::cmp::Ordering::Greater => return Ok((first, second)),
+        std::cmp::Ordering::Less => return Ok((second, first)),
+        std::cmp::Ordering::Equal => {}
+    }
+    let (Some(first_wards), Some(second_wards)) = (wards[first], wards[second]) else {
+        return Err(DerivationFailure::TiedFarmPriority);
+    };
+    match first_wards.cmp(&second_wards) {
+        std::cmp::Ordering::Greater => Ok((second, first)),
+        std::cmp::Ordering::Less => Ok((first, second)),
+        std::cmp::Ordering::Equal => Err(DerivationFailure::TiedFarmAndWardPriority),
     }
 }
 
-/// Pull gold at [`FARM_PRIORITY_MINUTE`] out of OpenDota's `gold_t` series.
+/// Pull creep score at [`FARM_PRIORITY_MINUTE`] out of OpenDota's `lh_t`
+/// series.
 ///
 /// A series that ends before ten minutes means the game was shorter than the
 /// sample point, so there is no farm-priority reading to take.
 #[must_use]
-pub fn gold_at_ten(gold_series: &[i64]) -> Option<i64> {
-    gold_series.get(FARM_PRIORITY_MINUTE).copied()
+pub fn last_hits_at_ten(last_hits_series: &[i64]) -> Option<i64> {
+    last_hits_series.get(FARM_PRIORITY_MINUTE).copied()
 }
 
 #[cfg(test)]

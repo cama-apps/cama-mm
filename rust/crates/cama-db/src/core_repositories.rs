@@ -1910,6 +1910,10 @@ pub struct RoleCoverage {
     pub participants: i64,
     pub with_derived_role: i64,
     pub with_gold_at_10: i64,
+    /// Participants with `last_hits_at_10` populated — the metric that
+    /// actually feeds [`derive_positions`]. `with_gold_at_10` is kept for
+    /// visibility into the still-captured but no-longer-consumed column.
+    pub with_last_hits_at_10: i64,
     pub matches_seen: i64,
     /// Distinct (player, role) pairs that have reached the minimum sample, so
     /// the factor can lift them off the floor.
@@ -1924,14 +1928,17 @@ pub struct RoleBackfillReport {
     pub matches_scanned: u64,
     /// Per match: the stored payload was not valid JSON.
     pub unreadable_payloads: u64,
-    /// Per team, so these four reconcile against `matches_scanned * 2`.
+    /// Per team, so these five reconcile against `matches_scanned * 2`.
     pub teams_derived: u64,
     pub unparsed_teams: u64,
     pub ambiguous_lanes: u64,
     pub incomplete_teams: u64,
     pub tied_farm_priority: u64,
+    /// A farm tie that the ward-count fallback also could not resolve.
+    pub tied_farm_and_ward_priority: u64,
     /// Per participant.
     pub gold_samples_written: u64,
+    pub last_hits_samples_written: u64,
 }
 
 /// Derive and store one match's positions inside `transaction`.
@@ -1958,19 +1965,29 @@ fn backfill_one_match(
         return Ok(());
     };
     let gold_by_hero = gold_at_ten_by_hero(&value);
+    let last_hits_by_hero = last_hits_at_ten_by_hero(&value);
 
-    let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
+    // (discord_id, team_number, hero_id, lane_role, obs_placed, sen_placed)
+    type BackfillParticipantRow = (i64, i64, i64, Option<i64>, Option<i64>, Option<i64>);
+    let participants: Vec<BackfillParticipantRow> = transaction
         .prepare(
-            "SELECT discord_id, team_number, hero_id, lane_role
+            "SELECT discord_id, team_number, hero_id, lane_role, obs_placed, sen_placed
                FROM match_participants
               WHERE match_id = ?1 AND guild_id = ?2 AND hero_id IS NOT NULL",
         )?
         .query_map(params![match_id, guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (discord_id, _, hero_id, _) in &participants {
+    for (discord_id, _, hero_id, ..) in &participants {
         if let Some(gold) = gold_by_hero.get(hero_id) {
             transaction.execute(
                 "UPDATE match_participants SET gold_at_10 = ?1
@@ -1979,22 +1996,31 @@ fn backfill_one_match(
             )?;
             report.gold_samples_written += 1;
         }
+        if let Some(last_hits) = last_hits_by_hero.get(hero_id) {
+            transaction.execute(
+                "UPDATE match_participants SET last_hits_at_10 = ?1
+                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![last_hits, match_id, discord_id, guild_id],
+            )?;
+            report.last_hits_samples_written += 1;
+        }
     }
 
     for team_number in [1_i64, 2] {
-        let team: Vec<&(i64, i64, i64, Option<i64>)> = participants
+        let team: Vec<&BackfillParticipantRow> = participants
             .iter()
-            .filter(|(_, number, _, _)| *number == team_number)
+            .filter(|(_, number, ..)| *number == team_number)
             .collect();
         if team.len() != 5 {
             report.incomplete_teams += 1;
             continue;
         }
         let stats: [LaneStats; 5] = std::array::from_fn(|index| {
-            let (_, _, hero_id, lane_role) = team[index];
+            let (_, _, hero_id, lane_role, obs_placed, sen_placed) = team[index];
             LaneStats {
                 lane_role: *lane_role,
-                gold_at_10: gold_by_hero.get(hero_id).copied(),
+                last_hits_at_10: last_hits_by_hero.get(hero_id).copied(),
+                wards: ward_total(*obs_placed, *sen_placed),
             }
         });
         let derived = derive_positions(&stats);
@@ -2003,8 +2029,11 @@ fn backfill_one_match(
             Err(DerivationFailure::Unparsed) => report.unparsed_teams += 1,
             Err(DerivationFailure::AmbiguousLanes) => report.ambiguous_lanes += 1,
             Err(DerivationFailure::TiedFarmPriority) => report.tied_farm_priority += 1,
+            Err(DerivationFailure::TiedFarmAndWardPriority) => {
+                report.tied_farm_and_ward_priority += 1;
+            }
         }
-        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+        for (index, (discord_id, ..)) in team.iter().enumerate() {
             // On failure the column is cleared, not left alone: a stale value
             // from a looser derivation would keep feeding role records forever.
             let role = derived.as_ref().ok().map(|positions| positions[index]);
@@ -2049,6 +2078,54 @@ fn gold_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
         by_hero.remove(&hero_id);
     }
     by_hero
+}
+
+/// Map hero id to that player's creep score at ten minutes, from an archived
+/// OpenDota match payload. Mirrors [`gold_at_ten_by_hero`], reading `lh_t`
+/// instead of `gold_t` — this is what actually feeds [`derive_positions`];
+/// `gold_at_ten_by_hero` is kept only to keep populating the stored
+/// `gold_at_10` column for its own sake.
+fn last_hits_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
+    let Some(players) = payload.get("players").and_then(serde_json::Value::as_array) else {
+        return BTreeMap::new();
+    };
+    let mut by_hero: BTreeMap<i64, i64> = BTreeMap::new();
+    let mut duplicated = Vec::new();
+    for player in players {
+        let Some(hero_id) = player.get("hero_id").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let Some(last_hits) = player
+            .get("lh_t")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if by_hero.insert(hero_id, last_hits).is_some() {
+            duplicated.push(hero_id);
+        }
+    }
+    // A duplicated hero would make the join ambiguous; drop those rather than
+    // attribute one player's farm to another.
+    for hero_id in duplicated {
+        by_hero.remove(&hero_id);
+    }
+    by_hero
+}
+
+/// `obs_placed + sen_placed`, or `None` if neither was ever captured — as
+/// opposed to `Some(0)`, which would misreport "captured as zero" for a row
+/// that simply predates ward tracking. Unlike `gold_at_10`/`last_hits_at_10`,
+/// wards are read from the live `match_participants` row rather than the
+/// archived payload: they were already written by the original enrichment,
+/// well before role derivation existed.
+fn ward_total(obs_placed: Option<i64>, sen_placed: Option<i64>) -> Option<i64> {
+    match (obs_placed, sen_placed) {
+        (None, None) => None,
+        (obs, sen) => Some(obs.unwrap_or(0) + sen.unwrap_or(0)),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2541,6 +2618,92 @@ impl MatchRepository {
     /// at once would be gigabytes on a busy league, and one long
     /// `BEGIN IMMEDIATE` would lock every other writer out past the five-second
     /// busy timeout.
+    /// Matches that were enriched before OpenDota finished parsing the replay.
+    ///
+    /// OpenDota serves basic match data immediately but fills `lane_role` and
+    /// the per-minute series only once the replay is parsed, minutes to hours
+    /// later. Enrichment runs soon after a match is recorded, so it routinely
+    /// stores a pre-parse snapshot and never looks again.
+    ///
+    /// `max_attempts` bounds how often a match is retried. Some matches can
+    /// never be completed - a participant with no linked Steam account is
+    /// never matched by OpenDota, and a replay OpenDota never parses has
+    /// nothing to fetch - so selecting purely on "still missing data" would
+    /// hand back the same oldest rows forever. Counting attempts lets a sweep
+    /// make real progress and lets a caller retry later by raising the bound.
+    ///
+    /// Ordered by attempts then id, so untried matches come first.
+    pub fn matches_missing_parsed_stats(
+        &self,
+        guild_id: Option<i64>,
+        limit: usize,
+        max_attempts: i64,
+    ) -> Result<Vec<(i64, i64)>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT m.match_id, m.valve_match_id
+               FROM matches AS m
+              WHERE m.guild_id = ?1 AND m.valve_match_id IS NOT NULL
+                AND m.parsed_refresh_attempts < ?3
+                AND EXISTS (
+                    SELECT 1 FROM match_participants AS mp
+                     WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
+                       AND (mp.lane_role IS NULL OR mp.gold_at_10 IS NULL)
+                )
+              ORDER BY m.parsed_refresh_attempts ASC, m.match_id ASC
+              LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    Self::normalize_guild_id(guild_id),
+                    limit as i64,
+                    max_attempts
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record that a refresh was attempted, whether or not it yielded data.
+    ///
+    /// Counted on attempt rather than on failure: a re-enrich that succeeds
+    /// but still leaves an unmatched participant NULL would otherwise be
+    /// selected again forever.
+    pub fn mark_parsed_refresh_attempt(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<(), CoreRepositoryError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE matches SET parsed_refresh_attempts = parsed_refresh_attempts + 1
+              WHERE match_id = ?1 AND guild_id = ?2",
+            params![match_id, Self::normalize_guild_id(guild_id)],
+        )?;
+        Ok(())
+    }
+
+    /// The stored enrichment provenance for a match, so a refresh can put it
+    /// back rather than relabelling an auto-discovered match as manual.
+    pub fn enrichment_provenance(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<(Option<String>, Option<f64>), CoreRepositoryError> {
+        let connection = self.connection()?;
+        let row = connection
+            .query_row(
+                "SELECT enrichment_source, enrichment_confidence FROM matches
+                  WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, Self::normalize_guild_id(guild_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.unwrap_or((None, None)))
+    }
+
     pub fn backfill_derived_roles(
         &self,
         guild_id: Option<i64>,
@@ -2578,22 +2741,25 @@ impl MatchRepository {
     ) -> Result<RoleCoverage, CoreRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let connection = self.connection()?;
-        let (participants, with_role, with_gold, enriched_matches) = connection.query_row(
-            "SELECT COUNT(*),
+        let (participants, with_role, with_gold, with_last_hits, enriched_matches) = connection
+            .query_row(
+                "SELECT COUNT(*),
                     SUM(CASE WHEN derived_role IS NOT NULL THEN 1 ELSE 0 END),
                     SUM(CASE WHEN gold_at_10 IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN last_hits_at_10 IS NOT NULL THEN 1 ELSE 0 END),
                     COUNT(DISTINCT match_id)
                FROM match_participants WHERE guild_id = ?1",
-            params![guild_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )?;
+                params![guild_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )?;
         // Players who have cleared the minimum sample in at least one role, i.e.
         // those the factor can actually move off the floor.
         let players_above_floor = connection.query_row(
@@ -2609,6 +2775,7 @@ impl MatchRepository {
             participants,
             with_derived_role: with_role,
             with_gold_at_10: with_gold,
+            with_last_hits_at_10: with_last_hits,
             matches_seen: enriched_matches,
             player_roles_above_minimum_sample: players_above_floor,
         })
@@ -5574,23 +5741,25 @@ mod tests {
         );
     }
 
-    /// An archived OpenDota payload: five heroes a side, gold series long
-    /// enough to sample at ten minutes.
+    /// An archived OpenDota payload: five heroes a side, gold and last-hits
+    /// series long enough to sample at ten minutes. The same value seeds
+    /// both series — these tests only care about relative farm order within
+    /// a lane, which is identical either way.
     fn enrichment_payload(entries: &[(i64, i64)]) -> String {
         let players = entries
             .iter()
-            .map(|(hero_id, gold_at_10)| {
+            .map(|(hero_id, farm_at_10)| {
                 let series = (0..=12)
                     .map(|minute| {
                         if minute == 10 {
-                            gold_at_10.to_string()
+                            farm_at_10.to_string()
                         } else {
                             "0".to_owned()
                         }
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{{\"hero_id\":{hero_id},\"gold_t\":[{series}]}}")
+                format!("{{\"hero_id\":{hero_id},\"gold_t\":[{series}],\"lh_t\":[{series}]}}")
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -5601,7 +5770,13 @@ mod tests {
         let team1: Vec<i64> = (0..5).map(|index| 7_100 + index).collect();
         let team2: Vec<i64> = (0..5).map(|index| 7_200 + index).collect();
         for discord_id in team1.iter().chain(&team2) {
-            fixture.add_player(*discord_id, TEST_GUILD_ID);
+            // Tolerated so a test can seed more than one match from the same
+            // roster; the fixture reuses a fixed set of ids.
+            let _ = fixture.players.add(&NewPlayer::new(
+                *discord_id,
+                format!("Player {discord_id}"),
+                Some(TEST_GUILD_ID),
+            ));
         }
         let match_id = fixture
             .matches
@@ -5668,6 +5843,150 @@ mod tests {
     ];
 
     #[test]
+    fn test_matches_missing_parsed_stats_selects_only_stale_enrichments() {
+        let fixture = Fixture::new();
+        let parsed = seed_enriched_match(&fixture, STANDARD_LANES);
+        // A match enriched before OpenDota parsed the replay: linked to a
+        // Valve id, but with no lane or farm data on its participants.
+        let stale = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        for (match_id, valve) in [(parsed, 111_i64), (stale, 222)] {
+            connection
+                .execute(
+                    "UPDATE matches SET valve_match_id = ?1 WHERE match_id = ?2",
+                    params![valve, match_id],
+                )
+                .expect("link valve id");
+        }
+        connection
+            .execute(
+                "UPDATE match_participants SET gold_at_10 = 3000 WHERE match_id = ?1",
+                params![parsed],
+            )
+            .expect("parsed has farm data");
+        connection
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("stale has neither");
+        drop(connection);
+
+        let candidates = fixture
+            .matches
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+            .expect("query");
+        assert_eq!(candidates, vec![(stale, 222)]);
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_ignores_matches_with_no_valve_id() {
+        let fixture = Fixture::new();
+        // Never linked to a Dota match, so there is nothing to re-fetch. These
+        // belong to discovery, not to the refresh sweep.
+        let unlinked = seed_enriched_match(&fixture, STANDARD_LANES);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![unlinked],
+            )
+            .expect("clear stats");
+
+        assert!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_stops_returning_an_exhausted_match() {
+        let fixture = Fixture::new();
+        let stale = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "UPDATE matches SET valve_match_id = 777 WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("link");
+        connection
+            .execute(
+                "UPDATE match_participants SET lane_role = NULL, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![stale],
+            )
+            .expect("clear");
+        drop(connection);
+
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .expect("first sweep")
+                .len(),
+            1
+        );
+        // A re-enrich that leaves an unmatched participant NULL must not pin
+        // the sweep on the same row forever.
+        fixture
+            .matches
+            .mark_parsed_refresh_attempt(stale, Some(TEST_GUILD_ID))
+            .expect("mark");
+        assert!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .expect("second sweep")
+                .is_empty()
+        );
+        // Raising the bound retries it, which is how a later sweep picks up
+        // replays OpenDota has parsed since.
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 2)
+                .expect("retry sweep")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_respects_its_cap() {
+        let fixture = Fixture::new();
+        for index in 0..5 {
+            let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+            let connection = fixture.connection();
+            connection
+                .execute(
+                    "UPDATE matches SET valve_match_id = ?1 WHERE match_id = ?2",
+                    params![900 + index, match_id],
+                )
+                .expect("link");
+            connection
+                .execute(
+                    "UPDATE match_participants SET lane_role = NULL WHERE match_id = ?1",
+                    params![match_id],
+                )
+                .expect("clear");
+        }
+        let capped = fixture
+            .matches
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2, 1)
+            .expect("query");
+        assert_eq!(capped.len(), 2);
+        // Oldest first, so a repeated sweep works through the backlog rather
+        // than revisiting the same recent matches.
+        assert!(capped[0].0 < capped[1].0);
+    }
+
+    #[test]
     fn test_backfill_derives_roles_from_archived_opendota_payloads() {
         let fixture = Fixture::new();
         let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
@@ -5679,6 +5998,7 @@ mod tests {
         assert_eq!(report.matches_scanned, 1);
         assert_eq!(report.teams_derived, 2);
         assert_eq!(report.gold_samples_written, 10);
+        assert_eq!(report.last_hits_samples_written, 10);
 
         let roles = derived_roles(&fixture, match_id);
         let by_id: BTreeMap<i64, Option<String>> = roles
@@ -8922,7 +9242,7 @@ mod tests {
             guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool',
             pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0,
             win_reward_jc INTEGER, jc_changes TEXT,
-            lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open','lowskill'))
+            lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open','lowskill')), parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX uq_matches_guild_pending_match ON matches(guild_id,pending_match_id) WHERE pending_match_id IS NOT NULL;
         CREATE TABLE match_participants (
@@ -8936,7 +9256,7 @@ mod tests {
             rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL,
             fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0,
             bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT,
-            gold_at_10 INTEGER, derived_role TEXT,
+            gold_at_10 INTEGER, derived_role TEXT, last_hits_at_10 INTEGER,
             PRIMARY KEY(match_id,discord_id)
         );
         CREATE TABLE rating_history (
