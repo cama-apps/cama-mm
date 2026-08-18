@@ -69,7 +69,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci-tests-${{ matrix.package }}
+          shared-key: rust-ci-tests-${{ matrix.name }}
           cache-workspace-crates: true
           cache-on-failure: true
 
@@ -82,6 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: rust/target
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-Zthreads=4"
     steps:
       - uses: actions/checkout@v7
 
