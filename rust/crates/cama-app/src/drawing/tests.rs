@@ -1391,16 +1391,16 @@ fn carry_spoke_reach(records: &BTreeMap<String, (u32, u32)>) -> i32 {
         .difference(&chrome.colours())
         .copied()
         .collect::<BTreeSet<_>>();
-    // Walk outward from the centre along the spoke and keep the furthest row
-    // that carries a data-only colour.
+    // Search inward from the outer ring for the furthest row carrying a
+    // data-only colour, so the first hit is the answer.
     (0..130)
-        .filter(|distance| {
+        .rev()
+        .find(|distance| {
             let y = CENTRE.1 - *distance as usize;
             data_only
                 .iter()
                 .any(|colour| drawn.contains_in((CENTRE.0 - 3, y, CENTRE.0 + 4, y + 1), *colour))
         })
-        .last()
         .unwrap_or(0)
 }
 
