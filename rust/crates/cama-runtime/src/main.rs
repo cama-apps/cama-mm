@@ -478,7 +478,6 @@ async fn run_health_smoke_inner(path: PathBuf) -> Result<(), String> {
         db_path: database_path.clone(),
         reconnect_initial: Duration::ZERO,
         reconnect_max: Duration::ZERO,
-        rust_cutover_candidate: false,
     };
     let mut registry = RegistryBuilder::default();
     registry
@@ -1089,10 +1088,7 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    if inventory::global_command_sync_allowed(
-        application_config.runtime.rust_cutover_candidate,
-        inventory::required_count(),
-    ) {
+    if inventory::global_command_sync_allowed(inventory::required_count()) {
         registry.enable_global_command_sync();
     }
     let registry = registry.build();

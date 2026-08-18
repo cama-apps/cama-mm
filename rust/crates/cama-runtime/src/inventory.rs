@@ -298,11 +298,10 @@ pub fn required_count() -> usize {
 }
 
 /// Return whether the runtime may replace Discord's existing global command
-/// tree. Both gates are intentionally explicit so an empty inventory in a
-/// normal/dev process remains read-only until cutover is opted in.
+/// tree. A non-empty required inventory keeps synchronization disabled.
 #[must_use]
-pub const fn global_command_sync_allowed(rust_cutover_candidate: bool, required: usize) -> bool {
-    rust_cutover_candidate && required == 0
+pub const fn global_command_sync_allowed(required: usize) -> bool {
+    required == 0
 }
 
 #[must_use]
@@ -784,22 +783,17 @@ mod tests {
     }
 
     #[test]
-    fn production_global_command_replacement_still_requires_explicit_cutover_candidate() {
+    fn production_global_command_replacement_requires_complete_inventory() {
         assert_eq!(required_count(), 0);
         assert!(MAIN_SOURCE.contains("inventory::global_command_sync_allowed("));
-        assert!(MAIN_SOURCE.contains("application_config.runtime.rust_cutover_candidate,"));
-        assert!(MAIN_SOURCE.contains("inventory::required_count(),"));
+        assert!(MAIN_SOURCE.contains("inventory::required_count())"));
         assert!(MAIN_SOURCE.contains("registry.enable_global_command_sync();"));
     }
 
     #[test]
-    fn zero_inventory_alone_cannot_enable_global_command_replacement() {
-        // The source-level assertion above protects the production callsite;
-        // this explicit matrix protects the two independent runtime gates,
-        // including the future zero-inventory case.
-        assert!(!global_command_sync_allowed(false, 0));
-        assert!(!global_command_sync_allowed(true, 1));
-        assert!(global_command_sync_allowed(true, 0));
+    fn complete_inventory_enables_global_command_replacement() {
+        assert!(!global_command_sync_allowed(1));
+        assert!(global_command_sync_allowed(0));
     }
 
     #[test]

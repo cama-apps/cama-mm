@@ -104,7 +104,6 @@ jobs:
           grep -Fq 'push: true' .github/workflows/release.yml
           grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml
           grep -Fq 'ENV GIT_SHA=${GIT_SHA}' Dockerfile.rust
-          grep -Fq 'RUST_CUTOVER_CANDIDATE: "true"' docker-compose.yml
           ! grep -E 'setup-uv|uv (run|sync)|(^|[[:space:]])python3?([[:space:]]|$)' \
             .github/workflows/ci.yml \
             .github/workflows/release.yml \
