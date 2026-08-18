@@ -399,7 +399,7 @@ impl Default for BalancedShuffler {
             use_jopacoin: false,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 550.0,
+            off_role_flat_penalty: 610.0,
             role_matchup_delta_weight: 0.18,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
@@ -2695,7 +2695,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_550_per_player() {
+    fn test_default_off_role_goodness_adds_610_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2731,7 +2731,7 @@ mod tests {
         let (_, _, score) =
             shuffler.score_unconstrained_metrics(&[team1_metrics], &[team2_metrics], 0.0);
 
-        assert_eq!(score, 1_100.0);
+        assert_eq!(score, 1_220.0);
     }
 
     #[test]
@@ -4884,6 +4884,74 @@ mod tests {
             team1.get_off_role_count().expect("roles assigned")
                 + team2.get_off_role_count().expect("roles assigned"),
             0
+        );
+    }
+
+    #[test]
+    fn test_default_610_off_role_goodness_prefers_lower_off_role_roster() {
+        let configured_shuffler = |off_role_flat_penalty| {
+            let mut shuffler = BalancedShuffler {
+                use_glicko: false,
+                off_role_multiplier: 1.0,
+                off_role_flat_value_penalty: 0.0,
+                role_matchup_delta_weight: 0.0,
+                exclusion_penalty_weight: 0.0,
+                rd_priority_weight: 0.0,
+                recent_match_penalty_weight: 0.0,
+                rating_spread_divisor: 1_000_000_000.0,
+                ..BalancedShuffler::default()
+            };
+            if let Some(value) = off_role_flat_penalty {
+                shuffler.off_role_flat_penalty = value;
+            }
+            shuffler.with_tie_breaker(Arc::new(|_| 0))
+        };
+        let fixture = [
+            (3_685, "1"),
+            (5_667, "1"),
+            (1_791, "1"),
+            (5_477, "2"),
+            (5_187, "2"),
+            (2_118, "3"),
+            (1_266, "3"),
+            (4_628, "4"),
+            (2_244, "4"),
+            (1_270, "5"),
+            (5_644, "5"),
+        ];
+        let players = fixture
+            .into_iter()
+            .enumerate()
+            .map(|(index, (mmr, role))| Player {
+                discord_id: Some(i64::try_from(index + 1).expect("fixture index fits")),
+                ..player(format!("Player{index}"), mmr, &[role])
+            })
+            .collect::<Vec<_>>();
+        let previous = configured_shuffler(Some(550.0))
+            .shuffle_from_pool(&players, PoolOptions::default())
+            .expect("550-point pool shuffle");
+        let actual = configured_shuffler(None)
+            .shuffle_from_pool(&players, PoolOptions::default())
+            .expect("default pool shuffle");
+        let excluded_ids = |result: &PoolResult| {
+            result
+                .excluded
+                .iter()
+                .filter_map(|player| player.discord_id)
+                .collect::<HashSet<_>>()
+        };
+        let off_roles = |result: &PoolResult| {
+            result.team1.get_off_role_count().expect("team 1 roles")
+                + result.team2.get_off_role_count().expect("team 2 roles")
+        };
+
+        assert_eq!(excluded_ids(&previous), HashSet::from([7]));
+        assert_eq!(off_roles(&previous), 1);
+        assert_eq!(excluded_ids(&actual), HashSet::from([3]));
+        assert_eq!(
+            off_roles(&actual),
+            0,
+            "the 610-point default should prefer the lower-off-role roster"
         );
     }
 
