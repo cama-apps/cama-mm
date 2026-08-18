@@ -50,12 +50,12 @@ use crate::boss_multi_tier::{
     BossPreparationState, BossProgress, BossProgressEntry, BossProgressValue, BossRepositoryPort,
     BossServiceError, BossStatus, CombatEffects, CombatState, Combatant, CurseKind, EchoRecord,
     EconomyEventPort, EntropyPort, FixedClock, GearRepairPort, GearSnapshot, GearWearResult,
-    GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption, MechanicStatusEffect,
-    OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING, PLAYER_HIT_FLOOR, PausedBossDuel,
-    PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError, ResolvedFight,
-    RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome, StingerCurseState,
-    WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary, mechanic_by_id,
-    regular_boss_wager_allowed, run_combat_round,
+    GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption, MechanicRoundRecord,
+    MechanicStatusEffect, OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING, PLAYER_HIT_FLOOR,
+    PausedBossDuel, PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError,
+    ResolvedFight, RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome,
+    StingerCurseState, WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary,
+    mechanic_by_id, regular_boss_wager_allowed, run_combat_round,
 };
 use crate::dig_bosses::{
     BarkContext, CombatStats as BossCombatStats, DialogueSlots, DuelOddsInput, PINNACLE_DEPTH,
@@ -1258,6 +1258,7 @@ fn paused_duel_row(
         "attempts_this_fight": duel.attempts_this_fight,
         "initial_win_chance": duel.initial_win_chance,
         "multiplier": duel.payout_multiplier,
+        "player_hp_max": duel.player_hp_max,
         "boss_hp_max": duel.boss_hp_max,
         "starting_boss_hp": duel.starting_boss_hp,
         "gear_snapshot_ids": duel.gear_snapshot.gear_ids,
@@ -1364,6 +1365,9 @@ fn paused_duel_from_row(row: &DigBossPausedDuelRow) -> Result<PausedBossDuel, St
         attempts_this_fight: json_i32(status.get("attempts_this_fight")).unwrap_or_default(),
         initial_win_chance: json_f64(status.get("initial_win_chance"), 0.5),
         payout_multiplier: json_f64(status.get("multiplier"), 1.0),
+        player_hp_max: json_i32(status.get("player_hp_max"))
+            .unwrap_or_else(|| narrow_i32(row.player_hp, "duel player_hp").unwrap_or(1))
+            .max(1),
         boss_hp_max: json_i32(status.get("boss_hp_max"))
             .unwrap_or_else(|| narrow_i32(row.boss_hp, "duel boss_hp").unwrap_or(1))
             .max(1),
@@ -1479,6 +1483,24 @@ fn round_record_json(record: &RoundRecord) -> Value {
             Value::from(record.effect_log.berserk_bonus),
         );
     }
+    if let Some(mechanic) = &record.mechanic {
+        object.insert(
+            "mechanic_id".to_owned(),
+            Value::String(mechanic.mechanic_id.clone()),
+        );
+        object.insert("option_idx".to_owned(), Value::from(mechanic.option_index));
+        object.insert(
+            "option_label".to_owned(),
+            Value::String(mechanic.option_label.clone()),
+        );
+        object.insert(
+            "narrative".to_owned(),
+            Value::String(mechanic.narrative.clone()),
+        );
+        if mechanic.warding_salts_blocked {
+            object.insert("warding_salts_blocked".to_owned(), Value::Bool(true));
+        }
+    }
     value
 }
 
@@ -1519,6 +1541,28 @@ fn parse_round_log(raw: &str) -> Vec<RoundRecord> {
                     skipped_player: json_bool(object.get("skipped_player")),
                     skipped_boss: json_bool(object.get("skipped_boss")),
                 },
+                mechanic: object
+                    .get("mechanic_id")
+                    .and_then(Value::as_str)
+                    .map(|mechanic_id| MechanicRoundRecord {
+                        mechanic_id: mechanic_id.to_owned(),
+                        option_index: object
+                            .get("option_idx")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| usize::try_from(value).ok())
+                            .unwrap_or_default(),
+                        option_label: object
+                            .get("option_label")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        narrative: object
+                            .get("narrative")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        warding_salts_blocked: json_bool(object.get("warding_salts_blocked")),
+                    }),
             })
         })
         .collect()
@@ -2008,6 +2052,7 @@ pub struct DigPinnacleResolved {
     pub new_depth: i32,
     pub boss_hp_remaining: i32,
     pub boss_hp_max: i32,
+    pub starting_boss_hp: i32,
     pub knockback: i32,
     pub round_log: Vec<RoundRecord>,
     pub gear_wear: GearWearResult,
@@ -2046,6 +2091,7 @@ struct PreparedPinnacleAttempt {
     phase: u8,
     mechanic: MechanicDefinition,
     combat: CombatState,
+    player_hp_max: i32,
     boss_hp_max: i32,
     starting_boss_hp: i32,
     attempts: i32,
@@ -2835,8 +2881,9 @@ impl DigBossRuntimeService {
                         false
                     }
                 });
-        if warding_salts_blocked {
+        let narrative = if warding_salts_blocked {
             self.mark_pinnacle_preparation_used(request)?;
+            "The warding salts flare and swallow the boss mechanic.".to_owned()
         } else {
             let outcome = apply_option_outcome(
                 &mechanic.options[option_index],
@@ -2848,7 +2895,8 @@ impl DigBossRuntimeService {
             paused.combat.player_hp = outcome.player_hp;
             paused.combat.boss_hp = outcome.boss_hp;
             paused.combat.effects = outcome.effects;
-        }
+            outcome.narrative
+        };
         paused.round_log.push(RoundRecord {
             round: paused.round_num,
             player_hp: paused.combat.player_hp.max(0),
@@ -2858,6 +2906,13 @@ impl DigBossRuntimeService {
             pet_assist: paused.combat.effects.pet_assist.clone(),
             pet_assist_damage: 0,
             effect_log: RoundEffectLog::default(),
+            mechanic: Some(MechanicRoundRecord {
+                mechanic_id: paused.mechanic_id.clone(),
+                option_index,
+                option_label: mechanic.options[option_index].label.clone(),
+                narrative,
+                warding_salts_blocked,
+            }),
         });
         let mut won = (paused.combat.boss_hp <= 0).then_some(true);
         if won.is_none() && paused.combat.player_hp <= 0 {
@@ -3330,6 +3385,7 @@ impl DigBossRuntimeService {
             boss_id,
             phase,
             mechanic,
+            player_hp_max: combat.player_hp.max(1),
             starting_boss_hp: combat.boss_hp,
             combat,
             boss_hp_max,
@@ -3380,6 +3436,7 @@ impl DigBossRuntimeService {
                         attempt.risk_tier,
                         attempt.win_chance,
                     )?,
+                    player_hp_max: attempt.player_hp_max,
                     boss_hp_max: attempt.boss_hp_max,
                     starting_boss_hp: attempt.starting_boss_hp,
                     gear_snapshot: attempt.gear_snapshot,
@@ -3776,6 +3833,7 @@ impl DigBossRuntimeService {
                             input.ending_boss_hp.max(0)
                         },
                         boss_hp_max: input.boss_hp_max,
+                        starting_boss_hp: input.starting_boss_hp,
                         knockback,
                         round_log: input.round_log.clone(),
                         gear_wear: input.gear_wear.clone(),

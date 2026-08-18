@@ -9043,6 +9043,16 @@ fn paused_boss_response(
     owner_id: i64,
     guild_id: i64,
 ) -> InteractionResponse {
+    let boss_name = cama_app::dig_bosses::boss_by_id(&paused.boss_id)
+        .map_or(paused.boss_id.as_str(), |boss| boss.name);
+    let choices = paused
+        .pending_prompt
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| format!("{}. {}", index + 1, option.label))
+        .collect::<Vec<_>>()
+        .join("\n");
     let buttons = paused
         .pending_prompt
         .options
@@ -9066,8 +9076,23 @@ fn paused_boss_response(
         .collect();
     InteractionResponse::message("")
         .embed(
-            InteractionEmbed::titled(&paused.pending_prompt.prompt_title)
-                .description(&paused.pending_prompt.prompt_description)
+            InteractionEmbed::titled(format!("{boss_name} — Round {}", paused.round_num))
+                .description(format!(
+                    "**{}**\n*{}*",
+                    paused.pending_prompt.prompt_title, paused.pending_prompt.prompt_description
+                ))
+                .field(
+                    "State",
+                    format!(
+                        "You: **{}/{} HP**  |  {boss_name}: **{}/{} HP**",
+                        paused.combat.player_hp.max(0),
+                        paused.player_hp_max,
+                        paused.combat.boss_hp.max(0),
+                        paused.boss_hp_max
+                    ),
+                    false,
+                )
+                .field("Your choice", choices, false)
                 .color(GOLD_COLOR),
         )
         .action_row(InteractionActionRow::buttons(buttons))
@@ -9137,6 +9162,31 @@ fn regular_boss_result_embed(
         ),
         false,
     );
+    if let Some(mechanic) = result
+        .round_log
+        .iter()
+        .rev()
+        .find_map(|round| round.mechanic.as_ref())
+    {
+        embed = embed.field(
+            format!("You chose: {}", mechanic.option_label),
+            &mechanic.narrative,
+            false,
+        );
+    }
+    if !result.won && result.starting_boss_hp > result.boss_hp_remaining {
+        embed = embed.field(
+            "The boss remembers",
+            format!(
+                "You knocked {boss_name} from **{}/{} HP** to **{}/{} HP** before retreating.",
+                result.starting_boss_hp,
+                result.boss_hp_max,
+                result.boss_hp_remaining,
+                result.boss_hp_max
+            ),
+            false,
+        );
+    }
     if let Some(assist) = result
         .round_log
         .iter()
@@ -9219,6 +9269,32 @@ fn pinnacle_boss_result_response(
         ),
         false,
     );
+    if let Some(mechanic) = result
+        .round_log
+        .iter()
+        .rev()
+        .find_map(|round| round.mechanic.as_ref())
+    {
+        embed = embed.field(
+            format!("You chose: {}", mechanic.option_label),
+            &mechanic.narrative,
+            false,
+        );
+    }
+    if !result.won && result.starting_boss_hp > result.boss_hp_remaining {
+        embed = embed.field(
+            "The boss remembers",
+            format!(
+                "You knocked {} from **{}/{} HP** to **{}/{} HP** before retreating.",
+                result.boss_name,
+                result.starting_boss_hp,
+                result.boss_hp_max,
+                result.boss_hp_remaining,
+                result.boss_hp_max
+            ),
+            false,
+        );
+    }
     if let Some(relic) = &result.relic_drop {
         embed = embed.field(
             "Pinnacle Relic",
