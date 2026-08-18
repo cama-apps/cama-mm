@@ -2053,21 +2053,31 @@ fn store_derived_roles(
     match_id: i64,
     guild_id: i64,
 ) -> Result<(), rusqlite::Error> {
-    let participants: Vec<(i64, i64, Option<i64>, Option<i64>)> = transaction
+    // (discord_id, team_number, lane_role, last_hits_at_10, obs_placed, sen_placed)
+    type DerivedRoleParticipantRow = (i64, i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let participants: Vec<DerivedRoleParticipantRow> = transaction
         .prepare(
-            "SELECT discord_id, team_number, lane_role, last_hits_at_10
-               FROM match_participants
-              WHERE match_id = ?1 AND guild_id = ?2",
+            "SELECT discord_id, team_number, lane_role, last_hits_at_10,
+                        obs_placed, sen_placed
+                   FROM match_participants
+                  WHERE match_id = ?1 AND guild_id = ?2",
         )?
         .query_map(params![match_id, guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     for team_number in [1_i64, 2] {
-        let team: Vec<&(i64, i64, Option<i64>, Option<i64>)> = participants
+        let team: Vec<&DerivedRoleParticipantRow> = participants
             .iter()
-            .filter(|(_, number, _, _)| *number == team_number)
+            .filter(|(_, number, ..)| *number == team_number)
             .collect();
         if team.len() != 5 {
             continue;
@@ -2075,9 +2085,10 @@ fn store_derived_roles(
         let stats: [LaneStats; 5] = std::array::from_fn(|index| LaneStats {
             lane_role: team[index].2,
             last_hits_at_10: team[index].3,
+            wards: ward_total(team[index].4, team[index].5),
         });
         let derived = derive_positions(&stats);
-        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+        for (index, (discord_id, ..)) in team.iter().enumerate() {
             // Cleared on failure rather than left alone: re-enrichment can
             // correct lane or last-hits data, and a stale position from the
             // earlier reading would otherwise keep feeding role records forever.
@@ -2090,4 +2101,14 @@ fn store_derived_roles(
         }
     }
     Ok(())
+}
+
+/// `obs_placed + sen_placed`, or `None` if neither was ever captured — as
+/// opposed to `Some(0)`, which would misreport "captured as zero" for a row
+/// that simply predates ward tracking.
+fn ward_total(obs_placed: Option<i64>, sen_placed: Option<i64>) -> Option<i64> {
+    match (obs_placed, sen_placed) {
+        (None, None) => None,
+        (obs, sen) => Some(obs.unwrap_or(0) + sen.unwrap_or(0)),
+    }
 }
