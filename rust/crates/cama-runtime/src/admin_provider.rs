@@ -122,7 +122,7 @@ pub struct AdminRoleBackfillResult {
     pub teams_derived: u64,
     pub gold_samples_written: u64,
     pub unreadable_payloads: u64,
-    pub unparsed_replays: u64,
+    pub unparsed_teams: u64,
     pub ambiguous_lanes: u64,
     pub incomplete_teams: u64,
     pub tied_farm_priority: u64,
@@ -1194,11 +1194,12 @@ impl AdminHandler {
         defer(&responder, true).await?;
         match self.ports.matches.backfill_derived_roles(guild_id).await {
             Ok(result) => {
-                let skipped = result.unparsed_replays
+                // Every skip reason here is per team, so the total reconciles
+                // against the teams actually examined.
+                let skipped = result.unparsed_teams
                     + result.ambiguous_lanes
                     + result.incomplete_teams
-                    + result.tied_farm_priority
-                    + result.unreadable_payloads;
+                    + result.tied_farm_priority;
                 let coverage = if result.participants == 0 {
                     0.0
                 } else {
@@ -1207,19 +1208,19 @@ impl AdminHandler {
                 respond_ephemeral(
                     &responder,
                     format!(
-                        "✅ Role backfill complete.
-                         **Scanned:** {} match(es), derived {} team(s), wrote {} gold sample(s).
-                         **Skipped {skipped}:** {} unparsed, {} ambiguous lanes, {} incomplete teams, {} tied farm, {} unreadable.
-                         **Coverage:** {}/{} participants have a role ({coverage:.1}%), {} have 10-minute gold.
+                        "✅ Role backfill complete.\n\
+                         **Scanned:** {} match(es), {} unreadable, wrote {} gold sample(s).\n\
+                         **Teams:** {} derived, {skipped} skipped ({} unparsed, {} ambiguous lanes, {} incomplete, {} tied farm).\n\
+                         **Coverage:** {}/{} participants have a role ({coverage:.1}%), {} have 10-minute gold.\n\
                          **Above minimum sample:** {} (player, role) pair(s) can move off the 0.95 floor.",
                         result.matches_scanned,
-                        result.teams_derived,
+                        result.unreadable_payloads,
                         result.gold_samples_written,
-                        result.unparsed_replays,
+                        result.teams_derived,
+                        result.unparsed_teams,
                         result.ambiguous_lanes,
                         result.incomplete_teams,
                         result.tied_farm_priority,
-                        result.unreadable_payloads,
                         result.with_derived_role,
                         result.participants,
                         result.with_gold_at_10,

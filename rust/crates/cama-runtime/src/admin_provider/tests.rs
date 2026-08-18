@@ -1147,7 +1147,7 @@ async fn test_backfillroles_reports_derivation_counts_and_resulting_coverage() {
         matches_scanned: 120,
         teams_derived: 200,
         gold_samples_written: 1_100,
-        unparsed_replays: 30,
+        unparsed_teams: 30,
         ambiguous_lanes: 8,
         incomplete_teams: 2,
         tied_farm_priority: 0,
@@ -1165,9 +1165,18 @@ async fn test_backfillroles_reports_derivation_counts_and_resulting_coverage() {
 
     assert!(response.ephemeral, "admin output stays private");
     assert!(response.content.contains("120 match(es)"));
-    assert!(response.content.contains("derived 200 team(s)"));
+    // The reply must not carry source indentation into Discord.
+    assert!(
+        !response.content.contains(
+            "
+   "
+        ),
+        "message lines must not be indented: {:?}",
+        response.content
+    );
+    assert!(response.content.contains("200 derived"));
     // Skips are surfaced with their reasons rather than hidden.
-    assert!(response.content.contains("Skipped 40"));
+    assert!(response.content.contains("40 skipped"));
     assert!(response.content.contains("30 unparsed"));
     assert!(response.content.contains("8 ambiguous lanes"));
     // Coverage is read back from the database, which is what confirms the run.

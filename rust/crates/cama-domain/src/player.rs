@@ -104,6 +104,13 @@ impl Player {
 
     /// This player's effective value when assigned `role`, after the
     /// role-performance multiplier.
+    ///
+    /// Deliberately unclamped. In jopacoin mode `get_value` returns a balance
+    /// that can be negative, and clamping here would collapse every debtor to
+    /// zero - the shuffler could no longer tell a player 5,000 in the hole
+    /// from one 100 down. The off-role path still clamps, via
+    /// [`crate::team::calculate_off_role_value`], because a flat penalty can
+    /// otherwise drive a value arbitrarily negative.
     #[must_use]
     pub fn role_adjusted_value(
         &self,
@@ -112,8 +119,7 @@ impl Player {
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> f64 {
-        (self.get_value(use_glicko, use_openskill, use_jopacoin) * self.role_factor_for(role))
-            .max(0.0)
+        self.get_value(use_glicko, use_openskill, use_jopacoin) * self.role_factor_for(role)
     }
 }
 

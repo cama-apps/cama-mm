@@ -4066,6 +4066,7 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
         .map(|team| {
             team.get_team_value_with_off_role_value_penalty(
                 true,
+                fixture.provider.handler.config.off_role_multiplier,
                 false,
                 false,
                 fixture.provider.handler.config.off_role_flat_value_penalty,
@@ -4074,10 +4075,11 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
         })
         .collect::<Vec<_>>();
     // These fixture players have no recorded role history, so every one takes
-    // the 0.95 role-performance floor. The drop from the pre-role-factor
-    // values [13_000, 11_300] is not a uniform 5% because on-role players are
-    // now scaled too, where the old off-role-only multiplier left them alone.
-    assert_eq!(configured, [12_350.0, 10_820.0]);
+    // the 0.95 role-performance floor, and the off-role multiplier still
+    // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
+    // 13_000; Dire carries one off-role player who now takes both factors,
+    // which is why it falls further than 5% from 11_300.
+    assert_eq!(configured, [12_350.0, 10_725.0]);
 }
 
 #[test]
