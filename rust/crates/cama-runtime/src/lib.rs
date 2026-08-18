@@ -4,6 +4,21 @@
 //! owns process configuration, database schema initialization, gateway supervision, and
 //! conversion between Discord interactions and the typed registration API.
 
+// Test-only source inclusion lets the core CI shard exercise production target
+// tests without compiling separate binary, integration, and example harnesses.
+#[cfg(all(test, feature = "runtime-test-core"))]
+extern crate self as cama_runtime;
+
+#[allow(dead_code)]
+#[cfg(all(test, feature = "runtime-test-core"))]
+#[path = "../tests/runtime_lifecycle.rs"]
+mod runtime_lifecycle_tests;
+
+#[allow(dead_code)]
+#[cfg(all(test, feature = "runtime-test-core"))]
+#[path = "../examples/profile_snapshot_smoke.rs"]
+mod profile_snapshot_smoke_tests;
+
 #[cfg(all(test, feature = "runtime-test-match"))]
 mod architecture_tests;
 
@@ -33,6 +48,8 @@ pub mod gateway;
 pub mod gateway_events;
 pub mod global_hooks;
 pub mod health;
+#[doc(hidden)]
+pub mod herogrid_provider;
 pub(crate) mod ids;
 pub mod info_provider;
 pub mod inventory;
@@ -56,6 +73,8 @@ pub mod raw_reactions;
 pub mod registration;
 pub mod registration_provider;
 pub mod reminder_provider;
+#[doc(hidden)]
+pub mod runtime_cli;
 pub mod scout_provider;
 pub mod serenity_transport;
 pub mod shop_provider;

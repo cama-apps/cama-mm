@@ -31,7 +31,7 @@ jobs:
           - name: cama-runtime-core
             package: cama-runtime
             arguments: >-
-              --all-targets --no-default-features
+              --lib --no-default-features
               --features runtime-test-core
           - name: cama-runtime-dig
             package: cama-runtime

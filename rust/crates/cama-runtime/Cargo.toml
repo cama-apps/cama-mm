@@ -24,6 +24,7 @@ runtime-test-match = []
 [[bin]]
 name = "cama-rust"
 path = "src/main.rs"
+test = false
 
 # This target source-includes the draft provider as a compile-closed checker.
 # Clippy/check still build it; running its inherited unit tests would duplicate
@@ -31,6 +32,19 @@ path = "src/main.rs"
 [[bin]]
 name = "draft_provider_check"
 path = "src/bin/draft_provider_check.rs"
+test = false
+
+# These targets remain production build/clippy targets. Their tests are
+# source-included in the library's core test shard so CI only has to compile
+# one runtime test harness.
+[[test]]
+name = "runtime_lifecycle"
+path = "tests/runtime_lifecycle.rs"
+test = false
+
+[[example]]
+name = "profile_snapshot_smoke"
+path = "examples/profile_snapshot_smoke.rs"
 test = false
 
 [dependencies]
