@@ -357,6 +357,11 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                     "Re-enrich matches that have enrichment but no fantasy data",
                     CommandOptionKind::Boolean,
                 ),
+                CommandOptionSpec::new(
+                    "refresh_parsed",
+                    "Re-enrich matches stored before OpenDota parsed the replay (Admin)",
+                    CommandOptionKind::Boolean,
+                ),
             ],
         ),
         subcommand("wipeall", "[Admin] Wipe all match enrichments", vec![]),
@@ -1131,6 +1136,12 @@ impl EnrichmentHandler {
         }
         let dry_run = boolean_option(options, "dry_run").unwrap_or(false);
         let refill = boolean_option(options, "refill_fantasy").unwrap_or(false);
+        let refresh_parsed = boolean_option(options, "refresh_parsed").unwrap_or(false);
+        if refresh_parsed {
+            return self
+                .handle_refresh_parsed(guild_id, dry_run, responder)
+                .await;
+        }
         if !defer(&responder, true).await {
             return Ok(());
         }
@@ -1161,6 +1172,132 @@ impl EnrichmentHandler {
         responder
             .edit_original(
                 InteractionResponse::message(format_discovery(&result, dry_run)).ephemeral(),
+            )
+            .await
+            .map_err(response_error)
+    }
+
+    /// Re-enrich matches whose stored payload predates OpenDota parsing the
+    /// replay.
+    ///
+    /// Enrichment runs soon after a match is recorded, but OpenDota fills
+    /// `lane_role` and the per-minute series only once the replay is parsed,
+    /// minutes to hours later. The stored snapshot is never refreshed, so
+    /// those matches stay starved of data that does exist upstream. This
+    /// re-runs the ordinary enrichment path against them, which rewrites the
+    /// payload and re-derives played positions on the way through.
+    async fn handle_refresh_parsed(
+        &self,
+        guild_id: i64,
+        dry_run: bool,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let matches = self.matches.clone();
+        let candidates = run_blocking(move || {
+            matches
+                .matches_missing_parsed_stats(Some(guild_id), 100)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(InteractionHandlerError::from)?;
+        if candidates.is_empty() {
+            return responder
+                .followup(
+                    InteractionResponse::message(
+                        "No matches are missing parsed stats. Every enriched match already has lane and farm data.",
+                    )
+                    .ephemeral(),
+                )
+                .await
+                .map_err(response_error);
+        }
+
+        responder
+            .followup(
+                InteractionResponse::message(format!(
+                    "Found {} match(es) missing parsed stats. {}",
+                    candidates.len(),
+                    if dry_run {
+                        "Previewing..."
+                    } else {
+                        "Re-enriching..."
+                    }
+                ))
+                .ephemeral(),
+            )
+            .await
+            .map_err(response_error)?;
+
+        let enrichment = Arc::clone(&self.enrichment);
+        let processed = candidates.len();
+        let (refreshed, errors) = run_blocking(move || {
+            let mut refreshed = Vec::new();
+            let mut errors = Vec::new();
+            for (match_id, valve_match_id) in candidates {
+                if dry_run {
+                    refreshed.push((match_id, valve_match_id));
+                    continue;
+                }
+                let result = enrichment.enrich_match(EnrichMatchRequest {
+                    internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
+                    valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
+                    guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
+                    source: EnrichmentSource::Manual,
+                    confidence: None,
+                    // The match is already linked to this Valve id; re-running
+                    // is a data refresh, not a re-identification.
+                    skip_validation: true,
+                    opendota_match_data: None,
+                });
+                if result.success {
+                    refreshed.push((match_id, valve_match_id));
+                } else {
+                    errors.push((
+                        match_id,
+                        result.error.unwrap_or_else(|| "Unknown".to_owned()),
+                    ));
+                }
+            }
+            Ok::<_, String>((refreshed, errors))
+        })
+        .await
+        .map_err(InteractionHandlerError::from)?;
+
+        let mut lines = vec![
+            format!(
+                "**Parsed Stats Refresh {}**",
+                if dry_run { "(DRY RUN)" } else { "Complete" }
+            ),
+            String::new(),
+            format!("Matches processed: {processed}"),
+            format!("Successfully refreshed: {}", refreshed.len()),
+            format!("Errors: {}", errors.len()),
+        ];
+        if processed == 100 {
+            lines
+                .push("Capped at 100 per run - re-run to continue through the backlog.".to_owned());
+        }
+        if !errors.is_empty() {
+            lines.extend([String::new(), "**Errors:**".to_owned()]);
+            lines.extend(
+                errors
+                    .iter()
+                    .take(5)
+                    .map(|(match_id, error)| format!("  #{match_id}: {error}")),
+            );
+        }
+        lines.extend([
+            String::new(),
+            "Run `/admin backfillroles` afterwards to derive positions from the refreshed data."
+                .to_owned(),
+        ]);
+        responder
+            .followup(
+                InteractionResponse::message(lines.join(
+                    "
+",
+                ))
+                .ephemeral(),
             )
             .await
             .map_err(response_error)
