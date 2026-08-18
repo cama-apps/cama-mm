@@ -2,7 +2,7 @@ use cama_domain::curfew::CurfewWindow;
 use rusqlite::params;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const GUILD: i64 = 0;
 const OTHER_GUILD: i64 = 999;
@@ -10,7 +10,7 @@ const OTHER_GUILD: i64 = 999;
 fn fixture() -> (tempfile::TempDir, CurfewRepository) {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("curfew.db");
-    initialize_or_migrate(&path).expect("migrate");
+    copy_migrated_database(&path).expect("migrate");
     (directory, CurfewRepository::new(&path))
 }
 

@@ -1563,8 +1563,8 @@ mod tests {
     #[test]
     fn planner_freezes_bomb_debt_post_blind_investments_and_spectator_ranks() {
         let file = NamedTempFile::new().expect("create financial planner fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("initialize financial planner fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy financial planner fixture");
         let mut connection = Connection::open(file.path()).expect("open financial planner fixture");
         connection
             .pragma_update(None, "foreign_keys", false)
@@ -1687,8 +1687,8 @@ mod tests {
     #[test]
     fn spectator_convergence_tie_uses_sqlite_post_effect_source_order() {
         let file = NamedTempFile::new().expect("create convergence planner fixture");
-        crate::schema_manager::initialize_or_migrate(file.path())
-            .expect("initialize convergence planner fixture");
+        crate::test_support::copy_migrated_database(file.path())
+            .expect("copy convergence planner fixture");
         let mut connection =
             Connection::open(file.path()).expect("open convergence planner fixture");
         connection

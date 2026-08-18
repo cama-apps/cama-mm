@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 use async_trait::async_trait;
-use cama_db::schema_manager::initialize_or_migrate;
 use tokio::sync::Semaphore;
 
 use super::*;

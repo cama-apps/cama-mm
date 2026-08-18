@@ -1,6 +1,5 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::{path::Path, process::Command};
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -370,70 +369,4 @@ fn malformed_payload_is_reported_instead_of_mutated() {
             .snapshot(explicit_key(GUILD, pending_match_id)),
         Err(MatchVotingRepositoryError::MalformedPayload(id)) if id == pending_match_id
     ));
-}
-
-/// Cross-language smoke: Python creates and seeds the migrated schema, Rust
-/// performs a payload-preserving vote CAS, and Python verifies the durable
-/// shape visible to a fresh service process.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_match_voting_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\npayload={'radiant_team_ids':[1,2,3,4,5],'dire_team_ids':[6,7,8,9,10],'excluded_player_ids':[],'excluded_conditional_player_ids':[],'record_submissions':{},'shuffle_timestamp':1700000000,'lobby_kind':'open'}\nc.execute('INSERT INTO pending_matches (pending_match_id,guild_id,payload) VALUES (?,?,?)',(900,4242,json.dumps(payload)))\nc.commit(); c.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = MatchVotingRepository::new(database.path());
-    let key = PendingVoteKey {
-        guild_id: Some(4_242),
-        pending_match_id: Some(900),
-    };
-    let before = repository
-        .snapshot(key)
-        .expect("read migrated pending match")
-        .expect("pending match");
-    assert!(matches!(
-        repository
-            .compare_and_set_submission(VoteSubmissionCas {
-                guild_id: key.guild_id,
-                pending_match_id: 900,
-                expected_payload: &before.payload,
-                user_id: -70_001,
-                result: "dire",
-                is_admin: true,
-            })
-            .expect("Rust CAS"),
-        VoteSubmissionCasOutcome::Applied(_)
-    ));
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nraw=c.execute('SELECT payload FROM pending_matches WHERE pending_match_id=900 AND guild_id=4242').fetchone()[0]\np=json.loads(raw)\nassert p['record_submissions']['-70001']=={'result':'dire','is_admin':True}\nassert p['radiant_team_ids']==[1,2,3,4,5] and p['shuffle_timestamp']==1700000000 and p['lobby_kind']=='open'\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

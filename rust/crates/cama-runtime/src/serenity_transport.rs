@@ -4108,6 +4108,14 @@ impl DiscordTransport for SerenityDiscordTransport {
         Ok(())
     }
 
+    async fn add_thread_member(&self, thread_id: u64, member_id: u64) -> Result<(), String> {
+        let context = self.context()?;
+        ChannelId::new(thread_id)
+            .add_thread_member(context.http.as_ref(), UserId::new(member_id))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn mafia_channel_available(
         &self,
         guild_id: u64,

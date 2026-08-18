@@ -8,31 +8,24 @@ use cama_db::economy_event_repository::{EventDraft, EventEffects};
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
 
-struct PythonDatabase {
+struct TestDatabase {
     path: PathBuf,
 }
 
-impl PythonDatabase {
+impl TestDatabase {
     fn new() -> Self {
         let sequence = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "cama-service-container-{}-{sequence}.db",
             std::process::id()
         ));
-        let status = crate::test_support::parity_python()
-            .args([
-                "-c",
-                "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()",
-            ])
-            .arg(&path)
-            .status()
-            .expect("run canonical Python schema manager");
-        assert!(status.success(), "Python schema initialization failed");
+        cama_db::schema_manager::initialize_or_migrate(&path)
+            .expect("initialize canonical Rust schema");
         Self { path }
     }
 }
 
-impl Drop for PythonDatabase {
+impl Drop for TestDatabase {
     fn drop(&mut self) {
         for suffix in ["", "-wal", "-shm"] {
             let candidate = PathBuf::from(format!("{}{suffix}", self.path.display()));
@@ -145,7 +138,7 @@ fn test_duel_repository_and_service_are_initialized_once() {
 
 #[test]
 fn test_vanity_tax_enforcement_survives_container_restart() {
-    let database = PythonDatabase::new();
+    let database = TestDatabase::new();
     let member = VanityMember {
         discord_id: 7,
         nickname: Some("Skater".to_owned()),
@@ -177,7 +170,7 @@ fn test_vanity_tax_enforcement_survives_container_restart() {
 
 #[test]
 fn test_configured_vanity_tax_rate_reaches_concrete_service_without_basis_point_rounding() {
-    let database = PythonDatabase::new();
+    let database = TestDatabase::new();
     let mut container = ServiceContainer::new(
         &database.path,
         ServiceContainerOptions {
@@ -257,7 +250,7 @@ fn test_concrete_opendota_transport_is_retained_for_runtime_consumers() {
 fn test_economy_controller_has_no_static_recovery_switch() {
     assert!(!REMOVED_CONSTRUCTOR_FIELDS.is_empty());
     assert!(REMOVED_CONSTRUCTOR_FIELDS.contains(&"economy_recovery_mode"));
-    let database = PythonDatabase::new();
+    let database = TestDatabase::new();
     let mut container = ServiceContainer::new(
         &database.path,
         ServiceContainerOptions {
@@ -277,7 +270,7 @@ fn test_economy_controller_has_no_static_recovery_switch() {
 
 #[test]
 fn test_severe_persisted_edict_dynamically_disables_reserve_voting() {
-    let database = PythonDatabase::new();
+    let database = TestDatabase::new();
     let mut container = ServiceContainer::new(
         &database.path,
         ServiceContainerOptions {

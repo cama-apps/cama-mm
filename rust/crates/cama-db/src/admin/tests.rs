@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 use super::*;
 
@@ -15,7 +15,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary Admin repository database");
-        initialize_or_migrate(database.path()).expect("migrate Python-compatible schema");
+        copy_migrated_database(database.path()).expect("migrate Python-compatible schema");
         let repository = AdminRepository::new(database.path());
         Self {
             database,

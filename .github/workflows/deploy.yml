@@ -42,7 +42,5 @@ jobs:
             git checkout --force "$DEPLOY_SHA"
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
             trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
-            BOT_RUNTIME=rust
-            RUST_CUTOVER_CANDIDATE=true
-            export BOT_RUNTIME RUST_CUTOVER_CANDIDATE RUST_RUNTIME_IMAGE
+            export RUST_RUNTIME_IMAGE
             GIT_SHA="$DEPLOY_SHA" ./scripts/deploy-runtime

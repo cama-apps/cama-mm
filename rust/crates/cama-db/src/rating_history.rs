@@ -965,7 +965,8 @@ fn unique_ids(discord_ids: &[i64]) -> Vec<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::path::Path;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use super::{
@@ -974,13 +975,28 @@ mod tests {
         RecalibrationRequest, RecalibrationService, RecalibrationServiceConfig,
         RecalibrationStateUpsert,
     };
+    use crate::test_support::FastTestDatabase;
     use rusqlite::{Connection, params};
     use tempfile::NamedTempFile;
 
     const TEST_GUILD_ID: i64 = 987_654_321;
 
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        _file: NamedTempFile,
+        _file: FixtureDatabase,
         repository: RatingHistoryRepository,
     }
 
@@ -994,8 +1010,9 @@ mod tests {
         games_played: i64,
     }
 
-    impl Fixture {
-        fn new() -> Self {
+    fn fixture_database(durable: bool) -> FixtureDatabase {
+        static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+        let template = TEMPLATE.get_or_init(|| {
             let file = NamedTempFile::new().expect("create temporary SQLite file");
             let connection = Connection::open(file.path()).expect("open temporary SQLite file");
             connection
@@ -1086,6 +1103,28 @@ mod tests {
                 )
                 .expect("create Python-compatible rating history schema");
             drop(connection);
+            file
+        });
+        if durable {
+            let file = NamedTempFile::new().expect("durable rating-history database");
+            std::fs::copy(template.path(), file.path())
+                .expect("copy rating-history fixture template");
+            FixtureDatabase::Durable(file)
+        } else {
+            FixtureDatabase::Fast(FastTestDatabase::from_template(template.path()))
+        }
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::from_database(fixture_database(false))
+        }
+
+        fn durable() -> Self {
+            Self::from_database(fixture_database(true))
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = RatingHistoryRepository::new(file.path());
             Self {
                 _file: file,
@@ -1836,7 +1875,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_recalibrations_bump_counter_once() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::durable();
         Connection::open(fixture._file.path())
             .expect("open fixture")
             .execute(

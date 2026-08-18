@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -18,7 +18,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let database = NamedTempFile::new().expect("temporary SQLite database");
-        initialize_or_migrate(database.path()).expect("canonical migrated schema");
+        copy_migrated_database(database.path()).expect("canonical migrated schema");
         let repository = DigPrestigeRuntimeRepository::new(database.path());
         let fixture = Self {
             database,

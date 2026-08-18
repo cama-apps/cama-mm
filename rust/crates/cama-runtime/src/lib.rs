@@ -4,6 +4,9 @@
 //! owns process configuration, database schema initialization, gateway supervision, and
 //! conversion between Discord interactions and the typed registration API.
 
+#[cfg(test)]
+mod architecture_tests;
+
 pub mod admin_match_correction;
 pub mod admin_provider;
 pub mod advstats_provider;

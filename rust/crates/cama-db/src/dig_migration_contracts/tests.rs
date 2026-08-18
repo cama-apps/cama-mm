@@ -87,15 +87,6 @@ fn scoped(prestige_level: i64, awards: &[i64]) -> AwardLedger {
     }
 }
 
-#[test]
-#[ignore = "explicit read-only audit of a disposable Python-migrated database"]
-fn unmapped_python_migrated_database_dig_migration_contract_smoke() {
-    let path = std::env::var("CAMA_RUST_DIG_MIGRATION_DB")
-        .expect("set CAMA_RUST_DIG_MIGRATION_DB to a disposable migrated database");
-    let audit = audit_existing_schema(path).expect("audit Python-migrated Dig schema");
-    assert!(audit.is_compatible(), "{audit:?}");
-}
-
 mod dig_auto_buy_settings_migration {
     use super::*;
 

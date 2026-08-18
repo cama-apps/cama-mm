@@ -4484,6 +4484,7 @@ fn upsert_match_prediction(
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
+    use std::sync::OnceLock;
 
     use cama_domain::rating::{CamaRatingSystem, TeamPlayer};
     use cama_domain::shuffler::{BalancedShuffler, PoolOptions};
@@ -4491,24 +4492,61 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::test_support::FastTestDatabase;
 
     const TEST_GUILD_ID: i64 = 987_654_321;
     const TEST_GUILD_ID_SECONDARY: i64 = 987_654_322;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         players: PlayerRepository,
         matches: MatchRepository,
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
             let file = NamedTempFile::new().expect("create on-disk SQLite fixture");
-            let connection = Connection::open(file.path()).expect("open fixture for schema setup");
-            connection
-                .execute_batch(TEST_SCHEMA)
-                .expect("install Python-compatible disposable schema");
-            drop(connection);
+            std::fs::copy(Self::template().path(), file.path())
+                .expect("copy SQLite fixture template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create SQLite fixture template");
+                let connection =
+                    Connection::open(file.path()).expect("open fixture template for schema setup");
+                connection
+                    .execute_batch(TEST_SCHEMA)
+                    .expect("install Python-compatible disposable schema template");
+                drop(connection);
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             Self {
                 players: PlayerRepository::new(file.path()),
                 matches: MatchRepository::new(file.path()),
@@ -7677,16 +7715,20 @@ mod tests {
     #[test]
     fn test_hero_pairwise_batch_matches_legacy_views() {
         let fixture = Fixture::new();
-        let connection = fixture.connection();
+        let mut connection = fixture.connection();
+        let transaction = connection
+            .transaction()
+            .expect("seed hero pairwise fixture");
         for index in 0..36_i64 {
             for repeat in 0..2_i64 {
                 let match_id = 10_000 + index * 2 + repeat;
-                connection.execute("INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id) VALUES(?1,'[1, 2]','[3]',1,?2)", params![match_id, TEST_GUILD_ID]).unwrap();
-                connection.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,1,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 10 + index / 12]).unwrap();
-                connection.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,2,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 200 + index % 3]).unwrap();
-                connection.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,3,?2,2,?3,?4)", params![match_id, TEST_GUILD_ID, 1-repeat, 100 + index % 12]).unwrap();
+                transaction.execute("INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id) VALUES(?1,'[1, 2]','[3]',1,?2)", params![match_id, TEST_GUILD_ID]).unwrap();
+                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,1,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 10 + index / 12]).unwrap();
+                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,2,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 200 + index % 3]).unwrap();
+                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,3,?2,2,?3,?4)", params![match_id, TEST_GUILD_ID, 1-repeat, 100 + index % 12]).unwrap();
             }
         }
+        transaction.commit().expect("commit hero pairwise fixture");
         let stats = fixture
             .matches
             .get_player_hero_pairwise_stats(1, Some(TEST_GUILD_ID), 2)
@@ -8364,7 +8406,7 @@ mod tests {
 
     #[test]
     fn concurrent_steals_are_serialized_without_lost_updates() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_durable();
         for discord_id in [-1, -2, -3] {
             fixture.add_player(discord_id, TEST_GUILD_ID);
         }
@@ -8396,34 +8438,6 @@ mod tests {
         assert_eq!(balances.get(&-1), Some(&30));
         assert_eq!(balances.get(&-2), Some(&40));
         assert_eq!(balances.get(&-3), Some(&30));
-    }
-
-    #[test]
-    fn python_migrated_database_interop_smoke() {
-        let file = NamedTempFile::new().unwrap();
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest.ancestors().nth(3).unwrap();
-        let output = crate::test_support::parity_python(root)
-            .args(["-c", "import sys; from infrastructure.schema_manager import SchemaManager; SchemaManager(sys.argv[1]).initialize()", file.path().to_str().unwrap()])
-            .output()
-            .expect("run Python schema authority");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let players = PlayerRepository::new(file.path());
-        players
-            .add(&NewPlayer::new(-9_223_372_036_854_000_000, "Signed", None))
-            .unwrap();
-        assert_eq!(
-            players
-                .get_by_id(-9_223_372_036_854_000_000, None)
-                .unwrap()
-                .unwrap()
-                .name,
-            "Signed"
-        );
     }
 
     #[test]

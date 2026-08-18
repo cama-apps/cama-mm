@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cama_db::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
+use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
 
 use super::*;
@@ -22,8 +22,7 @@ impl SqlGenerationPort for FixedSql {
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let path = directory.path().join("cama.db");
-    initialize_or_migrate_with_settings(&path, &MigrationSettings::default())
-        .expect("migrate temporary database");
+    copy_migrated_database(&path).expect("copy migrated database");
     let connection = Connection::open(&path).expect("open fixture");
     connection
         .pragma_update(None, "foreign_keys", false)

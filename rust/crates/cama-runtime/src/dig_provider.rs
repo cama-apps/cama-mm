@@ -2242,6 +2242,30 @@ impl DigInteractionHandler {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+            let pending = self
+                .pending_deliveries(DigRuntimePendingDeliveryQuery {
+                    guild_id: Some(guild_id),
+                    discord_id: Some(user_id),
+                    limit: 10,
+                })
+                .await?;
+            if !pending.is_empty() {
+                for delivery in pending {
+                    if let Err(error) = self.deliver_to_channel(&delivery).await {
+                        warn!(
+                            action_id = delivery.action_id,
+                            %error,
+                            "pending Dig delivery blocked paid Dig"
+                        );
+                    }
+                }
+                return responder
+                    .edit_original(InteractionResponse::message(
+                        "Your previous dig was already committed. Its result is being recovered; you were not charged for another dig. Run `/dig go` again after it appears.",
+                    ))
+                    .await
+                    .map_err(|error| error.to_string());
+            }
             let now = unix_now();
             let forced_event = self.force_event_pending(user_id, guild_id)?;
             let delivery_channel = self
@@ -4839,16 +4863,31 @@ impl DigInteractionHandler {
             flavor.flavor(&mut flavor_outcome, discord_id, guild_id, false);
             flavor_data
                 .get_flavor_receipt(action_id, discord_id, guild_id)
-                .map_err(|error| format!("Dig flavor receipt recovery failed: {error}"))?
-                .ok_or_else(|| {
-                    "Dig flavor phase remains pending; Discord delivery is blocked".to_owned()
-                })
+                .map_err(|error| format!("Dig flavor receipt recovery failed: {error}"))
         })
-        .await?;
+        .await;
+        let flavor = match receipt {
+            Ok(Some(receipt)) => dig_runtime_flavor_snapshot(receipt),
+            Ok(None) => {
+                warn!(
+                    action_id,
+                    "Dig flavor produced no durable receipt; finalizing without flavor"
+                );
+                DigRuntimeFlavorSnapshot::Skipped
+            }
+            Err(error) => {
+                warn!(
+                    action_id,
+                    %error,
+                    "Dig flavor receipt recovery failed; finalizing without flavor"
+                );
+                DigRuntimeFlavorSnapshot::Skipped
+            }
+        };
         self.finalize_delivery_snapshot(DigRuntimeFinalizeDelivery {
             action_id,
             source_key: delivery.source_key.clone(),
-            flavor: dig_runtime_flavor_snapshot(receipt),
+            flavor,
             boss: boss_info.map(|boss| cama_app::dig_runtime::DigRuntimeBossRenderSnapshot {
                 boundary: i64::from(boss.boundary),
                 boss_id: boss.boss_id,
@@ -5189,6 +5228,13 @@ impl DigInteractionHandler {
             .is_some_and(|last| unix_now().saturating_sub(last) < 3_600)
         {
             embed = embed.field("Cooldown", "Free dig is resting.", true);
+        }
+        if info.hard_hat_charges > 0 {
+            embed = embed.field(
+                "Protection",
+                format!("Hard Hat ({})", info.hard_hat_charges),
+                true,
+            );
         }
         if let Ok(Some(avatar)) = self
             .state

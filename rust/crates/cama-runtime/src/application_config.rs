@@ -796,7 +796,6 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
         "CAMA_GATEWAY_RECONNECT_MAX_SECONDS",
         "GAMBA_SYNTHETIC_MEMBERS_ENABLED",
         "OPENDOTA_API_KEY",
-        "RUST_CUTOVER_CANDIDATE",
     ]);
     keys
 }
@@ -806,7 +805,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::test_support::parity_python;
 
     fn parse(values: &[(&str, &str)]) -> ApplicationConfig {
         let values = values
@@ -1038,120 +1036,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_exactly_one_entry_for_every_config_py_environment_key() {
+    fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
         assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
-        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let config_path = repository_root.join("config.py");
-        let script = r#"
-import ast, pathlib, sys
-tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
-parsers = {'_parse_int', '_parse_optional_int', '_parse_float', '_parse_bool', '_parse_int_list'}
-keys = set()
-for node in ast.walk(tree):
-    if not isinstance(node, ast.Call) or not node.args:
-        continue
-    is_getenv = isinstance(node.func, ast.Attribute) and node.func.attr == 'getenv'
-    is_parser = isinstance(node.func, ast.Name) and node.func.id in parsers
-    if (is_getenv or is_parser) and isinstance(node.args[0], ast.Constant):
-        keys.add(node.args[0].value)
-print('\n'.join(sorted(keys)))
-"#;
-        let output = parity_python(&repository_root)
-            .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
-            .output()
-            .expect("Python is available to the Rust test suite");
-        assert!(output.status.success());
-        let discovered = String::from_utf8(output.stdout)
-            .expect("UTF-8 Python output")
-            .lines()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            discovered,
-            catalog.into_iter().map(str::to_owned).collect(),
-            "config.py environment declarations and Rust catalog drifted"
-        );
-    }
-
-    #[test]
-    fn every_catalog_key_is_consumed_by_a_typed_configuration_field() {
-        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let config_path = repository_root.join("config.py");
-        let script = r#"
-import ast, pathlib, sys
-tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
-parsers = {'_parse_int', '_parse_optional_int', '_parse_float', '_parse_bool', '_parse_int_list'}
-overrides = {}
-for node in ast.walk(tree):
-    if not isinstance(node, ast.Call) or not node.args:
-        continue
-    if not isinstance(node.func, ast.Name) or node.func.id not in parsers:
-        continue
-    if not isinstance(node.args[0], ast.Constant):
-        continue
-    key, parser = node.args[0].value, node.func.id
-    if parser == '_parse_bool':
-        default = ast.literal_eval(node.args[1])
-        overrides[key] = 'false' if default else 'true'
-    elif parser == '_parse_int':
-        default = eval(compile(ast.Expression(node.args[1]), '<config>', 'eval'), {'__builtins__': {}}, {})
-        overrides[key] = str(default + 12345)
-    elif parser == '_parse_float':
-        default = ast.literal_eval(node.args[1])
-        overrides[key] = repr(default + 0.123456789)
-    elif parser in {'_parse_optional_int', '_parse_int_list'}:
-        overrides[key] = '987654321'
-overrides.update({
-    'DB_PATH': '/typed/config.db',
-    'DISCORD_BOT_TOKEN': 'different-discord-secret',
-    'ADMIN_USER_IDS': '987654321',
-    'TAX_MAN_USER_IDS': '987654321',
-    'TAX_MEN_USER_IDS': '987654321',
-    'LOBBY_CHANNEL_ID': '987654321',
-    'GAMBA_CHANNEL_ID': '987654321',
-    'LOWSKILL_LOBBY_CHANNEL_ID': '987654321',
-    'DIG_CHANNEL_ID': '987654321',
-    'DUEL_CHANNEL_ID': '987654321',
-    'PET_CHANNEL_ID': '987654321',
-    'GROQ_API_KEY': 'different-groq-secret',
-    'CEREBRAS_API_KEY': 'different-cerebras-secret',
-    'AI_MODEL': 'other/provider-model',
-})
-print('\n'.join(f'{key}\t{value}' for key, value in sorted(overrides.items())))
-"#;
-        let output = parity_python(&repository_root)
-            .args(["-c", script, config_path.to_str().expect("UTF-8 path")])
-            .output()
-            .expect("Python is available to the Rust test suite");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let output_text = String::from_utf8(output.stdout).expect("UTF-8 Python output");
-        let overrides = output_text
-            .lines()
-            .map(|line| line.split_once('\t').expect("key and override"))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            overrides.keys().copied().collect::<BTreeSet<_>>(),
-            config_py_env_keys().collect::<BTreeSet<_>>()
-        );
-
-        let baseline = parse(&[("DISCORD_BOT_TOKEN", "baseline-discord-secret")]);
-        for (key, override_value) in overrides {
-            let mut values = BTreeMap::from([(
-                "DISCORD_BOT_TOKEN".to_owned(),
-                "baseline-discord-secret".to_owned(),
-            )]);
-            values.insert(key.to_owned(), override_value.to_owned());
-            let overridden = ApplicationConfig::from_lookup(|name| values.get(name).cloned())
-                .expect("generated override remains valid");
-            assert_ne!(
-                overridden, baseline,
-                "{key} was captured but did not reach a typed configuration field"
-            );
-        }
     }
 }

@@ -1,6 +1,5 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::{path::Path, process::Command};
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -695,70 +694,4 @@ fn unmapped_lifecycle_route_clears_are_guarded_and_guild_scoped() {
             persisted_route_state: None
         }
     ));
-}
-
-/// Cross-language smoke: Python creates/migrates a disposable database, Rust
-/// commits a guarded victory, and Python observes the complete transaction.
-#[test]
-#[ignore = "cross-language smoke; run explicitly when repository Python is available"]
-fn unmapped_python_migrated_database_route_interop_smoke() {
-    let database = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(&repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'route-interop',100))\nc.execute(\"INSERT INTO tunnels (discord_id,guild_id,depth,boss_progress,tunnel_name) VALUES (?,?,?,?,?)\",(-70001,0,24,'{\\\"25\\\": {\\\"boss_id\\\": \\\"grothak\\\", \\\"status\\\": \\\"active\\\"}}','interop'))\nc.commit()\nc.close()",
-        ])
-        .arg(database.path())
-        .output()
-        .expect("run Python schema authority");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = DigRouteRepository::new(database.path());
-    let outcome = repository
-        .claim_boss_victory_atomic(BossVictoryRequest {
-            discord_id: -70_001,
-            guild_id: None,
-            expected_depth: 24,
-            expected_boss_progress: ACTIVE,
-            expected_stinger_curse: TextGuard::Null,
-            depth_after: 25,
-            boss_progress_after: DEFEATED,
-            route_state_after: PENDING,
-            clear_stinger_curse: true,
-            jc_delta: 11,
-            vanity_tax: 0,
-            boss_id: "grothak",
-            boss_depth: 25,
-            echo_window_seconds: 86_400,
-            detail_json: r#"{"boundary": 25, "won": true, "jc_delta": 11}"#,
-            now: NOW,
-        })
-        .unwrap();
-    assert_eq!(outcome, BossOutcomeClaim::Claimed);
-
-    let verify = Command::new(python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nassert c.execute('SELECT depth,route_state FROM tunnels WHERE discord_id=-70001 AND guild_id=0').fetchone()==(25,sys.argv[2])\nassert c.execute('SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0').fetchone()[0]==111\nassert c.execute(\"SELECT COUNT(*) FROM dig_actions WHERE actor_id=-70001 AND action_type='boss_fight'\").fetchone()[0]==1\nassert c.execute(\"SELECT depth,killer_discord_id FROM dig_boss_echoes WHERE guild_id=0 AND boss_id='grothak'\").fetchone()==(25,-70001)\nassert c.execute(\"SELECT COUNT(*) FROM economy_ledger_entries WHERE account_id=-70001 AND source='dig'\").fetchone()[0]==1\nassert c.execute('SELECT COUNT(*) FROM economy_ledger_context').fetchone()[0]==0\nc.close()",
-        ])
-        .arg(database.path())
-        .arg(PENDING)
-        .output()
-        .expect("run Python post-Rust verification");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
 }

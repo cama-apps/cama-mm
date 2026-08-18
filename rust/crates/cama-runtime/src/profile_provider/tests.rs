@@ -9,7 +9,6 @@ use cama_db::gambling_stats_repository::{
     AutoBetGroupStats, AutoBetPerformance, PlayerAutoBetStats,
 };
 use cama_db::predictions_repository::{ContractSide, NewLevel, PredictionRepository};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -17,6 +16,7 @@ use super::*;
 use crate::registration::{
     InteractionMessageDelivery, InteractionResponseError, Registry, RegistryBuilder,
 };
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 #[derive(Debug, Default)]
 struct CapturedResponses {

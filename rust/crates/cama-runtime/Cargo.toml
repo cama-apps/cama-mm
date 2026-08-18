@@ -9,6 +9,14 @@ license.workspace = true
 name = "cama-rust"
 path = "src/main.rs"
 
+# This target source-includes the draft provider as a compile-closed checker.
+# Clippy/check still build it; running its inherited unit tests would duplicate
+# the same 56 tests already executed through the library target.
+[[bin]]
+name = "draft_provider_check"
+path = "src/bin/draft_provider_check.rs"
+test = false
+
 [dependencies]
 cama-app = { path = "../cama-app" }
 cama-db = { path = "../cama-db" }

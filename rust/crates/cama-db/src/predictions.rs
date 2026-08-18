@@ -2043,7 +2043,8 @@ fn unix_timestamp() -> Result<i64, PredictionRepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::path::Path;
+    use std::sync::{Arc, Barrier, OnceLock};
     use std::thread;
 
     use rusqlite::{Connection, params};
@@ -2053,22 +2054,53 @@ mod tests {
         BookSide, CONTRACT_VALUE, ContractSide, NewLevel, Position, PredictionRepository,
         PredictionRepositoryError, quote_total,
     };
+    use crate::test_support::FastTestDatabase;
 
     const GUILD: i64 = 101;
     const OTHER_GUILD: i64 = 202;
 
+    static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+    enum FixtureDatabase {
+        Fast(FastTestDatabase),
+        Durable(NamedTempFile),
+    }
+
+    impl FixtureDatabase {
+        fn path(&self) -> &Path {
+            match self {
+                Self::Fast(database) => database.path(),
+                Self::Durable(database) => database.path(),
+            }
+        }
+    }
+
     struct Fixture {
-        file: NamedTempFile,
+        file: FixtureDatabase,
         repository: PredictionRepository,
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::from_database(FixtureDatabase::Fast(FastTestDatabase::from_template(
+                Self::template().path(),
+            )))
+        }
+
+        fn new_durable() -> Self {
             let file = NamedTempFile::new().expect("create prediction SQLite fixture");
-            let connection = Connection::open(file.path()).expect("open prediction fixture");
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode=WAL;
+            std::fs::copy(Self::template().path(), file.path())
+                .expect("copy prediction fixture schema template");
+            Self::from_database(FixtureDatabase::Durable(file))
+        }
+
+        fn template() -> &'static NamedTempFile {
+            FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+                let file = NamedTempFile::new().expect("create prediction SQLite template");
+                let connection = Connection::open(file.path()).expect("open prediction template");
+                connection
+                    .execute_batch(
+                        "PRAGMA journal_mode=WAL;
                      CREATE TABLE players (
                          discord_id INTEGER NOT NULL,
                          guild_id INTEGER NOT NULL DEFAULT 0,
@@ -2183,8 +2215,14 @@ mod tests {
                          related_type TEXT,
                          related_id TEXT
                      );",
-                )
-                .expect("create migrated prediction fixture schema");
+                    )
+                    .expect("create migrated prediction fixture schema template");
+                drop(connection);
+                file
+            })
+        }
+
+        fn from_database(file: FixtureDatabase) -> Self {
             let repository = PredictionRepository::new(file.path());
             Self { file, repository }
         }
@@ -3246,7 +3284,7 @@ mod tests {
 
     #[test]
     fn test_atomic_buy_does_not_oversell_shared_depth() {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_durable();
         fixture.player(1, GUILD, 1_000);
         fixture.player(2, GUILD, 1_000);
         let market = fixture.market();

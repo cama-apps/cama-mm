@@ -17,9 +17,14 @@ mod registration {
     pub use cama_runtime::registration::*;
 }
 
-// Keep the source-inclusion checker as a second, compile-closed test target.
-// The unique module name prevents duplicate Rust IDs now that the admitted
-// library also runs the provider's substantive unit tests.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../test_support.rs"]
+mod test_support;
+
+// Keep the source-inclusion checker as a second compile-closed target. Cargo
+// does not run its inherited unit tests because they already run through the
+// library target, but check/clippy still compile this independent inclusion.
 #[allow(dead_code)]
 #[path = "../draft_provider.rs"]
 mod draft_provider_check_impl;

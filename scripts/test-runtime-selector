@@ -28,17 +28,13 @@ MUTATING_DOCKER_OPERATIONS = (
 )
 
 
-def rendered(runtime: str | None, candidate: str | None = None) -> dict[str, object]:
+def rendered(runtime: str | None) -> dict[str, object]:
     env = os.environ.copy()
     env["GIT_SHA"] = "selector-test-sha"
     if runtime is None:
         env.pop("BOT_RUNTIME", None)
     else:
         env["BOT_RUNTIME"] = runtime
-    if candidate is None:
-        env.pop("RUST_CUTOVER_CANDIDATE", None)
-    else:
-        env["RUST_CUTOVER_CANDIDATE"] = candidate
     result = subprocess.run(
         [str(COMPOSE), "config", "--format", "json"],
         cwd=ROOT,
@@ -269,8 +265,6 @@ def assert_selector() -> None:
     assert rust_bot["build"]["args"]["GIT_SHA"] == "selector-test-sha"
     assert python_bot["environment"]["BOT_RUNTIME"] == "python"
     assert rust_bot["environment"]["BOT_RUNTIME"] == "rust"
-    assert "RUST_CUTOVER_CANDIDATE" not in python_bot["environment"]
-    assert rust_bot["environment"]["RUST_CUTOVER_CANDIDATE"] == "false"
     assert rust_bot["command"] == ["serve"]
     assert python_bot["user"] == rust_bot["user"] == "1001:1001"
     assert python_bot["restart"] == rust_bot["restart"] == "always"
@@ -285,21 +279,8 @@ def assert_selector() -> None:
     expected_rust_bot = json.loads(json.dumps(python_bot))
     expected_rust_bot["build"]["dockerfile"] = "Dockerfile.rust"
     expected_rust_bot["environment"]["BOT_RUNTIME"] = "rust"
-    expected_rust_bot["environment"]["RUST_CUTOVER_CANDIDATE"] = "false"
     expected_rust_bot["command"] = ["serve"]
     assert rust_bot == expected_rust_bot
-
-    # Compose forwards the exact operator value. RuntimeConfig accepts only
-    # lowercase `true`; case-mismatched values must remain visibly disabled
-    # rather than being normalized by the selector.
-    assert (
-        rendered("rust", "true")["services"]["bot"]["environment"]["RUST_CUTOVER_CANDIDATE"]
-        == "true"
-    )
-    assert (
-        rendered("rust", "TRUE")["services"]["bot"]["environment"]["RUST_CUTOVER_CANDIDATE"]
-        == "TRUE"
-    )
 
     for invalid in ("", "bogus", "RUST"):
         env = os.environ | {"BOT_RUNTIME": invalid}
@@ -410,19 +391,6 @@ def assert_selector() -> None:
             env=os.environ | {"BOT_RUNTIME": "rust", "DB_PATH": str(database_path)},
         )
         assert allowed_rust.returncode == 0
-
-    deploy_env = os.environ | {"BOT_RUNTIME": "rust"}
-    deploy_env.pop("RUST_CUTOVER_CANDIDATE", None)
-    ungated_deploy = subprocess.run(
-        [str(DEPLOY)],
-        cwd=ROOT,
-        env=deploy_env,
-        capture_output=True,
-        text=True,
-    )
-    assert ungated_deploy.returncode == 65
-    assert "complete parity gate" in ungated_deploy.stderr
-
 
 if __name__ == "__main__":
     try:

@@ -1,29 +1,39 @@
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
 use crate::predictions_repository::{Book, Position, PredictionRepository, Trade};
+use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 7_777;
 const OTHER_GUILD: i64 = 8_888;
 const ADMIN: i64 = 999;
 const NOW: i64 = 2_000_000_000;
 
+fn fixture_template() -> &'static NamedTempFile {
+    static TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let file = NamedTempFile::new().expect("prediction resolution template");
+        Connection::open(file.path())
+            .expect("open fixture template")
+            .execute_batch(FIXTURE_SCHEMA)
+            .expect("create migrated-schema fixture");
+        file
+    })
+}
+
 struct Fixture {
-    file: NamedTempFile,
+    file: FastTestDatabase,
     repository: PredictionResolutionRepository,
     orderbook: PredictionRepository,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let file = NamedTempFile::new().expect("prediction resolution fixture");
-        let connection = Connection::open(file.path()).expect("open fixture");
-        connection
-            .execute_batch(FIXTURE_SCHEMA)
-            .expect("create migrated-schema fixture");
+        let file = FastTestDatabase::from_template(fixture_template().path());
         Self {
             repository: PredictionResolutionRepository::new(file.path()),
             orderbook: PredictionRepository::new(file.path()),

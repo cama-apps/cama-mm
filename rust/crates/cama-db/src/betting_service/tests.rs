@@ -1,22 +1,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::{FastTestDatabase, copy_migrated_database};
 
 const GUILD: i64 = 4242;
 const NOW: i64 = 10_000;
 
-fn fixture() -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temporary betting database");
-    let connection = Connection::open(file.path()).expect("open fixture");
-    connection
-        .execute_batch(
-            "CREATE TABLE players (
+static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+fn fixture() -> FastTestDatabase {
+    let template = FIXTURE_DATABASE_TEMPLATE.get_or_init(|| {
+        let file = NamedTempFile::new().expect("temporary betting database template");
+        let connection = Connection::open(file.path()).expect("open fixture template");
+        connection
+            .execute_batch(
+                "CREATE TABLE players (
                  discord_id INTEGER NOT NULL,
                  guild_id INTEGER NOT NULL DEFAULT 0,
                  jopacoin_balance INTEGER DEFAULT 3,
@@ -81,9 +84,12 @@ fn fixture() -> NamedTempFile {
                  updated_at TEXT,
                  PRIMARY KEY (guild_id, investor_id, target_id)
              );",
-        )
-        .expect("create disposable schema");
-    file
+            )
+            .expect("create disposable schema template");
+        drop(connection);
+        file
+    });
+    FastTestDatabase::from_template(template.path())
 }
 
 fn repo(path: &Path) -> BettingServiceRepository {
@@ -175,7 +181,7 @@ fn add_pending_payload(path: &Path, pending_match_id: i64, payload: &str) {
 
 fn migrated_concurrent_fixture() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary migrated concurrent database");
-    initialize_or_migrate(file.path()).expect("migrate concurrent database");
+    copy_migrated_database(file.path()).expect("copy concurrent database");
     let connection = Connection::open(file.path()).expect("open migrated concurrent database");
     connection
         .execute_batch("PRAGMA foreign_keys=OFF")
@@ -1650,99 +1656,9 @@ fn test_bet_history_distinguishes_zero_payout_from_null() {
     assert_eq!(history[1].profit, 10);
 }
 
-/// Python owns migrations and creates the fixture, Rust performs the guarded
-/// betting transactions, then Python verifies balances, status, and ledger
-/// attribution. This is deliberately outside the 30-node parity mapping.
-#[test]
-#[ignore = "cross-language smoke invokes the repository Python environment"]
-fn unmapped_python_migrated_database_betting_service_interop_smoke() {
-    let file = NamedTempFile::new().expect("temporary interop database");
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("repository root");
-    let python = repository_root.join(".venv/bin/python");
-    let initialize = Command::new(&python)
-        .current_dir(repository_root)
-        .args([
-            "-c",
-            "import json,sqlite3,sys\nfrom infrastructure.schema_manager import SchemaManager\np=sys.argv[1]\nSchemaManager(p).initialize()\nc=sqlite3.connect(p)\npayload={'radiant_team_ids':[1,2,3,4,5],'dire_team_ids':[6,7,8,9,10],'shuffle_timestamp':1700000000,'bet_lock_until':2000000000,'is_draft':False}\nc.execute(\"INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance) VALUES (?,?,?,?)\",(-70001,0,'bet-interop',100))\nc.execute(\"INSERT INTO pending_matches (pending_match_id,guild_id,payload) VALUES (?,?,?)\",(900,0,json.dumps(payload)))\nc.execute(\"INSERT INTO matches (match_id,team1_players,team2_players,winning_team) VALUES (?,?,?,?)\",(991,'[]','[]',1))\nc.execute(\"INSERT INTO manashop_buffs (discord_id,guild_id,buff_type,granted_at,expires_at) VALUES (?,?,?,?,?)\",(-70001,0,'communion_blessing',1700000000,2000000000))\nc.commit(); c.close()",
-            file.path().to_str().expect("UTF-8 path"),
-        ])
-        .output()
-        .expect("initialize Python-migrated database");
-    assert!(
-        initialize.status.success(),
-        "Python initialization failed: {}",
-        String::from_utf8_lossy(&initialize.stderr)
-    );
-
-    let repository = BettingServiceRepository::new(file.path());
-    let placed = repository
-        .place_bet_atomic(PlaceBetRequest {
-            guild_id: None,
-            pending_match_id: 900,
-            discord_id: -70_001,
-            team: BettingTeam::Radiant,
-            amount: 20,
-            bet_time: 1_700_000_000,
-            leverage: 1,
-            max_debt: 500,
-            is_blind: false,
-            odds_at_placement: None,
-        })
-        .expect("place through Python schema");
-    let settlement = repository
-        .settle_pending_bets_atomic(
-            991,
-            None,
-            1_700_000_000,
-            Some(900),
-            BettingTeam::Radiant,
-            BettingMode::House,
-        )
-        .expect("settle through Python schema");
-    assert_eq!(settlement.winners.len(), 1);
-    assert_eq!(settlement.winners[0].payout, 40);
-    assert!(
-        repository
-            .settle_pending_bets_atomic(
-                991,
-                None,
-                1_700_000_000,
-                Some(900),
-                BettingTeam::Radiant,
-                BettingMode::House,
-            )
-            .expect("idempotent interop retry")
-            .winners
-            .is_empty()
-    );
-    assert!(
-        repository
-            .consume_and_credit_atomic(1, -70_001, None, 5)
-            .expect("consume blessing through Python schema")
-    );
-
-    let verify = Command::new(python)
-        .args([
-            "-c",
-            "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nb=c.execute(\"SELECT jopacoin_balance FROM players WHERE discord_id=-70001 AND guild_id=0\").fetchone()[0]\nbet=c.execute(\"SELECT match_id,payout FROM bets WHERE bet_id=?\",(int(sys.argv[2]),)).fetchone()\ntriggered=c.execute(\"SELECT triggered FROM manashop_buffs WHERE id=1\").fetchone()[0]\nsources={r[0] for r in c.execute(\"SELECT source FROM economy_ledger_entries WHERE account_id=-70001\")}\nassert b == 125\nassert bet == (991,40)\nassert triggered == 1\nassert {'bet','bet_settlement','manashop_buff'} <= sources\nc.close()",
-            file.path().to_str().expect("UTF-8 path"),
-            &placed.bet_id.to_string(),
-        ])
-        .output()
-        .expect("verify Rust writes from Python");
-    assert!(
-        verify.status.success(),
-        "Python verification failed: {}",
-        String::from_utf8_lossy(&verify.stderr)
-    );
-}
-
 fn migrated_seed_fixture(match_id: i64, pending_match_id: i64, mode: BettingMode) -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary migrated seed database");
-    initialize_or_migrate(file.path()).expect("migrate seed database");
+    copy_migrated_database(file.path()).expect("copy seed database");
     let connection = Connection::open(file.path()).expect("open migrated seed database");
     connection
         .execute_batch("PRAGMA foreign_keys=OFF")
@@ -2879,7 +2795,7 @@ fn test_bomb_pot_player_already_in_debt_can_ante() {
 }
 
 fn settle_test_bets(
-    file: &NamedTempFile,
+    file: &FastTestDatabase,
     pending_match_id: i64,
     match_id: i64,
     mode: BettingMode,

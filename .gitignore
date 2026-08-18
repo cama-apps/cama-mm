@@ -156,6 +156,7 @@ rust/target/
 rust/**/target/
 rust/target-*/
 rust/.scratch-*/
+.cama-build/
 
 # OS files
 .DS_Store
@@ -200,6 +201,7 @@ scripts/*
 !scripts/runtime-entrypoint
 !scripts/sqlite_backup.py
 !scripts/sqlite_restore.py
+!scripts/stage-runtime-assets
 !scripts/test-runtime-selector
 docs/stats.md
 docs/

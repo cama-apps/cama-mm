@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::schema_manager::initialize_or_migrate;
+use crate::test_support::copy_migrated_database;
 
 const USER: i64 = 83_001;
 const GUILD: i64 = 83_002;
@@ -24,7 +24,7 @@ type PreservedAbandonState = (
 
 fn fixture(depth: i64) -> NamedTempFile {
     let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("migrated schema");
+    copy_migrated_database(database.path()).expect("migrated schema");
     let connection = Connection::open(database.path()).expect("fixture connection");
     connection
         .pragma_update(None, "foreign_keys", false)

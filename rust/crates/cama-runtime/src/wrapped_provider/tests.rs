@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use cama_app::wrapped_media::{WrappedSlideData, render_wrapped_slide};
-use cama_db::schema_manager::initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -9,6 +8,7 @@ use super::*;
 use crate::registration::{
     InteractionMessageDelivery, InteractionResponseError, Registry, RegistryBuilder,
 };
+use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: u64 = 42;
 const OWNER: u64 = 100;
