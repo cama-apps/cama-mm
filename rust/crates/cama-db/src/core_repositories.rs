@@ -1910,6 +1910,10 @@ pub struct RoleCoverage {
     pub participants: i64,
     pub with_derived_role: i64,
     pub with_gold_at_10: i64,
+    /// Participants with `last_hits_at_10` populated — the metric that
+    /// actually feeds [`derive_positions`]. `with_gold_at_10` is kept for
+    /// visibility into the still-captured but no-longer-consumed column.
+    pub with_last_hits_at_10: i64,
     pub matches_seen: i64,
     /// Distinct (player, role) pairs that have reached the minimum sample, so
     /// the factor can lift them off the floor.
@@ -1932,6 +1936,7 @@ pub struct RoleBackfillReport {
     pub tied_farm_priority: u64,
     /// Per participant.
     pub gold_samples_written: u64,
+    pub last_hits_samples_written: u64,
 }
 
 /// Derive and store one match's positions inside `transaction`.
@@ -1958,6 +1963,7 @@ fn backfill_one_match(
         return Ok(());
     };
     let gold_by_hero = gold_at_ten_by_hero(&value);
+    let last_hits_by_hero = last_hits_at_ten_by_hero(&value);
 
     let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
         .prepare(
@@ -1979,6 +1985,14 @@ fn backfill_one_match(
             )?;
             report.gold_samples_written += 1;
         }
+        if let Some(last_hits) = last_hits_by_hero.get(hero_id) {
+            transaction.execute(
+                "UPDATE match_participants SET last_hits_at_10 = ?1
+                  WHERE match_id = ?2 AND discord_id = ?3 AND guild_id = ?4",
+                params![last_hits, match_id, discord_id, guild_id],
+            )?;
+            report.last_hits_samples_written += 1;
+        }
     }
 
     for team_number in [1_i64, 2] {
@@ -1994,7 +2008,7 @@ fn backfill_one_match(
             let (_, _, hero_id, lane_role) = team[index];
             LaneStats {
                 lane_role: *lane_role,
-                gold_at_10: gold_by_hero.get(hero_id).copied(),
+                last_hits_at_10: last_hits_by_hero.get(hero_id).copied(),
             }
         });
         let derived = derive_positions(&stats);
@@ -2040,6 +2054,41 @@ fn gold_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
             continue;
         };
         if by_hero.insert(hero_id, gold).is_some() {
+            duplicated.push(hero_id);
+        }
+    }
+    // A duplicated hero would make the join ambiguous; drop those rather than
+    // attribute one player's farm to another.
+    for hero_id in duplicated {
+        by_hero.remove(&hero_id);
+    }
+    by_hero
+}
+
+/// Map hero id to that player's creep score at ten minutes, from an archived
+/// OpenDota match payload. Mirrors [`gold_at_ten_by_hero`], reading `lh_t`
+/// instead of `gold_t` — this is what actually feeds [`derive_positions`];
+/// `gold_at_ten_by_hero` is kept only to keep populating the stored
+/// `gold_at_10` column for its own sake.
+fn last_hits_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
+    let Some(players) = payload.get("players").and_then(serde_json::Value::as_array) else {
+        return BTreeMap::new();
+    };
+    let mut by_hero: BTreeMap<i64, i64> = BTreeMap::new();
+    let mut duplicated = Vec::new();
+    for player in players {
+        let Some(hero_id) = player.get("hero_id").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let Some(last_hits) = player
+            .get("lh_t")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if by_hero.insert(hero_id, last_hits).is_some() {
             duplicated.push(hero_id);
         }
     }
@@ -2578,22 +2627,25 @@ impl MatchRepository {
     ) -> Result<RoleCoverage, CoreRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let connection = self.connection()?;
-        let (participants, with_role, with_gold, enriched_matches) = connection.query_row(
-            "SELECT COUNT(*),
+        let (participants, with_role, with_gold, with_last_hits, enriched_matches) = connection
+            .query_row(
+                "SELECT COUNT(*),
                     SUM(CASE WHEN derived_role IS NOT NULL THEN 1 ELSE 0 END),
                     SUM(CASE WHEN gold_at_10 IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN last_hits_at_10 IS NOT NULL THEN 1 ELSE 0 END),
                     COUNT(DISTINCT match_id)
                FROM match_participants WHERE guild_id = ?1",
-            params![guild_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )?;
+                params![guild_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )?;
         // Players who have cleared the minimum sample in at least one role, i.e.
         // those the factor can actually move off the floor.
         let players_above_floor = connection.query_row(
@@ -2609,6 +2661,7 @@ impl MatchRepository {
             participants,
             with_derived_role: with_role,
             with_gold_at_10: with_gold,
+            with_last_hits_at_10: with_last_hits,
             matches_seen: enriched_matches,
             player_roles_above_minimum_sample: players_above_floor,
         })
@@ -5574,23 +5627,27 @@ mod tests {
         );
     }
 
-    /// An archived OpenDota payload: five heroes a side, gold series long
-    /// enough to sample at ten minutes.
+    /// An archived OpenDota payload: five heroes a side, gold and last-hits
+    /// series long enough to sample at ten minutes. The same value seeds
+    /// both series — these tests only care about relative farm order within
+    /// a lane, which is identical either way.
     fn enrichment_payload(entries: &[(i64, i64)]) -> String {
         let players = entries
             .iter()
-            .map(|(hero_id, gold_at_10)| {
+            .map(|(hero_id, farm_at_10)| {
                 let series = (0..=12)
                     .map(|minute| {
                         if minute == 10 {
-                            gold_at_10.to_string()
+                            farm_at_10.to_string()
                         } else {
                             "0".to_owned()
                         }
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{{\"hero_id\":{hero_id},\"gold_t\":[{series}]}}")
+                format!(
+                    "{{\"hero_id\":{hero_id},\"gold_t\":[{series}],\"lh_t\":[{series}]}}"
+                )
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -5679,6 +5736,7 @@ mod tests {
         assert_eq!(report.matches_scanned, 1);
         assert_eq!(report.teams_derived, 2);
         assert_eq!(report.gold_samples_written, 10);
+        assert_eq!(report.last_hits_samples_written, 10);
 
         let roles = derived_roles(&fixture, match_id);
         let by_id: BTreeMap<i64, Option<String>> = roles
@@ -8936,7 +8994,7 @@ mod tests {
             rune_pickups INTEGER, firstblood_claimed INTEGER, stuns REAL,
             fantasy_points REAL, guild_id INTEGER NOT NULL DEFAULT 0,
             bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT,
-            gold_at_10 INTEGER, derived_role TEXT,
+            gold_at_10 INTEGER, derived_role TEXT, last_hits_at_10 INTEGER,
             PRIMARY KEY(match_id,discord_id)
         );
         CREATE TABLE rating_history (

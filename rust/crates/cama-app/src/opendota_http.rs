@@ -939,6 +939,11 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
                 .and_then(Value::as_array)
                 .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
                 .and_then(Value::as_i64),
+            last_hits_at_10: object
+                .get("lh_t")
+                .and_then(Value::as_array)
+                .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
+                .and_then(Value::as_i64),
             towers_killed: field_i64(object, "towers_killed"),
             roshans_killed: field_i64(object, "roshans_killed"),
             teamfight_participation: field_f64(object, "teamfight_participation"),
