@@ -2811,6 +2811,92 @@ fn disbursement_vote_audit_matches_python_pagination_contract() {
     );
 }
 
+#[test]
+fn disbursement_petition_embed_explains_every_option_and_progress() {
+    let mut votes = DISBURSE_METHODS
+        .iter()
+        .map(|method| ((*method).to_owned(), 0))
+        .collect::<BTreeMap<_, _>>();
+    votes.insert("even".to_owned(), 2);
+    votes.insert("burn".to_owned(), 1);
+    let proposal = DisbursementProposal {
+        guild_id: 42,
+        proposal_id: 900,
+        message_id: None,
+        channel_id: None,
+        fund_amount: 250,
+        quorum_required: 10,
+        status: "active".to_owned(),
+        created_at: None,
+        votes,
+    };
+
+    let response = disbursement_proposal_response(&proposal);
+    let embed = &response.embeds[0];
+    assert_eq!(
+        embed.title.as_deref(),
+        Some("🏛️ Jopacoin Reserve Allocation Vote")
+    );
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("**250**"))
+    );
+    let expected_options = [
+        ("Even Split", "Repays every debtor evenly", "**2 votes**"),
+        ("Proportional", "in proportion", "**0 votes**"),
+        ("Neediest First", "deepest in debt", "**0 votes**"),
+        ("Stimulus", "outside the three richest", "**0 votes**"),
+        ("Lottery", "randomly selected", "**0 votes**"),
+        ("Social Security", "games played", "**0 votes**"),
+        ("Richest", "highest balance", "**0 votes**"),
+        ("Burn", "from circulation", "**1 vote**"),
+        ("Next Match Pot", "next match's betting pot", "**0 votes**"),
+        ("Cancel", "returns all locked funds", "**0 votes**"),
+    ];
+    for (label, explanation, count) in expected_options {
+        let field = embed
+            .fields
+            .iter()
+            .find(|field| field.name.contains(label))
+            .unwrap_or_else(|| panic!("missing petition field for {label}"));
+        assert!(field.inline, "petition option {label} must stay compact");
+        assert!(field.value.contains(explanation));
+        assert!(field.value.contains(count));
+    }
+    let progress = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "🗳️ Petition Progress")
+        .expect("petition progress field");
+    assert!(progress.value.contains("**3/10**"));
+    assert!(progress.value.contains("**30%**"));
+    assert!(progress.value.contains("7 more votes needed"));
+    assert_eq!(embed.fields.len(), 11);
+    assert_eq!(response.components.len(), 2);
+    assert!(response.components.iter().all(|row| row.buttons.len() == 5));
+    assert!(
+        embed
+            .footer
+            .as_deref()
+            .is_some_and(|footer| footer.contains("latest ballot replaces"))
+    );
+
+    let closed = disbursement_proposal_response_with_disabled_buttons(&proposal);
+    assert!(
+        closed
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| button.disabled)
+    );
+    assert_eq!(
+        closed.embeds[0].footer.as_deref(),
+        Some("Voting closed • Ties favor Even Split")
+    );
+}
+
 #[tokio::test]
 async fn wrong_channel_penalty_debits_one_and_credits_reserve() {
     let database = NamedTempFile::new().expect("temporary database");

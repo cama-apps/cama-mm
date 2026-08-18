@@ -6134,20 +6134,60 @@ fn state_key(state: &PendingDisburseVotes) -> String {
     )
 }
 
-fn disburse_method_label(method: &str) -> &str {
+fn disburse_method_details(method: &str) -> (&str, &str, &str) {
     match method {
-        "even" => "Even Split",
-        "proportional" => "Proportional",
-        "neediest" => "Neediest First",
-        "stimulus" => "Stimulus",
-        "lottery" => "Lottery",
-        "social_security" => "Social Security",
-        "richest" => "Richest",
-        "burn" => "Burn",
-        "next_match_pot" => "Next Match Pot",
-        "cancel" => "Cancel",
-        _ => method,
+        "even" => (
+            "📊",
+            "Even Split",
+            "Repays every debtor evenly, capped at each player's debt.",
+        ),
+        "proportional" => (
+            "📈",
+            "Proportional",
+            "Repays debtors in proportion to how much each one owes.",
+        ),
+        "neediest" => (
+            "🎯",
+            "Neediest First",
+            "Sends relief to the player deepest in debt, capped at their debt.",
+        ),
+        "stimulus" => (
+            "💸",
+            "Stimulus",
+            "Splits the reserve among non-debtors outside the three richest.",
+        ),
+        "lottery" => (
+            "🎲",
+            "Lottery",
+            "One randomly selected registered player wins the entire reserve.",
+        ),
+        "social_security" => (
+            "👴",
+            "Social Security",
+            "Rewards registered players in proportion to games played.",
+        ),
+        "richest" => (
+            "💎",
+            "Richest",
+            "Gives the entire reserve to the player with the highest balance.",
+        ),
+        "burn" => ("🔥", "Burn", "Removes the entire reserve from circulation."),
+        "next_match_pot" => (
+            "🎰",
+            "Next Match Pot",
+            "Moves the entire reserve into the next match's betting pot.",
+        ),
+        "cancel" => (
+            "↩️",
+            "Cancel",
+            "Ends the vote and returns all locked funds to the reserve.",
+        ),
+        _ => ("🗳️", method, "Custom reserve allocation option."),
     }
+}
+
+fn disburse_method_label(method: &str) -> &str {
+    disburse_method_details(method).1
 }
 
 fn winning_disbursement_method(votes: &BTreeMap<String, i64>) -> Option<&str> {
@@ -6174,17 +6214,40 @@ fn disbursement_proposal_response_with_disabled_buttons_impl(
     proposal: &DisbursementProposal,
     disabled: bool,
 ) -> InteractionResponse {
-    let vote_lines = DISBURSE_METHODS
-        .iter()
-        .map(|method| {
-            format!(
-                "{}: {}",
-                disburse_method_label(method),
-                proposal.votes.get(*method).copied().unwrap_or(0)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
+    const QUORUM_BAR_WIDTH: i64 = 12;
+    let total_votes = proposal.total_votes().max(0);
+    let quorum = proposal.quorum_required.max(0);
+    let progress_votes = if quorum == 0 {
+        quorum
+    } else {
+        total_votes.min(quorum)
+    };
+    let filled = if quorum == 0 {
+        QUORUM_BAR_WIDTH
+    } else {
+        progress_votes.saturating_mul(QUORUM_BAR_WIDTH) / quorum
+    };
+    let percentage = if quorum == 0 {
+        100
+    } else {
+        progress_votes.saturating_mul(100) / quorum
+    };
+    let filled = usize::try_from(filled).unwrap_or_default();
+    let empty = usize::try_from(QUORUM_BAR_WIDTH)
+        .unwrap_or_default()
+        .saturating_sub(filled);
+    let remaining = quorum.saturating_sub(total_votes);
+    let progress_note = if disabled {
+        "✅ Voting closed — this petition has been finalized.".to_owned()
+    } else if remaining == 0 {
+        "✅ Quorum reached — allocation begins with this ballot.".to_owned()
+    } else {
+        format!(
+            "{} more {} needed to decide the reserve's destination.",
+            remaining,
+            if remaining == 1 { "vote" } else { "votes" }
+        )
+    };
     let rows = DISBURSE_METHODS
         .chunks(5)
         .map(|methods| {
@@ -6210,19 +6273,41 @@ fn disbursement_proposal_response_with_disabled_buttons_impl(
             )
         })
         .collect::<Vec<_>>();
-    InteractionResponse::message("")
-        .embed(
-            InteractionEmbed::titled("💝 Jopacoin Reserve Allocation")
-                .description(format!(
-                    "**{}** {} is locked for this allocation vote.\n\nVotes: **{}/{}**\n{}",
-                    proposal.fund_amount,
-                    JOPACOIN_EMOTE,
-                    proposal.total_votes(),
-                    proposal.quorum_required,
-                    vote_lines
-                ))
-                .color(0xE9_1E_63),
+    let mut embed = InteractionEmbed::titled("🏛️ Jopacoin Reserve Allocation Vote")
+        .description(format!(
+            "**{}** {} is locked from the reserve. Choose what happens to it — every option is explained below.",
+            proposal.fund_amount, JOPACOIN_EMOTE
+        ))
+        .color(0xE9_1E_63);
+    for method in DISBURSE_METHODS {
+        let (icon, label, explanation) = disburse_method_details(method);
+        let votes = proposal.votes.get(method).copied().unwrap_or(0);
+        embed = embed.field(
+            format!("{icon} {label}"),
+            format!(
+                "{explanation}\n**{votes} {}**",
+                if votes == 1 { "vote" } else { "votes" }
+            ),
+            true,
+        );
+    }
+    embed = embed
+        .field(
+            "🗳️ Petition Progress",
+            format!(
+                "`{}{}` **{total_votes}/{quorum}** • **{percentage}%**\n{progress_note}",
+                "█".repeat(filled),
+                "░".repeat(empty),
+            ),
+            false,
         )
+        .footer(if disabled {
+            "Voting closed • Ties favor Even Split"
+        } else {
+            "Tap a button to vote • Your latest ballot replaces the previous one • Ties favor Even Split"
+        });
+    InteractionResponse::message("")
+        .embed(embed)
         .action_rows(rows)
 }
 
