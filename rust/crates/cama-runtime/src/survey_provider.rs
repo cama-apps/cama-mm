@@ -2555,10 +2555,10 @@ fn signed(value: u64, label: &str) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| format!("Discord {label} exceeds SQLite INTEGER"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "survey_provider/tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "survey_provider/runtime_tests.rs"]
 mod runtime_tests;

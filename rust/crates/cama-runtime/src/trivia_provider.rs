@@ -1453,6 +1453,6 @@ impl GatewayEventObserver for TriviaImageCacheWarmObserver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "trivia_provider/tests.rs"]
 mod tests;

@@ -890,6 +890,74 @@ fn paid_dig_debits_exactly_once_and_records_a_distinct_cost_ledger_entry() {
 }
 
 #[test]
+fn first_paid_dig_of_new_day_resets_stale_counter_before_incrementing() {
+    let database = fast_migrated_database();
+    let connection = Connection::open(database.path()).expect("open migrated database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match Python foreign-key behavior");
+    connection
+        .execute(
+            "INSERT INTO players
+                 (discord_id,guild_id,discord_username,jopacoin_balance)
+                 VALUES (?1,?2,?3,?4)",
+            params![-9_007_i64, 42_i64, "new-day-paid", 100_i64],
+        )
+        .expect("insert player");
+    connection
+        .execute(
+            "INSERT INTO tunnels (
+                 discord_id,guild_id,depth,max_depth,total_digs,last_dig_at,
+                 paid_digs_today,paid_dig_date
+             ) VALUES (?1,?2,10,10,1,?3,7,'1999-01-01')",
+            params![-9_007_i64, 42_i64, 1_700_000_000_i64],
+        )
+        .expect("insert tunnel with stale paid counter");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+    let outcome = service
+        .dig(DigRuntimeRequest {
+            discord_id: -9_007,
+            guild_id: 42,
+            now: 1_700_000_001,
+            paid: true,
+            forced_event: false,
+        })
+        .expect("first paid dig of new day");
+
+    assert!(outcome.success);
+    assert_eq!(outcome.paid_dig_cost, 3);
+    let today = game_date_for_timestamp(1_700_000_001_f64).expect("game date");
+    let connection = Connection::open(database.path()).expect("reopen paid database");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT paid_digs_today,paid_dig_date FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![-9_007_i64, 42_i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("new daily paid counter"),
+        (1, today)
+    );
+    drop(connection);
+
+    let next = service
+        .dig(DigRuntimeRequest {
+            discord_id: -9_007,
+            guild_id: 42,
+            now: 1_700_000_002,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("preview next paid dig");
+    assert!(!next.success);
+    assert!(next.paid_dig_available);
+    assert_eq!(next.paid_dig_cost, 5);
+}
+
+#[test]
 fn free_dig_commits_for_a_player_with_negative_balance() {
     let database = fast_migrated_database();
     let connection = Connection::open(database.path()).expect("open migrated database");

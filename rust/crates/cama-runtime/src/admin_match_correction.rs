@@ -660,6 +660,6 @@ fn owner_token() -> String {
     format!("rust-admin-{}-{nanos}-{sequence}", std::process::id())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "admin_match_correction/tests.rs"]
 mod tests;

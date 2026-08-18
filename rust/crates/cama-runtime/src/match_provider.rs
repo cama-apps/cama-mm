@@ -2464,7 +2464,7 @@ impl MatchHandler {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-match"))]
     async fn emit_post_match_debrief(&self, request: Option<MatchPostMatchDebriefRequest>) {
         self.emit_post_match_hooks(None, None, request).await;
     }
@@ -6235,6 +6235,6 @@ fn automatic_outcome_json(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "match_provider/tests.rs"]
 mod tests;

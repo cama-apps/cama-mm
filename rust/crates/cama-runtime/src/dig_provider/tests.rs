@@ -949,6 +949,72 @@ fn boss_failure_uses_python_error_embed() {
     assert_eq!(embed.color, Some(0xFF_A5_00));
 }
 
+#[tokio::test]
+async fn stale_namespaced_boss_duel_is_reported_to_the_player() {
+    let (_database, provider, _discord) = fixture();
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:duel:{USER}:{GUILD}:0"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss choice is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    let embed = &followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("Boss Fight Error"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("there is no active duel to resume")
+    );
+}
+
+#[tokio::test]
+async fn stale_carried_boss_fight_is_reported_as_expired() {
+    let (database, provider, _discord) = fixture();
+    Connection::open(database.path())
+        .expect("stale boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,1,1,0,'{}',0,0,100,0,'Stale Boss Button')",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("non-boss tunnel");
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:fight:carried:{USER}:{GUILD}"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss fight is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    assert!(
+        responder
+            .responses
+            .lock()
+            .expect("boss responses")
+            .is_empty()
+    );
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        "This boss encounter is no longer active. Use `/dig go` to continue."
+    );
+}
+
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
 #[test]
 fn failed_event_uses_python_error_embed() {
@@ -5670,7 +5736,8 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
     {
         let updates = open.updates.lock().expect("selector update");
         assert_eq!(updates.len(), 1);
-        let select = updates[0].components[0]
+        let update = &updates[0];
+        let select = update.components[0]
             .string_select
             .as_ref()
             .expect("gear select");
@@ -5685,6 +5752,33 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
                 .options
                 .iter()
                 .any(|option| option.value == format!("relic:{relic_id}"))
+        );
+        assert_eq!(
+            update.components[1]
+                .buttons
+                .iter()
+                .map(|button| button.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Back"]
+        );
+        let component_ids = update
+            .components
+            .iter()
+            .flat_map(|row| {
+                row.buttons
+                    .iter()
+                    .map(|button| button.custom_id.as_str())
+                    .chain(
+                        row.string_select
+                            .iter()
+                            .map(|select| select.custom_id.as_str()),
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            component_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            component_ids.len(),
+            "Discord requires every component custom_id to be unique"
         );
     }
 

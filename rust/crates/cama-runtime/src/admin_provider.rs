@@ -3534,6 +3534,6 @@ fn choices(mut option: CommandOptionSpec, values: &[(&str, &str)]) -> CommandOpt
     option
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "admin_provider/tests.rs"]
 mod tests;

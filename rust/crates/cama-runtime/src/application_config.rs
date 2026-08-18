@@ -800,7 +800,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
     keys
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 

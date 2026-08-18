@@ -161,7 +161,7 @@ impl PredictionRefreshWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-draft"))]
     fn with_test_dependencies(
         database_path: impl AsRef<Path>,
         settings: PredictionRefreshSettings,
@@ -425,7 +425,7 @@ impl PredictionDigestWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-draft"))]
     fn with_test_dependencies(
         database_path: impl AsRef<Path>,
         guild_source: Arc<dyn GambaGuildSource>,
@@ -929,6 +929,6 @@ fn summary_mention_users(content: &str) -> Vec<u64> {
     users
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "prediction_workers/tests.rs"]
 mod tests;

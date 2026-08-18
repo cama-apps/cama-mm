@@ -238,6 +238,6 @@ async fn followup(
         .map_err(|error| InteractionHandlerError::from(error.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "advstats_provider/tests.rs"]
 mod tests;

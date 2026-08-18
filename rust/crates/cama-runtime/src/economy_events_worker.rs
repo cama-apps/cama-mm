@@ -166,7 +166,7 @@ impl EconomyEventsWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn with_clock(
         database_path: impl AsRef<Path>,
         config: EconomyEventsWorkerConfig,
@@ -381,6 +381,6 @@ impl BackgroundWorker for EconomyEventsWorker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "economy_events_worker/tests.rs"]
 mod tests;

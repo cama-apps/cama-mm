@@ -4239,6 +4239,6 @@ fn payout_plan(
     (plan.deltas, plan.payout_per_winner, plan.nonprofit_overflow)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "mafia_provider_tests.rs"]
 mod tests;

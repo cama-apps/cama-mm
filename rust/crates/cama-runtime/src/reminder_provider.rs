@@ -511,7 +511,7 @@ pub struct ReminderHooks {
 }
 
 impl ReminderHooks {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     pub(crate) fn test_task_snapshot(
         &self,
         key: ReminderTaskKey,
@@ -715,6 +715,6 @@ fn reminder_response(preferences: ReminderPreferences) -> InteractionResponse {
         .action_row(InteractionActionRow::buttons(buttons))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "reminder_provider/tests.rs"]
 pub(crate) mod tests;

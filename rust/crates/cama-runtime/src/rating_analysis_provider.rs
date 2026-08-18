@@ -642,5 +642,5 @@ fn response_error(error: crate::registration::InteractionResponseError) -> Inter
     error.to_string().into()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 mod tests;

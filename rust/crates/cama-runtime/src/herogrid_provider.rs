@@ -1,6 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::{
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
+    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
+};
 use async_trait::async_trait;
 use cama_app::draft::DraftStateManager;
 use cama_app::embeds::LobbyKind;
@@ -9,12 +15,6 @@ use cama_app::herogrid::{
     HeroGridCommandService, HeroGridSource, HeroGridSources, Teams,
 };
 use cama_db::herogrid_repository::{HeroGridRepository, PersistedHeroGridSources};
-use cama_runtime::{
-    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
-};
 use tracing::{error, warn};
 
 // `discord.Color.blue()` in discord.py is the named blue 0x3498DB.
@@ -304,12 +304,12 @@ fn attachment_response(attachment: HeroGridAttachment) -> InteractionResponse {
         ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use std::sync::Mutex;
 
+    use crate::registration::InteractionResponseError;
     use cama_db::schema_manager::initialize_or_migrate;
-    use cama_runtime::registration::InteractionResponseError;
     use rusqlite::{Connection, params};
     use tempfile::NamedTempFile;
 

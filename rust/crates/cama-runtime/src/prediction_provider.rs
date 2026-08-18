@@ -173,7 +173,7 @@ impl ProductionPredictionNeonPort {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-draft"))]
     fn with_test_ports(
         database_path: impl AsRef<Path>,
         config: PredictionNeonConfig,
@@ -3222,6 +3222,6 @@ fn message_with_optional_chart(
     DiscordMessage::mentioning(response, mentions)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "prediction_provider/tests.rs"]
 mod tests;

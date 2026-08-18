@@ -1481,6 +1481,6 @@ async fn followup_ephemeral(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "player_trivia_provider/tests.rs"]
 mod tests;

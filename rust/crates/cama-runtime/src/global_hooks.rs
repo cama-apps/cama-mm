@@ -215,5 +215,5 @@ fn is_survey_command(root_name: &str, qualified_name: Option<&str>) -> bool {
         || qualified_name.is_some_and(|name| name == "survey" || name.starts_with("survey "))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests;

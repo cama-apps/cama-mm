@@ -3310,6 +3310,6 @@ fn check_rate_limit(
     Ok(None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "shop_provider/tests.rs"]
 mod tests;

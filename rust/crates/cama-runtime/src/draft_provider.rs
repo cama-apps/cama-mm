@@ -6017,6 +6017,6 @@ async fn financial_setup_retry_response(
     .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "draft_provider/tests.rs"]
 mod tests;

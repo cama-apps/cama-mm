@@ -1303,6 +1303,6 @@ impl CommandOptionChoices for CommandOptionSpec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "info_provider/tests.rs"]
 mod tests;

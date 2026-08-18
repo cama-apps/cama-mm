@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::dig_carry_wager::current_boss_boundary_from_json;
 use crate::dig_loot::{
     CanonicalEventResolution, CaveInChanceRequest, DigLootModifiers, DigLootService, InventoryItem,
     LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
@@ -3983,22 +3984,7 @@ fn seed_for(request: DigRuntimeRequest) -> u64 {
 }
 
 fn parked_boss_boundary(tunnel: &DigRuntimeTunnel) -> Option<i64> {
-    let Value::Object(progress) = serde_json::from_str::<Value>(&tunnel.boss_progress).ok()? else {
-        return None;
-    };
-    progress
-        .into_iter()
-        .filter_map(|(raw_boundary, value)| {
-            let boundary = raw_boundary.parse::<i64>().ok()?;
-            let status = value.as_str().map(str::to_owned).or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })?;
-            (status != "defeated" && tunnel.depth >= boundary.saturating_sub(1)).then_some(boundary)
-        })
-        .min()
+    current_boss_boundary_from_json(tunnel.depth, &tunnel.boss_progress)
 }
 
 fn injury_reduces_advance(raw: Option<&str>) -> bool {
@@ -4169,7 +4155,11 @@ fn apply_state(
             .max(0)
             .saturating_add(total_jc_increment.max(0));
         if paid {
-            tunnel.paid_digs_today = tunnel.paid_digs_today.saturating_add(1);
+            tunnel.paid_digs_today = if tunnel.paid_dig_date.as_deref() == Some(today) {
+                tunnel.paid_digs_today.saturating_add(1)
+            } else {
+                1
+            };
             tunnel.paid_dig_date = Some(today.to_owned());
         }
     }

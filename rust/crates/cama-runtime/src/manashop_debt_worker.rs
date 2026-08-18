@@ -72,7 +72,7 @@ impl ManashopDebtWorker {
         .map_err(|error| error.to_string())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn with_clock_and_interval(
         database_path: impl AsRef<Path>,
         guild_source: Arc<dyn FirstGamePoolGuildSource>,
@@ -128,6 +128,6 @@ impl BackgroundWorker for ManashopDebtWorker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "manashop_debt_worker/tests.rs"]
 mod tests;
