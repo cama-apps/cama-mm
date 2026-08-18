@@ -5346,6 +5346,7 @@ impl AdminMatchControl for MatchHandler {
                 ambiguous_lanes: report.ambiguous_lanes,
                 incomplete_teams: report.incomplete_teams,
                 tied_farm_priority: report.tied_farm_priority,
+                tied_farm_and_ward_priority: report.tied_farm_and_ward_priority,
                 participants: coverage.participants,
                 with_derived_role: coverage.with_derived_role,
                 with_gold_at_10: coverage.with_gold_at_10,

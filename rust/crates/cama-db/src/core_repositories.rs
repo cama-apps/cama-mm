@@ -1928,12 +1928,14 @@ pub struct RoleBackfillReport {
     pub matches_scanned: u64,
     /// Per match: the stored payload was not valid JSON.
     pub unreadable_payloads: u64,
-    /// Per team, so these four reconcile against `matches_scanned * 2`.
+    /// Per team, so these five reconcile against `matches_scanned * 2`.
     pub teams_derived: u64,
     pub unparsed_teams: u64,
     pub ambiguous_lanes: u64,
     pub incomplete_teams: u64,
     pub tied_farm_priority: u64,
+    /// A farm tie that the ward-count fallback also could not resolve.
+    pub tied_farm_and_ward_priority: u64,
     /// Per participant.
     pub gold_samples_written: u64,
     pub last_hits_samples_written: u64,
@@ -1965,18 +1967,27 @@ fn backfill_one_match(
     let gold_by_hero = gold_at_ten_by_hero(&value);
     let last_hits_by_hero = last_hits_at_ten_by_hero(&value);
 
-    let participants: Vec<(i64, i64, i64, Option<i64>)> = transaction
+    // (discord_id, team_number, hero_id, lane_role, obs_placed, sen_placed)
+    type BackfillParticipantRow = (i64, i64, i64, Option<i64>, Option<i64>, Option<i64>);
+    let participants: Vec<BackfillParticipantRow> = transaction
         .prepare(
-            "SELECT discord_id, team_number, hero_id, lane_role
+            "SELECT discord_id, team_number, hero_id, lane_role, obs_placed, sen_placed
                FROM match_participants
               WHERE match_id = ?1 AND guild_id = ?2 AND hero_id IS NOT NULL",
         )?
         .query_map(params![match_id, guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (discord_id, _, hero_id, _) in &participants {
+    for (discord_id, _, hero_id, ..) in &participants {
         if let Some(gold) = gold_by_hero.get(hero_id) {
             transaction.execute(
                 "UPDATE match_participants SET gold_at_10 = ?1
@@ -1996,19 +2007,20 @@ fn backfill_one_match(
     }
 
     for team_number in [1_i64, 2] {
-        let team: Vec<&(i64, i64, i64, Option<i64>)> = participants
+        let team: Vec<&BackfillParticipantRow> = participants
             .iter()
-            .filter(|(_, number, _, _)| *number == team_number)
+            .filter(|(_, number, ..)| *number == team_number)
             .collect();
         if team.len() != 5 {
             report.incomplete_teams += 1;
             continue;
         }
         let stats: [LaneStats; 5] = std::array::from_fn(|index| {
-            let (_, _, hero_id, lane_role) = team[index];
+            let (_, _, hero_id, lane_role, obs_placed, sen_placed) = team[index];
             LaneStats {
                 lane_role: *lane_role,
                 last_hits_at_10: last_hits_by_hero.get(hero_id).copied(),
+                wards: ward_total(*obs_placed, *sen_placed),
             }
         });
         let derived = derive_positions(&stats);
@@ -2017,8 +2029,11 @@ fn backfill_one_match(
             Err(DerivationFailure::Unparsed) => report.unparsed_teams += 1,
             Err(DerivationFailure::AmbiguousLanes) => report.ambiguous_lanes += 1,
             Err(DerivationFailure::TiedFarmPriority) => report.tied_farm_priority += 1,
+            Err(DerivationFailure::TiedFarmAndWardPriority) => {
+                report.tied_farm_and_ward_priority += 1;
+            }
         }
-        for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
+        for (index, (discord_id, ..)) in team.iter().enumerate() {
             // On failure the column is cleared, not left alone: a stale value
             // from a looser derivation would keep feeding role records forever.
             let role = derived.as_ref().ok().map(|positions| positions[index]);
@@ -2098,6 +2113,19 @@ fn last_hits_at_ten_by_hero(payload: &serde_json::Value) -> BTreeMap<i64, i64> {
         by_hero.remove(&hero_id);
     }
     by_hero
+}
+
+/// `obs_placed + sen_placed`, or `None` if neither was ever captured — as
+/// opposed to `Some(0)`, which would misreport "captured as zero" for a row
+/// that simply predates ward tracking. Unlike `gold_at_10`/`last_hits_at_10`,
+/// wards are read from the live `match_participants` row rather than the
+/// archived payload: they were already written by the original enrichment,
+/// well before role derivation existed.
+fn ward_total(obs_placed: Option<i64>, sen_placed: Option<i64>) -> Option<i64> {
+    match (obs_placed, sen_placed) {
+        (None, None) => None,
+        (obs, sen) => Some(obs.unwrap_or(0) + sen.unwrap_or(0)),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5645,9 +5673,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                format!(
-                    "{{\"hero_id\":{hero_id},\"gold_t\":[{series}],\"lh_t\":[{series}]}}"
-                )
+                format!("{{\"hero_id\":{hero_id},\"gold_t\":[{series}],\"lh_t\":[{series}]}}")
             })
             .collect::<Vec<_>>()
             .join(",");

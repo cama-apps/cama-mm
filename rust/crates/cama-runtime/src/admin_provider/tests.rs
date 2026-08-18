@@ -1152,6 +1152,7 @@ async fn test_backfillroles_reports_derivation_counts_and_resulting_coverage() {
         ambiguous_lanes: 8,
         incomplete_teams: 2,
         tied_farm_priority: 0,
+        tied_farm_and_ward_priority: 0,
         unreadable_payloads: 0,
         participants: 1_200,
         with_derived_role: 1_000,

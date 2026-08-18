@@ -125,6 +125,56 @@ fn test_identical_farm_in_a_lane_is_rejected_rather_than_coin_flipped() {
 }
 
 #[test]
+fn test_ward_count_breaks_a_farm_tie_toward_the_higher_warder_as_support() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(2); // fewer wards -> carry
+    team[4] = team[4].with_wards(14); // more wards -> hard support
+
+    assert_eq!(derive_positions(&team), Ok(["1", "2", "3", "4", "5"]));
+}
+
+#[test]
+fn test_ward_count_tie_break_is_symmetric_in_input_order() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(14); // more wards -> hard support
+    team[4] = team[4].with_wards(2); // fewer wards -> carry
+
+    assert_eq!(derive_positions(&team), Ok(["5", "2", "3", "4", "1"]));
+}
+
+#[test]
+fn test_ward_tie_after_a_farm_tie_is_still_rejected() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(6);
+    team[4] = team[4].with_wards(6);
+
+    assert_eq!(
+        derive_positions(&team),
+        Err(DerivationFailure::TiedFarmAndWardPriority)
+    );
+}
+
+#[test]
+fn test_missing_ward_data_on_a_farm_tie_is_rejected_not_guessed() {
+    let mut team = standard_team();
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
+    team[0] = team[0].with_wards(14);
+    // team[4].wards stays None: only one side of the tie has ward data.
+
+    assert_eq!(
+        derive_positions(&team),
+        Err(DerivationFailure::TiedFarmPriority)
+    );
+}
+
+#[test]
 fn test_every_accepted_result_is_a_permutation_of_one_through_five() {
     let accepted = [
         standard_team(),

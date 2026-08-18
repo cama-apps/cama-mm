@@ -16,6 +16,15 @@
 //! clean permutation of 1-5 returns [`None`]. A missing role reads as "no
 //! sample", which is recoverable; a wrong role silently corrupts a win rate
 //! forever.
+//!
+//! When two lane-mates have identical creep score at ten minutes, ward count
+//! (`obs_placed + sen_placed`) breaks the tie: it is a role trait that holds
+//! across the whole game rather than a farm reading with a right minute to
+//! take, so the full-game total is used directly, no time-slicing needed.
+//! This is a fallback, not a blend — wards are consulted only when farm
+//! carries no information at all, never averaged against it, since a
+//! weighted score would need an arbitrary weight and could override a clean
+//! farm read for no principled reason.
 
 /// OpenDota `lane_role` values, as rendered by the match embeds.
 pub const LANE_ROAM: i64 = 0;
@@ -34,6 +43,11 @@ pub struct LaneStats {
     pub lane_role: Option<i64>,
     /// Creep score at [`FARM_PRIORITY_MINUTE`], from OpenDota's `lh_t` series.
     pub last_hits_at_10: Option<i64>,
+    /// Full-game `obs_placed + sen_placed`, consulted only to break a tie on
+    /// `last_hits_at_10` within a lane. `None` when not (yet) captured —
+    /// this does not make the whole player `Unparsed`, since it is only
+    /// needed in the rare case a tie is actually hit.
+    pub wards: Option<i64>,
 }
 
 impl LaneStats {
@@ -42,7 +56,14 @@ impl LaneStats {
         Self {
             lane_role: Some(lane_role),
             last_hits_at_10: Some(last_hits_at_10),
+            wards: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_wards(mut self, wards: i64) -> Self {
+        self.wards = Some(wards);
+        self
     }
 }
 
@@ -58,8 +79,13 @@ pub enum DerivationFailure {
     /// tri-lane, a lane swap, two mids, and so on.
     AmbiguousLanes,
     /// Two players in the same lane had identical creep score at ten
-    /// minutes, so core and support cannot be separated without guessing.
+    /// minutes, and at least one of them has no ward count to fall back on,
+    /// so core and support cannot be separated without guessing.
     TiedFarmPriority,
+    /// Two players in the same lane had identical creep score at ten
+    /// minutes *and* identical ward counts, so the fallback signal did not
+    /// resolve it either.
+    TiedFarmAndWardPriority,
 }
 
 /// Derive the five positions for one team, in the same order as `team`.
@@ -75,13 +101,14 @@ pub enum DerivationFailure {
 pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], DerivationFailure> {
     let mut lanes = [0_i64; 5];
     let mut last_hits = [0_i64; 5];
+    let mut wards = [None; 5];
     for (index, stats) in team.iter().enumerate() {
-        let (Some(lane), Some(player_last_hits)) = (stats.lane_role, stats.last_hits_at_10)
-        else {
+        let (Some(lane), Some(player_last_hits)) = (stats.lane_role, stats.last_hits_at_10) else {
             return Err(DerivationFailure::Unparsed);
         };
         lanes[index] = lane;
         last_hits[index] = player_last_hits;
+        wards[index] = stats.wards;
     }
 
     let indices_in =
@@ -101,13 +128,13 @@ pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], Deri
     positions[mid[0]] = "2";
 
     // Safe lane: the farmed player is the carry, their partner the hard support.
-    let (carry, hard_support) = split_by_farm(&safe, &last_hits)?;
+    let (carry, hard_support) = split_by_farm(&safe, &last_hits, &wards)?;
     positions[carry] = "1";
     positions[hard_support] = "5";
 
     match (off.len(), roaming.len()) {
         (2, 0) => {
-            let (offlaner, soft_support) = split_by_farm(&off, &last_hits)?;
+            let (offlaner, soft_support) = split_by_farm(&off, &last_hits, &wards)?;
             positions[offlaner] = "3";
             positions[soft_support] = "4";
         }
@@ -124,16 +151,29 @@ pub fn derive_positions(team: &[LaneStats; 5]) -> Result<[&'static str; 5], Deri
     Ok(positions)
 }
 
-/// Split a two-player lane into (higher last hits, lower last hits).
+/// Split a two-player lane into (core, support): the higher-last-hits player
+/// first. A tie falls back to ward count — the higher-ward player is the
+/// support — since ward-buying is a role trait that holds all game, unlike
+/// farm, which needs a specific minute to be read at. A further tie (or
+/// missing ward data to break the first one) still fails rather than guess.
 fn split_by_farm(
     lane: &[usize],
     last_hits: &[i64; 5],
+    wards: &[Option<i64>; 5],
 ) -> Result<(usize, usize), DerivationFailure> {
     let (first, second) = (lane[0], lane[1]);
     match last_hits[first].cmp(&last_hits[second]) {
-        std::cmp::Ordering::Greater => Ok((first, second)),
-        std::cmp::Ordering::Less => Ok((second, first)),
-        std::cmp::Ordering::Equal => Err(DerivationFailure::TiedFarmPriority),
+        std::cmp::Ordering::Greater => return Ok((first, second)),
+        std::cmp::Ordering::Less => return Ok((second, first)),
+        std::cmp::Ordering::Equal => {}
+    }
+    let (Some(first_wards), Some(second_wards)) = (wards[first], wards[second]) else {
+        return Err(DerivationFailure::TiedFarmPriority);
+    };
+    match first_wards.cmp(&second_wards) {
+        std::cmp::Ordering::Greater => Ok((second, first)),
+        std::cmp::Ordering::Less => Ok((first, second)),
+        std::cmp::Ordering::Equal => Err(DerivationFailure::TiedFarmAndWardPriority),
     }
 }
 
