@@ -723,6 +723,18 @@ fn field_i64(object: &Map<String, Value>, name: &str) -> Option<i64> {
     object.get(name).and_then(value_i64)
 }
 
+/// Reads `object[name][minute]` — one entry of an OpenDota per-minute
+/// timeline array (e.g. `lh_t`, one last-hits snapshot per minute of game
+/// time). `None` if the field is absent (unparsed match) or the game ended
+/// before `minute`.
+fn field_i64_at_minute(object: &Map<String, Value>, name: &str, minute: usize) -> Option<i64> {
+    object
+        .get(name)?
+        .as_array()?
+        .get(minute)
+        .and_then(value_i64)
+}
+
 fn value_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()
@@ -926,6 +938,7 @@ fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
             hero_damage: field_i64(object, "hero_damage").unwrap_or(0),
             tower_damage: field_i64(object, "tower_damage").unwrap_or(0),
             last_hits: field_i64(object, "last_hits").unwrap_or(0),
+            last_hits_at_12: field_i64_at_minute(object, "lh_t", 12),
             denies: field_i64(object, "denies").unwrap_or(0),
             net_worth: field_i64(object, "net_worth")
                 .or_else(|| field_i64(object, "total_gold"))

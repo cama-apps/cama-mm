@@ -1199,6 +1199,7 @@ fn test_enrich_match_estimates_and_stores_positions_on_success() {
             stats: ParticipantFarmStats {
                 discord_id,
                 lane_role: Some(lane_role),
+                last_hits_at_12: None,
                 last_hits: Some(last_hits),
                 net_worth: None,
                 gpm: None,
@@ -1253,6 +1254,7 @@ fn test_enrich_match_position_estimate_failure_does_not_fail_enrichment() {
             stats: ParticipantFarmStats {
                 discord_id: 1,
                 lane_role: Some(1),
+                last_hits_at_12: None,
                 last_hits: Some(220),
                 net_worth: None,
                 gpm: None,
@@ -1265,6 +1267,7 @@ fn test_enrich_match_position_estimate_failure_does_not_fail_enrichment() {
             stats: ParticipantFarmStats {
                 discord_id: 2,
                 lane_role: Some(2),
+                last_hits_at_12: None,
                 last_hits: Some(180),
                 net_worth: None,
                 gpm: None,
@@ -1298,6 +1301,7 @@ fn test_backfill_estimated_positions_processes_every_candidate_match() {
             stats: ParticipantFarmStats {
                 discord_id,
                 lane_role: Some(lane_role),
+                last_hits_at_12: None,
                 last_hits: Some(last_hits),
                 net_worth: None,
                 gpm: None,
@@ -1347,6 +1351,7 @@ fn test_backfill_estimated_positions_skips_matches_the_heuristic_cannot_resolve(
         stats: ParticipantFarmStats {
             discord_id: 1,
             lane_role: Some(1),
+            last_hits_at_12: None,
             last_hits: Some(220),
             net_worth: None,
             gpm: None,

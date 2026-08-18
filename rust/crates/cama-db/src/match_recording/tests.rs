@@ -92,6 +92,7 @@ impl Fixture {
                      stuns REAL,
                      fantasy_points REAL,
                      estimated_position TEXT,
+                     last_hits_at_12 INTEGER,
                      PRIMARY KEY (match_id, discord_id)
                  );
                  CREATE TABLE wrapped_enrichment_facts (
@@ -320,6 +321,7 @@ fn fantasy_update(discord_id: i64, fantasy_points: f64) -> EnrichmentParticipant
         hero_damage: None,
         tower_damage: None,
         last_hits: None,
+        last_hits_at_12: None,
         denies: None,
         net_worth: None,
         hero_healing: None,
@@ -1223,6 +1225,7 @@ fn test_farm_stats_round_trip_through_position_estimation() {
     // own unit tests: highest last_hits -> pos1, sole mid -> pos2,
     // second-highest last_hits -> pos3, then the two lowest split by wards.
     let per_team_last_hits = [220, 180, 140, 20, 25];
+    let per_team_last_hits_at_12 = [130, 110, 90, 10, 15];
     let per_team_lane_role = [1, 2, 3, 3, 1];
     let per_team_obs_placed = [0, 0, 1, 2, 0];
     let per_team_sen_placed = [0, 0, 0, 1, 1];
@@ -1240,6 +1243,7 @@ fn test_farm_stats_round_trip_through_position_estimation() {
             hero_damage: None,
             tower_damage: None,
             last_hits: Some(per_team_last_hits[index % 5]),
+            last_hits_at_12: Some(per_team_last_hits_at_12[index % 5]),
             denies: None,
             net_worth: None,
             hero_healing: None,
@@ -1280,6 +1284,12 @@ fn test_farm_stats_round_trip_through_position_estimation() {
         .get_participant_farm_stats(match_id, Some(GUILD))
         .expect("read farm stats");
     assert_eq!(farm_rows.len(), 10);
+    let first_radiant = farm_rows
+        .iter()
+        .find(|row| row.stats.discord_id == radiant[0])
+        .expect("radiant player's farm row");
+    assert_eq!(first_radiant.stats.last_hits_at_12, Some(130));
+    assert_eq!(first_radiant.stats.last_hits, Some(220));
 
     let mut estimates = Vec::new();
     for team_number in [1, 2] {
@@ -1335,6 +1345,7 @@ fn minimal_lane_role_update(discord_id: i64) -> EnrichmentParticipantUpdate {
         hero_damage: None,
         tower_damage: None,
         last_hits: None,
+        last_hits_at_12: None,
         denies: None,
         net_worth: None,
         hero_healing: None,
@@ -1527,6 +1538,7 @@ fn test_match_and_participants_commit_in_one_call() {
             hero_damage: Some(20_000),
             tower_damage: Some(3_000),
             last_hits: Some(200),
+            last_hits_at_12: Some(120),
             denies: Some(10),
             net_worth: Some(25_000),
             hero_healing: Some(500),

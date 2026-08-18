@@ -112,6 +112,9 @@ pub struct EnrichedParticipantStats {
     pub hero_damage: i64,
     pub tower_damage: i64,
     pub last_hits: i64,
+    /// Creep score at the 12-minute mark (OpenDota's `lh_t[12]`); `None`
+    /// for matches shorter than 12 minutes or lacking a parsed timeline.
+    pub last_hits_at_12: Option<i64>,
     pub denies: i64,
     pub net_worth: i64,
     pub hero_healing: i64,
@@ -1309,6 +1312,7 @@ impl EnrichmentWritePort for MatchRecordingRepository {
                 hero_damage: Some(update.stats.hero_damage),
                 tower_damage: Some(update.stats.tower_damage),
                 last_hits: Some(update.stats.last_hits),
+                last_hits_at_12: update.stats.last_hits_at_12,
                 denies: Some(update.stats.denies),
                 net_worth: Some(update.stats.net_worth),
                 hero_healing: Some(update.stats.hero_healing),

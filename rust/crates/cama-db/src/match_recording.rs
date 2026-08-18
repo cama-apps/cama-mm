@@ -304,6 +304,9 @@ pub struct EnrichmentParticipantUpdate {
     pub hero_damage: Option<i64>,
     pub tower_damage: Option<i64>,
     pub last_hits: Option<i64>,
+    /// Creep score at the 12-minute mark (OpenDota's `lh_t[12]`), preferred
+    /// over full-game `last_hits` when estimating positions.
+    pub last_hits_at_12: Option<i64>,
     pub denies: Option<i64>,
     pub net_worth: Option<i64>,
     pub hero_healing: Option<i64>,
@@ -1278,7 +1281,7 @@ impl MatchRecordingRepository {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT discord_id, team_number, lane_role, last_hits, net_worth,
-                    gpm, obs_placed, sen_placed
+                    gpm, obs_placed, sen_placed, last_hits_at_12
              FROM match_participants
              WHERE match_id = ?1 AND guild_id = ?2 ORDER BY discord_id",
         )?;
@@ -1291,6 +1294,7 @@ impl MatchRecordingRepository {
                         stats: ParticipantFarmStats {
                             discord_id: row.get(0)?,
                             lane_role: row.get(2)?,
+                            last_hits_at_12: row.get(8)?,
                             last_hits: row.get(3)?,
                             net_worth: row.get(4)?,
                             gpm: row.get(5)?,
@@ -1506,7 +1510,7 @@ impl MatchRecordingRepository {
                      roshans_killed = ?16, teamfight_participation = ?17,
                      obs_placed = ?18, sen_placed = ?19, camps_stacked = ?20,
                      rune_pickups = ?21, firstblood_claimed = ?22, stuns = ?23,
-                     fantasy_points = ?24
+                     fantasy_points = ?24, last_hits_at_12 = ?28
                  WHERE match_id = ?25 AND discord_id = ?26 AND guild_id = ?27",
                 params![
                     participant.hero_id,
@@ -1535,7 +1539,8 @@ impl MatchRecordingRepository {
                     participant.fantasy_points,
                     request.match_id,
                     participant.discord_id,
-                    guild_id
+                    guild_id,
+                    participant.last_hits_at_12,
                 ],
             )?;
         }

@@ -410,6 +410,52 @@ async fn test_retries_on_503_then_succeeds() {
     assert_eq!(server.request_lines().len(), 2);
 }
 
+#[test]
+fn test_project_match_player_extracts_last_hits_at_12_from_lh_t() {
+    let value = serde_json::json!({
+        "match_id": 42,
+        "duration": 2400,
+        "radiant_win": true,
+        "players": [{
+            "account_id": 12345,
+            "player_slot": 0,
+            "last_hits": 220,
+            "lh_t": (0..=20).map(|minute| minute * 8).collect::<Vec<_>>(),
+        }],
+    });
+
+    let projected = project_match_details(value, 42).expect("typed match details");
+
+    assert_eq!(projected.players[0].stats.last_hits, 220);
+    assert_eq!(projected.players[0].stats.last_hits_at_12, Some(96));
+}
+
+#[test]
+fn test_project_match_player_last_hits_at_12_is_none_when_lh_t_is_absent_or_short() {
+    let absent = serde_json::json!({
+        "match_id": 42,
+        "duration": 300,
+        "radiant_win": true,
+        "players": [{"account_id": 12345, "player_slot": 0, "last_hits": 10}],
+    });
+    let projected = project_match_details(absent, 42).expect("typed match details");
+    assert_eq!(projected.players[0].stats.last_hits_at_12, None);
+
+    let short_game = serde_json::json!({
+        "match_id": 43,
+        "duration": 300,
+        "radiant_win": true,
+        "players": [{
+            "account_id": 12345,
+            "player_slot": 0,
+            "last_hits": 10,
+            "lh_t": [0, 2, 5],
+        }],
+    });
+    let projected = project_match_details(short_game, 43).expect("typed match details");
+    assert_eq!(projected.players[0].stats.last_hits_at_12, None);
+}
+
 #[tokio::test]
 async fn test_no_retry_on_403() {
     let server = ScriptedServer::start(vec![ScriptedResponse::status(403)]);

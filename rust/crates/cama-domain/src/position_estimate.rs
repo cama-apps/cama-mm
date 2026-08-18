@@ -1,7 +1,7 @@
 //! Heuristic estimation of which Dota position (1-5) a player actually
 //! played in a finished match, derived from OpenDota match-enrichment
-//! stats already captured per participant (`last_hits`, `net_worth`, `gpm`,
-//! `lane_role`, `obs_placed`, `sen_placed`).
+//! stats already captured per participant (`last_hits_at_12`, `last_hits`,
+//! `net_worth`, `gpm`, `lane_role`, `obs_placed`, `sen_placed`).
 //!
 //! This is independent of, and may disagree with, the shuffler's pre-game
 //! role assignment in [`crate::team`] — players often swap positions by
@@ -15,6 +15,10 @@ pub struct ParticipantFarmStats {
     pub discord_id: i64,
     /// OpenDota's lane classification: 1=safe, 2=mid, 3=off, 4=jungle.
     pub lane_role: Option<i64>,
+    /// Creep score at the 12-minute mark (OpenDota's `lh_t[12]`). `None`
+    /// for matches shorter than 12 minutes or enriched before this field
+    /// was captured.
+    pub last_hits_at_12: Option<i64>,
     pub last_hits: Option<i64>,
     pub net_worth: Option<i64>,
     pub gpm: Option<i64>,
@@ -30,9 +34,10 @@ pub enum PositionEstimateError {
     /// A team is always exactly five players.
     IncorrectTeamSize { actual: usize },
     /// A participant is missing `lane_role`, or the team as a whole doesn't
-    /// have any single farm metric (`last_hits`, then `net_worth`, then
-    /// `gpm`) populated for every member — a farm ranking needs one
-    /// consistent metric across the team, not a per-member mix of them.
+    /// have any single farm metric (`last_hits_at_12`, then `last_hits`,
+    /// then `net_worth`, then `gpm`) populated for every member — a farm
+    /// ranking needs one consistent metric across the team, not a
+    /// per-member mix of them.
     MissingFarmData { discord_id: i64 },
     /// Exactly one team member must have `lane_role == 2` (mid) to anchor
     /// the rest of the estimate; zero or multiple mids make the rest of the
@@ -46,11 +51,15 @@ pub enum PositionEstimateError {
 ///
 /// 1. The sole `lane_role == 2` member is position 2 (mid).
 /// 2. Of the remaining four, the two highest by farm are position 1 (carry)
-///    and position 3 (off), in that order. Farm is ranked by `last_hits`
-///    where available — unlike `net_worth`/`gpm`, creep score isn't
-///    inflated by kill/bounty gold a support happened to pick up, so it's
-///    a cleaner core-vs-support signal — falling back to `net_worth`, then
-///    `gpm`, only when `last_hits` isn't populated for the whole team.
+///    and position 3 (off), in that order. Farm is ranked by
+///    `last_hits_at_12` where available — creep score at the 12-minute mark
+///    isolates the laning phase specifically, before rotations, jungle
+///    pickup, and catch-up farming blur who actually had lane priority.
+///    Falls back to full-game `last_hits` (still cleaner than gold-based
+///    metrics, since kill/bounty gold can inflate a support's farm numbers
+///    without reflecting lane priority), then `net_worth`, then `gpm`, each
+///    only when every higher-priority metric is unavailable for the whole
+///    team.
 /// 3. Of the remaining two (lowest farm), the one with more wards placed
 ///    (`obs_placed + sen_placed`) is position 5 (hard support); ties break
 ///    toward the lower-farm player. The other is position 4 (soft support).
@@ -75,12 +84,8 @@ pub fn estimate_team_positions(
     }
 
     let Some(metric) = select_farm_metric(team) else {
-        let culprit = team
-            .iter()
-            .find(|member| member.last_hits.is_none())
-            .expect("select_farm_metric failed, so some member lacks last_hits");
         return Err(PositionEstimateError::MissingFarmData {
-            discord_id: culprit.discord_id,
+            discord_id: missing_farm_data_culprit(team),
         });
     };
     let farm_value = |member: &ParticipantFarmStats| metric.value(member).unwrap_or(0) as f64;
@@ -130,14 +135,23 @@ pub fn estimate_team_positions(
 /// populated for every member.
 #[derive(Clone, Copy)]
 enum FarmMetric {
+    LastHitsAt12,
     LastHits,
     NetWorth,
     Gpm,
 }
 
 impl FarmMetric {
+    const PRIORITY: [Self; 4] = [
+        Self::LastHitsAt12,
+        Self::LastHits,
+        Self::NetWorth,
+        Self::Gpm,
+    ];
+
     fn value(self, member: &ParticipantFarmStats) -> Option<i64> {
         match self {
+            Self::LastHitsAt12 => member.last_hits_at_12,
             Self::LastHits => member.last_hits,
             Self::NetWorth => member.net_worth,
             Self::Gpm => member.gpm,
@@ -146,13 +160,40 @@ impl FarmMetric {
 }
 
 /// Picks the highest-preference metric that's populated for every member of
-/// `team`. Mixing metrics per-member (e.g. `last_hits` for one player and
-/// `gpm` for another) would compare incompatible units, so a metric is only
-/// usable when the whole team has it.
+/// `team`. Mixing metrics per-member (e.g. `last_hits_at_12` for one player
+/// and `gpm` for another) would compare incompatible units, so a metric is
+/// only usable when the whole team has it.
 fn select_farm_metric(team: &[ParticipantFarmStats]) -> Option<FarmMetric> {
-    [FarmMetric::LastHits, FarmMetric::NetWorth, FarmMetric::Gpm]
+    FarmMetric::PRIORITY
         .into_iter()
         .find(|metric| team.iter().all(|member| metric.value(member).is_some()))
+}
+
+/// Identifies which member to blame when no metric covers the whole team.
+/// Skips metrics nobody has at all (nothing to blame — just not captured
+/// for this match) in favor of the highest-priority metric that's missing
+/// for *some but not all* members, which is a genuine, reportable gap.
+/// Falls back to the first member if every metric is either fully covered
+/// (shouldn't happen, since [`select_farm_metric`] already failed) or
+/// fully absent for the whole team.
+fn missing_farm_data_culprit(team: &[ParticipantFarmStats]) -> i64 {
+    for metric in FarmMetric::PRIORITY {
+        let mut present = 0;
+        let mut first_missing = None;
+        for member in team {
+            if metric.value(member).is_some() {
+                present += 1;
+            } else {
+                first_missing.get_or_insert(member.discord_id);
+            }
+        }
+        if present > 0
+            && let Some(discord_id) = first_missing
+        {
+            return discord_id;
+        }
+    }
+    team.first().map_or(0, |member| member.discord_id)
 }
 
 fn wards(member: &ParticipantFarmStats) -> i64 {
@@ -164,8 +205,8 @@ mod tests {
     use super::*;
 
     /// Builds a member with only `last_hits` populated as a farm metric —
-    /// the preferred one. Tests exercising the `net_worth`/`gpm` fallbacks
-    /// override those fields explicitly.
+    /// `last_hits_at_12` is left unset, so these tests exercise the
+    /// fallback path unless a test overrides it explicitly.
     fn member(
         discord_id: i64,
         lane_role: i64,
@@ -176,6 +217,7 @@ mod tests {
         ParticipantFarmStats {
             discord_id,
             lane_role: Some(lane_role),
+            last_hits_at_12: None,
             last_hits: Some(last_hits),
             net_worth: None,
             gpm: None,
@@ -195,6 +237,49 @@ mod tests {
         ];
 
         let result = estimate_team_positions(&team).expect("clean team estimates");
+
+        assert_eq!(
+            result,
+            vec![(1, "1"), (2, "2"), (3, "3"), (5, "4"), (4, "5")]
+        );
+    }
+
+    #[test]
+    fn test_prefers_last_hits_at_12_over_full_game_last_hits() {
+        // Full-game last_hits would rank member 3 above member 1 (a
+        // farm-heavy off-laner who caught up after laning), but the
+        // 12-minute snapshot reflects laning-phase priority correctly.
+        let mut team = vec![
+            member(1, 1, 150, 0, 0),
+            member(2, 2, 130, 0, 0),
+            member(3, 3, 260, 1, 0),
+            member(4, 3, 20, 2, 1),
+            member(5, 1, 25, 0, 1),
+        ];
+        let last_hits_at_12 = [90, 60, 40, 8, 10];
+        for (participant, value) in team.iter_mut().zip(last_hits_at_12) {
+            participant.last_hits_at_12 = Some(value);
+        }
+
+        let result = estimate_team_positions(&team).expect("last_hits_at_12 still estimates");
+
+        assert_eq!(
+            result,
+            vec![(1, "1"), (2, "2"), (3, "3"), (5, "4"), (4, "5")]
+        );
+    }
+
+    #[test]
+    fn test_falls_back_to_full_game_last_hits_when_at_12_is_missing_for_the_whole_team() {
+        let team = vec![
+            member(1, 1, 220, 0, 0),
+            member(2, 2, 180, 0, 0),
+            member(3, 3, 140, 1, 0),
+            member(4, 3, 20, 2, 1),
+            member(5, 1, 25, 0, 1),
+        ];
+
+        let result = estimate_team_positions(&team).expect("last_hits fallback still estimates");
 
         assert_eq!(
             result,
@@ -276,6 +361,34 @@ mod tests {
         team[4].last_hits = None;
 
         let error = estimate_team_positions(&team).expect_err("no metric is fully populated");
+
+        assert_eq!(
+            error,
+            PositionEstimateError::MissingFarmData { discord_id: 5 }
+        );
+    }
+
+    #[test]
+    fn test_blames_a_partial_gap_on_the_highest_priority_metric_over_fully_absent_ones() {
+        // last_hits_at_12 is present for 4/5 members — a genuine, reportable
+        // gap. last_hits/net_worth/gpm are absent for the *entire* team
+        // (never captured for this match), so they're not real culprits;
+        // the error should point at the member missing last_hits_at_12.
+        let mut team = vec![
+            member(1, 1, 220, 0, 0),
+            member(2, 2, 180, 0, 0),
+            member(3, 3, 140, 1, 0),
+            member(4, 3, 20, 2, 1),
+            member(5, 1, 25, 0, 1),
+        ];
+        for participant in &mut team {
+            participant.last_hits = None;
+        }
+        for (participant, value) in team.iter_mut().zip([90, 60, 40, 8]) {
+            participant.last_hits_at_12 = Some(value);
+        }
+
+        let error = estimate_team_positions(&team).expect_err("no metric fully covers the team");
 
         assert_eq!(
             error,
