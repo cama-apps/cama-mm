@@ -7926,22 +7926,27 @@ fn gear_select_response(
         format!("{verb} which piece?{page_label}"),
         page_options,
     );
-    let pagination = vec![
-        InteractionButton::new(
-            format!("{prefix}:page:{mode}:{}", page.saturating_sub(1)),
-            "Previous",
-        )
-        .style(InteractionButtonStyle::Secondary)
-        .disabled(page == 0),
-        InteractionButton::new(
-            format!("{prefix}:page:{mode}:{}", (page + 1).min(page_count - 1)),
-            "Next",
-        )
-        .style(InteractionButtonStyle::Secondary)
-        .disabled(page + 1 >= page_count),
+    let mut pagination = Vec::new();
+    if page_count > 1 {
+        pagination.extend([
+            InteractionButton::new(
+                format!("{prefix}:page:{mode}:{}", page.saturating_sub(1)),
+                "Previous",
+            )
+            .style(InteractionButtonStyle::Secondary)
+            .disabled(page == 0),
+            InteractionButton::new(
+                format!("{prefix}:page:{mode}:{}", (page + 1).min(page_count - 1)),
+                "Next",
+            )
+            .style(InteractionButtonStyle::Secondary)
+            .disabled(page + 1 >= page_count),
+        ]);
+    }
+    pagination.push(
         InteractionButton::new(format!("{prefix}:back"), "Back")
             .style(InteractionButtonStyle::Secondary),
-    ];
+    );
     Some(
         InteractionResponse::message("")
             .embed(gear_panel_embed(panel))

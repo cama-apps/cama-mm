@@ -5670,7 +5670,8 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
     {
         let updates = open.updates.lock().expect("selector update");
         assert_eq!(updates.len(), 1);
-        let select = updates[0].components[0]
+        let update = &updates[0];
+        let select = update.components[0]
             .string_select
             .as_ref()
             .expect("gear select");
@@ -5685,6 +5686,33 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
                 .options
                 .iter()
                 .any(|option| option.value == format!("relic:{relic_id}"))
+        );
+        assert_eq!(
+            update.components[1]
+                .buttons
+                .iter()
+                .map(|button| button.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Back"]
+        );
+        let component_ids = update
+            .components
+            .iter()
+            .flat_map(|row| {
+                row.buttons
+                    .iter()
+                    .map(|button| button.custom_id.as_str())
+                    .chain(
+                        row.string_select
+                            .iter()
+                            .map(|select| select.custom_id.as_str()),
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            component_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            component_ids.len(),
+            "Discord requires every component custom_id to be unique"
         );
     }
 
