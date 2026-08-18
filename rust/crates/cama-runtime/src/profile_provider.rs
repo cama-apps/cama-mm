@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use cama_app::balance_history_service::BalanceHistoryService;
 use cama_app::dedicated_lobby_channel::UserId;
 use cama_app::drawing::{
-    GambaInfo, GambaPoint, GambaStats, HeroPerformanceEntry, RatingHistoryEntry,
+    GambaInfo, GambaPoint, GambaStats, HeroPerformanceEntry, POSITION_AXES, RatingHistoryEntry,
     draw_balance_chart, draw_gamba_chart, draw_hero_performance_chart, draw_lane_distribution,
-    draw_rating_history_chart, draw_role_graph,
+    draw_position_winrate_radar, draw_rating_history_chart, draw_role_graph,
 };
 use cama_app::match_discovery::SteamId;
 use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaRuntimeServices};
@@ -31,6 +31,7 @@ use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::tip_repository::TipRepository;
 use cama_domain::formatting::{JOPACOIN_EMOTE, TOMBSTONE_EMOJI};
+use cama_domain::role_performance::MIN_GAMES_FOR_WINRATE;
 use rusqlite::types::Value;
 use tracing::warn;
 
@@ -121,6 +122,7 @@ enum ProfileTab {
     Dota,
     Teammates,
     Heroes,
+    Roles,
 }
 
 #[derive(Clone)]
@@ -537,7 +539,7 @@ fn profile_action_rows(view_id: u64, active: ProfileTab) -> Vec<InteractionActio
 }
 
 impl ProfileTab {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::Rating,
         Self::Economy,
@@ -546,6 +548,7 @@ impl ProfileTab {
         Self::Dota,
         Self::Teammates,
         Self::Heroes,
+        Self::Roles,
     ];
 
     const fn key(self) -> &'static str {
@@ -558,6 +561,7 @@ impl ProfileTab {
             Self::Dota => "dota",
             Self::Teammates => "teammates",
             Self::Heroes => "heroes",
+            Self::Roles => "roles",
         }
     }
 
@@ -571,13 +575,14 @@ impl ProfileTab {
             Self::Dota => "Dota",
             Self::Teammates => "Teammates",
             Self::Heroes => "Heroes",
+            Self::Roles => "Roles",
         }
     }
 
     const fn row(self) -> u8 {
         match self {
             Self::Overview | Self::Rating | Self::Economy | Self::Gambling | Self::Predictions => 0,
-            Self::Dota | Self::Teammates | Self::Heroes => 1,
+            Self::Dota | Self::Teammates | Self::Heroes | Self::Roles => 1,
         }
     }
 
@@ -590,6 +595,7 @@ impl ProfileTab {
                 | Self::Economy
                 | Self::Rating
                 | Self::Teammates
+                | Self::Roles
         )
     }
 
@@ -734,6 +740,7 @@ impl ProfileDataSources {
             ProfileTab::Dota => self.dota(target_id, guild_id, target_name),
             ProfileTab::Teammates => self.teammates(target_id, guild_id, target_name),
             ProfileTab::Heroes => self.heroes(target_id, guild_id, target_name),
+            ProfileTab::Roles => self.roles(target_id, guild_id, target_name),
         }
     }
 
@@ -1613,6 +1620,61 @@ impl ProfileDataSources {
         )
         .field("\u{200b}", "\u{200b}", true)
         .footer(footer))
+    }
+
+    /// Win rate per position actually played, as a five-spoke radar.
+    ///
+    /// Positions are estimated from OpenDota lane and ten-minute farm data,
+    /// not from the shuffler's pre-game assignment - players rearrange in
+    /// lobby, so what was assigned is not evidence of what was played.
+    fn roles(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        target_name: &str,
+    ) -> Result<ProfilePage, String> {
+        self.player(discord_id, guild_id)?;
+        let records = self
+            .matches
+            .player_role_records(discord_id, guild_id)
+            .map_err(|error| error.to_string())?;
+        let total: u32 = records.values().map(|(wins, losses)| wins + losses).sum();
+        if total == 0 {
+            return Ok(ProfilePage::new(
+                format!("Profile: {target_name} > Roles"),
+                DISCORD_BLUE,
+            )
+            .description(
+                "No position data yet. Positions come from OpenDota match data, so they appear once matches have been enriched.",
+            ));
+        }
+
+        let image = draw_position_winrate_radar(
+            &records,
+            &format!("Roles: {target_name}"),
+            MIN_GAMES_FOR_WINRATE,
+        );
+        let mut page = ProfilePage::new(format!("Profile: {target_name} > Roles"), DISCORD_BLUE)
+            .image_attachment("roles.png", image.into_inner());
+        for (key, name) in POSITION_AXES {
+            let (wins, losses) = records.get(key).copied().unwrap_or((0, 0));
+            let played = wins + losses;
+            let value = if played == 0 {
+                "No games".to_owned()
+            } else {
+                let rate = f64::from(wins) * 100.0 / f64::from(played);
+                let thin = if played < MIN_GAMES_FOR_WINRATE {
+                    " (low sample)"
+                } else {
+                    ""
+                };
+                format!("{wins}W {losses}L - {rate:.0}%{thin}")
+            };
+            page = page.field(name, value, true);
+        }
+        Ok(page.footer(
+            "Positions are estimated from OpenDota lane and 10-minute farm data, not the shuffler's assignment.",
+        ))
     }
 
     fn heroes(
