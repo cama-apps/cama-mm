@@ -218,6 +218,6 @@ fn interaction_embed(embed: DotaInfoEmbed) -> InteractionEmbed {
     converted
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "dota_info_provider/tests.rs"]
 mod tests;

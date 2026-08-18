@@ -167,7 +167,7 @@ impl DigWeatherWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn with_clock_and_interval(
         database_path: impl AsRef<Path>,
         configured_channel_id: Option<i64>,
@@ -387,7 +387,7 @@ impl DigWeatherWorker {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     async fn broadcast_rollover(
         &self,
         game_date: &str,
@@ -472,6 +472,6 @@ impl BackgroundWorker for DigWeatherWorker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "dig_weather_worker/tests.rs"]
 mod tests;

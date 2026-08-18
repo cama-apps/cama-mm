@@ -216,7 +216,7 @@ impl PetSweepWorker {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn with_ports(
         database_path: impl AsRef<Path>,
         configured_channel_id: i64,
@@ -726,5 +726,5 @@ fn report_notice_failure(kind: &'static str, id: i64, failure: NoticeFailure) ->
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 mod tests;

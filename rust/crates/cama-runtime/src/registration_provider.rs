@@ -2872,6 +2872,6 @@ impl NeonEventPort for SqliteNeonEventPort {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "registration_provider/tests.rs"]
 mod tests;

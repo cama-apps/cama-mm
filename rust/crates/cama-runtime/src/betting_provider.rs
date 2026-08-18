@@ -1266,7 +1266,7 @@ const WHEEL_MEDIA_SIZE: u16 = 500;
 const WHEEL_MEDIA_FRAME_COUNT: usize = 70;
 const EXPLOSION_MEDIA_FRAME_COUNT: usize = 56;
 const WHEEL_MEDIA_UPLOAD_LIMIT: usize = 4 * 1024 * 1024;
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 const EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET: usize = 500_000;
 const MAX_WHEEL_LABEL_SPRITES: usize = 128;
 const MAX_CACHED_WHEEL_ATTACHMENTS: usize = 4;
@@ -1590,7 +1590,7 @@ pub fn render_explosion_attachment_for_visual_equivalence() -> Result<Interactio
 /// but retaining this policy seam makes the memory bound explicit and keeps a
 /// future richer palette implementation from accidentally materializing a
 /// 500x500x56 RGB sheet.
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 fn explosion_palette_sample_size(frame_size: (usize, usize), frame_count: usize) -> (usize, usize) {
     let source_pixels = frame_size
         .0
@@ -1938,7 +1938,7 @@ fn wheel_frame_rotation(frame_index: usize, target_index: usize, wedge_count: us
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 fn wheel_index_at_pointer(rotation: f64, wedge_count: usize) -> Option<usize> {
     if wedge_count == 0 {
         return None;
@@ -9763,7 +9763,7 @@ fn wheel_display_label(option: &WheelOption) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 fn apply_event_multiplier_to_wedge(
     wedge: &mut cama_app::wheel::WheelWedge,
     win_multiplier: f64,
@@ -10199,6 +10199,6 @@ fn validate_investment_target(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "betting_provider/tests.rs"]
 mod tests;

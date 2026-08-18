@@ -304,7 +304,7 @@ fn attachment_response(attachment: HeroGridAttachment) -> InteractionResponse {
         ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use std::sync::Mutex;
 

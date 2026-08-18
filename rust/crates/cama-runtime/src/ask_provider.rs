@@ -350,6 +350,6 @@ async fn followup_fail_soft(responder: &dyn InteractionResponder, response: Inte
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "ask_provider/tests.rs"]
 mod tests;

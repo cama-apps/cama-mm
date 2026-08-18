@@ -372,7 +372,7 @@ impl DigRegistrationProvider {
     }
 
     /// Compose the complete production `/dig` command/component surface.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     #[must_use]
     pub fn new(
         database_path: impl AsRef<Path>,
@@ -387,7 +387,7 @@ impl DigRegistrationProvider {
     /// Compose the provider with an explicit media facade. Production uses
     /// [`Self::new`]; this seam keeps deployment-root and cached-byte behavior
     /// independently testable without putting filesystem work on Tokio.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     #[must_use]
     pub fn with_media(
         database_path: impl AsRef<Path>,
@@ -402,7 +402,7 @@ impl DigRegistrationProvider {
 
     /// Compose a test provider with an explicit AI service and no gateway
     /// vanity-tax state. Production must use [`Self::production`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     #[must_use = "inspect the provider admission result"]
     pub fn with_media_and_ai(
         database_path: impl AsRef<Path>,
@@ -6696,7 +6696,7 @@ impl RuntimeBossEntropy {
         self.random.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn reseed(&self, seed: u64) {
         *self.random() = fastrand::Rng::with_seed(seed);
     }
@@ -9683,6 +9683,6 @@ fn unix_now() -> i64 {
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "dig_provider/tests.rs"]
 mod tests;

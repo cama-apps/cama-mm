@@ -868,6 +868,6 @@ fn page_buttons(view_id: u64, page: usize, pages: usize) -> InteractionActionRow
     ])
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "scout_provider/tests.rs"]
 mod tests;

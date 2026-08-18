@@ -257,7 +257,7 @@ impl DuelChallengesWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-draft"))]
     fn with_runtime(
         database_path: impl AsRef<Path>,
         configured_channel_id: Option<i64>,
@@ -853,6 +853,6 @@ fn trial_label(trial: DuelTrial) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "duel_challenges_worker/tests.rs"]
 mod tests;

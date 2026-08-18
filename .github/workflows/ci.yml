@@ -13,15 +13,41 @@ permissions:
 
 jobs:
   rust-tests:
+    name: Rust tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - cama-domain
-          - cama-db
-          - cama-app
-          - cama-runtime
+        include:
+          - name: cama-domain
+            package: cama-domain
+            arguments: --all-targets --all-features
+          - name: cama-db
+            package: cama-db
+            arguments: --all-targets --all-features
+          - name: cama-app
+            package: cama-app
+            arguments: --all-targets --all-features
+          - name: cama-runtime-core
+            package: cama-runtime
+            arguments: >-
+              --all-targets --no-default-features
+              --features runtime-test-core
+          - name: cama-runtime-dig
+            package: cama-runtime
+            arguments: >-
+              --lib --no-default-features
+              --features runtime-test-dig
+          - name: cama-runtime-draft
+            package: cama-runtime
+            arguments: >-
+              --lib --no-default-features
+              --features runtime-test-draft
+          - name: cama-runtime-match
+            package: cama-runtime
+            arguments: >-
+              --lib --no-default-features
+              --features runtime-test-match
     env:
       CARGO_TARGET_DIR: rust/target
       # CI failures already report assertion locations, while debug line tables
@@ -43,10 +69,10 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
 
-      - name: Test ${{ matrix.package }}
+      - name: Test ${{ matrix.name }}
         run: >-
           cargo test --locked --manifest-path rust/Cargo.toml
-          --package ${{ matrix.package }} --all-targets --all-features
+          --package ${{ matrix.package }} ${{ matrix.arguments }}
 
   rust-lint:
     runs-on: ubuntu-latest

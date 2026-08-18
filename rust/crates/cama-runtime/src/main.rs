@@ -1491,7 +1491,7 @@ fn run_catalog_check(path: PathBuf) -> ExitCode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use tempfile::tempdir;
 

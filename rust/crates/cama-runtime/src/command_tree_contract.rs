@@ -328,7 +328,7 @@ fn collect_nested_snapshot(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use std::sync::Arc;
 

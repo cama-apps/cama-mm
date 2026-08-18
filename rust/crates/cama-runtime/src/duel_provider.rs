@@ -1169,6 +1169,6 @@ fn unsigned_id(id: i64, kind: &str) -> Result<u64, String> {
     u64::try_from(id).map_err(|_| format!("SQLite {kind} ID is negative"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "duel_provider/tests.rs"]
 mod tests;

@@ -75,7 +75,7 @@ impl BackgroundWorkerSpec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     use super::*;
 

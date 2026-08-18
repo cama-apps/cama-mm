@@ -4073,6 +4073,6 @@ fn schedule_message_delete(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "lobby_provider/tests.rs"]
 mod tests;

@@ -1,12 +1,17 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
+use std::path::PathBuf;
 use std::sync::OnceLock;
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 use rusqlite::{Connection, MAIN_DB};
 use tempfile::NamedTempFile;
 
 static MIGRATED_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 static NEXT_FAST_DATABASE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn migrated_database_template() -> &'static NamedTempFile {
@@ -28,6 +33,7 @@ pub(crate) fn initialize_test_database(path: impl AsRef<Path>) -> io::Result<()>
 }
 
 /// A file-backed canonical fixture for restart, locking, and durable-I/O tests.
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 pub(crate) fn migrated_database() -> NamedTempFile {
     let database = NamedTempFile::new().expect("temporary migrated database");
     initialize_test_database(database.path()).expect("copy canonical database template");
@@ -39,17 +45,20 @@ pub(crate) fn migrated_database() -> NamedTempFile {
 /// The keeper connection owns a named shared-memory database so production
 /// repositories can continue opening independent connections through `path()`.
 /// Dropping the handle releases the entire database without filesystem writes.
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 pub(crate) struct FastTestDatabase {
     path: PathBuf,
     _keeper: Connection,
 }
 
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 impl FastTestDatabase {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
 
+#[cfg(any(feature = "runtime-test-draft", feature = "runtime-test-match"))]
 pub(crate) fn fast_database() -> FastTestDatabase {
     let id = NEXT_FAST_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
     let path = PathBuf::from(format!(

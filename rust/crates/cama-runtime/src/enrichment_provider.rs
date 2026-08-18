@@ -2437,6 +2437,6 @@ fn unix_now() -> i64 {
         .map_or(0, |duration| duration.as_secs() as i64)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "enrichment_provider/tests.rs"]
 mod tests;

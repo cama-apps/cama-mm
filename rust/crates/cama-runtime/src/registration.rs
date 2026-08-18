@@ -1052,7 +1052,7 @@ pub enum RegistrationError {
     AmbiguousComponentPrefix(String),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use super::*;
 

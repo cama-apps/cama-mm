@@ -4,7 +4,7 @@
 //! owns process configuration, database schema initialization, gateway supervision, and
 //! conversion between Discord interactions and the typed registration API.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod architecture_tests;
 
 pub mod admin_match_correction;

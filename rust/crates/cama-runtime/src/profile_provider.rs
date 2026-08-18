@@ -2139,5 +2139,5 @@ fn ordered_positive_lanes(distribution: &BTreeMap<String, f64>) -> Vec<(String, 
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-draft"))]
 mod tests;
