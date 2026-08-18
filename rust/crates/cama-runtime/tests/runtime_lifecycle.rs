@@ -167,7 +167,6 @@ async fn startup_ready_registration_reconnect_and_shutdown_are_supervised() {
         db_path: "/tmp/cama-runtime-test.db".into(),
         reconnect_initial: Duration::ZERO,
         reconnect_max: Duration::ZERO,
-        rust_cutover_candidate: false,
     };
     let runtime = Runtime::new(
         config,
@@ -286,7 +285,6 @@ async fn shutdown_during_worker_restart_backoff_prevents_stale_restart() {
         db_path: "/tmp/cama-runtime-worker-shutdown.db".into(),
         reconnect_initial: Duration::ZERO,
         reconnect_max: Duration::ZERO,
-        rust_cutover_candidate: false,
     };
     let runtime = Runtime::new(
         config,

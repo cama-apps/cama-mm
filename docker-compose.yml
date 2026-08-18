@@ -16,7 +16,6 @@ services:
     environment:
       DB_PATH: /app/data/cama_shuffle.db
       BOT_RUNTIME: rust
-      RUST_CUTOVER_CANDIDATE: "true"
     command: ["serve"]
     user: "1001:1001"
     cap_add:
