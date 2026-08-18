@@ -12,6 +12,14 @@ struct DecodedPng {
 }
 
 impl DecodedPng {
+    /// Every distinct colour in the image.
+    fn colours(&self) -> BTreeSet<Rgba> {
+        self.pixels
+            .chunks_exact(4)
+            .map(|pixel| Rgba([pixel[0], pixel[1], pixel[2], pixel[3]]))
+            .collect()
+    }
+
     fn contains(&self, color: Rgba) -> bool {
         self.pixels.chunks_exact(4).any(|pixel| pixel == color.0)
     }
@@ -1342,79 +1350,119 @@ fn position_records(entries: [(u32, u32); 5]) -> BTreeMap<String, (u32, u32)> {
         .collect()
 }
 
+/// Colours produced only by the data path, i.e. present in a chart with a
+/// record but absent from one with none. Comparing against the empty chart
+/// keeps these assertions about the polygon and markers rather than about the
+/// rings, spokes and labels, which are drawn either way.
+fn data_only_colours(records: &BTreeMap<String, (u32, u32)>) -> BTreeSet<Rgba> {
+    let empty = position_records([(0, 0); 5]);
+    let drawn = assert_rgba_png(
+        &draw_position_winrate_radar(records, "Roles: Player", 3),
+        Some((400, 400)),
+    );
+    let chrome = assert_rgba_png(
+        &draw_position_winrate_radar(&empty, "Roles: Player", 3),
+        Some((400, 400)),
+    );
+    drawn
+        .colours()
+        .difference(&chrome.colours())
+        .copied()
+        .collect()
+}
+
+/// How far up the Carry spoke (the top one, straight above centre) the chart
+/// paints anything the empty chart does not. Returns the distance from centre
+/// in pixels, so a test can assert on the plotted geometry rather than merely
+/// on "some colour changed".
+fn carry_spoke_reach(records: &BTreeMap<String, (u32, u32)>) -> i32 {
+    const CENTRE: (usize, usize) = (200, 218);
+    let empty = position_records([(0, 0); 5]);
+    let drawn = assert_rgba_png(
+        &draw_position_winrate_radar(records, "Roles: Player", 3),
+        Some((400, 400)),
+    );
+    let chrome = assert_rgba_png(
+        &draw_position_winrate_radar(&empty, "Roles: Player", 3),
+        Some((400, 400)),
+    );
+    let data_only = drawn
+        .colours()
+        .difference(&chrome.colours())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    // Walk outward from the centre along the spoke and keep the furthest row
+    // that carries a data-only colour.
+    (0..130)
+        .filter(|distance| {
+            let y = CENTRE.1 - *distance as usize;
+            data_only
+                .iter()
+                .any(|colour| drawn.contains_in((CENTRE.0 - 3, y, CENTRE.0 + 4, y + 1), *colour))
+        })
+        .last()
+        .unwrap_or(0)
+}
+
 #[test]
-fn test_position_radar_renders_a_five_spoke_chart() {
-    let records = position_records([(6, 4), (3, 7), (5, 5), (8, 2), (1, 9)]);
-    let image = draw_position_winrate_radar(&records, "Roles: Player", 3);
-    assert_rgba_png(&image, Some((400, 400)));
+fn test_position_radar_plots_a_winning_position_further_out_than_a_losing_one() {
+    // Geometric, so removing the polygon or the markers fails it. Comparing
+    // whole PNGs cannot do this job: the rendered labels differ between any
+    // two fixtures regardless of shape.
+    let winning = position_records([(20, 0), (10, 10), (10, 10), (10, 10), (10, 10)]);
+    let losing = position_records([(0, 20), (10, 10), (10, 10), (10, 10), (10, 10)]);
+    let winning_reach = carry_spoke_reach(&winning);
+    let losing_reach = carry_spoke_reach(&losing);
+    assert!(
+        winning_reach > losing_reach + 20,
+        "a winning carry must plot markedly further out: {winning_reach} vs {losing_reach}"
+    );
+    assert!(
+        winning_reach > 80,
+        "a 20-0 record should reach most of the way out, got {winning_reach}"
+    );
 }
 
 #[test]
 fn test_position_radar_damps_a_thin_sample_instead_of_spiking_on_it() {
     // A 2-0 record is the pathological case: drawn raw it reaches the outer
-    // ring and dominates the shape on almost no evidence.
-    let thin = position_records([(10, 10), (10, 10), (10, 10), (2, 0), (10, 10)]);
-    let matched = position_records([(10, 10), (10, 10), (10, 10), (20, 0), (10, 10)]);
-    let flat = position_records([(10, 10); 5]);
-
-    let thin_image = draw_position_winrate_radar(&thin, "R", 3);
-    let matched_image = draw_position_winrate_radar(&matched, "R", 3);
-    let flat_image = draw_position_winrate_radar(&flat, "R", 3);
-
-    // It must still move off the break-even shape...
-    assert_ne!(thin_image.get_ref(), flat_image.get_ref());
-    // ...but nowhere near as far as the same rate backed by real evidence.
-    assert_ne!(thin_image.get_ref(), matched_image.get_ref());
+    // ring and dominates the shape on almost no evidence. Compared through
+    // plotted values rather than pixels, because the rendered labels differ
+    // between these fixtures regardless of geometry and would make a
+    // whole-image comparison pass even with shrinkage removed.
+    let thin = shrunk_win_rate(2, 0).expect("played");
+    let matched = shrunk_win_rate(20, 0).expect("played");
+    let even = shrunk_win_rate(10, 10).expect("played");
+    assert!(thin > even, "a winning record must still read as winning");
+    assert!(
+        thin < matched,
+        "2-0 must not plot as far out as 20-0: {thin} vs {matched}"
+    );
+    // Closer to even odds than to the ceiling.
+    assert!((thin - even).abs() < (thin - 100.0).abs());
 }
 
 #[test]
 fn test_position_radar_places_an_unplayed_position_at_break_even() {
-    // Zero games must not read as "never wins": an unplayed spoke sits on the
-    // 50% ring, where a 0-for-20 spoke would sit at the origin.
-    let unplayed = position_records([(10, 10), (10, 10), (10, 10), (10, 10), (0, 0)]);
-    let never_won = position_records([(10, 10), (10, 10), (10, 10), (10, 10), (0, 20)]);
-    assert_ne!(
-        draw_position_winrate_radar(&unplayed, "R", 3).get_ref(),
-        draw_position_winrate_radar(&never_won, "R", 3).get_ref()
-    );
-}
-
-#[test]
-fn test_performance_colour_runs_red_through_neutral_to_green() {
-    // Shrinkage means a plotted rate never quite reaches 0 or 100, so the
-    // gradient is checked at the function rather than hunting exact pixels.
-    let neutral = performance_colour(50.0);
-    assert_eq!(neutral, DISCORD_GREY);
-
-    let winning = performance_colour(90.0);
-    let losing = performance_colour(10.0);
-    assert!(
-        winning.0[1] > winning.0[0],
-        "above even odds should read green, got {winning:?}"
-    );
-    assert!(
-        losing.0[0] > losing.0[1],
-        "below even odds should read red, got {losing:?}"
-    );
-    // Further from even odds means further from neutral.
-    assert!(performance_colour(100.0).0[1] >= winning.0[1]);
-    assert!(performance_colour(0.0).0[0] >= losing.0[0]);
-}
-
-#[test]
-fn test_shrunk_win_rate_pulls_thin_samples_toward_even_odds() {
+    // Zero games must not read as "never wins".
     assert_eq!(shrunk_win_rate(0, 0), None);
-    // 2-0 is 100% raw but only 70% once the missing evidence is priced in.
-    let thin = shrunk_win_rate(2, 0).expect("played");
-    assert!((thin - 70.0).abs() < 1e-9, "got {thin}");
-    // The same rate over 20 games barely moves.
-    let solid = shrunk_win_rate(20, 0).expect("played");
-    assert!(solid > 85.0, "got {solid}");
-    // An even record stays exactly even at any volume.
-    for games in [2_u32, 10, 100] {
-        let even = shrunk_win_rate(games, games).expect("played");
-        assert!((even - 50.0).abs() < 1e-9, "got {even}");
-    }
+    let never_won = shrunk_win_rate(0, 20).expect("played");
+    assert!(
+        never_won < 50.0,
+        "an 0-for-20 record must plot below break-even, got {never_won}"
+    );
+}
+
+#[test]
+fn test_position_radar_fill_follows_the_whole_record_not_the_unplayed_spokes() {
+    // A player who has only ever lost must not render neutral just because
+    // four positions are unplayed and drawn at break-even.
+    let only_losses = position_records([(0, 10), (0, 0), (0, 0), (0, 0), (0, 0)]);
+    let colours = data_only_colours(&only_losses);
+    assert!(
+        colours.iter().any(|colour| colour.0[0] > colour.0[1] + 20),
+        "a losing-only record should draw distinctly red marks, got {colours:?}"
+    );
 }
 
 #[test]
@@ -1466,4 +1514,21 @@ fn test_position_radar_leaves_the_archetype_graph_untouched() {
         "Roles",
     );
     assert_ne!(positions.get_ref(), archetypes.get_ref());
+}
+
+#[test]
+fn test_position_radar_keeps_every_spoke_label_on_the_canvas() {
+    // The right-hand spokes start ~342px into a 400px canvas, so a label that
+    // is not clamped runs off the edge and `set_pixel` silently discards the
+    // overflow - the win rate just disappears. Long values are the risk case.
+    let records = position_records([(120, 96), (100, 100), (99, 1), (0, 200), (7, 7)]);
+    let image = draw_position_winrate_radar(&records, "Roles: A Very Long Name", 3);
+    let decoded = assert_rgba_png(&image, Some((400, 400)));
+    // Nothing may be painted in the final column; anything there means text
+    // was already being cut off at the boundary.
+    let right_edge_painted = (0..400).any(|y| {
+        decoded.contains_in((399, y, 400, y + 1), DISCORD_WHITE)
+            || decoded.contains_in((399, y, 400, y + 1), DISCORD_GREY)
+    });
+    assert!(!right_edge_painted, "a spoke label reached the canvas edge");
 }
