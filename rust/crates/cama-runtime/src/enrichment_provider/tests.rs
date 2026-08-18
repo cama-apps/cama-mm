@@ -1738,3 +1738,101 @@ async fn refresh_parsed_acknowledges_before_doing_any_work() {
         response.content
     );
 }
+
+/// Seed `count` matches that are linked to a Dota id but whose participants
+/// have no lane or farm data - the shape left behind when enrichment stored a
+/// payload before OpenDota finished parsing the replay.
+fn seed_stale_parsed_matches(path: &std::path::Path, count: i64) {
+    let connection = Connection::open(path).expect("open stale fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("production foreign-key mode");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO players(discord_id,guild_id,discord_username,steam_id)
+             VALUES (?1,?2,'Radiant',12345)",
+            params![100_i64, GUILD as i64],
+        )
+        .expect("insert player");
+    for index in 0..count {
+        let match_id = 1_000 + index;
+        connection
+            .execute(
+                "INSERT INTO matches(
+                     match_id,guild_id,team1_players,team2_players,winning_team,
+                     match_date,valve_match_id,enrichment_source,enrichment_data
+                 ) VALUES (?1,?2,'[100]','[]',1,'2024-01-15 12:00:00',?3,'auto','{}')",
+                params![match_id, GUILD as i64, 9_000 + index],
+            )
+            .expect("insert stale match");
+        connection
+            .execute(
+                "INSERT INTO match_participants(
+                     match_id,discord_id,guild_id,team_number,won,side
+                 ) VALUES (?1,100,?2,1,1,'radiant')",
+                params![match_id, GUILD as i64],
+            )
+            .expect("insert stale participant");
+    }
+}
+
+#[tokio::test]
+async fn refresh_parsed_drains_a_backlog_larger_than_one_chunk() {
+    // The sweep processes 25 matches per chunk. A backlog of 30 therefore only
+    // completes if the handler loops, which is the whole point of the command
+    // reporting "runs until the backlog is clear" rather than a fixed batch.
+    const BACKLOG: i64 = 30;
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    seed_stale_parsed_matches(&path, BACKLOG);
+    let bodies = (0..BACKLOG)
+        .map(|_| manual_match_payload())
+        .collect::<Vec<_>>();
+    let server = RouteServer::start(bodies);
+    let shared_services = services(&server);
+    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+        &path,
+        &application_config(),
+        Arc::clone(&shared_services),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command(
+                "enrich",
+                "discover",
+                vec![option("refresh_parsed", InteractionValue::Boolean(true))],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("refresh parsed response");
+
+    let captured = responder.captured.lock().expect("response capture");
+    assert_eq!(captured.deferred, [true]);
+    let summary = captured.followups.last().expect("refresh summary");
+    assert!(
+        summary
+            .content
+            .contains(&format!("Matches processed: {BACKLOG}")),
+        "the sweep must drain past a single chunk, got: {}",
+        summary.content
+    );
+
+    // And the queue is genuinely empty afterwards, not merely attempted.
+    let remaining = MatchRepository::new(&path)
+        .matches_missing_parsed_stats(Some(GUILD as i64), 100, 1)
+        .expect("remaining candidates");
+    assert!(
+        remaining.is_empty(),
+        "every match should be accounted for, {} left",
+        remaining.len()
+    );
+}
