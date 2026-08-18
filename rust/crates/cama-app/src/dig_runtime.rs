@@ -4169,7 +4169,11 @@ fn apply_state(
             .max(0)
             .saturating_add(total_jc_increment.max(0));
         if paid {
-            tunnel.paid_digs_today = tunnel.paid_digs_today.saturating_add(1);
+            tunnel.paid_digs_today = if tunnel.paid_dig_date.as_deref() == Some(today) {
+                tunnel.paid_digs_today.saturating_add(1)
+            } else {
+                1
+            };
             tunnel.paid_dig_date = Some(today.to_owned());
         }
     }
