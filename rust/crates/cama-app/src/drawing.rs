@@ -767,6 +767,45 @@ pub fn draw_role_graph(values: &BTreeMap<String, f64>, title: &str) -> Cursor<Ve
     render(raster)
 }
 
+/// Prior strength used to damp a win rate computed from very few games.
+///
+/// A raw rate is unusable as a *shape*: 2-0 draws a full-length spike and 0-2
+/// collapses to the origin, so the two least-evidenced positions end up
+/// defining the silhouette. Blending toward even odds in proportion to the
+/// missing evidence leaves a well-sampled spoke where it belongs while pulling
+/// a thin one back toward the middle.
+const WIN_RATE_PRIOR_GAMES: f64 = 3.0;
+
+/// A win rate shrunk toward even odds by [`WIN_RATE_PRIOR_GAMES`].
+#[must_use]
+fn shrunk_win_rate(wins: u32, losses: u32) -> Option<f64> {
+    let games = f64::from(wins + losses);
+    if games == 0.0 {
+        return None;
+    }
+    Some((f64::from(wins) + WIN_RATE_PRIOR_GAMES * 0.5) / (games + WIN_RATE_PRIOR_GAMES) * 100.0)
+}
+
+/// Blend between two colours, `amount` clamped to `0.0..=1.0`.
+fn blend(from: Rgba, to: Rgba, amount: f64) -> Rgba {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel = |index: usize| {
+        let start = f64::from(from.0[index]);
+        let end = f64::from(to.0[index]);
+        (start + (end - start) * amount).round() as u8
+    };
+    Rgba::rgb(channel(0), channel(1), channel(2))
+}
+
+/// Red below even odds, neutral at 50%, green above.
+fn performance_colour(win_rate: f64) -> Rgba {
+    if win_rate >= 50.0 {
+        blend(DISCORD_GREY, DISCORD_GREEN, (win_rate - 50.0) / 50.0)
+    } else {
+        blend(DISCORD_GREY, DISCORD_RED, (50.0 - win_rate) / 50.0)
+    }
+}
+
 /// The five Dota positions, in pentagon order starting from the top spoke.
 pub const POSITION_AXES: [(&str, &str); 5] = [
     ("1", "Carry"),
@@ -801,7 +840,7 @@ pub fn draw_position_winrate_radar(
         let (wins, losses) = sample(key);
         wins + losses
     };
-    let win_rate = |key: &str| {
+    let raw_win_rate = |key: &str| {
         let (wins, losses) = sample(key);
         let played = wins + losses;
         if played == 0 {
@@ -810,9 +849,15 @@ pub fn draw_position_winrate_radar(
             f64::from(wins) * 100.0 / f64::from(played)
         }
     };
+    // An unplayed position sits on the break-even ring rather than at the
+    // origin: "no games" is not the same claim as "never wins".
+    let plotted = |key: &str| {
+        let (wins, losses) = sample(key);
+        shrunk_win_rate(wins, losses).unwrap_or(50.0)
+    };
 
-    let center = (200, 215);
-    let radius = 130.0;
+    let center = (200, 218);
+    let radius = 122.0;
     for fraction in [0.25, 0.5, 0.75, 1.0] {
         let ring = radial_points(POSITION_AXES.len(), center, radius * fraction, |_| 1.0);
         // The 50% ring is the break-even line, so it carries more meaning than
@@ -844,20 +889,33 @@ pub fn draw_position_winrate_radar(
     }
 
     let data = radial_points(POSITION_AXES.len(), center, radius, |index| {
-        win_rate(POSITION_AXES[index].0) / 100.0
+        plotted(POSITION_AXES[index].0) / 100.0
     });
-    raster.polygon(&data, DISCORD_ACCENT.with_alpha(100));
-    raster.polygon_outline(&data, DISCORD_ACCENT);
+    // The fill takes the colour of the overall average, so the shape reads
+    // warm or cool before any single spoke is examined.
+    let overall = POSITION_AXES
+        .iter()
+        .map(|(key, _)| plotted(key))
+        .sum::<f64>()
+        / POSITION_AXES.len() as f64;
+    raster.polygon(&data, performance_colour(overall).with_alpha(90));
+    raster.polygon_outline(&data, performance_colour(overall));
     for (index, point) in data.iter().enumerate() {
         let key = POSITION_AXES[index].0;
-        // An unproven position gets a hollow marker so it cannot be mistaken
-        // for a measured result.
-        let colour = if games(key) >= minimum_sample {
-            DISCORD_ACCENT
-        } else {
+        let played = games(key);
+        // A thin sample keeps a grey ring around its marker, so "few games"
+        // stays visible without letting it distort the shape.
+        let outline = if played > 0 && played < minimum_sample {
             DISCORD_GREY
+        } else {
+            DISCORD_DARKER
         };
-        raster.circle(*point, 4, colour);
+        let fill = if played == 0 {
+            DISCORD_DARKER
+        } else {
+            performance_colour(plotted(key))
+        };
+        raster.circle_with_outline(*point, 4, fill, outline);
     }
 
     let label_offset = 28.0;
@@ -886,16 +944,23 @@ pub fn draw_position_winrate_radar(
             DISCORD_GREY
         };
         raster.text(x, y, name, name_colour, 1);
+        // The printed figure is the raw record. Shrinkage exists to keep the
+        // drawing honest; hiding the real numbers behind it would trade one
+        // distortion for another.
+        let (wins, losses) = sample(key);
         let detail = if played == 0 {
             "no games".to_owned()
         } else if played < minimum_sample {
-            // Flagged rather than dimmed: a thin sample is exactly what the
-            // reader needs to see, not what should fade away.
-            format!("{}% ({played}) ?", win_rate(key) as i32)
+            format!("{wins}W {losses}L {}% ?", raw_win_rate(key) as i32)
         } else {
-            format!("{}% ({played})", win_rate(key) as i32)
+            format!("{wins}W {losses}L {}%", raw_win_rate(key) as i32)
         };
-        raster.text(x, y + 9, &detail, DISCORD_GREY, 1);
+        let detail_colour = if played == 0 {
+            DISCORD_GREY
+        } else {
+            performance_colour(plotted(key))
+        };
+        raster.text(x, y + 9, &detail, detail_colour, 1);
     }
     render(raster)
 }
