@@ -87,6 +87,7 @@ impl Fixture {
                      lane_role INTEGER,
                      lane_efficiency INTEGER,
                      gold_at_10 INTEGER,
+                     last_hits_at_10 INTEGER,
                      derived_role TEXT,
                      towers_killed INTEGER,
                      roshans_killed INTEGER,
@@ -341,6 +342,7 @@ fn fantasy_update(discord_id: i64, fantasy_points: f64) -> EnrichmentParticipant
         lane_role: None,
         lane_efficiency: None,
         gold_at_10: None,
+        last_hits_at_10: None,
         towers_killed: None,
         roshans_killed: None,
         teamfight_participation: None,
@@ -1253,6 +1255,7 @@ fn test_match_and_participants_commit_in_one_call() {
             lane_role: Some(1),
             lane_efficiency: Some(80),
             gold_at_10: None,
+            last_hits_at_10: None,
             towers_killed: Some(2),
             roshans_killed: Some(1),
             teamfight_participation: Some(0.75),
@@ -2338,7 +2341,7 @@ fn test_garnishment_uses_correct_guild_balance() {
     assert_eq!(positive[0].garnished, 0);
 }
 
-/// (lane_role, gold_at_10) for a standard lineup, applied to each side.
+/// (lane_role, last_hits_at_10) for a standard lineup, applied to each side.
 const ENRICHMENT_LANES: [(i64, i64); 5] =
     [(1, 4_000), (2, 3_800), (3, 3_200), (3, 1_800), (1, 1_500)];
 
@@ -2347,7 +2350,7 @@ fn lane_participant_updates(all_ids: &[i64]) -> Vec<EnrichmentParticipantUpdate>
         .iter()
         .enumerate()
         .map(|(index, discord_id)| {
-            let (lane_role, gold_at_10) = ENRICHMENT_LANES[index % 5];
+            let (lane_role, last_hits_at_10) = ENRICHMENT_LANES[index % 5];
             EnrichmentParticipantUpdate {
                 discord_id: *discord_id,
                 hero_id: Some(discord_id % 100 + 1),
@@ -2364,7 +2367,8 @@ fn lane_participant_updates(all_ids: &[i64]) -> Vec<EnrichmentParticipantUpdate>
                 hero_healing: None,
                 lane_role: Some(lane_role),
                 lane_efficiency: None,
-                gold_at_10: Some(gold_at_10),
+                gold_at_10: None,
+                last_hits_at_10: Some(last_hits_at_10),
                 towers_killed: None,
                 roshans_killed: None,
                 teamfight_participation: None,

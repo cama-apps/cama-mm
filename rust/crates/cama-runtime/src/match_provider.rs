@@ -5340,6 +5340,7 @@ impl AdminMatchControl for MatchHandler {
                 matches_scanned: report.matches_scanned,
                 teams_derived: report.teams_derived,
                 gold_samples_written: report.gold_samples_written,
+                last_hits_samples_written: report.last_hits_samples_written,
                 unreadable_payloads: report.unreadable_payloads,
                 unparsed_teams: report.unparsed_teams,
                 ambiguous_lanes: report.ambiguous_lanes,
@@ -5348,6 +5349,7 @@ impl AdminMatchControl for MatchHandler {
                 participants: coverage.participants,
                 with_derived_role: coverage.with_derived_role,
                 with_gold_at_10: coverage.with_gold_at_10,
+                with_last_hits_at_10: coverage.with_last_hits_at_10,
                 player_roles_above_minimum_sample: coverage.player_roles_above_minimum_sample,
             })
         })

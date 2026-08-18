@@ -295,6 +295,10 @@ pub struct EnrichmentParticipantUpdate {
     pub lane_efficiency: Option<i64>,
     /// Gold at ten minutes, used to split each lane into core and support.
     pub gold_at_10: Option<i64>,
+    /// Creep score at ten minutes, preferred over `gold_at_10` for the same
+    /// core/support split — unlike gold, it can't be inflated by an early
+    /// kill, bounty rune, or tower assist.
+    pub last_hits_at_10: Option<i64>,
     pub towers_killed: Option<i64>,
     pub roshans_killed: Option<i64>,
     pub teamfight_participation: Option<f64>,
@@ -1366,7 +1370,7 @@ impl MatchRecordingRepository {
                      roshans_killed = ?16, teamfight_participation = ?17,
                      obs_placed = ?18, sen_placed = ?19, camps_stacked = ?20,
                      rune_pickups = ?21, firstblood_claimed = ?22, stuns = ?23,
-                     fantasy_points = ?24, gold_at_10 = ?25
+                     fantasy_points = ?24, gold_at_10 = ?25, last_hits_at_10 = ?29
                  WHERE match_id = ?26 AND discord_id = ?27 AND guild_id = ?28",
                 params![
                     participant.hero_id,
@@ -1396,7 +1400,8 @@ impl MatchRecordingRepository {
                     participant.gold_at_10,
                     request.match_id,
                     participant.discord_id,
-                    guild_id
+                    guild_id,
+                    participant.last_hits_at_10,
                 ],
             )?;
         }
@@ -2050,7 +2055,7 @@ fn store_derived_roles(
 ) -> Result<(), rusqlite::Error> {
     let participants: Vec<(i64, i64, Option<i64>, Option<i64>)> = transaction
         .prepare(
-            "SELECT discord_id, team_number, lane_role, gold_at_10
+            "SELECT discord_id, team_number, lane_role, last_hits_at_10
                FROM match_participants
               WHERE match_id = ?1 AND guild_id = ?2",
         )?
@@ -2069,13 +2074,13 @@ fn store_derived_roles(
         }
         let stats: [LaneStats; 5] = std::array::from_fn(|index| LaneStats {
             lane_role: team[index].2,
-            gold_at_10: team[index].3,
+            last_hits_at_10: team[index].3,
         });
         let derived = derive_positions(&stats);
         for (index, (discord_id, _, _, _)) in team.iter().enumerate() {
             // Cleared on failure rather than left alone: re-enrichment can
-            // correct lane or gold data, and a stale position from the earlier
-            // reading would otherwise keep feeding role records forever.
+            // correct lane or last-hits data, and a stale position from the
+            // earlier reading would otherwise keep feeding role records forever.
             let role = derived.as_ref().ok().map(|positions| positions[index]);
             transaction.execute(
                 "UPDATE match_participants SET derived_role = ?1

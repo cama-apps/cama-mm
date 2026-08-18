@@ -64,7 +64,7 @@ fn test_unparsed_replay_is_rejected_rather_than_guessed() {
     assert_eq!(derive_positions(&team), Err(DerivationFailure::Unparsed));
 
     let mut team = standard_team();
-    team[2].gold_at_10 = None;
+    team[2].last_hits_at_10 = None;
     assert_eq!(derive_positions(&team), Err(DerivationFailure::Unparsed));
 }
 
@@ -116,8 +116,8 @@ fn test_two_roamers_is_rejected() {
 #[test]
 fn test_identical_farm_in_a_lane_is_rejected_rather_than_coin_flipped() {
     let mut team = standard_team();
-    team[0].gold_at_10 = Some(2_500);
-    team[4].gold_at_10 = Some(2_500);
+    team[0].last_hits_at_10 = Some(2_500);
+    team[4].last_hits_at_10 = Some(2_500);
     assert_eq!(
         derive_positions(&team),
         Err(DerivationFailure::TiedFarmPriority)
@@ -144,14 +144,14 @@ fn test_every_accepted_result_is_a_permutation_of_one_through_five() {
 }
 
 #[test]
-fn test_gold_at_ten_reads_the_tenth_minute_sample() {
-    let series: Vec<i64> = (0..=15).map(|minute| minute * 100).collect();
-    assert_eq!(gold_at_ten(&series), Some(1_000));
+fn test_last_hits_at_ten_reads_the_tenth_minute_sample() {
+    let series: Vec<i64> = (0..=15).map(|minute| minute * 4).collect();
+    assert_eq!(last_hits_at_ten(&series), Some(40));
 }
 
 #[test]
-fn test_gold_at_ten_is_absent_for_a_game_shorter_than_the_sample() {
-    let series: Vec<i64> = (0..8).map(|minute| minute * 100).collect();
-    assert_eq!(gold_at_ten(&series), None);
-    assert_eq!(gold_at_ten(&[]), None);
+fn test_last_hits_at_ten_is_absent_for_a_game_shorter_than_the_sample() {
+    let series: Vec<i64> = (0..8).map(|minute| minute * 4).collect();
+    assert_eq!(last_hits_at_ten(&series), None);
+    assert_eq!(last_hits_at_ten(&[]), None);
 }
