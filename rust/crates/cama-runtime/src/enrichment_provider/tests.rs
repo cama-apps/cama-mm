@@ -1687,3 +1687,54 @@ async fn recorded_match_discovery_honors_disabled_guild_without_http() {
     assert_eq!(outcome, RecordedMatchDiscoveryOutcome::Disabled);
     assert!(server.requests(0).is_empty());
 }
+
+#[tokio::test]
+async fn refresh_parsed_acknowledges_before_doing_any_work() {
+    // The sweep scans the database and makes network calls, so the
+    // interaction must be deferred first. Returning before `defer` fails the
+    // command outright with "This interaction failed", which is exactly what
+    // an earlier revision of this branch did.
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    let server = RouteServer::start(vec![]);
+    let shared_services = services(&server);
+    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+        &path,
+        &application_config(),
+        Arc::clone(&shared_services),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command(
+                "enrich",
+                "discover",
+                vec![
+                    option("refresh_parsed", InteractionValue::Boolean(true)),
+                    option("dry_run", InteractionValue::Boolean(true)),
+                ],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("refresh parsed response");
+
+    let captured = responder.captured.lock().expect("response capture");
+    assert_eq!(captured.deferred, [true], "must defer before scanning");
+    let response = captured.followups.last().expect("refresh followup");
+    assert!(response.ephemeral, "admin output stays private");
+    assert!(
+        response
+            .content
+            .contains("No matches are missing parsed stats"),
+        "unexpected content: {}",
+        response.content
+    );
+}

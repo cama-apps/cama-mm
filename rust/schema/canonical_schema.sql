@@ -864,7 +864,7 @@ CREATE TABLE matches (
                 match_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 dotabuff_match_id TEXT,
                 notes TEXT
-            , valve_match_id INTEGER, duration_seconds INTEGER, radiant_score INTEGER, dire_score INTEGER, game_mode INTEGER, enrichment_data TEXT, enrichment_source TEXT, enrichment_confidence REAL, lobby_type TEXT DEFAULT 'shuffle', balancing_rating_system TEXT DEFAULT 'glicko', guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool', pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0, win_reward_jc INTEGER, jc_changes TEXT, lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open', 'lowskill')));
+            , valve_match_id INTEGER, duration_seconds INTEGER, radiant_score INTEGER, dire_score INTEGER, game_mode INTEGER, enrichment_data TEXT, enrichment_source TEXT, enrichment_confidence REAL, lobby_type TEXT DEFAULT 'shuffle', balancing_rating_system TEXT DEFAULT 'glicko', guild_id INTEGER NOT NULL DEFAULT 0, betting_mode TEXT DEFAULT 'pool', pending_match_id INTEGER, bonuses_paid INTEGER NOT NULL DEFAULT 0, win_reward_jc INTEGER, jc_changes TEXT, lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open', 'lowskill')), parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0);
 
 -- table: moderation_events
 CREATE TABLE moderation_events (

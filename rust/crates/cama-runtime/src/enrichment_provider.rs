@@ -1137,13 +1137,13 @@ impl EnrichmentHandler {
         let dry_run = boolean_option(options, "dry_run").unwrap_or(false);
         let refill = boolean_option(options, "refill_fantasy").unwrap_or(false);
         let refresh_parsed = boolean_option(options, "refresh_parsed").unwrap_or(false);
+        if !defer(&responder, true).await {
+            return Ok(());
+        }
         if refresh_parsed {
             return self
                 .handle_refresh_parsed(guild_id, dry_run, responder)
                 .await;
-        }
-        if !defer(&responder, true).await {
-            return Ok(());
         }
         if refill {
             return self
@@ -1192,10 +1192,15 @@ impl EnrichmentHandler {
         dry_run: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        // Each candidate is a rate-limited OpenDota round trip, so the batch
+        // is sized to finish inside the interaction token rather than to drain
+        // the backlog in one go.
+        const BATCH: usize = 25;
+        const MAX_ATTEMPTS: i64 = 1;
         let matches = self.matches.clone();
         let candidates = run_blocking(move || {
             matches
-                .matches_missing_parsed_stats(Some(guild_id), 100)
+                .matches_missing_parsed_stats(Some(guild_id), BATCH, MAX_ATTEMPTS)
                 .map_err(|error| error.to_string())
         })
         .await
@@ -1229,6 +1234,7 @@ impl EnrichmentHandler {
             .map_err(response_error)?;
 
         let enrichment = Arc::clone(&self.enrichment);
+        let matches = self.matches.clone();
         let processed = candidates.len();
         let (refreshed, errors) = run_blocking(move || {
             let mut refreshed = Vec::new();
@@ -1238,12 +1244,24 @@ impl EnrichmentHandler {
                     refreshed.push((match_id, valve_match_id));
                     continue;
                 }
+                // Counted before the attempt so a panic or error cannot leave
+                // the match pinned at the head of every future sweep.
+                let _ = matches.mark_parsed_refresh_attempt(match_id, Some(guild_id));
+                // Keep whatever provenance the match already carries: this is a
+                // data refresh, not a re-identification, and relabelling an
+                // auto-discovered match as manual would lose its confidence.
+                let (existing_source, existing_confidence) = matches
+                    .enrichment_provenance(match_id, Some(guild_id))
+                    .unwrap_or((None, None));
                 let result = enrichment.enrich_match(EnrichMatchRequest {
                     internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
                     valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
                     guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
-                    source: EnrichmentSource::Manual,
-                    confidence: None,
+                    source: existing_source
+                        .as_deref()
+                        .and_then(EnrichmentSource::from_stored)
+                        .unwrap_or(EnrichmentSource::Manual),
+                    confidence: existing_confidence,
                     // The match is already linked to this Valve id; re-running
                     // is a data refresh, not a re-identification.
                     skip_validation: true,

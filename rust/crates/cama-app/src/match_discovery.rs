@@ -402,6 +402,17 @@ impl EnrichmentSource {
             Self::Auto => "auto",
         }
     }
+
+    /// Recover the source from its stored spelling, so a refresh can preserve
+    /// a match's provenance instead of relabelling it.
+    #[must_use]
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
