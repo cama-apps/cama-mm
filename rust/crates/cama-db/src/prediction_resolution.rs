@@ -29,6 +29,8 @@ pub struct SettlementAdjustments {
     pub bankruptcy_credit_bps: Option<i64>,
     pub vanity_tax_bps: i64,
     pub vanity_taxable_ids: BTreeSet<i64>,
+    pub low_priority_tax_bps: i64,
+    pub low_priority_taxable_ids: BTreeSet<i64>,
 }
 
 impl Default for SettlementAdjustments {
@@ -39,6 +41,8 @@ impl Default for SettlementAdjustments {
             bankruptcy_credit_bps: None,
             vanity_tax_bps: 0,
             vanity_taxable_ids: BTreeSet::new(),
+            low_priority_tax_bps: 0,
+            low_priority_taxable_ids: BTreeSet::new(),
         }
     }
 }
@@ -47,11 +51,12 @@ impl Default for SettlementAdjustments {
 pub struct ResolutionWinner {
     pub discord_id: i64,
     pub contracts: i64,
-    /// Net player credit after bankruptcy and vanity deductions.
+    /// Net player credit after bankruptcy, vanity, and low-priority deductions.
     pub payout: i64,
     pub profit: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +77,7 @@ pub struct ResolutionParticipant {
     pub profit: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,7 +88,8 @@ pub struct Resolution {
     pub winners: Vec<ResolutionWinner>,
     pub losers: Vec<ResolutionLoser>,
     pub participants: Vec<ResolutionParticipant>,
-    /// Gross payout before bankruptcy and vanity deductions, matching Python.
+    /// Gross payout before bankruptcy, vanity, and low-priority deductions,
+    /// matching Python.
     pub total_payout: i64,
     pub payout_multiplier_bps: i64,
     pub lp_pnl: i64,
@@ -134,6 +141,8 @@ pub enum PredictionResolutionError {
     SettlementLedgerInconsistent,
     #[error("Vanity tax ledger is inconsistent.")]
     VanityTaxLedgerInconsistent,
+    #[error("Low priority tax ledger is inconsistent.")]
+    LowPriorityTaxLedgerInconsistent,
     #[error("settlement basis-point values must be between zero and a signed 64-bit integer")]
     InvalidAdjustments,
     #[error("invalid rollback book level")]
@@ -268,6 +277,7 @@ impl PredictionResolutionRepository {
                 .ok_or(PredictionResolutionError::ArithmeticOverflow)?;
             let mut bankruptcy_penalty = 0_i64;
             let mut vanity_tax = 0_i64;
+            let mut low_priority_tax = 0_i64;
 
             if base_payout > 0 {
                 if gross_profit > 0
@@ -284,6 +294,23 @@ impl PredictionResolutionRepository {
                 {
                     vanity_tax = multiply_bps_floor(gross_profit, adjustments.vanity_tax_bps)?;
                 }
+                if gross_profit > 0
+                    && adjustments
+                        .low_priority_taxable_ids
+                        .contains(&position.discord_id)
+                {
+                    // Billed on the same gross profit the vanity tax uses, then
+                    // capped at the profit the earlier withholdings left so the
+                    // three deductions together can never exceed that profit.
+                    let remaining_profit = gross_profit
+                        .checked_sub(bankruptcy_penalty)
+                        .and_then(|remaining| remaining.checked_sub(vanity_tax))
+                        .ok_or(PredictionResolutionError::ArithmeticOverflow)?
+                        .max(0);
+                    low_priority_tax =
+                        multiply_bps_floor(gross_profit, adjustments.low_priority_tax_bps)?
+                            .min(remaining_profit);
+                }
 
                 let credited_before_tax = gross_payout
                     .checked_sub(bankruptcy_penalty)
@@ -295,6 +322,7 @@ impl PredictionResolutionRepository {
                     adjustments.payout_multiplier_bps,
                     bankruptcy_penalty,
                     vanity_tax,
+                    low_priority_tax,
                     winning_contracts,
                 );
                 if credited_before_tax > 0 {
@@ -336,13 +364,29 @@ impl PredictionResolutionRepository {
                         },
                     )?;
                 }
+                if low_priority_tax > 0 {
+                    update_player_with_context(
+                        &transaction,
+                        LedgeredBalanceMutation {
+                            guild_id,
+                            discord_id: position.discord_id,
+                            delta: -low_priority_tax,
+                            source: "low_priority_tax",
+                            actor_id: None,
+                            prediction_id,
+                            reason: "low priority tax on JC profit",
+                            metadata: &metadata,
+                        },
+                    )?;
+                }
                 transaction.execute(
                     "UPDATE prediction_positions
-                     SET bankruptcy_penalty=?1,vanity_tax=?2
-                     WHERE prediction_id=?3 AND discord_id=?4",
+                     SET bankruptcy_penalty=?1,vanity_tax=?2,low_priority_tax=?3
+                     WHERE prediction_id=?4 AND discord_id=?5",
                     params![
                         bankruptcy_penalty,
                         vanity_tax,
+                        low_priority_tax,
                         prediction_id,
                         position.discord_id
                     ],
@@ -350,14 +394,16 @@ impl PredictionResolutionRepository {
 
                 let net_payout = credited_before_tax
                     .checked_sub(vanity_tax)
+                    .and_then(|credited| credited.checked_sub(low_priority_tax))
                     .ok_or(PredictionResolutionError::ArithmeticOverflow)?;
                 winners.push(ResolutionWinner {
                     discord_id: position.discord_id,
                     contracts: winning_contracts,
                     payout: net_payout,
-                    profit: gross_profit - bankruptcy_penalty - vanity_tax,
+                    profit: gross_profit - bankruptcy_penalty - vanity_tax - low_priority_tax,
                     bankruptcy_penalty,
                     vanity_tax,
+                    low_priority_tax,
                 });
             }
             if losing_contracts > 0 {
@@ -369,7 +415,7 @@ impl PredictionResolutionRepository {
             }
 
             let net_payout = if gross_payout > 0 {
-                gross_payout - bankruptcy_penalty - vanity_tax
+                gross_payout - bankruptcy_penalty - vanity_tax - low_priority_tax
             } else {
                 0
             };
@@ -383,6 +429,7 @@ impl PredictionResolutionRepository {
                 profit: net_payout - cost_basis,
                 bankruptcy_penalty,
                 vanity_tax,
+                low_priority_tax,
             });
             total_payout = total_payout
                 .checked_add(gross_payout)
@@ -505,6 +552,33 @@ impl PredictionResolutionRepository {
             vanity_by_account.insert(account_id, row);
         }
 
+        let low_priority_rows = load_ledger_rows(
+            &transaction,
+            guild_id,
+            prediction_id,
+            "low_priority_tax",
+            ledger_floor,
+        )?;
+        let mut low_priority_by_account = BTreeMap::new();
+        for row in low_priority_rows {
+            let account_id = row
+                .player_account_id()
+                .ok_or(PredictionResolutionError::LowPriorityTaxLedgerInconsistent)?;
+            if low_priority_by_account.contains_key(&account_id) {
+                return Err(PredictionResolutionError::LowPriorityTaxLedgerInconsistent);
+            }
+            let position = positions_by_account
+                .get(&account_id)
+                .ok_or(PredictionResolutionError::LowPriorityTaxLedgerInconsistent)?;
+            if position.winning_contracts(outcome) <= 0
+                || position.low_priority_tax <= 0
+                || row.delta != -position.low_priority_tax
+            {
+                return Err(PredictionResolutionError::LowPriorityTaxLedgerInconsistent);
+            }
+            low_priority_by_account.insert(account_id, row);
+        }
+
         let settlement_rows = load_ledger_rows(
             &transaction,
             guild_id,
@@ -537,7 +611,9 @@ impl PredictionResolutionRepository {
                 .bankruptcy_penalty
                 .unwrap_or(position.bankruptcy_penalty);
             let has_tax_row = vanity_by_account.contains_key(&account_id);
+            let has_low_priority_tax_row = low_priority_by_account.contains_key(&account_id);
             if has_tax_row != (position.vanity_tax > 0)
+                || has_low_priority_tax_row != (position.low_priority_tax > 0)
                 || gross_payout < 0
                 || bankruptcy_penalty < 0
                 || row.delta != gross_payout - bankruptcy_penalty
@@ -554,6 +630,7 @@ impl PredictionResolutionRepository {
                 gross_payout,
                 bankruptcy_penalty,
                 vanity_tax: position.vanity_tax,
+                low_priority_tax: position.low_priority_tax,
                 base_gross_payout: row.base_gross_payout.unwrap_or(fallback_gross),
                 payout_multiplier_bps: row.payout_multiplier_bps.unwrap_or(BASIS_POINTS),
             });
@@ -600,6 +677,7 @@ impl PredictionResolutionRepository {
             let credited = reversal
                 .settlement_credit
                 .checked_sub(reversal.vanity_tax)
+                .and_then(|credited| credited.checked_sub(reversal.low_priority_tax))
                 .ok_or(PredictionResolutionError::ArithmeticOverflow)?;
             let metadata = settlement_metadata(
                 outcome,
@@ -608,6 +686,7 @@ impl PredictionResolutionRepository {
                 reversal.payout_multiplier_bps,
                 reversal.bankruptcy_penalty,
                 reversal.vanity_tax,
+                reversal.low_priority_tax,
                 0,
             );
             if credited == 0 {
@@ -644,7 +723,8 @@ impl PredictionResolutionRepository {
         }
 
         transaction.execute(
-            "UPDATE prediction_positions SET bankruptcy_penalty=0,vanity_tax=0
+            "UPDATE prediction_positions
+             SET bankruptcy_penalty=0,vanity_tax=0,low_priority_tax=0
              WHERE prediction_id=?1",
             [prediction_id],
         )?;
@@ -776,7 +856,8 @@ pub(crate) const PNL_HISTORY_SQL: &str = "
            (SELECT COALESCE(SUM(e.delta),0) FROM economy_ledger_entries e
             WHERE e.guild_id=p.guild_id AND e.account_type='player'
               AND e.account_id=pp.discord_id
-              AND e.source IN ('prediction_resolution','vanity_tax')
+              AND e.source IN ('prediction_resolution','vanity_tax',
+                               'low_priority_tax')
               AND e.related_type='prediction'
               AND e.related_id=CAST(p.prediction_id AS TEXT)
               AND e.ledger_id>COALESCE((SELECT MAX(rb.ledger_id)
@@ -805,6 +886,7 @@ struct RollbackPosition {
     no_contracts: i64,
     bankruptcy_penalty: i64,
     vanity_tax: i64,
+    low_priority_tax: i64,
 }
 
 impl RollbackPosition {
@@ -844,6 +926,7 @@ struct Reversal {
     gross_payout: i64,
     bankruptcy_penalty: i64,
     vanity_tax: i64,
+    low_priority_tax: i64,
     base_gross_payout: i64,
     payout_multiplier_bps: i64,
 }
@@ -875,7 +958,8 @@ fn load_rollback_positions(
 ) -> Result<Vec<RollbackPosition>, rusqlite::Error> {
     let mut statement = transaction.prepare(
         "SELECT discord_id,yes_contracts,no_contracts,
-                COALESCE(bankruptcy_penalty,0),COALESCE(vanity_tax,0)
+                COALESCE(bankruptcy_penalty,0),COALESCE(vanity_tax,0),
+                COALESCE(low_priority_tax,0)
          FROM prediction_positions WHERE prediction_id=?1",
     )?;
     let rows = statement.query_map([prediction_id], |row| {
@@ -885,6 +969,7 @@ fn load_rollback_positions(
             no_contracts: row.get(2)?,
             bankruptcy_penalty: row.get(3)?,
             vanity_tax: row.get(4)?,
+            low_priority_tax: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -1102,6 +1187,7 @@ fn is_under_bankruptcy_penalty(
         .unwrap_or(false))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settlement_metadata(
     outcome: ContractSide,
     base_gross_payout: i64,
@@ -1109,12 +1195,14 @@ fn settlement_metadata(
     payout_multiplier_bps: i64,
     bankruptcy_penalty: i64,
     vanity_tax: i64,
+    low_priority_tax: i64,
     winning_contracts: i64,
 ) -> String {
     format!(
         "{{\"outcome\":\"{}\",\"base_gross_payout\":{base_gross_payout},\
          \"gross_payout\":{gross_payout},\"payout_multiplier_bps\":{payout_multiplier_bps},\
          \"bankruptcy_penalty\":{bankruptcy_penalty},\"vanity_tax\":{vanity_tax},\
+         \"low_priority_tax\":{low_priority_tax},\
          \"winning_contracts\":{winning_contracts}}}",
         side_name(outcome)
     )
@@ -1126,6 +1214,7 @@ fn validate_adjustments(
     if adjustments.contract_value < 0
         || adjustments.payout_multiplier_bps < 0
         || adjustments.vanity_tax_bps < 0
+        || adjustments.low_priority_tax_bps < 0
         || adjustments
             .bankruptcy_credit_bps
             .is_some_and(|bps| !(0..=BASIS_POINTS).contains(&bps))

@@ -265,6 +265,7 @@ pub struct SettlementResult {
     pub losers: Vec<SettledBet>,
     pub bankruptcy_penalties: BTreeMap<i64, i64>,
     pub vanity_taxes: BTreeMap<i64, i64>,
+    pub low_priority_taxes: BTreeMap<i64, i64>,
     pub seed: SeedSettlement,
 }
 
@@ -281,6 +282,10 @@ pub struct BetSettlementAdjustments {
     /// Exact production vanity rate; takes precedence when present.
     pub vanity_tax_rate: Option<f64>,
     pub vanity_taxable_ids: BTreeSet<i64>,
+    /// Profit-only low-priority tax applied to `low_priority_taxable_ids`.
+    /// `None` disables it, mirroring an absent vanity rate.
+    pub low_priority_tax_rate: Option<f64>,
+    pub low_priority_taxable_ids: BTreeSet<i64>,
     /// Python-compatible house profit multiple. `1.0` returns stake + one
     /// stake of profit; invalid values fall back to `1.0`.
     pub house_payout_multiplier: f64,
@@ -300,6 +305,8 @@ impl Default for BetSettlementAdjustments {
             vanity_tax_basis_points: 0,
             vanity_tax_rate: None,
             vanity_taxable_ids: BTreeSet::new(),
+            low_priority_tax_rate: None,
+            low_priority_taxable_ids: BTreeSet::new(),
             house_payout_multiplier: 1.0,
             payout_multiplier: 1.0,
             consume_seed: false,
@@ -1378,6 +1385,7 @@ impl BettingServiceRepository {
 
         let mut bankruptcy_penalties = BTreeMap::new();
         let mut vanity_taxes = BTreeMap::new();
+        let mut low_priority_taxes = BTreeMap::new();
         for (discord_id, (payout, stake)) in profit_inputs {
             let profit = payout.saturating_sub(stake);
             if profit <= 0 {
@@ -1409,7 +1417,7 @@ impl BettingServiceRepository {
                     }
                 }
             }
-            if adjustments.vanity_taxable_ids.contains(&discord_id) {
+            let vanity_tax = if adjustments.vanity_taxable_ids.contains(&discord_id) {
                 let vanity_rate = adjustments.vanity_tax_rate.map_or_else(
                     || adjustments.vanity_tax_basis_points.clamp(0, 10_000) as f64 / 10_000.0,
                     |rate| normalized_rate(rate, 1.0),
@@ -1418,24 +1426,66 @@ impl BettingServiceRepository {
                 if vanity_tax > 0 {
                     vanity_taxes.insert(discord_id, vanity_tax);
                 }
+                vanity_tax
+            } else {
+                0
+            };
+            if adjustments.low_priority_taxable_ids.contains(&discord_id) {
+                // Low priority taxes the same aggregate profit as vanity, not
+                // the post-vanity remainder, so both rates stay additive.
+                let low_priority_rate = adjustments
+                    .low_priority_tax_rate
+                    .map_or(0.0, |rate| normalized_rate(rate, 1.0));
+                // The bankruptcy withholding and both taxes are independent
+                // fractions of one basis, so their sum can exceed the profit
+                // they are withheld from. Clamp the combined withholding to
+                // `profit` by trimming the low-priority share, which keeps
+                // already-reported bankruptcy and vanity totals exact.
+                let headroom = profit
+                    .saturating_sub(
+                        bankruptcy_penalties
+                            .get(&discord_id)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                    .saturating_sub(vanity_tax)
+                    .max(0);
+                let low_priority_tax = ((profit as f64 * low_priority_rate) as i64).min(headroom);
+                if low_priority_tax > 0 {
+                    low_priority_taxes.insert(discord_id, low_priority_tax);
+                }
             }
         }
 
         if adjustments.vanity_tax_rate.is_some()
             || adjustments.vanity_tax_basis_points > 0
             || !adjustments.vanity_taxable_ids.is_empty()
+            || adjustments.low_priority_tax_rate.is_some()
+            || !adjustments.low_priority_taxable_ids.is_empty()
         {
             transaction.execute(
                 "DELETE FROM bet_settlement_taxes
                  WHERE match_id = ?1 AND guild_id = ?2",
                 params![match_id, guild_id],
             )?;
-            for (discord_id, vanity_tax) in &vanity_taxes {
+            // The row is keyed by player, and either withholding can apply on
+            // its own, so persist the union of both taxed sets.
+            let taxed_ids = vanity_taxes
+                .keys()
+                .chain(low_priority_taxes.keys())
+                .copied()
+                .collect::<BTreeSet<i64>>();
+            for discord_id in taxed_ids {
+                let vanity_tax = vanity_taxes.get(&discord_id).copied().unwrap_or_default();
+                let low_priority_tax = low_priority_taxes
+                    .get(&discord_id)
+                    .copied()
+                    .unwrap_or_default();
                 transaction.execute(
                     "INSERT INTO bet_settlement_taxes
-                         (match_id, guild_id, discord_id, vanity_tax)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![match_id, guild_id, discord_id, vanity_tax],
+                         (match_id, guild_id, discord_id, vanity_tax, low_priority_tax)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![match_id, guild_id, discord_id, vanity_tax, low_priority_tax],
                 )?;
             }
         }
@@ -1472,6 +1522,24 @@ impl BettingServiceRepository {
             }
             clear_ledger_context(&transaction)?;
         }
+        if !low_priority_taxes.is_empty() {
+            set_ledger_context(
+                &transaction,
+                "low_priority_tax",
+                pending_match_id,
+                "low priority tax on JC profit",
+            )?;
+            for (discord_id, low_priority_tax) in &low_priority_taxes {
+                transaction.execute(
+                    "UPDATE players
+                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?1,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE discord_id = ?2 AND guild_id = ?3",
+                    params![low_priority_tax, discord_id, guild_id],
+                )?;
+            }
+            clear_ledger_context(&transaction)?;
+        }
         for bet in &bets {
             if let Some(payout) = payouts.get(&bet.bet_id) {
                 transaction.execute(
@@ -1492,6 +1560,7 @@ impl BettingServiceRepository {
         let mut result = SettlementResult {
             bankruptcy_penalties,
             vanity_taxes,
+            low_priority_taxes,
             seed,
             ..SettlementResult::default()
         };
@@ -1722,21 +1791,30 @@ impl BettingServiceRepository {
         }
 
         let mut vanity_taxes = BTreeMap::new();
+        let mut low_priority_taxes = BTreeMap::new();
         let mut tax_statement = connection.prepare(
-            "SELECT discord_id, vanity_tax
+            "SELECT discord_id, vanity_tax, low_priority_tax
              FROM bet_settlement_taxes
              WHERE match_id = ?1 AND guild_id = ?2",
         )?;
         let mut tax_rows = tax_statement.query(params![match_id, guild_id])?;
         while let Some(row) = tax_rows.next()? {
-            vanity_taxes.insert(row.get(0)?, row.get(1)?);
+            let discord_id: i64 = row.get(0)?;
+            let vanity_tax: i64 = row.get(1)?;
+            let low_priority_tax: i64 = row.get(2)?;
+            if vanity_tax > 0 {
+                vanity_taxes.insert(discord_id, vanity_tax);
+            }
+            if low_priority_tax > 0 {
+                low_priority_taxes.insert(discord_id, low_priority_tax);
+            }
         }
 
         // The settlement transaction records each player's payout after the
-        // bankruptcy withholding in the immutable ledger.  Vanity tax is a
-        // separate ledger source, so gross - bet-settlement credit recovers
-        // the bankruptcy withholding without introducing a second settlement
-        // table or a schema fork.
+        // bankruptcy withholding in the immutable ledger.  Vanity and
+        // low-priority tax are separate ledger sources, so gross -
+        // bet-settlement credit recovers the bankruptcy withholding without
+        // introducing a second settlement table or a schema fork.
         let mut net_credits = BTreeMap::<i64, i64>::new();
         if let Some(pending_match_id) = pending_match_id {
             let mut ledger_statement = connection.prepare(
@@ -1775,6 +1853,7 @@ impl BettingServiceRepository {
             losers,
             bankruptcy_penalties,
             vanity_taxes,
+            low_priority_taxes,
             seed: SeedSettlement::default(),
         })
     }
@@ -2721,7 +2800,11 @@ fn settlement_bet_jc_deltas(settlement: &SettlementResult) -> BTreeMap<i64, i64>
             .and_modify(|delta| *delta = delta.saturating_add(bet.payout))
             .or_insert(bet.payout);
     }
-    for deductions in [&settlement.bankruptcy_penalties, &settlement.vanity_taxes] {
+    for deductions in [
+        &settlement.bankruptcy_penalties,
+        &settlement.vanity_taxes,
+        &settlement.low_priority_taxes,
+    ] {
         for (discord_id, amount) in deductions {
             deltas
                 .entry(*discord_id)

@@ -2293,6 +2293,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &config,
         "extend-no-penalty",
         &taxable,
+        &BTreeSet::new(),
         1.0,
         1.0,
         false,
@@ -2321,6 +2322,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         &config,
         "extend-active-penalty",
         &taxable,
+        &BTreeSet::new(),
         1.0,
         1.0,
         false,
@@ -2385,6 +2387,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &runtime,
             &event_id,
             &BTreeSet::new(),
+            &BTreeSet::new(),
             1.0,
             1.0,
             false,
@@ -2432,6 +2435,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             &ManaEffects::default(),
             &runtime,
             &event_id,
+            &BTreeSet::new(),
             &BTreeSet::new(),
             1.0,
             1.0,
@@ -2519,6 +2523,7 @@ fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_histor
             1.0,
             1.0,
             &BTreeSet::new(),
+            &BTreeSet::new(),
             None,
         )
         .expect("resolve pending numeric loss");
@@ -2605,6 +2610,7 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
             bankruptcy_penalty_rate: 0.0,
             garnishment_rate: 0.0,
             vanity_tax_rate: 0.0,
+            low_priority_tax_rate: 0.0,
             wheel_target_ev: 0.0,
             wheel_bankrupt_target_ev: 0.0,
             wheel_golden_target_ev: 0.0,
@@ -2949,6 +2955,7 @@ fn wheel_income_applies_vanity_tax_snapshot_and_stable_exact_once_key() {
         "123:7:abc",
         "test wheel reward",
         &taxable_ids,
+        &BTreeSet::new(),
     )
     .expect("credit taxable wheel reward");
     assert_eq!(first.gross, 100);
@@ -2964,6 +2971,92 @@ fn wheel_income_applies_vanity_tax_snapshot_and_stable_exact_once_key() {
     );
     assert_eq!(event_related_id("123:7:abc"), event_related_id("123:7:abc"));
     assert_ne!(event_related_id("123:7:abc"), event_related_id("124:7:abc"));
+}
+
+#[test]
+fn wheel_income_stacks_low_priority_tax_beside_the_vanity_tax() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(7, "doubly-taxed", Some(42)))
+        .expect("player");
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    let taxable_ids = BTreeSet::from([7_i64]);
+    let receipt = credit_wheel_income(
+        database.path(),
+        42,
+        7,
+        0,
+        100,
+        &runtime,
+        "321:7:abc",
+        "test wheel reward",
+        &taxable_ids,
+        &taxable_ids,
+    )
+    .expect("credit doubly taxed wheel reward");
+    // Both rates read the 100 JC gross, never the post-vanity remainder.
+    assert_eq!(receipt.vanity_tax, 10);
+    assert_eq!(receipt.low_priority_tax, 10);
+    assert_eq!(receipt.net, 80);
+    assert_eq!(
+        players
+            .get_by_id(7, Some(42))
+            .expect("player lookup")
+            .expect("player")
+            .jopacoin_balance,
+        83
+    );
+    let (rows, delta, reason): (i64, i64, String) = Connection::open(database.path())
+        .expect("open wheel ledger")
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(delta),0), COALESCE(MAX(reason),'')
+             FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+            params![42, 7],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read low priority tax ledger row");
+    assert_eq!(
+        (rows, delta, reason.as_str()),
+        (1, -10, "low priority tax on JC profit")
+    );
+}
+
+#[test]
+fn wheel_income_leaves_players_outside_the_low_priority_set_untaxed() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(8, "untaxed", Some(42)))
+        .expect("player");
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("configuration");
+    let runtime = BettingRuntimeConfig::from_application_config(&config);
+    let receipt = credit_wheel_income(
+        database.path(),
+        42,
+        8,
+        0,
+        100,
+        &runtime,
+        "322:8:abc",
+        "test wheel reward",
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )
+    .expect("credit untaxed wheel reward");
+    assert_eq!(receipt.vanity_tax, 0);
+    assert_eq!(receipt.low_priority_tax, 0);
+    assert_eq!(receipt.net, 100);
 }
 
 #[test]
@@ -3000,6 +3093,7 @@ fn wheel_positive_delta_applies_blood_pact_once_through_protection_gateway() {
         &runtime,
         "wheel-blood-pact",
         "test wheel reward",
+        &BTreeSet::new(),
         &BTreeSet::new(),
     )
     .expect("credit wheel reward");
@@ -3547,6 +3641,7 @@ fn hostile_mechanics_only_target_visible_guild_members() {
         WheelMechanic::Heist,
         "heist-visibility",
         &config,
+        &BTreeSet::new(),
         &BTreeSet::new(),
         1.0,
         Some(&visible),

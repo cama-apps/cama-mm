@@ -24,7 +24,7 @@ pub const LOW_PRIORITY_EFFECTIVENESS: f64 = 0.5;
 /// Avoids aimed at a low-priority player are twice as effective.
 pub const LOW_PRIORITY_AVOID_TARGET_EFFECTIVENESS: f64 = 2.0;
 /// Match goodness penalty for every selected low-priority player.
-pub const LOW_PRIORITY_GOODNESS_PENALTY: f64 = 600.0;
+pub const LOW_PRIORITY_GOODNESS_PENALTY: f64 = 660.0;
 /// Goodness bonus for grouping low-priority players on one team.
 pub const LOW_PRIORITY_TEAM_GROUPING_BONUS: f64 = 100.0;
 
@@ -686,7 +686,8 @@ impl BalancedShuffler {
         })
     }
 
-    /// Penalize each selected low-priority Discord ID by 500 points.
+    /// Penalize each selected low-priority Discord ID by
+    /// [`LOW_PRIORITY_GOODNESS_PENALTY`].
     #[must_use]
     pub fn calculate_low_priority_penalty(
         selected_ids: &HashSet<i64>,
@@ -2671,12 +2672,12 @@ mod tests {
     }
 
     #[test]
-    fn test_low_priority_penalty_is_600_per_selected_player() {
+    fn test_low_priority_penalty_is_660_per_selected_player() {
         let selected = HashSet::from([100, 101, 102]);
         let low_priority = HashSet::from([100, 101, 999]);
         assert_eq!(
             BalancedShuffler::calculate_low_priority_penalty(&selected, Some(&low_priority)),
-            1_200.0
+            1_320.0
         );
     }
 
@@ -3285,12 +3286,12 @@ mod tests {
     }
 
     #[test]
-    fn test_goodness_adds_600_per_active_low_priority_player() {
+    fn test_goodness_adds_660_per_active_low_priority_player() {
         let selected = (1_000..1_010).collect::<HashSet<_>>();
         let active = HashSet::from([1_000, 1_001]);
         let baseline = BalancedShuffler::calculate_low_priority_penalty(&selected, None);
         let penalized = BalancedShuffler::calculate_low_priority_penalty(&selected, Some(&active));
-        assert_eq!(penalized - baseline, 1_200.0);
+        assert_eq!(penalized - baseline, 1_320.0);
     }
 
     #[test]

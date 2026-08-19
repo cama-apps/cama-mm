@@ -172,13 +172,14 @@ impl Fixture {
             .expect("position")
     }
 
-    fn deductions(&self, prediction_id: i64, discord_id: i64) -> (i64, i64) {
+    fn deductions(&self, prediction_id: i64, discord_id: i64) -> (i64, i64, i64) {
         self.connection()
             .query_row(
-                "SELECT bankruptcy_penalty,vanity_tax FROM prediction_positions
+                "SELECT bankruptcy_penalty,vanity_tax,low_priority_tax
+                 FROM prediction_positions
                  WHERE prediction_id=?1 AND discord_id=?2",
                 params![prediction_id, discord_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("deductions")
     }
@@ -253,6 +254,15 @@ fn vanity_adjustments(discord_id: i64) -> SettlementAdjustments {
         payout_multiplier_bps: 100_000,
         vanity_tax_bps: 1_000,
         vanity_taxable_ids: BTreeSet::from([discord_id]),
+        ..SettlementAdjustments::default()
+    }
+}
+
+fn low_priority_adjustments(discord_id: i64) -> SettlementAdjustments {
+    SettlementAdjustments {
+        payout_multiplier_bps: 100_000,
+        low_priority_tax_bps: 1_000,
+        low_priority_taxable_ids: BTreeSet::from([discord_id]),
         ..SettlementAdjustments::default()
     }
 }
@@ -489,6 +499,187 @@ fn test_resolve_orderbook_vanity_tax_is_audited_and_rollback_safe() {
     assert_eq!(rollback.total_reversed, gross - tax);
     assert_eq!(fixture.balance(1), before);
     assert_eq!(fixture.deductions(prediction_id, 1).1, 0);
+}
+
+#[test]
+fn test_resolve_orderbook_low_priority_tax_is_audited_and_rollback_safe() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    let prediction_id = fixture.market("low priority tax?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 5);
+    let cost = fixture.position(prediction_id, 1).yes_cost_basis_total;
+    let before = fixture.balance(1);
+    let result = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &low_priority_adjustments(1),
+        )
+        .expect("taxed settlement");
+    let gross = 5 * CONTRACT_VALUE * 10;
+    let tax = (gross - cost) / 10;
+    assert!(tax > 0);
+    assert_eq!(result.winners[0].low_priority_tax, tax);
+    assert_eq!(result.winners[0].vanity_tax, 0);
+    assert_eq!(result.winners[0].payout, gross - tax);
+    assert_eq!(fixture.balance(1) - before, gross - tax);
+    assert_eq!(
+        fixture
+            .repository
+            .user_orderbook_stats(1, GUILD)
+            .expect("stats")
+            .realized_pnl,
+        gross - cost - tax
+    );
+    let tax_row: (i64, String, String, String) = fixture
+        .connection()
+        .query_row(
+            "SELECT delta,related_type,related_id,reason FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=1 AND source='low_priority_tax'",
+            [GUILD],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("tax ledger");
+    assert_eq!(
+        tax_row,
+        (
+            -tax,
+            "prediction".to_owned(),
+            prediction_id.to_string(),
+            "low priority tax on JC profit".to_owned()
+        )
+    );
+    assert_eq!(fixture.ledger_count(prediction_id, "vanity_tax"), 0);
+    assert_eq!(fixture.deductions(prediction_id, 1).2, tax);
+
+    let rollback = fixture.rollback(prediction_id).expect("rollback");
+    assert_eq!(rollback.total_reversed, gross - tax);
+    assert_eq!(fixture.balance(1), before);
+    assert_eq!(fixture.deductions(prediction_id, 1).2, 0);
+}
+
+#[test]
+fn test_resolve_orderbook_stacks_low_priority_tax_beside_the_vanity_row() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    fixture.set_bankruptcy_penalty(1);
+    let prediction_id = fixture.market("stacked withholding?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 5);
+    let cost = fixture.position(prediction_id, 1).yes_cost_basis_total;
+    let before = fixture.balance(1);
+    let result = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &SettlementAdjustments {
+                bankruptcy_credit_bps: Some(5_000),
+                vanity_tax_bps: 1_000,
+                vanity_taxable_ids: BTreeSet::from([1]),
+                ..low_priority_adjustments(1)
+            },
+        )
+        .expect("stacked settlement");
+    let gross = 5 * CONTRACT_VALUE * 10;
+    let profit = gross - cost;
+    let penalty = profit / 2;
+    let tax = profit / 10;
+    assert!(tax > 0);
+    // Both taxes bill the same gross profit, not a post-vanity remainder.
+    assert_eq!(result.winners[0].bankruptcy_penalty, penalty);
+    assert_eq!(result.winners[0].vanity_tax, tax);
+    assert_eq!(result.winners[0].low_priority_tax, tax);
+    assert_eq!(result.winners[0].payout, gross - penalty - tax - tax);
+    assert_eq!(fixture.balance(1) - before, gross - penalty - tax - tax);
+    assert_eq!(fixture.deductions(prediction_id, 1), (penalty, tax, tax));
+    assert_eq!(fixture.ledger_count(prediction_id, "vanity_tax"), 1);
+    assert_eq!(fixture.ledger_count(prediction_id, "low_priority_tax"), 1);
+    let settlement_delta: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT delta FROM economy_ledger_entries
+             WHERE guild_id=?1 AND source='prediction_resolution' AND related_id=?2",
+            params![GUILD, prediction_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("settlement ledger");
+    assert_eq!(settlement_delta, gross - penalty);
+
+    let rollback = fixture.rollback(prediction_id).expect("rollback");
+    assert_eq!(rollback.total_reversed, gross - penalty - tax - tax);
+    assert_eq!(fixture.balance(1), before);
+    assert_eq!(fixture.deductions(prediction_id, 1), (0, 0, 0));
+}
+
+#[test]
+fn test_low_priority_tax_is_capped_by_the_profit_earlier_withholdings_leave() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    fixture.set_bankruptcy_penalty(1);
+    let prediction_id = fixture.market("fully withheld profit?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 5);
+    let cost = fixture.position(prediction_id, 1).yes_cost_basis_total;
+    let before = fixture.balance(1);
+    let result = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &SettlementAdjustments {
+                bankruptcy_credit_bps: Some(0),
+                ..low_priority_adjustments(1)
+            },
+        )
+        .expect("fully withheld settlement");
+    let gross = 5 * CONTRACT_VALUE * 10;
+    assert_eq!(result.winners[0].bankruptcy_penalty, gross - cost);
+    assert_eq!(result.winners[0].low_priority_tax, 0);
+    assert_eq!(result.winners[0].payout, cost);
+    assert_eq!(fixture.balance(1) - before, cost);
+    assert_eq!(fixture.ledger_count(prediction_id, "low_priority_tax"), 0);
+}
+
+#[test]
+fn test_low_priority_tax_reaches_only_listed_players_with_positive_profit() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    fixture.player(2, 1_000);
+    let listed_market = fixture.market("listed player only?");
+    fixture.buy(listed_market, 1, ContractSide::Yes, 5);
+    fixture.buy(listed_market, 2, ContractSide::Yes, 5);
+    let listed_cost = fixture.position(listed_market, 1).yes_cost_basis_total;
+    let result = fixture
+        .settle(
+            listed_market,
+            ContractSide::Yes,
+            &low_priority_adjustments(1),
+        )
+        .expect("listed settlement");
+    let gross = 5 * CONTRACT_VALUE * 10;
+    assert_eq!(
+        result.winners[0].low_priority_tax,
+        (gross - listed_cost) / 10
+    );
+    assert_eq!(result.winners[1].low_priority_tax, 0);
+    assert_eq!(fixture.deductions(listed_market, 2).2, 0);
+    assert_eq!(fixture.ledger_count(listed_market, "low_priority_tax"), 1);
+
+    let unprofitable_market = fixture.market("no profit to tax?");
+    fixture.buy(unprofitable_market, 1, ContractSide::Yes, 5);
+    let unprofitable = fixture
+        .settle(
+            unprofitable_market,
+            ContractSide::Yes,
+            &SettlementAdjustments {
+                payout_multiplier_bps: 2_500,
+                ..low_priority_adjustments(1)
+            },
+        )
+        .expect("unprofitable settlement");
+    assert!(unprofitable.winners[0].profit < 0);
+    assert_eq!(unprofitable.winners[0].low_priority_tax, 0);
+    assert_eq!(
+        fixture.ledger_count(unprofitable_market, "low_priority_tax"),
+        0
+    );
 }
 
 #[test]
@@ -1126,6 +1317,7 @@ CREATE TABLE prediction_positions (
     no_cost_basis_total INTEGER NOT NULL DEFAULT 0,
     bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
     vanity_tax INTEGER NOT NULL DEFAULT 0,
+    low_priority_tax INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(prediction_id,discord_id)
 );
 CREATE TABLE prediction_trades (

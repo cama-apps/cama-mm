@@ -162,16 +162,25 @@ pub struct BetCorrectionOptions<'a> {
     pub house_payout_multiplier: f64,
     pub vanity_tax_rate: f64,
     pub vanity_taxable_ids: &'a BTreeSet<i64>,
+    pub low_priority_tax_rate: f64,
+    pub low_priority_taxable_ids: &'a BTreeSet<i64>,
 }
 
 impl<'a> BetCorrectionOptions<'a> {
     #[must_use]
-    pub const fn pool(vanity_tax_rate: f64, vanity_taxable_ids: &'a BTreeSet<i64>) -> Self {
+    pub const fn pool(
+        vanity_tax_rate: f64,
+        vanity_taxable_ids: &'a BTreeSet<i64>,
+        low_priority_tax_rate: f64,
+        low_priority_taxable_ids: &'a BTreeSet<i64>,
+    ) -> Self {
         Self {
             pool_mode: true,
             house_payout_multiplier: 1.0,
             vanity_tax_rate,
             vanity_taxable_ids,
+            low_priority_tax_rate,
+            low_priority_taxable_ids,
         }
     }
 }
@@ -1457,27 +1466,41 @@ impl MatchCorrectionRepository {
         }
 
         let old_taxes = load_settlement_taxes(&transaction, match_id, guild_id)?;
-        for (&discord_id, &tax) in &old_taxes {
-            *combined_deltas.entry(discord_id).or_insert(0) += tax;
+        for (&discord_id, taxes) in &old_taxes {
+            *combined_deltas.entry(discord_id).or_insert(0) += taxes.total();
         }
         let total_stakes = total_stakes_by_player(&bets);
         let new_taxes = new_deltas
             .iter()
             .filter_map(|(&discord_id, &payout)| {
-                if !options.vanity_taxable_ids.contains(&discord_id) {
+                let profit = payout - total_stakes.get(&discord_id).copied().unwrap_or(0);
+                if profit <= 0 {
                     return None;
                 }
-                let profit = payout - total_stakes.get(&discord_id).copied().unwrap_or(0);
-                let tax = if profit > 0 {
+                let vanity_tax = if options.vanity_taxable_ids.contains(&discord_id) {
                     (profit as f64 * options.vanity_tax_rate) as i64
                 } else {
                     0
                 };
-                (tax > 0).then_some((discord_id, tax))
+                // Both withholdings are charged against the same pre-tax
+                // profit, so misconfigured rates could otherwise take more
+                // than the player won.  Vanity totals are already visible to
+                // players, so the clamp falls on the low-priority share.
+                let low_priority_tax = if options.low_priority_taxable_ids.contains(&discord_id) {
+                    ((profit as f64 * options.low_priority_tax_rate) as i64)
+                        .clamp(0, (profit - vanity_tax).max(0))
+                } else {
+                    0
+                };
+                let taxes = SettlementTaxes {
+                    vanity_tax,
+                    low_priority_tax,
+                };
+                (taxes.total() > 0).then_some((discord_id, taxes))
             })
             .collect::<BTreeMap<_, _>>();
-        for (&discord_id, &tax) in &new_taxes {
-            *combined_deltas.entry(discord_id).or_insert(0) -= tax;
+        for (&discord_id, taxes) in &new_taxes {
+            *combined_deltas.entry(discord_id).or_insert(0) -= taxes.total();
         }
 
         if !combined_deltas.is_empty() {
@@ -1519,12 +1542,18 @@ impl MatchCorrectionRepository {
             "DELETE FROM bet_settlement_taxes WHERE match_id=?1 AND guild_id=?2",
             params![match_id, guild_id],
         )?;
-        for (&discord_id, &tax) in &new_taxes {
+        for (&discord_id, taxes) in &new_taxes {
             transaction.execute(
                 "INSERT INTO bet_settlement_taxes (
-                     match_id,guild_id,discord_id,vanity_tax
-                 ) VALUES (?1,?2,?3,?4)",
-                params![match_id, guild_id, discord_id, tax],
+                     match_id,guild_id,discord_id,vanity_tax,low_priority_tax
+                 ) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    match_id,
+                    guild_id,
+                    discord_id,
+                    taxes.vanity_tax,
+                    taxes.low_priority_tax
+                ],
             )?;
         }
         transaction.execute("UPDATE bets SET payout=NULL WHERE match_id=?1", [match_id])?;
@@ -3163,18 +3192,38 @@ fn compute_new_payouts(
     (user_payouts, payout_updates)
 }
 
+/// The withholdings persisted for one player's settled bets.  Reversing that
+/// settlement has to refund every one of them, not just the vanity share.
+#[derive(Clone, Copy, Debug)]
+struct SettlementTaxes {
+    vanity_tax: i64,
+    low_priority_tax: i64,
+}
+
+impl SettlementTaxes {
+    const fn total(self) -> i64 {
+        self.vanity_tax + self.low_priority_tax
+    }
+}
+
 fn load_settlement_taxes(
     transaction: &Transaction<'_>,
     match_id: i64,
     guild_id: i64,
-) -> Result<BTreeMap<i64, i64>, rusqlite::Error> {
+) -> Result<BTreeMap<i64, SettlementTaxes>, rusqlite::Error> {
     let mut statement = transaction.prepare(
-        "SELECT discord_id,vanity_tax FROM bet_settlement_taxes
+        "SELECT discord_id,vanity_tax,low_priority_tax FROM bet_settlement_taxes
          WHERE match_id=?1 AND guild_id=?2",
     )?;
     statement
         .query_map(params![match_id, guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((
+                row.get(0)?,
+                SettlementTaxes {
+                    vanity_tax: row.get(1)?,
+                    low_priority_tax: row.get(2)?,
+                },
+            ))
         })?
         .collect()
 }

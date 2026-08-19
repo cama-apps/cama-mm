@@ -39,6 +39,8 @@ CREATE TABLE bet_settlement_taxes (
                 discord_id INTEGER NOT NULL,
                 vanity_tax INTEGER NOT NULL DEFAULT 0
                     CHECK (vanity_tax >= 0),
+                low_priority_tax INTEGER NOT NULL DEFAULT 0
+                    CHECK (low_priority_tax >= 0),
                 PRIMARY KEY (match_id, guild_id, discord_id)
             );
 
@@ -1269,7 +1271,7 @@ CREATE TABLE prediction_positions (
                 yes_contracts INTEGER NOT NULL DEFAULT 0,
                 yes_cost_basis_total INTEGER NOT NULL DEFAULT 0,
                 no_contracts INTEGER NOT NULL DEFAULT 0,
-                no_cost_basis_total INTEGER NOT NULL DEFAULT 0, bankruptcy_penalty INTEGER NOT NULL DEFAULT 0, vanity_tax INTEGER NOT NULL DEFAULT 0,
+                no_cost_basis_total INTEGER NOT NULL DEFAULT 0, bankruptcy_penalty INTEGER NOT NULL DEFAULT 0, vanity_tax INTEGER NOT NULL DEFAULT 0, low_priority_tax INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (prediction_id, discord_id),
                 FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
                 FOREIGN KEY (discord_id) REFERENCES players(discord_id)

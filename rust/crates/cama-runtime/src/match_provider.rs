@@ -356,6 +356,7 @@ impl MatchRegistrationProvider {
             garnishment_rate: config.values.garnishment_percentage,
             bankruptcy_kept_rate: config.values.bankruptcy_penalty_rate,
             vanity_tax_rate: config.values.vanity_tax_rate,
+            low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             minigame_scale: config.values.minigame_jc_delta_scale,
             vanity_tax: Arc::new(PersistentMatchVanityTax(vanity_tax)),
             economy: Arc::clone(&economy),
@@ -599,6 +600,7 @@ struct ProductionMatchRewardControl {
     garnishment_rate: f64,
     bankruptcy_kept_rate: f64,
     vanity_tax_rate: f64,
+    low_priority_tax_rate: f64,
     minigame_scale: f64,
     vanity_tax: Arc<dyn MatchVanityTaxSource>,
     economy: Arc<SqliteEconomyEventService>,
@@ -652,9 +654,14 @@ struct GeneratedRewardBatch<'a> {
     gross: i64,
     apply_bankruptcy_penalty: bool,
     /// Python parity: only `_award_with_penalties` batches (win, exclusion,
-    /// streaming) carry vanity-tax rates; `award_participation` (including
-    /// the bomb-pot bonus) never does.
+    /// streaming) carry profit-tax rates; `award_participation` (including
+    /// the bomb-pot bonus) never does. Vanity and low-priority tax share the
+    /// gate so neither reaches a batch the other cannot.
     apply_vanity_tax: bool,
+    /// Taxable roster captured before this match drained the low-priority win
+    /// counters. `None` re-reads current state, which is right for callers
+    /// outside a match-recording flow.
+    low_priority_taxable_ids: Option<&'a BTreeSet<i64>>,
     source: &'a str,
     related_type: &'a str,
     related_id: i64,
@@ -733,6 +740,13 @@ impl ProductionMatchRewardControl {
                         .get(&discord_id)
                         .copied()
                         .unwrap_or_default(),
+                )
+                .saturating_sub(
+                    settlement
+                        .low_priority_taxes
+                        .get(&discord_id)
+                        .copied()
+                        .unwrap_or_default(),
                 );
             if net_profit <= 0 || !targets.contains(&discord_id) {
                 continue;
@@ -761,6 +775,18 @@ impl ProductionMatchRewardControl {
             .blood_pact_targets(batch.player_ids, batch.guild_id)
             .map_err(|error| error.to_string())?;
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(batch.guild_id);
+        let queried_low_priority_taxable_ids = match batch.low_priority_taxable_ids {
+            Some(_) => None,
+            None => Some(
+                LowPriorityRepository::new(&self.database_path)
+                    .active_taxable_ids(Some(batch.guild_id))
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        let low_priority_taxable_ids = batch
+            .low_priority_taxable_ids
+            .or(queried_low_priority_taxable_ids.as_ref())
+            .expect("one of the two branches always yields a roster");
         let requests = batch
             .player_ids
             .iter()
@@ -774,6 +800,13 @@ impl ProductionMatchRewardControl {
                     && vanity_taxable_ids.contains(discord_id)
                 {
                     self.vanity_tax_rate
+                } else {
+                    0.0
+                },
+                low_priority_tax_rate: if batch.apply_vanity_tax
+                    && low_priority_taxable_ids.contains(discord_id)
+                {
+                    self.low_priority_tax_rate
                 } else {
                     0.0
                 },
@@ -928,6 +961,7 @@ impl ProductionMatchRewardControl {
     fn award_match_win(
         &self,
         request: CorrectionWinRewardRequest,
+        low_priority_taxable_ids: Option<&BTreeSet<i64>>,
     ) -> Result<MatchWinRewardOutcome, String> {
         let vanity_tax_rate = if self
             .vanity_tax
@@ -938,6 +972,22 @@ impl ProductionMatchRewardControl {
         } else {
             0.0
         };
+        let queried_low_priority_taxable_ids = match low_priority_taxable_ids {
+            Some(_) => None,
+            None => Some(
+                LowPriorityRepository::new(&self.database_path)
+                    .active_taxable_ids(Some(request.guild_id))
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        let low_priority_tax_rate = if low_priority_taxable_ids
+            .or(queried_low_priority_taxable_ids.as_ref())
+            .is_some_and(|roster| roster.contains(&request.discord_id))
+        {
+            self.low_priority_tax_rate
+        } else {
+            0.0
+        };
         let award = IncomeAwardRequest {
             discord_id: request.discord_id,
             gross: request.gross_reward,
@@ -945,6 +995,7 @@ impl ProductionMatchRewardControl {
             apply_bankruptcy_penalty: true,
             bankruptcy_kept_rate: self.bankruptcy_kept_rate,
             vanity_tax_rate,
+            low_priority_tax_rate,
             decrement_bankruptcy_penalty: true,
             source: "match_win_bonus",
             related_type: Some("match_win_bonus"),
@@ -1041,7 +1092,7 @@ impl CorrectionWinRewardControl for ProductionMatchRewardControl {
         &self,
         request: CorrectionWinRewardRequest,
     ) -> Result<CorrectionWinRewardResult, String> {
-        let outcome = self.award_match_win(request)?;
+        let outcome = self.award_match_win(request, None)?;
         Ok(CorrectionWinRewardResult {
             snapshot_balance_delta: outcome.snapshot_balance_delta(),
         })
@@ -1171,6 +1222,7 @@ struct MatchConfig {
     bankruptcy_kept_rate: f64,
     house_payout_multiplier: f64,
     vanity_tax_rate: f64,
+    low_priority_profit_tax_rate: f64,
     loan_cooldown_seconds: i64,
     loan_max_amount: i64,
     loan_fee_rate: f64,
@@ -1179,6 +1231,7 @@ struct MatchConfig {
     jopacoin_win_reward: i64,
     jopacoin_per_game: i64,
     jopacoin_exclusion_reward: i64,
+    low_priority_mmr_multiplier: f64,
     off_role_multiplier: f64,
     off_role_flat_value_penalty: f64,
     off_role_flat_penalty: f64,
@@ -1223,6 +1276,7 @@ impl MatchConfig {
             bankruptcy_kept_rate: config.values.bankruptcy_penalty_rate,
             house_payout_multiplier: config.values.house_payout_multiplier,
             vanity_tax_rate: config.values.vanity_tax_rate,
+            low_priority_profit_tax_rate: config.values.low_priority_profit_tax_rate,
             loan_cooldown_seconds: config.values.loan_cooldown_seconds,
             loan_max_amount: config.values.loan_max_amount,
             loan_fee_rate: config.values.loan_fee_rate,
@@ -1231,6 +1285,7 @@ impl MatchConfig {
             jopacoin_win_reward: config.values.jopacoin_win_reward,
             jopacoin_per_game: config.values.jopacoin_per_game,
             jopacoin_exclusion_reward: config.values.jopacoin_exclusion_reward,
+            low_priority_mmr_multiplier: config.values.low_priority_mmr_multiplier,
             off_role_multiplier: config.values.off_role_multiplier,
             off_role_flat_value_penalty: config.values.off_role_flat_value_penalty,
             off_role_flat_penalty: config.values.off_role_flat_penalty,
@@ -2194,6 +2249,7 @@ impl MatchHandler {
                     gross: amount,
                     apply_bankruptcy_penalty: true,
                     apply_vanity_tax: true,
+                    low_priority_taxable_ids: None,
                     source: "match_streaming_bonus",
                     related_type: "match",
                     related_id: match_id,
@@ -2748,6 +2804,17 @@ impl MatchHandler {
             .low_priority
             .get_active_ids(&participant_ids, Some(pending.guild_id))
             .map_err(|error| error.to_string())?;
+        // Snapshot taxability before `record_match_core_atomic` below drains
+        // the low-priority win counters. A player whose deciding win lands in
+        // this very match still played it under low priority - the shuffle
+        // already balanced them as stronger and penalised their selection -
+        // so this match's winnings are taxed on the status it was played
+        // under, not the status it produced. Guild-wide rather than
+        // participant-scoped because bettors need not be participants.
+        let low_priority_taxable_ids = self
+            .low_priority
+            .active_taxable_ids(Some(pending.guild_id))
+            .map_err(|error| error.to_string())?;
 
         let mut glicko_before = BTreeMap::new();
         let mut openskill_before = BTreeMap::new();
@@ -3141,6 +3208,8 @@ impl MatchHandler {
                     bankruptcy_kept_rate: Some(self.config.bankruptcy_kept_rate),
                     vanity_tax_rate: Some(self.config.vanity_tax_rate),
                     vanity_taxable_ids: self.rewards.vanity_tax.taxable_ids(pending.guild_id),
+                    low_priority_tax_rate: Some(self.config.low_priority_profit_tax_rate),
+                    low_priority_taxable_ids: low_priority_taxable_ids.clone(),
                     house_payout_multiplier: self.config.house_payout_multiplier,
                     payout_multiplier: self
                         .economy
@@ -3197,8 +3266,14 @@ impl MatchHandler {
             debrief_channel_id,
         );
 
-        let jc_lines =
-            self.settle_match_rewards(match_id, pending, winners, losers, &settlement)?;
+        let jc_lines = self.settle_match_rewards(
+            match_id,
+            pending,
+            winners,
+            losers,
+            &settlement,
+            &low_priority_taxable_ids,
+        )?;
         LoanService::new(
             LoanRepository::new(&self.database_path),
             LoanPolicy {
@@ -3250,6 +3325,7 @@ impl MatchHandler {
         winners: &[i64],
         losers: &[i64],
         settlement: &SettlementResult,
+        low_priority_taxable_ids: &BTreeSet<i64>,
     ) -> Result<Vec<String>, String> {
         let matches = MatchRepository::new(&self.database_path);
         let mut jc_changes = matches
@@ -3314,6 +3390,7 @@ impl MatchHandler {
                     }),
                 apply_bankruptcy_penalty: false,
                 apply_vanity_tax: false,
+                low_priority_taxable_ids: Some(low_priority_taxable_ids),
                 source: "match_participation",
                 related_type: "match",
                 related_id: match_id,
@@ -3341,6 +3418,7 @@ impl MatchHandler {
                     gross: self.config.bomb_pot_participation_bonus,
                     apply_bankruptcy_penalty: false,
                     apply_vanity_tax: false,
+                    low_priority_taxable_ids: Some(low_priority_taxable_ids),
                     source: "match_participation",
                     related_type: "match",
                     related_id: match_id,
@@ -3362,12 +3440,15 @@ impl MatchHandler {
             }
 
             for player_id in winners {
-                let outcome = self.rewards.award_match_win(CorrectionWinRewardRequest {
-                    guild_id: pending.guild_id,
-                    match_id,
-                    discord_id: *player_id,
-                    gross_reward: self.config.jopacoin_win_reward,
-                })?;
+                let outcome = self.rewards.award_match_win(
+                    CorrectionWinRewardRequest {
+                        guild_id: pending.guild_id,
+                        match_id,
+                        discord_id: *player_id,
+                        gross_reward: self.config.jopacoin_win_reward,
+                    },
+                    Some(low_priority_taxable_ids),
+                )?;
                 let net = outcome
                     .receipt
                     .net
@@ -3402,6 +3483,7 @@ impl MatchHandler {
                 gross: self.config.jopacoin_exclusion_reward,
                 apply_bankruptcy_penalty: true,
                 apply_vanity_tax: true,
+                low_priority_taxable_ids: Some(low_priority_taxable_ids),
                 source: "match_exclusion",
                 related_type: "match",
                 related_id: match_id,
@@ -3686,6 +3768,23 @@ impl MatchHandler {
             .low_priority
             .get_active_ids(&request.player_ids, Some(request.guild_id))
             .map_err(|error| error.to_string())?;
+        // Low priority makes a player's games harder by balancing them as
+        // though they were stronger, until they win their way out. This scales
+        // only the value the shuffler compares; stored ratings, profiles, and
+        // the post-match rating update all read the untouched player. Jopacoin
+        // mode is excluded deliberately: its "rating" is a signed balance, so
+        // scaling would drive a debtor further negative and hand them easier
+        // games instead of harder ones.
+        if !use_jopacoin {
+            for player in &mut players {
+                if player
+                    .discord_id
+                    .is_some_and(|discord_id| low_priority_ids.contains(&discord_id))
+                {
+                    player.matchmaking_multiplier = Some(self.config.low_priority_mmr_multiplier);
+                }
+            }
+        }
         let domain_avoids = avoids
             .iter()
             .map(|avoid| SoftAvoid {
@@ -4328,6 +4427,7 @@ impl MatchHandler {
                 gross: self.config.streaming_bonus,
                 apply_bankruptcy_penalty: true,
                 apply_vanity_tax: true,
+                low_priority_taxable_ids: None,
                 source: "shuffle_streaming_bonus",
                 related_type: "pending_match",
                 related_id: prepared.pending.pending_match_id,
@@ -5898,6 +5998,7 @@ fn bet_jc_deltas(
     for deductions in [
         &settlement.bankruptcy_penalties,
         &settlement.vanity_taxes,
+        &settlement.low_priority_taxes,
         blood_pact_skims,
     ] {
         for (discord_id, amount) in deductions {

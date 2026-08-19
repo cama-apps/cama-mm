@@ -85,6 +85,7 @@ pub struct BetHistoryEntry {
     pub match_id: i64,
     pub payout: Option<i64>,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub outcome: GamblingOutcome,
     pub profit: i64,
 }
@@ -293,6 +294,7 @@ pub struct BettingImpactBet {
     pub effective_bet: i64,
     pub payout: Option<i64>,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub bet_for_target: bool,
     pub won: bool,
     pub profit: i64,
@@ -541,6 +543,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
             "SELECT b.discord_id, b.match_id,
                     b.amount * COALESCE(b.leverage, 1), b.payout,
                     COALESCE(bst.vanity_tax, 0),
+                    COALESCE(bst.low_priority_tax, 0),
                     CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END,
                     b.team_bet_on,
                     m.winning_team
@@ -564,9 +567,10 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -579,6 +583,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     effective_bet,
                     payout,
                     stored_vanity_tax,
+                    stored_low_priority_tax,
                     target_team,
                     bet_team,
                     winning_team,
@@ -586,16 +591,17 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     let target_team = BetSide::parse(&target_team)?;
                     let bet_team = BetSide::parse(&bet_team)?;
                     let won = bet_team.won(winning_team);
-                    let vanity_tax = if won && taxed_settlements.insert((bettor_id, match_id)) {
-                        stored_vanity_tax
-                    } else {
-                        0
-                    };
+                    // One settlement withholds both profit taxes together, so
+                    // they share the single first-sighting guard.
+                    let settled = won && taxed_settlements.insert((bettor_id, match_id));
+                    let vanity_tax = if settled { stored_vanity_tax } else { 0 };
+                    let low_priority_tax = if settled { stored_low_priority_tax } else { 0 };
                     let profit = if won {
                         payout
                             .unwrap_or_else(|| effective_bet.saturating_mul(2))
                             .saturating_sub(effective_bet)
                             .saturating_sub(vanity_tax)
+                            .saturating_sub(low_priority_tax)
                     } else {
                         -effective_bet
                     };
@@ -605,6 +611,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                         effective_bet,
                         payout,
                         vanity_tax,
+                        low_priority_tax,
                         bet_for_target: bet_team == target_team,
                         won,
                         profit,
@@ -625,7 +632,8 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     b.amount * COALESCE(b.leverage, 1), b.team_bet_on,
                     COALESCE(b.is_blind, 0), b.investment_target_id,
                     b.investment_direction, b.bet_time, b.match_id, b.payout,
-                    COALESCE(bst.vanity_tax, 0), m.winning_team
+                    COALESCE(bst.vanity_tax, 0),
+                    COALESCE(bst.low_priority_tax, 0), m.winning_team
              FROM bets b
              JOIN matches m ON m.match_id = b.match_id
              LEFT JOIN bet_settlement_taxes bst
@@ -652,6 +660,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                         row.get::<_, Option<i64>>(10)?,
                         row.get::<_, i64>(11)?,
                         row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
                     ))
                 },
             )?
@@ -672,17 +681,21 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     match_id,
                     payout,
                     stored_vanity_tax,
+                    stored_low_priority_tax,
                     winning_team,
                 ) = row;
                 let team = BetSide::parse(&side)?;
                 let won = team.won(winning_team);
-                let vanity_tax = if won && taxed_matches.insert(match_id) {
-                    stored_vanity_tax
-                } else {
-                    0
-                };
+                // One settlement withholds both profit taxes together, so they
+                // share the single first-sighting guard.
+                let settled = won && taxed_matches.insert(match_id);
+                let vanity_tax = if settled { stored_vanity_tax } else { 0 };
+                let low_priority_tax = if settled { stored_low_priority_tax } else { 0 };
                 let profit = if won {
-                    payout.unwrap_or(effective_bet.saturating_mul(2)) - effective_bet - vanity_tax
+                    payout.unwrap_or(effective_bet.saturating_mul(2))
+                        - effective_bet
+                        - vanity_tax
+                        - low_priority_tax
                 } else {
                     -effective_bet
                 };
@@ -699,6 +712,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     match_id,
                     payout,
                     vanity_tax,
+                    low_priority_tax,
                     outcome: if won {
                         GamblingOutcome::Won
                     } else {
@@ -960,7 +974,8 @@ impl GamblingStatsPort for GamblingStatsRepository {
                         SUM(CASE WHEN won = 1
                                  THEN COALESCE(payout, effective_bet * 2) - effective_bet
                                  ELSE -effective_bet END)
-                          - COALESCE((SELECT SUM(bst.vanity_tax)
+                          - COALESCE((SELECT SUM(bst.vanity_tax
+                                                 + bst.low_priority_tax)
                                       FROM bet_settlement_taxes bst
                                       WHERE bst.guild_id = ordered.guild_id
                                         AND bst.discord_id = ordered.discord_id), 0),

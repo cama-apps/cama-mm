@@ -23,6 +23,7 @@ use cama_app::trivia_image_cache::{
 use cama_app::trivia_questions::{TriviaCatalog, TriviaQuestion, TriviaRandom, generate_question};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::trivia_commands_repository::TriviaCommandsRepository;
@@ -156,6 +157,7 @@ impl TriviaRegistrationProvider {
             pets: PetEvolutionRepository::new(&database_path),
             economy_events: SqliteEconomyEventService::new(&database_path, economy_config),
             vanity_tax,
+            low_priority: LowPriorityRepository::new(&database_path),
             discord,
             reminder_hooks,
             catalog: Arc::clone(&catalog),
@@ -225,6 +227,7 @@ struct TriviaRuntimeConfig {
     answer_timeout: Duration,
     bankrupt_multiplier: f64,
     cooldown_seconds: i64,
+    low_priority_tax_rate: f64,
     minigame_scale: f64,
     reward_per_question: i64,
 }
@@ -239,6 +242,7 @@ impl TriviaRuntimeConfig {
             ),
             bankrupt_multiplier: config.values.trivia_bankrupt_multiplier,
             cooldown_seconds: config.values.trivia_cooldown_seconds,
+            low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             minigame_scale: config.values.minigame_jc_delta_scale,
             reward_per_question: config.values.trivia_reward_per_question,
         }
@@ -253,6 +257,7 @@ struct TriviaRuntimeState {
     pets: PetEvolutionRepository,
     economy_events: SqliteEconomyEventService,
     vanity_tax: Arc<PersistentVanityTaxService>,
+    low_priority: LowPriorityRepository,
     discord: Arc<dyn TriviaDiscordPort>,
     reminder_hooks: Option<ReminderHooks>,
     catalog: Arc<TriviaCatalog>,
@@ -822,9 +827,20 @@ impl TriviaRuntimeState {
                     warn!(user_id, guild_id, %error, "failed to apply trivia bankruptcy debuff")
                 }
             }
-            streak_bonus -= self
+            // Both taxes bill the same pre-penalty streak bonus so the low
+            // priority share never compounds on top of the vanity share.
+            let vanity_tax = self
                 .vanity_tax
                 .calculate_tax(user_id, guild_id, gross_streak_bonus);
+            let low_priority_tax = self.low_priority_tax(user_id, guild_id, gross_streak_bonus);
+            // The bankruptcy debuff already withheld part of the bonus, so cap
+            // the combined withholding at the bonus itself: a streak reward
+            // must never turn into a charge against the per-question reward.
+            let withheld = (gross_streak_bonus - streak_bonus)
+                .saturating_add(vanity_tax)
+                .saturating_add(low_priority_tax)
+                .min(gross_streak_bonus);
+            streak_bonus = gross_streak_bonus - withheld;
         }
 
         let raw = self.config.reward_per_question + streak_bonus;
@@ -874,6 +890,25 @@ impl TriviaRuntimeState {
             Ok(_) => reward,
             Err(error) => {
                 warn!(user_id, guild_id, %error, "failed to award trivia JC");
+                0
+            }
+        }
+    }
+
+    /// Sibling of the vanity tax for players serving active low priority.
+    /// Called from the blocking award path only, because the taxable set is a
+    /// SQLite read rather than the vanity service's in-memory cache.
+    fn low_priority_tax(&self, user_id: i64, guild_id: i64, profit: i64) -> i64 {
+        if profit <= 0 {
+            return 0;
+        }
+        match self.low_priority.active_taxable_ids(Some(guild_id)) {
+            Ok(taxable) if taxable.contains(&user_id) => {
+                (profit as f64 * self.config.low_priority_tax_rate) as i64
+            }
+            Ok(_) => 0,
+            Err(error) => {
+                warn!(user_id, guild_id, %error, "failed to read trivia low priority tax status");
                 0
             }
         }

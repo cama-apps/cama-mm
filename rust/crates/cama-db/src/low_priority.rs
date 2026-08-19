@@ -6,7 +6,7 @@
 //! dynamic integer distinction so boolean and floating-point values can be
 //! rejected before any database write occurs.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::{Value, ValueRef};
@@ -269,6 +269,29 @@ impl LowPriorityRepository {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Active low-priority Discord IDs for one guild.
+    ///
+    /// Shaped as a `BTreeSet` so the economy paths that already gate a
+    /// per-player tax rate on a membership set can consult low priority the
+    /// same way they consult vanity-tax enforcement. Unlike
+    /// [`Self::get_active_ids`] this needs no candidate list, because a
+    /// settlement learns which players it is paying only once it is already
+    /// inside its own transaction.
+    pub fn active_taxable_ids(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<BTreeSet<i64>, LowPriorityRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT discord_id
+             FROM low_priority_state
+             WHERE guild_id = ?1 AND active = 1 AND wins_remaining > 0",
+        )?;
+        let rows = statement.query_map([guild_id], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// List active assignments for a guild in stable player-ID order.
     pub fn list_active(
         &self,
@@ -342,7 +365,7 @@ fn python_truthy(value: ValueRef<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use super::{
         LOW_PRIORITY_REQUIRED_WINS, LowPriorityRepository, LowPriorityRepositoryError,
@@ -547,6 +570,92 @@ mod tests {
                 .unwrap()
                 .expect("secondary state")
                 .active
+        );
+    }
+
+    #[test]
+    fn test_active_taxable_ids_are_active_only_and_guild_scoped() {
+        let fixture = Fixture::new();
+        for discord_id in [101, 102] {
+            fixture
+                .repository
+                .set_low_priority(&SetLowPriorityInput::new(
+                    discord_id,
+                    Some(TEST_GUILD_ID),
+                    901,
+                    None,
+                ))
+                .unwrap();
+        }
+        fixture
+            .repository
+            .set_low_priority(&SetLowPriorityInput::new(
+                777,
+                Some(SECONDARY_GUILD_ID),
+                902,
+                None,
+            ))
+            .unwrap();
+        fixture
+            .repository
+            .clear_low_priority(102, Some(TEST_GUILD_ID), 901, None)
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .repository
+                .active_taxable_ids(Some(TEST_GUILD_ID))
+                .unwrap(),
+            BTreeSet::from([101]),
+            "a cleared assignment must stop being taxable"
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .active_taxable_ids(Some(SECONDARY_GUILD_ID))
+                .unwrap(),
+            BTreeSet::from([777]),
+            "taxability must not leak across guilds"
+        );
+        assert!(
+            fixture
+                .repository
+                .active_taxable_ids(Some(SECONDARY_GUILD_ID + 1))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_active_taxable_ids_drop_a_player_who_has_won_their_way_out() {
+        let fixture = Fixture::new();
+        fixture
+            .repository
+            .set_low_priority(&SetLowPriorityInput::new(
+                101,
+                Some(TEST_GUILD_ID),
+                901,
+                None,
+            ))
+            .unwrap();
+        // Winning out of low priority is recorded by the match path, which
+        // drains `wins_remaining` to zero while the row stays active.
+        Connection::open(fixture._file.path())
+            .expect("open low-priority fixture")
+            .execute(
+                "UPDATE low_priority_state SET wins_remaining = 0
+                 WHERE discord_id = ?1 AND guild_id = ?2",
+                [101_i64, TEST_GUILD_ID],
+            )
+            .expect("drain remaining wins");
+
+        assert!(
+            fixture
+                .repository
+                .active_taxable_ids(Some(TEST_GUILD_ID))
+                .unwrap()
+                .is_empty(),
+            "the tax must stop when the player leaves low priority"
         );
     }
 

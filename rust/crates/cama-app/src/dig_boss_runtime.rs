@@ -254,6 +254,7 @@ impl BossRepositoryPort for SqliteBossRepository {
                 echo,
                 artifact: None,
                 vanity_tax: commit.vanity_tax,
+                low_priority_tax: commit.low_priority_tax,
             })
             .map_err(|error| self.repository_error(error))?;
         match outcome {
@@ -1199,6 +1200,7 @@ fn boss_audit_detail(audit: &BossAuditRecord, commit: &RepositoryCommit) -> Stri
         "jc_delta": audit.jc_delta,
         "depth_after": audit.depth_after,
         "vanity_tax": commit.vanity_tax,
+        "low_priority_tax": commit.low_priority_tax,
     })
     .to_string()
 }
@@ -1777,6 +1779,29 @@ impl DigBossVanityTaxPort for NoDigBossVanityTax {
     }
 }
 
+/// Separately accounted sibling of [`DigBossVanityTaxPort`] for players in
+/// active low priority. Both sinks read the same gross boss winnings.
+pub trait DigBossLowPriorityTaxPort: Send + Sync {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoDigBossLowPriorityTax;
+
+impl DigBossLowPriorityTaxPort for NoDigBossLowPriorityTax {
+    fn calculate_tax(&self, _discord_id: i64, _guild_id: i64, _gross_profit: i64) -> i64 {
+        0
+    }
+}
+
+/// Amount the profit policy withheld for low priority on the settlement in
+/// flight.
+///
+/// The multi-tier commit contract carries the vanity amount only, so the
+/// profit policy and the repository adapter share this handle to keep the
+/// gross credit and the separate low-priority debit in one transaction. A
+/// victory settlement always taxes immediately before its commit, and the
+/// commit consumes the value, so no settlement can inherit another's.
 struct SqliteBossEconomyEvent {
     service: SqliteEconomyEventService,
     now: i64,
@@ -1808,6 +1833,7 @@ impl EconomyEventPort for SqliteBossEconomyEvent {
 struct SqliteBossProfitPolicy {
     bankruptcy: BankruptcyService<BankruptcyRepository>,
     vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+    low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
     warnings: Vec<String>,
 }
 
@@ -1821,7 +1847,11 @@ impl std::fmt::Debug for SqliteBossProfitPolicy {
 }
 
 impl SqliteBossProfitPolicy {
-    fn new(path: &Path, vanity_tax: Arc<dyn DigBossVanityTaxPort>) -> Self {
+    fn new(
+        path: &Path,
+        vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+        low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
+    ) -> Self {
         Self {
             bankruptcy: BankruptcyService::new(
                 BankruptcyRepository::new(path),
@@ -1829,6 +1859,7 @@ impl SqliteBossProfitPolicy {
             )
             .expect("the default bankruptcy policy is valid"),
             vanity_tax,
+            low_priority_tax,
             warnings: Vec::new(),
         }
     }
@@ -1855,10 +1886,22 @@ impl BankruptcyPort for SqliteBossProfitPolicy {
             .vanity_tax
             .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
             .clamp(0, penalty.penalized.max(0));
+        // The low-priority sink reads the same gross winnings, so the two
+        // taxes stack additively rather than compounding. Clamping to what the
+        // bankruptcy penalty and the vanity tax left keeps the combined
+        // withholding at or below the profit basis.
+        let low_priority_tax = self
+            .low_priority_tax
+            .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
+            .clamp(0, penalty.penalized.max(0).saturating_sub(vanity_tax));
         BankruptcyAdjustment {
-            penalized: penalty.penalized.saturating_sub(vanity_tax),
+            penalized: penalty
+                .penalized
+                .saturating_sub(vanity_tax)
+                .saturating_sub(low_priority_tax),
             penalty_applied: penalty.penalty_applied,
             vanity_tax,
+            low_priority_tax,
         }
     }
 }
@@ -2049,6 +2092,7 @@ pub struct DigPinnacleResolved {
     pub gross_payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub new_depth: i32,
     pub boss_hp_remaining: i32,
     pub boss_hp_max: i32,
@@ -2182,6 +2226,7 @@ impl DigBossRuntimeConfig {
 pub struct DigBossRuntimeService {
     config: DigBossRuntimeConfig,
     vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+    low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
 }
 
 impl std::fmt::Debug for DigBossRuntimeService {
@@ -2215,12 +2260,22 @@ impl DigBossRuntimeService {
         Self {
             config,
             vanity_tax: Arc::new(NoDigBossVanityTax),
+            low_priority_tax: Arc::new(NoDigBossLowPriorityTax),
         }
     }
 
     #[must_use]
     pub fn with_vanity_tax(mut self, vanity_tax: Arc<dyn DigBossVanityTaxPort>) -> Self {
         self.vanity_tax = vanity_tax;
+        self
+    }
+
+    #[must_use]
+    pub fn with_low_priority_tax(
+        mut self,
+        low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
+    ) -> Self {
+        self.low_priority_tax = low_priority_tax;
         self
     }
 
@@ -2496,6 +2551,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3121,6 +3177,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3338,6 +3395,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3549,8 +3607,11 @@ impl DigBossRuntimeService {
         entropy: &mut E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
-        let mut profit_policy =
-            SqliteBossProfitPolicy::new(&self.config.database_path, Arc::clone(&self.vanity_tax));
+        let mut profit_policy = SqliteBossProfitPolicy::new(
+            &self.config.database_path,
+            Arc::clone(&self.vanity_tax),
+            Arc::clone(&self.low_priority_tax),
+        );
         let mut economy_event = SqliteBossEconomyEvent::new(
             &self.config.database_path,
             self.config.economy_event.clone(),
@@ -3583,6 +3644,7 @@ impl DigBossRuntimeService {
             let mut payout = 0;
             let mut bankruptcy_penalty = 0;
             let mut vanity_tax = 0;
+            let mut low_priority_tax = 0;
             let mut jc_delta = 0;
             let mut knockback = 0;
             let mut next_phase = input.phase;
@@ -3678,6 +3740,7 @@ impl DigBossRuntimeService {
                 );
                 bankruptcy_penalty = adjustment.penalty_applied;
                 vanity_tax = adjustment.vanity_tax;
+                low_priority_tax = adjustment.low_priority_tax;
                 jc_delta = adjustment.penalized;
                 payout = jc_delta;
                 proposed.balance = expected.balance.saturating_add(jc_delta);
@@ -3765,6 +3828,7 @@ impl DigBossRuntimeService {
                 "reward_multiplier":DIG_POSITIVE_JC_MULTIPLIER,
                 "bankruptcy_penalty":bankruptcy_penalty,
                 "vanity_tax":vanity_tax,
+                "low_priority_tax":low_priority_tax,
                 "starting_boss_hp":input.starting_boss_hp,
             })
             .to_string();
@@ -3789,6 +3853,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact,
                     vanity_tax,
+                    low_priority_tax,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
             match commit {
@@ -3825,6 +3890,7 @@ impl DigBossRuntimeService {
                         gross_payout,
                         bankruptcy_penalty,
                         vanity_tax,
+                        low_priority_tax,
                         new_depth: narrow_i32(proposed.depth, "depth")
                             .map_err(DigBossRuntimeError::Infrastructure)?,
                         boss_hp_remaining: if input.won {
@@ -4163,6 +4229,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4331,6 +4398,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4354,7 +4422,11 @@ impl DigBossRuntimeService {
                 self.config.economy_event.clone(),
                 now,
             ),
-            SqliteBossProfitPolicy::new(&self.config.database_path, Arc::clone(&self.vanity_tax)),
+            SqliteBossProfitPolicy::new(
+                &self.config.database_path,
+                Arc::clone(&self.vanity_tax),
+                Arc::clone(&self.low_priority_tax),
+            ),
             SqliteBossGearRepair::new(&self.config.database_path),
             DigBossOutcomeCollector::default(),
         )

@@ -325,6 +325,35 @@ fn test_wheel_history_subtracts_persisted_vanity_tax() {
 }
 
 #[test]
+fn test_wheel_history_subtracts_both_persisted_profit_taxes() {
+    let history = service(FakeHistoryPort {
+        wheel: vec![WheelHistoryRow {
+            spin_time: 1_000,
+            result: 100,
+            outcome_metadata: Some("{\"vanity_tax\": 10, \"low_priority_tax\": 10}".to_owned()),
+        }],
+        ..FakeHistoryPort::default()
+    })
+    .get_balance_event_series(USER, GUILD);
+    assert_eq!(deltas(&history), [80]);
+    assert_eq!(history.source_totals, BTreeMap::from([(SOURCE_WHEEL, 80)]));
+}
+
+#[test]
+fn test_wheel_history_ignores_a_negative_low_priority_tax() {
+    let history = service(FakeHistoryPort {
+        wheel: vec![WheelHistoryRow {
+            spin_time: 1_000,
+            result: 100,
+            outcome_metadata: Some("{\"low_priority_tax\": -25}".to_owned()),
+        }],
+        ..FakeHistoryPort::default()
+    })
+    .get_balance_event_series(USER, GUILD);
+    assert_eq!(deltas(&history), [100]);
+}
+
+#[test]
 fn test_double_or_nothing_delta_from_balance_math() {
     let history = service(FakeHistoryPort {
         doubles: vec![

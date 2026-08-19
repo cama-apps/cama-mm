@@ -48,6 +48,7 @@ use cama_db::dota_bet_seed_repository::{BettingMode, BettingTeam, SeedSplit};
 use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
 use cama_db::golden_wheel_repository::GoldenWheelRepository;
 use cama_db::loan_repository::{DebtPayment, LedgerContext, LoanRepository};
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mana_service_repository::BankruptBuff;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::ManashopRepository;
@@ -718,6 +719,10 @@ pub struct BettingRuntimeConfig {
     /// supplies the taxable-id set (see `credit_wheel_income`).
     #[allow(dead_code)]
     pub vanity_tax_rate: f64,
+    /// Profit tax withheld from wheel income while a player serves active low
+    /// priority. The taxable set is read from SQLite inside the spin's
+    /// blocking closure (see `credit_wheel_income`).
+    pub low_priority_tax_rate: f64,
     pub wheel_target_ev: f64,
     pub wheel_bankrupt_target_ev: f64,
     pub wheel_golden_target_ev: f64,
@@ -763,6 +768,7 @@ impl BettingRuntimeConfig {
             bankruptcy_penalty_rate: values.bankruptcy_penalty_rate,
             garnishment_rate: values.garnishment_percentage,
             vanity_tax_rate: values.vanity_tax_rate,
+            low_priority_tax_rate: values.low_priority_profit_tax_rate,
             wheel_target_ev: values.wheel_target_ev,
             wheel_bankrupt_target_ev: values.wheel_bankrupt_target_ev,
             wheel_golden_target_ev: values.wheel_golden_target_ev,
@@ -2610,6 +2616,11 @@ impl BettingInteractionHandler {
             let option_for_settlement = option.clone();
             let member_snapshot = self.guild_member_snapshot(pending.guild_id).await;
             let result = sqlite("expired wheel interaction sweep", move || {
+                // Low-priority eligibility is a SQLite read, so it resolves on
+                // the blocking side with the rest of the settlement.
+                let low_priority_taxable_ids = LowPriorityRepository::new(&path)
+                    .active_taxable_ids(Some(pending.guild_id))
+                    .map_err(|error| error.to_string())?;
                 resolve_pending_wheel(
                     &path,
                     pending.guild_id,
@@ -2627,6 +2638,7 @@ impl BettingInteractionHandler {
                     pending.event_win_multiplier,
                     pending.event_loss_multiplier,
                     &vanity_taxable_ids,
+                    &low_priority_taxable_ids,
                     member_snapshot.as_ref(),
                 )
             })
@@ -3057,6 +3069,11 @@ impl BettingInteractionHandler {
                 let option_for_settlement = option.clone();
                 let member_snapshot = self.guild_member_snapshot(guild_id).await;
                 let result = sqlite("expired wheel interaction resolution", move || {
+                    // Low-priority eligibility is a SQLite read, so it resolves
+                    // on the blocking side with the rest of the settlement.
+                    let low_priority_taxable_ids = LowPriorityRepository::new(&path)
+                        .active_taxable_ids(Some(guild_id))
+                        .map_err(|error| error.to_string())?;
                     resolve_pending_wheel(
                         &path,
                         guild_id,
@@ -3074,6 +3091,7 @@ impl BettingInteractionHandler {
                         pending.event_win_multiplier,
                         pending.event_loss_multiplier,
                         &vanity_taxable_ids,
+                        &low_priority_taxable_ids,
                         member_snapshot.as_ref(),
                     )
                 })
@@ -3158,6 +3176,11 @@ impl BettingInteractionHandler {
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
         let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let result = sqlite("wheel interaction resolution", move || {
+            // Low-priority eligibility is a SQLite read, so it resolves on the
+            // blocking side with the rest of the settlement.
+            let low_priority_taxable_ids = LowPriorityRepository::new(&path)
+                .active_taxable_ids(Some(guild_id))
+                .map_err(|error| error.to_string())?;
             resolve_pending_wheel(
                 &path,
                 guild_id,
@@ -3175,6 +3198,7 @@ impl BettingInteractionHandler {
                 event_win_multiplier,
                 event_loss_multiplier,
                 &vanity_taxable_ids,
+                &low_priority_taxable_ids,
                 member_snapshot.as_ref(),
             )
         })
@@ -4438,6 +4462,11 @@ impl BettingInteractionHandler {
             .await
             .unwrap_or((1.0, 1.0));
         let outcome = sqlite("gamba spin", move || {
+            // Low-priority eligibility is a SQLite read, so it resolves on the
+            // blocking side with the rest of the spin.
+            let low_priority_taxable_ids = LowPriorityRepository::new(&path)
+                .active_taxable_ids(Some(guild_id))
+                .map_err(|error| error.to_string())?;
             spin_once(
                 &path,
                 guild_id,
@@ -4447,6 +4476,7 @@ impl BettingInteractionHandler {
                 event_win_multiplier,
                 event_loss_multiplier,
                 &vanity_taxable_ids,
+                &low_priority_taxable_ids,
                 admin_bypass,
                 bonus_spin,
                 member_snapshot.as_ref(),
@@ -7076,6 +7106,7 @@ fn credit_wheel_income(
     event_id: &str,
     reason: &str,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_taxable_ids: &BTreeSet<i64>,
 ) -> Result<cama_db::match_recording_repository::IncomeAwardReceipt, String> {
     if gross <= 0 {
         let balance = PlayerRepository::new(path)
@@ -7102,6 +7133,11 @@ fn credit_wheel_income(
                 bankruptcy_kept_rate: config.bankruptcy_penalty_rate,
                 vanity_tax_rate: if vanity_taxable_ids.contains(&user_id) {
                     config.vanity_tax_rate
+                } else {
+                    0.0
+                },
+                low_priority_tax_rate: if low_priority_taxable_ids.contains(&user_id) {
+                    config.low_priority_tax_rate
                 } else {
                     0.0
                 },
@@ -7464,6 +7500,7 @@ fn resolve_wheel_value(
     config: &BettingRuntimeConfig,
     event_id: &str,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_taxable_ids: &BTreeSet<i64>,
     event_win_multiplier: f64,
     event_loss_multiplier: f64,
     bonus_spin: bool,
@@ -7501,6 +7538,7 @@ fn resolve_wheel_value(
                     event_id,
                     "gamba wheel payout",
                     vanity_taxable_ids,
+                    low_priority_taxable_ids,
                 )?;
                 return Ok(WheelResolution::new(
                     WheelValue::Numeric(adjusted),
@@ -7643,6 +7681,7 @@ fn resolve_wheel_value(
                 event_id,
                 "gamba eruption fallback credit",
                 vanity_taxable_ids,
+                low_priority_taxable_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7670,6 +7709,7 @@ fn resolve_wheel_value(
                 event_id,
                 "gamba overgrowth reward",
                 vanity_taxable_ids,
+                low_priority_taxable_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7691,6 +7731,7 @@ fn resolve_wheel_value(
                 event_id,
                 "gamba compound interest credit",
                 vanity_taxable_ids,
+                low_priority_taxable_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7717,6 +7758,7 @@ fn resolve_wheel_value(
                 event_id,
                 "gamba dividend credit",
                 vanity_taxable_ids,
+                low_priority_taxable_ids,
             )?;
             Ok(WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
@@ -7771,6 +7813,7 @@ fn resolve_wheel_value(
                 event_id,
                 config,
                 vanity_taxable_ids,
+                low_priority_taxable_ids,
                 event_win_multiplier,
                 visible_member_ids,
             )?;
@@ -7821,6 +7864,7 @@ fn resolve_wheel_value(
                     event_id,
                     "gamba chain reaction credit",
                     vanity_taxable_ids,
+                    low_priority_taxable_ids,
                 )?;
                 Ok(WheelResolution::new(
                     WheelValue::Mechanic(mechanic),
@@ -7895,6 +7939,12 @@ fn wheel_income_note(receipt: &cama_db::match_recording_repository::IncomeAwardR
         notes.push(format!(
             "{} {} vanity tax",
             receipt.vanity_tax, JOPACOIN_EMOTE
+        ));
+    }
+    if receipt.low_priority_tax > 0 {
+        notes.push(format!(
+            "{} {} low priority tax",
+            receipt.low_priority_tax, JOPACOIN_EMOTE
         ));
     }
     if notes.is_empty() {
@@ -8033,6 +8083,7 @@ fn resolve_hostile_mechanic(
     event_id: &str,
     config: &BettingRuntimeConfig,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_taxable_ids: &BTreeSet<i64>,
     event_win_multiplier: f64,
     visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<HostileResolution, String> {
@@ -8369,6 +8420,7 @@ fn resolve_hostile_mechanic(
                         event_id,
                         "gamba heist fallback credit",
                         vanity_taxable_ids,
+                        low_priority_taxable_ids,
                     )?
                     .net,
                 );
@@ -8421,6 +8473,7 @@ fn resolve_hostile_mechanic(
                         event_id,
                         "gamba market crash fallback credit",
                         vanity_taxable_ids,
+                        low_priority_taxable_ids,
                     )?
                     .net,
                 );
@@ -8477,6 +8530,7 @@ fn resolve_hostile_mechanic(
                         event_id,
                         "gamba hostile takeover fallback credit",
                         vanity_taxable_ids,
+                        low_priority_taxable_ids,
                     )?
                     .net,
                 );
@@ -8736,6 +8790,7 @@ fn spin_once(
     event_win_multiplier: f64,
     event_loss_multiplier: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_taxable_ids: &BTreeSet<i64>,
     admin_bypass: bool,
     bonus_spin: bool,
     visible_member_ids: Option<&BTreeSet<i64>>,
@@ -8875,6 +8930,7 @@ fn spin_once(
             &event_id,
             "EXPLOSION",
             vanity_taxable_ids,
+            low_priority_taxable_ids,
         )?;
         let (blood_pact_skim, balance_after) = match apply_wheel_blood_pact_skim(
             path,
@@ -8912,6 +8968,7 @@ fn spin_once(
                 "garnished_amount": receipt.garnished,
                 "bankruptcy_penalty": receipt.bankruptcy_penalty,
                 "vanity_tax": receipt.vanity_tax,
+                "low_priority_tax": receipt.low_priority_tax,
                 "blood_pact_skim": blood_pact_skim,
                 "event_win_multiplier": event_win_multiplier,
                 "event_loss_multiplier": event_loss_multiplier,
@@ -8934,11 +8991,13 @@ fn spin_once(
             receipt
                 .gross
                 .saturating_sub(receipt.bankruptcy_penalty)
-                .saturating_sub(receipt.vanity_tax),
+                .saturating_sub(receipt.vanity_tax)
+                .saturating_sub(receipt.low_priority_tax),
             next_spin_at,
             receipt.garnished,
             receipt.bankruptcy_penalty,
             receipt.vanity_tax,
+            receipt.low_priority_tax,
             blood_pact_skim,
         );
         if bonus_spin {
@@ -9052,6 +9111,7 @@ fn spin_once(
         config,
         &event_id,
         vanity_taxable_ids,
+        low_priority_taxable_ids,
         event_win_multiplier,
         event_loss_multiplier,
         bonus_spin,
@@ -9495,10 +9555,21 @@ fn wheel_result_embed(
                 false,
             );
         }
+        if receipt.low_priority_tax > 0 {
+            embed = embed.field(
+                "Low Priority Tax",
+                format!(
+                    "−{} {} low priority tax",
+                    receipt.low_priority_tax, JOPACOIN_EMOTE
+                ),
+                false,
+            );
+        }
     }
     embed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wheel_explosion_embed(
     balance: i64,
     reward: i64,
@@ -9506,6 +9577,7 @@ fn wheel_explosion_embed(
     garnished: i64,
     bankruptcy_penalty: i64,
     vanity_tax: i64,
+    low_priority_tax: i64,
     blood_pact_skim: i64,
 ) -> InteractionEmbed {
     let mut description = format!(
@@ -9530,6 +9602,13 @@ fn wheel_explosion_embed(
         embed = embed.field(
             "Vanity Tax",
             format!("−{vanity_tax} {JOPACOIN_EMOTE} vanity tax"),
+            false,
+        );
+    }
+    if low_priority_tax > 0 {
+        embed = embed.field(
+            "Low Priority Tax",
+            format!("−{low_priority_tax} {JOPACOIN_EMOTE} low priority tax"),
             false,
         );
     }
@@ -10021,6 +10100,7 @@ fn resolve_pending_wheel(
     event_win_multiplier: f64,
     event_loss_multiplier: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_taxable_ids: &BTreeSet<i64>,
     visible_member_ids: Option<&BTreeSet<i64>>,
 ) -> Result<PendingWheelResolution, String> {
     if use_reroll
@@ -10060,6 +10140,7 @@ fn resolve_pending_wheel(
         config,
         event_id,
         vanity_taxable_ids,
+        low_priority_taxable_ids,
         event_win_multiplier,
         event_loss_multiplier,
         bonus_spin,

@@ -137,6 +137,7 @@ pub struct PredictionPositionRow {
     pub no_cost_basis_total: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub question: Option<String>,
 }
 
@@ -160,6 +161,7 @@ pub struct SettledBetRow {
     pub effective_bet: Option<i64>,
     pub payout: i64,
     pub settlement_vanity_tax: i64,
+    pub settlement_low_priority_tax: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2167,8 +2169,16 @@ fn build_betting_questions(
         let won = (row.team_bet_on.eq_ignore_ascii_case("radiant") && row.winning_team == 1)
             || (row.team_bet_on.eq_ignore_ascii_case("dire") && row.winning_team == 2);
         let tax_key = (row.discord_id, row.match_id);
-        let vanity_tax = if won && taxed_settlements.insert(tax_key) {
+        // One settlement withholds both profit taxes together, so they share
+        // the single first-sighting guard.
+        let settled = won && taxed_settlements.insert(tax_key);
+        let vanity_tax = if settled {
             row.settlement_vanity_tax
+        } else {
+            0
+        };
+        let low_priority_tax = if settled {
+            row.settlement_low_priority_tax
         } else {
             0
         };
@@ -2176,7 +2186,7 @@ fn build_betting_questions(
         player.bets += 1;
         player.wins += i64::from(won);
         player.wagered = player.wagered.saturating_add(effective);
-        player.pnl += row.payout - effective - vanity_tax;
+        player.pnl += row.payout - effective - vanity_tax - low_priority_tax;
     }
     add_player_leader(
         candidates,
@@ -2586,7 +2596,8 @@ fn prediction_pnl(row: &PredictionPositionRow) -> Option<i64> {
             .saturating_sub(row.yes_cost_basis_total)
             .saturating_sub(row.no_cost_basis_total)
             .saturating_sub(row.bankruptcy_penalty)
-            .saturating_sub(row.vanity_tax),
+            .saturating_sub(row.vanity_tax)
+            .saturating_sub(row.low_priority_tax),
     )
 }
 

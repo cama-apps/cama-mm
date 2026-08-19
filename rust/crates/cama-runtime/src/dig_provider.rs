@@ -19,10 +19,10 @@ use cama_app::boss_multi_tier::{BossServiceError, EntropyPort, PausedBossDuel, R
 use cama_app::dig_abandon_runtime::DigAbandonRuntimeService;
 use cama_app::dig_assets::{BossIdentity, BossScene};
 use cama_app::dig_boss_runtime::{
-    DigBossBrokenGear, DigBossEncounterInfo, DigBossGearDrop, DigBossPrestigeRelicDrop,
-    DigBossResolvedOutcome, DigBossRetreatOutcome, DigBossRuntimeConfig, DigBossRuntimeError,
-    DigBossRuntimeRequest, DigBossRuntimeResult as DigBossCallResult, DigBossRuntimeService,
-    DigBossScoutOutcome, DigBossStartOutcome, DigPinnacleResolved,
+    DigBossBrokenGear, DigBossEncounterInfo, DigBossGearDrop, DigBossLowPriorityTaxPort,
+    DigBossPrestigeRelicDrop, DigBossResolvedOutcome, DigBossRetreatOutcome, DigBossRuntimeConfig,
+    DigBossRuntimeError, DigBossRuntimeRequest, DigBossRuntimeResult as DigBossCallResult,
+    DigBossRuntimeService, DigBossScoutOutcome, DigBossStartOutcome, DigPinnacleResolved,
 };
 use cama_app::dig_bosses::{
     PINNACLE_DEPTH, PINNACLE_SECRET_PHASE_CHANCE, luminosity_combat_penalty, pinnacle_by_id,
@@ -52,8 +52,9 @@ use cama_app::dig_runtime::{
     DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeConfig,
     DigRuntimeDeliveryContext, DigRuntimeDeliveryPart, DigRuntimeDeliverySnapshot,
     DigRuntimeExecution, DigRuntimeFinalizeDelivery, DigRuntimeFlavorSnapshot, DigRuntimeFlexData,
-    DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel,
-    DigRuntimeRenderKind, DigRuntimeSettleBloodPact, DigWeatherEffects,
+    DigRuntimeLowPriorityTaxPort, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
+    DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind, DigRuntimeSettleBloodPact,
+    DigWeatherEffects,
 };
 use cama_app::dig_service::{PICKAXE_TIERS, layer_at};
 use cama_app::dig_social_runtime::DigSocialRuntimeService;
@@ -62,6 +63,7 @@ use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::dig_inventory_repository::DigInventoryRepository;
 use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::neon_events::NeonEventRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_domain::formatting::JOPACOIN_EMOTE;
@@ -502,6 +504,7 @@ impl DigRegistrationProvider {
                     flavor,
                     flavor_data,
                     vanity_tax,
+                    low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
                     neon: Mutex::new(neon),
                     boss_entropy: RuntimeBossEntropy::default(),
                     view_nonce: format!("{:016x}", fastrand::u64(..)),
@@ -703,6 +706,9 @@ struct DigRuntimeState {
     /// constructors keep an explicit no-tax path so policy fixtures remain
     /// independent from gateway membership refresh state.
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+    /// Rate applied to Dig JC profit for players in active low priority. The
+    /// roster itself is persisted, so no gateway state is cached here.
+    low_priority_tax_rate: f64,
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
     boss_entropy: RuntimeBossEntropy,
     bonus_dispatcher: Mutex<Option<Arc<dyn DigBonusDispatchPort>>>,
@@ -717,12 +723,63 @@ struct DigRuntimeState {
     force_events: Mutex<BTreeSet<(i64, i64)>>,
 }
 
+/// Persisted active-low-priority roster used as a Dig profit sink.
+///
+/// The roster lives in SQLite rather than in refreshed gateway state, so this
+/// adapter is built by the blocking composition helpers below and reads the
+/// guild's roster on the same thread as the settlement it taxes.
+#[derive(Debug)]
+struct SqliteDigLowPriorityTax {
+    repository: LowPriorityRepository,
+    rate: f64,
+}
+
+impl SqliteDigLowPriorityTax {
+    fn new(path: &Path, rate: f64) -> Self {
+        Self {
+            repository: LowPriorityRepository::new(path),
+            rate,
+        }
+    }
+
+    fn tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        if gross_profit <= 0 || self.rate <= 0.0 {
+            return 0;
+        }
+        // An unreadable roster must not invent a withholding: the settlement
+        // proceeds untaxed rather than charging a player it cannot verify.
+        let Ok(taxable) = self.repository.active_taxable_ids(Some(guild_id)) else {
+            return 0;
+        };
+        if taxable.contains(&discord_id) {
+            (gross_profit as f64 * self.rate) as i64
+        } else {
+            0
+        }
+    }
+}
+
+impl DigRuntimeLowPriorityTaxPort for SqliteDigLowPriorityTax {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        self.tax(discord_id, guild_id, gross_profit)
+    }
+}
+
+impl DigBossLowPriorityTaxPort for SqliteDigLowPriorityTax {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        self.tax(discord_id, guild_id, gross_profit)
+    }
+}
+
 fn configured_dig_runtime(
     path: PathBuf,
     config: DigRuntimeConfig,
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+    low_priority_tax_rate: f64,
 ) -> cama_app::dig_runtime::DigRuntimeService {
-    let service = cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(path, config);
+    let low_priority_tax = Arc::new(SqliteDigLowPriorityTax::new(&path, low_priority_tax_rate));
+    let service = cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(path, config)
+        .with_low_priority_tax(low_priority_tax);
     if let Some(vanity_tax) = vanity_tax {
         service.with_vanity_tax(vanity_tax)
     } else {
@@ -734,9 +791,12 @@ fn configured_boss_runtime(
     path: PathBuf,
     pet_hunger_decay_per_day: i64,
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+    low_priority_tax_rate: f64,
 ) -> DigBossRuntimeService {
+    let low_priority_tax = Arc::new(SqliteDigLowPriorityTax::new(&path, low_priority_tax_rate));
     let service =
-        DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, pet_hunger_decay_per_day));
+        DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, pet_hunger_decay_per_day))
+            .with_low_priority_tax(low_priority_tax);
     if let Some(vanity_tax) = vanity_tax {
         service.with_vanity_tax(vanity_tax)
     } else {
@@ -3648,9 +3708,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let entropy = self.state.boss_entropy.clone();
         tokio::task::spawn_blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax).encounter(
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate).encounter(
                 DigBossRuntimeRequest {
                     discord_id: user_id,
                     guild_id,
@@ -3690,9 +3751,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
                 .start(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3735,9 +3797,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
                 .resume(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3761,9 +3824,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
                 .scout(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3786,9 +3850,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
                 .retreat(
                     DigBossRuntimeRequest {
                         discord_id: user_id,
@@ -3812,8 +3877,9 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax)
+            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
                 .cheer(cheerer_id, target_id, guild_id, now)
                 .map_err(|error| error.to_string())
         })
@@ -4149,9 +4215,10 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let config = self.state.dig_config.clone();
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         blocking(move || {
             let pet_path = path.clone();
-            let service = configured_dig_runtime(path, config, vanity_tax);
+            let service = configured_dig_runtime(path, config, vanity_tax, low_priority_tax_rate);
             let outcome = service
                 .dig_with_delivery(
                     cama_app::dig_runtime::DigRuntimeRequest {
@@ -4848,13 +4915,14 @@ impl DigInteractionHandler {
         let path = self.state.database_path.clone();
         let config = self.state.dig_config.clone();
         let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
         let request = DigRuntimeSettleBloodPact {
             action_id: delivery.action_id,
             source_key: delivery.source_key.clone(),
             occurred_at: delivery.committed_at,
         };
         blocking(move || {
-            configured_dig_runtime(path, config, vanity_tax)
+            configured_dig_runtime(path, config, vanity_tax, low_priority_tax_rate)
                 .settle_blood_pact_delivery(request)
                 .map_err(|error| error.to_string())
         })
@@ -8290,6 +8358,12 @@ fn python_dig_result_embed(
             progress.push_str(&format!(
                 "\n−{} {JOPACOIN_EMOTE} vanity tax",
                 result.vanity_tax
+            ));
+        }
+        if result.low_priority_tax > 0 {
+            progress.push_str(&format!(
+                "\n−{} {JOPACOIN_EMOTE} low priority tax",
+                result.low_priority_tax
             ));
         }
         embed = embed.field("Progress", progress, false);
