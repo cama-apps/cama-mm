@@ -1081,3 +1081,69 @@ fn match_ban_migration_uses_python_numeric_projection() {
     assert_eq!(json_ban_integer(&serde_json::json!(" 7_400 ")), Some(7_400));
     assert_eq!(json_ban_integer(&serde_json::json!(true)), None);
 }
+
+#[test]
+fn test_low_priority_reason_visibility_defaults_off_for_rows_migrated_from_the_old_schema() {
+    let file = empty_database();
+    let connection = Connection::open(file.path()).expect("open legacy low-priority fixture");
+    connection
+        .execute_batch(
+            "CREATE TABLE low_priority_state (
+                 discord_id             INTEGER NOT NULL,
+                 guild_id               INTEGER NOT NULL DEFAULT 0,
+                 wins_required          INTEGER NOT NULL DEFAULT 3,
+                 wins_remaining         INTEGER NOT NULL DEFAULT 3,
+                 start_pending_match_id INTEGER,
+                 active                 INTEGER NOT NULL DEFAULT 1,
+                 reason                 TEXT,
+                 set_by                 INTEGER NOT NULL,
+                 removed_by             INTEGER,
+                 removed_reason         TEXT,
+                 created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 updated_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (discord_id, guild_id)
+             );
+             INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
+             ) VALUES(7,42,3,2,1,'reported by Bob',900);",
+        )
+        .expect("seed a row authored before the reason was player-facing");
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("migrate the legacy low-priority table");
+
+    let connection = Connection::open(file.path()).expect("reopen migrated fixture");
+    let (reason, visible): (String, i64) = connection
+        .query_row(
+            "SELECT reason, reason_player_visible FROM low_priority_state
+             WHERE discord_id=7 AND guild_id=42",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy row survives the migration");
+    assert_eq!(reason, "reported by Bob", "the audit trail is preserved");
+    assert_eq!(
+        visible, 0,
+        "a reason written under the admin-only contract stays admin-only"
+    );
+    assert!(ledger_names(file.path()).contains("add_low_priority_reason_player_visibility"));
+}
+
+#[test]
+fn test_low_priority_reason_visibility_is_set_for_assignments_written_by_rust() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize current schema");
+    let repository = crate::low_priority_repository::LowPriorityRepository::new(file.path());
+    let mut input = crate::low_priority_repository::SetLowPriorityInput::new(
+        7,
+        Some(42),
+        900,
+        Some("repeated abandons".to_owned()),
+    );
+    input.wins_required = crate::low_priority_repository::PythonIntegerInput::Integer(3);
+    let state = repository.set_low_priority(&input).expect("assign");
+    assert!(
+        state.reason_player_visible,
+        "a reason typed under the new option description is the player's to read"
+    );
+}

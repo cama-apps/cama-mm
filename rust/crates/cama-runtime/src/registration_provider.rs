@@ -2865,8 +2865,14 @@ fn format_low_priority(state: &LowPriorityState) -> String {
         "**Low priority** — {completed}/{} {required_noun} completed ({} {remaining_noun} remaining)",
         state.wins_required, state.wins_remaining
     );
-    if let Some(reason) = player_visible_reason(state.reason.as_deref()) {
-        rendered.push_str(&format!("\nReason: {reason}"));
+    // Rows written before the option was documented as player-facing carry
+    // `reason_player_visible = 0`; their reason may name a third party, so the
+    // player gets their progress without it. "Placed for" rather than "Reason"
+    // keeps this attributable when a suspension is rendered alongside it.
+    if state.reason_player_visible
+        && let Some(reason) = player_visible_reason(state.reason.as_deref())
+    {
+        rendered.push_str(&format!("\nPlaced for: {reason}"));
     }
     rendered
 }
