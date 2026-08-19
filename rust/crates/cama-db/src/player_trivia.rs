@@ -142,6 +142,7 @@ pub struct PredictionPositionRow {
     pub no_cost_basis_total: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub question: Option<String>,
 }
 
@@ -171,6 +172,7 @@ pub struct SettledBetRow {
     pub effective_bet: Option<i64>,
     pub payout: i64,
     pub settlement_vanity_tax: i64,
+    pub settlement_low_priority_tax: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1147,6 +1149,7 @@ fn load_snapshot_from_connection(
                 COALESCE(pp.yes_contracts,0), COALESCE(pp.yes_cost_basis_total,0),
                 COALESCE(pp.no_contracts,0), COALESCE(pp.no_cost_basis_total,0),
                 COALESCE(pp.bankruptcy_penalty,0), COALESCE(pp.vanity_tax,0),
+                COALESCE(pp.low_priority_tax,0),
                 CASE WHEN p.status='resolved' THEN p.question END
          FROM prediction_positions pp JOIN predictions p USING(prediction_id)
          WHERE p.guild_id=?1 ORDER BY pp.prediction_id, pp.discord_id",
@@ -1163,7 +1166,8 @@ fn load_snapshot_from_connection(
                 no_cost_basis_total: row.get(7)?,
                 bankruptcy_penalty: row.get(8)?,
                 vanity_tax: row.get(9)?,
-                question: row.get(10)?,
+                low_priority_tax: row.get(10)?,
+                question: row.get(11)?,
             })
         },
     )?;
@@ -1194,7 +1198,8 @@ fn load_snapshot_from_connection(
         connection,
         "SELECT b.bet_id, b.discord_id, b.match_id, b.team_bet_on, m.winning_team,
                 b.amount, COALESCE(b.leverage,1), b.amount*COALESCE(b.leverage,1),
-                COALESCE(b.payout,0), COALESCE(bst.vanity_tax,0)
+                COALESCE(b.payout,0), COALESCE(bst.vanity_tax,0),
+                COALESCE(bst.low_priority_tax,0)
          FROM bets b JOIN matches m ON m.guild_id=b.guild_id AND m.match_id=b.match_id
          LEFT JOIN bet_settlement_taxes bst ON bst.guild_id=b.guild_id
               AND bst.match_id=b.match_id AND bst.discord_id=b.discord_id
@@ -1212,6 +1217,7 @@ fn load_snapshot_from_connection(
                 effective_bet: row.get(7)?,
                 payout: row.get(8)?,
                 settlement_vanity_tax: row.get(9)?,
+                settlement_low_priority_tax: row.get(10)?,
             })
         },
     )?;

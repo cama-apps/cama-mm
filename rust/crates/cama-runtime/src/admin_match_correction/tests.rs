@@ -219,7 +219,14 @@ impl Fixture {
     }
 
     fn connection(&self) -> Connection {
-        Connection::open(self.database.path()).expect("open fixture database")
+        let connection = Connection::open(self.database.path()).expect("open fixture database");
+        // Same compatibility choice as `Fixture::new`: the migrated schema
+        // keeps historical foreign keys aimed at the pre-guild player key, so
+        // seeding through a fresh connection needs the pragma too.
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF")
+            .expect("use Python-compatible foreign-key mode");
+        connection
     }
 
     fn balance(&self, discord_id: i64) -> i64 {
@@ -231,6 +238,63 @@ impl Fixture {
                 |row| row.get(0),
             )
             .expect("load player balance")
+    }
+
+    fn add_bettor(&self, discord_id: i64, balance: i64) {
+        self.connection()
+            .execute(
+                "INSERT INTO players (
+                     discord_id,guild_id,discord_username,jopacoin_balance,
+                     lowest_balance_ever
+                 ) VALUES (?1,?2,?3,?4,?4)",
+                params![discord_id, GUILD, format!("bettor-{discord_id}"), balance],
+            )
+            .expect("seed bettor");
+    }
+
+    fn place_bet(&self, discord_id: i64, team: MatchSide, amount: i64, payout: Option<i64>) {
+        self.connection()
+            .execute(
+                "INSERT INTO bets (
+                     guild_id,match_id,discord_id,team_bet_on,amount,bet_time,
+                     leverage,payout
+                 ) VALUES (?1,?2,?3,?4,?5,?6,1,?7)",
+                params![
+                    GUILD,
+                    self.match_id,
+                    discord_id,
+                    team.label(),
+                    amount,
+                    MATCH_AT,
+                    payout
+                ],
+            )
+            .expect("seed settled bet");
+    }
+
+    fn assign_low_priority(&self, discord_id: i64) {
+        self.connection()
+            .execute(
+                "INSERT INTO low_priority_state (discord_id,guild_id,set_by)
+                 VALUES (?1,?2,?3)",
+                params![discord_id, GUILD, ADMIN],
+            )
+            .expect("seed low priority state");
+    }
+
+    fn settlement_taxes(&self) -> Vec<(i64, i64, i64)> {
+        self.connection()
+            .prepare(
+                "SELECT discord_id,vanity_tax,low_priority_tax
+                 FROM bet_settlement_taxes WHERE match_id=?1 ORDER BY discord_id",
+            )
+            .expect("prepare settlement taxes")
+            .query_map([self.match_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("query settlement taxes")
+            .collect::<Result<_, _>>()
+            .expect("settlement taxes")
     }
 }
 
@@ -254,6 +318,7 @@ async fn test_correction_replay_failure_has_idempotent_recovery() {
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards: rewards.clone(),
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(FailFirstReplay(AtomicBool::new(true))),
@@ -397,6 +462,7 @@ async fn pending_correction_recovers_total_reward_snapshot_after_adapter_only_cr
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards: rewards.clone(),
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(AllowReplay),
@@ -457,6 +523,7 @@ async fn ready_observer_recovers_a_persisted_core_applied_correction() {
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards: rewards.clone(),
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(FailFirstReplay(AtomicBool::new(true))),
@@ -526,6 +593,7 @@ async fn ready_observer_cleans_claim_when_replay_committed_before_process_exit()
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards: rewards.clone(),
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(FailFirstReplay(AtomicBool::new(true))),
@@ -598,6 +666,7 @@ async fn reconnect_ready_never_releases_a_live_correction_lease() {
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards,
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(AllowReplay),
@@ -649,6 +718,7 @@ async fn ready_observer_leaves_foreign_guild_correction_and_lease_untouched() {
         new_player_mmr_discount: 0,
         house_payout_multiplier: 1.0,
         vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
         rewards: rewards.clone(),
         vanity_tax: Arc::new(NoVanityTax),
         replay_gate: Arc::new(FailFirstReplay(AtomicBool::new(true))),
@@ -700,4 +770,52 @@ async fn ready_observer_leaves_foreign_guild_correction_and_lease_untouched() {
         )
         .expect("foreign recovery state remains");
     assert_eq!(state, ("foreign-dead-owner".to_owned(), 1, 1));
+}
+
+/// The low-priority roster lives in SQLite, so it has to be read on the same
+/// blocking worker that owns the correction, and its withholding is accounted
+/// apart from the vanity tax the settlement table already tracks.
+#[tokio::test]
+async fn test_correction_taxes_low_priority_bet_profit_separately() {
+    let fixture = Fixture::new();
+    let repository = MatchCorrectionRepository::new(fixture.database.path());
+    let rewards = Arc::new(RepositoryReward {
+        repository: repository.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let radiant_bettor = 90_001;
+    let dire_bettor = 90_002;
+    fixture.add_bettor(radiant_bettor, 300);
+    fixture.add_bettor(dire_bettor, 100);
+    fixture.place_bet(radiant_bettor, MatchSide::Radiant, 100, Some(200));
+    fixture.place_bet(dire_bettor, MatchSide::Dire, 100, None);
+    fixture.assign_low_priority(dire_bettor);
+    let control = ProductionAdminMatchCorrectionControl {
+        repository,
+        database_path: fixture.database.path().to_path_buf(),
+        openskill: CamaOpenSkillSystem::default(),
+        rating: CamaRatingSystem::default(),
+        new_player_mmr_discount: 0,
+        house_payout_multiplier: 1.0,
+        vanity_tax_rate: 0.1,
+        low_priority_tax_rate: 0.1,
+        rewards,
+        vanity_tax: Arc::new(NoVanityTax),
+        replay_gate: Arc::new(AllowReplay),
+    };
+
+    control
+        .correct_match(AdminCorrectMatchRequest {
+            guild_id: GUILD,
+            actor_id: ADMIN,
+            match_id: fixture.match_id,
+            correct_result: AdminCorrectMatchSide::Dire,
+        })
+        .await
+        .expect("corrected settlement");
+
+    // The 200 pool payout on a 100 stake is 100 profit, so 10 is withheld.
+    assert_eq!(fixture.balance(dire_bettor), 100 + 200 - 10);
+    assert_eq!(fixture.balance(radiant_bettor), 100);
+    assert_eq!(fixture.settlement_taxes(), vec![(dire_bettor, 0, 10)]);
 }

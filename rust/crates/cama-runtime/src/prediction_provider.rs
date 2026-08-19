@@ -21,6 +21,7 @@ use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
 use cama_db::guild_config_repository::GuildConfigRepository;
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::prediction_resolution_repository::{
     BASIS_POINTS, PredictionResolutionRepository, Resolution, ResolutionParticipant,
@@ -517,6 +518,7 @@ pub struct PredictionCommandConfig {
     pub fade_ticks: i64,
     pub initial_fair_default: i64,
     pub levels_per_side: usize,
+    pub low_priority_tax_bps: i64,
     pub max_contracts_per_trade: i64,
     pub outer_level_sizes: Vec<i64>,
     pub price_high: i64,
@@ -548,6 +550,7 @@ impl PredictionCommandConfig {
             initial_fair_default: values.prediction_initial_fair_default,
             levels_per_side: usize::try_from(values.prediction_levels_per_side.max(0))
                 .unwrap_or(usize::MAX),
+            low_priority_tax_bps: rate_to_bps(values.low_priority_profit_tax_rate),
             max_contracts_per_trade: values.prediction_max_contracts_per_trade,
             outer_level_sizes: values.prediction_outer_level_sizes.clone(),
             price_high: values.prediction_price_high,
@@ -627,6 +630,7 @@ impl PredictionRegistrationProvider {
                 predictions: PredictionRepository::new(&path),
                 resolutions: PredictionResolutionRepository::new(&path),
                 pets: PetEvolutionRepository::new(&path),
+                low_priority: LowPriorityRepository::new(&path),
                 config: PredictionCommandConfig::from_application_config(config),
                 vanity_tax,
                 command_discord: ports.command_discord,
@@ -659,6 +663,7 @@ struct PredictionInteractionHandler {
     predictions: PredictionRepository,
     resolutions: PredictionResolutionRepository,
     pets: PetEvolutionRepository,
+    low_priority: LowPriorityRepository,
     config: PredictionCommandConfig,
     vanity_tax: Arc<dyn PredictionVanityTaxPort>,
     command_discord: Arc<dyn PredictionCommandDiscordPort>,
@@ -2151,6 +2156,7 @@ impl PredictionInteractionHandler {
         let taxable = self.vanity_tax.taxable_ids(market.guild_id);
         let repository = self.predictions.clone();
         let resolutions = self.resolutions.clone();
+        let low_priority = self.low_priority.clone();
         let config = self.config.clone();
         let resolved_by = command.user_id;
         let market_guild_id = market.guild_id;
@@ -2161,6 +2167,11 @@ impl PredictionInteractionHandler {
                     now_seconds(),
                     config.economy_events_enabled,
                 )
+                .map_err(|error| error.to_string())?;
+            // Read on the blocking pool, not beside the vanity set, because it
+            // is a SQLite query rather than an in-memory cache lookup.
+            let low_priority_taxable_ids = low_priority
+                .active_taxable_ids(Some(market_guild_id))
                 .map_err(|error| error.to_string())?;
             resolutions
                 .settle_orderbook(
@@ -2173,6 +2184,8 @@ impl PredictionInteractionHandler {
                         bankruptcy_credit_bps: Some(config.bankruptcy_credit_bps),
                         vanity_tax_bps: config.vanity_tax_bps,
                         vanity_taxable_ids: taxable,
+                        low_priority_tax_bps: config.low_priority_tax_bps,
+                        low_priority_taxable_ids,
                     },
                 )
                 .map_err(|error| error.to_string())
@@ -3141,11 +3154,18 @@ fn resolution_chunks(resolution: &Resolution, question: &str) -> Vec<String> {
         .iter()
         .map(|participant| participant.vanity_tax)
         .sum();
+    let low_priority: i64 = participants
+        .iter()
+        .map(|participant| participant.low_priority_tax)
+        .sum();
     if bankruptcy > 0 {
         lines.push(format!("({bankruptcy} JC withheld from bankrupt winners.)"));
     }
     if vanity > 0 {
         lines.push(format!("(−{vanity} JC vanity tax.)"));
+    }
+    if low_priority > 0 {
+        lines.push(format!("(−{low_priority} JC low priority tax.)"));
     }
     chunk_lines(&lines, DISCORD_MESSAGE_LIMIT)
 }

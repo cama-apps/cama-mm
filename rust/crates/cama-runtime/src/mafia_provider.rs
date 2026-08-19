@@ -25,6 +25,7 @@ use cama_app::mafia_flavor::MafiaFlavorService;
 use cama_app::mafia_service::{compute_payouts, role_counts};
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::core_repositories::PlayerRepository;
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mafia_repository::{
     AddBountyResult, MafiaAction, MafiaActionType, MafiaCancelResult, MafiaGame, MafiaHistoryRow,
     MafiaPhase, MafiaPlayer, MafiaRepository, MafiaRepositoryError, MafiaRole, MafiaTwist,
@@ -243,10 +244,12 @@ impl MafiaRegistrationProvider {
             handler: Arc::new(MafiaInteractionHandler {
                 repository: MafiaRepository::new(&path),
                 players: PlayerRepository::new(&path),
+                database_path: path,
                 flavor: MafiaFlavorService::default(),
                 vanity_tax,
                 bankruptcy_penalty_rate: config.values.bankruptcy_penalty_rate,
                 vanity_tax_rate: config.values.vanity_tax_rate,
+                low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
                 discord,
                 mafia_discord,
                 channel_id: config.channels.mafia,
@@ -339,10 +342,12 @@ impl BackgroundWorker for MafiaPhaseWorker {
 struct MafiaInteractionHandler {
     repository: MafiaRepository,
     players: PlayerRepository,
+    database_path: std::path::PathBuf,
     flavor: MafiaFlavorService,
     vanity_tax: Arc<PersistentVanityTaxService>,
     bankruptcy_penalty_rate: f64,
     vanity_tax_rate: f64,
+    low_priority_tax_rate: f64,
     discord: Arc<dyn DiscordTransport>,
     mafia_discord: Arc<dyn MafiaDiscordPort>,
     channel_id: i64,
@@ -395,6 +400,7 @@ struct DaySummary {
     bounty_reward: i64,
     bankruptcy_penalties: BTreeMap<i64, i64>,
     vanity_taxes: BTreeMap<i64, i64>,
+    low_priority_taxes: BTreeMap<i64, i64>,
     vote_breakdown: BTreeMap<i64, i64>,
     vote_detail: Vec<(i64, i64)>,
     twist: Option<MafiaTwist>,
@@ -421,6 +427,9 @@ struct ResolutionReceipt {
     bounty_reward: i64,
     bankruptcy_penalties: BTreeMap<i64, i64>,
     vanity_taxes: BTreeMap<i64, i64>,
+    // Receipts written before this withholding existed replay without it.
+    #[serde(default)]
+    low_priority_taxes: BTreeMap<i64, i64>,
     vote_breakdown: BTreeMap<i64, i64>,
     vote_detail: Vec<(i64, i64)>,
     twist: Option<String>,
@@ -445,6 +454,7 @@ impl ResolutionReceipt {
             bounty_reward: summary.bounty_reward,
             bankruptcy_penalties: summary.bankruptcy_penalties.clone(),
             vanity_taxes: summary.vanity_taxes.clone(),
+            low_priority_taxes: summary.low_priority_taxes.clone(),
             vote_breakdown: summary.vote_breakdown.clone(),
             vote_detail: summary.vote_detail.clone(),
             twist: summary.twist.map(|twist| twist.as_str().to_owned()),
@@ -471,6 +481,7 @@ impl ResolutionReceipt {
             bounty_reward: self.bounty_reward,
             bankruptcy_penalties: self.bankruptcy_penalties,
             vanity_taxes: self.vanity_taxes,
+            low_priority_taxes: self.low_priority_taxes,
             vote_breakdown: self.vote_breakdown,
             vote_detail: self.vote_detail,
             twist,
@@ -1176,13 +1187,20 @@ impl MafiaInteractionHandler {
                 let bankruptcy_penalty_rate = self.bankruptcy_penalty_rate;
                 let vanity_tax_rate = self.vanity_tax_rate;
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+                let low_priority_tax_rate = self.low_priority_tax_rate;
+                let database_path = self.database_path.clone();
                 let summary = blocking(move || {
+                    let low_priority_taxable_ids = LowPriorityRepository::new(&database_path)
+                        .active_taxable_ids(Some(guild_id))
+                        .map_err(to_string)?;
                     force_finalize(
                         &repository,
                         guild_id,
                         Some(bankruptcy_penalty_rate),
                         vanity_tax_rate,
                         &vanity_taxable_ids,
+                        low_priority_tax_rate,
+                        &low_priority_taxable_ids,
                     )
                 })
                 .await
@@ -1504,13 +1522,20 @@ impl MafiaInteractionHandler {
                 let bankruptcy_penalty_rate = self.bankruptcy_penalty_rate;
                 let vanity_tax_rate = self.vanity_tax_rate;
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
+                let low_priority_tax_rate = self.low_priority_tax_rate;
+                let database_path = self.database_path.clone();
                 let summary = blocking(move || {
+                    let low_priority_taxable_ids = LowPriorityRepository::new(&database_path)
+                        .active_taxable_ids(Some(guild_id))
+                        .map_err(to_string)?;
                     resolve_day(
                         &repository,
                         guild_id,
                         Some(bankruptcy_penalty_rate),
                         vanity_tax_rate,
                         &vanity_taxable_ids,
+                        low_priority_tax_rate,
+                        &low_priority_taxable_ids,
                     )
                 })
                 .await?;
@@ -2066,6 +2091,13 @@ impl MafiaInteractionHandler {
         let vanity_total = summary.vanity_taxes.values().sum::<i64>();
         if vanity_total > 0 {
             lines.push(format!("−{} {JOPACOIN_EMOTE} vanity tax.", vanity_total));
+        }
+        let low_priority_total = summary.low_priority_taxes.values().sum::<i64>();
+        if low_priority_total > 0 {
+            lines.push(format!(
+                "−{} {JOPACOIN_EMOTE} low priority tax.",
+                low_priority_total
+            ));
         }
         let living_mentions = players
             .iter()
@@ -3717,6 +3749,8 @@ fn resolve_day(
     bankruptcy_penalty_rate: Option<f64>,
     vanity_tax_rate: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_tax_rate: f64,
+    low_priority_taxable_ids: &BTreeSet<i64>,
 ) -> Result<DaySummary, String> {
     let Some(game) = repository
         .get_active_game(Some(guild_id))
@@ -3873,6 +3907,7 @@ fn resolve_day(
                 bounty_reward: result.bounty.reward,
                 bankruptcy_penalties: result.bankruptcy_penalties.clone(),
                 vanity_taxes: result.vanity_taxes.clone(),
+                low_priority_taxes: result.low_priority_taxes.clone(),
                 vote_breakdown: receipt_breakdown,
                 vote_detail: receipt_vote_detail,
                 twist: receipt_twist,
@@ -3903,6 +3938,8 @@ fn resolve_day(
                 bankruptcy_penalty_rate,
                 vanity_tax_rate,
                 vanity_taxable_ids,
+                low_priority_tax_rate,
+                low_priority_taxable_ids,
                 receipt_factory,
             )
             .map_err(to_string)?;
@@ -3926,6 +3963,7 @@ fn resolve_day(
             bounty_reward: result.bounty.reward,
             bankruptcy_penalties: result.bankruptcy_penalties,
             vanity_taxes: result.vanity_taxes,
+            low_priority_taxes: result.low_priority_taxes,
             vote_breakdown: breakdown,
             vote_detail,
             twist: game.twist_event,
@@ -3971,6 +4009,8 @@ fn force_finalize(
     bankruptcy_penalty_rate: Option<f64>,
     vanity_tax_rate: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
+    low_priority_tax_rate: f64,
+    low_priority_taxable_ids: &BTreeSet<i64>,
 ) -> Result<DaySummary, String> {
     let Some(game) = repository
         .get_active_game(Some(guild_id))
@@ -4063,6 +4103,7 @@ fn force_finalize(
             nonprofit_overflow: overflow,
             bankruptcy_penalties: result.bankruptcy_penalties.clone(),
             vanity_taxes: result.vanity_taxes.clone(),
+            low_priority_taxes: result.low_priority_taxes.clone(),
             twist: receipt_twist,
             ..DaySummary::default()
         };
@@ -4087,6 +4128,8 @@ fn force_finalize(
             bankruptcy_penalty_rate,
             vanity_tax_rate,
             vanity_taxable_ids,
+            low_priority_tax_rate,
+            low_priority_taxable_ids,
             receipt_factory,
         )
         .map_err(to_string)?;
@@ -4108,6 +4151,7 @@ fn force_finalize(
         nonprofit_overflow: overflow,
         bankruptcy_penalties: result.bankruptcy_penalties,
         vanity_taxes: result.vanity_taxes,
+        low_priority_taxes: result.low_priority_taxes,
         twist: game.twist_event,
         ..DaySummary::default()
     })

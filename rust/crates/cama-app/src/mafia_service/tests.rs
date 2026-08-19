@@ -1054,6 +1054,88 @@ fn test_finalize_day_resolution_applies_audited_vanity_tax() {
 }
 
 #[test]
+fn test_finalize_day_resolution_applies_audited_low_priority_tax() {
+    let (mut mafia, repository) = service();
+    mafia.vanity_tax_basis_points = 100;
+    mafia.low_priority_tax_basis_points = 1_000;
+    seed_accounts(&repository, &[511, 512, 513, 514, 515], 0);
+    let game_id = day_game(
+        &repository,
+        roster(
+            GUILD,
+            &[
+                (511, Role::Mafia, true),
+                (512, Role::Townie, false),
+                (513, Role::Doctor, false),
+                (514, Role::Detective, false),
+                (515, Role::Townie, false),
+            ],
+        ),
+    );
+    repository.mark_vanity_taxable(GUILD, 512);
+    repository.mark_low_priority_taxable(GUILD, 512);
+    assert!(mafia.finalize_manual(game_id, Winner::Town, &BTreeMap::from([(512, 225)])));
+    // Both rates read the same 217 JC profit: 2 vanity plus 21 low priority.
+    assert_eq!(repository.balance(GUILD, 512), 202);
+    assert_eq!(repository.nonprofit_fund(GUILD), 23);
+    let ledger = repository.ledger();
+    assert_eq!(ledger.len(), 2);
+    assert_eq!(ledger[1].source, "low_priority_tax");
+    assert_eq!(ledger[1].delta, -21);
+    assert_eq!(ledger[1].related_id, game_id.to_string());
+}
+
+#[test]
+fn test_low_priority_tax_never_withholds_past_the_profit() {
+    let (mut mafia, repository) = service();
+    mafia.vanity_tax_basis_points = 9_000;
+    mafia.low_priority_tax_basis_points = 9_000;
+    seed_accounts(&repository, &[511, 512, 513, 514, 515], 0);
+    let game_id = day_game(
+        &repository,
+        roster(
+            GUILD,
+            &[
+                (511, Role::Mafia, true),
+                (512, Role::Townie, false),
+                (513, Role::Doctor, false),
+                (514, Role::Detective, false),
+                (515, Role::Townie, false),
+            ],
+        ),
+    );
+    repository.mark_vanity_taxable(GUILD, 512);
+    repository.mark_low_priority_taxable(GUILD, 512);
+    assert!(mafia.finalize_manual(game_id, Winner::Town, &BTreeMap::from([(512, 225)])));
+    // The vanity tax takes 195 of the 217 profit, so only 22 is left to take.
+    assert_eq!(repository.balance(GUILD, 512), ENTRY_FEE);
+    assert_eq!(repository.ledger()[1].delta, -22);
+}
+
+#[test]
+fn test_resolve_day_taxes_low_priority_profit_on_the_vanity_basis() {
+    let (mut mafia, repository) = service();
+    mafia.vanity_tax_basis_points = 2_000;
+    mafia.low_priority_tax_basis_points = 2_000;
+    seed_accounts(&repository, &[1, 2, 3, 4, 5], -ENTRY_FEE);
+    for id in [2, 3, 4, 5] {
+        repository.mark_vanity_taxable(GUILD, id);
+        repository.mark_low_priority_taxable(GUILD, id);
+    }
+    day_game(&repository, base_roles());
+    vote_for(&mafia, &[2, 3, 4, 5], 1);
+    let result = mafia.resolve_day(GUILD).expect("resolution");
+    assert!(!result.low_priority_taxes.is_empty());
+    // Equal rates over one profit basis must withhold equal amounts.
+    assert_eq!(result.low_priority_taxes, result.vanity_taxes);
+    let player_total: i64 = [1, 2, 3, 4, 5]
+        .iter()
+        .map(|id| repository.balance(GUILD, *id))
+        .sum();
+    assert_eq!(player_total + repository.nonprofit_fund(GUILD), 0);
+}
+
+#[test]
 fn test_player_role_includes_allies_for_mafia() {
     let (mafia, repository) = service();
     repository.seed_game(

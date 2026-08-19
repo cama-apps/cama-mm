@@ -48,6 +48,14 @@ pub struct Player {
     /// ("1".."5"). Absent roles mean no recorded sample, which the role factor
     /// treats as unproven. Empty for players loaded outside team balancing.
     pub role_records: BTreeMap<String, RoleRecord>,
+    /// Matchmaking-only strength multiplier applied on top of the selected
+    /// rating, where `None` is neutral.
+    ///
+    /// The shuffle path sets this so a player can be balanced as though they
+    /// were stronger or weaker than their rating. It is never persisted and
+    /// never reaches stored ratings, profiles, leaderboards, or the rating
+    /// update after a match: only the value team balancing compares.
+    pub matchmaking_multiplier: Option<f64>,
 }
 
 impl Player {
@@ -68,8 +76,17 @@ impl Player {
     ///    Glicko rating and then quarter-scaled MMR when `os_mu` is absent.
     /// 3. Glicko when requested and available.
     /// 4. Raw MMR, or zero when the player has no rating data.
+    ///
+    /// [`Self::matchmaking_multiplier`] scales the selected rating last, so a
+    /// player can be balanced above or below their true strength.
     #[must_use]
     pub fn get_value(&self, use_glicko: bool, use_openskill: bool, use_jopacoin: bool) -> f64 {
+        self.base_value(use_glicko, use_openskill, use_jopacoin)
+            * self.matchmaking_multiplier.unwrap_or(1.0)
+    }
+
+    /// The selected rating before any matchmaking-only multiplier.
+    fn base_value(&self, use_glicko: bool, use_openskill: bool, use_jopacoin: bool) -> f64 {
         if use_jopacoin {
             return self.jopacoin_balance as f64;
         }
@@ -240,5 +257,93 @@ mod tests {
             ..Player::new("AllSources")
         };
         assert_eq!(all_sources.get_value(true, true, true), 7.0);
+    }
+
+    #[test]
+    fn test_absent_matchmaking_multiplier_leaves_every_rating_source_untouched() {
+        let player = Player {
+            mmr: Some(2_000),
+            glicko_rating: Some(1_800.0),
+            os_mu: Some(45.0),
+            jopacoin_balance: 500,
+            ..Player::new("Neutral")
+        };
+
+        assert_eq!(player.matchmaking_multiplier, None);
+        assert_eq!(player.get_value(true, false, false), 1_800.0);
+        assert_eq!(player.get_value(false, false, false), 2_000.0);
+        assert_eq!(
+            player.get_value(true, true, false),
+            (45.0 - OPENSKILL_MIN_MU) * OPENSKILL_DISPLAY_SCALE
+        );
+        assert_eq!(player.get_value(true, false, true), 500.0);
+    }
+
+    #[test]
+    fn test_matchmaking_multiplier_scales_each_rating_source() {
+        let player = Player {
+            mmr: Some(2_000),
+            glicko_rating: Some(1_800.0),
+            os_mu: Some(45.0),
+            matchmaking_multiplier: Some(1.10),
+            ..Player::new("LowPriority")
+        };
+
+        assert_eq!(player.get_value(true, false, false), 1_800.0 * 1.10);
+        assert_eq!(player.get_value(false, false, false), 2_000.0 * 1.10);
+        assert_eq!(
+            player.get_value(true, true, false),
+            (45.0 - OPENSKILL_MIN_MU) * OPENSKILL_DISPLAY_SCALE * 1.10
+        );
+
+        let unrated = Player {
+            matchmaking_multiplier: Some(1.10),
+            ..Player::new("Unrated")
+        };
+        assert_eq!(unrated.get_value(true, false, false), 0.0);
+    }
+
+    #[test]
+    fn test_matchmaking_multiplier_clamps_below_origin_before_scaling() {
+        // The OpenSkill branch floors at zero, so a player under the display
+        // origin stays at zero rather than being scaled into a negative value.
+        let below_origin = Player {
+            os_mu: Some(20.0),
+            matchmaking_multiplier: Some(1.10),
+            ..Player::new("BelowOrigin")
+        };
+        assert_eq!(below_origin.get_value(true, true, false), 0.0);
+    }
+
+    #[test]
+    fn test_matchmaking_multiplier_composes_with_the_role_factor() {
+        let player = Player {
+            glicko_rating: Some(2_000.0),
+            matchmaking_multiplier: Some(1.10),
+            ..Player::new("Flex")
+        };
+
+        let expected = 2_000.0 * 1.10 * player.role_factor_for("1");
+        assert_eq!(
+            player.role_adjusted_value("1", true, false, false),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_matchmaking_multiplier_would_invert_a_jopacoin_debtor() {
+        // Documents why the shuffle path never sets the multiplier in jopacoin
+        // mode: a jopacoin "rating" is a signed balance, so scaling a debtor
+        // pushes them further negative, which reads as weaker rather than
+        // stronger and would hand them easier games.
+        let debtor = Player {
+            jopacoin_balance: -200,
+            matchmaking_multiplier: Some(1.10),
+            ..Player::new("Debtor")
+        };
+        let scaled = debtor.get_value(true, false, true);
+
+        assert!((scaled - -220.0).abs() < 1e-9);
+        assert!(scaled < -200.0);
     }
 }

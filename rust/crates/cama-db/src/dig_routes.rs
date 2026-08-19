@@ -99,6 +99,7 @@ pub struct BossVictoryRequest<'a> {
     pub clear_stinger_curse: bool,
     pub jc_delta: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub boss_id: &'a str,
     pub boss_depth: i64,
     pub echo_window_seconds: i64,
@@ -291,9 +292,11 @@ impl DigRouteRepository {
             .checked_add(request.echo_window_seconds)
             .ok_or(DigRouteRepositoryError::AmountOverflow)?;
         let vanity_tax = request.vanity_tax.max(0);
+        let low_priority_tax = request.low_priority_tax.max(0);
         let gross_delta = request
             .jc_delta
             .checked_add(vanity_tax)
+            .and_then(|delta| delta.checked_add(low_priority_tax))
             .ok_or(DigRouteRepositoryError::AmountOverflow)?;
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
@@ -356,6 +359,20 @@ impl DigRouteRepository {
                     related_id: request.boss_id,
                     metadata: request.detail_json,
                     reason: "vanity tax on JC profit",
+                },
+            )?;
+        }
+        if low_priority_tax > 0 {
+            update_balance_with_ledger_context(
+                &transaction,
+                request.discord_id,
+                guild_id,
+                -low_priority_tax,
+                BalanceLedgerContext {
+                    source: "low_priority_tax",
+                    related_id: request.boss_id,
+                    metadata: request.detail_json,
+                    reason: "low priority tax on JC profit",
                 },
             )?;
         }

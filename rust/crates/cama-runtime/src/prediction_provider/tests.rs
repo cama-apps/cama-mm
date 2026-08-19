@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use cama_db::low_priority_repository::SetLowPriorityInput;
 use cama_db::schema_manager::{MigrationSettings, initialize_or_migrate_with_settings};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -483,12 +484,20 @@ impl Fixture {
     }
 
     fn provider(&self) -> PredictionRegistrationProvider {
+        self.provider_with_config(test_config())
+    }
+
+    fn provider_with_config(
+        &self,
+        config: PredictionCommandConfig,
+    ) -> PredictionRegistrationProvider {
         PredictionRegistrationProvider {
             handler: Arc::new(PredictionInteractionHandler {
                 predictions: PredictionRepository::new(&self.path),
                 resolutions: PredictionResolutionRepository::new(&self.path),
                 pets: PetEvolutionRepository::new(&self.path),
-                config: test_config(),
+                low_priority: LowPriorityRepository::new(&self.path),
+                config,
                 vanity_tax: Arc::new(FakeVanityTax),
                 command_discord: self.command.clone(),
                 market_discord: self.market.clone(),
@@ -520,6 +529,7 @@ fn test_config() -> PredictionCommandConfig {
         fade_ticks: 5,
         initial_fair_default: 50,
         levels_per_side: 2,
+        low_priority_tax_bps: 0,
         max_contracts_per_trade: 100,
         outer_level_sizes: vec![],
         price_high: 95,
@@ -1211,6 +1221,93 @@ async fn resolve_rollback_cancel_drive_durable_state_and_terminal_or_restored_co
     assert_eq!(
         edits[2].2.response.embeds[0].fields[0].value,
         "**CANCELLED** — cost basis refunded."
+    );
+}
+
+#[tokio::test]
+async fn resolve_taxes_active_low_priority_profit_through_its_own_ledger_row() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let prediction_id = fixture.market("Does low priority pay its own tax?");
+    PredictionRepository::new(&fixture.path)
+        .buy_contracts_atomic_with_max(prediction_id, TRADER, ContractSide::Yes, 2, 100)
+        .expect("buy taxed contracts");
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&fixture.provider_with_config(PredictionCommandConfig {
+            low_priority_tax_bps: 1_000,
+            ..test_config()
+        }))
+        .expect("register prediction provider");
+    let registry = builder.build();
+    // Assigned after registration so the settlement has to read the live table.
+    LowPriorityRepository::new(&fixture.path)
+        .set_low_priority(&SetLowPriorityInput::new(TRADER, Some(GUILD), ADMIN, None))
+        .expect("assign low priority");
+
+    let responder = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("predict")
+        .expect("predict command handler")
+        .handle(
+            command_request(
+                "resolve",
+                vec![
+                    integer("prediction_id", prediction_id),
+                    string("outcome", "yes"),
+                ],
+                ADMIN,
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("resolve prediction");
+
+    // 10 JC of cost basis against a 200 JC payout leaves 190 JC of profit.
+    let settled_balance: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![TRADER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read settled wallet");
+    assert_eq!(settled_balance, 1_171);
+    let tax_row: (i64, String) = fixture
+        .connection()
+        .query_row(
+            "SELECT delta,reason FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+            params![GUILD, TRADER],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read low priority tax ledger");
+    assert_eq!(tax_row, (-19, "low priority tax on JC profit".to_owned()));
+    let vanity_rows: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND source='vanity_tax'",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .expect("read vanity tax ledger");
+    assert_eq!(vanity_rows, 0);
+    let persisted_tax: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT low_priority_tax FROM prediction_positions
+             WHERE prediction_id=?1 AND discord_id=?2",
+            params![prediction_id, TRADER],
+            |row| row.get(0),
+        )
+        .expect("read persisted low priority tax");
+    assert_eq!(persisted_tax, 19);
+    assert!(
+        responder.snapshot().followups[0]
+            .content
+            .contains("(−19 JC low priority tax.)")
     );
 }
 

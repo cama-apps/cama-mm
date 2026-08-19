@@ -946,6 +946,110 @@ fn test_add_bounty_is_guild_isolated() {
     );
 }
 
+#[test]
+fn test_finalize_day_resolution_stacks_low_priority_tax_on_the_vanity_basis() {
+    let fixture = Fixture::new();
+    for discord_id in [1, 2, 3] {
+        fixture.seed_player(discord_id, GUILD, 100);
+    }
+    let game_id = fixture.game(MafiaPhase::Day);
+    let result = fixture
+        .repository
+        .finalize_day_resolution(
+            game_id,
+            MafiaWinner::Town,
+            50,
+            None,
+            None,
+            &BTreeMap::from([(1, 50), (2, 50), (3, 10)]),
+            10,
+            0,
+            2_000,
+            None,
+            false,
+            0,
+            None,
+            0.25,
+            &BTreeSet::from([1, 2]),
+            0.10,
+            &BTreeSet::from([1, 3]),
+        )
+        .expect("finalize terminal day");
+    assert!(result.applied);
+    assert_eq!(result.vanity_taxes, BTreeMap::from([(1, 10), (2, 10)]));
+    // Both rates read the same 40 JC profit, and player 3 cleared none.
+    assert_eq!(result.low_priority_taxes, BTreeMap::from([(1, 4)]));
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(1, Some(GUILD))
+            .expect("taxed twice"),
+        136
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(2, Some(GUILD))
+            .expect("vanity tax only"),
+        140
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(3, Some(GUILD))
+            .expect("no profit"),
+        110
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row("SELECT COUNT(*) FROM economy_ledger_context", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("ledger context cleared"),
+        0
+    );
+}
+
+#[test]
+fn test_finalize_day_resolution_caps_stacked_withholding_at_the_profit() {
+    let fixture = Fixture::new();
+    fixture.seed_player(1, GUILD, 100);
+    let game_id = fixture.game(MafiaPhase::Day);
+    let result = fixture
+        .repository
+        .finalize_day_resolution(
+            game_id,
+            MafiaWinner::Town,
+            50,
+            None,
+            None,
+            &BTreeMap::from([(1, 50)]),
+            10,
+            0,
+            2_000,
+            None,
+            false,
+            0,
+            None,
+            0.9,
+            &BTreeSet::from([1]),
+            0.9,
+            &BTreeSet::from([1]),
+        )
+        .expect("finalize terminal day");
+    assert_eq!(result.vanity_taxes, BTreeMap::from([(1, 36)]));
+    assert_eq!(result.low_priority_taxes, BTreeMap::from([(1, 4)]));
+    // Withholding stops at the 40 JC profit, leaving the entry fee intact.
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(1, Some(GUILD))
+            .expect("clamped withholding"),
+        110
+    );
+}
+
 const FIXTURE_SCHEMA: &str = r#"
 PRAGMA foreign_keys=OFF;
 CREATE TABLE players (

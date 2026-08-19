@@ -132,6 +132,10 @@ pub struct DigBossRuntimeCommit<'a> {
     /// Profit-only vanity deduction. The repository credits gross Dig JC and
     /// records this as a separate `vanity_tax` debit in the same transaction.
     pub vanity_tax: i64,
+    /// Profit-only low-priority deduction taken from the same gross Dig JC.
+    /// It is accounted separately from the vanity deduction so each sink keeps
+    /// its own `low_priority_tax` ledger row in the same transaction.
+    pub low_priority_tax: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1008,12 +1012,15 @@ fn apply_balance(
     request: DigBossRuntimeCommit<'_>,
 ) -> Result<(), DigBossRuntimeRepositoryError> {
     let vanity_tax = request.vanity_tax.max(0);
+    let low_priority_tax = request.low_priority_tax.max(0);
     let net_delta = request
         .proposed
         .balance
         .saturating_sub(request.expected.balance);
-    let gross_delta = net_delta.saturating_add(vanity_tax);
-    if gross_delta == 0 && vanity_tax == 0 {
+    let gross_delta = net_delta
+        .saturating_add(vanity_tax)
+        .saturating_add(low_priority_tax);
+    if gross_delta == 0 && vanity_tax == 0 && low_priority_tax == 0 {
         return Ok(());
     }
     let audit = request
@@ -1049,6 +1056,10 @@ fn apply_balance(
         ));
     }
     transaction.execute("DELETE FROM economy_ledger_context", [])?;
+    // Each profit sink is withheld from the same gross credit and keeps its
+    // own ledger row, so the running balance walks the gross credit down to
+    // the proposed net one sink at a time.
+    let mut withheld_balance = gross_balance;
     if vanity_tax > 0 {
         transaction.execute(
             "INSERT INTO economy_ledger_context
@@ -1060,19 +1071,50 @@ fn apply_balance(
                 audit.detail_json,
             ],
         )?;
+        let next_balance = withheld_balance.saturating_sub(vanity_tax);
         let changed = transaction.execute(
             "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
               WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
             params![
-                request.proposed.balance,
+                next_balance,
                 request.expected.key.discord_id,
                 request.expected.key.guild_id,
-                gross_balance,
+                withheld_balance,
             ],
         )?;
         if changed != 1 {
             return Err(DigBossRuntimeRepositoryError::InvalidState(
                 "player balance changed during vanity-tax settlement",
+            ));
+        }
+        transaction.execute("DELETE FROM economy_ledger_context", [])?;
+        withheld_balance = next_balance;
+    }
+    if low_priority_tax > 0 {
+        transaction.execute(
+            "INSERT INTO economy_ledger_context
+             (id,source,actor_id,related_type,related_id,reason,metadata)
+             VALUES (1,'low_priority_tax',?1,'boss',?2,'low priority tax on JC profit',?3)",
+            params![
+                request.expected.key.discord_id,
+                audit.action_type,
+                audit.detail_json,
+            ],
+        )?;
+        let next_balance = withheld_balance.saturating_sub(low_priority_tax);
+        let changed = transaction.execute(
+            "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
+              WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
+            params![
+                next_balance,
+                request.expected.key.discord_id,
+                request.expected.key.guild_id,
+                withheld_balance,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DigBossRuntimeRepositoryError::InvalidState(
+                "player balance changed during low-priority-tax settlement",
             ));
         }
         transaction.execute("DELETE FROM economy_ledger_context", [])?;

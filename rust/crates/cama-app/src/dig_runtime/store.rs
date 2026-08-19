@@ -1168,13 +1168,16 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             }
         }
         // `request.next.balance` is the net post-policy balance.  Record the
-        // gross reward first (net plus the explicit tax), then withhold the
-        // tax in its own ledger row.  Both updates remain inside this
-        // transaction so an audit/delivery failure cannot leave either side
+        // gross reward first (net plus the explicit taxes), then withhold each
+        // tax in its own ledger row.  All updates remain inside this
+        // transaction so an audit/delivery failure cannot leave any side
         // of the split persisted.
         let net_reward_delta = request.next.balance.saturating_sub(balance_after_cost);
         let vanity_tax = request.vanity_tax.max(0);
-        let gross_reward_delta = net_reward_delta.saturating_add(vanity_tax);
+        let low_priority_tax = request.low_priority_tax.max(0);
+        let gross_reward_delta = net_reward_delta
+            .saturating_add(vanity_tax)
+            .saturating_add(low_priority_tax);
         let gross_balance = balance_after_cost.saturating_add(gross_reward_delta);
         if gross_reward_delta != 0 {
             set_runtime_ledger_context(
@@ -1195,6 +1198,7 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 return Err(DigRuntimeStoreError::Conflict);
             }
         }
+        let mut withheld_balance = gross_balance;
         if vanity_tax != 0 {
             set_runtime_ledger_context_source(
                 &transaction,
@@ -1205,10 +1209,33 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 "vanity tax on JC profit",
                 &request.detail,
             )?;
+            let next_balance = withheld_balance.saturating_sub(vanity_tax);
             let changed = transaction.execute(
                 "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
                  WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
-                params![request.next.balance, discord_id, guild_id, gross_balance],
+                params![next_balance, discord_id, guild_id, withheld_balance],
+            )?;
+            clear_runtime_ledger_context(&transaction)?;
+            if changed != 1 {
+                return Err(DigRuntimeStoreError::Conflict);
+            }
+            withheld_balance = next_balance;
+        }
+        if low_priority_tax != 0 {
+            set_runtime_ledger_context_source(
+                &transaction,
+                "low_priority_tax",
+                discord_id,
+                &request.action_type,
+                &request.action_type,
+                "low priority tax on JC profit",
+                &request.detail,
+            )?;
+            let next_balance = withheld_balance.saturating_sub(low_priority_tax);
+            let changed = transaction.execute(
+                "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
+                 WHERE discord_id=?2 AND guild_id=?3 AND COALESCE(jopacoin_balance,0)=?4",
+                params![next_balance, discord_id, guild_id, withheld_balance],
             )?;
             clear_runtime_ledger_context(&transaction)?;
             if changed != 1 {

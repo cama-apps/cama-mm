@@ -1838,6 +1838,7 @@ fn canonical_migrated_sqlite_income_order_and_match_marker_match_python() {
         apply_bankruptcy_penalty: true,
         bankruptcy_kept_rate: 0.75,
         vanity_tax_rate: 0.10,
+        low_priority_tax_rate: 0.0,
         decrement_bankruptcy_penalty: true,
         source: "match_win_bonus",
         related_type: Some("match_win_bonus"),
@@ -1856,6 +1857,7 @@ fn canonical_migrated_sqlite_income_order_and_match_marker_match_python() {
             garnished: 50,
             bankruptcy_penalty: 12,
             vanity_tax: 5,
+            low_priority_tax: 0,
             net: 33,
             balance_delta: 83,
             balance_after: -917,
@@ -1887,6 +1889,170 @@ fn canonical_migrated_sqlite_income_order_and_match_marker_match_python() {
         )
         .expect("read canonical award state");
     assert_eq!(state, (-917, 1, 83, 3));
+}
+
+#[test]
+fn low_priority_tax_is_debited_beside_the_vanity_tax_row() {
+    const PLAYER: i64 = 70_301;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open low-priority award database");
+    insert_award_player(&connection, PLAYER, 0);
+    drop(connection);
+
+    let repository = MatchRecordingRepository::new(database.path());
+    let receipts = repository
+        .credit_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardRequest {
+                vanity_tax_rate: 0.10,
+                low_priority_tax_rate: 0.10,
+                related_type: Some("match_participation"),
+                related_id: Some(931),
+                ..IncomeAwardRequest::ordinary(PLAYER, 100, "match_participation")
+            }],
+        )
+        .expect("credit doubly taxed award");
+    // Both rates apply to the same 100 JC profit basis rather than the
+    // post-vanity remainder.
+    assert_eq!(receipts[0].vanity_tax, 10);
+    assert_eq!(receipts[0].low_priority_tax, 10);
+    assert_eq!(receipts[0].net, 80);
+    assert_eq!(receipts[0].balance_delta, 80);
+    assert_eq!(receipts[0].balance_after, 80);
+
+    let connection = Connection::open(database.path()).expect("reopen low-priority award database");
+    let (vanity_rows, vanity_delta): (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(delta),0) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='vanity_tax'",
+            params![GUILD, PLAYER],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read vanity tax ledger rows");
+    assert_eq!((vanity_rows, vanity_delta), (1, -10));
+    let (low_priority_rows, low_priority_delta, reason): (i64, i64, String) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(delta),0), COALESCE(MAX(reason),'')
+             FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+            params![GUILD, PLAYER],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read low priority tax ledger rows");
+    assert_eq!(
+        (low_priority_rows, low_priority_delta, reason.as_str()),
+        (1, -10, "low priority tax on JC profit")
+    );
+    let balance: i64 = connection
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read taxed balance");
+    assert_eq!(balance, 80);
+}
+
+#[test]
+fn low_priority_tax_never_withholds_more_than_the_profit_basis() {
+    const PLAYER: i64 = 70_302;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open clamped award database");
+    insert_award_player(&connection, PLAYER, 500);
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,2,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("insert bankruptcy state");
+    drop(connection);
+
+    let receipts = MatchRecordingRepository::new(database.path())
+        .credit_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardRequest {
+                apply_bankruptcy_penalty: true,
+                bankruptcy_kept_rate: 0.5,
+                vanity_tax_rate: 0.40,
+                low_priority_tax_rate: 0.25,
+                related_type: Some("match_win_bonus"),
+                related_id: Some(932),
+                ..IncomeAwardRequest::ordinary(PLAYER, 100, "match_win_bonus")
+            }],
+        )
+        .expect("credit over-withheld award");
+    // 50 penalty + 40 vanity leaves only 10 of the 100 JC basis, so the
+    // 25 JC low-priority share is trimmed instead of overdrawing the profit.
+    assert_eq!(receipts[0].bankruptcy_penalty, 50);
+    assert_eq!(receipts[0].vanity_tax, 40);
+    assert_eq!(receipts[0].low_priority_tax, 10);
+    assert_eq!(receipts[0].net, 0);
+    assert_eq!(receipts[0].balance_delta, 0);
+    assert_eq!(receipts[0].balance_after, 500);
+}
+
+#[test]
+fn recovered_income_award_receipt_replays_the_low_priority_tax() {
+    const PLAYER: i64 = 70_303;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open recovered award database");
+    insert_award_player(&connection, PLAYER, 0);
+    drop(connection);
+
+    let repository = MatchRecordingRepository::new(database.path());
+    let award = IncomeAwardRequest {
+        vanity_tax_rate: 0.10,
+        low_priority_tax_rate: 0.10,
+        related_type: Some("match_win_bonus"),
+        related_id: Some(933),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 100, "match_win_bonus")
+    };
+    let first = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("credit exact-once award");
+    let retry = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("recover exact-once award");
+    assert!(!retry[0].applied);
+    assert_eq!(retry[0].low_priority_tax, first[0].low_priority_tax);
+    assert_eq!(retry[0].vanity_tax, first[0].vanity_tax);
+    assert_eq!(retry[0].balance_delta, first[0].balance_delta);
+    assert_eq!(retry[0].net, first[0].net);
+}
+
+#[test]
+fn low_priority_tax_skips_non_positive_income() {
+    const PLAYER: i64 = 70_304;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open untaxed award database");
+    insert_award_player(&connection, PLAYER, 40);
+    drop(connection);
+
+    let receipts = MatchRecordingRepository::new(database.path())
+        .credit_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardRequest {
+                low_priority_tax_rate: 0.10,
+                ..IncomeAwardRequest::ordinary(PLAYER, 0, "match_participation")
+            }],
+        )
+        .expect("credit zero award");
+    assert_eq!(receipts[0].low_priority_tax, 0);
+
+    let connection = Connection::open(database.path()).expect("reopen untaxed award database");
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+            params![GUILD, PLAYER],
+            |row| row.get(0),
+        )
+        .expect("count low priority tax rows");
+    assert_eq!(rows, 0);
 }
 
 #[test]

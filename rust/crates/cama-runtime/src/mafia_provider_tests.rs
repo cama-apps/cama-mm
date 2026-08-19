@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cama_app::service_container::{ServiceContainer, ServiceContainerOptions};
+use cama_db::low_priority_repository::SetLowPriorityInput;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -348,6 +349,137 @@ async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
             })
             .expect("ledger context clear"),
         0
+    );
+}
+
+#[tokio::test]
+async fn migrated_sqlite_resolution_taxes_active_low_priority_profit() {
+    let fixture = EconomyFixture::new();
+    for id in [1_i64, 2, 3] {
+        fixture.seed_player(id, 100);
+    }
+    LowPriorityRepository::new(fixture.database.path())
+        .set_low_priority(&SetLowPriorityInput::new(2, Some(77), 900, None))
+        .expect("seed active low priority");
+
+    let game_id = fixture
+        .repository
+        .create_game(Some(77), "2026-08-12", MafiaPhase::Day, 1_000, 15, None)
+        .expect("create terminal test game");
+    fixture
+        .repository
+        .add_players(
+            game_id,
+            &[
+                MafiaPlayer::new(game_id, 1, 77, MafiaRole::Mafia),
+                MafiaPlayer::new(game_id, 2, 77, MafiaRole::Townie),
+                MafiaPlayer::new(game_id, 3, 77, MafiaRole::Townie),
+            ],
+        )
+        .expect("seed game roster");
+    fixture
+        .repository
+        .record_action(&MafiaAction {
+            game_id,
+            guild_id: 77,
+            actor_id: 2,
+            target_id: Some(1),
+            action_type: MafiaActionType::Vote,
+            phase: MafiaPhase::Day,
+            day_number: 1,
+            result: None,
+        })
+        .expect("record lynch vote");
+
+    let mut container =
+        ServiceContainer::new(fixture.database.path(), ServiceContainerOptions::default());
+    container.initialize();
+    let vanity_tax = Arc::clone(
+        &container
+            .components()
+            .expect("economy service components")
+            .vanity_tax_service,
+    );
+    let discord = Arc::new(RecordingDiscord::default());
+    let mafia_port = Arc::new(RecordingMafiaPort::default());
+    let provider = MafiaRegistrationProvider::new_with_mafia_port(
+        fixture.database.path(),
+        &economy_config(),
+        vanity_tax,
+        discord,
+        mafia_port,
+    );
+    provider
+        .handler
+        .tick_guild(77)
+        .await
+        .expect("resolve migrated SQLite game through provider");
+
+    // A 50 JC payout on an 8 JC entry fee is 42 JC of profit, taxed at 10%.
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(2, Some(77))
+            .expect("low-priority town wallet"),
+        146
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(3, Some(77))
+            .expect("untaxed town wallet"),
+        150
+    );
+    let receipt = fixture
+        .repository
+        .get_game_by_id(game_id)
+        .expect("read settled game")
+        .expect("settled game")
+        .resolution_summary
+        .expect("atomic resolution receipt");
+    assert!(receipt.contains("\"vanity_taxes\":{}"));
+    assert!(receipt.contains("\"low_priority_taxes\":{\"2\":4}"));
+
+    let ledger = fixture
+        .connection()
+        .prepare(
+            "SELECT account_id,delta,source,related_type,related_id,reason,metadata
+             FROM economy_ledger_entries WHERE guild_id=77 ORDER BY ledger_id",
+        )
+        .expect("prepare ledger query")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .expect("read ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ledger");
+    assert!(!ledger.iter().any(|row| row.2 == "vanity_tax"));
+    let low_priority_ledger = ledger
+        .iter()
+        .find(|row| row.0 == 2 && row.1 == -4)
+        .expect("low priority ledger context");
+    let game_id_text = game_id.to_string();
+    assert_eq!(low_priority_ledger.2, "low_priority_tax");
+    assert_eq!(low_priority_ledger.3.as_deref(), Some("mafia_game"));
+    assert_eq!(
+        low_priority_ledger.4.as_deref(),
+        Some(game_id_text.as_str())
+    );
+    assert_eq!(
+        low_priority_ledger.5.as_deref(),
+        Some("low priority tax on JC profit")
+    );
+    assert_eq!(
+        low_priority_ledger.6.as_deref(),
+        Some("{\"winner\":\"TOWN\",\"entry_fee\":8}")
     );
 }
 

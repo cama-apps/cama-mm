@@ -156,6 +156,7 @@ fn regular_resolved_fixture(won: bool, broken_ids: Vec<i64>) -> ResolvedFight {
         gross_payout: if won { 500 } else { 0 },
         bankruptcy_penalty: 0,
         vanity_tax: 0,
+        low_priority_tax: 0,
         new_depth: if won { 100 } else { 95 },
         boss_hp_remaining: if won { 0 } else { 50 },
         boss_hp_max: 100,
@@ -613,6 +614,7 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                     weakened_until: 1_700_086_400,
                 }),
                 vanity_tax: 10,
+                low_priority_tax: 10,
                 preparation_mutation: crate::boss_multi_tier::BossPreparationMutation::Clear {
                     boundary: 25,
                 },
@@ -1860,6 +1862,121 @@ fn runtime_service_applies_daily_profit_policies_and_returns_typed_receipt() {
             )
             .expect("tax ledger"),
         1
+    );
+}
+
+/// Fake active-low-priority roster: one member taxed at a fixed percentage.
+#[derive(Debug)]
+struct FixedBossLowPriorityTax {
+    discord_id: i64,
+    guild_id: i64,
+    percent: i64,
+}
+
+impl DigBossLowPriorityTaxPort for FixedBossLowPriorityTax {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        if discord_id != self.discord_id || guild_id != self.guild_id || gross_profit <= 0 {
+            return 0;
+        }
+        gross_profit * self.percent / 100
+    }
+}
+
+fn taxed_boss_victory(low_priority_percent: Option<i64>) -> (FastTestDatabase, i64, i64) {
+    let database = fixture();
+    let vanity = Arc::new(VanityTaxService::with_rate_fraction(None, 0.10));
+    vanity
+        .refresh_guild(
+            GUILD,
+            &[VanityMember {
+                discord_id: PLAYER,
+                nickname: None,
+            }],
+            None,
+        )
+        .expect("vanity snapshot");
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = false;
+    let mut runtime = DigBossRuntimeService::sqlite(config).with_vanity_tax(vanity);
+    if let Some(percent) = low_priority_percent {
+        runtime = runtime.with_low_priority_tax(Arc::new(FixedBossLowPriorityTax {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            percent,
+        }));
+    }
+    let result = runtime
+        .fight_regular(
+            DigBossRuntimeRequest {
+                discord_id: PLAYER,
+                guild_id: GUILD,
+                now: 1_700_000_000,
+            },
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("fight");
+    assert!(result.outcome.won);
+    (database, result.outcome.vanity_tax, result.outcome.jc_delta)
+}
+
+#[test]
+fn runtime_service_stacks_low_priority_tax_beside_vanity_on_boss_winnings() {
+    let (_control, control_vanity, control_credited) = taxed_boss_victory(None);
+    assert!(control_vanity > 0);
+    // The same rate on the same gross winnings must produce the same amount:
+    // the low-priority sink reads the pre-vanity basis, not the remainder.
+    let (taxed, taxed_vanity, taxed_credited) = taxed_boss_victory(Some(10));
+    assert_eq!(taxed_vanity, control_vanity);
+    assert_eq!(taxed_credited, control_credited - control_vanity);
+    let ledger = Connection::open(taxed.path())
+        .expect("verify DB")
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+              WHERE account_id=?1 AND guild_id=?2 AND source='low_priority_tax'
+                AND delta=?3",
+            params![PLAYER, GUILD, -control_vanity],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("low-priority tax ledger");
+    assert_eq!(ledger, 1);
+}
+
+#[test]
+fn runtime_boss_loss_is_exempt_from_low_priority_tax() {
+    let database = fixture();
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = false;
+    let result = DigBossRuntimeService::sqlite(config)
+        .with_low_priority_tax(Arc::new(FixedBossLowPriorityTax {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            percent: 10,
+        }))
+        .fight_regular(
+            DigBossRuntimeRequest {
+                discord_id: PLAYER,
+                guild_id: GUILD,
+                now: 1_700_000_000,
+            },
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(1.0),
+        )
+        .expect("fight");
+    assert!(!result.outcome.won);
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("verify DB")
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries
+                  WHERE account_id=?1 AND guild_id=?2 AND source='low_priority_tax'",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("loss ledger"),
+        0
     );
 }
 

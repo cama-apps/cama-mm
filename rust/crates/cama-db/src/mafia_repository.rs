@@ -239,6 +239,7 @@ pub struct MafiaFinalizeResult {
     pub bounty: BountyResolution,
     pub bankruptcy_penalties: BTreeMap<i64, i64>,
     pub vanity_taxes: BTreeMap<i64, i64>,
+    pub low_priority_taxes: BTreeMap<i64, i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1204,6 +1205,8 @@ impl MafiaRepository {
         bankruptcy_penalty_rate: Option<f64>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
+        low_priority_tax_rate: f64,
+        low_priority_taxable_ids: &BTreeSet<i64>,
     ) -> Result<MafiaFinalizeResult, MafiaRepositoryError> {
         self.finalize_day_resolution_inner(
             game_id,
@@ -1221,13 +1224,15 @@ impl MafiaRepository {
             bankruptcy_penalty_rate,
             vanity_tax_rate,
             vanity_taxable_ids,
+            low_priority_tax_rate,
+            low_priority_taxable_ids,
             None::<fn(&MafiaFinalizeResult) -> Result<String, MafiaRepositoryError>>,
         )
     }
 
     /// Atomically settle a terminal DAY and write its exact resolution receipt
     /// before committing the same SQLite transaction. The factory runs after
-    /// all payout, bounty, bankruptcy, and vanity-tax amounts are known, but
+    /// all payout, bounty, bankruptcy, and tax amounts are known, but
     /// before `COMMIT`, so a crash cannot leave a settled game without the
     /// copy needed for deterministic READY replay.
     #[allow(clippy::too_many_arguments)]
@@ -1248,6 +1253,8 @@ impl MafiaRepository {
         bankruptcy_penalty_rate: Option<f64>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
+        low_priority_tax_rate: f64,
+        low_priority_taxable_ids: &BTreeSet<i64>,
         receipt_factory: F,
     ) -> Result<MafiaFinalizeResult, MafiaRepositoryError>
     where
@@ -1269,6 +1276,8 @@ impl MafiaRepository {
             bankruptcy_penalty_rate,
             vanity_tax_rate,
             vanity_taxable_ids,
+            low_priority_tax_rate,
+            low_priority_taxable_ids,
             Some(receipt_factory),
         )
     }
@@ -1291,6 +1300,8 @@ impl MafiaRepository {
         bankruptcy_penalty_rate: Option<f64>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
+        low_priority_tax_rate: f64,
+        low_priority_taxable_ids: &BTreeSet<i64>,
         receipt_factory: Option<F>,
     ) -> Result<MafiaFinalizeResult, MafiaRepositoryError>
     where
@@ -1352,6 +1363,7 @@ impl MafiaRepository {
         };
         let mut penalties = BTreeMap::new();
         let mut taxes = BTreeMap::new();
+        let mut low_priority_taxes = BTreeMap::new();
         if !payout_deltas.is_empty() {
             set_ledger_context_with_metadata(
                 &transaction,
@@ -1489,12 +1501,59 @@ impl MafiaRepository {
             clear_ledger_context(&transaction)?;
             tax_result?;
         }
+        if low_priority_tax_rate > 0.0 {
+            let rate = low_priority_tax_rate.clamp(0.0, 1.0);
+            set_ledger_context_with_metadata(
+                &transaction,
+                "low_priority_tax",
+                None,
+                game_id,
+                "low priority tax on JC profit",
+                &format!(
+                    "{{\"winner\":\"{}\",\"entry_fee\":{}}}",
+                    winner.as_str(),
+                    entry_fee
+                ),
+            )?;
+            let tax_result: Result<(), MafiaRepositoryError> = (|| {
+                for (&discord_id, &amount) in payout_deltas {
+                    if !low_priority_taxable_ids.contains(&discord_id) {
+                        continue;
+                    }
+                    let profit = (amount - entry_fee).max(0);
+                    // The penalty and the vanity tax are independent rates on
+                    // this same profit, so cap the combined withholding at the
+                    // profit instead of letting the payout go net negative.
+                    let withheld = penalties.get(&discord_id).copied().unwrap_or(0)
+                        + taxes.get(&discord_id).copied().unwrap_or(0);
+                    let tax = (((profit as f64) * rate) as i64).min(profit - withheld);
+                    if tax <= 0 {
+                        continue;
+                    }
+                    let changed = transaction.execute(
+                        "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
+                             updated_at=CURRENT_TIMESTAMP WHERE discord_id=?2 AND guild_id=?3",
+                        params![tax, discord_id, guild_id],
+                    )?;
+                    if changed != 1 {
+                        return Err(MafiaRepositoryError::Invalid(
+                            "low_priority_tax_player_missing",
+                        ));
+                    }
+                    low_priority_taxes.insert(discord_id, tax);
+                }
+                Ok(())
+            })();
+            clear_ledger_context(&transaction)?;
+            tax_result?;
+        }
         let result = MafiaFinalizeResult {
             applied: true,
             reason: None,
             bounty,
             bankruptcy_penalties: penalties,
             vanity_taxes: taxes,
+            low_priority_taxes,
         };
         if let Some(receipt_factory) = receipt_factory {
             let payload = receipt_factory(&result)?;

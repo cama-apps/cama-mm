@@ -97,6 +97,7 @@ impl SqliteBalanceHistoryPort {
                     pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
                     COALESCE(pp.bankruptcy_penalty, 0) AS penalty,
                     COALESCE(pp.vanity_tax, 0) AS vanity_tax,
+                    COALESCE(pp.low_priority_tax, 0) AS low_priority_tax,
                     (SELECT COUNT(*)
                      FROM economy_ledger_entries e
                      WHERE e.guild_id = p.guild_id
@@ -116,7 +117,8 @@ impl SqliteBalanceHistoryPort {
                      WHERE e.guild_id = p.guild_id
                        AND e.account_type = 'player'
                        AND e.account_id = pp.discord_id
-                       AND e.source IN ('prediction_resolution', 'vanity_tax')
+                       AND e.source IN ('prediction_resolution', 'vanity_tax',
+                                       'low_priority_tax')
                        AND e.related_type = 'prediction'
                        AND e.related_id = CAST(p.prediction_id AS TEXT)
                        AND e.ledger_id > COALESCE((
@@ -141,8 +143,9 @@ impl SqliteBalanceHistoryPort {
             let cost: i64 = row.get(5)?;
             let penalty: i64 = row.get(6)?;
             let vanity_tax: i64 = row.get(7)?;
-            let settlement_ledger_count: i64 = row.get(8)?;
-            let credited: i64 = row.get(9)?;
+            let low_priority_tax: i64 = row.get(8)?;
+            let settlement_ledger_count: i64 = row.get(9)?;
+            let credited: i64 = row.get(10)?;
             let winning_contracts = if outcome == "yes" {
                 yes_contracts
             } else {
@@ -155,6 +158,7 @@ impl SqliteBalanceHistoryPort {
                     .saturating_mul(CONTRACT_VALUE)
                     .saturating_sub(penalty)
                     .saturating_sub(vanity_tax)
+                    .saturating_sub(low_priority_tax)
             };
             Ok(PredictionHistoryRow {
                 prediction_id: row.get(0)?,

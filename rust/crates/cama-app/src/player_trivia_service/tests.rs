@@ -1131,6 +1131,7 @@ fn test_prediction_questions_subtract_vanity_tax_from_total_pnl() {
                 yes_contracts: 1,
                 yes_cost_basis_total: if player_id == 1 { 0 } else { player_id },
                 vanity_tax: if player_id == 1 { 5 } else { 0 },
+                low_priority_tax: 0,
                 ..PredictionPositionRow::default()
             });
         }
@@ -1165,6 +1166,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             effective_bet: Some(50),
             payout: 100,
             settlement_vanity_tax: 1,
+            settlement_low_priority_tax: 0,
         },
         SettledBetRow {
             bet_id: 2,
@@ -1177,6 +1179,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             effective_bet: Some(50),
             payout: 100,
             settlement_vanity_tax: 1,
+            settlement_low_priority_tax: 0,
         },
     ];
     for (index, amount) in [34, 33, 33].into_iter().enumerate() {
@@ -1191,6 +1194,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             effective_bet: Some(amount),
             payout: 0,
             settlement_vanity_tax: 0,
+            settlement_low_priority_tax: 0,
         });
     }
     let mut next_bet_id = 10;
@@ -1207,6 +1211,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
                 effective_bet: Some(1),
                 payout: 1,
                 settlement_vanity_tax: 0,
+                settlement_low_priority_tax: 0,
             });
             next_bet_id += 1;
         }
@@ -1415,6 +1420,7 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
                 effective_bet: Some(player_id * 10),
                 payout: if index < player_id { player_id * 25 } else { 0 },
                 settlement_vanity_tax: player_id,
+                settlement_low_priority_tax: 0,
             });
             snapshot.wheel_spins.push(WheelSpinRow {
                 spin_id: player_id * 100 + index,
@@ -1485,6 +1491,7 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
                 no_cost_basis_total: 0,
                 bankruptcy_penalty: 0,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 question: Some(format!("Will market {prediction_id} resolve yes?")),
             });
             for _ in 0..player_id + 2 {

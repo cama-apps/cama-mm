@@ -69,6 +69,9 @@ pub struct DigProfitPolicy {
     pub bankruptcy_keep_basis_points: i64,
     /// Vanity tax on generated profit. `0` means the player is not taxable.
     pub vanity_tax_basis_points: i64,
+    /// Low-priority tax on generated profit, accounted separately from the
+    /// vanity tax. `0` means the player is not in active low priority.
+    pub low_priority_tax_basis_points: i64,
 }
 
 impl Default for DigProfitPolicy {
@@ -76,6 +79,7 @@ impl Default for DigProfitPolicy {
         Self {
             bankruptcy_keep_basis_points: 10_000,
             vanity_tax_basis_points: 0,
+            low_priority_tax_basis_points: 0,
         }
     }
 }
@@ -86,6 +90,7 @@ pub struct DigProfitSettlement {
     pub net: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
 }
 
 /// Apply a non-negative basis-point multiplier with Python's positive-value
@@ -173,13 +178,26 @@ pub fn apply_jc_profit_policies(gross: i64, policy: DigProfitPolicy) -> DigProfi
         scale_dig_reward_basis_points(gross, 10_000_i64.saturating_sub(keep_basis_points));
     let vanity_tax =
         scale_dig_reward_basis_points(gross, policy.vanity_tax_basis_points.clamp(0, 10_000));
+    // Every sink takes its share of the same gross profit, so the combined
+    // withholding is clamped to that profit: a generated reward can be
+    // reduced to zero but must never turn into a wallet debit.
+    let low_priority_tax =
+        scale_dig_reward_basis_points(gross, policy.low_priority_tax_basis_points.clamp(0, 10_000))
+            .min(
+                gross
+                    .saturating_sub(bankruptcy_penalty)
+                    .saturating_sub(vanity_tax)
+                    .max(0),
+            );
     DigProfitSettlement {
         gross,
         net: gross
             .saturating_sub(bankruptcy_penalty)
-            .saturating_sub(vanity_tax),
+            .saturating_sub(vanity_tax)
+            .saturating_sub(low_priority_tax),
         bankruptcy_penalty,
         vanity_tax,
+        low_priority_tax,
     }
 }
 
@@ -785,6 +803,7 @@ pub struct DigOutcome {
     pub mana_yield_tax: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub cave_in: bool,
     pub boss_encounter: Option<i64>,
 }
@@ -940,6 +959,7 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
         mana_yield_tax,
         bankruptcy_penalty: profit.bankruptcy_penalty,
         vanity_tax: profit.vanity_tax,
+        low_priority_tax: profit.low_priority_tax,
         cave_in,
         boss_encounter,
     }
@@ -1206,6 +1226,7 @@ pub struct BossResolution {
     pub payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub knockback: i64,
 }
 
@@ -1253,6 +1274,7 @@ pub fn resolve_boss_with_policy(
             payout: profit.net,
             bankruptcy_penalty: profit.bankruptcy_penalty,
             vanity_tax: profit.vanity_tax,
+            low_priority_tax: profit.low_priority_tax,
             knockback: 0,
         }
     } else {
@@ -1264,6 +1286,7 @@ pub fn resolve_boss_with_policy(
             payout: 0,
             bankruptcy_penalty: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             knockback,
         }
     }

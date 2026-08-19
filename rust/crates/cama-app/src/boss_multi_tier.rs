@@ -881,6 +881,9 @@ pub struct BankruptcyAdjustment {
     pub penalty_applied: i64,
     /// Profit-only vanity deduction computed from the same gross winnings.
     pub vanity_tax: i64,
+    /// Profit-only low-priority deduction, computed from that same basis so
+    /// the two taxes stack additively rather than compounding.
+    pub low_priority_tax: i64,
 }
 
 pub trait BankruptcyPort {
@@ -896,6 +899,7 @@ impl BankruptcyPort for NoBankruptcy {
             penalized: positive_winnings,
             penalty_applied: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
         }
     }
 }
@@ -913,6 +917,7 @@ impl BankruptcyPort for HalvingBankruptcy {
             penalized,
             penalty_applied: positive_winnings - penalized,
             vanity_tax: 0,
+            low_priority_tax: 0,
         }
     }
 }
@@ -1164,6 +1169,8 @@ pub struct RepositoryCommit {
     pub echo: Option<EchoRecord>,
     /// Separate ledger debit applied after crediting the gross Dig payout.
     pub vanity_tax: i64,
+    /// Sibling debit for a player in low priority, recorded on its own row.
+    pub low_priority_tax: i64,
     pub preparation_mutation: BossPreparationMutation,
 }
 
@@ -1315,6 +1322,7 @@ pub struct VictoryEconomy {
     pub credited: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub wager_profit_after_event: i64,
 }
 
@@ -1329,6 +1337,7 @@ pub struct ResolvedFight {
     pub gross_payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub new_depth: i32,
     pub boss_hp_remaining: i32,
     pub boss_hp_max: i32,
@@ -2374,6 +2383,7 @@ where
             credited: bankruptcy.penalized,
             bankruptcy_penalty: bankruptcy.penalty_applied,
             vanity_tax: bankruptcy.vanity_tax,
+            low_priority_tax: bankruptcy.low_priority_tax,
             wager_profit_after_event: event_profit,
         }
     }
@@ -2448,6 +2458,7 @@ where
                         }),
                         echo: None,
                         vanity_tax: 0,
+                        low_priority_tax: 0,
                         preparation_mutation: BossPreparationMutation::Preserve,
                     },
                 )?;
@@ -2464,6 +2475,7 @@ where
                     gross_payout: 0,
                     bankruptcy_penalty: 0,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                     new_depth: tunnel.depth,
                     boss_hp_remaining: 0,
                     boss_hp_max: input.boss_hp_max,
@@ -2536,6 +2548,7 @@ where
                         weakened_until: now.saturating_add(ECHO_WINDOW_SECONDS),
                     }),
                     vanity_tax: economy.vanity_tax,
+                    low_priority_tax: economy.low_priority_tax,
                     preparation_mutation: BossPreparationMutation::Clear {
                         boundary: input.boundary,
                     },
@@ -2554,6 +2567,7 @@ where
                 gross_payout: economy.gross_payout,
                 bankruptcy_penalty: economy.bankruptcy_penalty,
                 vanity_tax: economy.vanity_tax,
+                low_priority_tax: economy.low_priority_tax,
                 new_depth: input.boundary,
                 boss_hp_remaining: 0,
                 boss_hp_max: input.boss_hp_max,
@@ -2636,6 +2650,7 @@ where
                 }),
                 echo: None,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Clear {
                     boundary: input.boundary,
                 },
@@ -2654,6 +2669,7 @@ where
             gross_payout: 0,
             bankruptcy_penalty: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             new_depth: depth_after,
             boss_hp_remaining: input.ending_boss_hp.max(0),
             boss_hp_max: input.boss_hp_max,
@@ -3185,6 +3201,7 @@ where
                 audit: None,
                 echo: None,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Preserve,
             },
         )?;

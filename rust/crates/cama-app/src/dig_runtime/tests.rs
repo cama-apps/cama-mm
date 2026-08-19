@@ -24,14 +24,16 @@ use crate::economy_event_service::EconomyEventConfig;
 use super::{
     DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeCommit, DigRuntimeConfig,
     DigRuntimeDeliveryContext, DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart,
-    DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel,
-    DigRuntimeRequest, DigRuntimeService, DigRuntimeSettleBloodPact, DigRuntimeSnapshot,
-    DigRuntimeStore, DigRuntimeStoreError, DigRuntimeVersion, InMemoryDigRuntimeStore,
-    SqliteDigRuntimeStore, proportional_mana_yield_tax, scale_dig_minigame_jc,
+    DigRuntimeLowPriorityTaxPort, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
+    DigRuntimeRebindDeliveryChannel, DigRuntimeRequest, DigRuntimeService,
+    DigRuntimeSettleBloodPact, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
+    DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore, proportional_mana_yield_tax,
+    scale_dig_minigame_jc,
 };
 use crate::vanity_tax_service::{VanityMember, VanityTaxService};
 use cama_domain::game_date::game_date_for_timestamp;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 const PET_DAY: i64 = DIG_WORK_UNITS_PER_BLOCK;
 
@@ -673,6 +675,7 @@ fn sqlite_delivery_outbox_invalid_detail_rolls_back_actor_and_action() {
             .map_or(1, |tunnel| tunnel.depth.saturating_add(1)),
         jc_delta: 0,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_cost: 0,
         action_type: "dig".to_owned(),
         detail: "[]".to_owned(),
@@ -731,6 +734,7 @@ fn stale_snapshot_is_rejected_by_cas() {
         depth_after: 1,
         jc_delta: 1,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_cost: 0,
         action_type: "dig".to_owned(),
         detail: "{}".to_owned(),
@@ -1073,6 +1077,7 @@ fn sqlite_commit_preserves_distinct_trailing_tunnel_columns() {
             depth_after: 11,
             jc_delta: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -1860,6 +1865,7 @@ fn sqlite_pet_work_conflict_rolls_back_the_whole_commit() {
             depth_after: 20,
             jc_delta: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -3949,6 +3955,179 @@ fn sqlite_normal_dig_applies_vanity_tax_to_gross_and_audits_net() {
     assert_eq!(audit, (taxable_outcome.jc_earned, 1));
 }
 
+/// Fake active-low-priority roster: one member taxed at a fixed percentage.
+/// The basis it was handed is recorded so a test can prove the low-priority
+/// sink saw the pre-vanity profit rather than the post-vanity remainder.
+#[derive(Debug)]
+struct FixedLowPriorityTax {
+    discord_id: i64,
+    guild_id: i64,
+    percent: i64,
+    observed_basis: AtomicI64,
+}
+
+impl FixedLowPriorityTax {
+    fn new(discord_id: i64, guild_id: i64, percent: i64) -> Self {
+        Self {
+            discord_id,
+            guild_id,
+            percent,
+            observed_basis: AtomicI64::new(-1),
+        }
+    }
+}
+
+impl DigRuntimeLowPriorityTaxPort for FixedLowPriorityTax {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64 {
+        if discord_id != self.discord_id || guild_id != self.guild_id || gross_profit <= 0 {
+            return 0;
+        }
+        self.observed_basis.store(gross_profit, Ordering::Relaxed);
+        gross_profit * self.percent / 100
+    }
+}
+
+#[test]
+fn sqlite_normal_dig_stacks_low_priority_tax_beside_vanity_on_the_same_basis() {
+    let control = fast_migrated_database();
+    let taxable = fast_migrated_database();
+    let actor = 60_141;
+    let guild = 60_142;
+    let now = 1_900_141_000;
+    for database in [&control, &taxable] {
+        seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+        Connection::open(database.path())
+            .expect("low-priority setup connection")
+            .execute("DELETE FROM economy_ledger_entries", [])
+            .expect("clear low-priority setup ledger");
+    }
+    let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+    let request = DigRuntimeRequest {
+        discord_id: actor,
+        guild_id: guild,
+        now: dig_now,
+        paid: false,
+        forced_event: false,
+    };
+    let today = game_date_for_timestamp(dig_now as f64).expect("low-priority date");
+    for database in [&control, &taxable] {
+        seed_two_weather_rows(database, guild, &today, "Magma", "fossil_rush");
+    }
+    let control_outcome = DigRuntimeService::sqlite(control.path())
+        .dig(request)
+        .expect("control normal Dig");
+    assert!(control_outcome.success);
+    assert!(!control_outcome.cave_in);
+    let basis = control_outcome.jc_earned;
+    assert!(basis > 0);
+
+    let vanity = Arc::new(VanityTaxService::with_rate_fraction(None, 0.5));
+    vanity
+        .refresh_guild(
+            guild,
+            &[VanityMember {
+                discord_id: actor,
+                nickname: None,
+            }],
+            None,
+        )
+        .expect("refresh taxable member");
+    let low_priority = Arc::new(FixedLowPriorityTax::new(actor, guild, 50));
+    let taxable_outcome = DigRuntimeService::sqlite(taxable.path())
+        .with_vanity_tax(vanity)
+        .with_low_priority_tax(Arc::clone(&low_priority) as Arc<dyn DigRuntimeLowPriorityTaxPort>)
+        .dig(request)
+        .expect("taxable normal Dig");
+    let expected_vanity = basis / 2;
+    let expected_low_priority = basis * 50 / 100;
+    assert!(expected_vanity > 0);
+    assert!(expected_low_priority > 0);
+    // Both sinks read the same pre-subtraction basis, so the low-priority
+    // share is not computed from the post-vanity remainder.
+    assert_eq!(low_priority.observed_basis.load(Ordering::Relaxed), basis);
+    assert_eq!(taxable_outcome.vanity_tax, expected_vanity);
+    assert_eq!(taxable_outcome.low_priority_tax, expected_low_priority);
+    assert_eq!(
+        taxable_outcome.jc_earned,
+        basis - expected_vanity - expected_low_priority
+    );
+    let detail = latest_dig_detail(&taxable, actor, guild);
+    assert_eq!(detail["vanity_tax"].as_i64(), Some(expected_vanity));
+    assert_eq!(
+        detail["low_priority_tax"].as_i64(),
+        Some(expected_low_priority)
+    );
+
+    let connection = Connection::open(taxable.path()).expect("inspect low-priority ledger");
+    let ledger = connection
+        .prepare(
+            "SELECT source,delta FROM economy_ledger_entries
+                 WHERE account_id=?1 AND guild_id=?2 ORDER BY ledger_id",
+        )
+        .expect("prepare low-priority ledger")
+        .query_map(params![actor, guild], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .expect("query low-priority ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect low-priority ledger");
+    assert_eq!(
+        ledger,
+        vec![
+            ("dig".to_owned(), basis),
+            ("vanity_tax".to_owned(), -expected_vanity),
+            ("low_priority_tax".to_owned(), -expected_low_priority),
+        ]
+    );
+    let audit: (i64, i64) = connection
+        .query_row(
+            "SELECT jc_delta,COUNT(*) FROM dig_actions
+                 WHERE actor_id=?1 AND guild_id=?2 AND action_type='dig'",
+            params![actor, guild],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("low-priority audit");
+    assert_eq!(audit, (taxable_outcome.jc_earned, 1));
+}
+
+#[test]
+fn sqlite_cave_in_dig_is_exempt_from_low_priority_tax() {
+    let database = fast_migrated_database();
+    let actor = 60_143;
+    let guild = 60_144;
+    let now = 1_900_143_000;
+    seed_live_runtime_tunnel(&database, actor, guild, now, 76, 1, Some(now - 7_200));
+    Connection::open(database.path())
+        .expect("cave-in setup connection")
+        .execute("DELETE FROM economy_ledger_entries", [])
+        .expect("clear cave-in setup ledger");
+    let dig_now = find_cave_dig_time(actor, guild, now);
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .with_low_priority_tax(Arc::new(FixedLowPriorityTax::new(actor, guild, 25)))
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: dig_now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("cave-in Dig");
+    assert!(outcome.cave_in);
+    assert_eq!(outcome.low_priority_tax, 0);
+    assert_eq!(
+        Connection::open(database.path())
+            .expect("inspect cave-in ledger")
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries
+                     WHERE account_id=?1 AND guild_id=?2 AND source='low_priority_tax'",
+                params![actor, guild],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cave-in low-priority ledger count"),
+        0
+    );
+}
+
 #[test]
 fn sqlite_first_dig_is_exempt_from_vanity_tax() {
     let database = fast_migrated_database();
@@ -4055,6 +4234,7 @@ fn sqlite_vanity_tax_rolls_back_on_audit_failure_without_duplicate_ledger() {
             depth_after: 11,
             jc_delta: 10,
             vanity_tax: 2,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -4078,6 +4258,86 @@ fn sqlite_vanity_tax_rolls_back_on_audit_failure_without_duplicate_ledger() {
             )
             .expect("rollback ledger count"),
         0
+    );
+}
+
+#[test]
+fn sqlite_low_priority_tax_never_withholds_more_than_the_reward_in_hand() {
+    // The tax basis is reconstructed pre-bankruptcy, but what can actually be
+    // withheld is the reward the bankruptcy penalty already shrank. Clamping
+    // the tax to the basis instead of to that remainder turned a Dig reward
+    // into a wallet debit.
+    let control = fast_migrated_database();
+    let penalized = fast_migrated_database();
+    let actor = 60_151;
+    let guild = 60_152;
+    let now = 1_900_151_000;
+    for database in [&control, &penalized] {
+        seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+        Connection::open(database.path())
+            .expect("low-priority clamp boss-progress connection")
+            .execute(
+                "UPDATE tunnels SET boss_progress=?1,temp_buffs=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                    r#"{"digs_remaining":1,"effect":{"yield_multiplier":2.0}}"#,
+                    actor,
+                    guild,
+                ],
+            )
+            .expect("seed defeated bosses");
+    }
+    Connection::open(penalized.path())
+        .expect("bankruptcy state connection")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                     discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+                 ) VALUES(?1,?2,2,1)",
+            params![actor, guild],
+        )
+        .expect("seed bankruptcy penalty");
+    let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+    let today = game_date_for_timestamp(dig_now as f64).expect("low-priority clamp Dig date");
+    for database in [&control, &penalized] {
+        seed_two_weather_rows(database, guild, &today, "Magma", "fossil_rush");
+    }
+    let request = DigRuntimeRequest {
+        discord_id: actor,
+        guild_id: guild,
+        now: dig_now,
+        paid: false,
+        forced_event: false,
+    };
+    let control_outcome = DigRuntimeService::sqlite(control.path())
+        .dig(request)
+        .expect("control Dig");
+    let basis = control_outcome.jc_earned;
+    assert!(basis > 0, "fixture must earn something to tax");
+
+    // A full-rate sink against a quarter-withheld reward: the pre-bankruptcy
+    // basis exceeds what is left in hand.
+    let outcome = DigRuntimeService::sqlite_with_config(
+        penalized.path(),
+        DigRuntimeConfig::default().with_bankruptcy_penalty_rate(0.75),
+    )
+    .with_low_priority_tax(Arc::new(FixedLowPriorityTax::new(actor, guild, 100)))
+    .dig(request)
+    .expect("penalized low-priority Dig");
+
+    assert!(
+        outcome.bankruptcy_penalty > 0,
+        "the fixture must actually withhold a bankruptcy penalty"
+    );
+    assert!(
+        outcome.low_priority_tax > 0,
+        "the low-priority sink must actually fire"
+    );
+    assert!(
+        outcome.jc_earned >= 0,
+        "a fully taxed reward falls to zero and never becomes a wallet debit,          but it ended at {} after a {} tax",
+        outcome.jc_earned,
+        outcome.low_priority_tax,
     );
 }
 
@@ -4591,6 +4851,7 @@ fn sqlite_overgrowth_spend_rolls_back_when_later_commit_leg_fails() {
             depth_after: 11,
             jc_delta: 10,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -4640,6 +4901,7 @@ fn sqlite_vanished_overgrowth_charge_rejects_whole_dig_stage() {
             depth_after: 11,
             jc_delta: 10,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),
@@ -4828,6 +5090,7 @@ fn sqlite_artifact_commit_conflict_persists_neither_artifact_nor_counter() {
             depth_after: 11,
             jc_delta: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "dig".to_owned(),
             detail: "{}".to_owned(),

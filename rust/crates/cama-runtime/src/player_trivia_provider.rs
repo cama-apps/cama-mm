@@ -1348,6 +1348,7 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
                 no_cost_basis_total: row.no_cost_basis_total,
                 bankruptcy_penalty: row.bankruptcy_penalty,
                 vanity_tax: row.vanity_tax,
+                low_priority_tax: row.low_priority_tax,
                 question: row.question,
             })
             .collect(),
@@ -1375,6 +1376,7 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
                 effective_bet: row.effective_bet,
                 payout: row.payout,
                 settlement_vanity_tax: row.settlement_vanity_tax,
+                settlement_low_priority_tax: row.settlement_low_priority_tax,
             })
             .collect(),
         dig_artifacts: value

@@ -106,6 +106,7 @@ fn reward_fixture() -> (NamedTempFile, ProductionMatchRewardControl) {
         garnishment_rate: 0.5,
         bankruptcy_kept_rate: 0.75,
         vanity_tax_rate: 0.10,
+        low_priority_tax_rate: 0.10,
         minigame_scale: 1.0,
         vanity_tax: Arc::new(NoVanityTax),
         economy: Arc::new(SqliteEconomyEventService::new(database.path(), economy)),
@@ -159,6 +160,7 @@ fn blood_pact_cap_fixture(
         garnishment_rate: 0.5,
         bankruptcy_kept_rate: 0.75,
         vanity_tax_rate: 0.10,
+        low_priority_tax_rate: 0.10,
         minigame_scale,
         vanity_tax: Arc::new(NoVanityTax),
         economy: Arc::new(SqliteEconomyEventService::new(database.path(), economy)),
@@ -3959,7 +3961,18 @@ fn production_goodness_score_includes_configured_soft_avoid_penalty() {
 
 #[test]
 fn test_goodness_includes_low_priority_selection_penalty_and_team_bonus() {
-    let fixture = MatchRuntimeFixture::new();
+    // Neutralize the low-priority matchmaking multiplier so this case still
+    // isolates the selection penalty and the team-grouping bonus. With the
+    // multiplier active the inflated values dominate the 100-point grouping
+    // bonus and the pair is split instead, which
+    // `test_low_priority_multiplier_hands_the_flagged_player_a_weaker_team`
+    // covers separately.
+    let mut config = production_test_config();
+    config.values.low_priority_mmr_multiplier = 1.0;
+    let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+        config,
+        Arc::new(PublicationDiscord::default()),
+    );
     let player_ids = fixture.add_shuffle_pool(10, false);
     let baseline = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
     let low_priority_ids = player_ids[..2].to_vec();
@@ -3997,7 +4010,112 @@ fn test_goodness_includes_low_priority_selection_penalty_and_team_bonus() {
         extra_f64(&baseline.pending.state, "goodness_score").expect("baseline goodness");
     let penalized_score =
         extra_f64(&penalized.pending.state, "goodness_score").expect("penalized goodness");
-    assert_eq!(penalized_score - baseline_score, 1_100.0);
+    // Two selected low-priority players at LOW_PRIORITY_GOODNESS_PENALTY each,
+    // less the one-team grouping bonus.
+    assert_eq!(penalized_score - baseline_score, 1_220.0);
+}
+
+#[test]
+fn test_low_priority_multiplier_hands_the_flagged_player_a_weaker_team() {
+    // Eight interchangeable 2000s plus two swing players. The flagged player
+    // truly sits at 1000, so the x1.10 multiplier presents them to the
+    // balancer as 1100 - exactly the untouched swing player's rating. The
+    // balancer therefore reads the split as perfectly even while the flagged
+    // player's side is genuinely 100 points light: a harder game.
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let flagged = player_ids[0];
+    let counterpart = player_ids[1];
+    fixture.set_glicko_rating(&[flagged], 1_000.0);
+    fixture.set_glicko_rating(&[counterpart], 1_100.0);
+    fixture.set_glicko_rating(&player_ids[2..], 2_000.0);
+
+    let connection =
+        Connection::open(fixture.database.path()).expect("open low-priority multiplier fixture");
+    connection
+        .execute(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,
+                 start_pending_match_id,active,set_by
+             ) VALUES(?1,?2,3,3,NULL,1,901)",
+            params![flagged, GUILD],
+        )
+        .expect("seed active low-priority player");
+
+    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    let radiant = prepared
+        .pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let (flagged_side, opposing_side): (Vec<i64>, Vec<i64>) = player_ids
+        .iter()
+        .copied()
+        .partition(|id| radiant.contains(id) == radiant.contains(&flagged));
+
+    let true_rating = |id: i64| -> f64 {
+        connection
+            .query_row(
+                "SELECT glicko_rating FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![id, GUILD],
+                |row| row.get::<_, f64>(0),
+            )
+            .expect("read stored rating")
+    };
+    let flagged_strength = flagged_side.iter().copied().map(true_rating).sum::<f64>();
+    let opposing_strength = opposing_side.iter().copied().map(true_rating).sum::<f64>();
+
+    assert!(
+        flagged_strength < opposing_strength,
+        "low-priority player's team should be genuinely weaker:          {flagged_strength} vs {opposing_strength}"
+    );
+    assert!(
+        !flagged_side.contains(&counterpart),
+        "the equal-inflated-rating counterpart belongs on the opposing team"
+    );
+}
+
+#[test]
+fn test_low_priority_multiplier_never_reaches_stored_ratings() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, true);
+    let connection =
+        Connection::open(fixture.database.path()).expect("open low-priority storage fixture");
+    connection
+        .execute(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,
+                 start_pending_match_id,active,set_by
+             ) VALUES(?1,?2,3,3,NULL,1,901)",
+            params![player_ids[0], GUILD],
+        )
+        .expect("seed active low-priority player");
+
+    let stored = |connection: &Connection| -> Vec<(f64, f64, f64)> {
+        player_ids
+            .iter()
+            .map(|id| {
+                connection
+                    .query_row(
+                        "SELECT glicko_rating, os_mu, current_mmr
+                         FROM players WHERE discord_id=?1 AND guild_id=?2",
+                        params![id, GUILD],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .expect("read stored rating triple")
+            })
+            .collect()
+    };
+    let before = stored(&connection);
+    fixture.prepare_shuffle(player_ids.clone(), "openskill", Vec::new());
+
+    assert_eq!(
+        before,
+        stored(&connection),
+        "shuffling must not write the matchmaking multiplier back into ratings"
+    );
 }
 
 #[test]
@@ -4207,6 +4325,50 @@ fn test_final_low_priority_win_boosts_both_rating_gains_before_release() {
             .expect("read released low-priority state"),
         (0, 0)
     );
+}
+
+#[test]
+fn test_final_low_priority_win_is_still_taxed_by_the_match_that_releases_it() {
+    // Recording the match drains the low-priority win counters, so reading
+    // taxability afterwards would see an already-released player and skip the
+    // tax on the very match that was balanced as harder for them.
+    let fixture = MatchRuntimeFixture::new();
+    let (pending, target, peer) = fixture.final_low_priority_pending();
+    fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("record final low-priority win");
+
+    let connection = Connection::open(fixture.database.path()).expect("inspect low-priority tax");
+    let taxed = |discord_id| {
+        connection
+            .query_row(
+                "SELECT COALESCE(SUM(-delta),0) FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+                params![GUILD, discord_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read low-priority tax ledger")
+    };
+
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT active,wins_remaining FROM low_priority_state
+                 WHERE guild_id=?1 AND discord_id=?2",
+                params![GUILD, target],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read released low-priority state"),
+        (0, 0),
+        "this match must be the one that releases the player"
+    );
+    assert!(
+        taxed(target) > 0,
+        "the releasing match is taxed on the status it was played under"
+    );
+    assert_eq!(taxed(peer), 0, "an unflagged winner is never taxed");
 }
 
 #[test]
@@ -7008,6 +7170,109 @@ async fn discovered_recorded_match_is_published_once_to_the_persisted_origin_cha
     );
 }
 
+fn activate_low_priority(database: &NamedTempFile, discord_id: i64) {
+    Connection::open(database.path())
+        .expect("open low priority state")
+        .execute(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,set_by
+             ) VALUES(?1,?2,3,3,1,?3)",
+            params![discord_id, GUILD, 90_001],
+        )
+        .expect("insert active low priority state");
+}
+
+fn ledger_total(database: &NamedTempFile, discord_id: i64, source: &str) -> (i64, i64) {
+    Connection::open(database.path())
+        .expect("open reward ledger")
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(delta),0) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source=?3",
+            params![GUILD, discord_id, source],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read reward ledger totals")
+}
+
+#[test]
+fn generated_match_reward_withholds_low_priority_tax_in_its_own_ledger_row() {
+    let (database, control) = reward_fixture();
+    activate_low_priority(&database, WINNER);
+    let players = [WINNER];
+    let first = control
+        .award_generated_batch(GeneratedRewardBatch {
+            guild_id: GUILD,
+            player_ids: &players,
+            gross: 100,
+            apply_bankruptcy_penalty: true,
+            apply_vanity_tax: true,
+            low_priority_taxable_ids: None,
+            source: "match_streaming_bonus",
+            related_type: "match",
+            related_id: MATCH_ID,
+            reason: "match streaming bonus",
+            event_nonce_tag: 6,
+        })
+        .expect("award low-priority generated reward");
+    // 100 gross, 50 garnished against the negative balance, so both the 25%
+    // bankruptcy withholding and the 10% tax read the same 50 JC basis.
+    let receipt = first[&WINNER].receipt;
+    assert_eq!(receipt.garnished, 50);
+    assert_eq!(receipt.bankruptcy_penalty, 12);
+    assert_eq!(receipt.vanity_tax, 0);
+    assert_eq!(receipt.low_priority_tax, 5);
+    assert_eq!(receipt.net, 33);
+    assert_eq!(ledger_total(&database, WINNER, "low_priority_tax"), (1, -5));
+}
+
+#[test]
+fn generated_match_reward_leaves_untaxed_players_untouched() {
+    let (database, control) = reward_fixture();
+    let players = [WINNER];
+    let first = control
+        .award_generated_batch(GeneratedRewardBatch {
+            guild_id: GUILD,
+            player_ids: &players,
+            gross: 100,
+            apply_bankruptcy_penalty: true,
+            apply_vanity_tax: true,
+            low_priority_taxable_ids: None,
+            source: "match_streaming_bonus",
+            related_type: "match",
+            related_id: MATCH_ID,
+            reason: "match streaming bonus",
+            event_nonce_tag: 6,
+        })
+        .expect("award untaxed generated reward");
+    assert_eq!(first[&WINNER].receipt.low_priority_tax, 0);
+    assert_eq!(ledger_total(&database, WINNER, "low_priority_tax"), (0, 0));
+}
+
+#[test]
+fn match_win_reward_withholds_low_priority_tax_from_the_profit_basis() {
+    let (database, control) = reward_fixture();
+    activate_low_priority(&database, SKIMMER);
+    let outcome = control
+        .award_match_win(
+            CorrectionWinRewardRequest {
+                guild_id: GUILD,
+                match_id: MATCH_ID,
+                discord_id: SKIMMER,
+                gross_reward: 100,
+            },
+            None,
+        )
+        .expect("award low-priority match win");
+    assert_eq!(outcome.receipt.vanity_tax, 0);
+    assert_eq!(outcome.receipt.low_priority_tax, 10);
+    assert_eq!(outcome.receipt.net, 90);
+    assert_eq!(outcome.receipt.balance_delta, 90);
+    assert_eq!(
+        ledger_total(&database, SKIMMER, "low_priority_tax"),
+        (1, -10)
+    );
+}
+
 #[test]
 fn generated_match_reward_retry_recovers_base_and_blood_pact_without_second_payment() {
     let (database, control) = reward_fixture();
@@ -7018,6 +7283,7 @@ fn generated_match_reward_retry_recovers_base_and_blood_pact_without_second_paym
         gross: 100,
         apply_bankruptcy_penalty: true,
         apply_vanity_tax: true,
+        low_priority_taxable_ids: None,
         source: "match_streaming_bonus",
         related_type: "match",
         related_id: MATCH_ID,

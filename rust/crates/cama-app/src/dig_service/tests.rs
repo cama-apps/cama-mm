@@ -280,6 +280,7 @@ fn test_helltide_tax_precedes_independent_profit_deductions() {
     input.profit_policy = DigProfitPolicy {
         bankruptcy_keep_basis_points: 7_500,
         vanity_tax_basis_points: 1_000,
+        low_priority_tax_basis_points: 0,
     };
     let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
     // positive(10)=7, Helltide's deflationary 3 remains 3, leaving 4;
@@ -298,6 +299,7 @@ fn test_mana_yield_tax_precedes_helltide_and_independent_profit_deductions() {
     input.profit_policy = DigProfitPolicy {
         bankruptcy_keep_basis_points: 7_500,
         vanity_tax_basis_points: 1_000,
+        low_priority_tax_basis_points: 0,
     };
     let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
     // positive(20)=13, Mana removes 2, Helltide removes 3, then both profit
@@ -1122,6 +1124,7 @@ fn test_bankruptcy_debuff_shared_dig_profit_helper() {
         DigProfitPolicy {
             bankruptcy_keep_basis_points: 7_500,
             vanity_tax_basis_points: 0,
+            low_priority_tax_basis_points: 0,
         },
     );
     assert_eq!(
@@ -1131,6 +1134,7 @@ fn test_bankruptcy_debuff_shared_dig_profit_helper() {
             net: 75,
             bankruptcy_penalty: 25,
             vanity_tax: 0,
+            low_priority_tax: 0,
         }
     );
     assert_eq!(
@@ -1143,6 +1147,7 @@ fn test_bankruptcy_debuff_shared_dig_profit_helper() {
             DigProfitPolicy {
                 bankruptcy_keep_basis_points: 7_500,
                 vanity_tax_basis_points: 0,
+                low_priority_tax_basis_points: 0,
             },
         ),
         DigProfitSettlement::default()
@@ -1157,6 +1162,7 @@ fn test_bankruptcy_debuff_dig_vanity_tax_applies_independently() {
             DigProfitPolicy {
                 bankruptcy_keep_basis_points: 10_000,
                 vanity_tax_basis_points: 1_000,
+                low_priority_tax_basis_points: 0,
             },
         ),
         DigProfitSettlement {
@@ -1164,8 +1170,46 @@ fn test_bankruptcy_debuff_dig_vanity_tax_applies_independently() {
             net: 225,
             bankruptcy_penalty: 0,
             vanity_tax: 25,
+            low_priority_tax: 0,
         }
     );
+}
+
+#[test]
+fn test_low_priority_tax_stacks_additively_on_the_same_profit_basis() {
+    assert_eq!(
+        apply_jc_profit_policies(
+            250,
+            DigProfitPolicy {
+                bankruptcy_keep_basis_points: 10_000,
+                vanity_tax_basis_points: 1_000,
+                low_priority_tax_basis_points: 1_000,
+            },
+        ),
+        DigProfitSettlement {
+            gross: 250,
+            net: 200,
+            bankruptcy_penalty: 0,
+            vanity_tax: 25,
+            low_priority_tax: 25,
+        }
+    );
+}
+
+#[test]
+fn test_combined_withholding_never_exceeds_the_profit_basis() {
+    let settlement = apply_jc_profit_policies(
+        100,
+        DigProfitPolicy {
+            bankruptcy_keep_basis_points: 1_000,
+            vanity_tax_basis_points: 1_000,
+            low_priority_tax_basis_points: 1_000,
+        },
+    );
+    assert_eq!(settlement.bankruptcy_penalty, 90);
+    assert_eq!(settlement.vanity_tax, 10);
+    assert_eq!(settlement.low_priority_tax, 0);
+    assert_eq!(settlement.net, 0);
 }
 
 #[test]
@@ -1173,6 +1217,7 @@ fn test_bankruptcy_debuff_normal_dig_routes_yield_but_first_dig_is_exempt() {
     let policy = DigProfitPolicy {
         bankruptcy_keep_basis_points: 7_500,
         vanity_tax_basis_points: 0,
+        low_priority_tax_basis_points: 0,
     };
     let mut welcome = TunnelState::default();
     let welcome_before = welcome.balance;
@@ -1208,6 +1253,7 @@ fn test_bankruptcy_debuff_boss_victory_routes_payout_through_policy() {
         DigProfitPolicy {
             bankruptcy_keep_basis_points: 7_500,
             vanity_tax_basis_points: 0,
+            low_priority_tax_basis_points: 0,
         },
     );
     let expected_penalty = ordinary.payout * 2_500 / 10_000;
@@ -1953,6 +1999,7 @@ fn test_pinnacle_reward_applies_edict_to_base_and_wager_profit() {
     let policy = DigProfitPolicy {
         bankruptcy_keep_basis_points: 7_500,
         vanity_tax_basis_points: 1_000,
+        low_priority_tax_basis_points: 0,
     };
     let settled = resolve_boss_with_policy(350, 1_000, 250, true, 1_000, 500, 20, policy);
     let gross = scale_positive_dig_jc(1_000) + 500;

@@ -225,6 +225,7 @@ pub struct DayResolution {
     pub nonprofit_overflow: i64,
     pub bankruptcy_penalties: BTreeMap<PlayerId, i64>,
     pub vanity_taxes: BTreeMap<PlayerId, i64>,
+    pub low_priority_taxes: BTreeMap<PlayerId, i64>,
     pub bounty: BountyResolution,
     pub cap_forced: bool,
 }
@@ -286,6 +287,7 @@ pub struct MafiaState {
     nonprofit: BTreeMap<GuildId, i64>,
     bankruptcy_players: BTreeSet<(GuildId, PlayerId)>,
     vanity_taxable: BTreeSet<(GuildId, PlayerId)>,
+    low_priority_taxable: BTreeSet<(GuildId, PlayerId)>,
     ledger: Vec<LedgerEntry>,
     next_game_id: GameId,
     lose_next_night_claim: bool,
@@ -469,6 +471,12 @@ impl MemoryMafiaRepository {
         });
     }
 
+    pub fn mark_low_priority_taxable(&self, guild_id: GuildId, player_id: PlayerId) {
+        self.transaction(|state| {
+            state.low_priority_taxable.insert((guild_id, player_id));
+        });
+    }
+
     pub fn lose_next_night_claim(&self) {
         self.transaction(|state| state.lose_next_night_claim = true);
     }
@@ -610,6 +618,7 @@ pub struct MafiaService<R: MafiaRepositoryPort = MemoryMafiaRepository> {
     pub max_debt: i64,
     pub bankruptcy_penalty_rate_basis_points: u16,
     pub vanity_tax_basis_points: u16,
+    pub low_priority_tax_basis_points: u16,
 }
 
 impl<R: MafiaRepositoryPort> MafiaService<R> {
@@ -621,6 +630,7 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
             max_debt: 500,
             bankruptcy_penalty_rate_basis_points: 0,
             vanity_tax_basis_points: 0,
+            low_priority_tax_basis_points: 0,
         }
     }
 
@@ -1433,6 +1443,7 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                 let payout = compute_payouts(pot_total, &winning_ids, mvp_id, bookie_id);
                 let mut penalties = BTreeMap::new();
                 let mut vanity_taxes = BTreeMap::new();
+                let mut low_priority_taxes = BTreeMap::new();
                 for (&player_id, &gross) in &payout.deltas {
                     let profit = (gross - game.entry_fee).max(0);
                     let penalty = if state
@@ -1445,6 +1456,18 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                     };
                     let vanity_tax = if state.vanity_taxable.contains(&(game.guild_id, player_id)) {
                         profit * i64::from(self.vanity_tax_basis_points) / 10_000
+                    } else {
+                        0
+                    };
+                    // Both withholdings share this profit basis, so the last
+                    // one is capped by what the others left of it.
+                    let low_priority_tax = if state
+                        .low_priority_taxable
+                        .contains(&(game.guild_id, player_id))
+                    {
+                        (profit * i64::from(self.low_priority_tax_basis_points) / 10_000)
+                            .min(profit - penalty - vanity_tax)
+                            .max(0)
                     } else {
                         0
                     };
@@ -1462,11 +1485,23 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                             related_id: game_id.to_string(),
                         });
                     }
+                    if low_priority_tax > 0 {
+                        low_priority_taxes.insert(player_id, low_priority_tax);
+                        state.ledger.push(LedgerEntry {
+                            guild_id: game.guild_id,
+                            account_id: player_id,
+                            delta: -low_priority_tax,
+                            source: "low_priority_tax",
+                            related_type: "mafia_game",
+                            related_id: game_id.to_string(),
+                        });
+                    }
                     *state
                         .balances
                         .entry((game.guild_id, player_id))
-                        .or_default() += gross - penalty - vanity_tax;
-                    *state.nonprofit.entry(game.guild_id).or_default() += penalty + vanity_tax;
+                        .or_default() += gross - penalty - vanity_tax - low_priority_tax;
+                    *state.nonprofit.entry(game.guild_id).or_default() +=
+                        penalty + vanity_tax + low_priority_tax;
                 }
                 *state.nonprofit.entry(game.guild_id).or_default() += payout.nonprofit_overflow;
                 if let Some(active) = state.games.get_mut(&game_id) {
@@ -1492,6 +1527,7 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                     nonprofit_overflow: payout.nonprofit_overflow,
                     bankruptcy_penalties: penalties,
                     vanity_taxes,
+                    low_priority_taxes,
                     bounty,
                     cap_forced: cap_reached && lynched_role != Some(Role::Jester),
                     ..DayResolution::default()
@@ -1654,7 +1690,7 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
     }
 
     /// Repository-level finalize used by recovery/admin adapters. The phase
-    /// claim, payout, vanity tax ledger, and terminal state are one transaction.
+    /// claim, payout, tax ledger, and terminal state are one transaction.
     pub fn finalize_manual(
         &self,
         game_id: GameId,
@@ -1675,10 +1711,22 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                 } else {
                     0
                 };
+                // Both withholdings share this profit basis, so the last one
+                // is capped by what the other left of it.
+                let low_priority_tax = if state
+                    .low_priority_taxable
+                    .contains(&(game.guild_id, player_id))
+                {
+                    (profit * i64::from(self.low_priority_tax_basis_points) / 10_000)
+                        .min(profit - tax)
+                        .max(0)
+                } else {
+                    0
+                };
                 *state
                     .balances
                     .entry((game.guild_id, player_id))
-                    .or_default() += gross - tax;
+                    .or_default() += gross - tax - low_priority_tax;
                 if tax > 0 {
                     *state.nonprofit.entry(game.guild_id).or_default() += tax;
                     state.ledger.push(LedgerEntry {
@@ -1686,6 +1734,17 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
                         account_id: player_id,
                         delta: -tax,
                         source: "vanity_tax",
+                        related_type: "mafia_game",
+                        related_id: game_id.to_string(),
+                    });
+                }
+                if low_priority_tax > 0 {
+                    *state.nonprofit.entry(game.guild_id).or_default() += low_priority_tax;
+                    state.ledger.push(LedgerEntry {
+                        guild_id: game.guild_id,
+                        account_id: player_id,
+                        delta: -low_priority_tax,
+                        source: "low_priority_tax",
                         related_type: "mafia_game",
                         related_id: game_id.to_string(),
                     });
