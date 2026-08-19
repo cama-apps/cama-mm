@@ -4418,6 +4418,14 @@ impl DiscordTransport for SerenityDiscordTransport {
         Ok(Some(context.cache.current_user().id.get()))
     }
 
+    async fn guild_name(&self, guild_id: u64) -> Result<Option<String>, String> {
+        let context = self.context()?;
+        Ok(context
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|guild| guild.name.clone()))
+    }
+
     async fn user(&self, user_id: u64) -> Result<Option<DiscordUserSnapshot>, String> {
         let context = self.context()?;
         let user_id = UserId::new(user_id);

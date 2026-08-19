@@ -205,6 +205,9 @@ struct RecordingTransport {
     /// probe honest: a bare `defer` also marks the interaction acknowledged.
     responses_on_send: Mutex<Vec<usize>>,
     fail_direct_messages: AtomicBool,
+    /// Name the gateway would resolve for [`GUILD`]; `None` models a transport
+    /// that cannot resolve it, which the copy must survive.
+    guild_name: Mutex<Option<String>>,
     responder: Mutex<Option<Arc<RecordingResponder>>>,
 }
 
@@ -220,14 +223,13 @@ impl DiscordTransport for RecordingTransport {
 
     async fn send_message(
         &self,
-        channel_id: u64,
+        _channel_id: u64,
         _message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String> {
-        Ok(DiscordMessageReceipt {
-            channel_id,
-            message_id: 1,
-            jump_url: "https://discord.test/message/1".to_owned(),
-        })
+        // No `/admin` route posts to a channel. Failing loudly keeps that true:
+        // the previous fixture wired the live transport, which errored without a
+        // gateway, so a route that started broadcasting would surface here.
+        Err("admin routes must not send channel messages".to_owned())
     }
 
     async fn edit_message(
@@ -236,11 +238,11 @@ impl DiscordTransport for RecordingTransport {
         _message_id: u64,
         _message: DiscordMessage,
     ) -> Result<(), String> {
-        Ok(())
+        Err("admin routes must not mutate channel messages".to_owned())
     }
 
     async fn delete_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
-        Ok(())
+        Err("admin routes must not mutate channel messages".to_owned())
     }
 
     async fn create_public_thread(
@@ -249,11 +251,11 @@ impl DiscordTransport for RecordingTransport {
         _message_id: u64,
         _name: &str,
     ) -> Result<u64, String> {
-        Ok(1)
+        Err("admin routes must not create threads".to_owned())
     }
 
     async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
-        Ok(())
+        Err("admin routes must not mutate channel messages".to_owned())
     }
 
     async fn archive_thread(
@@ -294,7 +296,7 @@ impl DiscordTransport for RecordingTransport {
     }
 
     async fn unpin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
-        Ok(())
+        Err("admin routes must not mutate channel messages".to_owned())
     }
 
     async fn send_direct_message(
@@ -330,6 +332,15 @@ impl DiscordTransport for RecordingTransport {
         _user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
         Ok(None)
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> Result<Option<String>, String> {
+        Ok(self
+            .guild_name
+            .lock()
+            .expect("guild name lock")
+            .clone()
+            .filter(|_| guild_id == GUILD))
     }
 }
 
@@ -1415,6 +1426,11 @@ async fn test_backfillroles_requires_admin() {
 async fn test_lowprio_add_dms_the_player_after_acknowledging_with_the_reason_only() {
     let fixture = ProviderFixture::new();
     fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    *fixture
+        .transport
+        .guild_name
+        .lock()
+        .expect("guild name lock") = Some("Camaraderous".to_owned());
     let reason = "repeated abandons";
 
     let responder = fixture
@@ -1441,7 +1457,7 @@ async fn test_lowprio_add_dms_the_player_after_acknowledging_with_the_reason_onl
     assert_eq!(*recipient, TARGET);
     assert_eq!(
         message.response.content,
-        assignment_direct_message(4, Some(reason)),
+        assignment_direct_message(4, Some(reason), Some("Camaraderous")),
         "the restored notice must match the single-sourced policy copy"
     );
     assert!(
@@ -1454,8 +1470,8 @@ async fn test_lowprio_add_dms_the_player_after_acknowledging_with_the_reason_onl
         message
             .response
             .content
-            .contains("`/player lobby status` in the server to view your progress"),
-        "the notice must point at a command that actually answers it"
+            .contains("`/player lobby status` in **Camaraderous** to view your progress"),
+        "the notice must name the guild it is about and a command that answers it"
     );
     assert_eq!(
         message.allowed_mentions,
@@ -1542,7 +1558,7 @@ async fn test_lowprio_add_dm_reflects_the_default_win_requirement_and_omits_a_mi
     assert_eq!(direct.len(), 1);
     assert_eq!(
         direct[0].1.response.content,
-        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS, None)
+        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS, None, None)
     );
     assert!(!direct[0].1.response.content.contains("Reason"));
 }

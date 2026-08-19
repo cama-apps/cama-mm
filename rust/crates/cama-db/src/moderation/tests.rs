@@ -765,6 +765,7 @@ const FIXTURE_SCHEMA: &str = r#"
         start_pending_match_id INTEGER CHECK(start_pending_match_id >= 0),
         active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
         reason TEXT,
+        reason_player_visible INTEGER NOT NULL DEFAULT 0 CHECK(reason_player_visible IN (0,1)),
         set_by INTEGER NOT NULL,
         removed_by INTEGER,
         removed_reason TEXT,

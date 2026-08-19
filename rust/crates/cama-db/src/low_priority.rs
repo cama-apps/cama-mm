@@ -59,6 +59,12 @@ pub struct LowPriorityState {
     pub start_pending_match_id: Option<i64>,
     pub active: bool,
     pub reason: Option<String>,
+    /// Whether `reason` was authored knowing the placed player would read it.
+    ///
+    /// Rows written before `/admin lowprio add` documented the option as
+    /// player-facing default to `false`, so player-facing surfaces show their
+    /// progress without disclosing a reason that may name a third party.
+    pub reason_player_visible: bool,
     pub set_by: i64,
     pub removed_by: Option<i64>,
     pub removed_reason: Option<String>,
@@ -151,7 +157,8 @@ impl LowPriorityRepository {
             .connection()?
             .query_row(
                 "SELECT discord_id, guild_id, wins_required, wins_remaining,
-                        start_pending_match_id, active, reason, set_by,
+                        start_pending_match_id, active, reason,
+                        reason_player_visible, set_by,
                         removed_by, removed_reason, created_at, updated_at
                  FROM low_priority_state
                  WHERE discord_id = ?1 AND guild_id = ?2",
@@ -178,10 +185,11 @@ impl LowPriorityRepository {
         transaction.execute(
             "INSERT INTO low_priority_state (
                  discord_id, guild_id, wins_required, wins_remaining,
-                 start_pending_match_id, active, reason, set_by, removed_by,
+                 start_pending_match_id, active, reason, reason_player_visible,
+                 set_by, removed_by,
                  removed_reason, created_at, updated_at
              )
-             VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, ?6, NULL, NULL,
+             VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, 1, ?6, NULL, NULL,
                      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                  wins_required = excluded.wins_required,
@@ -189,6 +197,7 @@ impl LowPriorityRepository {
                  start_pending_match_id = excluded.start_pending_match_id,
                  active = 1,
                  reason = excluded.reason,
+                 reason_player_visible = excluded.reason_player_visible,
                  set_by = excluded.set_by,
                  removed_by = NULL,
                  removed_reason = NULL,
@@ -206,7 +215,8 @@ impl LowPriorityRepository {
         let state = transaction
             .query_row(
                 "SELECT discord_id, guild_id, wins_required, wins_remaining,
-                        start_pending_match_id, active, reason, set_by,
+                        start_pending_match_id, active, reason,
+                        reason_player_visible, set_by,
                         removed_by, removed_reason, created_at, updated_at
                  FROM low_priority_state
                  WHERE discord_id = ?1 AND guild_id = ?2",
@@ -301,7 +311,8 @@ impl LowPriorityRepository {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT discord_id, guild_id, wins_required, wins_remaining,
-                    start_pending_match_id, active, reason, set_by,
+                    start_pending_match_id, active, reason,
+                    reason_player_visible, set_by,
                     removed_by, removed_reason, created_at, updated_at
              FROM low_priority_state
              WHERE guild_id = ?1 AND active = 1 AND wins_remaining > 0
@@ -346,11 +357,12 @@ fn row_to_state(row: &Row<'_>) -> Result<LowPriorityState, rusqlite::Error> {
         start_pending_match_id: row.get(4)?,
         active: python_truthy(row.get_ref(5)?),
         reason: row.get(6)?,
-        set_by: row.get(7)?,
-        removed_by: row.get(8)?,
-        removed_reason: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        reason_player_visible: python_truthy(row.get_ref(7)?),
+        set_by: row.get(8)?,
+        removed_by: row.get(9)?,
+        removed_reason: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -400,6 +412,8 @@ mod tests {
                          active                 INTEGER NOT NULL DEFAULT 1
                              CHECK(active IN (0, 1)),
                          reason                 TEXT,
+                         reason_player_visible  INTEGER NOT NULL DEFAULT 0
+                             CHECK(reason_player_visible IN (0, 1)),
                          set_by                 INTEGER NOT NULL,
                          removed_by             INTEGER,
                          removed_reason         TEXT,
@@ -458,6 +472,7 @@ mod tests {
                 "start_pending_match_id",
                 "active",
                 "reason",
+                "reason_player_visible",
                 "set_by",
                 "removed_by",
                 "removed_reason",

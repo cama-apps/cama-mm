@@ -668,9 +668,25 @@ impl AdminHandler {
             ),
         )
         .await;
+        let guild_name = match u64::try_from(guild_id) {
+            Ok(guild_id) => self
+                .ports
+                .discord
+                .guild_name(guild_id)
+                .await
+                .unwrap_or_default(),
+            Err(_) => None,
+        };
         self.best_effort_dm(
             user.id,
-            assignment_direct_message(state.wins_required, state.reason.as_deref()),
+            assignment_direct_message(
+                state.wins_required,
+                state
+                    .reason
+                    .as_deref()
+                    .filter(|_| state.reason_player_visible),
+                guild_name.as_deref(),
+            ),
         )
         .await;
         acknowledged
