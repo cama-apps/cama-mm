@@ -1630,3 +1630,57 @@ async fn test_lowprio_remove_stays_silent_toward_the_player() {
         "clearing low priority keeps the existing silent contract"
     );
 }
+
+#[test]
+fn lowprio_add_option_bounds_are_pinned() {
+    // These bounds moved here when the unwired cama-app policy module (which
+    // owned the only assertions on them) was removed. `max_length` is what keeps
+    // a stored reason inside REASON_DISPLAY_LIMIT.
+    let options = admin_options(3_000.0);
+    let lowprio = options
+        .iter()
+        .find(|option| option.name == "lowprio")
+        .expect("lowprio group");
+    let add = lowprio
+        .options
+        .iter()
+        .find(|option| option.name == "add")
+        .expect("lowprio add leaf");
+
+    let wins = add
+        .options
+        .iter()
+        .find(|option| option.name == "wins")
+        .expect("wins option");
+    assert_eq!(wins.kind, CommandOptionKind::Integer);
+    assert!(!wins.required);
+    assert_eq!(wins.min_integer, Some(1));
+    assert_eq!(wins.max_integer, Some(20));
+
+    let reason = add
+        .options
+        .iter()
+        .find(|option| option.name == "reason")
+        .expect("reason option");
+    assert_eq!(reason.kind, CommandOptionKind::String);
+    assert!(!reason.required);
+    assert_eq!(
+        reason.max_length,
+        Some(REASON_DISPLAY_LIMIT),
+        "Discord must reject what the renderer would have to clip"
+    );
+    assert_eq!(
+        reason.min_length, None,
+        "short shorthand reasons have always been accepted"
+    );
+    assert!(
+        reason.description.contains("shown privately to the player"),
+        "the admin writing it must be told the player reads it: {}",
+        reason.description
+    );
+    assert!(
+        reason.description.contains("do not name who reported them"),
+        "{}",
+        reason.description
+    );
+}

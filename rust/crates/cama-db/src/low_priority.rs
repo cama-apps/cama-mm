@@ -79,6 +79,12 @@ pub struct SetLowPriorityInput {
     pub guild_id: Option<i64>,
     pub set_by: i64,
     pub reason: Option<String>,
+    /// Whether `reason` was authored knowing the placed player would read it.
+    ///
+    /// The authoring surface owns this, not the repository: only the command
+    /// that showed the admin a "the player sees this" option description can
+    /// honestly claim consent. Defaults to `false` so a caller must opt in.
+    pub reason_player_visible: bool,
     pub wins_required: PythonIntegerInput,
     pub start_pending_match_id: Option<PythonIntegerInput>,
 }
@@ -98,6 +104,7 @@ impl SetLowPriorityInput {
             guild_id,
             set_by,
             reason,
+            reason_player_visible: false,
             wins_required: PythonIntegerInput::Integer(LOW_PRIORITY_REQUIRED_WINS),
             start_pending_match_id: None,
         }
@@ -189,7 +196,7 @@ impl LowPriorityRepository {
                  set_by, removed_by,
                  removed_reason, created_at, updated_at
              )
-             VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, 1, ?6, NULL, NULL,
+             VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, ?6, ?7, NULL, NULL,
                      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                  wins_required = excluded.wins_required,
@@ -209,6 +216,7 @@ impl LowPriorityRepository {
                 wins_required,
                 start_pending_match_id,
                 input.reason.as_deref(),
+                i64::from(input.reason_player_visible),
                 input.set_by,
             ],
         )?;

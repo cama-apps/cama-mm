@@ -1129,3 +1129,94 @@ fn streaming_bonus_uses_typed_go_live_activity() {
     assert!(!is_streaming_activity(ActivityType::Playing));
     assert!(!is_streaming_activity(ActivityType::Listening));
 }
+
+/// Serve one canned HTTP reply and return the proxy base URL plus the server
+/// thread, so a transport helper can be driven without a live gateway.
+fn canned_discord_reply(status: &'static str, body: String) -> (String, JoinHandle<()>) {
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("bind local Discord HTTP capture server");
+    let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept Discord HTTP request");
+        let mut chunk = [0_u8; 4096];
+        let mut request = Vec::new();
+        loop {
+            let read = stream.read(&mut chunk).expect("read Discord HTTP request");
+            assert!(read > 0, "capture server received an incomplete request");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write Discord HTTP response headers");
+        stream
+            .write_all(body.as_bytes())
+            .expect("write Discord HTTP response body");
+    });
+    (proxy, server)
+}
+
+#[tokio::test]
+async fn guild_name_falls_back_to_http_when_the_gateway_cache_is_cold() {
+    let (proxy, server) = canned_discord_reply(
+        "200 OK",
+        serde_json::json!({
+            "id": "42",
+            "name": "Camaraderous",
+            "owner_id": "7",
+            "roles": [],
+            "emojis": [],
+            "features": [],
+            "verification_level": 0,
+            "default_message_notifications": 0,
+            "explicit_content_filter": 0,
+            "mfa_level": 0,
+            "nsfw_level": 0,
+            "premium_tier": 0,
+            "system_channel_flags": 0,
+            "stickers": [],
+            "premium_progress_bar_enabled": false,
+            "preferred_locale": "en-US"
+        })
+        .to_string(),
+    );
+    let http = HttpBuilder::new("test-token")
+        .application_id(ApplicationId::new(42))
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+
+    let name = fetch_guild_name(&http, GuildId::new(42))
+        .await
+        .expect("guild lookup succeeds");
+    server.join().expect("capture server completes");
+    assert_eq!(
+        name,
+        Some("Camaraderous".to_owned()),
+        "a cold cache must not silently degrade the notice to unqualified copy"
+    );
+}
+
+#[tokio::test]
+async fn guild_name_reports_a_missing_guild_as_absent_rather_than_an_error() {
+    let (proxy, server) = canned_discord_reply(
+        "404 Not Found",
+        serde_json::json!({"code": 10004, "message": "Unknown Guild"}).to_string(),
+    );
+    let http = HttpBuilder::new("test-token")
+        .application_id(ApplicationId::new(42))
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+
+    let name = fetch_guild_name(&http, GuildId::new(42))
+        .await
+        .expect("a missing guild is not a transport failure");
+    server.join().expect("capture server completes");
+    assert_eq!(name, None);
+}

@@ -1141,9 +1141,18 @@ fn test_low_priority_reason_visibility_is_set_for_assignments_written_by_rust() 
         Some("repeated abandons".to_owned()),
     );
     input.wins_required = crate::low_priority_repository::PythonIntegerInput::Integer(3);
-    let state = repository.set_low_priority(&input).expect("assign");
+
+    // The authoring surface opts in; the repository does not decide for it.
+    let defaulted = repository.set_low_priority(&input).expect("assign");
     assert!(
-        state.reason_player_visible,
+        !defaulted.reason_player_visible,
+        "a caller that never saw the player-facing option description must not          have its reason disclosed"
+    );
+
+    input.reason_player_visible = true;
+    let opted_in = repository.set_low_priority(&input).expect("reassign");
+    assert!(
+        opted_in.reason_player_visible,
         "a reason typed under the new option description is the player's to read"
     );
 }
