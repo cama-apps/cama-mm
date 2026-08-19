@@ -159,6 +159,7 @@ fn regular_resolved_fixture(won: bool, broken_ids: Vec<i64>) -> ResolvedFight {
         new_depth: if won { 100 } else { 95 },
         boss_hp_remaining: if won { 0 } else { 50 },
         boss_hp_max: 100,
+        starting_boss_hp: 100,
         extra_knockback: 0,
         extra_cooldown_seconds: 0,
         round_log: Vec::new(),
@@ -725,6 +726,13 @@ fn paused_duel() -> PausedBossDuel {
                 skipped_player: true,
                 skipped_boss: true,
             },
+            mechanic: Some(crate::boss_multi_tier::MechanicRoundRecord {
+                mechanic_id: "grothak_earthquake".to_owned(),
+                option_index: 0,
+                option_label: "Brace".to_owned(),
+                narrative: "You weather the quake.".to_owned(),
+                warding_salts_blocked: false,
+            }),
         }],
         pending_prompt: PendingPrompt {
             mechanic_id: "grothak_earthquake".to_owned(),
@@ -739,6 +747,7 @@ fn paused_duel() -> PausedBossDuel {
         attempts_this_fight: 2,
         initial_win_chance: 0.43,
         payout_multiplier: 2.4,
+        player_hp_max: 5,
         boss_hp_max: 7,
         starting_boss_hp: 7,
         gear_snapshot: GearSnapshot {
