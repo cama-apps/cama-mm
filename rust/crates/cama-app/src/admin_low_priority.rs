@@ -115,6 +115,24 @@ pub trait LowPriorityModerationPort {
     fn record_event(&self, event: LowPriorityAuditEvent) -> Result<(), String>;
 }
 
+/// Polite notice sent to a player when an admin places them in low priority.
+///
+/// The notice deliberately omits both the issuing admin and the admin-authored
+/// reason: `/admin lowprio add` documents its `reason` option as visible to
+/// admins and the moderation audit history only, and that free text is the one
+/// field that can name whoever raised the behaviour, since nothing in
+/// `low_priority_state` records a reporter separately.
+#[must_use]
+pub fn assignment_direct_message(wins_required: i64) -> String {
+    let wins = if wins_required == 1 { "win" } else { "wins" };
+    let games = if wins_required == 1 { "game" } else { "games" };
+    format!(
+        "You were placed in low priority for **{wins_required} {wins}**.\n\
+         The matchmaker is asking for a small course correction.\n\
+         Win {wins_required} recorded {games} to return to regular matchmaking."
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandDelivery {
     pub response: String,
@@ -208,7 +226,7 @@ where
                 state.wins_remaining
             ),
             ephemeral: true,
-            direct_message: None,
+            direct_message: Some(assignment_direct_message(state.wins_required)),
         })
     }
 
@@ -452,8 +470,57 @@ mod tests {
             }]
         );
         assert!(delivery.response.contains("7 wins required"));
-        assert!(delivery.direct_message.is_none());
+        assert_eq!(
+            delivery.direct_message.as_deref(),
+            Some(assignment_direct_message(7).as_str())
+        );
         assert!(delivery.ephemeral);
+    }
+
+    #[test]
+    fn test_lowprio_assignment_dm_is_polite_and_names_nobody() {
+        let notice = assignment_direct_message(3);
+        assert_eq!(
+            notice,
+            "You were placed in low priority for **3 wins**.\n\
+             The matchmaker is asking for a small course correction.\n\
+             Win 3 recorded games to return to regular matchmaking."
+        );
+        assert_eq!(
+            assignment_direct_message(1),
+            "You were placed in low priority for **1 win**.\n\
+             The matchmaker is asking for a small course correction.\n\
+             Win 1 recorded game to return to regular matchmaking."
+        );
+    }
+
+    #[test]
+    fn test_lowprio_assignment_dm_never_leaks_the_reason_or_the_admin() {
+        let players = FakePlayers {
+            exists: true,
+            ..FakePlayers::default()
+        };
+        let repository = FakeRepository::default();
+        *repository.set_result.lock().unwrap() = Some(state(4, 4));
+        let moderation = FakeModeration::default();
+        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
+            .add(
+                true,
+                900,
+                42,
+                77,
+                Some("reported by <@901> for griefing"),
+                4,
+            )
+            .unwrap();
+
+        let notice = delivery.direct_message.expect("assignment notice");
+        assert!(notice.contains("**4 wins**"));
+        assert!(!notice.contains("griefing"));
+        assert!(!notice.contains("Reason"));
+        assert!(!notice.contains("901"));
+        assert!(!notice.contains("900"));
+        assert!(!notice.contains('@'));
     }
 
     #[test]
