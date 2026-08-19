@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::admin_low_priority::assignment_direct_message;
 use cama_app::moderation::{
     CreateSuspension, ModerationService, ModerationServiceError, RecordLowPriorityEvent,
     parse_expiry,
@@ -665,6 +666,8 @@ impl AdminHandler {
             ),
         )
         .await?;
+        self.best_effort_dm(user.id, assignment_direct_message(state.wins_required))
+            .await;
         Ok(())
     }
 

@@ -5,6 +5,10 @@ use cama_app::opendota_http::{OpenDotaHttpConfig, OpenDotaRuntimeServices};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
+use crate::discord_transport::{
+    DiscordAllowedMentions, DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
+    DiscordMessageSnapshot,
+};
 use crate::registration::{InteractionResponseError, Registry};
 
 use super::*;
@@ -189,6 +193,137 @@ impl InteractionResponder for RecordingResponder {
     }
 }
 
+/// Captures the best-effort player DMs the admin routes emit so the tests can
+/// assert their copy without a live gateway. Each capture also records whether
+/// the interaction had already been acknowledged, so a DM can never be allowed
+/// to precede the Discord callback.
+#[derive(Default)]
+struct RecordingTransport {
+    direct_messages: Mutex<Vec<(u64, DiscordMessage)>>,
+    acknowledged_on_send: Mutex<Vec<bool>>,
+    responder: Mutex<Option<Arc<RecordingResponder>>>,
+}
+
+#[async_trait]
+impl DiscordTransport for RecordingTransport {
+    async fn fetch_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<Option<DiscordMessageSnapshot>, String> {
+        Ok(None)
+    }
+
+    async fn send_message(
+        &self,
+        channel_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, String> {
+        Ok(DiscordMessageReceipt {
+            channel_id,
+            message_id: 1,
+            jump_url: "https://discord.test/message/1".to_owned(),
+        })
+    }
+
+    async fn edit_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn delete_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn create_public_thread(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _name: &str,
+    ) -> Result<u64, String> {
+        Ok(1)
+    }
+
+    async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn archive_thread(
+        &self,
+        _thread_id: u64,
+        _name: &str,
+        _locked: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+        _user_id: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn clear_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn unpin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn send_direct_message(
+        &self,
+        user_id: u64,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        let acknowledged = self
+            .responder
+            .lock()
+            .expect("responder probe lock")
+            .as_ref()
+            .is_some_and(|responder| responder.response_is_done());
+        self.acknowledged_on_send
+            .lock()
+            .expect("acknowledgement lock")
+            .push(acknowledged);
+        self.direct_messages
+            .lock()
+            .expect("direct message lock")
+            .push((user_id, message));
+        Ok(())
+    }
+
+    async fn guild_member(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
+        Ok(None)
+    }
+}
+
 struct RecordingDiscordControl {
     health_calls: AtomicUsize,
     sync_calls: AtomicUsize,
@@ -333,6 +468,7 @@ struct ProviderFixture {
     database: NamedTempFile,
     provider: AdminRegistrationProvider,
     discord: Arc<RecordingDiscordControl>,
+    transport: Arc<RecordingTransport>,
     lobby: Arc<RecordingLobbyControl>,
     matches: Arc<RecordingMatchControl>,
     corrections: Arc<RecordingCorrectionControl>,
@@ -364,13 +500,13 @@ impl ProviderFixture {
         let lobby = Arc::new(RecordingLobbyControl::default());
         let matches = Arc::new(RecordingMatchControl::default());
         let corrections = Arc::new(RecordingCorrectionControl::default());
-        let transport = Arc::new(crate::SerenityDiscordTransport::new());
+        let transport = Arc::new(RecordingTransport::default());
         let provider = AdminRegistrationProvider::new(
             database.path(),
             &config,
             opendota,
             AdminRuntimePorts {
-                discord: transport,
+                discord: transport.clone(),
                 discord_control: discord.clone(),
                 lobby: lobby.clone(),
                 matches: matches.clone(),
@@ -382,10 +518,19 @@ impl ProviderFixture {
             database,
             provider,
             discord,
+            transport,
             lobby,
             matches,
             corrections,
         }
+    }
+
+    fn direct_messages(&self) -> Vec<(u64, DiscordMessage)> {
+        self.transport
+            .direct_messages
+            .lock()
+            .expect("direct message lock")
+            .clone()
     }
 
     fn registry(&self) -> Registry {
@@ -481,6 +626,11 @@ impl ProviderFixture {
 
     async fn dispatch_request(&self, request: InteractionRequest) -> Arc<RecordingResponder> {
         let responder = Arc::new(RecordingResponder::default());
+        *self
+            .transport
+            .responder
+            .lock()
+            .expect("responder probe lock") = Some(responder.clone());
         self.registry()
             .command_handler("admin")
             .expect("Admin handler")
@@ -509,6 +659,31 @@ fn admin_command(
         options: vec![InteractionOption {
             name: subcommand.to_owned(),
             value: InteractionValue::Subcommand(options),
+        }],
+    }
+}
+
+fn admin_lowprio_command(
+    subcommand: &str,
+    options: Vec<InteractionOption>,
+    interaction_id: u64,
+    actor_id: u64,
+    permissions: Option<u64>,
+) -> InteractionRequest {
+    InteractionRequest::Command {
+        interaction_id,
+        name: "admin".to_owned(),
+        user_id: actor_id,
+        user_display_name: "Admin".to_owned(),
+        guild_id: Some(GUILD),
+        channel_id: Some(55),
+        member_permissions: permissions,
+        options: vec![InteractionOption {
+            name: "lowprio".to_owned(),
+            value: InteractionValue::SubcommandGroup(vec![InteractionOption {
+                name: subcommand.to_owned(),
+                value: InteractionValue::Subcommand(options),
+            }]),
         }],
     }
 }
@@ -1214,5 +1389,157 @@ async fn test_backfillroles_requires_admin() {
             .expect("lock")
             .is_empty(),
         "a non-admin must not trigger a database-wide scan"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_add_dms_the_player_after_acknowledging_without_naming_anybody() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    let reason = "reported by <@42099> for repeated abandons";
+
+    let responder = fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "Target"),
+                string_option("reason", reason),
+                integer_option("wins", 4),
+            ],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let acknowledgement = responder.last();
+    assert!(acknowledgement.ephemeral);
+    assert!(acknowledgement.content.contains("4 wins required"));
+
+    let direct = fixture.direct_messages();
+    assert_eq!(direct.len(), 1, "the placed player gets exactly one notice");
+    let (recipient, message) = &direct[0];
+    assert_eq!(*recipient, TARGET);
+    assert_eq!(
+        message.response.content,
+        assignment_direct_message(4),
+        "the restored notice must match the single-sourced policy copy"
+    );
+    assert_eq!(
+        message.allowed_mentions,
+        DiscordAllowedMentions::None,
+        "a moderation notice must never ping anybody"
+    );
+    assert!(!message.response.content.contains("repeated abandons"));
+    assert!(!message.response.content.contains("42099"));
+    assert!(!message.response.content.contains(&ADMIN.to_string()));
+    assert!(!message.response.content.contains('@'));
+    assert!(
+        !message
+            .response
+            .content
+            .to_ascii_lowercase()
+            .contains("reason")
+    );
+
+    assert_eq!(
+        *fixture
+            .transport
+            .acknowledged_on_send
+            .lock()
+            .expect("acknowledgement lock"),
+        [true],
+        "the interaction must be acknowledged before the DM round trip"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_add_dm_reflects_the_default_win_requirement() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            2,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let direct = fixture.direct_messages();
+    assert_eq!(direct.len(), 1);
+    assert_eq!(
+        direct[0].1.response.content,
+        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS)
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_add_does_not_dm_unregistered_players_or_non_admins() {
+    let fixture = ProviderFixture::new();
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            3,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(
+        fixture.direct_messages().is_empty(),
+        "an unregistered player is never placed and never notified"
+    );
+
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            4,
+            90_001,
+            Some(0),
+        ))
+        .await;
+    assert!(
+        fixture.direct_messages().is_empty(),
+        "a rejected non-admin must not be able to make the bot DM anyone"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_remove_stays_silent_toward_the_player() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            5,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(fixture.direct_messages().len(), 1);
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "remove",
+            vec![
+                user_option("user", TARGET, "Target"),
+                string_option("reason", "served the wins"),
+            ],
+            6,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(
+        fixture.direct_messages().len(),
+        1,
+        "clearing low priority keeps the existing silent contract"
     );
 }
