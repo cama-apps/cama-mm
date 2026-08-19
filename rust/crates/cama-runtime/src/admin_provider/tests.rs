@@ -200,7 +200,11 @@ impl InteractionResponder for RecordingResponder {
 #[derive(Default)]
 struct RecordingTransport {
     direct_messages: Mutex<Vec<(u64, DiscordMessage)>>,
-    acknowledged_on_send: Mutex<Vec<bool>>,
+    /// Responses already delivered to the caller when each DM was attempted.
+    /// Counting responses rather than reading `response_is_done` keeps the
+    /// probe honest: a bare `defer` also marks the interaction acknowledged.
+    responses_on_send: Mutex<Vec<usize>>,
+    fail_direct_messages: AtomicBool,
     responder: Mutex<Option<Arc<RecordingResponder>>>,
 }
 
@@ -298,20 +302,25 @@ impl DiscordTransport for RecordingTransport {
         user_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
-        let acknowledged = self
+        let delivered = self
             .responder
             .lock()
             .expect("responder probe lock")
             .as_ref()
-            .is_some_and(|responder| responder.response_is_done());
-        self.acknowledged_on_send
+            .map_or(0, |responder| {
+                responder.responses.lock().expect("response lock").len()
+            });
+        self.responses_on_send
             .lock()
             .expect("acknowledgement lock")
-            .push(acknowledged);
+            .push(delivered);
         self.direct_messages
             .lock()
             .expect("direct message lock")
             .push((user_id, message));
+        if self.fail_direct_messages.load(Ordering::Acquire) {
+            return Err("Cannot send messages to this user".to_owned());
+        }
         Ok(())
     }
 
@@ -663,7 +672,8 @@ fn admin_command(
     }
 }
 
-fn admin_lowprio_command(
+fn admin_group_command(
+    group: &str,
     subcommand: &str,
     options: Vec<InteractionOption>,
     interaction_id: u64,
@@ -679,13 +689,30 @@ fn admin_lowprio_command(
         channel_id: Some(55),
         member_permissions: permissions,
         options: vec![InteractionOption {
-            name: "lowprio".to_owned(),
+            name: group.to_owned(),
             value: InteractionValue::SubcommandGroup(vec![InteractionOption {
                 name: subcommand.to_owned(),
                 value: InteractionValue::Subcommand(options),
             }]),
         }],
     }
+}
+
+fn admin_lowprio_command(
+    subcommand: &str,
+    options: Vec<InteractionOption>,
+    interaction_id: u64,
+    actor_id: u64,
+    permissions: Option<u64>,
+) -> InteractionRequest {
+    admin_group_command(
+        "lowprio",
+        subcommand,
+        options,
+        interaction_id,
+        actor_id,
+        permissions,
+    )
 }
 
 fn admin_adjust_command(
@@ -695,22 +722,14 @@ fn admin_adjust_command(
     actor_id: u64,
     permissions: Option<u64>,
 ) -> InteractionRequest {
-    InteractionRequest::Command {
+    admin_group_command(
+        "adjust",
+        subcommand,
+        options,
         interaction_id,
-        name: "admin".to_owned(),
-        user_id: actor_id,
-        user_display_name: "Admin".to_owned(),
-        guild_id: Some(GUILD),
-        channel_id: Some(55),
-        member_permissions: permissions,
-        options: vec![InteractionOption {
-            name: "adjust".to_owned(),
-            value: InteractionValue::SubcommandGroup(vec![InteractionOption {
-                name: subcommand.to_owned(),
-                value: InteractionValue::Subcommand(options),
-            }]),
-        }],
-    }
+        actor_id,
+        permissions,
+    )
 }
 
 fn integer_option(name: &str, value: i64) -> InteractionOption {
@@ -1393,10 +1412,10 @@ async fn test_backfillroles_requires_admin() {
 }
 
 #[tokio::test]
-async fn test_lowprio_add_dms_the_player_after_acknowledging_without_naming_anybody() {
+async fn test_lowprio_add_dms_the_player_after_acknowledging_with_the_reason_only() {
     let fixture = ProviderFixture::new();
     fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
-    let reason = "reported by <@42099> for repeated abandons";
+    let reason = "repeated abandons";
 
     let responder = fixture
         .dispatch_request(admin_lowprio_command(
@@ -1422,39 +1441,90 @@ async fn test_lowprio_add_dms_the_player_after_acknowledging_without_naming_anyb
     assert_eq!(*recipient, TARGET);
     assert_eq!(
         message.response.content,
-        assignment_direct_message(4),
+        assignment_direct_message(4, Some(reason)),
         "the restored notice must match the single-sourced policy copy"
+    );
+    assert!(
+        message
+            .response
+            .content
+            .contains("Reason: repeated abandons")
+    );
+    assert!(
+        message
+            .response
+            .content
+            .contains("`/player lobby status` in the server to view your progress"),
+        "the notice must point at a command that actually answers it"
     );
     assert_eq!(
         message.allowed_mentions,
         DiscordAllowedMentions::None,
         "a moderation notice must never ping anybody"
     );
-    assert!(!message.response.content.contains("repeated abandons"));
-    assert!(!message.response.content.contains("42099"));
+    // The reason is the player's to see; the admin who issued it is not.
     assert!(!message.response.content.contains(&ADMIN.to_string()));
-    assert!(!message.response.content.contains('@'));
-    assert!(
-        !message
-            .response
-            .content
-            .to_ascii_lowercase()
-            .contains("reason")
-    );
+    assert!(!message.response.content.contains("<@"));
 
     assert_eq!(
         *fixture
             .transport
-            .acknowledged_on_send
+            .responses_on_send
             .lock()
             .expect("acknowledgement lock"),
-        [true],
-        "the interaction must be acknowledged before the DM round trip"
+        [1],
+        "the admin must have their reply in hand before the DM round trip"
     );
 }
 
 #[tokio::test]
-async fn test_lowprio_add_dm_reflects_the_default_win_requirement() {
+async fn test_lowprio_add_survives_a_player_with_closed_dms() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .transport
+        .fail_direct_messages
+        .store(true, Ordering::Release);
+
+    let responder = fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "Target"),
+                integer_option("wins", 2),
+            ],
+            7,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    assert!(
+        responder.last().content.contains("2 wins required"),
+        "a rejected DM must not cost the admin their confirmation"
+    );
+    assert_eq!(
+        fixture.direct_messages().len(),
+        1,
+        "the notice is still attempted"
+    );
+    let stored = Connection::open(fixture.database.path())
+        .expect("open Admin provider database")
+        .query_row(
+            "SELECT wins_remaining FROM low_priority_state
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("low priority row persists");
+    assert_eq!(stored, 2, "the penalty stands even when the DM bounces");
+}
+
+#[tokio::test]
+async fn test_lowprio_add_dm_reflects_the_default_win_requirement_and_omits_a_missing_reason() {
     let fixture = ProviderFixture::new();
     fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
 
@@ -1472,8 +1542,9 @@ async fn test_lowprio_add_dm_reflects_the_default_win_requirement() {
     assert_eq!(direct.len(), 1);
     assert_eq!(
         direct[0].1.response.content,
-        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS)
+        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS, None)
     );
+    assert!(!direct[0].1.response.content.contains("Reason"));
 }
 
 #[tokio::test]

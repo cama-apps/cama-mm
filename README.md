@@ -321,8 +321,8 @@ List all available commands with descriptions.
 
 - `/admin` — Maintenance subcommands: `addfake`, `filllobbytest`, `resetuser`, `registeruser`, `givecoin`, `setrating`, `bumprd`, `adjust rating|rd`, `recalibrate`, `extendbetting`, `correctmatch`, `sync`, `health`, `seedherogrid`, Steam ID management (`addsteamid`, `removesteamid`, `setprimarysteam`), and cooldown resets (`resetbankruptcycooldown`, `resetloancooldown`, `resetrecalibrationcooldown`)
 - `/admin moderation suspend|lift|status|list|history` — Temporarily block selected lobby kinds by duration, future completed matches, or both, with private reasons and durable history
-- `/admin lowprio add|remove|status|list` — Admin-only private management and inspection of low-priority shuffle modifiers and 1.1× positive rating gains for 1–20 required wins. `add` also sends the affected player a short private notice with the required win count; the admin reason is never included, so a reporter can never be named
-- `/player lobby status` — Privately view your active lobby suspension
+- `/admin lowprio add|remove|status|list` — Admin-only private management and inspection of low-priority shuffle modifiers and 1.1× positive rating gains for 1–20 required wins. `add` also sends the affected player a short private notice with the required win count and the reason; the issuing admin is never named, so write reasons that describe the behaviour rather than who raised it
+- `/player lobby status` — Privately view your active lobby suspension and your low-priority progress (wins completed and remaining)
 - `/enrich` — Match enrichment and discovery: `setleague`, `discover`, `match`, `backfill`, `wipematch`, `wipeall`, `rebuildpairings`, `config`
 - `/trivia-reset-cooldown` — Reset a user's trivia cooldown
 - `/survey` — Manage and report on one-off anonymous DM surveys (`create`, `list`, `preview`, `delete`, `send`, `retry`, `results`, `close`, and `question add|edit|remove|move`)

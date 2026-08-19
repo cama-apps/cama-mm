@@ -1158,7 +1158,7 @@ async fn lobby_status_response(database: &NamedTempFile, user_id: u64) -> Intera
 }
 
 #[tokio::test]
-async fn test_player_lobby_status_exposes_only_the_callers_suspension() {
+async fn test_player_lobby_status_exposes_only_the_callers_suspension_and_low_priority() {
     let database = database();
     let now = now_seconds();
     Connection::open(database.path())
@@ -1172,7 +1172,7 @@ async fn test_player_lobby_status_exposes_only_the_callers_suspension() {
                       'repeat abandonment','admin',999,1,1,{now},{now});
              INSERT INTO low_priority_state(
                  discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
-             ) VALUES(42,42,7,3,1,'missed ready checks',999);",
+             ) VALUES(42,42,7,3,1,'missed ready checks',987654321098);",
             now + 9_000
         ))
         .expect("seed private lobby status");
@@ -1187,15 +1187,68 @@ async fn test_player_lobby_status_exposes_only_the_callers_suspension() {
             .contains("and 2 completed matches remaining")
     );
     assert!(response.content.contains("Reason: repeat abandonment"));
+    // A player must be able to discover their own low priority privately.
+    assert!(response.content.contains("**Low priority**"));
     assert!(
-        !response
+        response
             .content
-            .to_ascii_lowercase()
-            .contains("low priority")
+            .contains("4/7 wins completed (3 wins remaining)")
     );
-    assert!(!response.content.to_ascii_lowercase().contains("progress"));
-    assert!(!response.content.contains("missed ready checks"));
+    assert!(response.content.contains("Reason: missed ready checks"));
+    // `set_by` stays admin-facing: the player learns what, never who. The
+    // sentinel is 12 digits so it cannot collide with the rendered timestamp.
+    assert!(!response.content.contains("987654321098"));
     assert!(!response.content.contains("<@42>"));
+}
+
+#[tokio::test]
+async fn test_player_lobby_status_reports_low_priority_without_a_suspension() {
+    let database = database();
+    Connection::open(database.path())
+        .expect("open lobby status database")
+        .execute_batch(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
+             ) VALUES(42,42,3,1,1,NULL,999);",
+        )
+        .expect("seed low priority without a suspension");
+    let response = lobby_status_response(&database, 42).await;
+    assert!(response.ephemeral);
+    assert!(!response.content.contains("Lobby suspension"));
+    assert!(!response.content.contains("All clear"));
+    assert!(
+        response
+            .content
+            .contains("**Low priority** — 2/3 wins completed (1 win remaining)")
+    );
+    // A NULL reason must not render a dangling "Reason:" line.
+    assert!(!response.content.contains("Reason"));
+}
+
+#[tokio::test]
+async fn test_player_lobby_status_ignores_served_and_other_guild_low_priority() {
+    let database = database();
+    Connection::open(database.path())
+        .expect("open lobby status database")
+        .execute_batch(
+            "INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
+             ) VALUES(42,42,3,0,1,'served it out',999);
+             INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
+             ) VALUES(42,77,5,5,1,'other league',999);
+             INSERT INTO low_priority_state(
+                 discord_id,guild_id,wins_required,wins_remaining,active,reason,set_by
+             ) VALUES(43,42,5,5,1,'somebody else',999);",
+        )
+        .expect("seed drained, cross-guild, and foreign low priority");
+    let response = lobby_status_response(&database, 42).await;
+    assert!(response.content.contains("All clear"));
+    assert!(!response.content.contains("**Low priority**"));
+    assert!(!response.content.contains("wins completed"));
+    assert!(!response.content.contains("served it out"));
+    assert!(!response.content.contains("other league"));
+    assert!(!response.content.contains("somebody else"));
 }
 
 #[tokio::test]
@@ -1205,7 +1258,7 @@ async fn test_player_lobby_status_reports_no_active_suspension() {
     assert!(response.ephemeral);
     assert_eq!(
         response.content,
-        "✅ All clear — you have no active lobby suspension."
+        "✅ All clear — you have no active lobby suspension or low priority."
     );
 }
 
