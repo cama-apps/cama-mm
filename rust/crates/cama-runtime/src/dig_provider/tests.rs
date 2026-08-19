@@ -226,9 +226,11 @@ fn pinnacle_boss_projection_fixture(
         gross_payout: if won { 500 } else { 0 },
         bankruptcy_penalty: 0,
         vanity_tax: 0,
+        low_priority_tax: 0,
         new_depth: if won { 350 } else { 340 },
         boss_hp_remaining: if won { 0 } else { 50 },
         boss_hp_max: 100,
+        starting_boss_hp: 100,
         knockback: if won { 0 } else { 10 },
         round_log: Vec::new(),
         gear_wear: Default::default(),
@@ -834,9 +836,11 @@ fn regular_boss_projection_fixture(won: bool) -> cama_app::boss_multi_tier::Reso
         gross_payout: if won { 500 } else { 0 },
         bankruptcy_penalty: 0,
         vanity_tax: 0,
+        low_priority_tax: 0,
         new_depth: if won { 100 } else { 95 },
         boss_hp_remaining: if won { 0 } else { 50 },
         boss_hp_max: 100,
+        starting_boss_hp: 100,
         extra_knockback: 0,
         extra_cooldown_seconds: 0,
         round_log: Vec::new(),
@@ -846,6 +850,103 @@ fn regular_boss_projection_fixture(won: bool) -> cama_app::boss_multi_tier::Reso
         rescue_line_used: false,
         warding_salts_blocked: false,
     }
+}
+
+#[test]
+fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
+    use cama_app::boss_duel::RiskTier;
+    use cama_app::boss_multi_tier::{
+        CombatEffects, CombatState, GearSnapshot, PausedBossDuel, PendingPrompt, mechanic_by_id,
+    };
+
+    let mechanic = mechanic_by_id("ogre_fireblast").expect("Ogre mechanic is bundled");
+    let paused = PausedBossDuel {
+        boss_id: "ogre_magi".to_owned(),
+        boundary: 75,
+        mechanic_id: mechanic.id.clone(),
+        risk_tier: RiskTier::Bold,
+        wager: 0,
+        combat: CombatState {
+            player_hp: 7,
+            boss_hp: 11,
+            player_hit: 0.5,
+            player_damage: 2,
+            boss_hit: 0.5,
+            boss_damage: 2,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+        round_num: 2,
+        round_log: Vec::new(),
+        pending_prompt: PendingPrompt::from(&mechanic),
+        attempts_this_fight: 1,
+        initial_win_chance: 0.5,
+        payout_multiplier: 1.0,
+        player_hp_max: 10,
+        boss_hp_max: 14,
+        starting_boss_hp: 14,
+        gear_snapshot: GearSnapshot::default(),
+        forced_no_wager_phase: false,
+        echo_applied: false,
+        echo_killer_id: None,
+    };
+
+    let response = super::paused_boss_response(&paused, USER as i64, GUILD as i64);
+    let embed = &response.embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("The Twin-Skulled — Round 2"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some(
+            "**The Twin-Skulled chants a slow fire blast**\n*Left head counts down. Right head forgot the number.*"
+        )
+    );
+    assert_eq!(
+        boss_projection_field(embed, "State").map(|field| field.value.as_str()),
+        Some("You: **7/10 HP**  |  The Twin-Skulled: **11/14 HP**")
+    );
+    assert_eq!(
+        boss_projection_field(embed, "Your choice").map(|field| field.value.as_str()),
+        Some("1. Slap the left head\n2. Confuse both heads\n3. Stand in front and grin")
+    );
+}
+
+#[test]
+fn boss_result_shows_selected_outcome_and_softened_hp() {
+    use cama_app::boss_multi_tier::{MechanicRoundRecord, RoundEffectLog, RoundRecord};
+
+    let mut result = regular_boss_projection_fixture(false);
+    result.boss_hp_remaining = 40;
+    result.round_log.push(RoundRecord {
+        round: 2,
+        player_hp: 4,
+        boss_hp: 40,
+        player_hit: false,
+        boss_hit: None,
+        pet_assist: None,
+        pet_assist_damage: 0,
+        effect_log: RoundEffectLog::default(),
+        mechanic: Some(MechanicRoundRecord {
+            mechanic_id: "ogre_fireblast".to_owned(),
+            option_index: 2,
+            option_label: "Stand in front and grin".to_owned(),
+            narrative: "Right head casts backwards. Ogre lights himself up.".to_owned(),
+            warding_salts_blocked: false,
+        }),
+    });
+
+    let embed = super::regular_boss_result_embed(&result, None, None, &[]);
+    assert_eq!(
+        boss_projection_field(&embed, "You chose: Stand in front and grin")
+            .map(|field| field.value.as_str()),
+        Some("Right head casts backwards. Ogre lights himself up.")
+    );
+    assert_eq!(
+        boss_projection_field(&embed, "The boss remembers").map(|field| field.value.as_str()),
+        Some(
+            "You knocked Grothak the Unbreakable from **100/100 HP** to **40/100 HP** before retreating."
+        )
+    );
 }
 
 fn boss_projection_field<'a>(
@@ -947,6 +1048,72 @@ fn boss_failure_uses_python_error_embed() {
         Some("The guardian refuses the wager.")
     );
     assert_eq!(embed.color, Some(0xFF_A5_00));
+}
+
+#[tokio::test]
+async fn stale_namespaced_boss_duel_is_reported_to_the_player() {
+    let (_database, provider, _discord) = fixture();
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:duel:{USER}:{GUILD}:0"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss choice is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    let embed = &followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("Boss Fight Error"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("there is no active duel to resume")
+    );
+}
+
+#[tokio::test]
+async fn stale_carried_boss_fight_is_reported_as_expired() {
+    let (database, provider, _discord) = fixture();
+    Connection::open(database.path())
+        .expect("stale boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,1,1,0,'{}',0,0,100,0,'Stale Boss Button')",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("non-boss tunnel");
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:boss:fight:carried:{USER}:{GUILD}"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("a stale boss fight is a handled interaction");
+
+    assert_eq!(*responder.defers.lock().expect("boss defers"), vec![false]);
+    assert!(
+        responder
+            .responses
+            .lock()
+            .expect("boss responses")
+            .is_empty()
+    );
+    let followups = responder.followups.lock().expect("boss followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        "This boss encounter is no longer active. Use `/dig go` to continue."
+    );
 }
 
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
@@ -1629,6 +1796,7 @@ fn hook_outcome() -> DigRuntimeOutcome {
         advance: 1,
         jc_earned: 2,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_after: 100,
         tunnel_name: "Test Tunnel".to_owned(),
         milestone_bonus: 0,
@@ -3924,6 +4092,7 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         advance: 0,
         jc_earned: 0,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_after: 100,
         tunnel_name: "Test Tunnel".to_owned(),
         milestone_bonus: 0,
@@ -4773,7 +4942,7 @@ async fn boss_modal_and_resume_live_path_sends_neon_after_primary_result() {
             params![
                 USER as i64,
                 GUILD as i64,
-                r#"{"25":{"boss_id":"grothak","status":"active"}}"#,
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":4}}"#,
             ],
         )
         .expect("live boss tunnel");
@@ -4959,6 +5128,7 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
         advance: 4,
         jc_earned: 6,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_after: 106,
         tunnel_name: "The Media Mine".to_owned(),
         milestone_bonus: 0,
@@ -5085,6 +5255,7 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         advance: 4,
         jc_earned: 6,
         vanity_tax: 0,
+        low_priority_tax: 0,
         balance_after: 106,
         tunnel_name: "The Event Mine".to_owned(),
         milestone_bonus: 0,
@@ -5670,7 +5841,8 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
     {
         let updates = open.updates.lock().expect("selector update");
         assert_eq!(updates.len(), 1);
-        let select = updates[0].components[0]
+        let update = &updates[0];
+        let select = update.components[0]
             .string_select
             .as_ref()
             .expect("gear select");
@@ -5685,6 +5857,33 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
                 .options
                 .iter()
                 .any(|option| option.value == format!("relic:{relic_id}"))
+        );
+        assert_eq!(
+            update.components[1]
+                .buttons
+                .iter()
+                .map(|button| button.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Back"]
+        );
+        let component_ids = update
+            .components
+            .iter()
+            .flat_map(|row| {
+                row.buttons
+                    .iter()
+                    .map(|button| button.custom_id.as_str())
+                    .chain(
+                        row.string_select
+                            .iter()
+                            .map(|select| select.custom_id.as_str()),
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            component_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            component_ids.len(),
+            "Discord requires every component custom_id to be unique"
         );
     }
 

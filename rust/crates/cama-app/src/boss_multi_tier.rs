@@ -8,22 +8,26 @@
 //! doubles, not claims of a production cutover.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::LazyLock;
 
 use cama_domain::dig_economy::{
     WagerMultiplier, WinChance, effective_wager_multiplier, scale_positive_dig_jc,
     settled_wager_multiplier,
 };
+use serde::Deserialize;
 use thiserror::Error;
 
 pub use crate::boss_duel::RiskTier;
 use crate::boss_duel::{
     PHASE_TRANSITION_EVENTS, PetAssist, boss_base_reward, boss_payout_multiplier, transition_event,
 };
+#[cfg(test)]
+use crate::dig_bosses::BOSSES;
 pub use crate::dig_bosses::{
     BOSS_BOUNDARIES, BossDefinition, BossProgress, BossProgressEntry, BossProgressValue, BossStatus,
 };
 use crate::dig_bosses::{
-    BOSSES, CombatStats, DuelOddsInput, PINNACLE_DEPTH, boss_by_id, boss_pool_for_tier,
+    CombatStats, DuelOddsInput, PINNACLE_DEPTH, boss_by_id, boss_pool_for_tier,
     duel_win_probability_with_damage_bonus, regular_phase, scale_boss_stats,
 };
 use crate::dig_relic_rework::{
@@ -367,13 +371,15 @@ pub fn stinger_by_id(stinger_id: &str) -> Option<&'static StingerDefinition> {
     STINGERS.iter().find(|stinger| stinger.id == stinger_id)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum Combatant {
     Player,
     Boss,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum MechanicStatusEffect {
     Burn,
     Silence,
@@ -382,7 +388,7 @@ pub enum MechanicStatusEffect {
     Reveal,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct OutcomeRoll {
     pub probability: f64,
     pub player_hp_delta: i32,
@@ -392,14 +398,14 @@ pub struct OutcomeRoll {
     pub narrative: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MechanicOption {
     pub label: String,
     pub flavor: String,
     pub outcome_rolls: Vec<OutcomeRoll>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MechanicDefinition {
     pub id: String,
     pub archetype: String,
@@ -407,310 +413,51 @@ pub struct MechanicDefinition {
     pub prompt_title: String,
     pub prompt_description: String,
     pub options: Vec<MechanicOption>,
+    #[serde(rename = "safe_option_idx")]
     pub safe_option_index: usize,
 }
 
-fn roll(
-    probability: f64,
-    player_hp_delta: i32,
-    boss_hp_delta: i32,
-    skip_next_round_for: Option<Combatant>,
-    status_effect: Option<MechanicStatusEffect>,
-    narrative: &str,
-) -> OutcomeRoll {
-    OutcomeRoll {
-        probability,
-        player_hp_delta,
-        boss_hp_delta,
-        skip_next_round_for,
-        status_effect,
-        narrative: narrative.to_owned(),
-    }
-}
+static MECHANIC_CATALOG: LazyLock<BTreeMap<String, MechanicDefinition>> = LazyLock::new(|| {
+    let catalog: BTreeMap<String, MechanicDefinition> =
+        serde_json::from_str(include_str!("../data/boss_mechanics.json"))
+            .expect("the bundled boss mechanic catalog must be valid JSON");
+    validate_mechanic_catalog(&catalog);
+    catalog
+});
 
-fn option(label: &str, flavor: &str, outcome_rolls: Vec<OutcomeRoll>) -> MechanicOption {
-    MechanicOption {
-        label: label.to_owned(),
-        flavor: flavor.to_owned(),
-        outcome_rolls,
-    }
-}
-
-fn grothak_earthquake() -> MechanicDefinition {
-    MechanicDefinition {
-        id: "grothak_earthquake".to_owned(),
-        archetype: "channel_aoe".to_owned(),
-        trigger_round: 3,
-        prompt_title: "Grothak rears up for a slam".to_owned(),
-        prompt_description: "The cavern shudders. A boulder-sized fist rises.".to_owned(),
-        options: vec![
-            option(
-                "Brace against the wall",
-                "You put your back to stone.",
-                vec![
-                    roll(
-                        0.75,
-                        -1,
-                        0,
-                        None,
-                        None,
-                        "Dust fills your mouth but you stay on your feet.",
-                    ),
-                    roll(
-                        0.25,
-                        -2,
-                        0,
-                        None,
-                        None,
-                        "The wall cracks — a chunk catches you in the chest.",
-                    ),
-                ],
-            ),
-            option(
-                "Roll into his leg",
-                "You tuck and dive forward.",
-                vec![
-                    roll(
-                        0.55,
-                        -1,
-                        -2,
-                        None,
-                        None,
-                        "You get under the slam; your pick opens a gash on his shin.",
-                    ),
-                    roll(
-                        0.45,
-                        -2,
-                        0,
-                        Some(Combatant::Player),
-                        None,
-                        "The slam catches your shoulder — you lose your footing.",
-                    ),
-                ],
-            ),
-            option(
-                "Leap and swing for his face",
-                "You go for the throat.",
-                vec![
-                    roll(
-                        0.25,
-                        0,
-                        -3,
-                        None,
-                        None,
-                        "You land a brutal blow on his jaw — teeth fly.",
-                    ),
-                    roll(
-                        0.75,
-                        -3,
-                        0,
-                        None,
-                        None,
-                        "Grothak catches you out of the air; you hit the floor hard.",
-                    ),
-                ],
-            ),
-        ],
-        safe_option_index: 0,
-    }
-}
-
-fn pudge_hook() -> MechanicDefinition {
-    MechanicDefinition {
-        id: "pudge_hook".to_owned(),
-        archetype: "hook_pull".to_owned(),
-        trigger_round: 3,
-        prompt_title: "The Butcher winds up the hook".to_owned(),
-        prompt_description: "The chain rattles. His arm cocks back.".to_owned(),
-        options: vec![
-            option(
-                "Dodge left",
-                "You dive for cover.",
-                vec![
-                    roll(0.70, 0, 0, None, None, "The hook whips past you."),
-                    roll(0.30, -1, 0, None, None, "The hook clips your shoulder."),
-                ],
-            ),
-            option(
-                "Dodge right into a swing",
-                "You trade a graze for a counter.",
-                vec![
-                    roll(
-                        0.50,
-                        -1,
-                        -2,
-                        None,
-                        None,
-                        "You take it low, land a free hit on his gut.",
-                    ),
-                    roll(
-                        0.50,
-                        -2,
-                        0,
-                        Some(Combatant::Player),
-                        None,
-                        "The hook lands clean — no counter possible.",
-                    ),
-                ],
-            ),
-            option(
-                "Grab the hook",
-                "You lunge for the chain.",
-                vec![
-                    roll(
-                        0.25,
-                        0,
-                        -4,
-                        None,
-                        None,
-                        "You yank The Butcher off balance — massive hit!",
-                    ),
-                    roll(
-                        0.75,
-                        -3,
-                        0,
-                        None,
-                        None,
-                        "The Butcher pulls harder — you take the weight.",
-                    ),
-                ],
-            ),
-        ],
-        safe_option_index: 0,
-    }
-}
-
-fn cm_frostbite() -> MechanicDefinition {
-    MechanicDefinition {
-        id: "cm_frostbite".to_owned(),
-        archetype: "dot_debuff".to_owned(),
-        trigger_round: 2,
-        prompt_title: "The Frostbinder chants a frostbite".to_owned(),
-        prompt_description: "Ice crawls up your boots. Your breath fogs.".to_owned(),
-        options: vec![
-            option(
-                "Stomp the ice",
-                "You break it with force.",
-                vec![
-                    roll(0.65, 0, 0, None, None, "You shatter free before it sets."),
-                    roll(
-                        0.35,
-                        -1,
-                        0,
-                        None,
-                        Some(MechanicStatusEffect::Frostbite),
-                        "The ice grabs a foot; you limp.",
-                    ),
-                ],
-            ),
-            option(
-                "Close the distance",
-                "You rush her.",
-                vec![
-                    roll(
-                        0.45,
-                        -1,
-                        -2,
-                        None,
-                        None,
-                        "You cut her chant short. Worth the freeze.",
-                    ),
-                    roll(
-                        0.55,
-                        -2,
-                        0,
-                        None,
-                        Some(MechanicStatusEffect::Frostbite),
-                        "She finishes — your legs seize up.",
-                    ),
-                ],
-            ),
-            option(
-                "Stand still and wait",
-                "Ride it out.",
-                vec![
-                    roll(0.20, 0, 0, None, None, "She miscounts. The freeze fizzles."),
-                    roll(
-                        0.80,
-                        -2,
-                        0,
-                        Some(Combatant::Player),
-                        Some(MechanicStatusEffect::Frostbite),
-                        "You freeze solid. Turn wasted.",
-                    ),
-                ],
-            ),
-        ],
-        safe_option_index: 0,
-    }
-}
-
-fn generic_registered_mechanic(mechanic_id: &str) -> MechanicDefinition {
-    MechanicDefinition {
-        id: mechanic_id.to_owned(),
-        archetype: "authored_regular".to_owned(),
-        trigger_round: 3,
-        prompt_title: mechanic_id.replace('_', " "),
-        prompt_description: "The boss forces a reactive choice.".to_owned(),
-        options: vec![
-            option(
-                "Hold position",
-                "You choose the measured line.",
-                vec![
-                    roll(0.75, 0, 0, None, None, "You hold steady."),
-                    roll(0.25, -1, 0, None, None, "The timing costs you."),
-                ],
-            ),
-            option(
-                "Press the opening",
-                "You trade space for damage.",
-                vec![
-                    roll(
-                        0.55,
-                        -1,
-                        -2,
-                        None,
-                        Some(MechanicStatusEffect::Reveal),
-                        "The counter opens a weakness.",
-                    ),
-                    roll(0.45, -2, 0, None, None, "The counter comes late."),
-                ],
-            ),
-            option(
-                "Risk everything",
-                "You commit through the hazard.",
-                vec![
-                    roll(0.35, 0, -3, None, None, "The gamble lands cleanly."),
-                    roll(
-                        0.65,
-                        -3,
-                        0,
-                        None,
-                        Some(MechanicStatusEffect::Bleed),
-                        "The gamble turns against you.",
-                    ),
-                ],
-            ),
-        ],
-        safe_option_index: 0,
+fn validate_mechanic_catalog(catalog: &BTreeMap<String, MechanicDefinition>) {
+    for (key, mechanic) in catalog {
+        assert_eq!(key, &mechanic.id, "boss mechanic key must match its id");
+        assert_eq!(
+            mechanic.options.len(),
+            3,
+            "boss mechanic {key} must expose exactly three options"
+        );
+        assert!(
+            mechanic.safe_option_index < mechanic.options.len(),
+            "boss mechanic {key} has an invalid safe option"
+        );
+        for option in &mechanic.options {
+            assert!(
+                !option.outcome_rolls.is_empty(),
+                "boss mechanic {key} has an option without outcomes"
+            );
+            let probability = option
+                .outcome_rolls
+                .iter()
+                .map(|outcome| outcome.probability)
+                .sum::<f64>();
+            assert!(
+                (probability - 1.0).abs() < 1e-9,
+                "boss mechanic {key} option probabilities must sum to one"
+            );
+        }
     }
 }
 
 #[must_use]
 pub fn mechanic_by_id(mechanic_id: &str) -> Option<MechanicDefinition> {
-    let registered = BOSSES
-        .iter()
-        .flat_map(|boss| boss.mechanic_pool)
-        .any(|candidate| candidate == mechanic_id);
-    if !registered {
-        return None;
-    }
-    Some(match mechanic_id {
-        "grothak_earthquake" => grothak_earthquake(),
-        "pudge_hook" => pudge_hook(),
-        "cm_frostbite" => cm_frostbite(),
-        _ => generic_registered_mechanic(mechanic_id),
-    })
+    MECHANIC_CATALOG.get(mechanic_id).cloned()
 }
 
 /// Regular boss fights preserve one opening exchange and then surface the
@@ -1134,6 +881,9 @@ pub struct BankruptcyAdjustment {
     pub penalty_applied: i64,
     /// Profit-only vanity deduction computed from the same gross winnings.
     pub vanity_tax: i64,
+    /// Profit-only low-priority deduction, computed from that same basis so
+    /// the two taxes stack additively rather than compounding.
+    pub low_priority_tax: i64,
 }
 
 pub trait BankruptcyPort {
@@ -1149,6 +899,7 @@ impl BankruptcyPort for NoBankruptcy {
             penalized: positive_winnings,
             penalty_applied: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
         }
     }
 }
@@ -1166,6 +917,7 @@ impl BankruptcyPort for HalvingBankruptcy {
             penalized,
             penalty_applied: positive_winnings - penalized,
             vanity_tax: 0,
+            low_priority_tax: 0,
         }
     }
 }
@@ -1303,6 +1055,16 @@ pub struct RoundRecord {
     pub pet_assist: Option<PetAssist>,
     pub pet_assist_damage: i32,
     pub effect_log: RoundEffectLog,
+    pub mechanic: Option<MechanicRoundRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MechanicRoundRecord {
+    pub mechanic_id: String,
+    pub option_index: usize,
+    pub option_label: String,
+    pub narrative: String,
+    pub warding_salts_blocked: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1339,6 +1101,7 @@ pub struct PausedBossDuel {
     pub attempts_this_fight: i32,
     pub initial_win_chance: f64,
     pub payout_multiplier: f64,
+    pub player_hp_max: i32,
     pub boss_hp_max: i32,
     pub starting_boss_hp: i32,
     pub gear_snapshot: GearSnapshot,
@@ -1406,6 +1169,8 @@ pub struct RepositoryCommit {
     pub echo: Option<EchoRecord>,
     /// Separate ledger debit applied after crediting the gross Dig payout.
     pub vanity_tax: i64,
+    /// Sibling debit for a player in low priority, recorded on its own row.
+    pub low_priority_tax: i64,
     pub preparation_mutation: BossPreparationMutation,
 }
 
@@ -1557,6 +1322,7 @@ pub struct VictoryEconomy {
     pub credited: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub wager_profit_after_event: i64,
 }
 
@@ -1571,9 +1337,11 @@ pub struct ResolvedFight {
     pub gross_payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub new_depth: i32,
     pub boss_hp_remaining: i32,
     pub boss_hp_max: i32,
+    pub starting_boss_hp: i32,
     pub extra_knockback: i32,
     pub extra_cooldown_seconds: i64,
     pub round_log: Vec<RoundRecord>,
@@ -2006,6 +1774,7 @@ pub fn run_combat_round(
                 pet_assist: combat.effects.pet_assist.clone(),
                 pet_assist_damage: 0,
                 effect_log,
+                mechanic: None,
             },
             Some(true),
         );
@@ -2026,6 +1795,7 @@ pub fn run_combat_round(
                     pet_assist: combat.effects.pet_assist.clone(),
                     pet_assist_damage: 0,
                     effect_log,
+                    mechanic: None,
                 },
                 Some(false),
             );
@@ -2108,6 +1878,7 @@ pub fn run_combat_round(
                 pet_assist: combat.effects.pet_assist.clone(),
                 pet_assist_damage,
                 effect_log,
+                mechanic: None,
             },
             Some(true),
         );
@@ -2145,6 +1916,7 @@ pub fn run_combat_round(
                 pet_assist: combat.effects.pet_assist.clone(),
                 pet_assist_damage,
                 effect_log,
+                mechanic: None,
             },
             Some(true),
         );
@@ -2170,6 +1942,7 @@ pub fn run_combat_round(
                     pet_assist: combat.effects.pet_assist.clone(),
                     pet_assist_damage,
                     effect_log,
+                    mechanic: None,
                 },
                 Some(false),
             );
@@ -2192,6 +1965,7 @@ pub fn run_combat_round(
             pet_assist: combat.effects.pet_assist.clone(),
             pet_assist_damage,
             effect_log,
+            mechanic: None,
         },
         None,
     )
@@ -2609,6 +2383,7 @@ where
             credited: bankruptcy.penalized,
             bankruptcy_penalty: bankruptcy.penalty_applied,
             vanity_tax: bankruptcy.vanity_tax,
+            low_priority_tax: bankruptcy.low_priority_tax,
             wager_profit_after_event: event_profit,
         }
     }
@@ -2683,6 +2458,7 @@ where
                         }),
                         echo: None,
                         vanity_tax: 0,
+                        low_priority_tax: 0,
                         preparation_mutation: BossPreparationMutation::Preserve,
                     },
                 )?;
@@ -2699,9 +2475,11 @@ where
                     gross_payout: 0,
                     bankruptcy_penalty: 0,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                     new_depth: tunnel.depth,
                     boss_hp_remaining: 0,
                     boss_hp_max: input.boss_hp_max,
+                    starting_boss_hp: input.starting_boss_hp,
                     extra_knockback: 0,
                     extra_cooldown_seconds: 0,
                     round_log: input.round_log,
@@ -2770,6 +2548,7 @@ where
                         weakened_until: now.saturating_add(ECHO_WINDOW_SECONDS),
                     }),
                     vanity_tax: economy.vanity_tax,
+                    low_priority_tax: economy.low_priority_tax,
                     preparation_mutation: BossPreparationMutation::Clear {
                         boundary: input.boundary,
                     },
@@ -2788,9 +2567,11 @@ where
                 gross_payout: economy.gross_payout,
                 bankruptcy_penalty: economy.bankruptcy_penalty,
                 vanity_tax: economy.vanity_tax,
+                low_priority_tax: economy.low_priority_tax,
                 new_depth: input.boundary,
                 boss_hp_remaining: 0,
                 boss_hp_max: input.boss_hp_max,
+                starting_boss_hp: input.starting_boss_hp,
                 extra_knockback: 0,
                 extra_cooldown_seconds: 0,
                 round_log: input.round_log,
@@ -2869,6 +2650,7 @@ where
                 }),
                 echo: None,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Clear {
                     boundary: input.boundary,
                 },
@@ -2887,9 +2669,11 @@ where
             gross_payout: 0,
             bankruptcy_penalty: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             new_depth: depth_after,
             boss_hp_remaining: input.ending_boss_hp.max(0),
             boss_hp_max: input.boss_hp_max,
+            starting_boss_hp: input.starting_boss_hp,
             extra_knockback,
             extra_cooldown_seconds: extra_cooldown,
             round_log: input.round_log,
@@ -2954,6 +2738,7 @@ where
                 consume_phase_event: true,
             });
         self.persist_consumed_phase_event(key, &tunnel_before_preparation, &tunnel)?;
+        let player_hp_max = combat.player_hp.max(1);
         let starting_boss_hp = combat.boss_hp;
         let initial_win_chance = combat_win_probability(&combat);
         let gear_snapshot = self.gear_repair.snapshot(key);
@@ -2974,6 +2759,7 @@ where
                     attempts_this_fight: tunnel.boss_attempts.saturating_add(1),
                     initial_win_chance,
                     payout_multiplier: boss_payout_multiplier(boundary, risk_tier),
+                    player_hp_max,
                     boss_hp_max,
                     starting_boss_hp,
                     gear_snapshot,
@@ -3002,6 +2788,7 @@ where
                         won,
                         ending_boss_hp: combat.boss_hp,
                         boss_hp_max,
+                        starting_boss_hp,
                         win_chance: initial_win_chance,
                         echo_applied,
                         forced_no_wager_phase: forced,
@@ -3023,6 +2810,7 @@ where
             won: false,
             ending_boss_hp: combat.boss_hp,
             boss_hp_max,
+            starting_boss_hp,
             win_chance: initial_win_chance,
             echo_applied,
             forced_no_wager_phase: forced,
@@ -3068,7 +2856,7 @@ where
                         false
                     }
                 });
-        if warding_salts_blocked {
+        let narrative = if warding_salts_blocked {
             let tunnel = self
                 .repository
                 .load_tunnel(key)
@@ -3084,6 +2872,7 @@ where
                     ..RepositoryCommit::default()
                 },
             )?;
+            "The warding salts flare and swallow the boss mechanic.".to_owned()
         } else {
             let outcome = apply_option_outcome(
                 &mechanic.options[option_index],
@@ -3095,7 +2884,25 @@ where
             paused.combat.player_hp = outcome.player_hp;
             paused.combat.boss_hp = outcome.boss_hp;
             paused.combat.effects = outcome.effects;
-        }
+            outcome.narrative
+        };
+        paused.round_log.push(RoundRecord {
+            round: paused.round_num,
+            player_hp: paused.combat.player_hp.max(0),
+            boss_hp: paused.combat.boss_hp.max(0),
+            player_hit: false,
+            boss_hit: None,
+            pet_assist: paused.combat.effects.pet_assist.clone(),
+            pet_assist_damage: 0,
+            effect_log: RoundEffectLog::default(),
+            mechanic: Some(MechanicRoundRecord {
+                mechanic_id: paused.mechanic_id.clone(),
+                option_index,
+                option_label: mechanic.options[option_index].label.clone(),
+                narrative,
+                warding_salts_blocked,
+            }),
+        });
         let mut won = if paused.combat.boss_hp <= 0 {
             Some(true)
         } else if paused.combat.player_hp <= 0 {
@@ -3123,6 +2930,7 @@ where
             won: won.unwrap_or(false),
             ending_boss_hp: paused.combat.boss_hp,
             boss_hp_max: paused.boss_hp_max,
+            starting_boss_hp: paused.starting_boss_hp,
             win_chance: paused.initial_win_chance,
             echo_applied: paused.echo_applied,
             forced_no_wager_phase: paused.forced_no_wager_phase,
@@ -3192,6 +3000,7 @@ where
         } else {
             boss_hp_max
         };
+        let starting_boss_hp = combat.boss_hp;
         let win_chance = combat_win_probability(&combat);
         let gear_snapshot = self.gear_repair.snapshot(key);
         let mut round_log = Vec::new();
@@ -3213,6 +3022,7 @@ where
             won: won.unwrap_or(false),
             ending_boss_hp: combat.boss_hp,
             boss_hp_max,
+            starting_boss_hp,
             win_chance,
             echo_applied,
             forced_no_wager_phase: forced,
@@ -3391,6 +3201,7 @@ where
                 audit: None,
                 echo: None,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Preserve,
             },
         )?;
@@ -3430,6 +3241,7 @@ struct ResolveFightInput {
     won: bool,
     ending_boss_hp: i32,
     boss_hp_max: i32,
+    starting_boss_hp: i32,
     win_chance: f64,
     echo_applied: bool,
     forced_no_wager_phase: bool,

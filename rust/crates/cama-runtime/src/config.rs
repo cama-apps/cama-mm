@@ -111,7 +111,7 @@ pub enum ConfigError {
     ReconnectRange { initial: u64, maximum: u64 },
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     use std::collections::BTreeMap;
 

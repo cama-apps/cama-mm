@@ -1163,7 +1163,7 @@ impl TriviaRandom for SeededTriviaRandom {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 

@@ -1173,6 +1173,6 @@ where
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "mana_provider/tests.rs"]
 mod tests;

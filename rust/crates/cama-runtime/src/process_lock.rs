@@ -85,7 +85,7 @@ pub enum ProcessLockError {
     Lock { path: PathBuf, source: io::Error },
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     #[cfg(target_os = "linux")]
     use std::process::{Command, Stdio};

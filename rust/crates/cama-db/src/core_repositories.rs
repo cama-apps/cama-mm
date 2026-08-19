@@ -1495,6 +1495,9 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<Player, rusqlite::Error> {
     // empty, which the role factor treats as no sample.
     Ok(Player {
         role_records: std::collections::BTreeMap::new(),
+        // A stored player is never pre-scaled: the shuffle path injects the
+        // matchmaking multiplier so profiles and leaderboards stay truthful.
+        matchmaking_multiplier: None,
         name: row.get(0)?,
         mmr,
         initial_mmr,

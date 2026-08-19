@@ -1935,6 +1935,6 @@ impl From<TaxRepositoryError> for InteractionHandlerError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 #[path = "tax_provider/tests.rs"]
 mod tests;

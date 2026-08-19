@@ -76,7 +76,7 @@ impl FirstGamePoolWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn with_clock_and_intervals(
         database_path: impl AsRef<Path>,
         daily_amount: i64,
@@ -268,6 +268,6 @@ impl BackgroundWorker for FirstGamePoolWorker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "first_game_pool_worker/tests.rs"]
 mod tests;

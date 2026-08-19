@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::service_container::PersistentVanityTaxService;
+use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::match_correction_repository::{
     BetCorrectionOptions, ClaimState, CoreCorrectionRequest, MatchCorrectionError,
     MatchCorrectionRepository, MatchSide, OPENSKILL_REPLAY_ALGORITHM_VERSION,
@@ -77,6 +78,7 @@ impl AdminMatchCorrectionRuntime {
             new_player_mmr_discount: config.migration.new_player_mmr_discount,
             house_payout_multiplier: config.values.house_payout_multiplier,
             vanity_tax_rate: config.values.vanity_tax_rate,
+            low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             rewards,
             vanity_tax: Arc::new(PersistentVanityTaxSource(vanity_tax)),
             replay_gate: Arc::new(AllowReplay),
@@ -129,6 +131,7 @@ struct ProductionAdminMatchCorrectionControl {
     new_player_mmr_discount: i32,
     house_payout_multiplier: f64,
     vanity_tax_rate: f64,
+    low_priority_tax_rate: f64,
     rewards: Arc<dyn CorrectionWinRewardControl>,
     vanity_tax: Arc<dyn CorrectionVanityTaxSource>,
     replay_gate: Arc<dyn ReplayGate>,
@@ -144,6 +147,7 @@ impl Clone for ProductionAdminMatchCorrectionControl {
             new_player_mmr_discount: self.new_player_mmr_discount,
             house_payout_multiplier: self.house_payout_multiplier,
             vanity_tax_rate: self.vanity_tax_rate,
+            low_priority_tax_rate: self.low_priority_tax_rate,
             rewards: Arc::clone(&self.rewards),
             vanity_tax: Arc::clone(&self.vanity_tax),
             replay_gate: Arc::clone(&self.replay_gate),
@@ -413,6 +417,11 @@ impl ProductionAdminMatchCorrectionControl {
             return Ok(None);
         }
         let taxable = self.vanity_tax.taxable_ids(guild_id);
+        // Correction already runs on the blocking worker, so the low-priority
+        // roster is queried here rather than handed in from the async caller.
+        let low_priority_taxable = LowPriorityRepository::new(&self.database_path)
+            .active_taxable_ids(Some(guild_id))
+            .map_err(|error| AdminCorrectMatchError::Unexpected(error.to_string()))?;
         let result = self
             .repository
             .settle_bet_correction_atomic(
@@ -424,6 +433,8 @@ impl ProductionAdminMatchCorrectionControl {
                     house_payout_multiplier: self.house_payout_multiplier,
                     vanity_tax_rate: self.vanity_tax_rate,
                     vanity_taxable_ids: &taxable,
+                    low_priority_tax_rate: self.low_priority_tax_rate,
+                    low_priority_taxable_ids: &low_priority_taxable,
                 },
             )
             .map_err(unexpected_repository_error)?;
@@ -660,6 +671,6 @@ fn owner_token() -> String {
     format!("rust-admin-{}-{nanos}-{sequence}", std::process::id())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "admin_match_correction/tests.rs"]
 mod tests;

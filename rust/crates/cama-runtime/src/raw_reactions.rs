@@ -112,7 +112,7 @@ impl fmt::Debug for RawReactionObservers {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     use std::sync::Mutex;
 

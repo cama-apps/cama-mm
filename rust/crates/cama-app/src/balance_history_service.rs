@@ -349,13 +349,21 @@ where
                 if row.result == 0 {
                     return None;
                 }
-                let vanity_tax = row
-                    .outcome_metadata
-                    .as_deref()
-                    .and_then(|metadata| json_i64(metadata, "vanity_tax"))
-                    .unwrap_or_default()
-                    .max(0);
-                let net_result = row.result.saturating_sub(vanity_tax);
+                let withheld = |key: &str| {
+                    row.outcome_metadata
+                        .as_deref()
+                        .and_then(|metadata| json_i64(metadata, key))
+                        .unwrap_or_default()
+                        .max(0)
+                };
+                let vanity_tax = withheld("vanity_tax");
+                // A low-priority spinner is withheld a second, separately
+                // recorded tax out of the same spin. Both must come off the
+                // charted result or the wheel line over-reports the win.
+                let net_result = row
+                    .result
+                    .saturating_sub(vanity_tax)
+                    .saturating_sub(withheld("low_priority_tax"));
                 Some(BalanceEvent {
                     time: row.spin_time,
                     delta: net_result,

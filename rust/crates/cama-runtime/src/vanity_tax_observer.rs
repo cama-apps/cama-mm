@@ -28,7 +28,7 @@ impl VanityTaxGatewayObserver {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-match"))]
     fn with_page_limit(service: Arc<PersistentVanityTaxService>, page_limit: u64) -> Self {
         Self {
             service,
@@ -194,6 +194,6 @@ impl GatewayEventObserver for VanityTaxGatewayObserver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "vanity_tax_observer/tests.rs"]
 mod tests;

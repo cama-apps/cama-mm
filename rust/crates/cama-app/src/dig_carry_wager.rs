@@ -13,6 +13,7 @@ use cama_domain::dig_economy::{
     DigEconomyInputError, WagerMultiplier, WinChance, effective_wager_multiplier,
     scale_positive_dig_jc, settled_wager_multiplier,
 };
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::boss_duel::RiskTier;
@@ -572,26 +573,43 @@ pub fn pinnacle_wager_profit(
 
 #[must_use]
 pub fn current_boss_boundary(snapshot: &CarryTunnelSnapshot) -> Option<i64> {
-    for boundary in REGULAR_BOUNDARIES {
-        let status = snapshot
+    current_boss_boundary_for(snapshot.depth, |boundary| {
+        snapshot
             .entry(boundary)
-            .and_then(|entry| entry.status.as_deref());
-        if snapshot.depth >= boundary - 1 && is_unfinished_status(status) {
+            .and_then(|entry| entry.status.as_deref())
+    })
+}
+
+/// Resolve the current boss directly from persisted progress JSON using the
+/// same status and boundary rules as [`current_boss_boundary`].
+#[must_use]
+pub fn current_boss_boundary_from_json(depth: i64, raw_progress: &str) -> Option<i64> {
+    let progress = serde_json::from_str::<Value>(raw_progress).ok()?;
+    let progress = progress.as_object()?;
+    current_boss_boundary_for(depth, |boundary| {
+        let value = progress.get(&boundary.to_string())?;
+        value
+            .as_str()
+            .or_else(|| value.get("status").and_then(Value::as_str))
+    })
+}
+
+fn current_boss_boundary_for<'a>(
+    depth: i64,
+    mut status_for: impl FnMut(i64) -> Option<&'a str>,
+) -> Option<i64> {
+    for boundary in REGULAR_BOUNDARIES {
+        if depth >= boundary - 1 && is_unfinished_status(status_for(boundary)) {
             return Some(boundary);
         }
     }
-    if snapshot.depth < PINNACLE_BOUNDARY - 1 {
+    if depth < PINNACLE_BOUNDARY - 1 {
         return None;
     }
-    let all_regular_defeated = REGULAR_BOUNDARIES.iter().all(|boundary| {
-        snapshot
-            .entry(*boundary)
-            .and_then(|entry| entry.status.as_deref())
-            == Some("defeated")
-    });
-    let pinnacle_status = snapshot
-        .entry(PINNACLE_BOUNDARY)
-        .and_then(|entry| entry.status.as_deref());
+    let all_regular_defeated = REGULAR_BOUNDARIES
+        .iter()
+        .all(|boundary| status_for(*boundary) == Some("defeated"));
+    let pinnacle_status = status_for(PINNACLE_BOUNDARY);
     (all_regular_defeated
         && matches!(
             pinnacle_status,

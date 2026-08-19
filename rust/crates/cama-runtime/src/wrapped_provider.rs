@@ -2152,5 +2152,5 @@ where
     Some(best)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests;

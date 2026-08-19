@@ -71,7 +71,20 @@ impl MigratedFixture {
     }
 
     fn vanity_tax(&self) -> Arc<PersistentVanityTaxService> {
-        let mut container = ServiceContainer::new(&self.path, ServiceContainerOptions::default());
+        self.vanity_tax_at_rate(ServiceContainerOptions::default().vanity_tax_rate)
+    }
+
+    /// A trivia streak bonus is one or two JC, so the production ten percent
+    /// rate truncates to zero. Profit-tax tests raise the rate instead of
+    /// inflating the bonus, which mana effects would make date-dependent.
+    fn vanity_tax_at_rate(&self, rate: f64) -> Arc<PersistentVanityTaxService> {
+        let mut container = ServiceContainer::new(
+            &self.path,
+            ServiceContainerOptions {
+                vanity_tax_rate: rate,
+                ..ServiceContainerOptions::default()
+            },
+        );
         container.initialize();
         Arc::clone(
             &container
@@ -883,4 +896,139 @@ fn pinned_catalog_constructs_the_full_production_provider() {
     let registry = flow_registry(&provider);
     assert!(registry.command_handler("trivia").is_some());
     assert!(registry.component_handler("trivia_1_1_0").is_some());
+}
+
+/// `flow_config` with the low priority profit tax and bankruptcy debuff raised
+/// high enough that a two-JC streak bonus produces non-zero truncated shares.
+fn taxed_flow_config(bankruptcy_penalty_rate: &str) -> ApplicationConfig {
+    let bankruptcy_penalty_rate = bankruptcy_penalty_rate.to_owned();
+    ApplicationConfig::from_lookup(|key| match key {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ECONOMY_EVENTS_ENABLED" => Some("false".to_owned()),
+        "TRIVIA_ANSWER_TIMEOUT_SECONDS" => Some("300".to_owned()),
+        "LOW_PRIORITY_PROFIT_TAX_RATE" => Some("0.5".to_owned()),
+        "BANKRUPTCY_PENALTY_RATE" => Some(bankruptcy_penalty_rate.clone()),
+        _ => None,
+    })
+    .expect("taxed trivia flow configuration")
+}
+
+fn seed_active_low_priority(fixture: &MigratedFixture) {
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO low_priority_state (
+                 discord_id, guild_id, wins_required, wins_remaining, active, set_by
+             ) VALUES (?1, ?2, 3, 3, 1, 901)",
+            params![FLOW_USER, FLOW_GUILD],
+        )
+        .expect("seed active low priority state");
+}
+
+fn taxed_flow_provider(
+    fixture: &MigratedFixture,
+    cache_root: &Path,
+    config: &ApplicationConfig,
+    vanity_tax: Arc<PersistentVanityTaxService>,
+) -> TriviaRegistrationProvider {
+    TriviaRegistrationProvider::from_catalog(
+        &fixture.path,
+        flow_catalog(cache_root),
+        TriviaImageCache::new(cache_root).expect("image cache"),
+        config,
+        vanity_tax,
+        Arc::new(FlowDiscord::default()),
+        None,
+    )
+    .expect("construct taxed trivia provider")
+}
+
+#[test]
+fn active_low_priority_taxes_the_trivia_streak_bonus() {
+    let fixture = MigratedFixture::new();
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let provider = taxed_flow_provider(
+        &fixture,
+        cache.path(),
+        &taxed_flow_config("0.75"),
+        fixture.vanity_tax(),
+    );
+
+    // A ten-answer streak pays a two-JC bonus above the one-JC answer reward.
+    let untaxed = provider
+        .handler
+        .state
+        .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 10, 1);
+    assert_eq!(untaxed, 3);
+    assert_eq!(fixture.balance(), 6);
+
+    seed_active_low_priority(&fixture);
+    let taxed = provider
+        .handler
+        .state
+        .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 10, 2);
+    assert_eq!(taxed, 2);
+    assert_eq!(fixture.balance(), 8);
+}
+
+#[test]
+fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_streak_bonus() {
+    let fixture = MigratedFixture::new();
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let vanity_tax = fixture.vanity_tax_at_rate(0.5);
+    vanity_tax
+        .set_manual_taxation(FLOW_GUILD, FLOW_USER, true, 901)
+        .expect("enforce vanity taxation");
+    seed_active_low_priority(&fixture);
+    let provider = taxed_flow_provider(
+        &fixture,
+        cache.path(),
+        &taxed_flow_config("0.75"),
+        vanity_tax,
+    );
+
+    // Both taxes take half of the same two-JC bonus, leaving only the
+    // per-question reward. Billing the low priority share on the post-vanity
+    // remainder would truncate to zero and credit one JC of bonus anyway.
+    let award = provider
+        .handler
+        .state
+        .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 10, 1);
+    assert_eq!(award, 1);
+    assert_eq!(fixture.balance(), 4);
+}
+
+#[test]
+fn combined_trivia_withholding_never_exceeds_the_streak_bonus() {
+    let fixture = MigratedFixture::new();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (discord_id, guild_id, penalty_games_remaining)
+             VALUES (?1, ?2, 2)",
+            params![FLOW_USER, FLOW_GUILD],
+        )
+        .expect("seed bankruptcy penalty games");
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let vanity_tax = fixture.vanity_tax_at_rate(0.5);
+    vanity_tax
+        .set_manual_taxation(FLOW_GUILD, FLOW_USER, true, 901)
+        .expect("enforce vanity taxation");
+    seed_active_low_priority(&fixture);
+    let provider = taxed_flow_provider(
+        &fixture,
+        cache.path(),
+        &taxed_flow_config("0.5"),
+        vanity_tax,
+    );
+
+    // The bankruptcy debuff keeps half the bonus while both taxes bill half of
+    // it, so uncapped withholding would turn a correct answer into a charge
+    // against the per-question reward.
+    let award = provider
+        .handler
+        .state
+        .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 10, 1);
+    assert_eq!(award, 1);
+    assert_eq!(fixture.balance(), 4);
 }

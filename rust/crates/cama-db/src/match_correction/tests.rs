@@ -390,6 +390,21 @@ impl Fixture {
             )
             .expect("bet payout")
     }
+
+    fn settlement_taxes(&self, match_id: i64) -> Vec<(i64, i64, i64)> {
+        self.connection()
+            .prepare(
+                "SELECT discord_id,vanity_tax,low_priority_tax FROM bet_settlement_taxes
+                 WHERE match_id=?1 ORDER BY discord_id",
+            )
+            .expect("prepare settlement taxes")
+            .query_map([match_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("query settlement taxes")
+            .collect::<Result<_, _>>()
+            .expect("settlement taxes")
+    }
 }
 
 fn json_ids(ids: &[i64]) -> String {
@@ -960,7 +975,7 @@ fn test_correction_reverses_bet_payouts() {
             seeded.match_id,
             Some(GUILD),
             MatchSide::Dire,
-            BetCorrectionOptions::pool(0.0, &BTreeSet::new()),
+            BetCorrectionOptions::pool(0.0, &BTreeSet::new(), 0.0, &BTreeSet::new()),
         )
         .unwrap();
     assert_eq!(result.balance_changes[&spectator], 70);
@@ -998,6 +1013,8 @@ fn test_correction_reverses_bet_payouts() {
                 house_payout_multiplier: 1.0,
                 vanity_tax_rate: 0.0,
                 vanity_taxable_ids: &BTreeSet::new(),
+                low_priority_tax_rate: 0.0,
+                low_priority_taxable_ids: &BTreeSet::new(),
             },
         )
         .unwrap();
@@ -1044,7 +1061,7 @@ fn test_correction_bet_settlement_is_all_or_nothing() {
                 seeded.match_id,
                 Some(GUILD),
                 MatchSide::Dire,
-                BetCorrectionOptions::pool(0.0, &BTreeSet::new())
+                BetCorrectionOptions::pool(0.0, &BTreeSet::new(), 0.0, &BTreeSet::new())
             )
             .is_err()
     );
@@ -1122,7 +1139,7 @@ fn test_retry_finishes_bets_before_recovering_openskill() {
             seeded.match_id,
             Some(GUILD),
             MatchSide::Dire,
-            BetCorrectionOptions::pool(0.0, &BTreeSet::new()),
+            BetCorrectionOptions::pool(0.0, &BTreeSet::new(), 0.0, &BTreeSet::new()),
         )
         .unwrap();
     let balances_after_settlement = (fixture.balance(radiant_bettor), fixture.balance(spectator));
@@ -1138,7 +1155,7 @@ fn test_retry_finishes_bets_before_recovering_openskill() {
             seeded.match_id,
             Some(GUILD),
             MatchSide::Dire,
-            BetCorrectionOptions::pool(0.0, &BTreeSet::new()),
+            BetCorrectionOptions::pool(0.0, &BTreeSet::new(), 0.0, &BTreeSet::new()),
         )
         .unwrap();
     assert!(duplicate.balance_changes.is_empty());
@@ -1203,7 +1220,7 @@ fn test_correction_refunds_old_vanity_tax_and_taxes_new_winner() {
             seeded.match_id,
             Some(GUILD),
             MatchSide::Dire,
-            BetCorrectionOptions::pool(0.10, &taxable),
+            BetCorrectionOptions::pool(0.10, &taxable, 0.0, &BTreeSet::new()),
         )
         .unwrap();
     assert_eq!(fixture.balance(radiant_bettor), 100);
@@ -1220,6 +1237,122 @@ fn test_correction_refunds_old_vanity_tax_and_taxes_new_winner() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(taxes, vec![(dire_bettor, 10)]);
+}
+
+#[test]
+fn test_correction_refunds_old_low_priority_tax_and_taxes_new_winner() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_300);
+    let radiant_bettor = 3_398;
+    let dire_bettor = 3_399;
+    // 200 before the bet, less the 100 stake, plus the 200 pool payout, less
+    // the 10 vanity and 10 low-priority withholdings the settlement charged.
+    fixture.add_spectator(radiant_bettor, 280);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bet_settlement_taxes(
+                 match_id,guild_id,discord_id,vanity_tax,low_priority_tax
+             ) VALUES (?1,?2,?3,10,10)",
+            params![seeded.match_id, GUILD, radiant_bettor],
+        )
+        .unwrap();
+    let taxable = BTreeSet::from([radiant_bettor, dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            BetCorrectionOptions::pool(0.10, &taxable, 0.10, &taxable),
+        )
+        .unwrap();
+    // Reversing the settlement restores the staked balance exactly, which only
+    // holds when both withholdings come back.
+    assert_eq!(fixture.balance(radiant_bettor), 100);
+    assert_eq!(fixture.balance(dire_bettor), 280);
+    assert_eq!(
+        fixture.settlement_taxes(seeded.match_id),
+        vec![(dire_bettor, 10, 10)]
+    );
+}
+
+#[test]
+fn test_correction_taxes_low_priority_winner_outside_the_vanity_set() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_400);
+    let radiant_bettor = 3_498;
+    let dire_bettor = 3_499;
+    fixture.add_spectator(radiant_bettor, 300);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    let low_priority = BTreeSet::from([dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            BetCorrectionOptions::pool(0.10, &BTreeSet::new(), 0.10, &low_priority),
+        )
+        .unwrap();
+    assert_eq!(fixture.balance(radiant_bettor), 100);
+    assert_eq!(fixture.balance(dire_bettor), 290);
+    assert_eq!(
+        fixture.settlement_taxes(seeded.match_id),
+        vec![(dire_bettor, 0, 10)]
+    );
+}
+
+#[test]
+fn test_correction_never_withholds_more_than_the_bet_profit() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_500);
+    let radiant_bettor = 3_598;
+    let dire_bettor = 3_599;
+    fixture.add_spectator(radiant_bettor, 300);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    let taxable = BTreeSet::from([dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            BetCorrectionOptions::pool(0.90, &taxable, 0.90, &taxable),
+        )
+        .unwrap();
+    // 100 profit, 90 of it to the vanity tax, and the low-priority share
+    // clamped to the 10 that remains rather than the 90 its rate asks for.
+    assert_eq!(fixture.balance(dire_bettor), 200);
+    assert_eq!(
+        fixture.settlement_taxes(seeded.match_id),
+        vec![(dire_bettor, 90, 10)]
+    );
 }
 
 #[test]
@@ -2595,6 +2728,7 @@ CREATE TABLE bet_settlement_taxes (
     guild_id INTEGER NOT NULL,
     discord_id INTEGER NOT NULL,
     vanity_tax INTEGER NOT NULL,
+    low_priority_tax INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(match_id,guild_id,discord_id)
 );
 CREATE TABLE economy_ledger_context (

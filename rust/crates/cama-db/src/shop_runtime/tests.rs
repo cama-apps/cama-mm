@@ -828,6 +828,73 @@ fn test_protection_guardian_halves_current_loss_and_spends_absorbed_capacity() {
 }
 
 #[test]
+fn test_protection_counterspell_does_not_absorb_self_inflicted_wheel_loss() {
+    let fixture = Fixture::new();
+    fixture.player(VICTIM, 100);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO manashop_buffs(
+                 discord_id,guild_id,buff_type,granted_at,expires_at,triggered,data)
+             VALUES(?1,?2,'counterspell',?3,?4,0,NULL)",
+            params![VICTIM, GUILD, NOW - 1, NOW + 100],
+        )
+        .expect("seed Counterspell");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO player_mana(
+                 discord_id,guild_id,current_land,assigned_date,consumed_today,
+                 white_shield_remaining
+             ) VALUES(?1,?2,'Plains','2033-05-18',0,25)",
+            params![VICTIM, GUILD],
+        )
+        .expect("seed Plains Guardian");
+
+    let result = fixture
+        .repository
+        .apply_hostile_loss(&HostileLossRequest {
+            victim_id: VICTIM,
+            guild_id: GUILD,
+            requested: 100,
+            kind: "wheel_loss".to_owned(),
+            actor_id: Some(VICTIM),
+            event_key: "wheel-loss:self-counterspell".to_owned(),
+            destination: HostileDestination::Reserve,
+            recipient_id: None,
+            clamp_to_balance: false,
+            min_balance: None,
+            protect_self: true,
+            metadata: json!({}),
+            occurred_at: NOW,
+            mana_date: "2033-05-18".to_owned(),
+        })
+        .expect("Guardian-protected wheel loss");
+
+    assert_eq!((result.absorbed, result.applied), (25, 75));
+    assert_eq!(
+        result
+            .details
+            .iter()
+            .map(|detail| detail.source.as_str())
+            .collect::<Vec<_>>(),
+        vec!["guardian"]
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT triggered FROM manashop_buffs
+                 WHERE discord_id=?1 AND guild_id=?2 AND buff_type='counterspell'",
+                params![VICTIM, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn test_protection_aegis_capacity_reduces_both_sides_of_player_transfer() {
     let fixture = Fixture::new();
     fixture.player(VICTIM, 100);

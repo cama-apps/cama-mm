@@ -1182,12 +1182,16 @@ pub(crate) fn apply_hostile_loss_in(
                 .unwrap_or_default(),
         ),
     };
-    let shieldable = request.protect_self || request.actor_id != Some(request.victim_id);
+    let hostile_actor = request.actor_id != Some(request.victim_id);
+    let shieldable = request.protect_self || hostile_actor;
     let mut remaining = attempted;
     let mut details = Vec::new();
     let mut pool_keys = Vec::new();
 
-    if shieldable
+    // Counterspell is PvP immunity, so `protect_self` must not make a
+    // self-inflicted wheel loss eligible for its unlimited absorption. White
+    // pools and the daily Guardian aura intentionally remain eligible below.
+    if hostile_actor
         && remaining > 0
         && let Some(buff) = active_buffs(
             connection,

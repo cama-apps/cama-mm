@@ -139,6 +139,8 @@ pub struct Values {
     pub lobby_ready_cooldown_seconds: i64,
     pub lobby_ready_threshold: i64,
     pub lottery_activity_days: i64,
+    pub low_priority_mmr_multiplier: f64,
+    pub low_priority_profit_tax_rate: f64,
     pub max_debt: i64,
     pub max_rating_swing_per_game: f64,
     pub max_rd_contraction_per_game: f64,
@@ -477,6 +479,11 @@ impl ApplicationConfig {
                 lobby_ready_cooldown_seconds: p.i64("LOBBY_READY_COOLDOWN_SECONDS", 60),
                 lobby_ready_threshold: p.i64("LOBBY_READY_THRESHOLD", 10),
                 lottery_activity_days: p.i64("LOTTERY_ACTIVITY_DAYS", 14),
+                // Not `clamped_rate`: that caps at 0.5, which would
+                // silently invert an above-one strength multiplier.
+                low_priority_mmr_multiplier: p
+                    .strength_multiplier("LOW_PRIORITY_MMR_MULTIPLIER", 1.10),
+                low_priority_profit_tax_rate: p.clamped_rate("LOW_PRIORITY_PROFIT_TAX_RATE", 0.10),
                 max_debt: p.i64("MAX_DEBT", 500),
                 max_rating_swing_per_game: p.f64("MAX_RATING_SWING_PER_GAME", 400.0),
                 max_rd_contraction_per_game: p.f64("MAX_RD_CONTRACTION_PER_GAME", 0.065),
@@ -730,6 +737,21 @@ impl Parser<'_> {
         })
     }
 
+    /// A matchmaking strength multiplier, where 1.0 is neutral.
+    ///
+    /// Below one the setting would invert: a low-priority player would be
+    /// balanced as weaker and handed *easier* games. That failure is invisible
+    /// because the multiplier never touches stored ratings, so a value that
+    /// cannot mean what the name promises falls back to the default instead.
+    fn strength_multiplier(&self, name: &str, default: f64) -> f64 {
+        let value = self.f64(name, default);
+        if value.is_finite() && value >= 1.0 {
+            value
+        } else {
+            default
+        }
+    }
+
     fn clamped_rate(&self, name: &str, default: f64) -> f64 {
         let value = self.f64(name, default);
         // Python evaluates max(0.0, min(0.5, NaN)) as 0.5 because NaN never
@@ -800,7 +822,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
     keys
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1007,6 +1029,40 @@ mod tests {
     }
 
     #[test]
+    fn test_low_priority_mmr_multiplier_defaults_and_rejects_inverting_values() {
+        let default = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(default.values.low_priority_mmr_multiplier, 1.10);
+
+        let raised = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("LOW_PRIORITY_MMR_MULTIPLIER", "1.25"),
+        ]);
+        assert_eq!(raised.values.low_priority_mmr_multiplier, 1.25);
+
+        let neutral = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("LOW_PRIORITY_MMR_MULTIPLIER", "1.0"),
+        ]);
+        assert_eq!(
+            neutral.values.low_priority_mmr_multiplier, 1.0,
+            "an operator must be able to switch the multiplier off"
+        );
+
+        // Anything below one would balance a low-priority player as weaker and
+        // hand them easier games, so it falls back rather than inverting.
+        for inverting in ["0", "-2", "0.5", "not-a-number", "NaN"] {
+            let config = parse(&[
+                ("DISCORD_BOT_TOKEN", "token"),
+                ("LOW_PRIORITY_MMR_MULTIPLIER", inverting),
+            ]);
+            assert_eq!(
+                config.values.low_priority_mmr_multiplier, 1.10,
+                "{inverting} must not invert low priority"
+            );
+        }
+    }
+
+    #[test]
     fn double_or_nothing_default_cost_matches_python() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.shop_double_or_nothing_cost, 50);
@@ -1038,6 +1094,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
     }
 }

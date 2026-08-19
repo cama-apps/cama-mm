@@ -194,6 +194,7 @@ fn victory_request(route_state_after: &'static str) -> BossVictoryRequest<'stati
         clear_stinger_curse: true,
         jc_delta: 11,
         vanity_tax: 0,
+        low_priority_tax: 0,
         boss_id: "grothak",
         boss_depth: 25,
         echo_window_seconds: 86_400,
@@ -534,6 +535,48 @@ fn test_bankruptcy_debuff_dig_atomic_credit_audits_vanity_tax() {
     assert_eq!(
         ledger,
         [("dig".to_owned(), 250), ("vanity_tax".to_owned(), -2)]
+    );
+}
+
+#[test]
+fn test_low_priority_tax_debits_its_own_row_beside_the_vanity_tax() {
+    let fixture = Fixture::new();
+    fixture.add_actor(ACTOR, GUILD, 100);
+    fixture.prepare_boss(ACTOR, GUILD);
+    let mut request = victory_request(PENDING);
+    request.jc_delta = 248;
+    request.vanity_tax = 2;
+    request.low_priority_tax = 25;
+    assert_eq!(
+        fixture
+            .repository
+            .claim_boss_victory_atomic(request)
+            .expect("taxed atomic Dig credit"),
+        BossOutcomeClaim::Claimed
+    );
+    assert_eq!(fixture.balance(ACTOR, GUILD), 348);
+    let ledger = fixture
+        .connection()
+        .prepare(
+            "SELECT source, delta FROM economy_ledger_entries
+             WHERE guild_id = ?1 AND account_id = ?2
+               AND source IN ('dig', 'vanity_tax', 'low_priority_tax')
+             ORDER BY ledger_id",
+        )
+        .expect("prepare ledger")
+        .query_map(params![GUILD, ACTOR], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .expect("query ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ledger");
+    assert_eq!(
+        ledger,
+        [
+            ("dig".to_owned(), 275),
+            ("vanity_tax".to_owned(), -2),
+            ("low_priority_tax".to_owned(), -25),
+        ]
     );
 }
 

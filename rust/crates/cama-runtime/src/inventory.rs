@@ -329,12 +329,13 @@ const fn wired(python_name: &'static str, rust_boundary: &'static str) -> Cutove
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests {
     use super::*;
 
     const MAIN_SOURCE: &str = include_str!("main.rs");
     const SERENITY_TRANSPORT_SOURCE: &str = include_str!("serenity_transport.rs");
+    const SERENITY_TRANSPORT_TEST_SOURCE: &str = include_str!("serenity_transport/tests.rs");
 
     #[test]
     fn all_python_extensions_are_explicit_without_overclaiming_partial_lobby_wiring() {
@@ -409,7 +410,8 @@ mod tests {
             "component_only_followup_transport_preserves_existing_media",
         ] {
             assert!(
-                SERENITY_TRANSPORT_SOURCE.contains(seam),
+                SERENITY_TRANSPORT_SOURCE.contains(seam)
+                    || SERENITY_TRANSPORT_TEST_SOURCE.contains(seam),
                 "missing attachment-preserving followup seam {seam}"
             );
         }

@@ -50,12 +50,12 @@ use crate::boss_multi_tier::{
     BossPreparationState, BossProgress, BossProgressEntry, BossProgressValue, BossRepositoryPort,
     BossServiceError, BossStatus, CombatEffects, CombatState, Combatant, CurseKind, EchoRecord,
     EconomyEventPort, EntropyPort, FixedClock, GearRepairPort, GearSnapshot, GearWearResult,
-    GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption, MechanicStatusEffect,
-    OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING, PLAYER_HIT_FLOOR, PausedBossDuel,
-    PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError, ResolvedFight,
-    RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome, StingerCurseState,
-    WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary, mechanic_by_id,
-    regular_boss_wager_allowed, run_combat_round,
+    GuildId, MechanicDefinition, MechanicOption as CoreMechanicOption, MechanicRoundRecord,
+    MechanicStatusEffect, OutcomeRoll as CoreOutcomeRoll, PLAYER_HIT_CEILING, PLAYER_HIT_FLOOR,
+    PausedBossDuel, PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError,
+    ResolvedFight, RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome,
+    StingerCurseState, WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary,
+    mechanic_by_id, regular_boss_wager_allowed, run_combat_round,
 };
 use crate::dig_bosses::{
     BarkContext, CombatStats as BossCombatStats, DialogueSlots, DuelOddsInput, PINNACLE_DEPTH,
@@ -254,6 +254,7 @@ impl BossRepositoryPort for SqliteBossRepository {
                 echo,
                 artifact: None,
                 vanity_tax: commit.vanity_tax,
+                low_priority_tax: commit.low_priority_tax,
             })
             .map_err(|error| self.repository_error(error))?;
         match outcome {
@@ -1199,6 +1200,7 @@ fn boss_audit_detail(audit: &BossAuditRecord, commit: &RepositoryCommit) -> Stri
         "jc_delta": audit.jc_delta,
         "depth_after": audit.depth_after,
         "vanity_tax": commit.vanity_tax,
+        "low_priority_tax": commit.low_priority_tax,
     })
     .to_string()
 }
@@ -1258,6 +1260,7 @@ fn paused_duel_row(
         "attempts_this_fight": duel.attempts_this_fight,
         "initial_win_chance": duel.initial_win_chance,
         "multiplier": duel.payout_multiplier,
+        "player_hp_max": duel.player_hp_max,
         "boss_hp_max": duel.boss_hp_max,
         "starting_boss_hp": duel.starting_boss_hp,
         "gear_snapshot_ids": duel.gear_snapshot.gear_ids,
@@ -1364,6 +1367,9 @@ fn paused_duel_from_row(row: &DigBossPausedDuelRow) -> Result<PausedBossDuel, St
         attempts_this_fight: json_i32(status.get("attempts_this_fight")).unwrap_or_default(),
         initial_win_chance: json_f64(status.get("initial_win_chance"), 0.5),
         payout_multiplier: json_f64(status.get("multiplier"), 1.0),
+        player_hp_max: json_i32(status.get("player_hp_max"))
+            .unwrap_or_else(|| narrow_i32(row.player_hp, "duel player_hp").unwrap_or(1))
+            .max(1),
         boss_hp_max: json_i32(status.get("boss_hp_max"))
             .unwrap_or_else(|| narrow_i32(row.boss_hp, "duel boss_hp").unwrap_or(1))
             .max(1),
@@ -1479,6 +1485,24 @@ fn round_record_json(record: &RoundRecord) -> Value {
             Value::from(record.effect_log.berserk_bonus),
         );
     }
+    if let Some(mechanic) = &record.mechanic {
+        object.insert(
+            "mechanic_id".to_owned(),
+            Value::String(mechanic.mechanic_id.clone()),
+        );
+        object.insert("option_idx".to_owned(), Value::from(mechanic.option_index));
+        object.insert(
+            "option_label".to_owned(),
+            Value::String(mechanic.option_label.clone()),
+        );
+        object.insert(
+            "narrative".to_owned(),
+            Value::String(mechanic.narrative.clone()),
+        );
+        if mechanic.warding_salts_blocked {
+            object.insert("warding_salts_blocked".to_owned(), Value::Bool(true));
+        }
+    }
     value
 }
 
@@ -1519,6 +1543,28 @@ fn parse_round_log(raw: &str) -> Vec<RoundRecord> {
                     skipped_player: json_bool(object.get("skipped_player")),
                     skipped_boss: json_bool(object.get("skipped_boss")),
                 },
+                mechanic: object
+                    .get("mechanic_id")
+                    .and_then(Value::as_str)
+                    .map(|mechanic_id| MechanicRoundRecord {
+                        mechanic_id: mechanic_id.to_owned(),
+                        option_index: object
+                            .get("option_idx")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| usize::try_from(value).ok())
+                            .unwrap_or_default(),
+                        option_label: object
+                            .get("option_label")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        narrative: object
+                            .get("narrative")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        warding_salts_blocked: json_bool(object.get("warding_salts_blocked")),
+                    }),
             })
         })
         .collect()
@@ -1733,6 +1779,29 @@ impl DigBossVanityTaxPort for NoDigBossVanityTax {
     }
 }
 
+/// Separately accounted sibling of [`DigBossVanityTaxPort`] for players in
+/// active low priority. Both sinks read the same gross boss winnings.
+pub trait DigBossLowPriorityTaxPort: Send + Sync {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoDigBossLowPriorityTax;
+
+impl DigBossLowPriorityTaxPort for NoDigBossLowPriorityTax {
+    fn calculate_tax(&self, _discord_id: i64, _guild_id: i64, _gross_profit: i64) -> i64 {
+        0
+    }
+}
+
+/// Amount the profit policy withheld for low priority on the settlement in
+/// flight.
+///
+/// The multi-tier commit contract carries the vanity amount only, so the
+/// profit policy and the repository adapter share this handle to keep the
+/// gross credit and the separate low-priority debit in one transaction. A
+/// victory settlement always taxes immediately before its commit, and the
+/// commit consumes the value, so no settlement can inherit another's.
 struct SqliteBossEconomyEvent {
     service: SqliteEconomyEventService,
     now: i64,
@@ -1764,6 +1833,7 @@ impl EconomyEventPort for SqliteBossEconomyEvent {
 struct SqliteBossProfitPolicy {
     bankruptcy: BankruptcyService<BankruptcyRepository>,
     vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+    low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
     warnings: Vec<String>,
 }
 
@@ -1777,7 +1847,11 @@ impl std::fmt::Debug for SqliteBossProfitPolicy {
 }
 
 impl SqliteBossProfitPolicy {
-    fn new(path: &Path, vanity_tax: Arc<dyn DigBossVanityTaxPort>) -> Self {
+    fn new(
+        path: &Path,
+        vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+        low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
+    ) -> Self {
         Self {
             bankruptcy: BankruptcyService::new(
                 BankruptcyRepository::new(path),
@@ -1785,6 +1859,7 @@ impl SqliteBossProfitPolicy {
             )
             .expect("the default bankruptcy policy is valid"),
             vanity_tax,
+            low_priority_tax,
             warnings: Vec::new(),
         }
     }
@@ -1811,10 +1886,22 @@ impl BankruptcyPort for SqliteBossProfitPolicy {
             .vanity_tax
             .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
             .clamp(0, penalty.penalized.max(0));
+        // The low-priority sink reads the same gross winnings, so the two
+        // taxes stack additively rather than compounding. Clamping to what the
+        // bankruptcy penalty and the vanity tax left keeps the combined
+        // withholding at or below the profit basis.
+        let low_priority_tax = self
+            .low_priority_tax
+            .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
+            .clamp(0, penalty.penalized.max(0).saturating_sub(vanity_tax));
         BankruptcyAdjustment {
-            penalized: penalty.penalized.saturating_sub(vanity_tax),
+            penalized: penalty
+                .penalized
+                .saturating_sub(vanity_tax)
+                .saturating_sub(low_priority_tax),
             penalty_applied: penalty.penalty_applied,
             vanity_tax,
+            low_priority_tax,
         }
     }
 }
@@ -2005,9 +2092,11 @@ pub struct DigPinnacleResolved {
     pub gross_payout: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     pub new_depth: i32,
     pub boss_hp_remaining: i32,
     pub boss_hp_max: i32,
+    pub starting_boss_hp: i32,
     pub knockback: i32,
     pub round_log: Vec<RoundRecord>,
     pub gear_wear: GearWearResult,
@@ -2046,6 +2135,7 @@ struct PreparedPinnacleAttempt {
     phase: u8,
     mechanic: MechanicDefinition,
     combat: CombatState,
+    player_hp_max: i32,
     boss_hp_max: i32,
     starting_boss_hp: i32,
     attempts: i32,
@@ -2136,6 +2226,7 @@ impl DigBossRuntimeConfig {
 pub struct DigBossRuntimeService {
     config: DigBossRuntimeConfig,
     vanity_tax: Arc<dyn DigBossVanityTaxPort>,
+    low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
 }
 
 impl std::fmt::Debug for DigBossRuntimeService {
@@ -2169,12 +2260,22 @@ impl DigBossRuntimeService {
         Self {
             config,
             vanity_tax: Arc::new(NoDigBossVanityTax),
+            low_priority_tax: Arc::new(NoDigBossLowPriorityTax),
         }
     }
 
     #[must_use]
     pub fn with_vanity_tax(mut self, vanity_tax: Arc<dyn DigBossVanityTaxPort>) -> Self {
         self.vanity_tax = vanity_tax;
+        self
+    }
+
+    #[must_use]
+    pub fn with_low_priority_tax(
+        mut self,
+        low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
+    ) -> Self {
+        self.low_priority_tax = low_priority_tax;
         self
     }
 
@@ -2450,6 +2551,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -2835,8 +2937,9 @@ impl DigBossRuntimeService {
                         false
                     }
                 });
-        if warding_salts_blocked {
+        let narrative = if warding_salts_blocked {
             self.mark_pinnacle_preparation_used(request)?;
+            "The warding salts flare and swallow the boss mechanic.".to_owned()
         } else {
             let outcome = apply_option_outcome(
                 &mechanic.options[option_index],
@@ -2848,7 +2951,8 @@ impl DigBossRuntimeService {
             paused.combat.player_hp = outcome.player_hp;
             paused.combat.boss_hp = outcome.boss_hp;
             paused.combat.effects = outcome.effects;
-        }
+            outcome.narrative
+        };
         paused.round_log.push(RoundRecord {
             round: paused.round_num,
             player_hp: paused.combat.player_hp.max(0),
@@ -2858,6 +2962,13 @@ impl DigBossRuntimeService {
             pet_assist: paused.combat.effects.pet_assist.clone(),
             pet_assist_damage: 0,
             effect_log: RoundEffectLog::default(),
+            mechanic: Some(MechanicRoundRecord {
+                mechanic_id: paused.mechanic_id.clone(),
+                option_index,
+                option_label: mechanic.options[option_index].label.clone(),
+                narrative,
+                warding_salts_blocked,
+            }),
         });
         let mut won = (paused.combat.boss_hp <= 0).then_some(true);
         if won.is_none() && paused.combat.player_hp <= 0 {
@@ -3066,6 +3177,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3283,6 +3395,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3330,6 +3443,7 @@ impl DigBossRuntimeService {
             boss_id,
             phase,
             mechanic,
+            player_hp_max: combat.player_hp.max(1),
             starting_boss_hp: combat.boss_hp,
             combat,
             boss_hp_max,
@@ -3380,6 +3494,7 @@ impl DigBossRuntimeService {
                         attempt.risk_tier,
                         attempt.win_chance,
                     )?,
+                    player_hp_max: attempt.player_hp_max,
                     boss_hp_max: attempt.boss_hp_max,
                     starting_boss_hp: attempt.starting_boss_hp,
                     gear_snapshot: attempt.gear_snapshot,
@@ -3492,8 +3607,11 @@ impl DigBossRuntimeService {
         entropy: &mut E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
-        let mut profit_policy =
-            SqliteBossProfitPolicy::new(&self.config.database_path, Arc::clone(&self.vanity_tax));
+        let mut profit_policy = SqliteBossProfitPolicy::new(
+            &self.config.database_path,
+            Arc::clone(&self.vanity_tax),
+            Arc::clone(&self.low_priority_tax),
+        );
         let mut economy_event = SqliteBossEconomyEvent::new(
             &self.config.database_path,
             self.config.economy_event.clone(),
@@ -3526,6 +3644,7 @@ impl DigBossRuntimeService {
             let mut payout = 0;
             let mut bankruptcy_penalty = 0;
             let mut vanity_tax = 0;
+            let mut low_priority_tax = 0;
             let mut jc_delta = 0;
             let mut knockback = 0;
             let mut next_phase = input.phase;
@@ -3621,6 +3740,7 @@ impl DigBossRuntimeService {
                 );
                 bankruptcy_penalty = adjustment.penalty_applied;
                 vanity_tax = adjustment.vanity_tax;
+                low_priority_tax = adjustment.low_priority_tax;
                 jc_delta = adjustment.penalized;
                 payout = jc_delta;
                 proposed.balance = expected.balance.saturating_add(jc_delta);
@@ -3708,6 +3828,7 @@ impl DigBossRuntimeService {
                 "reward_multiplier":DIG_POSITIVE_JC_MULTIPLIER,
                 "bankruptcy_penalty":bankruptcy_penalty,
                 "vanity_tax":vanity_tax,
+                "low_priority_tax":low_priority_tax,
                 "starting_boss_hp":input.starting_boss_hp,
             })
             .to_string();
@@ -3732,6 +3853,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact,
                     vanity_tax,
+                    low_priority_tax,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
             match commit {
@@ -3768,6 +3890,7 @@ impl DigBossRuntimeService {
                         gross_payout,
                         bankruptcy_penalty,
                         vanity_tax,
+                        low_priority_tax,
                         new_depth: narrow_i32(proposed.depth, "depth")
                             .map_err(DigBossRuntimeError::Infrastructure)?,
                         boss_hp_remaining: if input.won {
@@ -3776,6 +3899,7 @@ impl DigBossRuntimeService {
                             input.ending_boss_hp.max(0)
                         },
                         boss_hp_max: input.boss_hp_max,
+                        starting_boss_hp: input.starting_boss_hp,
                         knockback,
                         round_log: input.round_log.clone(),
                         gear_wear: input.gear_wear.clone(),
@@ -4105,6 +4229,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4273,6 +4398,7 @@ impl DigBossRuntimeService {
                     echo: None,
                     artifact: None,
                     vanity_tax: 0,
+                    low_priority_tax: 0,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4296,7 +4422,11 @@ impl DigBossRuntimeService {
                 self.config.economy_event.clone(),
                 now,
             ),
-            SqliteBossProfitPolicy::new(&self.config.database_path, Arc::clone(&self.vanity_tax)),
+            SqliteBossProfitPolicy::new(
+                &self.config.database_path,
+                Arc::clone(&self.vanity_tax),
+                Arc::clone(&self.low_priority_tax),
+            ),
             SqliteBossGearRepair::new(&self.config.database_path),
             DigBossOutcomeCollector::default(),
         )

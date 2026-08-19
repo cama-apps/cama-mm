@@ -608,5 +608,5 @@ fn signed_id(value: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
         .map_err(|_| format!("Discord {kind} ID exceeds SQLite's signed integer range").into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-core"))]
 mod tests;

@@ -39,6 +39,7 @@ fn auto_history_bet(
         match_id,
         payout: Some(wagered.saturating_add(profit).max(0)),
         vanity_tax: 0,
+        low_priority_tax: 0,
         outcome: if profit >= 0 {
             GamblingOutcome::Won
         } else {
@@ -115,6 +116,7 @@ impl Fixture {
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      discord_id INTEGER NOT NULL,
                      vanity_tax INTEGER NOT NULL DEFAULT 0,
+                     low_priority_tax INTEGER NOT NULL DEFAULT 0,
                      PRIMARY KEY (match_id, guild_id, discord_id)
                  );
                  CREATE TABLE bankruptcy_state (
@@ -728,6 +730,7 @@ fn impact_bet(
         effective_bet,
         payout: Some(effective_bet.saturating_add(profit)),
         vanity_tax: 0,
+        low_priority_tax: 0,
         bet_for_target,
         won,
         profit,

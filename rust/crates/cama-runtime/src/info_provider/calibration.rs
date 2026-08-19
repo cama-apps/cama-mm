@@ -61,7 +61,7 @@ impl CalibrationDataSources {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-test-match"))]
     const fn rating_system(&self) -> &CamaRatingSystem {
         &self.rating_system
     }
@@ -1983,7 +1983,7 @@ fn hero_short_name(hero_id: i64) -> String {
     cama_app::hero_lookup::hero_short_name(hero_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-test-match"))]
 mod configured_model_tests {
     use super::*;
 

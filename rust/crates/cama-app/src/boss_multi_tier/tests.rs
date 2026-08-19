@@ -14,6 +14,38 @@ const PLAYER_ID: i64 = 10_001;
 const GUILD_ID: i64 = 777;
 const NOW: i64 = 1_000_000;
 
+#[test]
+fn bundled_mechanic_catalog_preserves_authored_ogre_fireblast() {
+    assert_eq!(MECHANIC_CATALOG.len(), 135);
+    let mechanic = mechanic_by_id("ogre_fireblast").expect("Ogre mechanic is bundled");
+    assert_eq!(mechanic.trigger_round, 3);
+    assert_eq!(
+        mechanic.prompt_title,
+        "The Twin-Skulled chants a slow fire blast"
+    );
+    assert_eq!(
+        mechanic.prompt_description,
+        "Left head counts down. Right head forgot the number."
+    );
+    assert_eq!(
+        mechanic
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Slap the left head",
+            "Confuse both heads",
+            "Stand in front and grin"
+        ]
+    );
+    assert_eq!(mechanic.options[2].outcome_rolls[0].boss_hp_delta, -3);
+    assert_eq!(
+        mechanic.options[2].outcome_rolls[1].status_effect,
+        Some(MechanicStatusEffect::Burn)
+    );
+}
+
 fn key() -> PlayerKey {
     PlayerKey::new(PLAYER_ID, Some(GUILD_ID))
 }
@@ -121,6 +153,7 @@ fn seed_paused(
     snapshot: GearSnapshot,
 ) {
     let mechanic = mechanic_by_id(mechanic_id).expect("test mechanic is registered");
+    let player_hp_max = combat.player_hp.max(1);
     let duel = PausedBossDuel {
         boss_id: boss_id.to_owned(),
         boundary: 25,
@@ -134,6 +167,7 @@ fn seed_paused(
         attempts_this_fight: 1,
         initial_win_chance: 0.5,
         payout_multiplier: 1.5,
+        player_hp_max,
         boss_hp_max,
         starting_boss_hp: boss_hp_max,
         gear_snapshot: snapshot,
@@ -446,7 +480,15 @@ fn test_resume_clears_state_row() {
         3,
         GearSnapshot::default(),
     );
-    service.resume_boss_duel(key(), 0).expect("resume resolves");
+    let result = service.resume_boss_duel(key(), 0).expect("resume resolves");
+    let mechanic = result
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("selected mechanic is recorded");
+    assert_eq!(mechanic.mechanic_id, "grothak_earthquake");
+    assert_eq!(mechanic.option_label, "Brace against the wall");
+    assert!(!mechanic.narrative.is_empty());
     assert!(service.repository.active_duel(key()).is_none());
 }
 

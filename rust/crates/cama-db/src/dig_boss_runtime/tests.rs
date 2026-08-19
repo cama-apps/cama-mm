@@ -77,6 +77,7 @@ fn victory_commit<'a>(
         }),
         artifact: None,
         vanity_tax: 0,
+        low_priority_tax: 0,
     }
 }
 
@@ -419,6 +420,70 @@ fn vanity_tax_preserves_gross_and_tax_ledgers_while_audit_records_net_change() {
             })
             .expect("context count"),
         0
+    );
+}
+
+#[test]
+fn low_priority_tax_is_withheld_beside_the_vanity_tax_from_the_same_gross_credit() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = victory_state(&snapshot);
+    state.balance = 145;
+    let mut request = victory_commit(&snapshot, &state);
+    request.vanity_tax = 10;
+    request.low_priority_tax = 10;
+
+    let outcome = repository.commit(request).expect("taxed victory");
+    let DigBossRuntimeCommitOutcome::Applied(receipt) = outcome else {
+        panic!("expected applied victory, got {outcome:?}");
+    };
+    assert_eq!(receipt.balance_after, 145);
+
+    let connection = Connection::open(database.path()).expect("verify DB");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT jopacoin_balance FROM players
+                  WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("balance"),
+        145
+    );
+    let ledger_rows = connection
+        .prepare(
+            "SELECT source,delta FROM economy_ledger_entries
+              WHERE account_id=?1 AND guild_id=?2
+                AND source IN ('dig','vanity_tax','low_priority_tax')
+              ORDER BY source",
+        )
+        .expect("ledger query")
+        .query_map(params![PLAYER, GUILD], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .expect("ledger rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("ledger values");
+    assert_eq!(
+        ledger_rows,
+        vec![
+            ("dig".to_owned(), 65),
+            ("low_priority_tax".to_owned(), -10),
+            ("vanity_tax".to_owned(), -10),
+        ]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT jc_delta FROM dig_actions
+                  WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_fight'",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("audit delta"),
+        45
     );
 }
 

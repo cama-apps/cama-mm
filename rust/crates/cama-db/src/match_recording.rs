@@ -141,6 +141,8 @@ pub struct IncomeAwardRequest<'a> {
     /// Fraction of post-garnishment income retained while penalized.
     pub bankruptcy_kept_rate: f64,
     pub vanity_tax_rate: f64,
+    /// Profit tax withheld while the player is serving active low priority.
+    pub low_priority_tax_rate: f64,
     pub decrement_bankruptcy_penalty: bool,
     pub source: &'a str,
     pub related_type: Option<&'a str>,
@@ -161,6 +163,7 @@ impl<'a> IncomeAwardRequest<'a> {
             apply_bankruptcy_penalty: false,
             bankruptcy_kept_rate: 1.0,
             vanity_tax_rate: 0.0,
+            low_priority_tax_rate: 0.0,
             decrement_bankruptcy_penalty: false,
             source,
             related_type: None,
@@ -178,6 +181,7 @@ pub struct IncomeAwardReceipt {
     pub garnished: i64,
     pub bankruptcy_penalty: i64,
     pub vanity_tax: i64,
+    pub low_priority_tax: i64,
     /// Spendable income after every deduction, matching Python's `net` key.
     pub net: i64,
     /// Actual player-balance movement. Garnishment is a bookkeeping split,
@@ -604,8 +608,29 @@ impl MatchRecordingRepository {
             } else {
                 0
             };
+            // Low priority taxes the same profit basis as vanity, never the
+            // post-vanity remainder, so the two rates stay additive.
+            let low_priority_tax = if net_before_penalty > 0 {
+                truncated_rate(
+                    net_before_penalty,
+                    normalized_rate(award.low_priority_tax_rate, 0.5),
+                )
+            } else {
+                0
+            };
+            // The bankruptcy withholding and both taxes are independent
+            // fractions of one basis, so their sum can exceed the profit they
+            // are withheld from. Clamp the combined withholding to
+            // `net_before_penalty` by trimming the low-priority share, which
+            // keeps already-reported bankruptcy and vanity totals exact.
+            let low_priority_tax = low_priority_tax.min(
+                net_before_penalty
+                    .saturating_sub(bankruptcy_penalty)
+                    .saturating_sub(vanity_tax)
+                    .max(0),
+            );
             let metadata = format!(
-                "{{\"gross\":{gross},\"garnished\":{garnished},\"bankruptcy_penalty\":{bankruptcy_penalty},\"vanity_tax\":{vanity_tax}}}"
+                "{{\"gross\":{gross},\"garnished\":{garnished},\"bankruptcy_penalty\":{bankruptcy_penalty},\"vanity_tax\":{vanity_tax},\"low_priority_tax\":{low_priority_tax}}}"
             );
 
             install_income_ledger_context(
@@ -659,6 +684,23 @@ impl MatchRecordingRepository {
                 )?;
                 clear_income_ledger_context(&transaction)?;
             }
+            if low_priority_tax > 0 {
+                install_income_ledger_context(
+                    &transaction,
+                    *award,
+                    "low_priority_tax",
+                    "low priority tax on JC profit",
+                    &metadata,
+                )?;
+                transaction.execute(
+                    "UPDATE players
+                     SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
+                         updated_at=CURRENT_TIMESTAMP
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![low_priority_tax, award.discord_id, guild_id],
+                )?;
+                clear_income_ledger_context(&transaction)?;
+            }
 
             let penalty_games_remaining = if award.decrement_bankruptcy_penalty {
                 transaction.execute(
@@ -676,7 +718,8 @@ impl MatchRecordingRepository {
             };
             let balance_delta = gross
                 .saturating_sub(bankruptcy_penalty)
-                .saturating_sub(vanity_tax);
+                .saturating_sub(vanity_tax)
+                .saturating_sub(low_priority_tax);
             clear_income_award_compensation_marker(&transaction, guild_id, *award)?;
             receipts.push(IncomeAwardReceipt {
                 discord_id: award.discord_id,
@@ -684,9 +727,11 @@ impl MatchRecordingRepository {
                 garnished,
                 bankruptcy_penalty,
                 vanity_tax,
+                low_priority_tax,
                 net: net_before_penalty
                     .saturating_sub(bankruptcy_penalty)
-                    .saturating_sub(vanity_tax),
+                    .saturating_sub(vanity_tax)
+                    .saturating_sub(low_priority_tax),
                 balance_delta,
                 balance_after: current_balance.saturating_add(balance_delta),
                 penalty_games_remaining,
@@ -1972,10 +2017,13 @@ fn recover_income_award_receipt(
     let garnished = component("garnished");
     let bankruptcy_penalty = component("bankruptcy_penalty");
     let vanity_tax = component("vanity_tax");
-    // Bankruptcy debits retain the base source. Vanity-tax rows use the
-    // shared `vanity_tax` source, so recover that deduction from the base
-    // row's immutable metadata rather than summing another award's tax.
-    let balance_delta = source_delta.saturating_sub(vanity_tax);
+    let low_priority_tax = component("low_priority_tax");
+    // Bankruptcy debits retain the base source. Vanity-tax and low-priority
+    // rows use their own shared sources, so recover those deductions from the
+    // base row's immutable metadata rather than summing another award's tax.
+    let balance_delta = source_delta
+        .saturating_sub(vanity_tax)
+        .saturating_sub(low_priority_tax);
     let balance_after = transaction
         .query_row(
             "SELECT COALESCE(jopacoin_balance,0) FROM players
@@ -2002,10 +2050,12 @@ fn recover_income_award_receipt(
         garnished,
         bankruptcy_penalty,
         vanity_tax,
+        low_priority_tax,
         net: gross
             .saturating_sub(garnished)
             .saturating_sub(bankruptcy_penalty)
-            .saturating_sub(vanity_tax),
+            .saturating_sub(vanity_tax)
+            .saturating_sub(low_priority_tax),
         balance_delta,
         balance_after,
         penalty_games_remaining,

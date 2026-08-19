@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::dig_carry_wager::current_boss_boundary_from_json;
 use crate::dig_loot::{
     CanonicalEventResolution, CaveInChanceRequest, DigLootModifiers, DigLootService, InventoryItem,
     LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
@@ -505,6 +506,9 @@ pub struct DigRuntimeCommit {
     /// Tax withheld from the gross JC reward. `jc_delta` remains the net
     /// audited reward so historical Dig reports retain their Python meaning.
     pub vanity_tax: i64,
+    /// Low-priority tax withheld from the same gross JC reward, accounted and
+    /// ledgered separately from the vanity tax.
+    pub low_priority_tax: i64,
     /// Conditional wallet debit reserved before the staged Dig reward. This
     /// remains in the same transaction while producing its own ledger entry.
     pub balance_cost: i64,
@@ -1083,6 +1087,10 @@ pub struct DigRuntimeOutcome {
     pub jc_earned: i64,
     /// Vanity tax withheld from the post-Mana/post-Helltide gross reward.
     pub vanity_tax: i64,
+    /// Low-priority tax withheld from the same gross reward as the vanity
+    /// tax. Deliveries persisted before this sink existed default to zero.
+    #[serde(default)]
+    pub low_priority_tax: i64,
     pub balance_after: i64,
     /// Python's result-card inputs, captured at settlement so reconnect
     /// delivery does not have to reconstruct presentation from newer state.
@@ -1168,6 +1176,7 @@ impl DigRuntimeOutcome {
             advance: 0,
             jc_earned: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_after: snapshot.balance,
             tunnel_name: snapshot.tunnel.as_ref().map_or_else(
                 || "Unknown Tunnel".to_owned(),
@@ -1240,12 +1249,32 @@ impl DigRuntimeVanityTaxPort for NoDigRuntimeVanityTax {
     }
 }
 
+/// Application seam for the persisted active-low-priority tax policy.
+///
+/// This mirrors [`DigRuntimeVanityTaxPort`] as a separately accounted sink:
+/// the default runtime is a no-op so non-Discord callers retain the current
+/// economy until a provider injects the guild's active low-priority roster
+/// with [`DigRuntimeService::with_low_priority_tax`].
+pub trait DigRuntimeLowPriorityTaxPort: Send + Sync + std::fmt::Debug {
+    fn calculate_tax(&self, discord_id: i64, guild_id: i64, gross_profit: i64) -> i64;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoDigRuntimeLowPriorityTax;
+
+impl DigRuntimeLowPriorityTaxPort for NoDigRuntimeLowPriorityTax {
+    fn calculate_tax(&self, _discord_id: i64, _guild_id: i64, _gross_profit: i64) -> i64 {
+        0
+    }
+}
+
 /// Full application orchestration for a Dig request.
 #[derive(Clone, Debug)]
 pub struct DigRuntimeService<S = SqliteDigRuntimeStore> {
     store: S,
     config: DigRuntimeConfig,
     vanity_tax: Arc<dyn DigRuntimeVanityTaxPort>,
+    low_priority_tax: Arc<dyn DigRuntimeLowPriorityTaxPort>,
 }
 
 impl DigRuntimeService<SqliteDigRuntimeStore> {
@@ -1872,12 +1901,22 @@ where
             store,
             config,
             vanity_tax: Arc::new(NoDigRuntimeVanityTax),
+            low_priority_tax: Arc::new(NoDigRuntimeLowPriorityTax),
         }
     }
 
     #[must_use]
     pub fn with_vanity_tax(mut self, vanity_tax: Arc<dyn DigRuntimeVanityTaxPort>) -> Self {
         self.vanity_tax = vanity_tax;
+        self
+    }
+
+    #[must_use]
+    pub fn with_low_priority_tax(
+        mut self,
+        low_priority_tax: Arc<dyn DigRuntimeLowPriorityTaxPort>,
+    ) -> Self {
+        self.low_priority_tax = low_priority_tax;
         self
     }
 
@@ -2049,6 +2088,7 @@ where
                 advance: 0,
                 jc_earned: 0,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 balance_after: current.balance,
                 tunnel_name: tunnel.tunnel_name.clone(),
                 milestone_bonus: 0,
@@ -2116,6 +2156,7 @@ where
                 advance: 0,
                 jc_earned: 0,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 balance_after: current.balance,
                 tunnel_name: tunnel.tunnel_name.clone(),
                 milestone_bonus: 0,
@@ -2364,6 +2405,7 @@ where
                 depth_after: first.advance,
                 jc_delta: first.jc_earned,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 balance_cost: 0,
                 action_type: "dig".to_owned(),
                 detail: serde_json::json!({
@@ -2373,6 +2415,7 @@ where
                     "economy_adjusted_jc": daily_adjusted_jc,
                     "economy_reward_multiplier": economy_multiplier,
                     "vanity_tax": 0,
+                    "low_priority_tax": 0,
                     "pet_dig_bonus": pet_dig_bonus,
                     "boss_boundary": gated_total.boss_encounter,
                 })
@@ -2388,6 +2431,7 @@ where
                 advance: first.advance,
                 jc_earned: first.jc_earned,
                 vanity_tax: 0,
+                low_priority_tax: 0,
                 balance_after,
                 tunnel_name: current.tunnel.as_ref().map_or_else(
                     || "Unknown Tunnel".to_owned(),
@@ -3203,6 +3247,7 @@ where
                     DIG_REWARD_BASIS_POINTS
                 },
                 vanity_tax_basis_points: 0,
+                low_priority_tax_basis_points: 0,
             },
             ..DigOutcomeInput::default()
         };
@@ -3339,10 +3384,25 @@ where
                 .calculate_tax(request.discord_id, request.guild_id, vanity_tax_basis)
                 .max(0)
                 .min(vanity_tax_basis);
-            if vanity_tax > 0 {
-                state.balance = state.balance.saturating_sub(vanity_tax);
-                outcome.jc_earned = outcome.jc_earned.saturating_sub(vanity_tax);
+            // The low-priority sink reads the same pre-subtraction basis, so
+            // the two taxes stack additively instead of compounding. What is
+            // actually withheld, though, comes out of the reward still in
+            // hand, which the bankruptcy penalty has already reduced: clamping
+            // the pair to `vanity_tax_basis` would let a heavily penalized
+            // digger be debited more than they earned. Trim the low-priority
+            // share, so a taxed reward may fall to zero but never becomes a
+            // wallet debit.
+            let low_priority_tax = self
+                .low_priority_tax
+                .calculate_tax(request.discord_id, request.guild_id, vanity_tax_basis)
+                .max(0)
+                .min(outcome.jc_earned.max(0).saturating_sub(vanity_tax).max(0));
+            let withheld = vanity_tax.saturating_add(low_priority_tax);
+            if withheld > 0 {
+                state.balance = state.balance.saturating_sub(withheld);
+                outcome.jc_earned = outcome.jc_earned.saturating_sub(withheld);
                 outcome.vanity_tax = vanity_tax;
+                outcome.low_priority_tax = low_priority_tax;
             }
         }
         let wallet_reward_delta = state
@@ -3603,6 +3663,7 @@ where
             "helltide_tax": helltide_tax,
             "bankruptcy_penalty": outcome.bankruptcy_penalty,
             "vanity_tax": outcome.vanity_tax,
+            "low_priority_tax": outcome.low_priority_tax,
             // Python's audit contract names the pre-positive-scale authored
             // payout as gross.  Keep the economy-adjusted/post-scale bucket
             // separate so live Dig can prove the sink ordering without
@@ -3658,6 +3719,11 @@ where
             } else {
                 outcome.vanity_tax
             },
+            low_priority_tax: if outcome.cave_in {
+                0
+            } else {
+                outcome.low_priority_tax
+            },
             balance_cost: if paid_charge_active { paid_cost } else { 0 },
             action_type: "dig".to_owned(),
             detail,
@@ -3678,6 +3744,11 @@ where
                 0
             } else {
                 outcome.vanity_tax
+            },
+            low_priority_tax: if outcome.cave_in {
+                0
+            } else {
+                outcome.low_priority_tax
             },
             balance_after,
             tunnel_name: tunnel.tunnel_name.clone(),
@@ -3787,6 +3858,7 @@ where
             depth_after: tunnel.depth,
             jc_delta: 0,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: "route_choice".to_owned(),
             detail: serde_json::json!({"route_id": route_id}).to_string(),
@@ -3910,6 +3982,7 @@ where
             depth_after: depth,
             jc_delta: -result.cost,
             vanity_tax: 0,
+            low_priority_tax: 0,
             balance_cost: 0,
             action_type: action_type.to_owned(),
             detail: serde_json::json!({"item": result.item, "item_id": result.item_id}).to_string(),
@@ -3983,22 +4056,7 @@ fn seed_for(request: DigRuntimeRequest) -> u64 {
 }
 
 fn parked_boss_boundary(tunnel: &DigRuntimeTunnel) -> Option<i64> {
-    let Value::Object(progress) = serde_json::from_str::<Value>(&tunnel.boss_progress).ok()? else {
-        return None;
-    };
-    progress
-        .into_iter()
-        .filter_map(|(raw_boundary, value)| {
-            let boundary = raw_boundary.parse::<i64>().ok()?;
-            let status = value.as_str().map(str::to_owned).or_else(|| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })?;
-            (status != "defeated" && tunnel.depth >= boundary.saturating_sub(1)).then_some(boundary)
-        })
-        .min()
+    current_boss_boundary_from_json(tunnel.depth, &tunnel.boss_progress)
 }
 
 fn injury_reduces_advance(raw: Option<&str>) -> bool {
@@ -4169,7 +4227,11 @@ fn apply_state(
             .max(0)
             .saturating_add(total_jc_increment.max(0));
         if paid {
-            tunnel.paid_digs_today = tunnel.paid_digs_today.saturating_add(1);
+            tunnel.paid_digs_today = if tunnel.paid_dig_date.as_deref() == Some(today) {
+                tunnel.paid_digs_today.saturating_add(1)
+            } else {
+                1
+            };
             tunnel.paid_dig_date = Some(today.to_owned());
         }
     }

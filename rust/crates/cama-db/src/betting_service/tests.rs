@@ -1715,6 +1715,142 @@ fn seed_adjustments() -> BetSettlementAdjustments {
 }
 
 #[test]
+fn migrated_settlement_stacks_low_priority_tax_beside_the_vanity_tax() {
+    let match_id = 9_111;
+    let pending_match_id = 9_011;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place winning pool bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing pool bet");
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                vanity_tax_rate: Some(0.10),
+                vanity_taxable_ids: BTreeSet::from([91_001]),
+                low_priority_tax_rate: Some(0.10),
+                low_priority_taxable_ids: BTreeSet::from([91_001]),
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle doubly taxed pool");
+    let profit = settlement.winners[0].payout - settlement.winners[0].effective_amount;
+    let expected = (profit as f64 * 0.10) as i64;
+    // Both rates read the same profit basis rather than the post-vanity
+    // remainder, so equal rates withhold equal amounts.
+    assert!(expected > 0);
+    assert_eq!(settlement.vanity_taxes[&91_001], expected);
+    assert_eq!(settlement.low_priority_taxes[&91_001], expected);
+    assert!(!settlement.low_priority_taxes.contains_key(&91_002));
+
+    let connection = Connection::open(file.path()).expect("open settlement taxes");
+    let persisted: (i64, i64) = connection
+        .query_row(
+            "SELECT vanity_tax, low_priority_tax FROM bet_settlement_taxes
+             WHERE match_id=?1 AND guild_id=?2 AND discord_id=?3",
+            params![match_id, GUILD, 91_001],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read persisted settlement taxes");
+    assert_eq!(persisted, (expected, expected));
+    let (rows, delta, reason): (i64, i64, String) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(delta),0), COALESCE(MAX(reason),'')
+             FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='low_priority_tax'",
+            params![GUILD, 91_001],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read low priority tax ledger row");
+    assert_eq!(
+        (rows, delta, reason.as_str()),
+        (1, -expected, "low priority tax on JC profit")
+    );
+    drop(connection);
+
+    Connection::open(file.path())
+        .expect("open recovery match")
+        .execute(
+            "UPDATE matches SET pending_match_id=?1 WHERE match_id=?2",
+            params![pending_match_id, match_id],
+        )
+        .expect("tag recovery match with pending id");
+    let recovered = repository
+        .recover_settlement_for_match(match_id, Some(GUILD))
+        .expect("recover committed settlement");
+    assert_eq!(recovered.vanity_taxes, settlement.vanity_taxes);
+    assert_eq!(recovered.low_priority_taxes, settlement.low_priority_taxes);
+}
+
+#[test]
+fn migrated_settlement_taxes_low_priority_players_without_a_vanity_row() {
+    let match_id = 9_112;
+    let pending_match_id = 9_012;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place winning pool bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing pool bet");
+    let balance_before: i64 = Connection::open(file.path())
+        .expect("open pre-settlement balance")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![91_001, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read pre-settlement balance");
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                low_priority_tax_rate: Some(0.10),
+                low_priority_taxable_ids: BTreeSet::from([91_001]),
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle low-priority-only pool");
+    let profit = settlement.winners[0].payout - settlement.winners[0].effective_amount;
+    let expected = (profit as f64 * 0.10) as i64;
+    assert!(expected > 0);
+    assert!(settlement.vanity_taxes.is_empty());
+    assert_eq!(settlement.low_priority_taxes[&91_001], expected);
+    // The gross payout returns the stake, so only the tax leaves the winner.
+    assert_eq!(
+        settlement.winners[0].balance_after,
+        balance_before + settlement.winners[0].payout - expected
+    );
+    let persisted: (i64, i64) = Connection::open(file.path())
+        .expect("open settlement taxes")
+        .query_row(
+            "SELECT vanity_tax, low_priority_tax FROM bet_settlement_taxes
+             WHERE match_id=?1 AND guild_id=?2 AND discord_id=?3",
+            params![match_id, GUILD, 91_001],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read persisted settlement taxes");
+    assert_eq!(persisted, (0, expected));
+}
+
+#[test]
 fn migrated_pool_seed_multiplier_penalty_and_tax_share_one_settlement() {
     let match_id = 9_101;
     let pending_match_id = 9_001;
