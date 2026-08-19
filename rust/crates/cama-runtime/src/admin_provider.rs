@@ -633,6 +633,9 @@ impl AdminHandler {
             );
             input.wins_required = PythonIntegerInput::Integer(wins);
             input.start_pending_match_id = Some(PythonIntegerInput::Integer(watermark));
+            // The option description this admin just read says the placed player
+            // sees the reason, so this row's reason is theirs to read.
+            input.reason_player_visible = true;
             let state = low_priority
                 .set_low_priority(&input)
                 .map_err(|error| error.to_string())?;
@@ -3399,8 +3402,9 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
         "Reason shown privately to the player and admins — do not name who reported them",
         CommandOptionKind::String,
     );
-    assignment_reason.min_length = Some(3);
-    assignment_reason.max_length = Some(u16::try_from(REASON_DISPLAY_LIMIT).unwrap_or(300));
+    // Bounded above only. A lower bound would silently reject the short
+    // shorthand reasons this command has always accepted.
+    assignment_reason.max_length = Some(REASON_DISPLAY_LIMIT);
     vec![
         subcommand(
             "add",

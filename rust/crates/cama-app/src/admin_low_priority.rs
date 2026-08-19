@@ -1,37 +1,87 @@
 //! Player-facing low-priority copy.
 //!
 //! `/admin lowprio add` is the only way a player enters low priority, and it
-//! notifies them. Both surfaces that show a placed player their own state --
-//! that notice and `/player lobby status` -- render the admin-authored reason
-//! through the one normaliser here so they clip and defuse it identically.
+//! notifies them. The two surfaces that show a placed player their own
+//! low-priority state -- that notice and the low-priority section of
+//! `/player lobby status` -- render the admin-authored reason through the one
+//! normaliser here, so they redact and clip it identically.
 
+use cama_domain::embed_safety::truncate_field;
 use cama_domain::formatting::escape_discord_text;
 
 /// Longest admin-authored reason rendered into player-facing low-priority copy.
 ///
-/// Matches the bound `/admin lowprio add` puts on the option. Rows written
+/// Matches the bound `/admin lowprio add` puts on the option, so it is a `u16`
+/// like the option field itself and needs no fallible conversion. Rows written
 /// before that bound existed are clipped here rather than trusted, so a legacy
 /// reason cannot push a DM or a status reply past Discord's 2000-character
 /// message limit and get it silently rejected.
-pub const REASON_DISPLAY_LIMIT: usize = 300;
+pub const REASON_DISPLAY_LIMIT: u16 = 300;
+
+/// What a redacted user mention is replaced with in player-facing copy.
+const REDACTED_MENTION: &str = "someone";
 
 /// Prepare an admin-authored low-priority reason for player-facing copy.
 ///
-/// Blank reasons become `None` so no dangling `Reason:` line is rendered. The
-/// surviving text is clipped to [`REASON_DISPLAY_LIMIT`] and then escaped, which
-/// matters for more than markdown: `escape_discord_text` breaks up `@`, so a
-/// reason an admin wrote as `reported by <@901>` reaches the player as inert
-/// text instead of resolving into the reporter's name. Escaping cannot stop an
-/// admin from typing a name in plain prose — the option description carries that
-/// warning — but it does stop the mention syntax from doing it for them.
+/// Blank reasons become `None` so no dangling `Reason:` line is rendered.
+///
+/// User mentions are **removed**, not merely escaped. Escaping stops Discord
+/// resolving `<@901>` into a display name, but it still hands the placed player
+/// the reporter's raw account ID, which is one lookup away from the name. Only
+/// dropping the mention outright keeps the "never say who reported them"
+/// guarantee. Nothing here can stop an admin typing a name in plain prose; the
+/// option description carries that warning.
+///
+/// What survives is escaped so its markdown cannot reformat the message around
+/// it, and only then clipped to [`REASON_DISPLAY_LIMIT`] characters including
+/// the truncation marker. Clipping last is what makes the budget exact:
+/// escaping can double a string's length, so a clip applied first would be
+/// re-inflated past the limit by the escape that follows it.
 #[must_use]
 pub fn player_visible_reason(reason: Option<&str>) -> Option<String> {
     let reason = reason.map(str::trim).filter(|reason| !reason.is_empty())?;
-    let mut clipped: String = reason.chars().take(REASON_DISPLAY_LIMIT).collect();
-    if clipped.chars().count() < reason.chars().count() {
-        clipped.push('…');
+    let redacted = redact_user_mentions(reason);
+    let redacted = redacted.trim();
+    if redacted.is_empty() {
+        return None;
     }
-    Some(escape_discord_text(&clipped))
+    Some(truncate_field(
+        &escape_discord_text(redacted),
+        usize::from(REASON_DISPLAY_LIMIT),
+    ))
+}
+
+/// Replace every `<@id>` / `<@!id>` user mention with [`REDACTED_MENTION`].
+///
+/// Hand-rolled rather than pulled from a regex crate: the grammar is three
+/// literal characters around a digit run, and `cama-app` has no regex
+/// dependency to justify adding for it.
+fn redact_user_mentions(reason: &str) -> String {
+    let mut out = String::with_capacity(reason.len());
+    let mut rest = reason;
+    while let Some(start) = rest.find("<@") {
+        let (before, candidate) = rest.split_at(start);
+        let digits = candidate
+            .trim_start_matches("<@")
+            .trim_start_matches('!')
+            .trim_start_matches('&');
+        let digit_len = digits
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(digits.len());
+        let closes = digits[digit_len..].starts_with('>');
+        out.push_str(before);
+        if digit_len > 0 && closes {
+            out.push_str(REDACTED_MENTION);
+            let consumed = candidate.len() - digits.len() + digit_len + 1;
+            rest = &candidate[consumed..];
+        } else {
+            // Not a mention after all: keep the literal `<@` and carry on.
+            out.push_str("<@");
+            rest = &candidate[2..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Polite notice sent to a player when an admin places them in low priority.
@@ -93,31 +143,58 @@ mod tests {
     }
 
     #[test]
-    fn test_lowprio_reason_defuses_a_mention_so_it_cannot_resolve_to_a_reporter() {
-        // Suppressed mentions do not stop Discord rendering `<@id>` as the
-        // named user, so the syntax itself has to be broken up.
+    fn test_lowprio_reason_removes_a_mention_rather_than_defusing_it() {
+        // Escaping alone would only stop Discord resolving the mention; the raw
+        // account id would still reach the player, and an id is one lookup away
+        // from the name. The whole mention has to go.
         let rendered = player_visible_reason(Some("reported by <@901> for griefing"))
             .expect("reason survives");
         assert!(!rendered.contains("<@901>"));
-        assert!(rendered.contains('\u{200b}'));
         assert!(
-            rendered.contains("901"),
-            "the text is defused, not censored"
+            !rendered.contains("901"),
+            "the reporter's id must not survive: {rendered}"
         );
+        assert!(rendered.contains("for griefing"), "the rest is kept");
 
         let notice = assignment_direct_message(3, Some("reported by <@901> for griefing"), None);
         assert!(!notice.contains("<@901>"));
-        // `@` gains a zero-width space and `>` is escaped, so Discord's mention
-        // parser no longer sees a user reference to resolve.
-        assert!(notice.contains("Reason: reported by <@\u{200b}901\\>"));
+        assert!(notice.contains("Reason: reported by someone for griefing"));
+    }
+
+    #[test]
+    fn test_lowprio_reason_redacts_every_mention_shape_and_keeps_the_rest() {
+        for mention in ["<@901>", "<@!901>", "<@&901>"] {
+            let rendered =
+                player_visible_reason(Some(&format!("ganked by {mention} twice"))).unwrap();
+            assert_eq!(rendered, "ganked by someone twice", "shape {mention}");
+        }
+        assert_eq!(
+            player_visible_reason(Some("<@1> and <@2> both reported it")).unwrap(),
+            "someone and someone both reported it"
+        );
+        // Text that only looks like the start of a mention is left alone.
+        let literal = player_visible_reason(Some("said <@ nothing")).unwrap();
+        assert!(literal.contains("nothing"), "{literal}");
+        assert!(!literal.contains("someone"), "{literal}");
+    }
+
+    #[test]
+    fn test_lowprio_reason_that_is_only_a_mention_keeps_no_trace_of_the_id() {
+        let notice = assignment_direct_message(3, Some("<@901>"), None);
+        assert!(notice.contains("Reason: someone"), "{notice}");
+        assert!(!notice.contains("901"), "{notice}");
     }
 
     #[test]
     fn test_lowprio_reason_is_clipped_so_a_legacy_row_cannot_break_delivery() {
         let legacy = "g".repeat(4_000);
         let rendered = player_visible_reason(Some(&legacy)).expect("reason survives");
-        assert_eq!(rendered.chars().count(), REASON_DISPLAY_LIMIT + 1);
-        assert!(rendered.ends_with('…'));
+        assert_eq!(
+            rendered.chars().count(),
+            usize::from(REASON_DISPLAY_LIMIT),
+            "the marker fits inside the documented budget"
+        );
+        assert!(rendered.ends_with("..."));
 
         let notice = assignment_direct_message(3, Some(&legacy), None);
         assert!(
@@ -129,10 +206,10 @@ mod tests {
 
     #[test]
     fn test_lowprio_reason_at_the_limit_is_not_marked_as_clipped() {
-        let exact = "g".repeat(REASON_DISPLAY_LIMIT);
+        let exact = "g".repeat(usize::from(REASON_DISPLAY_LIMIT));
         let rendered = player_visible_reason(Some(&exact)).expect("reason survives");
         assert_eq!(rendered, exact);
-        assert!(!rendered.ends_with('…'));
+        assert!(!rendered.ends_with("..."));
     }
 
     #[test]
