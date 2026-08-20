@@ -5,6 +5,10 @@ use cama_app::opendota_http::{OpenDotaHttpConfig, OpenDotaRuntimeServices};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
+use crate::discord_transport::{
+    DiscordAllowedMentions, DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
+    DiscordMessageSnapshot,
+};
 use crate::registration::{InteractionResponseError, Registry};
 
 use super::*;
@@ -189,6 +193,157 @@ impl InteractionResponder for RecordingResponder {
     }
 }
 
+/// Captures the best-effort player DMs the admin routes emit so the tests can
+/// assert their copy without a live gateway. Each capture also records whether
+/// the interaction had already been acknowledged, so a DM can never be allowed
+/// to precede the Discord callback.
+#[derive(Default)]
+struct RecordingTransport {
+    direct_messages: Mutex<Vec<(u64, DiscordMessage)>>,
+    /// Responses already delivered to the caller when each DM was attempted.
+    /// Counting responses rather than reading `response_is_done` keeps the
+    /// probe honest: a bare `defer` also marks the interaction acknowledged.
+    responses_on_send: Mutex<Vec<usize>>,
+    fail_direct_messages: AtomicBool,
+    /// Name the gateway would resolve for [`GUILD`]; `None` models a transport
+    /// that cannot resolve it, which the copy must survive.
+    guild_name: Mutex<Option<String>>,
+    responder: Mutex<Option<Arc<RecordingResponder>>>,
+}
+
+#[async_trait]
+impl DiscordTransport for RecordingTransport {
+    async fn fetch_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<Option<DiscordMessageSnapshot>, String> {
+        Ok(None)
+    }
+
+    async fn send_message(
+        &self,
+        _channel_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, String> {
+        // No `/admin` route posts to a channel. Failing loudly keeps that true:
+        // the previous fixture wired the live transport, which errored without a
+        // gateway, so a route that started broadcasting would surface here.
+        Err("admin routes must not send channel messages".to_owned())
+    }
+
+    async fn edit_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<(), String> {
+        Err("admin routes must not mutate channel messages".to_owned())
+    }
+
+    async fn delete_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Err("admin routes must not mutate channel messages".to_owned())
+    }
+
+    async fn create_public_thread(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _name: &str,
+    ) -> Result<u64, String> {
+        Err("admin routes must not create threads".to_owned())
+    }
+
+    async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Err("admin routes must not mutate channel messages".to_owned())
+    }
+
+    async fn archive_thread(
+        &self,
+        _thread_id: u64,
+        _name: &str,
+        _locked: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+        _user_id: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn clear_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn unpin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Err("admin routes must not mutate channel messages".to_owned())
+    }
+
+    async fn send_direct_message(
+        &self,
+        user_id: u64,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        let delivered = self
+            .responder
+            .lock()
+            .expect("responder probe lock")
+            .as_ref()
+            .map_or(0, |responder| {
+                responder.responses.lock().expect("response lock").len()
+            });
+        self.responses_on_send
+            .lock()
+            .expect("acknowledgement lock")
+            .push(delivered);
+        self.direct_messages
+            .lock()
+            .expect("direct message lock")
+            .push((user_id, message));
+        if self.fail_direct_messages.load(Ordering::Acquire) {
+            return Err("Cannot send messages to this user".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn guild_member(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
+        Ok(None)
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> Result<Option<String>, String> {
+        Ok(self
+            .guild_name
+            .lock()
+            .expect("guild name lock")
+            .clone()
+            .filter(|_| guild_id == GUILD))
+    }
+}
+
 struct RecordingDiscordControl {
     health_calls: AtomicUsize,
     sync_calls: AtomicUsize,
@@ -333,6 +488,7 @@ struct ProviderFixture {
     database: NamedTempFile,
     provider: AdminRegistrationProvider,
     discord: Arc<RecordingDiscordControl>,
+    transport: Arc<RecordingTransport>,
     lobby: Arc<RecordingLobbyControl>,
     matches: Arc<RecordingMatchControl>,
     corrections: Arc<RecordingCorrectionControl>,
@@ -364,13 +520,13 @@ impl ProviderFixture {
         let lobby = Arc::new(RecordingLobbyControl::default());
         let matches = Arc::new(RecordingMatchControl::default());
         let corrections = Arc::new(RecordingCorrectionControl::default());
-        let transport = Arc::new(crate::SerenityDiscordTransport::new());
+        let transport = Arc::new(RecordingTransport::default());
         let provider = AdminRegistrationProvider::new(
             database.path(),
             &config,
             opendota,
             AdminRuntimePorts {
-                discord: transport,
+                discord: transport.clone(),
                 discord_control: discord.clone(),
                 lobby: lobby.clone(),
                 matches: matches.clone(),
@@ -382,10 +538,19 @@ impl ProviderFixture {
             database,
             provider,
             discord,
+            transport,
             lobby,
             matches,
             corrections,
         }
+    }
+
+    fn direct_messages(&self) -> Vec<(u64, DiscordMessage)> {
+        self.transport
+            .direct_messages
+            .lock()
+            .expect("direct message lock")
+            .clone()
     }
 
     fn registry(&self) -> Registry {
@@ -481,6 +646,11 @@ impl ProviderFixture {
 
     async fn dispatch_request(&self, request: InteractionRequest) -> Arc<RecordingResponder> {
         let responder = Arc::new(RecordingResponder::default());
+        *self
+            .transport
+            .responder
+            .lock()
+            .expect("responder probe lock") = Some(responder.clone());
         self.registry()
             .command_handler("admin")
             .expect("Admin handler")
@@ -513,7 +683,8 @@ fn admin_command(
     }
 }
 
-fn admin_adjust_command(
+fn admin_group_command(
+    group: &str,
     subcommand: &str,
     options: Vec<InteractionOption>,
     interaction_id: u64,
@@ -529,13 +700,47 @@ fn admin_adjust_command(
         channel_id: Some(55),
         member_permissions: permissions,
         options: vec![InteractionOption {
-            name: "adjust".to_owned(),
+            name: group.to_owned(),
             value: InteractionValue::SubcommandGroup(vec![InteractionOption {
                 name: subcommand.to_owned(),
                 value: InteractionValue::Subcommand(options),
             }]),
         }],
     }
+}
+
+fn admin_lowprio_command(
+    subcommand: &str,
+    options: Vec<InteractionOption>,
+    interaction_id: u64,
+    actor_id: u64,
+    permissions: Option<u64>,
+) -> InteractionRequest {
+    admin_group_command(
+        "lowprio",
+        subcommand,
+        options,
+        interaction_id,
+        actor_id,
+        permissions,
+    )
+}
+
+fn admin_adjust_command(
+    subcommand: &str,
+    options: Vec<InteractionOption>,
+    interaction_id: u64,
+    actor_id: u64,
+    permissions: Option<u64>,
+) -> InteractionRequest {
+    admin_group_command(
+        "adjust",
+        subcommand,
+        options,
+        interaction_id,
+        actor_id,
+        permissions,
+    )
 }
 
 fn integer_option(name: &str, value: i64) -> InteractionOption {
@@ -1214,5 +1419,268 @@ async fn test_backfillroles_requires_admin() {
             .expect("lock")
             .is_empty(),
         "a non-admin must not trigger a database-wide scan"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_add_dms_the_player_after_acknowledging_with_the_reason_only() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    *fixture
+        .transport
+        .guild_name
+        .lock()
+        .expect("guild name lock") = Some("Camaraderous".to_owned());
+    let reason = "repeated abandons";
+
+    let responder = fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "Target"),
+                string_option("reason", reason),
+                integer_option("wins", 4),
+            ],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let acknowledgement = responder.last();
+    assert!(acknowledgement.ephemeral);
+    assert!(acknowledgement.content.contains("4 wins required"));
+
+    let direct = fixture.direct_messages();
+    assert_eq!(direct.len(), 1, "the placed player gets exactly one notice");
+    let (recipient, message) = &direct[0];
+    assert_eq!(*recipient, TARGET);
+    assert_eq!(
+        message.response.content,
+        assignment_direct_message(4, Some(reason), Some("Camaraderous")),
+        "the restored notice must match the single-sourced policy copy"
+    );
+    assert!(
+        message
+            .response
+            .content
+            .contains("Reason: repeated abandons")
+    );
+    assert!(
+        message
+            .response
+            .content
+            .contains("`/player lobby status` in **Camaraderous** to view your progress"),
+        "the notice must name the guild it is about and a command that answers it"
+    );
+    assert_eq!(
+        message.allowed_mentions,
+        DiscordAllowedMentions::None,
+        "a moderation notice must never ping anybody"
+    );
+    // The reason is the player's to see; the admin who issued it is not.
+    assert!(!message.response.content.contains(&ADMIN.to_string()));
+    assert!(!message.response.content.contains("<@"));
+
+    assert_eq!(
+        *fixture
+            .transport
+            .responses_on_send
+            .lock()
+            .expect("acknowledgement lock"),
+        [1],
+        "the admin must have their reply in hand before the DM round trip"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_add_survives_a_player_with_closed_dms() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .transport
+        .fail_direct_messages
+        .store(true, Ordering::Release);
+
+    let responder = fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "Target"),
+                integer_option("wins", 2),
+            ],
+            7,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    assert!(
+        responder.last().content.contains("2 wins required"),
+        "a rejected DM must not cost the admin their confirmation"
+    );
+    assert_eq!(
+        fixture.direct_messages().len(),
+        1,
+        "the notice is still attempted"
+    );
+    let stored = Connection::open(fixture.database.path())
+        .expect("open Admin provider database")
+        .query_row(
+            "SELECT wins_remaining FROM low_priority_state
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("low priority row persists");
+    assert_eq!(stored, 2, "the penalty stands even when the DM bounces");
+}
+
+#[tokio::test]
+async fn test_lowprio_add_dm_reflects_the_default_win_requirement_and_omits_a_missing_reason() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            2,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let direct = fixture.direct_messages();
+    assert_eq!(direct.len(), 1);
+    assert_eq!(
+        direct[0].1.response.content,
+        assignment_direct_message(LOW_PRIORITY_REQUIRED_WINS, None, None)
+    );
+    assert!(!direct[0].1.response.content.contains("Reason"));
+}
+
+#[tokio::test]
+async fn test_lowprio_add_does_not_dm_unregistered_players_or_non_admins() {
+    let fixture = ProviderFixture::new();
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            3,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(
+        fixture.direct_messages().is_empty(),
+        "an unregistered player is never placed and never notified"
+    );
+
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            4,
+            90_001,
+            Some(0),
+        ))
+        .await;
+    assert!(
+        fixture.direct_messages().is_empty(),
+        "a rejected non-admin must not be able to make the bot DM anyone"
+    );
+}
+
+#[tokio::test]
+async fn test_lowprio_remove_stays_silent_toward_the_player() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![user_option("user", TARGET, "Target")],
+            5,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(fixture.direct_messages().len(), 1);
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "remove",
+            vec![
+                user_option("user", TARGET, "Target"),
+                string_option("reason", "served the wins"),
+            ],
+            6,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(
+        fixture.direct_messages().len(),
+        1,
+        "clearing low priority keeps the existing silent contract"
+    );
+}
+
+#[test]
+fn lowprio_add_option_bounds_are_pinned() {
+    // These bounds moved here when the unwired cama-app policy module (which
+    // owned the only assertions on them) was removed. `max_length` is what keeps
+    // a stored reason inside REASON_DISPLAY_LIMIT.
+    let options = admin_options(3_000.0);
+    let lowprio = options
+        .iter()
+        .find(|option| option.name == "lowprio")
+        .expect("lowprio group");
+    let add = lowprio
+        .options
+        .iter()
+        .find(|option| option.name == "add")
+        .expect("lowprio add leaf");
+
+    let wins = add
+        .options
+        .iter()
+        .find(|option| option.name == "wins")
+        .expect("wins option");
+    assert_eq!(wins.kind, CommandOptionKind::Integer);
+    assert!(!wins.required);
+    assert_eq!(wins.min_integer, Some(1));
+    assert_eq!(wins.max_integer, Some(20));
+
+    let reason = add
+        .options
+        .iter()
+        .find(|option| option.name == "reason")
+        .expect("reason option");
+    assert_eq!(reason.kind, CommandOptionKind::String);
+    assert!(!reason.required);
+    assert_eq!(
+        reason.max_length,
+        Some(REASON_DISPLAY_LIMIT),
+        "Discord must reject what the renderer would have to clip"
+    );
+    assert_eq!(
+        reason.min_length, None,
+        "short shorthand reasons have always been accepted"
+    );
+    assert!(
+        reason.description.contains("shown privately to the player"),
+        "the admin writing it must be told the player reads it: {}",
+        reason.description
+    );
+    assert!(
+        reason.description.contains("do not name who reported them"),
+        "{}",
+        reason.description
     );
 }

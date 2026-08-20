@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::admin_low_priority::{REASON_DISPLAY_LIMIT, assignment_direct_message};
 use cama_app::moderation::{
     CreateSuspension, ModerationService, ModerationServiceError, RecordLowPriorityEvent,
     parse_expiry,
@@ -632,6 +633,9 @@ impl AdminHandler {
             );
             input.wins_required = PythonIntegerInput::Integer(wins);
             input.start_pending_match_id = Some(PythonIntegerInput::Integer(watermark));
+            // The option description this admin just read says the placed player
+            // sees the reason, so this row's reason is theirs to read.
+            input.reason_player_visible = true;
             let state = low_priority
                 .set_low_priority(&input)
                 .map_err(|error| error.to_string())?;
@@ -657,15 +661,38 @@ impl AdminHandler {
         })
         .await
         .map_err(|error| format!("low-priority write task failed: {error}"))??;
-        respond_ephemeral(
+        // The penalty is already committed, so the player is told either way:
+        // acknowledge first, then notify, and only then surface an ack failure.
+        let acknowledged = respond_ephemeral(
             &responder,
             format!(
                 "✅ Updated matchmaking state for <@{}>. {} wins required.",
                 user.id, state.wins_remaining
             ),
         )
-        .await?;
-        Ok(())
+        .await;
+        let guild_name = match u64::try_from(guild_id) {
+            Ok(guild_id) => self
+                .ports
+                .discord
+                .guild_name(guild_id)
+                .await
+                .unwrap_or_default(),
+            Err(_) => None,
+        };
+        self.best_effort_dm(
+            user.id,
+            assignment_direct_message(
+                state.wins_required,
+                state
+                    .reason
+                    .as_deref()
+                    .filter(|_| state.reason_player_visible),
+                guild_name.as_deref(),
+            ),
+        )
+        .await;
+        acknowledged
     }
 
     async fn lowprio_remove(
@@ -3368,17 +3395,23 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
     );
     wins.min_integer = Some(1);
     wins.max_integer = Some(20);
+    // The assignment reason reaches the placed player, so it carries the same
+    // bounds as the other player-facing moderation reason.
+    let mut assignment_reason = option(
+        "reason",
+        "Reason shown privately to the player and admins — do not name who reported them",
+        CommandOptionKind::String,
+    );
+    // Bounded above only. A lower bound would silently reject the short
+    // shorthand reasons this command has always accepted.
+    assignment_reason.max_length = Some(REASON_DISPLAY_LIMIT);
     vec![
         subcommand(
             "add",
             "Set restricted matchmaking state",
             vec![
                 required("user", "Player to update", CommandOptionKind::User),
-                option(
-                    "reason",
-                    "Reason visible to admins and recorded in moderation audit history",
-                    CommandOptionKind::String,
-                ),
+                assignment_reason,
                 wins,
             ],
         ),

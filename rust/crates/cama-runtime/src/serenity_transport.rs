@@ -2655,6 +2655,25 @@ async fn edit_component_only_original(
         .await
 }
 
+/// Resolve a guild's name over HTTP when the gateway cache cannot answer.
+///
+/// Split out from [`SerenityDiscordTransport::guild_name`] so the fallback is
+/// reachable in tests: the method itself needs a live gateway context first,
+/// which is why its siblings have no coverage.
+async fn fetch_guild_name(http: &Http, guild_id: GuildId) -> Result<Option<String>, String> {
+    match guild_id.to_partial_guild(http).await {
+        Ok(guild) => Ok(Some(guild.name)),
+        Err(serenity::Error::Http(error))
+            if error
+                .status_code()
+                .is_some_and(|status| status.as_u16() == 404) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 async fn edit_component_only_followup(
     http: &Http,
     interaction_token: &str,
@@ -4416,6 +4435,22 @@ impl DiscordTransport for SerenityDiscordTransport {
     async fn bot_user_id(&self) -> Result<Option<u64>, String> {
         let context = self.context()?;
         Ok(Some(context.cache.current_user().id.get()))
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> Result<Option<String>, String> {
+        let context = self.context()?;
+        let guild_id = GuildId::new(guild_id);
+        if let Some(name) = context
+            .cache
+            .guild(guild_id)
+            .map(|guild| guild.name.clone())
+        {
+            return Ok(Some(name));
+        }
+        // A reconnect or a guild not yet delivered by GUILD_CREATE leaves the
+        // cache empty. Falling back to HTTP, like `user` and `guild_member` do,
+        // keeps a notice from silently degrading to unqualified copy.
+        fetch_guild_name(&context.http, guild_id).await
     }
 
     async fn user(&self, user_id: u64) -> Result<Option<DiscordUserSnapshot>, String> {

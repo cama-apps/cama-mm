@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cama_app::admin_low_priority::player_visible_reason;
 use cama_app::curfew_service::{CurfewService, CurfewServiceError};
 use cama_app::moderation::ModerationService;
 use cama_app::neon_degen::{EventKey, NeonDegenService, NeonEventPort, StoreError};
@@ -22,6 +23,7 @@ use cama_app::registration::{RoleInputError, parse_roles};
 use cama_app::timezone_service::{TimezoneService, TimezoneServiceError};
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::curfew::CurfewRepository;
+use cama_db::low_priority_repository::{LowPriorityRepository, LowPriorityState};
 use cama_db::moderation::{
     LobbySuspension, ModerationRepository, SuspensionCompletion, SuspensionScope,
 };
@@ -151,6 +153,7 @@ impl PlayerRegistrationProvider {
                 referrals: ReferralRepository::new(path),
                 notifications: NotificationRepository::new(path),
                 moderation: ModerationRepository::new(path),
+                low_priority: LowPriorityRepository::new(path),
                 players: PlayerRepository::new(path),
                 curfew: CurfewService::new(CurfewRepository::new(path)),
                 opendota,
@@ -423,7 +426,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
             ),
             subcommand(
                 "status",
-                "Privately view your active lobby suspension",
+                "Privately view your active lobby suspension and low-priority progress",
                 Vec::new(),
             ),
         ]),
@@ -558,6 +561,7 @@ struct PlayerRegistrationHandler {
     referrals: ReferralRepository,
     notifications: NotificationRepository,
     moderation: ModerationRepository,
+    low_priority: LowPriorityRepository,
     players: PlayerRepository,
     curfew: CurfewService,
     opendota: Arc<OpenDotaRuntimeServices>,
@@ -2528,19 +2532,36 @@ impl PlayerRegistrationHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let moderation = self.moderation.clone();
+        let low_priority = self.low_priority.clone();
         let user = signed_id(context.user_id, "user")?;
         let guild = signed_id(guild_id, "guild")?;
         let now = now_seconds();
-        let suspension = tokio::task::spawn_blocking(move || {
-            ModerationService::new(moderation).get_active_suspension(user, Some(guild), None, now)
+        // Both lookups are for the caller's own row in their own guild, so the
+        // command can never surface another player's restrictions.
+        let (suspension, low_priority) = tokio::task::spawn_blocking(move || {
+            let suspension = ModerationService::new(moderation)
+                .get_active_suspension(user, Some(guild), None, now)
+                .map_err(|error| format!("{error:?}"))?;
+            let low_priority = low_priority
+                .get_state(user, Some(guild))
+                .map_err(|error| error.to_string())?
+                .filter(|state| state.active && state.wins_remaining > 0);
+            Ok::<_, String>((suspension, low_priority))
         })
         .await
-        .map_err(|error| format!("suspension lookup task failed: {error}"))?
-        .map_err(|error| format!("{error:?}"))?;
-        let message = suspension.map_or_else(
-            || "✅ All clear — you have no active lobby suspension.".to_owned(),
-            |suspension| format_suspension(&suspension),
-        );
+        .map_err(|error| format!("lobby status lookup task failed: {error}"))??;
+        let mut sections = Vec::new();
+        if let Some(suspension) = suspension.as_ref() {
+            sections.push(format_suspension(suspension));
+        }
+        if let Some(state) = low_priority.as_ref() {
+            sections.push(format_low_priority(state));
+        }
+        let message = if sections.is_empty() {
+            "✅ All clear — you have no active lobby suspension or low priority.".to_owned()
+        } else {
+            sections.join("\n\n")
+        };
         followup_ephemeral(&responder, message).await
     }
 
@@ -2820,6 +2841,40 @@ fn format_suspension(state: &LobbySuspension) -> String {
         "**Lobby suspension** — {scope}\nTerm: {terms}\nReason: {}",
         state.reason
     )
+}
+
+/// Render the caller's own low-priority progress.
+///
+/// This deliberately omits `set_by`: the player is shown what they are serving
+/// and why, never which admin issued it, matching the assignment DM. The reason
+/// goes through the same `player_visible_reason` normaliser as that DM so both
+/// player-facing surfaces clip and defuse it identically.
+fn format_low_priority(state: &LowPriorityState) -> String {
+    let completed = state.wins_required.saturating_sub(state.wins_remaining);
+    let required_noun = if state.wins_required == 1 {
+        "win"
+    } else {
+        "wins"
+    };
+    let remaining_noun = if state.wins_remaining == 1 {
+        "win"
+    } else {
+        "wins"
+    };
+    let mut rendered = format!(
+        "**Low priority** — {completed}/{} {required_noun} completed ({} {remaining_noun} remaining)",
+        state.wins_required, state.wins_remaining
+    );
+    // Rows written before the option was documented as player-facing carry
+    // `reason_player_visible = 0`; their reason may name a third party, so the
+    // player gets their progress without it. "Placed for" rather than "Reason"
+    // keeps this attributable when a suspension is rendered alongside it.
+    if state.reason_player_visible
+        && let Some(reason) = player_visible_reason(state.reason.as_deref())
+    {
+        rendered.push_str(&format!("\nPlaced for: {reason}"));
+    }
+    rendered
 }
 
 struct SqliteNeonEventPort {

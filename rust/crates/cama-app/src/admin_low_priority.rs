@@ -1,526 +1,251 @@
-//! Admin low-priority command policy over the shared SQLite repository contract.
+//! Player-facing low-priority copy.
+//!
+//! `/admin lowprio add` is the only way a player enters low priority, and it
+//! notifies them. The two surfaces that show a placed player their own
+//! low-priority state -- that notice and the low-priority section of
+//! `/player lobby status` -- render the admin-authored reason through the one
+//! normaliser here, so they redact and clip it identically.
 
-use cama_db::low_priority_repository::{
-    LowPriorityRepository, LowPriorityState, PythonIntegerInput, SetLowPriorityInput,
-};
+use cama_domain::embed_safety::truncate_field;
+use cama_domain::formatting::escape_discord_text;
 
-pub const DEFAULT_REQUIRED_WINS: i64 = 3;
-pub const MIN_REQUIRED_WINS: i64 = 1;
-pub const MAX_REQUIRED_WINS: i64 = 20;
+/// Longest admin-authored reason rendered into player-facing low-priority copy.
+///
+/// Matches the bound `/admin lowprio add` puts on the option, so it is a `u16`
+/// like the option field itself and needs no fallible conversion. Rows written
+/// before that bound existed are clipped here rather than trusted, so a legacy
+/// reason cannot push a DM or a status reply past Discord's 2000-character
+/// message limit and get it silently rejected.
+pub const REASON_DISPLAY_LIMIT: u16 = 300;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandMetadata {
-    pub name: &'static str,
-    pub manage_guild: bool,
-}
+/// What a redacted user mention is replaced with in player-facing copy.
+const REDACTED_MENTION: &str = "someone";
 
-pub const COMMANDS: [CommandMetadata; 4] = [
-    CommandMetadata {
-        name: "add",
-        manage_guild: false,
-    },
-    CommandMetadata {
-        name: "remove",
-        manage_guild: false,
-    },
-    CommandMetadata {
-        name: "status",
-        manage_guild: false,
-    },
-    CommandMetadata {
-        name: "list",
-        manage_guild: false,
-    },
-];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WinsOption {
-    pub default: i64,
-    pub minimum: i64,
-    pub maximum: i64,
-}
-
-pub const WINS_OPTION: WinsOption = WinsOption {
-    default: DEFAULT_REQUIRED_WINS,
-    minimum: MIN_REQUIRED_WINS,
-    maximum: MAX_REQUIRED_WINS,
-};
-
-pub trait PlayerDirectory {
-    fn player_exists(&self, discord_id: i64, guild_id: i64) -> Result<bool, String>;
-}
-
-pub trait LowPriorityCommandPort {
-    fn get_state(&self, discord_id: i64, guild_id: i64)
-    -> Result<Option<LowPriorityState>, String>;
-
-    fn set_low_priority(&self, input: &SetLowPriorityInput) -> Result<LowPriorityState, String>;
-
-    fn clear_low_priority(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        removed_by: i64,
-        reason: Option<&str>,
-    ) -> Result<bool, String>;
-}
-
-impl LowPriorityCommandPort for LowPriorityRepository {
-    fn get_state(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<LowPriorityState>, String> {
-        LowPriorityRepository::get_state(self, discord_id, Some(guild_id))
-            .map_err(|error| error.to_string())
+/// Prepare an admin-authored low-priority reason for player-facing copy.
+///
+/// Blank reasons become `None` so no dangling `Reason:` line is rendered.
+///
+/// User mentions are **removed**, not merely escaped. Escaping stops Discord
+/// resolving `<@901>` into a display name, but it still hands the placed player
+/// the reporter's raw account ID, which is one lookup away from the name. Only
+/// dropping the mention outright keeps the "never say who reported them"
+/// guarantee. Nothing here can stop an admin typing a name in plain prose; the
+/// option description carries that warning.
+///
+/// What survives is escaped so its markdown cannot reformat the message around
+/// it, and only then clipped to [`REASON_DISPLAY_LIMIT`] characters including
+/// the truncation marker. Clipping last is what makes the budget exact:
+/// escaping can double a string's length, so a clip applied first would be
+/// re-inflated past the limit by the escape that follows it.
+#[must_use]
+pub fn player_visible_reason(reason: Option<&str>) -> Option<String> {
+    let reason = reason.map(str::trim).filter(|reason| !reason.is_empty())?;
+    let redacted = redact_user_mentions(reason);
+    let redacted = redacted.trim();
+    if redacted.is_empty() {
+        return None;
     }
-
-    fn set_low_priority(&self, input: &SetLowPriorityInput) -> Result<LowPriorityState, String> {
-        LowPriorityRepository::set_low_priority(self, input).map_err(|error| error.to_string())
-    }
-
-    fn clear_low_priority(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        removed_by: i64,
-        reason: Option<&str>,
-    ) -> Result<bool, String> {
-        LowPriorityRepository::clear_low_priority(
-            self,
-            discord_id,
-            Some(guild_id),
-            removed_by,
-            reason,
-        )
-        .map_err(|error| error.to_string())
-    }
+    Some(truncate_field(
+        &escape_discord_text(redacted),
+        usize::from(REASON_DISPLAY_LIMIT),
+    ))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LowPriorityAuditEvent {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub event_type: &'static str,
-    pub wins_required: i64,
-    pub wins_remaining: i64,
-    pub pending_match_watermark: Option<i64>,
-    pub actor_id: i64,
-    pub reason: Option<String>,
-    pub source: &'static str,
-}
-
-pub trait LowPriorityModerationPort {
-    fn pending_match_watermark(&self, guild_id: i64) -> Result<Option<i64>, String>;
-    fn record_event(&self, event: LowPriorityAuditEvent) -> Result<(), String>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommandDelivery {
-    pub response: String,
-    pub ephemeral: bool,
-    pub direct_message: Option<String>,
-}
-
-pub struct LowPriorityAdmin<'a, P, R, M> {
-    players: &'a P,
-    repository: &'a R,
-    moderation: Option<&'a M>,
-}
-
-impl<'a, P, R, M> LowPriorityAdmin<'a, P, R, M>
-where
-    P: PlayerDirectory,
-    R: LowPriorityCommandPort,
-    M: LowPriorityModerationPort,
-{
-    #[must_use]
-    pub const fn new(players: &'a P, repository: &'a R, moderation: Option<&'a M>) -> Self {
-        Self {
-            players,
-            repository,
-            moderation,
+/// Replace every `<@id>` / `<@!id>` user mention with [`REDACTED_MENTION`].
+///
+/// Hand-rolled rather than pulled from a regex crate: the grammar is three
+/// literal characters around a digit run, and `cama-app` has no regex
+/// dependency to justify adding for it.
+fn redact_user_mentions(reason: &str) -> String {
+    let mut out = String::with_capacity(reason.len());
+    let mut rest = reason;
+    while let Some(start) = rest.find("<@") {
+        let (before, candidate) = rest.split_at(start);
+        let digits = candidate
+            .trim_start_matches("<@")
+            .trim_start_matches('!')
+            .trim_start_matches('&');
+        let digit_len = digits
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(digits.len());
+        let closes = digits[digit_len..].starts_with('>');
+        out.push_str(before);
+        if digit_len > 0 && closes {
+            out.push_str(REDACTED_MENTION);
+            let consumed = candidate.len() - digits.len() + digit_len + 1;
+            rest = &candidate[consumed..];
+        } else {
+            // Not a mention after all: keep the literal `<@` and carry on.
+            out.push_str("<@");
+            rest = &candidate[2..];
         }
     }
+    out.push_str(rest);
+    out
+}
 
-    pub fn add(
-        &self,
-        admin_allowed: bool,
-        admin_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        reason: Option<&str>,
-        wins: i64,
-    ) -> Result<CommandDelivery, String> {
-        if !admin_allowed {
-            return Ok(CommandDelivery {
-                response: "❌ Admin only! You need Administrator or Manage Server permissions."
-                    .to_owned(),
-                ephemeral: true,
-                direct_message: None,
-            });
-        }
-        if !self.players.player_exists(target_id, guild_id)? {
-            return Ok(CommandDelivery {
-                response: format!("⚠️ <@{target_id}> is not registered."),
-                ephemeral: true,
-                direct_message: None,
-            });
-        }
-
-        let previous = self.repository.get_state(target_id, guild_id)?;
-        let watermark = self
-            .moderation
-            .map(|moderation| moderation.pending_match_watermark(guild_id))
-            .transpose()?
-            .flatten();
-        let mut input = SetLowPriorityInput::new(
-            target_id,
-            Some(guild_id),
-            admin_id,
-            reason.map(str::to_owned),
+/// Polite notice sent to a player when an admin places them in low priority.
+///
+/// The notice carries the admin-authored reason so the player learns what the
+/// correction is for, but never the issuing admin: `set_by` stays admin-facing
+/// on `/admin lowprio status`. `low_priority_state` has no reporter column, so
+/// the reason is the only field that could name whoever raised the behaviour;
+/// it goes through [`player_visible_reason`] first.
+#[must_use]
+pub fn assignment_direct_message(
+    wins_required: i64,
+    reason: Option<&str>,
+    guild_name: Option<&str>,
+) -> String {
+    let wins = if wins_required == 1 { "win" } else { "wins" };
+    let games = if wins_required == 1 { "game" } else { "games" };
+    let reason = player_visible_reason(reason)
+        .map_or_else(String::new, |reason| format!("\nReason: {reason}"));
+    // Low priority is per-guild but a DM is not, so name the server when the
+    // transport can resolve it rather than leaving a two-league player guessing.
+    let server = guild_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || "in the server".to_owned(),
+            |name| format!("in **{}**", escape_discord_text(name)),
         );
-        input.wins_required = PythonIntegerInput::Integer(wins);
-        input.start_pending_match_id = watermark.map(PythonIntegerInput::Integer);
-        let state = self.repository.set_low_priority(&input)?;
-
-        if let Some(moderation) = self.moderation {
-            let _ = moderation.record_event(LowPriorityAuditEvent {
-                discord_id: target_id,
-                guild_id,
-                event_type: if previous.is_some_and(|state| state.active) {
-                    "lowprio_replace"
-                } else {
-                    "lowprio_assign"
-                },
-                wins_required: state.wins_required,
-                wins_remaining: state.wins_remaining,
-                pending_match_watermark: state.start_pending_match_id.or(watermark),
-                actor_id: admin_id,
-                reason: reason.map(str::to_owned),
-                source: "admin",
-            });
-        }
-
-        Ok(CommandDelivery {
-            response: format!(
-                "✅ Updated matchmaking state for <@{target_id}>. {} wins required.",
-                state.wins_remaining
-            ),
-            ephemeral: true,
-            direct_message: None,
-        })
-    }
-
-    pub fn status(
-        &self,
-        admin_allowed: bool,
-        target_id: i64,
-        guild_id: i64,
-    ) -> Result<CommandDelivery, String> {
-        if !admin_allowed {
-            return Ok(CommandDelivery {
-                response: "❌ Admin only! You need Administrator or Manage Server permissions."
-                    .to_owned(),
-                ephemeral: true,
-                direct_message: None,
-            });
-        }
-        let state = self.repository.get_state(target_id, guild_id)?;
-        let response = match state {
-            Some(state) if state.active => format!(
-                "<@{target_id}>: {}/{} wins completed ({} remaining).\nReason: {}\nIssued by: <@{}>\nApplied: {}",
-                state.wins_required - state.wins_remaining,
-                state.wins_required,
-                state.wins_remaining,
-                state.reason.as_deref().unwrap_or("Not provided"),
-                state.set_by,
-                state.created_at,
-            ),
-            _ => format!("<@{target_id}> does not have active restricted matchmaking state."),
-        };
-        Ok(CommandDelivery {
-            response,
-            ephemeral: true,
-            direct_message: None,
-        })
-    }
-
-    pub fn remove(
-        &self,
-        admin_allowed: bool,
-        admin_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        reason: Option<&str>,
-    ) -> Result<CommandDelivery, String> {
-        if !admin_allowed {
-            return Ok(CommandDelivery {
-                response: "❌ Admin only! You need Administrator or Manage Server permissions."
-                    .to_owned(),
-                ephemeral: true,
-                direct_message: None,
-            });
-        }
-        let previous = self.repository.get_state(target_id, guild_id)?;
-        let removed = self
-            .repository
-            .clear_low_priority(target_id, guild_id, admin_id, reason)?;
-        if removed && let Some(moderation) = self.moderation {
-            let previous = previous.as_ref();
-            let _ = moderation.record_event(LowPriorityAuditEvent {
-                discord_id: target_id,
-                guild_id,
-                event_type: "lowprio_clear",
-                wins_required: previous.map_or(DEFAULT_REQUIRED_WINS, |state| state.wins_required),
-                wins_remaining: 0,
-                pending_match_watermark: previous.and_then(|state| state.start_pending_match_id),
-                actor_id: admin_id,
-                reason: reason.map(str::to_owned),
-                source: "admin",
-            });
-        }
-        Ok(CommandDelivery {
-            response: if removed {
-                format!("✅ Cleared matchmaking state for <@{target_id}>.")
-            } else {
-                format!("<@{target_id}> does not have active restricted matchmaking state.")
-            },
-            ephemeral: true,
-            direct_message: None,
-        })
-    }
+    format!(
+        "You were placed in low priority {server} for **{wins_required} {wins}**.\n\
+         The matchmaker is asking for a small course correction.\
+         {reason}\n\
+         Win {wins_required} recorded {games} to return to regular matchmaking.\n\
+         Use `/player lobby status` {server} to view your progress."
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
-    #[derive(Default)]
-    struct FakePlayers {
-        calls: Mutex<Vec<(i64, i64)>>,
-        exists: bool,
-    }
-
-    impl PlayerDirectory for FakePlayers {
-        fn player_exists(&self, discord_id: i64, guild_id: i64) -> Result<bool, String> {
-            self.calls.lock().unwrap().push((discord_id, guild_id));
-            Ok(self.exists)
-        }
-    }
-
-    struct FakeRepository {
-        get_calls: Mutex<Vec<(i64, i64)>>,
-        set_calls: Mutex<Vec<SetLowPriorityInput>>,
-        get_result: Mutex<Option<LowPriorityState>>,
-        set_result: Mutex<Option<LowPriorityState>>,
-    }
-
-    impl Default for FakeRepository {
-        fn default() -> Self {
-            Self {
-                get_calls: Mutex::default(),
-                set_calls: Mutex::default(),
-                get_result: Mutex::new(None),
-                set_result: Mutex::new(None),
-            }
-        }
-    }
-
-    impl LowPriorityCommandPort for FakeRepository {
-        fn get_state(
-            &self,
-            discord_id: i64,
-            guild_id: i64,
-        ) -> Result<Option<LowPriorityState>, String> {
-            self.get_calls.lock().unwrap().push((discord_id, guild_id));
-            Ok(self.get_result.lock().unwrap().clone())
-        }
-
-        fn set_low_priority(
-            &self,
-            input: &SetLowPriorityInput,
-        ) -> Result<LowPriorityState, String> {
-            self.set_calls.lock().unwrap().push(input.clone());
-            Ok(self.set_result.lock().unwrap().clone().unwrap())
-        }
-
-        fn clear_low_priority(
-            &self,
-            _discord_id: i64,
-            _guild_id: i64,
-            _removed_by: i64,
-            _reason: Option<&str>,
-        ) -> Result<bool, String> {
-            Ok(true)
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeModeration {
-        watermark_calls: Mutex<Vec<i64>>,
-        events: Mutex<Vec<LowPriorityAuditEvent>>,
-        watermark: Option<i64>,
-    }
-
-    impl LowPriorityModerationPort for FakeModeration {
-        fn pending_match_watermark(&self, guild_id: i64) -> Result<Option<i64>, String> {
-            self.watermark_calls.lock().unwrap().push(guild_id);
-            Ok(self.watermark)
-        }
-
-        fn record_event(&self, event: LowPriorityAuditEvent) -> Result<(), String> {
-            self.events.lock().unwrap().push(event);
-            Ok(())
-        }
-    }
-
-    fn state(wins_required: i64, wins_remaining: i64) -> LowPriorityState {
-        LowPriorityState {
-            discord_id: 42,
-            guild_id: 77,
-            wins_required,
-            wins_remaining,
-            start_pending_match_id: Some(314),
-            active: true,
-            reason: Some("internal".to_owned()),
-            set_by: 900,
-            removed_by: None,
-            removed_reason: None,
-            created_at: "2026-08-05 12:34:56".to_owned(),
-            updated_at: "2026-08-05 12:34:56".to_owned(),
-        }
-    }
-
     #[test]
-    fn test_low_priority_commands_have_no_static_permission_gate() {
-        assert!(COMMANDS.iter().all(|command| !command.manage_guild));
+    fn test_lowprio_assignment_dm_is_polite_and_points_at_the_player_status_command() {
         assert_eq!(
-            COMMANDS.map(|command| command.name),
-            ["add", "remove", "status", "list"]
+            assignment_direct_message(3, Some("repeated abandons"), Some("Camaraderous")),
+            "You were placed in low priority in **Camaraderous** for **3 wins**.\n\
+             The matchmaker is asking for a small course correction.\n\
+             Reason: repeated abandons\n\
+             Win 3 recorded games to return to regular matchmaking.\n\
+             Use `/player lobby status` in **Camaraderous** to view your progress."
+        );
+        assert_eq!(
+            assignment_direct_message(1, None, None),
+            "You were placed in low priority in the server for **1 win**.\n\
+             The matchmaker is asking for a small course correction.\n\
+             Win 1 recorded game to return to regular matchmaking.\n\
+             Use `/player lobby status` in the server to view your progress."
         );
     }
 
     #[test]
-    fn test_lowprio_add_exposes_bounded_configurable_win_count() {
-        assert_eq!(WINS_OPTION.default, 3);
-        assert_eq!(WINS_OPTION.minimum, 1);
-        assert_eq!(WINS_OPTION.maximum, 20);
-    }
-
-    #[test]
-    fn test_lowprio_add_sets_configurable_wins_and_pending_match_watermark() {
-        let players = FakePlayers {
-            exists: true,
-            ..FakePlayers::default()
-        };
-        let repository = FakeRepository::default();
-        *repository.set_result.lock().unwrap() = Some(state(7, 7));
-        let moderation = FakeModeration {
-            watermark: Some(314),
-            ..FakeModeration::default()
-        };
-        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
-            .add(true, 900, 42, 77, Some("internal"), 7)
-            .unwrap();
-
-        assert_eq!(*players.calls.lock().unwrap(), [(42, 77)]);
-        assert_eq!(*moderation.watermark_calls.lock().unwrap(), [77]);
-        let inputs = repository.set_calls.lock().unwrap();
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].wins_required, PythonIntegerInput::Integer(7));
-        assert_eq!(
-            inputs[0].start_pending_match_id,
-            Some(PythonIntegerInput::Integer(314))
-        );
-        assert_eq!(inputs[0].set_by, 900);
-        assert_eq!(inputs[0].reason.as_deref(), Some("internal"));
-        assert_eq!(
-            *moderation.events.lock().unwrap(),
-            [LowPriorityAuditEvent {
-                discord_id: 42,
-                guild_id: 77,
-                event_type: "lowprio_assign",
-                wins_required: 7,
-                wins_remaining: 7,
-                pending_match_watermark: Some(314),
-                actor_id: 900,
-                reason: Some("internal".to_owned()),
-                source: "admin",
-            }]
-        );
-        assert!(delivery.response.contains("7 wins required"));
-        assert!(delivery.direct_message.is_none());
-        assert!(delivery.ephemeral);
-    }
-
-    #[test]
-    fn test_lowprio_runtime_admin_check_blocks_repository_access() {
-        let players = FakePlayers::default();
-        let repository = FakeRepository::default();
-        let moderation = FakeModeration::default();
-        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
-            .add(false, 900, 42, 77, None, 3)
-            .unwrap();
-        assert!(players.calls.lock().unwrap().is_empty());
-        assert!(repository.get_calls.lock().unwrap().is_empty());
-        assert!(repository.set_calls.lock().unwrap().is_empty());
-        assert!(delivery.ephemeral);
-    }
-
-    #[test]
-    fn test_lowprio_status_reports_progress_ephemerally() {
-        let players = FakePlayers::default();
-        let repository = FakeRepository::default();
-        let mut current = state(5, 2);
-        current.reason = Some("repeat abandonment".to_owned());
-        current.set_by = 901;
-        *repository.get_result.lock().unwrap() = Some(current);
-        let moderation = FakeModeration::default();
-        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
-            .status(true, 42, 77)
-            .unwrap();
+    fn test_lowprio_reason_removes_a_mention_rather_than_defusing_it() {
+        // Escaping alone would only stop Discord resolving the mention; the raw
+        // account id would still reach the player, and an id is one lookup away
+        // from the name. The whole mention has to go.
+        let rendered = player_visible_reason(Some("reported by <@901> for griefing"))
+            .expect("reason survives");
+        assert!(!rendered.contains("<@901>"));
         assert!(
-            delivery
-                .response
-                .contains("3/5 wins completed (2 remaining)")
+            !rendered.contains("901"),
+            "the reporter's id must not survive: {rendered}"
         );
-        assert!(delivery.response.contains("repeat abandonment"));
-        assert!(delivery.response.contains("<@901>"));
-        assert!(delivery.response.contains("2026-08-05 12:34:56"));
-        assert!(delivery.ephemeral);
+        assert!(rendered.contains("for griefing"), "the rest is kept");
+
+        let notice = assignment_direct_message(3, Some("reported by <@901> for griefing"), None);
+        assert!(!notice.contains("<@901>"));
+        assert!(notice.contains("Reason: reported by someone for griefing"));
     }
 
     #[test]
-    fn test_lowprio_remove_clears_state_and_records_audit_without_dm() {
-        let players = FakePlayers {
-            exists: true,
-            ..FakePlayers::default()
-        };
-        let repository = FakeRepository::default();
-        *repository.get_result.lock().unwrap() = Some(state(7, 3));
-        let moderation = FakeModeration::default();
-        let delivery = LowPriorityAdmin::new(&players, &repository, Some(&moderation))
-            .remove(true, 900, 42, 77, Some("internal"))
-            .unwrap();
-
-        assert!(delivery.direct_message.is_none());
-        assert!(delivery.response.contains("Cleared matchmaking state"));
+    fn test_lowprio_reason_redacts_every_mention_shape_and_keeps_the_rest() {
+        for mention in ["<@901>", "<@!901>", "<@&901>"] {
+            let rendered =
+                player_visible_reason(Some(&format!("ganked by {mention} twice"))).unwrap();
+            assert_eq!(rendered, "ganked by someone twice", "shape {mention}");
+        }
         assert_eq!(
-            *moderation.events.lock().unwrap(),
-            [LowPriorityAuditEvent {
-                discord_id: 42,
-                guild_id: 77,
-                event_type: "lowprio_clear",
-                wins_required: 7,
-                wins_remaining: 0,
-                pending_match_watermark: Some(314),
-                actor_id: 900,
-                reason: Some("internal".to_owned()),
-                source: "admin",
-            }]
+            player_visible_reason(Some("<@1> and <@2> both reported it")).unwrap(),
+            "someone and someone both reported it"
         );
+        // Text that only looks like the start of a mention is left alone.
+        let literal = player_visible_reason(Some("said <@ nothing")).unwrap();
+        assert!(literal.contains("nothing"), "{literal}");
+        assert!(!literal.contains("someone"), "{literal}");
+    }
+
+    #[test]
+    fn test_lowprio_reason_that_is_only_a_mention_keeps_no_trace_of_the_id() {
+        let notice = assignment_direct_message(3, Some("<@901>"), None);
+        assert!(notice.contains("Reason: someone"), "{notice}");
+        assert!(!notice.contains("901"), "{notice}");
+    }
+
+    #[test]
+    fn test_lowprio_reason_is_clipped_so_a_legacy_row_cannot_break_delivery() {
+        let legacy = "g".repeat(4_000);
+        let rendered = player_visible_reason(Some(&legacy)).expect("reason survives");
+        assert_eq!(
+            rendered.chars().count(),
+            usize::from(REASON_DISPLAY_LIMIT),
+            "the marker fits inside the documented budget"
+        );
+        assert!(rendered.ends_with("..."));
+
+        let notice = assignment_direct_message(3, Some(&legacy), None);
+        assert!(
+            notice.chars().count() < 2_000,
+            "the notice must stay inside Discord's message limit, got {}",
+            notice.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_lowprio_reason_at_the_limit_is_not_marked_as_clipped() {
+        let exact = "g".repeat(usize::from(REASON_DISPLAY_LIMIT));
+        let rendered = player_visible_reason(Some(&exact)).expect("reason survives");
+        assert_eq!(rendered, exact);
+        assert!(!rendered.ends_with("..."));
+    }
+
+    #[test]
+    fn test_lowprio_assignment_dm_omits_a_blank_reason_rather_than_an_empty_line() {
+        for blank in ["", "   ", "\n\t "] {
+            let notice = assignment_direct_message(2, Some(blank), None);
+            assert!(
+                !notice.contains("Reason"),
+                "blank reason {blank:?} rendered"
+            );
+            assert_eq!(notice, assignment_direct_message(2, None, None));
+        }
+    }
+
+    #[test]
+    fn test_lowprio_assignment_dm_carries_the_reason_but_never_the_issuing_admin() {
+        let notice = assignment_direct_message(4, Some("repeated abandons"), None);
+        assert!(notice.contains("**4 wins**"));
+        assert!(notice.contains("Reason: repeated abandons"));
+        // The issuing admin is not an input here by construction: `set_by` stays
+        // on the admin-facing `/admin lowprio status`. The player is told what,
+        // never who.
+        assert!(!notice.contains("<@"));
+    }
+
+    #[test]
+    fn test_lowprio_assignment_dm_pluralises_every_legal_win_count() {
+        for wins in 1..=20 {
+            let notice = assignment_direct_message(wins, None, None);
+            let (win_noun, game_noun) = if wins == 1 {
+                ("1 win**", "Win 1 recorded game ")
+            } else {
+                ("wins**", "recorded games ")
+            };
+            assert!(notice.contains(win_noun), "wins={wins}: {notice}");
+            assert!(notice.contains(game_noun), "wins={wins}: {notice}");
+        }
     }
 }

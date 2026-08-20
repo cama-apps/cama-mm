@@ -9333,7 +9333,8 @@ mod tests {
             wins_required INTEGER NOT NULL DEFAULT 3,
             wins_remaining INTEGER NOT NULL DEFAULT 3,
             start_pending_match_id INTEGER, active INTEGER NOT NULL DEFAULT 1,
-            reason TEXT, set_by INTEGER NOT NULL, removed_by INTEGER,
+            reason TEXT, reason_player_visible INTEGER NOT NULL DEFAULT 0,
+            set_by INTEGER NOT NULL, removed_by INTEGER,
             removed_reason TEXT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(discord_id,guild_id)

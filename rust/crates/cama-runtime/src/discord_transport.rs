@@ -417,6 +417,14 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
+    /// Resolve a guild's display name. DMs are global while most player state
+    /// is per-guild, so a notice delivered outside any server needs this to say
+    /// which one it is about. Transports that cannot resolve it stay source
+    /// compatible and the caller falls back to unqualified copy.
+    async fn guild_name(&self, _guild_id: u64) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// Resolve a raw-event actor outside a guild member payload. Production
     /// uses Serenity's user cache before HTTP, matching Python's
     /// `get_user`/`fetch_user` fallback; existing test transports remain
