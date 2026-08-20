@@ -38,7 +38,7 @@ use cama_db::rating_history_repository::{RatingHistoryRepository, RecalibrationR
 use cama_db::registration_repository::RegistrationRepository;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::permissions::{DiscordPermissions, PermissionContext, has_admin_permission};
-use cama_domain::rating::CamaRatingSystem;
+use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD, cap_glicko_rd};
 use cama_domain::region::{
     CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
 };
@@ -1769,6 +1769,7 @@ impl AdminHandler {
         let Some(rd) = snapshot.glicko_rd else {
             return Err("rated player has no Glicko RD".into());
         };
+        let rd = cap_glicko_rd(rd);
         let Some(volatility) = snapshot.glicko_volatility else {
             return Err("rated player has no Glicko volatility".into());
         };
@@ -1808,8 +1809,12 @@ impl AdminHandler {
         }
         let user = required_user(&context.options, "user")?;
         let rd = required_number(&context.options, "rd")?;
-        if !(0.0..=350.0).contains(&rd) {
-            return respond_ephemeral(&responder, "❌ RD must be between 0 and 350.").await;
+        if !(0.0..=MAX_GLICKO_RD).contains(&rd) {
+            return respond_ephemeral(
+                &responder,
+                format!("❌ RD must be between 0 and {MAX_GLICKO_RD:.0}."),
+            )
+            .await;
         }
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
@@ -1890,7 +1895,7 @@ impl AdminHandler {
             )
             .await;
         }
-        let rd = snapshot.glicko_rd.unwrap_or(self.config.initial_glicko_rd);
+        let rd = cap_glicko_rd(snapshot.glicko_rd.unwrap_or(self.config.initial_glicko_rd));
         let volatility = snapshot.glicko_volatility.unwrap_or(0.06);
         let actor_id = signed_id(context.actor_id, "actor")?;
         let repository = self.admin.clone();
@@ -1927,8 +1932,8 @@ impl AdminHandler {
             return Ok(());
         }
         let amount = integer(&context.options, "amount").unwrap_or(100);
-        if !(1..=350).contains(&amount) {
-            return respond_ephemeral(&responder, "❌ Amount must be between 1 and 350.").await;
+        if !(1..=MAX_GLICKO_RD as i64).contains(&amount) {
+            return respond_ephemeral(&responder, "❌ Amount must be between 1 and 250.").await;
         }
         defer(&responder, true).await?;
         let repository = self.admin.clone();
@@ -1944,7 +1949,7 @@ impl AdminHandler {
             return respond_ephemeral(&responder, "❌ No rated players found.").await;
         };
         let mut content = format!(
-            "✅ Bumped RD for **{}** players by **+{amount}** (capped at 350)\n• Avg RD: {:.0} → **{:.0}**",
+            "✅ Bumped RD for **{}** players by **+{amount}** (capped at {MAX_GLICKO_RD:.0})\n• Avg RD: {:.0} → **{:.0}**",
             result.count, result.average_rd_before, result.average_rd_after
         );
         if let (Some(before), Some(after)) =
@@ -1996,7 +2001,11 @@ impl AdminHandler {
             .await;
         }
         let old_rd = snapshot.glicko_rd.ok_or("rated player has no Glicko RD")?;
-        let new_rd = self.config.recalibration_initial_rd.max(old_rd);
+        let new_rd = self
+            .config
+            .recalibration_initial_rd
+            .max(old_rd)
+            .min(MAX_GLICKO_RD);
         let old_os_sigma = snapshot.os_sigma;
         let new_os_sigma = old_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
         let now = now_seconds();
@@ -3161,7 +3170,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                         required("user", "Player to adjust", CommandOptionKind::User),
                         required(
                             "rd",
-                            "New rating deviation / uncertainty (0-350)",
+                            "New rating deviation / uncertainty (0-250)",
                             CommandOptionKind::Number,
                         ),
                     ],
@@ -3286,7 +3295,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "Increase rating uncertainty after a major patch (Admin only)",
             vec![option(
                 "amount",
-                "RD increase amount (default 100, max 350)",
+                "RD increase amount (default 100, max 250)",
                 CommandOptionKind::Integer,
             )],
         ),

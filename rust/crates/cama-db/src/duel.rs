@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_domain::rating::cap_glicko_rd;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
@@ -1156,7 +1157,7 @@ fn find_player_snapshot(
             |row| {
                 Ok(PlayerSnapshot {
                     rating: row.get(0)?,
-                    rd: row.get(1)?,
+                    rd: row.get::<_, Option<f64>>(1)?.map(cap_glicko_rd),
                     balance: python_int(row.get_ref(2)?, 2)?,
                 })
             },

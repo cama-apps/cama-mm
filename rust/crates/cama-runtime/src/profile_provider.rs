@@ -31,6 +31,8 @@ use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::tip_repository::TipRepository;
 use cama_domain::formatting::{JOPACOIN_EMOTE, TOMBSTONE_EMOJI};
+use cama_domain::rating::cap_glicko_rd;
+use cama_domain::rating_insights::rd_to_certainty;
 use cama_domain::role_performance::MIN_GAMES_FOR_WINRATE;
 use rusqlite::types::Value;
 use tracing::warn;
@@ -778,7 +780,7 @@ impl ProfileDataSources {
             |rating| {
                 let certainty = player
                     .glicko_rd
-                    .map_or(0.0, |rd| (100.0 - rd / 350.0 * 100.0).clamp(0.0, 100.0));
+                    .map_or(0.0, |rd| rd_to_certainty(cap_glicko_rd(rd)));
                 format!("**Glicko:** {rating:.0} ({certainty:.0}% certain)")
             },
         );
@@ -844,7 +846,7 @@ impl ProfileDataSources {
             |rating| {
                 format!(
                     "**Rating:** {rating:.0}\n**RD:** {}\n**Volatility:** {}",
-                    optional_decimal(player.glicko_rd),
+                    optional_decimal(player.glicko_rd.map(cap_glicko_rd)),
                     optional_decimal(player.glicko_volatility)
                 )
             },

@@ -13,7 +13,7 @@ use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::player::Player;
-use cama_domain::rating::CamaRatingSystem;
+use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD};
 use cama_domain::rating_insights::rd_to_certainty;
 use cama_domain::tip_service::{TipLeaderboardEntry, TipVolume};
 
@@ -594,7 +594,7 @@ where
                                 .glicko_rating
                                 .expect("retained Glicko players have ratings"),
                         ),
-                        rd_to_certainty(player.glicko_rd.unwrap_or(350.0)),
+                        rd_to_certainty(player.glicko_rd.unwrap_or(MAX_GLICKO_RD)),
                     ),
                     RatingKind::OpenSkill => (
                         i64::from(

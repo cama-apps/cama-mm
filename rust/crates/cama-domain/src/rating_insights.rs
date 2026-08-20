@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::player::{OPENSKILL_DISPLAY_SCALE, Player};
+use crate::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 
 /// Display-rank thresholds in descending order.
 pub const RATING_BUCKETS: [(&str, f64); 8] = [
@@ -313,7 +314,7 @@ fn normal_cdf(value: f64) -> f64 {
 /// Convert RD to certainty percentage. Higher means more certain.
 #[must_use]
 pub fn rd_to_certainty(rd: f64) -> f64 {
-    100.0 - ((rd / 350.0) * 100.0).min(100.0)
+    100.0 - (cap_glicko_rd(rd) / MAX_GLICKO_RD) * 100.0
 }
 
 /// Return the display calibration tier for an RD value.
@@ -323,7 +324,7 @@ pub fn get_rd_tier_name(rd: f64) -> &'static str {
         "Locked In"
     } else if rd <= 150.0 {
         "Settling"
-    } else if rd <= 250.0 {
+    } else if rd < MAX_GLICKO_RD {
         "Developing"
     } else {
         "Fresh"
@@ -728,6 +729,15 @@ pub fn compute_calibration_stats(
     match_predictions: &[MatchPrediction],
     history: &[RatingHistoryEntry],
 ) -> CalibrationStats {
+    let normalized_players = players
+        .iter()
+        .cloned()
+        .map(|mut player| {
+            player.glicko_rd = player.glicko_rd.map(cap_glicko_rd);
+            player
+        })
+        .collect::<Vec<_>>();
+    let players = normalized_players.as_slice();
     let rated_players: Vec<_> = players
         .iter()
         .filter(|player| player.glicko_rating.is_some())
@@ -738,7 +748,7 @@ pub fn compute_calibration_stats(
         .collect();
     let rd_values: Vec<_> = rated_players
         .iter()
-        .map(|player| player.glicko_rd.unwrap_or(350.0))
+        .map(|player| player.glicko_rd.unwrap_or(MAX_GLICKO_RD))
         .collect();
 
     let mut rating_buckets: Vec<_> = RATING_BUCKETS
@@ -801,15 +811,15 @@ pub fn compute_calibration_stats(
     let mut most_calibrated = rated_players.clone();
     most_calibrated.sort_by(|left, right| {
         left.glicko_rd
-            .unwrap_or(350.0)
-            .total_cmp(&right.glicko_rd.unwrap_or(350.0))
+            .unwrap_or(MAX_GLICKO_RD)
+            .total_cmp(&right.glicko_rd.unwrap_or(MAX_GLICKO_RD))
     });
     let mut least_calibrated = rated_players.clone();
     least_calibrated.sort_by(|left, right| {
         right
             .glicko_rd
-            .unwrap_or(350.0)
-            .total_cmp(&left.glicko_rd.unwrap_or(350.0))
+            .unwrap_or(MAX_GLICKO_RD)
+            .total_cmp(&left.glicko_rd.unwrap_or(MAX_GLICKO_RD))
     });
     let mut highest_volatility = rated_players.clone();
     highest_volatility.sort_by(|left, right| {
@@ -1188,7 +1198,8 @@ mod tests {
         assert_eq!(stats.rd_tier_count("Locked In"), Some(1));
         assert_eq!(stats.rd_tier_count("Developing"), Some(1));
         assert_eq!(stats.rd_tier_count("Fresh"), Some(1));
-        close(stats.avg_certainty.unwrap(), 47.6, 0.1);
+        close(stats.avg_rd.unwrap(), 166.7, 0.1);
+        close(stats.avg_certainty.unwrap(), 33.3, 0.1);
         close(stats.avg_drift.unwrap(), 77.5, 1e-10);
         close(stats.median_drift.unwrap(), 77.5, 1e-10);
         assert_eq!(stats.prediction_quality.count, 2);

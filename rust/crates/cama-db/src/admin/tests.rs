@@ -83,7 +83,7 @@ fn test_bumps_all_rated_players() {
 }
 
 #[test]
-fn test_caps_rd_at_350() {
+fn test_caps_rd_at_shared_limit() {
     let fixture = Fixture::new();
     fixture.player(1, GUILD, Some(1_500.0), 300.0, 0.06);
     fixture.player(2, GUILD, Some(1_200.0), 340.0, 0.06);
@@ -92,9 +92,9 @@ fn test_caps_rd_at_350() {
         .bump_uncertainties(GUILD, 100.0, 9)
         .expect("bump uncertainty")
         .expect("summary");
-    assert_eq!(result.average_rd_after, 350.0);
-    assert_eq!(fixture.rating(1, GUILD).1, 350.0);
-    assert_eq!(fixture.rating(2, GUILD).1, 350.0);
+    assert_eq!(result.average_rd_after, 250.0);
+    assert_eq!(fixture.rating(1, GUILD).1, 250.0);
+    assert_eq!(fixture.rating(2, GUILD).1, 250.0);
 }
 
 #[test]
