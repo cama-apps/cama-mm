@@ -65,6 +65,56 @@ fn bets_team_rows_split_at_discords_field_value_limit() {
 }
 
 #[test]
+fn bets_pages_preserve_every_row_within_discord_embed_limits() {
+    let lines = (1..=180)
+        .map(|index| format!("<@{index}> • {index} {JOPACOIN_EMOTE} • {}", "x".repeat(45)))
+        .collect::<Vec<_>>();
+    let mut fields = vec![("Current Odds".to_owned(), "Radiant 2x | Dire 2x".to_owned())];
+    fields.extend(bounded_bet_team_fields("🔴 Dire", lines.len(), &lines));
+    fields.push((
+        "Pool Summary".to_owned(),
+        "**Total:** 180 effective".to_owned(),
+    ));
+
+    let embeds = paginated_bet_embeds("📊 Match #511 — Pool Bets (180 bets)", fields);
+
+    assert!(embeds.len() > 1);
+    assert_eq!(embeds[0].fields[0].name, "Current Odds");
+    assert_eq!(
+        embeds.last().unwrap().fields.last().unwrap().name,
+        "Pool Summary"
+    );
+    assert!(embeds.iter().all(|embed| embed.fields.len() <= MAX_FIELDS));
+    assert!(embeds.iter().all(|embed| {
+        embed
+            .title
+            .as_deref()
+            .map_or(0, |value| value.chars().count())
+            + embed
+                .fields
+                .iter()
+                .map(|field| field.name.chars().count() + field.value.chars().count())
+                .sum::<usize>()
+            <= TOTAL_LIMIT
+    }));
+    assert_eq!(
+        embeds
+            .iter()
+            .flat_map(|embed| &embed.fields)
+            .filter(|field| field.name.starts_with("🔴 Dire Bets"))
+            .flat_map(|field| field.value.lines())
+            .collect::<Vec<_>>(),
+        lines.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert!(embeds.iter().all(|embed| {
+        embed
+            .fields
+            .iter()
+            .all(|field| !field.value.contains("more"))
+    }));
+}
+
+#[test]
 fn investment_target_validation_rejects_self_short_and_unregistered_targets() {
     assert_eq!(
         validate_investment_target(1, 1, "short", true, true),
@@ -1410,6 +1460,97 @@ async fn bet_command_uses_existing_schema_and_red_green_policy() {
             .as_slice(),
         &[(42, pending.pending_match_id)]
     );
+}
+
+#[tokio::test]
+async fn bets_command_returns_more_than_fifteen_bets_without_omission() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let now = unix_seconds().expect("timestamp");
+    let pending = PendingMatchRepository::new(database.path())
+        .create_pending_match(
+            42,
+            &PendingMatchState {
+                shuffle_timestamp: Some(now.saturating_sub(10)),
+                bet_lock_until: Some(now.saturating_add(600)),
+                betting_mode: "pool".to_owned(),
+                ..PendingMatchState::default()
+            },
+        )
+        .expect("pending match");
+    let players = PlayerRepository::new(database.path());
+    let betting = BettingServiceRepository::new(database.path());
+    for index in 1..=16 {
+        let discord_id = 1_000 + index;
+        players
+            .add(&NewPlayer::new(
+                discord_id,
+                format!("bettor-{index}"),
+                Some(42),
+            ))
+            .expect("player");
+        players
+            .update_balance(discord_id, Some(42), 100)
+            .expect("balance");
+        betting
+            .place_bet_atomic(PlaceBetRequest {
+                guild_id: Some(42),
+                pending_match_id: pending.pending_match_id,
+                discord_id,
+                team: BettingTeam::Dire,
+                amount: index,
+                bet_time: now,
+                leverage: 1,
+                max_debt: 500,
+                is_blind: false,
+                odds_at_placement: None,
+            })
+            .expect("place bet");
+    }
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("betting composition configuration");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let responder = RecordingResponder::default();
+
+    provider
+        .handler
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 3,
+                name: "bets".to_owned(),
+                user_id: 999,
+                user_display_name: "viewer".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(99),
+                member_permissions: None,
+                options: vec![InteractionOption {
+                    name: "match".to_owned(),
+                    value: InteractionValue::Integer(pending.pending_match_id),
+                }],
+            },
+            Arc::new(responder.clone()),
+        )
+        .await
+        .expect("dispatch bets command");
+
+    assert_eq!(responder.defers.lock().unwrap().as_slice(), &[true]);
+    let responses = responder.responses.lock().unwrap();
+    let dire_lines = responses
+        .iter()
+        .flat_map(|response| &response.embeds)
+        .flat_map(|embed| &embed.fields)
+        .filter(|field| field.name.starts_with("🔴 Dire Bets"))
+        .flat_map(|field| field.value.lines())
+        .collect::<Vec<_>>();
+    assert_eq!(dire_lines.len(), 16);
+    assert!(dire_lines.iter().all(|line| !line.contains("more")));
+    assert!(responses.iter().all(|response| response.ephemeral));
 }
 
 #[test]
