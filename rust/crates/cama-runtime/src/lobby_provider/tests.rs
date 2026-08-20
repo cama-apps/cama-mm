@@ -2179,6 +2179,117 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
 }
 
 #[tokio::test]
+async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck() {
+    // Regression test: a curfew kick must also sweep the removed player out
+    // of an in-flight readycheck — its roster and its confirmation reaction —
+    // the same way `/kick` does via `sync_readycheck_with_lobby`. Merely
+    // resyncing the internal lobby-membership mirror (what the old
+    // `refresh_curfew_lobby` did) left a curfewed player still counted
+    // toward the ready quorum and still shown as confirmed.
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "readycheck",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let before = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .expect("readycheck posted");
+    assert!(before.lobby_ids.contains(&AppUserId(1)));
+    assert!(
+        before.reacted.contains_key(&AppUserId(1)),
+        "a just-joined player auto-confirms as a recent signup"
+    );
+    let readycheck_message_id = to_u64(before.message_id.0).expect("readycheck Discord message");
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+        })
+        .expect("seed an always-active curfew window");
+
+    let edits_before = transport.edit_count();
+    let lobby = provider.live_lobby_service();
+    let kicks = provider.curfew_service().sweep(&lobby, &[42], now);
+    assert_eq!(kicks.len(), 1);
+    for kick in &kicks {
+        provider
+            .curfew_lobby_display()
+            .refresh_curfew_lobby(kick.guild_id, kick.lobby_kind)
+            .await
+            .expect("refresh lobby display after curfew kick");
+    }
+
+    let after = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .expect("readycheck remains live");
+    assert!(
+        !after.lobby_ids.contains(&AppUserId(1)),
+        "curfew kick must remove the player from the readycheck roster"
+    );
+    assert!(
+        !after.reacted.contains_key(&AppUserId(1)),
+        "curfew kick must drop the player's readycheck confirmation"
+    );
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .removed_reactions
+            .iter()
+            .any(|(_, message_id, emoji, user_id)| {
+                *message_id == readycheck_message_id && emoji.name == READY_EMOJI && *user_id == 1
+            }),
+        "curfew kick must remove the player's physical readycheck reaction"
+    );
+    assert!(
+        transport.edit_count() > edits_before,
+        "the readycheck message must be repainted after a curfew kick"
+    );
+}
+
+#[tokio::test]
 async fn test_auto_join_blocked_during_active_curfew_window() {
     let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
     let transport = Arc::new(RecordingTransport::default());

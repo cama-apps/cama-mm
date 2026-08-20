@@ -1204,12 +1204,16 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
 }
 
 /// Production surface used by the curfew sweep worker to make a removal
-/// actually visible: re-syncs readycheck eligibility and re-renders the
-/// lobby's live Discord embed, matching Python's
-/// `_deliver_curfew_kick` -> `_sync_lobby_displays` pair.
+/// actually visible: reconciles the live ready-check generation (roster,
+/// stale confirmation reactions, repainted message) against the
+/// post-removal lobby, then re-renders the lobby's live Discord embed,
+/// matching Python's `_deliver_curfew_kick` -> `_sync_lobby_displays` pair.
+/// Mirrors `handle_kick`'s use of `sync_readycheck_with_lobby` — a curfewed
+/// player must disappear from an in-flight readycheck the same way a kicked
+/// one does, not just from the lobby roster.
 #[derive(Clone)]
 struct CurfewLobbyDisplay {
-    state: Arc<LobbyRuntimeState>,
+    handler: Arc<LobbyInteractionHandler>,
 }
 
 #[async_trait]
@@ -1220,8 +1224,8 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         lobby_kind: LobbyKind,
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
-        self.state.sync_ready_lobby(scope);
-        self.state.sync_lobby_display(scope).await
+        self.handler.sync_readycheck_with_lobby(scope).await;
+        self.handler.state.sync_lobby_display(scope).await
     }
 
     async fn remove_curfew_lobby_reaction(
@@ -1231,7 +1235,8 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         discord_id: i64,
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
-        self.state
+        self.handler
+            .state
             .remove_lobby_reaction(scope, AppUserId(discord_id))
             .await
     }
@@ -1340,7 +1345,7 @@ impl LobbyRegistrationProvider {
     #[must_use]
     pub fn curfew_lobby_display(&self) -> Arc<dyn CurfewLobbyDisplayPort> {
         Arc::new(CurfewLobbyDisplay {
-            state: Arc::clone(&self.handler.state),
+            handler: Arc::clone(&self.handler),
         })
     }
 
