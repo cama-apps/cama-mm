@@ -14,6 +14,7 @@ use cama_app::opendota_http::{OpenDotaHttpBuildError, OpenDotaRuntimeServices};
 use cama_app::service_container::ServiceContainerOptions;
 use cama_app::shop_commands::SHOP_SOFT_AVOID_COST;
 use cama_db::schema_manager::MigrationSettings;
+use cama_domain::rating::MAX_GLICKO_RD;
 
 use crate::{DiscordToken, RuntimeConfig};
 
@@ -460,7 +461,7 @@ impl ApplicationConfig {
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
                 hostile_loss_min_balance: p.i64("HOSTILE_LOSS_MIN_BALANCE", 50),
                 house_payout_multiplier: p.f64("HOUSE_PAYOUT_MULTIPLIER", 1.0),
-                initial_glicko_rd: p.f64("INITIAL_GLICKO_RD", 350.0),
+                initial_glicko_rd: p.f64("INITIAL_GLICKO_RD", MAX_GLICKO_RD).min(MAX_GLICKO_RD),
                 jopacoin_exclusion_reward: p.i64("JOPACOIN_EXCLUSION_REWARD", 5),
                 jopacoin_min_bet: p.i64("JOPACOIN_MIN_BET", 1),
                 // Base Dota rewards are source-controlled so deployments cannot
@@ -558,7 +559,9 @@ impl ApplicationConfig {
                 rd_decay_grace_period_days: p.i64("RD_DECAY_GRACE_PERIOD_DAYS", 7),
                 rd_priority_weight: p.f64("RD_PRIORITY_WEIGHT", 0.2),
                 recalibration_cooldown_seconds: p.i64("RECALIBRATION_COOLDOWN_SECONDS", 7776000),
-                recalibration_initial_rd: p.f64("RECALIBRATION_INITIAL_RD", 350.0),
+                recalibration_initial_rd: p
+                    .f64("RECALIBRATION_INITIAL_RD", MAX_GLICKO_RD)
+                    .min(MAX_GLICKO_RD),
                 recalibration_initial_volatility: p.f64("RECALIBRATION_INITIAL_VOLATILITY", 0.06),
                 region_split_penalty: p.f64("REGION_SPLIT_PENALTY", 500.0),
                 role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
@@ -839,6 +842,8 @@ mod tests {
     #[test]
     fn defaults_and_derived_aliases_match_python() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(config.values.initial_glicko_rd, 250.0);
+        assert_eq!(config.values.recalibration_initial_rd, 250.0);
         assert_eq!(config.values.bet_lock_seconds, 1_200);
         assert_eq!(config.values.openskill_shuffle_chance, 0.02);
         assert_eq!(config.values.auto_spectator_bet_count, 10);
@@ -851,6 +856,17 @@ mod tests {
         assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
         assert_eq!(config.llm.model, DEFAULT_CEREBRAS_MODEL);
+    }
+
+    #[test]
+    fn glicko_rd_settings_cannot_exceed_shared_cap() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("INITIAL_GLICKO_RD", "350"),
+            ("RECALIBRATION_INITIAL_RD", "300"),
+        ]);
+        assert_eq!(config.values.initial_glicko_rd, 250.0);
+        assert_eq!(config.values.recalibration_initial_rd, 250.0);
     }
 
     #[test]

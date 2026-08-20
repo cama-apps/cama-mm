@@ -7,7 +7,7 @@ use cama_app::drawing::draw_rating_distribution_with_median;
 use cama_db::core_repositories::{LobbyTypeStats, MatchRepository, PlayerRepository};
 use cama_domain::openskill::{CamaOpenSkillSystem, Rating as OpenSkillRating};
 use cama_domain::player::Player;
-use cama_domain::rating::{CamaRatingSystem, RatingConfig};
+use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD, RatingConfig, cap_glicko_rd};
 use cama_domain::rating_insights::{
     CalibrationStats, MatchPrediction, OpenSkillMatchRatings, PlayerCalibration, PredictionQuality,
     RatingHistoryEntry, RatingMovement, RatingSeedCalculator, RatingStability,
@@ -187,7 +187,7 @@ impl CalibrationDataSources {
         );
         let tier = |name| stats.rd_tier_count(name).unwrap_or_default();
         let calibration_progress = format!(
-            "**Locked In** (RD ≤75, 79-100% certain): {}\n**Settling** (RD 76-150, 57-79% certain): {}\n**Developing** (RD 151-250, 29-57% certain): {}\n**Fresh** (RD 251+, 0-29% certain): {}\n\nAvg: RD {} ({} certain)",
+            "**Locked In** (RD ≤75, 70-100% certain): {}\n**Settling** (RD 76-150, 40-70% certain): {}\n**Developing** (RD 151-249, 1-40% certain): {}\n**Fresh** (RD 250+, 0% certain): {}\n\nAvg: RD {} ({} certain)",
             tier("Locked In"),
             tier("Settling"),
             tier("Developing"),
@@ -925,7 +925,7 @@ fn format_ranked(players: &[Player], value: impl Fn(&Player) -> String) -> Strin
 
 fn format_calibrated(players: &[Player]) -> String {
     format_ranked(players, |player| {
-        let rd = player.glicko_rd.unwrap_or(350.0);
+        let rd = cap_glicko_rd(player.glicko_rd.unwrap_or(MAX_GLICKO_RD));
         format!("RD {rd:.0}, {:.0}%", rd_to_certainty(rd))
     })
 }
@@ -1129,12 +1129,12 @@ impl CalibrationDataSources {
         );
         let rating_system = &self.rating_system;
         let os_system = self.openskill_system()?;
-        let rd = player.glicko_rd.unwrap_or(350.0);
+        let rd = cap_glicko_rd(player.glicko_rd.unwrap_or(MAX_GLICKO_RD));
         let calibration_tier = if rd <= 75.0 {
             "Locked In"
         } else if rd <= 150.0 {
             "Settling"
-        } else if rd <= 250.0 {
+        } else if rd < MAX_GLICKO_RD {
             "Developing"
         } else {
             "Fresh"
@@ -1705,7 +1705,7 @@ fn rating_profile_lines(
         || "N/A".to_owned(),
         |rating| rating_system.rating_to_display(rating).to_string(),
     );
-    let rd = player.glicko_rd.unwrap_or(350.0);
+    let rd = cap_glicko_rd(player.glicko_rd.unwrap_or(MAX_GLICKO_RD));
     let certainty = 100.0 - rating_system.get_rating_uncertainty_percentage(rd);
     let mut lines = vec![
         format!("**Rating:** {rating_display} | **RD:** {rd:.0} ({certainty:.0}% certain)"),
@@ -2171,7 +2171,7 @@ mod configured_model_tests {
 
         assert_eq!(value.matches("**Rating:**").count(), 1);
         assert_eq!(value.matches("**Tier:**").count(), 1);
-        assert!(value.contains("**RD:** 350"));
+        assert!(value.contains("**RD:** 250"));
         assert!(value.contains("**OpenSkill:** 250"));
         assert!(value.contains("64% certain"));
     }

@@ -783,7 +783,7 @@ fn test_load_glicko_player_uses_created_at_when_last_match_missing() {
 }
 
 #[test]
-fn test_load_glicko_player_caps_rd_at_350() {
+fn test_load_glicko_player_caps_rd_at_shared_limit() {
     let system = CamaRatingSystem::default();
     let now = DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
         .expect("fixed timestamp")
@@ -796,8 +796,17 @@ fn test_load_glicko_player_caps_rd_at_350() {
             None,
             now,
         ),
-        350.0
+        250.0
     );
+}
+
+#[test]
+fn test_load_glicko_player_without_dates_still_caps_rd_at_shared_limit() {
+    let system = CamaRatingSystem::default();
+    let now = DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
+        .expect("fixed timestamp")
+        .with_timezone(&Utc);
+    assert_eq!(decayed_glicko_rd(&system, 350.0, None, None, now), 250.0);
 }
 
 fn assert_shuffle_prediction_preserves_zero_and_uses_discounted_missing_seed(

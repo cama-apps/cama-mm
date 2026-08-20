@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{
@@ -351,7 +352,7 @@ impl RatingHistoryRepository {
                 |row| {
                     Ok(RecalibrationPlayer {
                         rating: row.get(0)?,
-                        rd: row.get(1)?,
+                        rd: row.get::<_, Option<f64>>(1)?.map(cap_glicko_rd),
                         volatility: row.get(2)?,
                         os_sigma: row.get(3)?,
                         games_played: row.get(4)?,
@@ -391,6 +392,7 @@ impl RatingHistoryRepository {
         }
 
         let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let new_rd = request.new_rd.min(MAX_GLICKO_RD);
         transaction.execute(
             "UPDATE players
              SET glicko_rating = ?1, glicko_rd = ?2, glicko_volatility = ?3,
@@ -405,7 +407,7 @@ impl RatingHistoryRepository {
              WHERE discord_id = ?7 AND guild_id = ?8",
             params![
                 request.rating,
-                request.new_rd,
+                new_rd,
                 request.new_volatility,
                 request.new_os_sigma,
                 OPENSKILL_ALGORITHM_VERSION,
@@ -853,7 +855,7 @@ impl RecalibrationService {
         else {
             return Ok(RecalibrationExecution::Rejected(eligibility));
         };
-        let new_rd = current_rd.max(self.config.initial_rd);
+        let new_rd = current_rd.max(self.config.initial_rd).min(MAX_GLICKO_RD);
         let new_os_sigma = current_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
         let total_recalibrations =
             match self
@@ -1422,6 +1424,41 @@ mod tests {
     }
 
     #[test]
+    fn test_recalibrate_caps_legacy_rd_before_display_and_persistence() {
+        let fixture = Fixture::new();
+        fixture.seed_recalibration_player(12_345, Some(1_500.0), Some(350.0), Some(0.06), None, 5);
+        assert_eq!(
+            recalibration_service(&fixture)
+                .can_recalibrate_at(12_345, Some(TEST_GUILD_ID), 10_000)
+                .expect("check legacy player"),
+            RecalibrationEligibility::Allowed {
+                current_rating: 1_500.0,
+                current_rd: 250.0,
+                current_volatility: 0.06,
+                games_played: 5,
+                current_os_sigma: None,
+            }
+        );
+
+        let RecalibrationExecution::Success(success) = recalibration_service(&fixture)
+            .recalibrate_at(12_345, Some(TEST_GUILD_ID), 10_000)
+            .expect("recalibrate legacy player")
+        else {
+            panic!("legacy player should recalibrate");
+        };
+        assert_eq!((success.old_rd, success.new_rd), (250.0, 250.0));
+        let stored_rd: f64 = Connection::open(fixture._file.path())
+            .expect("open recalibrated player")
+            .query_row(
+                "SELECT glicko_rd FROM players WHERE discord_id=12345 AND guild_id=?1",
+                [TEST_GUILD_ID],
+                |row| row.get(0),
+            )
+            .expect("read capped RD");
+        assert_eq!(stored_rd, 250.0);
+    }
+
+    #[test]
     fn test_can_recalibrate_on_cooldown() {
         let fixture = Fixture::new();
         fixture.seed_recalibration_player(12_345, Some(1_500.0), Some(80.0), Some(0.06), None, 5);
@@ -1464,7 +1501,7 @@ mod tests {
         };
         assert_eq!(success.old_rating, 1_500.0);
         assert_eq!(success.old_rd, 80.0);
-        assert_eq!(success.new_rd, 350.0);
+        assert_eq!(success.new_rd, 250.0);
         assert_eq!(success.new_volatility, 0.06);
         assert_eq!(success.total_recalibrations, 1);
         assert_eq!(success.cooldown_ends_at, 13_600);
@@ -1479,7 +1516,7 @@ mod tests {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .expect("read recalibrated player");
-        assert_eq!((rating, rd, volatility), (1_500.0, 350.0, 0.06));
+        assert_eq!((rating, rd, volatility), (1_500.0, 250.0, 0.06));
         assert!((sigma - (25.0 / 3.0)).abs() < 1e-12);
     }
 
@@ -1935,7 +1972,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Glicko RD");
-        assert_eq!(rd, 300.0);
+        assert_eq!(rd, 250.0);
         let connection = Connection::open(fixture._file.path()).expect("open fixture");
         let sigma: f64 = connection
             .query_row(

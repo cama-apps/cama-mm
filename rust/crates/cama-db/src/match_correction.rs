@@ -20,7 +20,7 @@ use cama_domain::openskill::{
 };
 use cama_domain::rating::{
     CamaRatingSystem, MatchUpdateOptions, NEW_PLAYER_MMR_DISCOUNT, RecordedValue, TeamPlayer,
-    recorded_streak_rate, recorded_streak_threshold,
+    cap_glicko_rd, recorded_streak_rate, recorded_streak_threshold,
 };
 
 use crate::open_runtime_connection;
@@ -1272,7 +1272,7 @@ impl MatchCorrectionRepository {
                    )",
                 params![
                     update.rating,
-                    update.rd,
+                    cap_glicko_rd(update.rd),
                     update.volatility,
                     update.discord_id,
                     guild_id,

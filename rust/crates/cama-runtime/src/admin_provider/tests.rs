@@ -1141,7 +1141,7 @@ async fn test_setinitialrating_uses_new_player_rd_when_rating_data_is_missing() 
         .await;
     assert_eq!(
         fixture.rating(TARGET),
-        (Some(1_500.0), Some(350.0), Some(0.06))
+        (Some(1_500.0), Some(250.0), Some(0.06))
     );
 }
 
@@ -1333,7 +1333,7 @@ async fn test_adjust_rd_rejects_invalid_rd() {
             "rd",
             vec![
                 user_option("user", TARGET, "Target"),
-                number_option("rd", 351.0),
+                number_option("rd", 251.0),
             ],
             40,
             ADMIN,
@@ -1341,7 +1341,7 @@ async fn test_adjust_rd_rejects_invalid_rd() {
         )
         .await
         .last();
-    assert!(response.content.contains("RD must be between 0 and 350"));
+    assert!(response.content.contains("RD must be between 0 and 250"));
     assert_eq!(fixture.rating(TARGET).1, Some(100.0));
 }
 

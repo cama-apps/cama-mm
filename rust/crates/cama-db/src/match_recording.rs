@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use cama_domain::role_derivation::{LaneStats, derive_positions};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -402,8 +403,14 @@ impl MatchRecordingRepository {
                  discord_id, guild_id, discord_username, wins, losses,
                  glicko_rating, glicko_rd, glicko_volatility,
                  jopacoin_balance, lowest_balance_ever, updated_at
-             ) VALUES (?1, ?2, ?3, 0, 0, ?4, 350.0, 0.06, 3, 3, CURRENT_TIMESTAMP)",
-            params![discord_id, Self::normalize_guild_id(guild_id), name, rating],
+             ) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, 0.06, 3, 3, CURRENT_TIMESTAMP)",
+            params![
+                discord_id,
+                Self::normalize_guild_id(guild_id),
+                name,
+                rating,
+                MAX_GLICKO_RD
+            ],
         )?;
         Ok(())
     }
@@ -419,10 +426,14 @@ impl MatchRecordingRepository {
                 "SELECT discord_id, discord_username,
                         COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                         COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                        COALESCE(glicko_rd, 350.0),
+                        COALESCE(glicko_rd, ?3),
                         COALESCE(glicko_volatility, 0.06)
                  FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
+                params![
+                    discord_id,
+                    Self::normalize_guild_id(guild_id),
+                    MAX_GLICKO_RD
+                ],
                 player_from_row,
             )
             .optional()
@@ -447,7 +458,7 @@ impl MatchRecordingRepository {
             "SELECT discord_id, discord_username,
                     COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                     COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                    COALESCE(glicko_rd, 350.0),
+                    COALESCE(glicko_rd, {MAX_GLICKO_RD}),
                     COALESCE(glicko_volatility, 0.06)
              FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})"
         );
@@ -1557,7 +1568,7 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<PlayerRecord, rusqlite::Er
         wins: row.get(3)?,
         losses: row.get(4)?,
         glicko_rating: row.get(5)?,
-        glicko_rd: row.get(6)?,
+        glicko_rd: cap_glicko_rd(row.get(6)?),
         glicko_volatility: row.get(7)?,
     })
 }
@@ -1572,10 +1583,10 @@ fn player_for_update(
             "SELECT discord_id, discord_username,
                     COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                     COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                    COALESCE(glicko_rd, 350.0),
+                    COALESCE(glicko_rd, ?3),
                     COALESCE(glicko_volatility, 0.06)
              FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-            params![discord_id, guild_id],
+            params![discord_id, guild_id, MAX_GLICKO_RD],
             player_from_row,
         )
         .optional()?

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
+use cama_domain::rating::cap_glicko_rd;
 use cama_domain::role_derivation::{
     DerivationFailure, FARM_PRIORITY_MINUTE, LaneStats, derive_positions,
 };
@@ -284,6 +285,7 @@ impl PlayerRepository {
             .as_deref()
             .filter(|roles| !roles.is_empty())
             .map(encode_string_array);
+        let glicko_rd = player.glicko_rd.map(cap_glicko_rd);
         match connection.execute(
             "INSERT INTO players (
                 discord_id, guild_id, discord_username, dotabuff_url, steam_id,
@@ -305,7 +307,7 @@ impl PlayerRepository {
                 roles,
                 player.main_role,
                 player.glicko_rating,
-                player.glicko_rd,
+                glicko_rd,
                 player.glicko_volatility,
                 player.os_mu,
                 player.os_sigma,
@@ -437,7 +439,7 @@ impl PlayerRepository {
              WHERE discord_id = ?4 AND guild_id = ?5",
             params![
                 rating,
-                rd,
+                cap_glicko_rd(rd),
                 volatility,
                 discord_id,
                 Self::normalize_guild_id(guild_id)
@@ -466,7 +468,9 @@ impl PlayerRepository {
                 },
             )
             .optional()?;
-        Ok(row.and_then(|(rating, rd, volatility)| rating.map(|rating| (rating, rd, volatility))))
+        Ok(row.and_then(|(rating, rd, volatility)| {
+            rating.map(|rating| (rating, rd.map(cap_glicko_rd), volatility))
+        }))
     }
 
     pub fn get_match_rating_inputs(
@@ -1508,7 +1512,7 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<Player, rusqlite::Error> {
             .and_then(|json| decode_string_array(json).ok()),
         main_role: row.get(6)?,
         glicko_rating: row.get(7)?,
-        glicko_rd: row.get(8)?,
+        glicko_rd: row.get::<_, Option<f64>>(8)?.map(cap_glicko_rd),
         glicko_volatility: row.get(9)?,
         os_mu: row.get(10)?,
         os_sigma: row.get(11)?,
@@ -3933,7 +3937,7 @@ impl MatchRepository {
                  WHERE discord_id = ?4 AND guild_id = ?5",
                 params![
                     update.rating,
-                    update.rd,
+                    cap_glicko_rd(update.rd),
                     update.volatility,
                     update.discord_id,
                     guild_id
@@ -5056,6 +5060,24 @@ mod tests {
             .players
             .add(&configured_player(12_345, "TestPlayer", TEST_GUILD_ID))
             .unwrap();
+        assert_eq!(
+            fixture
+                .connection()
+                .query_row(
+                    "SELECT glicko_rd FROM players WHERE discord_id=12345 AND guild_id=?1",
+                    [TEST_GUILD_ID],
+                    |row| row.get::<_, f64>(0),
+                )
+                .expect("read stored RD"),
+            250.0
+        );
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players SET glicko_rd=350.0 WHERE discord_id=12345 AND guild_id=?1",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed legacy over-cap RD");
         let player = fixture
             .players
             .get_by_id(12_345, Some(TEST_GUILD_ID))
@@ -5067,6 +5089,7 @@ mod tests {
             player.preferred_roles,
             Some(vec!["1".to_owned(), "2".to_owned()])
         );
+        assert_eq!(player.glicko_rd, Some(250.0));
     }
 
     #[test]
@@ -5163,7 +5186,7 @@ mod tests {
                 .players
                 .get_glicko_rating(12_345, Some(TEST_GUILD_ID))
                 .unwrap(),
-            Some((1_600.0, Some(300.0), Some(0.05)))
+            Some((1_600.0, Some(250.0), Some(0.05)))
         );
     }
 

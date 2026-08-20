@@ -5855,7 +5855,7 @@ fn decayed_glicko_rd(
     now: DateTime<Utc>,
 ) -> f64 {
     let Some(reference) = last_match_at.or(created_at) else {
-        return rd;
+        return cama_domain::rating::cap_glicko_rd(rd);
     };
     let days = (now - reference).num_days().max(0);
     system.apply_rd_decay(rd, i32::try_from(days).unwrap_or(i32::MAX))

@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_domain::rating::cap_glicko_rd;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -1000,7 +1001,7 @@ fn map_player(row: &Row<'_>) -> Result<ShopPlayer, rusqlite::Error> {
         wins: row.get(2)?,
         losses: row.get(3)?,
         glicko_rating: row.get(4)?,
-        glicko_rd: row.get(5)?,
+        glicko_rd: row.get::<_, Option<f64>>(5)?.map(cap_glicko_rd),
         glicko_volatility: row.get(6)?,
         os_mu: row.get(7)?,
         os_sigma: row.get(8)?,
