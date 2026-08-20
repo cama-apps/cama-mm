@@ -64,7 +64,7 @@ use cama_db::shop_runtime::{
 };
 use cama_db::tip_repository::TipRepository;
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
-use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, truncate_field};
+use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
@@ -3753,9 +3753,7 @@ impl BettingInteractionHandler {
         if let Some(lock) = lock_until {
             odds_text.push_str(&format!("\nBetting closes <t:{lock}:R>"));
         }
-        let mut embed = InteractionEmbed::titled(overview.title)
-            .color(0xF1_C4_0F)
-            .field("Current Odds", odds_text, false);
+        let mut fields = vec![("Current Odds".to_owned(), odds_text)];
         for (team, label) in [
             (BettingTeam::Radiant, "🟢 Radiant"),
             (BettingTeam::Dire, "🔴 Dire"),
@@ -3767,9 +3765,8 @@ impl BettingInteractionHandler {
             if rows.is_empty() {
                 continue;
             }
-            let mut lines = rows
+            let lines = rows
                 .iter()
-                .take(15)
                 .enumerate()
                 .map(|(index, bet)| {
                     let bettor = if is_admin || !betting_open {
@@ -3793,12 +3790,7 @@ impl BettingInteractionHandler {
                     )
                 })
                 .collect::<Vec<_>>();
-            if rows.len() > 15 {
-                lines.push(format!("... +{} more", rows.len() - 15));
-            }
-            for (name, value) in bounded_bet_team_fields(label, rows.len(), &lines) {
-                embed = embed.field(name, value, false);
-            }
+            fields.extend(bounded_bet_team_fields(label, rows.len(), &lines));
         }
         let summary_name = if mode == BettingMode::Pool {
             "Pool Summary"
@@ -3810,8 +3802,8 @@ impl BettingInteractionHandler {
         } else {
             "Total staked"
         };
-        embed = embed.field(
-            summary_name,
+        fields.push((
+            summary_name.to_owned(),
             format!(
                 "**{summary_total_label}:** {total} {} effective\nRadiant: {} ({:.0}%) | Dire: {} ({:.0}%)",
                 JOPACOIN_EMOTE,
@@ -3820,12 +3812,14 @@ impl BettingInteractionHandler {
                 totals.dire,
                 pct(totals.dire, total)
             ),
-            false,
-        );
-        responder
-            .followup(InteractionResponse::message("").embed(embed).ephemeral())
-            .await
-            .map_err(|error| error.to_string())
+        ));
+        for embed in paginated_bet_embeds(&overview.title, fields) {
+            responder
+                .followup(InteractionResponse::message("").embed(embed).ephemeral())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     async fn balance(
@@ -6021,6 +6015,31 @@ fn bounded_bet_team_fields(
             (name, value)
         })
         .collect()
+}
+
+fn paginated_bet_embeds(title: &str, fields: Vec<(String, String)>) -> Vec<InteractionEmbed> {
+    let title_chars = title.chars().count();
+    let mut embeds = Vec::new();
+    let mut embed = InteractionEmbed::titled(title).color(0xF1_C4_0F);
+    let mut total_chars = title_chars;
+
+    for (name, value) in fields {
+        let field_chars = name.chars().count() + value.chars().count();
+        if !embed.fields.is_empty()
+            && (embed.fields.len() == MAX_FIELDS || total_chars + field_chars > TOTAL_LIMIT)
+        {
+            embeds.push(embed);
+            embed = InteractionEmbed::titled(title).color(0xF1_C4_0F);
+            total_chars = title_chars;
+        }
+        total_chars += field_chars;
+        embed = embed.field(name, value, false);
+    }
+
+    if !embed.fields.is_empty() {
+        embeds.push(embed);
+    }
+    embeds
 }
 
 /// Match Python's `int(retry_after)` response formatting: durations are
