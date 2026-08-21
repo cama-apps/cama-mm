@@ -410,9 +410,16 @@ impl PetSweepWorker {
         let marked_pet = pet.clone();
         self.run_service(move |service| service.mark_hatch_announced(&marked_pet))
             .await?;
-        self.reminders
-            .rearm_pet(pet.discord_id, pet.guild_id)
-            .await?;
+        // The hatch is already durable and announced, so this is best effort:
+        // failing here logs "will retry" but nothing ever retries it, and the
+        // announcement would be re-sent instead.
+        if let Err(error) = self.reminders.rearm_pet(pet.discord_id, pet.guild_id).await {
+            warn!(
+                pet_id = pet.pet_id,
+                ?error,
+                "pet hatch reminder rearm failed"
+            );
+        }
         Ok(())
     }
 
@@ -479,9 +486,20 @@ impl PetSweepWorker {
             )
             .await?;
         }
-        self.reminders
+        // The public death message has already been delivered, so a reminder
+        // failure must not fail the notice: the sweep would re-announce the
+        // same death on every pass because the pet is never marked announced.
+        if let Err(error) = self
+            .reminders
             .cancel_pet(pet.discord_id, pet.guild_id)
-            .await?;
+            .await
+        {
+            warn!(
+                pet_id = pet.pet_id,
+                ?error,
+                "pet death reminder cancellation failed"
+            );
+        }
         if dm_enabled {
             let mut cancellation = context.clone();
             let message = pet_message(embed, media);
