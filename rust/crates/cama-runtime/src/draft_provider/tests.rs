@@ -1,7 +1,7 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
@@ -111,6 +111,9 @@ struct NullDiscord {
     completion_sends_started: AtomicUsize,
     completion_send_gate: Semaphore,
     fail_edits: AtomicBool,
+    /// Fail edits only for this channel, so one guild's repaint can break
+    /// while another guild's succeeds.
+    fail_edits_for_channel: AtomicU64,
     fail_delivery_sends: AtomicBool,
     accept_delivery_before_failure: AtomicBool,
     fail_delivery_history: AtomicBool,
@@ -127,6 +130,7 @@ impl Default for NullDiscord {
             completion_sends_started: AtomicUsize::new(0),
             completion_send_gate: Semaphore::new(0),
             fail_edits: AtomicBool::new(false),
+            fail_edits_for_channel: AtomicU64::new(0),
             fail_delivery_sends: AtomicBool::new(false),
             accept_delivery_before_failure: AtomicBool::new(false),
             fail_delivery_history: AtomicBool::new(false),
@@ -232,7 +236,9 @@ impl DiscordTransport for NullDiscord {
         message_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
-        if self.fail_edits.load(Ordering::Acquire) {
+        if self.fail_edits.load(Ordering::Acquire)
+            || self.fail_edits_for_channel.load(Ordering::Acquire) == channel_id
+        {
             return Err("simulated Discord edit failure".to_owned());
         }
         self.edited
@@ -4495,5 +4501,72 @@ async fn drafting_components_reject_nonparticipants_before_mutation() {
             .expect("state lock")
             .side_preferences
             .contains_key(&999)
+    );
+}
+
+#[test]
+fn one_guild_hydration_failure_does_not_block_other_guilds() {
+    // Recovery runs across every persisted draft. A guild whose draft message
+    // was deleted while the bot was down fails its repaint; that must not leave
+    // every other guild unhydrated -- and, because ready recovery gives up on
+    // the first error, unfinalized as well.
+    let database = migrated_database();
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    for (guild_id, channel_id) in [(42_i64, 777_u64), (43, 778)] {
+        let mut state = DraftState::with_session(guild_id, DraftLobbyKind::Open, 9);
+        state.captain1_id = Some(1);
+        state.captain2_id = Some(2);
+        state.radiant_captain_id = Some(1);
+        state.dire_captain_id = Some(2);
+        state.coinflip_winner_id = Some(1);
+        state.phase = DraftPhase::WinnerSideChoice;
+        state.draft_channel_id = Some(i64::try_from(channel_id).expect("channel"));
+        state.draft_message_id = Some(1234);
+        persistence
+            .create_envelope(&state.to_snapshot().envelope(1))
+            .expect("create durable draft");
+    }
+
+    let drafts = Arc::new(DraftStateManager::default());
+    let discord = Arc::new(NullDiscord::default());
+    // Only the first guild's repaint fails.
+    discord.fail_edits_for_channel.store(777, Ordering::Release);
+    let lobby = LobbyRegistrationProvider::new(
+        database.path(),
+        LobbyRuntimeConfig {
+            lobby_channel_id: Some(700),
+            low_skill_lobby_channel_id: Some(701),
+            admin_user_ids: BTreeSet::from([9001]),
+            ready_threshold: 10,
+            max_players: 20,
+            first_game_pool_daily_amount: 0,
+        },
+        Arc::clone(&drafts),
+        discord.clone(),
+    )
+    .expect("lobby provider");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobby.match_lobby_port(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    let error = block_on(provider.hydrate()).expect_err("the broken guild is reported");
+    assert!(error.contains("guild 42"), "unexpected report: {error}");
+    assert!(
+        drafts.has_active_draft(Some(43)),
+        "the healthy guild must still hydrate"
     );
 }

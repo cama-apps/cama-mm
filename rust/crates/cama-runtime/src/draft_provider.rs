@@ -540,20 +540,68 @@ impl DraftRegistrationProvider {
             .map_err(|error| format!("draft state load task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let mut restored = 0usize;
+        let mut failures = Vec::new();
         for envelope in envelopes {
             if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&envelope.guild_id)) {
                 continue;
             }
-            let guild_id = envelope.guild_id;
-            let session_id = envelope.session_id;
-            let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
-            let operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
-            let _operation_guard = operation_lock.lock().await;
-            let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, initial_kind);
-            let _lobby_operation_guard = lobby_operation_lock.lock().await;
-            let envelope = match self.handler.reload_durable_envelope(guild_id).await {
-                Ok(Some(envelope)) => envelope,
-                Ok(None) => {
+            // One guild's durable row must not abort recovery for every other
+            // guild: a deleted draft message here would leave every later guild
+            // unhydrated and, because ready_recovery aborts, unfinalized too.
+            let envelope_guild_id = envelope.guild_id;
+            let hydrated: Result<bool, String> = async {
+                let guild_id = envelope.guild_id;
+                let session_id = envelope.session_id;
+                let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
+                let operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
+                let _operation_guard = operation_lock.lock().await;
+                let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, initial_kind);
+                let _lobby_operation_guard = lobby_operation_lock.lock().await;
+                let envelope = match self.handler.reload_durable_envelope(guild_id).await {
+                    Ok(Some(envelope)) => envelope,
+                    Ok(None) => {
+                        let live_same_session = self
+                            .handler
+                            .drafts
+                            .get_state(Some(guild_id))
+                            .is_some_and(|state| lock_state(&state).session_id == session_id);
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        if live_same_session {
+                            return Err(format!(
+                                "live draft session {session_id} has no durable recovery row"
+                            ));
+                        }
+                        return Ok(false);
+                    }
+                    Err(error) => {
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        return Err(error);
+                    }
+                };
+                if envelope.session_id != session_id {
+                    self.handler.cleanup_unused_draft_operation_lock(
+                        guild_id,
+                        session_id,
+                        &operation_lock,
+                    );
+                    return Err(format!(
+                        "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
+                        envelope.session_id
+                    ));
+                }
+                if !envelope.active
+                    || envelope.finalizing
+                    || envelope.pending_match_id.is_some()
+                    || envelope.state.as_state().phase == DraftPhase::Complete
+                {
                     let live_same_session = self
                         .handler
                         .drafts
@@ -564,158 +612,130 @@ impl DraftRegistrationProvider {
                         session_id,
                         &operation_lock,
                     );
+                    if live_same_session && (envelope.finalizing || envelope.pending_match_id.is_some())
+                    {
+                        // A same-process completion may still own the live
+                        // Draft while READY fires. Leave that state intact; the
+                        // READY observer invokes the durable recovery worker
+                        // immediately after hydration and its terminal CAS owns
+                        // the eventual local cleanup.
+                        warn!(
+                            guild_id,
+                            session_id, "live finalizing Draft retained for READY recovery"
+                        );
+                        return Ok(false);
+                    }
                     if live_same_session {
                         return Err(format!(
-                            "live draft session {session_id} has no durable recovery row"
+                            "live draft session {session_id} now requires finalization recovery"
                         ));
                     }
-                    continue;
-                }
-                Err(error) => {
-                    self.handler.cleanup_unused_draft_operation_lock(
-                        guild_id,
-                        session_id,
-                        &operation_lock,
-                    );
-                    return Err(error);
-                }
-            };
-            if envelope.session_id != session_id {
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                return Err(format!(
-                    "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
-                    envelope.session_id
-                ));
-            }
-            if !envelope.active
-                || envelope.finalizing
-                || envelope.pending_match_id.is_some()
-                || envelope.state.as_state().phase == DraftPhase::Complete
-            {
-                let live_same_session = self
-                    .handler
-                    .drafts
-                    .get_state(Some(guild_id))
-                    .is_some_and(|state| lock_state(&state).session_id == session_id);
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                if live_same_session && (envelope.finalizing || envelope.pending_match_id.is_some())
-                {
-                    // A same-process completion may still own the live
-                    // Draft while READY fires. Leave that state intact; the
-                    // READY observer invokes the durable recovery worker
-                    // immediately after hydration and its terminal CAS owns
-                    // the eventual local cleanup.
+                    // TODO(draft-persistence): implement idempotent pending-match
+                    // finalization recovery before hydrating these rows.
                     warn!(
                         guild_id,
-                        session_id, "live finalizing Draft retained for READY recovery"
+                        session_id,
+                        finalizing = envelope.finalizing,
+                        pending_match_id = ?envelope.pending_match_id,
+                        "skipping draft row that requires finalization recovery"
                     );
-                    continue;
+                    return Ok(false);
                 }
-                if live_same_session {
-                    return Err(format!(
-                        "live draft session {session_id} now requires finalization recovery"
-                    ));
-                }
-                // TODO(draft-persistence): implement idempotent pending-match
-                // finalization recovery before hydrating these rows.
-                warn!(
-                    guild_id,
-                    session_id,
-                    finalizing = envelope.finalizing,
-                    pending_match_id = ?envelope.pending_match_id,
-                    "skipping draft row that requires finalization recovery"
-                );
-                continue;
-            }
-            let state = envelope.state.clone().into_state();
-            let kind = to_runtime_kind(state.lobby_kind);
-            if kind != initial_kind {
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                return Err(format!(
-                    "draft guild {guild_id} changed lobby scope during hydration"
-                ));
-            }
-            let existing = self.handler.drafts.get_state(Some(guild_id));
-            let (handle, live_state, active_envelope, freshly_restored) = if let Some(existing) =
-                existing
-            {
-                let existing_session = lock_state(&existing).session_id;
-                if existing_session != session_id {
+                let state = envelope.state.clone().into_state();
+                let kind = to_runtime_kind(state.lobby_kind);
+                if kind != initial_kind {
                     self.handler.cleanup_unused_draft_operation_lock(
                         guild_id,
                         session_id,
                         &operation_lock,
                     );
                     return Err(format!(
-                        "draft guild {guild_id} already has session {existing_session}, refusing to hydrate stale session {session_id}"
+                        "draft guild {guild_id} changed lobby scope during hydration"
                     ));
                 }
-                let Some(cached) = lock_recover(&self.handler.persisted_envelopes)
-                    .get(&(guild_id, session_id))
-                    .cloned()
-                else {
-                    return Err(format!(
-                        "draft session {session_id} is live without a hydrated CAS envelope"
-                    ));
-                };
-                if envelope != cached {
-                    return Err(format!(
-                        "draft session {session_id} durable envelope does not match the live CAS cache: cached revision {}, durable revision {}",
-                        cached.revision, envelope.revision
-                    ));
-                }
-                // Repeated READY is strictly idempotent from the already-live
-                // state. Never overwrite an in-flight or freshly committed
-                // mutation with the load snapshot.
-                let live_state = lock_state(&existing).clone();
-                if live_state.to_snapshot() != cached.state {
-                    return Err(format!(
-                        "draft session {session_id} live state does not match its CAS cache"
-                    ));
-                }
-                (existing, live_state, cached, false)
-            } else {
-                let handle = self
-                    .handler
-                    .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
-                lock_recover(&self.handler.persisted_envelopes)
-                    .insert((guild_id, session_id), envelope.clone());
-                (handle, state.clone(), envelope, true)
-            };
-            self.handler.restore_hydrated_receipt(&live_state);
-            if let Err(error) = self.handler.republish_hydrated_view(&live_state).await {
-                if freshly_restored {
-                    self.handler
-                        .unwind_fresh_hydration(&handle, &live_state, &operation_lock);
-                }
-                return Err(format!(
-                    "draft recovery repaint failed for guild {guild_id}, session {session_id}: {error}"
-                ));
-            }
-            let seconds = active_envelope
-                .deadline_at
-                .map(|deadline| deadline.saturating_sub(unix_now()).max(1) as u64)
-                .unwrap_or_else(|| {
-                    if lock_state(&handle).phase == DraftPhase::Drafting {
-                        DRAFTING_TIMEOUT_SECONDS
-                    } else {
-                        PRE_DRAFT_TIMEOUT_SECONDS
+                let existing = self.handler.drafts.get_state(Some(guild_id));
+                let (handle, live_state, active_envelope, freshly_restored) = if let Some(existing) =
+                    existing
+                {
+                    let existing_session = lock_state(&existing).session_id;
+                    if existing_session != session_id {
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        return Err(format!(
+                            "draft guild {guild_id} already has session {existing_session}, refusing to hydrate stale session {session_id}"
+                        ));
                     }
-                });
-            self.handler.schedule_timeout(guild_id, session_id, seconds);
-            restored += 1;
+                    let Some(cached) = lock_recover(&self.handler.persisted_envelopes)
+                        .get(&(guild_id, session_id))
+                        .cloned()
+                    else {
+                        return Err(format!(
+                            "draft session {session_id} is live without a hydrated CAS envelope"
+                        ));
+                    };
+                    if envelope != cached {
+                        return Err(format!(
+                            "draft session {session_id} durable envelope does not match the live CAS cache: cached revision {}, durable revision {}",
+                            cached.revision, envelope.revision
+                        ));
+                    }
+                    // Repeated READY is strictly idempotent from the already-live
+                    // state. Never overwrite an in-flight or freshly committed
+                    // mutation with the load snapshot.
+                    let live_state = lock_state(&existing).clone();
+                    if live_state.to_snapshot() != cached.state {
+                        return Err(format!(
+                            "draft session {session_id} live state does not match its CAS cache"
+                        ));
+                    }
+                    (existing, live_state, cached, false)
+                } else {
+                    let handle = self
+                        .handler
+                        .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
+                    lock_recover(&self.handler.persisted_envelopes)
+                        .insert((guild_id, session_id), envelope.clone());
+                    (handle, state.clone(), envelope, true)
+                };
+                self.handler.restore_hydrated_receipt(&live_state);
+                if let Err(error) = self.handler.republish_hydrated_view(&live_state).await {
+                    if freshly_restored {
+                        self.handler
+                            .unwind_fresh_hydration(&handle, &live_state, &operation_lock);
+                    }
+                    return Err(format!(
+                        "draft recovery repaint failed for guild {guild_id}, session {session_id}: {error}"
+                    ));
+                }
+                let seconds = active_envelope
+                    .deadline_at
+                    .map(|deadline| deadline.saturating_sub(unix_now()).max(1) as u64)
+                    .unwrap_or_else(|| {
+                        if lock_state(&handle).phase == DraftPhase::Drafting {
+                            DRAFTING_TIMEOUT_SECONDS
+                        } else {
+                            PRE_DRAFT_TIMEOUT_SECONDS
+                        }
+                    });
+                self.handler.schedule_timeout(guild_id, session_id, seconds);
+                Ok(true)
+            }
+            .await;
+            match hydrated {
+                Ok(true) => restored += 1,
+                Ok(false) => {}
+                Err(error) => failures.push(format!("guild {}: {error}", envelope_guild_id)),
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "Draft hydration failed for {} row(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
         }
         Ok(restored)
     }

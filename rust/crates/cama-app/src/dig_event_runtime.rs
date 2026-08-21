@@ -122,9 +122,20 @@ pub struct DigEventRuntimeOutcome {
     pub guild_modifier: Option<DigEventGuildModifierOutcome>,
     pub chain_event: Option<CanonicalEventPresentation>,
     pub quest_finale: Option<DigEventQuestFinale>,
+    /// The attempt lost a race but the pending event is still open, so the
+    /// caller should leave its controls usable instead of ending the event.
+    pub retryable: bool,
 }
 
 impl DigEventRuntimeOutcome {
+    /// A blocked attempt whose event is still open for another try.
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            retryable: true,
+            ..Self::blocked(message)
+        }
+    }
+
     fn blocked(message: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -140,6 +151,7 @@ impl DigEventRuntimeOutcome {
             guild_modifier: None,
             chain_event: None,
             quest_finale: None,
+            retryable: false,
         }
     }
 }
@@ -1218,6 +1230,7 @@ impl DigEventRuntimeService {
                     guild_modifier: guild_modifier.clone(),
                     chain_event: chain_event.clone(),
                     quest_finale: None,
+                    retryable: false,
                 })
             })
             .transpose()
@@ -1259,7 +1272,7 @@ impl DigEventRuntimeService {
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
             DigEventSettlementOutcome::Conflict => {
-                return Ok(DigEventRuntimeOutcome::blocked(
+                return Ok(DigEventRuntimeOutcome::retryable(
                     "Your tunnel changed while this event was resolving. Try the choice again.",
                 ));
             }
@@ -1298,6 +1311,7 @@ impl DigEventRuntimeService {
             guild_modifier,
             chain_event,
             quest_finale,
+            retryable: false,
         };
         if let Some(context) = delivery_context.as_ref()
             && outcome.action_id.is_some()
@@ -1474,7 +1488,7 @@ impl DigEventRuntimeService {
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
             DigEventSettlementOutcome::Conflict => {
-                return Ok(DigEventRuntimeOutcome::blocked(
+                return Ok(DigEventRuntimeOutcome::retryable(
                     "Your tunnel changed while this event was resolving. Try the choice again.",
                 ));
             }
@@ -1501,6 +1515,7 @@ impl DigEventRuntimeService {
             guild_modifier: None,
             chain_event: None,
             quest_finale: None,
+            retryable: false,
         })
     }
 

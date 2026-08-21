@@ -2589,6 +2589,17 @@ impl DigInteractionHandler {
                 }
             };
             if !result.success {
+                // A retryable block lost a race but left the pending event
+                // open, and the copy tells the player to try again -- so the
+                // controls this handler disabled have to come back, or the
+                // event is wedged with its side effects already committed.
+                if result.retryable {
+                    let restored =
+                        unlocked_event_controls(&prompt, &self.state.view_nonce, action_id);
+                    if let Err(error) = responder.edit_original(restored).await {
+                        warn!(%error, "could not re-enable Dig event controls after a conflict");
+                    }
+                }
                 let response = event_resolution_response(&result);
                 return responder
                     .followup(response)
@@ -8904,6 +8915,20 @@ fn event_choice_is_valid(
             .and_then(|index| index.parse::<usize>().ok())
             .is_some_and(|index| index < event.boon_options.len().min(5)),
     }
+}
+
+/// Re-enable the event's controls after a retryable conflict.
+fn unlocked_event_controls(
+    prompt: &cama_app::dig_event_runtime::DigEventActionPresentation,
+    view_nonce: &str,
+    action_id: i64,
+) -> InteractionResponse {
+    let buttons = cama_app::dig_loot::canonical_event(&prompt.event.event_id)
+        .map(|event| {
+            event_action_buttons(event, view_nonce, action_id, prompt.safe_disabled, false)
+        })
+        .unwrap_or_default();
+    InteractionResponse::message("").action_row(InteractionActionRow::buttons(buttons))
 }
 
 fn locked_event_controls(
