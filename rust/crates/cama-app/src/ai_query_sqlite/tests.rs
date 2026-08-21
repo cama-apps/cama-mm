@@ -136,3 +136,37 @@ fn missing_database_and_write_sql_fail_without_creating_or_mutating() {
         .expect("read unchanged wins");
     assert_eq!(wins, 9);
 }
+
+#[test]
+fn a_runaway_generated_query_is_aborted_instead_of_pinning_the_thread() {
+    // The SQL reaching this repository is model-generated, so a cross join with
+    // an ORDER BY can run effectively forever on the blocking thread that
+    // executes it.
+    let (_directory, path) = fixture();
+    let connection = Connection::open(&path).expect("seed rows");
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS runaway_probe (value INTEGER);
+             WITH RECURSIVE counter(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM counter WHERE value < 2000
+             )
+             INSERT INTO runaway_probe(value) SELECT value FROM counter;",
+        )
+        .expect("seed probe rows");
+    drop(connection);
+
+    let repository = SqliteAIQueryRepository::new(&path);
+    let error = repository
+        .execute_readonly(
+            "SELECT a.value FROM runaway_probe a, runaway_probe b, runaway_probe c
+             ORDER BY a.value * b.value * c.value",
+            &[],
+            5,
+        )
+        .expect_err("a runaway query must be aborted");
+
+    assert!(
+        matches!(error, QueryRepositoryError::Storage(_)),
+        "unexpected error: {error}"
+    );
+}
