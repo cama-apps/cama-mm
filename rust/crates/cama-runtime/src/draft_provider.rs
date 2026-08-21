@@ -44,7 +44,9 @@ use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordMessageReceipt, DiscordTransport};
+use crate::discord_transport::{
+    DiscordDestinationStatus, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
+};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -1790,21 +1792,21 @@ impl DraftHandler {
             .reconcile_source_delivery(&mut job, &owner, &plan, &state, &embed)
             .await?;
         let lobby_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.lobby,
-                &embed,
+                Self::embed_message(&embed),
                 "lobby",
                 plan.started_at,
             )
             .await?;
         let origin_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.origin,
-                &embed,
+                Self::embed_message(&embed),
                 "origin",
                 plan.started_at,
             )
@@ -2004,21 +2006,21 @@ impl DraftHandler {
             .reconcile_source_delivery(&mut job, &owner, plan, state, &embed)
             .await?;
         let lobby_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.lobby,
-                &embed,
+                Self::embed_message(&embed),
                 "lobby",
                 plan.started_at,
             )
             .await?;
         let origin_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.origin,
-                &embed,
+                Self::embed_message(&embed),
                 "origin",
                 plan.started_at,
             )
@@ -2161,28 +2163,42 @@ impl DraftHandler {
             plan.source.message_id.and_then(|id| u64::try_from(id).ok()),
         ) {
             (Some(channel_id), Some(message_id)) => {
-                self.discord
-                    .fetch_message(channel_id, message_id)
-                    .await?
-                    .ok_or_else(|| {
-                        format!(
-                            "Discord source message {channel_id}/{message_id} disappeared before recovery"
+                let edited = async {
+                    if self
+                        .discord
+                        .fetch_message(channel_id, message_id)
+                        .await?
+                        .is_none()
+                    {
+                        // The plan's message id is immutable, so a deleted
+                        // source message can never be edited into success.
+                        return Ok(false);
+                    }
+                    self.discord
+                        .edit_message(
+                            channel_id,
+                            message_id,
+                            DiscordMessage::default_mentions(
+                                InteractionResponse::message("").embed(embed.clone()),
+                            ),
                         )
-                    })?;
-                self.discord
-                    .edit_message(
+                        .await?;
+                    Ok::<bool, String>(true)
+                }
+                .await;
+                match edited {
+                    Ok(true) => Some(DiscordMessageReceipt {
                         channel_id,
                         message_id,
-                        DiscordMessage::default_mentions(
-                            InteractionResponse::message("").embed(embed.clone()),
-                        ),
-                    )
-                    .await?;
-                Some(DiscordMessageReceipt {
-                    channel_id,
-                    message_id,
-                    jump_url: discord_jump_url(state.guild_id, channel_id, message_id),
-                })
+                        jump_url: discord_jump_url(state.guild_id, channel_id, message_id),
+                    }),
+                    Ok(false) => None,
+                    Err(error) => {
+                        self.skip_or_fail(channel_id, "source", job.guild_id, &error)
+                            .await?;
+                        None
+                    }
+                }
             }
             _ => None,
         };
@@ -2191,27 +2207,48 @@ impl DraftHandler {
         Ok(receipt)
     }
 
-    async fn reconcile_channel_delivery(
+    /// Whether a failed delivery to `channel_id` may be recorded as a
+    /// permanent skip.
+    ///
+    /// A finalization plan freezes its channel ids at link time, so a
+    /// destination Discord reports as gone or inaccessible can never be
+    /// retried into success -- and because the publication CAS and the
+    /// terminal job/envelope delete both sit behind these deliveries, a
+    /// permanent failure leaves the guild's `finalizing` envelope in place and
+    /// blocks every later `/draft start`. Anything Discord does not prove
+    /// permanent stays retryable.
+    async fn skip_or_fail(
         &self,
-        job: &mut DraftFinalizationJobSnapshot,
-        owner: &str,
+        channel_id: u64,
+        name: &str,
+        guild_id: i64,
+        error: &str,
+    ) -> Result<(), String> {
+        if self.discord.destination_status(channel_id).await
+            == DiscordDestinationStatus::Undeliverable
+        {
+            warn!(
+                %error,
+                channel_id,
+                delivery = name,
+                guild_id,
+                "draft finalization destination is permanently undeliverable; recording a skip"
+            );
+            return Ok(());
+        }
+        Err(error.to_owned())
+    }
+
+    /// Perform one plan-frozen delivery, without deciding what a failure means.
+    async fn attempt_delivery(
+        &self,
+        channel_id: u64,
         delivery: &cama_app::draft::DraftFinalizationDeliveryPlan,
-        embed: &InteractionEmbed,
+        message: DiscordMessage,
         name: &str,
         after_unix_seconds: i64,
-    ) -> Result<Option<DiscordMessageReceipt>, String> {
-        if let Some(receipt) = persisted_delivery(&job.progress_json, name) {
-            return Ok(receipt);
-        }
-        let Some(channel_id) = delivery.channel_id.and_then(|id| u64::try_from(id).ok()) else {
-            self.persist_delivery(job, owner, name, None).await?;
-            return Ok(None);
-        };
-        let message =
-            DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed.clone()));
-        let receipt = if let Some(message_id) =
-            delivery.message_id.and_then(|id| u64::try_from(id).ok())
-        {
+    ) -> Result<DiscordMessageReceipt, String> {
+        if let Some(message_id) = delivery.message_id.and_then(|id| u64::try_from(id).ok()) {
             self.discord
                 .fetch_message(channel_id, message_id)
                 .await?
@@ -2223,12 +2260,13 @@ impl DraftHandler {
             self.discord
                 .edit_message(channel_id, message_id, message)
                 .await?;
-            DiscordMessageReceipt {
+            return Ok(DiscordMessageReceipt {
                 channel_id,
                 message_id,
                 jump_url: discord_jump_url(0, channel_id, message_id),
-            }
-        } else if let Some(receipt) = self
+            });
+        }
+        if let Some(receipt) = self
             .discord
             .find_message_by_delivery_key(
                 channel_id,
@@ -2238,29 +2276,64 @@ impl DraftHandler {
             )
             .await?
         {
-            receipt
-        } else {
-            match self
+            return Ok(receipt);
+        }
+        match self
+            .discord
+            .send_message_with_delivery_key(channel_id, &delivery.delivery_key, message)
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            // Discord may have accepted a nonce-bearing request whose response
+            // was lost, so history is checked before the failure is reported.
+            Err(send_error) => self
                 .discord
-                .send_message_with_delivery_key(channel_id, &delivery.delivery_key, message)
-                .await
-            {
-                Ok(receipt) => receipt,
-                Err(send_error) => self
-                    .discord
-                    .find_message_by_delivery_key(
-                        channel_id,
-                        &delivery.delivery_key,
-                        after_unix_seconds,
-                        500,
-                    )
-                    .await?
-                    .ok_or(send_error)?,
+                .find_message_by_delivery_key(
+                    channel_id,
+                    &delivery.delivery_key,
+                    after_unix_seconds,
+                    500,
+                )
+                .await?
+                .ok_or(send_error),
+        }
+    }
+
+    async fn reconcile_delivery(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        delivery: &cama_app::draft::DraftFinalizationDeliveryPlan,
+        message: DiscordMessage,
+        name: &str,
+        after_unix_seconds: i64,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if let Some(receipt) = persisted_delivery(&job.progress_json, name) {
+            return Ok(receipt);
+        }
+        let Some(channel_id) = delivery.channel_id.and_then(|id| u64::try_from(id).ok()) else {
+            self.persist_delivery(job, owner, name, None).await?;
+            return Ok(None);
+        };
+        let receipt = match self
+            .attempt_delivery(channel_id, delivery, message, name, after_unix_seconds)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.skip_or_fail(channel_id, name, job.guild_id, &error)
+                    .await?;
+                self.persist_delivery(job, owner, name, None).await?;
+                return Ok(None);
             }
         };
         self.persist_delivery(job, owner, name, Some(receipt.clone()))
             .await?;
         Ok(Some(receipt))
+    }
+
+    fn embed_message(embed: &InteractionEmbed) -> DiscordMessage {
+        DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed.clone()))
     }
 
     async fn reconcile_thread_deliveries(
@@ -2286,15 +2359,27 @@ impl DraftHandler {
             "🔒 {} Draft Complete - Awaiting Results",
             to_runtime_kind(state.lobby_kind).label()
         );
-        self.discord
+        if let Err(error) = self
+            .discord
             .edit_thread(thread_id, &name, false, false)
-            .await?;
+            .await
+        {
+            // An unreachable thread cannot host either delivery, and stranding
+            // them would keep the guild's envelope finalizing forever.
+            self.skip_or_fail(thread_id, "thread-embed", job.guild_id, &error)
+                .await?;
+            self.persist_delivery(job, owner, "thread-embed", None)
+                .await?;
+            self.persist_delivery(job, owner, "thread-ping", None)
+                .await?;
+            return Ok((None, None));
+        }
         let embed_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 job,
                 owner,
                 &plan.thread_embed,
-                embed,
+                Self::embed_message(embed),
                 "thread-embed",
                 plan.started_at,
             )
@@ -2317,78 +2402,36 @@ impl DraftHandler {
                 .await?;
             None
         } else {
-            if let Some(receipt) = persisted_delivery(&job.progress_json, "thread-ping") {
-                receipt
-            } else {
-                let message = DiscordMessage::mentioning(
-                    InteractionResponse::message(format!(
-                        "{content}\nPlayers, please take your starting positions!"
-                    )),
-                    mentions.iter().copied().collect(),
-                );
-                let receipt = if let Some(message_id) = plan
-                    .thread_ping
-                    .message_id
-                    .and_then(|id| u64::try_from(id).ok())
-                {
-                    self.discord
-                    .fetch_message(thread_id, message_id)
-                    .await?
-                    .ok_or_else(|| {
-                        format!(
-                            "Discord thread-ping message {thread_id}/{message_id} disappeared before recovery"
-                        )
-                    })?;
-                    self.discord
-                        .edit_message(thread_id, message_id, message)
-                        .await?;
-                    DiscordMessageReceipt {
-                        channel_id: thread_id,
-                        message_id,
-                        jump_url: discord_jump_url(0, thread_id, message_id),
-                    }
-                } else if let Some(receipt) = self
-                    .discord
-                    .find_message_by_delivery_key(
-                        thread_id,
-                        &plan.thread_ping.delivery_key,
-                        plan.started_at,
-                        500,
-                    )
-                    .await?
-                {
-                    receipt
-                } else {
-                    match self
-                        .discord
-                        .send_message_with_delivery_key(
-                            thread_id,
-                            &plan.thread_ping.delivery_key,
-                            message,
-                        )
-                        .await
-                    {
-                        Ok(receipt) => receipt,
-                        Err(send_error) => self
-                            .discord
-                            .find_message_by_delivery_key(
-                                thread_id,
-                                &plan.thread_ping.delivery_key,
-                                plan.started_at,
-                                500,
-                            )
-                            .await?
-                            .ok_or(send_error)?,
-                    }
-                };
-                self.persist_delivery(job, owner, "thread-ping", Some(receipt.clone()))
-                    .await?;
-                Some(receipt)
-            }
+            let message = DiscordMessage::mentioning(
+                InteractionResponse::message(format!(
+                    "{content}\nPlayers, please take your starting positions!"
+                )),
+                mentions.iter().copied().collect(),
+            );
+            self.reconcile_delivery(
+                job,
+                owner,
+                &plan.thread_ping,
+                message,
+                "thread-ping",
+                plan.started_at,
+            )
+            .await?
         };
-        self.discord
+        if let Err(error) = self
+            .discord
             .edit_thread(thread_id, &name, false, true)
-            .await?;
+            .await
+        {
+            // Publication already succeeded; a cosmetic re-lock must never
+            // wedge the terminal CAS.
+            warn!(
+                %error,
+                thread_id,
+                guild_id = job.guild_id,
+                "draft finalization could not re-lock its thread"
+            );
+        }
         Ok((embed_receipt, ping_receipt))
     }
 
