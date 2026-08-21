@@ -381,7 +381,10 @@ pub fn add_player_fields(embed: &mut ScoutEmbed, name: &str, lines: &[String]) {
             } else {
                 format!("{name} ({})", index + 1)
             },
-            value: chunk.join("\n"),
+            // A single line longer than the limit is emitted alone, so the
+            // chunk still needs truncating -- the domain helper this loop
+            // mirrors guards the same way.
+            value: cama_domain::embed_safety::truncate_field(&chunk.join("\n"), EMBED_FIELD_LIMIT),
         });
     }
 }

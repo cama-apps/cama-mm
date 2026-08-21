@@ -851,3 +851,53 @@ async fn both_workers_cancel_promptly_from_long_sleep() {
         .unwrap()
         .unwrap();
 }
+
+#[test]
+fn digest_embed_stops_before_discord_rejects_it() {
+    // Each market row is ~345 characters, so a busy guild passes the
+    // 6000-character embed cap before the 25-field cap. An oversized digest is
+    // rejected by the API and, because its outbox row is only acknowledged on
+    // success, would be retried on every wake forever.
+    let markets = (1..=25)
+        .map(|index| PredictionDigestMarket {
+            prediction_id: index,
+            question: "w".repeat(200),
+            current_price: Some(55),
+            prev_price: Some(40),
+            guild_id: 765_432_109_876_543_210,
+            created_at: 1_700_000_000,
+            thread_id: Some(987_654_321_098_765_432),
+            embed_message_id: Some(876_543_210_987_654_321),
+            volume_recent: 1_234,
+        })
+        .collect::<Vec<_>>();
+    let payload = PredictionDigestPayload {
+        slot: 0,
+        split_banner: false,
+        markets,
+    };
+
+    let message = prediction_digest_message(&payload, None, None);
+    let embed = message
+        .response
+        .embeds
+        .first()
+        .expect("digest renders an embed");
+
+    assert!(
+        embed.fields.len() < 25,
+        "the character budget must stop before the field cap here"
+    );
+    assert!(
+        embed.content_len() <= 6_000,
+        "digest embed is {} characters",
+        embed.content_len()
+    );
+    assert!(
+        embed
+            .footer
+            .as_ref()
+            .is_some_and(|footer| footer.contains("more")),
+        "the skipped markets are reported in the footer"
+    );
+}

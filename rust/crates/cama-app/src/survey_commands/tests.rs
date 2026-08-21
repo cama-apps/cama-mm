@@ -1251,3 +1251,60 @@ fn test_maximum_size_review_and_preview_embeds_stay_within_discord_limits() {
     );
     assert!(previews.iter().all(Embed::discord_safe));
 }
+
+#[test]
+fn results_pages_keep_long_written_responses_inside_the_embed_budget() {
+    // Written answers run to 1000 characters and escaping roughly doubles them,
+    // so a fixed four-responses-per-page split overruns Discord's 6000-char
+    // embed budget and the whole results followup is rejected.
+    let long_answer = "a. ".repeat(330);
+    let results = SurveyResults {
+        survey_id: 12,
+        title: "Long answers".to_owned(),
+        status: SurveyStatus::Closed,
+        recipient_count: 12,
+        delivered_count: 12,
+        started_count: 12,
+        completed_count: 12,
+        delivery_rate: 1.0,
+        started_rate: 1.0,
+        completion_rate: 1.0,
+        response_rate: 1.0,
+        questions: vec![QuestionResult {
+            question_id: 201,
+            position: 1,
+            prompt: "Tell us everything".to_owned(),
+            question_type: QuestionType::Text,
+            response_count: 12,
+            skipped_count: 0,
+            nps_score: None,
+            promoters: 0,
+            passives: 0,
+            detractors: 0,
+            rating_average: None,
+            rating_distribution: [0; 5],
+            text_responses: vec![long_answer; 12],
+        }],
+    };
+
+    let pages = results_pages(&results);
+
+    assert!(pages.len() > 1, "long answers must span multiple pages");
+    for (index, page) in pages.iter().enumerate() {
+        assert!(
+            page.discord_safe(),
+            "page {index} exceeds Discord's embed limits: {} chars, {} fields",
+            page.content_len(),
+            page.fields.len()
+        );
+    }
+    let rendered = pages
+        .iter()
+        .flat_map(|page| page.fields.iter())
+        .filter(|field| field.name.starts_with("Anonymous response"))
+        .count();
+    assert!(
+        rendered >= 12,
+        "every response is still rendered, got {rendered} response fields"
+    );
+}
