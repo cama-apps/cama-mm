@@ -851,6 +851,46 @@ fn black_mana_prediction_steal_and_vendetta_settle_after_the_base_hit() {
 }
 
 #[test]
+fn a_broke_attacker_reflects_nothing_while_the_defender_still_collects() {
+    let database = sabotage_fixture(100);
+    let connection = Connection::open(database.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO dig_artifacts
+                (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'vendetta_coin',?3,1,1)",
+            params![TARGET, GUILD, NOW - 1],
+        )
+        .unwrap();
+    // Exactly the sabotage cost: nothing is left to reflect afterwards.
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=20 WHERE discord_id=?1 AND guild_id=?2",
+            params![HELPER, GUILD],
+        )
+        .unwrap();
+
+    let result = sabotage_with(
+        &DigSocialRuntimeService::sqlite(database.path()),
+        [8, 4],
+        [0.0, 0.0],
+        [0, 0, 0],
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.vendetta_reflect, 0,
+        "a broke attacker cannot be reflected below zero"
+    );
+    assert_eq!(
+        result.vendetta_bonus, 3,
+        "the defender's bonus is reported only because it was credited"
+    );
+    assert_eq!(balance(&database, HELPER), 0);
+    assert_eq!(balance(&database, TARGET), 203);
+}
+
+#[test]
 fn sabotage_validation_errors_match_python_copy() {
     let database = sabotage_fixture(30);
     let service = DigSocialRuntimeService::sqlite(database.path());

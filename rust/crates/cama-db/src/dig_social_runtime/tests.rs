@@ -416,7 +416,7 @@ fn concurrent_sabotage_delivery_commits_exactly_once() {
 }
 
 #[test]
-fn sabotage_side_effects_preserve_python_separate_commit_boundaries() {
+fn sabotage_mana_steal_keeps_its_own_commit_boundary() {
     let database = sabotage_fixture();
     let repository = DigSocialRuntimeRepository::new(database.path());
     let detail = format!(r#"{{"target_id":{TARGET},"damage":5,"amount":12}}"#);
@@ -426,42 +426,163 @@ fn sabotage_side_effects_preserve_python_separate_commit_boundaries() {
             .unwrap(),
         Some(112)
     );
-    assert!(
-        repository
-            .try_debit_vendetta_reflect(HELPER, TARGET, GUILD, 2, &detail)
-            .unwrap()
-    );
-    assert_eq!(
-        repository
-            .credit_vendetta_bonus(TARGET, HELPER, GUILD, 3, &detail)
-            .unwrap(),
-        Some(203)
-    );
-    let action_id = repository
-        .log_vendetta_reflect(TARGET, GUILD, &detail, NOW)
+}
+
+#[test]
+fn vendetta_reflect_settles_the_debit_credit_and_audit_together() {
+    let database = sabotage_fixture();
+    let repository = DigSocialRuntimeRepository::new(database.path());
+    let detail = format!(r#"{{"target_id":{TARGET},"damage":5}}"#);
+    let receipt = repository
+        .atomic_vendetta_reflect(DigVendettaReflectSettlement {
+            actor_id: HELPER,
+            target_id: TARGET,
+            guild_id: GUILD,
+            reflect: 2,
+            bonus: 3,
+            reflect_detail_json: &detail,
+            bonus_detail_json: &detail,
+            created_at: NOW,
+        })
         .unwrap();
+
+    assert_eq!(receipt.reflected, 2);
+    assert_eq!(receipt.bonus_credited, 3);
     let connection = Connection::open(database.path()).unwrap();
     assert_eq!(
         connection
             .query_row(
                 "SELECT actor_id FROM dig_actions
                  WHERE id=?1 AND action_type='vendetta_reflect' AND target_id IS NULL",
-                [action_id],
+                [receipt.action_id],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
         TARGET
     );
+    assert_eq!(balance(&connection, HELPER), 98);
+    assert_eq!(balance(&connection, TARGET), 203);
+}
+
+#[test]
+fn a_failed_vendetta_bonus_rolls_the_reflect_debit_back() {
+    let database = sabotage_fixture();
+    let repository = DigSocialRuntimeRepository::new(database.path());
+    let detail = format!(r#"{{"target_id":{TARGET},"damage":5}}"#);
+    let error = repository
+        .atomic_vendetta_reflect_inner(
+            DigVendettaReflectSettlement {
+                actor_id: HELPER,
+                target_id: TARGET,
+                guild_id: GUILD,
+                reflect: 2,
+                bonus: 3,
+                reflect_detail_json: &detail,
+                bonus_detail_json: &detail,
+                created_at: NOW,
+            },
+            true,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DigSocialRuntimeRepositoryError::InjectedFailure
+    ));
+    let connection = Connection::open(database.path()).unwrap();
+    assert_eq!(
+        balance(&connection, HELPER),
+        100,
+        "the attacker keeps the reflect the defender was never credited"
+    );
+    assert_eq!(balance(&connection, TARGET), 200);
     assert_eq!(
         connection
             .query_row(
-                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
-                params![HELPER, GUILD],
+                "SELECT COUNT(*) FROM dig_actions WHERE action_type='vendetta_reflect'",
+                [],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        110
+        0,
+        "a rolled-back reflect leaves no audit row"
     );
+}
+
+#[test]
+fn a_broke_attacker_reflects_nothing_and_the_audit_records_it() {
+    let database = sabotage_fixture();
+    let connection = Connection::open(database.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=1 WHERE discord_id=?1 AND guild_id=?2",
+            params![HELPER, GUILD],
+        )
+        .unwrap();
+    let repository = DigSocialRuntimeRepository::new(database.path());
+    let detail = format!(r#"{{"target_id":{TARGET},"damage":5}}"#);
+    let receipt = repository
+        .atomic_vendetta_reflect(DigVendettaReflectSettlement {
+            actor_id: HELPER,
+            target_id: TARGET,
+            guild_id: GUILD,
+            reflect: 20,
+            bonus: 3,
+            reflect_detail_json: &detail,
+            bonus_detail_json: &detail,
+            created_at: NOW,
+        })
+        .unwrap();
+
+    assert_eq!(receipt.reflected, 0, "the balance floor blocks the debit");
+    assert_eq!(receipt.bonus_credited, 3);
+    assert_eq!(balance(&connection, HELPER), 1);
+    let audit: String = connection
+        .query_row(
+            "SELECT detail FROM dig_actions WHERE id=?1",
+            [receipt.action_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        audit.contains(r#""reflected":0"#),
+        "the audit reports what moved, got {audit}"
+    );
+}
+
+#[test]
+fn a_missing_defender_reports_no_vendetta_bonus() {
+    let database = sabotage_fixture();
+    let repository = DigSocialRuntimeRepository::new(database.path());
+    let detail = format!(r#"{{"target_id":{TARGET},"damage":5}}"#);
+    let receipt = repository
+        .atomic_vendetta_reflect(DigVendettaReflectSettlement {
+            actor_id: HELPER,
+            target_id: TARGET,
+            guild_id: GUILD + 1,
+            reflect: 2,
+            bonus: 3,
+            reflect_detail_json: &detail,
+            bonus_detail_json: &detail,
+            created_at: NOW,
+        })
+        .unwrap();
+
+    assert_eq!(receipt.reflected, 0);
+    assert_eq!(
+        receipt.bonus_credited, 0,
+        "an uncreditable bonus must not be reported as paid"
+    );
+}
+
+fn balance(connection: &Connection, discord_id: i64) -> i64 {
+    connection
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, GUILD],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 #[test]
