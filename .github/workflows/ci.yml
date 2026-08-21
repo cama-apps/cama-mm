@@ -12,8 +12,36 @@ permissions:
   contents: read
 
 jobs:
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Install checksum-verified cargo-vet
+        run: .github/scripts/install-cargo-vet
+
+      - name: Forbid new unaudited exemptions
+        run: .github/scripts/check-cargo-vet-exemptions "${{ github.event.pull_request.base.sha }}"
+
+      # Fetching reads package manifests but does not compile build scripts.
+      # Vetting must succeed before any job is allowed to build third-party code.
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked --manifest-path rust/Cargo.toml
+
+      - name: Require an approved dependency graph
+        run: cargo vet check --locked --manifest-path rust/Cargo.toml
+
   rust-tests:
     name: Rust tests (${{ matrix.name }})
+    needs: dependency-policy
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -79,6 +107,7 @@ jobs:
           --package ${{ matrix.package }} ${{ matrix.arguments }}
 
   rust-lint:
+    needs: dependency-policy
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: rust/target
@@ -126,7 +155,7 @@ jobs:
   # artifact on every PR. The main-only Release workflow owns compilation,
   # publication, and the deploy handoff.
   runtime-images:
-    needs: [rust, rust-lint]
+    needs: [dependency-policy, rust, rust-lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

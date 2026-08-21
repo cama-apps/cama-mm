@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly cargo_vet_version="0.10.0"
+readonly cargo_vet_sha256="c7664d9db5dd2ff813f20303650ac8253fa712ff2a1ea9ce12bed71e346f1744"
+readonly archive_name="cargo-vet-x86_64-unknown-linux-gnu.tar.xz"
+readonly archive_dir="cargo-vet-x86_64-unknown-linux-gnu"
+readonly runner_temp="${RUNNER_TEMP:?RUNNER_TEMP must be set by GitHub Actions}"
+readonly github_path="${GITHUB_PATH:?GITHUB_PATH must be set by GitHub Actions}"
+readonly archive_path="${runner_temp}/${archive_name}"
+readonly install_root="${runner_temp}/cargo-vet-${cargo_vet_version}"
+readonly download_url="https://github.com/mozilla/cargo-vet/releases/download/v${cargo_vet_version}/${archive_name}"
+
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+  --output "${archive_path}" "${download_url}"
+printf '%s  %s\n' "${cargo_vet_sha256}" "${archive_path}" | sha256sum --check --strict -
+mkdir -p "${install_root}"
+tar --extract --xz --file "${archive_path}" --directory "${install_root}"
+printf '%s\n' "${install_root}/${archive_dir}" >> "${github_path}"

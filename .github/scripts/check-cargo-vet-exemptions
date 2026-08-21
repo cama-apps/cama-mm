@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly base_revision="${1:?usage: check-cargo-vet-exemptions BASE_REVISION}"
+readonly config_path="rust/supply-chain/config.toml"
+
+if ! git cat-file -e "${base_revision}:${config_path}" 2>/dev/null; then
+  # The policy bootstrap is the only change allowed to establish exemptions.
+  exit 0
+fi
+
+extract_exemptions() {
+  awk '
+    /^\[\[exemptions\./ {
+      package = $0
+      sub(/^\[\[exemptions\./, "", package)
+      sub(/\]\]$/, "", package)
+      gsub(/^"|"$/, "", package)
+      next
+    }
+    /^version = "/ && package != "" {
+      version = $0
+      sub(/^version = "/, "", version)
+      sub(/"$/, "", version)
+      print package "@" version
+      package = ""
+    }
+  '
+}
+
+readonly new_exemptions="$({
+  comm -13 \
+    <(git show "${base_revision}:${config_path}" | extract_exemptions | sort -u) \
+    <(extract_exemptions < "${config_path}" | sort -u)
+})"
+
+if [[ -n "${new_exemptions}" ]]; then
+  printf '%s\n' \
+    "New cargo-vet exemptions are forbidden; audit the crate or import a trusted audit:" \
+    "${new_exemptions}" >&2
+  exit 1
+fi
