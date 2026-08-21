@@ -594,9 +594,14 @@ impl InteractionEmbed {
     }
 }
 
-/// Discord rejects an embed whose parts total more than 6000 characters; the
-/// margin leaves room for a footer appended after the fields.
-pub const EMBED_CONTENT_BUDGET: usize = 5_900;
+/// Discord rejects an embed whose parts total more than 6000 characters.
+///
+/// The margin leaves room for a footer appended *after* the fields, which is
+/// exactly what the callers that overflow do: a "more not shown" footer is only
+/// emitted when the budget cut fired, and with several skipped categories it
+/// runs past 130 characters. The margin is sized for the longest such footer
+/// rather than a round number.
+pub const EMBED_CONTENT_BUDGET: usize = 5_700;
 /// Discord's hard limit on embed fields.
 pub const EMBED_FIELD_COUNT_LIMIT: usize = 25;
 
@@ -1306,6 +1311,44 @@ mod tests {
         assert_eq!(
             error,
             RegistrationError::InvalidAutocompleteOption("hero".to_owned())
+        );
+    }
+}
+
+#[cfg(test)]
+mod embed_budget_tests {
+    use super::{EMBED_CONTENT_BUDGET, InteractionEmbed};
+
+    #[test]
+    fn a_filled_embed_still_fits_after_its_overflow_footer() {
+        // The footer is assembled after the fields, and it is only long when
+        // the budget cut fired -- the two conditions always co-occur -- so the
+        // margin has to cover the longest footer a caller appends.
+        let longest_footer = "more not shown: +9 open, +9 resolved, +9 cancelled  ·  \
+             /predict view <id> for the full ladder  ·  /predict help for how it works";
+        let mut embed =
+            InteractionEmbed::titled("📈 Prediction markets").description("x".repeat(200));
+        let mut added = 0;
+        loop {
+            let (next, accepted) = embed.field_within_budget(
+                format!("📈 #{added}  ·  YES 55%  ·  vol 1234"),
+                format!("\"{}\"", "w".repeat(200)),
+                false,
+            );
+            embed = next;
+            if !accepted {
+                break;
+            }
+            added += 1;
+        }
+
+        assert!(added > 0, "the budget must admit some rows");
+        assert!(embed.content_len() <= EMBED_CONTENT_BUDGET);
+        let with_footer = embed.footer(longest_footer);
+        assert!(
+            with_footer.content_len() <= 6_000,
+            "embed is {} characters once the footer is attached",
+            with_footer.content_len()
         );
     }
 }

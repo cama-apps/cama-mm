@@ -41,7 +41,7 @@ from typing import Any
 from PIL import Image, ImageSequence
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FIXTURE = ROOT / "scripts" / "visual_equivalence_fixture.json"
+DEFAULT_FIXTURE = ROOT / "rust" / "crates" / "cama-app" / "tests" / "fixtures" / "visual_equivalence.json"
 if str(ROOT) not in sys.path:
     # Executing a file under scripts/ places that directory, rather than the
     # repository root, on sys.path.  Keep the explicit runner self-contained

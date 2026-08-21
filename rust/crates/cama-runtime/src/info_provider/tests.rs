@@ -1280,12 +1280,14 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
         .await
         .expect("leaderboard with expiring view");
     tokio::time::sleep(Duration::from_millis(30)).await;
+    // Deleted through the channel, not the interaction followup: the timer can
+    // outlive the interaction token once an interaction re-arms it.
     assert_eq!(
         *responder.deletions.lock().expect("deletions"),
         [InteractionMessageReceipt {
             message_id: 4_242,
             channel_id: CHANNEL,
-            delivery: InteractionMessageDelivery::InteractionFollowup,
+            delivery: InteractionMessageDelivery::ChannelFallback,
         }]
     );
 

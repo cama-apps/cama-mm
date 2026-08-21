@@ -54,6 +54,12 @@ pub struct DigBonusRuntimeConfig {
     pub package_timeout: Duration,
     pub trivia_timeout: Duration,
     pub trivia_generation_retries: usize,
+    /// Server-side secret mixed into the package-bonus draw.
+    ///
+    /// The action id it would otherwise be seeded from is printed verbatim in
+    /// the button the player clicks, so the draw would be computable offline.
+    /// Zero keeps the legacy seed, which is what the tests pin.
+    pub entropy_secret: u64,
 }
 
 impl Default for DigBonusRuntimeConfig {
@@ -62,6 +68,7 @@ impl Default for DigBonusRuntimeConfig {
             package_timeout: DEFAULT_PACKAGE_TIMEOUT,
             trivia_timeout: DEFAULT_TRIVIA_TIMEOUT,
             trivia_generation_retries: DEFAULT_TRIVIA_GENERATION_RETRIES,
+            entropy_secret: 0,
         }
     }
 }
@@ -74,6 +81,8 @@ impl DigBonusRuntimeConfig {
                 u64::try_from(config.values.trivia_answer_timeout_seconds.max(0))
                     .unwrap_or(u64::MAX),
             ),
+            // Production shares the dig runtime's per-process secret.
+            entropy_secret: cama_app::dig_runtime::DigRuntimeConfig::production().entropy_secret,
             ..Self::default()
         }
     }
@@ -747,7 +756,8 @@ impl DigBonusRuntime {
         let economy = self.state.economy.clone();
         let config = self.state.config;
         let presentation = tokio::task::spawn_blocking(move || {
-            let mut entropy = SeededLootEntropy::new(action_id.unsigned_abs());
+            let mut entropy =
+                SeededLootEntropy::new(action_id.unsigned_abs() ^ config.entropy_secret);
             prepare_package_bonus(&economy, guild_id, user_id, &members, &mut entropy)
         })
         .await

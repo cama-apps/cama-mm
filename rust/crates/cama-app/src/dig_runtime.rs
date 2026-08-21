@@ -132,7 +132,7 @@ pub struct DigRuntimeConfig {
     /// Keeping the decay policy on the runtime config makes the dig aggregate
     /// use the same value as the pet application service without a scheduler.
     pub pet_decay_per_day: i64,
-    /// Server-side secret mixed into every dig seed.
+    /// Server-side secret mixed into dig and dig-event seeds.
     ///
     /// Without it a dig's randomness derives entirely from values the player
     /// knows or controls -- their ids, the click second, and the paid/forced

@@ -1084,7 +1084,7 @@ impl DigEventRuntimeService {
             return Ok(DigEventRuntimeOutcome::blocked("You don't have a tunnel."));
         };
         let quest_snapshot = repository.quest_snapshot(key, request.now)?;
-        let mut entropy = SeededLootEntropy::new(event_seed(request));
+        let mut entropy = SeededLootEntropy::new(event_seed(request, self.config.entropy_secret));
         let policy = event_policy(
             &snapshot,
             request.chained,
@@ -1375,7 +1375,8 @@ impl DigEventRuntimeService {
         let outcome = event.outcomes.get(request.choice).ok_or_else(|| {
             DigEventRuntimeError::Policy(format!("Invalid choice: {}", request.choice))
         })?;
-        let mut entropy = SeededLootEntropy::new(legacy_event_seed(request));
+        let mut entropy =
+            SeededLootEntropy::new(legacy_event_seed(request, self.config.entropy_secret));
         let jc = outcome.jc.sample(&mut entropy);
         let advance = outcome.advance.sample(&mut entropy);
         self.resolve_legacy_event(DigLegacyEventRequest {
@@ -2264,7 +2265,14 @@ fn resolution_as_outcome(
     }
 }
 
-fn event_seed(request: DigRuntimeEventRequest<'_>) -> u64 {
+/// Seed one event resolution.
+///
+/// `secret` is the server-side value from `DigRuntimeConfig`. Without it the
+/// seed is derived entirely from public inputs -- the event key carries the
+/// action id that is printed verbatim in the button the player clicks, and the
+/// choice is one of the hashed fields -- so a player could compute the outcome
+/// of both branches offline and always take the winning one.
+fn event_seed(request: DigRuntimeEventRequest<'_>, secret: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in request
         .event_key
@@ -2276,10 +2284,14 @@ fn event_seed(request: DigRuntimeEventRequest<'_>) -> u64 {
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
     }
-    hash
+    // A zero secret reproduces the legacy seed exactly, which is what keeps the
+    // deterministic tests meaningful; hashing the zero bytes would not.
+    hash ^ secret
 }
 
-fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>) -> u64 {
+/// Seed one legacy-catalog resolution; see [`event_seed`] for why the secret
+/// has to be mixed in.
+fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>, secret: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in request
         .event_key
@@ -2291,7 +2303,9 @@ fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>) -> u64 {
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
     }
-    hash
+    // A zero secret reproduces the legacy seed exactly, which is what keeps the
+    // deterministic tests meaningful; hashing the zero bytes would not.
+    hash ^ secret
 }
 
 fn authored_modifier(value: &Value) -> Option<AuthoredModifier> {
