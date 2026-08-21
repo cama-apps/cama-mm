@@ -7437,3 +7437,60 @@ fn prepared_shuffle_runs_blind_investment_and_spectator_batches_on_migrated_sqli
             > 0
     );
 }
+
+/// A win award to an indebted player: garnishment splits the gross, so the
+/// balance moves by `net + garnished`, not by `net`.
+fn garnished_win_receipt() -> IncomeAwardReceipt {
+    IncomeAwardReceipt {
+        discord_id: 1,
+        gross: 100,
+        garnished: 40,
+        bankruptcy_penalty: 0,
+        vanity_tax: 0,
+        low_priority_tax: 0,
+        net: 60,
+        balance_delta: 100,
+        balance_after: -900,
+        penalty_games_remaining: 0,
+        applied: true,
+    }
+}
+
+#[test]
+fn saga_compensation_reverses_the_movement_the_credit_actually_made() {
+    // Reversing only `net` leaves the garnished share on the player's balance,
+    // and because the rollback row reopens the exact-once marker the retry pays
+    // the award again in full -- so the player keeps the difference and later
+    // corrections under-reverse by the same amount.
+    let win = MatchWinRewardOutcome {
+        receipt: garnished_win_receipt(),
+        communion_bonus: 15,
+        blood_pact_skim: 5,
+    };
+    assert_eq!(win.snapshot_balance_delta(), 110);
+    assert_eq!(
+        win.compensatable_balance_delta(),
+        win.snapshot_balance_delta(),
+        "the compensation must match what was credited"
+    );
+
+    let generated = GeneratedRewardOutcome {
+        receipt: garnished_win_receipt(),
+        blood_pact_skim: 5,
+    };
+    assert_eq!(generated.balance_delta(), 95);
+    assert_eq!(
+        generated.compensatable_balance_delta(),
+        generated.balance_delta()
+    );
+
+    // A recovered (unapplied) receipt moved no money, so it compensates zero.
+    let recovered = GeneratedRewardOutcome {
+        receipt: IncomeAwardReceipt {
+            applied: false,
+            ..garnished_win_receipt()
+        },
+        blood_pact_skim: 5,
+    };
+    assert_eq!(recovered.compensatable_balance_delta(), 0);
+}
