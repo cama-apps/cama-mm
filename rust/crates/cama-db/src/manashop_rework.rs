@@ -1455,6 +1455,47 @@ impl ManashopRepository {
         Ok(())
     }
 
+    /// Book a Dark Bargain's debt buff and credit its principal together.
+    ///
+    /// Splitting these leaves a player owing the debt without ever receiving
+    /// the principal if the process dies or the credit fails in between --
+    /// and the default penalty later charges them for it.
+    pub fn grant_dark_bargain_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+        principal: i64,
+    ) -> Result<i64, ManashopRepositoryError> {
+        let guild_id = Self::normalize_guild_id(request.guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO manashop_buffs (
+                 discord_id, guild_id, buff_type, target_id, granted_at,
+                 expires_at, triggered, data
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+                request.discord_id,
+                guild_id,
+                request.buff_type,
+                request.target_id,
+                request.granted_at,
+                request.expires_at,
+                request.data.map(buff_data_to_json)
+            ],
+        )?;
+        let buff_id = transaction.last_insert_rowid();
+        if transaction.execute(
+            "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1
+             WHERE discord_id = ?2 AND guild_id = ?3",
+            params![principal, request.discord_id, guild_id],
+        )? != 1
+        {
+            return Err(ManashopRepositoryError::StateChanged("dark bargain player"));
+        }
+        transaction.commit()?;
+        Ok(buff_id)
+    }
+
     pub fn transfer_balance_atomic(
         &self,
         from_id: i64,

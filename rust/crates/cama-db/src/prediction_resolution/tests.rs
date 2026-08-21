@@ -1406,3 +1406,36 @@ BEGIN
          (SELECT metadata FROM economy_ledger_context WHERE id=1));
 END;
 ";
+
+#[test]
+fn rollback_succeeds_on_a_market_that_contains_a_sell_trade() {
+    // prediction_trades stores sells with negated jopacoins, so the signed
+    // trade cash flow is a plain sum. Negating sells a second time inflates the
+    // expected gross, the settlement audit then fails, and the admin can never
+    // roll the market back.
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    let prediction_id = fixture.market("sell then resolve?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 10);
+    fixture
+        .orderbook
+        .sell_contracts_atomic(prediction_id, 1, ContractSide::Yes, 4)
+        .expect("sell contracts");
+    let before = fixture.balance(1);
+
+    let settled = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &SettlementAdjustments::default(),
+        )
+        .expect("settle a market containing a sell");
+    assert!(settled.winners[0].payout > 0);
+    assert_eq!(fixture.balance(1) - before, settled.winners[0].payout);
+
+    let rollback = fixture
+        .rollback(prediction_id)
+        .expect("a market with a sell trade can still be rolled back");
+    assert_eq!(rollback.total_reversed, settled.winners[0].payout);
+    assert_eq!(fixture.balance(1), before);
+}

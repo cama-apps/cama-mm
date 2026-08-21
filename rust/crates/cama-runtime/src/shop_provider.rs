@@ -1646,32 +1646,15 @@ impl ShopInteractionHandler {
                 ))
             }
             "dark_bargain" => {
+                // The debt and its principal commit together: a player must
+                // never owe the bargain without having been paid it.
                 let repository = self.manashop.clone();
-                run_blocking("Dark Bargain debt grant", move || {
+                run_blocking("Dark Bargain", move || {
                     BuffService::new(repository, now)
-                        .grant_dark_bargain_debt(user_id, guild_id, 700)
+                        .grant_dark_bargain(user_id, guild_id, 700, 800)
                 })
                 .await
                 .map_err(|_| "Could not strike the bargain; refunded.".to_owned())?;
-                let repository = self.repository.clone();
-                run_blocking("Dark Bargain credit", move || {
-                    repository.adjust_balance(
-                        user_id,
-                        guild_id,
-                        800,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                })
-                .await
-                .map_err(|_| {
-                    "Could not credit the bargain; refunded. Debt note has been recorded — contact an admin if it doesn't clear."
-                        .to_owned()
-                })?;
                 Ok(format!(
                     "🌿💀 **DARK BARGAIN** — <@{user_id}> signs in red ink.\n+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
                     spec.cost,

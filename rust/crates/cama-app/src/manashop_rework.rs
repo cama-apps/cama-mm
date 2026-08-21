@@ -271,11 +271,17 @@ impl BuffService {
         )
     }
 
-    pub fn grant_dark_bargain_debt(
+    /// Book the debt and credit the principal in one transaction.
+    ///
+    /// A player must never end up owing the bargain without having been paid
+    /// it: the default penalty (-1600 JC plus five bankruptcy games) is charged
+    /// off the debt buff alone.
+    pub fn grant_dark_bargain(
         &self,
         discord_id: i64,
         guild_id: i64,
         amount_due: i64,
+        principal: i64,
     ) -> Result<i64, ManashopRepositoryError> {
         let data = BuffData {
             amount_due: Some(amount_due),
@@ -284,13 +290,17 @@ impl BuffService {
             default_penalty_games: Some(5),
             ..BuffData::default()
         };
-        self.grant(
-            discord_id,
-            guild_id,
-            BuffType::DarkBargain,
-            24 * 7,
-            None,
-            Some(&data),
+        self.repository.grant_dark_bargain_atomic(
+            GrantBuffRequest {
+                discord_id,
+                guild_id: Some(guild_id),
+                buff_type: BuffType::DarkBargain.as_str(),
+                target_id: None,
+                granted_at: self.now,
+                expires_at: self.now + 24 * 7 * HOURS,
+                data: Some(&data),
+            },
+            principal,
         )
     }
 
