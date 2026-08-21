@@ -2549,9 +2549,12 @@ impl DraftHandler {
         };
         let lock = self.lobbies.operation_lock(context.guild_id, kind);
         let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, lock.lock()).await else {
-            return followup_ephemeral(
+            // Nothing has acknowledged this interaction yet, so the reply has
+            // to be the initial response; a followup on an unacknowledged
+            // interaction is rejected and the user sees nothing.
+            return respond_ephemeral(
                 &responder,
-                &format!(
+                format!(
                     "A {} shuffle or draft is already being processed. Please wait.",
                     kind.label()
                 ),
@@ -2951,8 +2954,15 @@ impl DraftHandler {
         admin: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        // Lock waits and the persistence delete can outlast Discord's
+        // three-second initial-response window, so the interaction is
+        // acknowledged before any of that work begins.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let Some(handle) = self.drafts.get_state(Some(guild_id)) else {
-            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+            return followup_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
         let initial = lock_state(&handle).clone();
         let kind = to_runtime_kind(initial.lobby_kind);
@@ -2960,7 +2970,7 @@ impl DraftHandler {
         let Ok(_draft_operation_guard) =
             tokio::time::timeout(OPERATION_LOCK_TIMEOUT, draft_operation_lock.lock()).await
         else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "A draft is already being processed. Please wait.",
             )
@@ -2969,17 +2979,17 @@ impl DraftHandler {
         let kind_lock = self.lobbies.operation_lock(guild_id, kind);
         let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, kind_lock.lock()).await
         else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "A draft is already being processed. Please wait.",
             )
             .await;
         };
         let Some(current) = self.drafts.get_state(Some(guild_id)) else {
-            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+            return followup_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
         if !Arc::ptr_eq(&current, &handle) {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ This draft is no longer active — use the controls on the current draft.",
             )
@@ -2987,7 +2997,7 @@ impl DraftHandler {
         }
         let snapshot = lock_state(&current).clone();
         if snapshot.session_id != initial.session_id {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ This draft is no longer active — use the controls on the current draft.",
             )
@@ -2998,14 +3008,14 @@ impl DraftHandler {
             .flatten()
             .any(|captain| captain == user_id);
         if !admin && !is_captain {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ Only captains or server admins can restart the draft.",
             )
             .await;
         }
         if snapshot.phase == DraftPhase::Complete {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "⏳ Draft results are still being finalized. Please wait.",
             )
@@ -3015,7 +3025,7 @@ impl DraftHandler {
             match self.delete_persisted(&snapshot).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "❌ This draft is no longer active — use the controls on the current draft.",
                     )
@@ -3023,7 +3033,7 @@ impl DraftHandler {
                 }
                 Err(error) => {
                     warn!(%error, guild_id, session_id = snapshot.session_id, "draft restart persistence cleanup failed");
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "⚠️ Draft restart could not be saved. Please try again.",
                     )
@@ -3367,16 +3377,24 @@ impl DraftHandler {
             false,
         )
         .await?;
-        if let Some(session) = drafting_session {
+        // The update below is this interaction's initial callback, so it has to
+        // land before any followup: the component auto-ack only fires after a
+        // 1.5s deadline, and on the fast path Discord rejects a followup sent
+        // while the interaction is still unacknowledged.
+        let symmetry_session = drafting_session;
+        if let Some(session) = symmetry_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-            self.emit_captain_symmetry(guild_id, &handle, responder)
-                .await;
         }
         responder
             .update(response)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if symmetry_session.is_some() {
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        Ok(())
     }
 
     async fn choose_hero(
@@ -3452,16 +3470,24 @@ impl DraftHandler {
             false,
         )
         .await?;
-        if let Some(session) = drafting_session {
+        // The update below is this interaction's initial callback, so it has to
+        // land before any followup: the component auto-ack only fires after a
+        // 1.5s deadline, and on the fast path Discord rejects a followup sent
+        // while the interaction is still unacknowledged.
+        let symmetry_session = drafting_session;
+        if let Some(session) = symmetry_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-            self.emit_captain_symmetry(guild_id, &handle, responder)
-                .await;
         }
         responder
             .update(response)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if symmetry_session.is_some() {
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        Ok(())
     }
 
     async fn pick_player(

@@ -360,9 +360,17 @@ impl InteractionHandler for ReminderHandler {
                     return Err(format!("reminder handler received command {name:?}").into());
                 }
                 let (user_id, guild_id) = signed_ids(user_id, guild_id)?;
+                // Slash commands have no automatic acknowledgement, and the
+                // preferences read can wait out SQLite's five-second busy
+                // timeout, so the interaction is acknowledged first. The
+                // settings UI is ephemeral either way.
+                responder
+                    .defer(true)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let preferences = self.state.preferences(user_id, guild_id).await?;
                 responder
-                    .respond(reminder_response(preferences))
+                    .followup(reminder_response(preferences))
                     .await
                     .map_err(|error| error.to_string().into())
             }

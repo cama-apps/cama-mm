@@ -1414,8 +1414,14 @@ impl PetInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        // Python performs this preview before deferring; failures are an
-        // immediate ephemeral response and never leave a public placeholder.
+        // The preview runs two SQLite reads on a connection with a five-second
+        // busy timeout, which can outlast Discord's three-second window, so the
+        // interaction is acknowledged first -- the same order command_altar
+        // uses for its preview.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let preview = self
             .run_eating(
                 move |service| match service.eat_preview(user_id, Some(guild_id)) {
@@ -1426,18 +1432,8 @@ impl PetInteractionHandler {
             .await;
         let pet = match preview {
             Ok(pet) => pet,
-            Err(error) => {
-                return respond(
-                    &responder,
-                    InteractionResponse::message(format!("❌ {error}")).ephemeral(),
-                )
-                .await;
-            }
+            Err(error) => return followup_error(&responder, error).await,
         };
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let token = self.next_token("eat");
         let embed = eating_warning_embed(&pet);
         let response = confirmation_response(
