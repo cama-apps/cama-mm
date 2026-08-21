@@ -4439,19 +4439,29 @@ impl MatchHandler {
                 .iter()
                 .filter_map(|player_id| i64::try_from(*player_id).ok())
                 .collect::<Vec<_>>();
-            if let Err(error) = self.rewards.award_generated_batch(GeneratedRewardBatch {
-                guild_id: context.guild_id,
-                player_ids: &player_ids,
-                gross: self.config.streaming_bonus,
-                apply_bankruptcy_penalty: true,
-                apply_vanity_tax: true,
-                low_priority_taxable_ids: None,
-                source: "shuffle_streaming_bonus",
-                related_type: "pending_match",
-                related_id: prepared.pending.pending_match_id,
-                reason: "shuffle streaming bonus",
-                event_nonce_tag: 5,
-            }) {
+            // These are SQLite money writes, so they belong on a blocking
+            // thread like the equivalent award at match record time.
+            let rewards = Arc::clone(&self.rewards);
+            let gross = self.config.streaming_bonus;
+            let pending_match_id = prepared.pending.pending_match_id;
+            let awarded = tokio::task::spawn_blocking(move || {
+                rewards.award_generated_batch(GeneratedRewardBatch {
+                    guild_id: guild_id_i64,
+                    player_ids: &player_ids,
+                    gross,
+                    apply_bankruptcy_penalty: true,
+                    apply_vanity_tax: true,
+                    low_priority_taxable_ids: None,
+                    source: "shuffle_streaming_bonus",
+                    related_type: "pending_match",
+                    related_id: pending_match_id,
+                    reason: "shuffle streaming bonus",
+                    event_nonce_tag: 5,
+                })
+            })
+            .await
+            .map_err(|error| format!("shuffle streaming bonus task failed: {error}"))?;
+            if let Err(error) = awarded {
                 warn!(%error, "shuffle streaming bonus failed");
             }
             let persisted_streamers = streaming_ids

@@ -93,10 +93,10 @@ impl PlayerTriviaRegistrationProvider {
                     service,
                     penalties: PredictionRepository::new(database_path.as_ref()),
                     pets: PetEvolutionRepository::new(database_path.as_ref()),
-                    economy_events: SqliteEconomyEventService::new(
+                    economy_events: Arc::new(SqliteEconomyEventService::new(
                         database_path.as_ref(),
                         event_config,
-                    ),
+                    )),
                     discord,
                     config: PlayerTriviaRuntimeConfig::from_application_config(config),
                     command_cooldowns: Mutex::new(BTreeMap::new()),
@@ -162,7 +162,7 @@ struct PlayerTriviaRuntimeState {
     service: Arc<app::PlayerTriviaService<RuntimePlayerTriviaRepository>>,
     penalties: PredictionRepository,
     pets: PetEvolutionRepository,
-    economy_events: SqliteEconomyEventService,
+    economy_events: Arc<SqliteEconomyEventService>,
     discord: Arc<dyn PlayerTriviaDiscordPort>,
     config: PlayerTriviaRuntimeConfig,
     command_cooldowns: Mutex<BTreeMap<i64, Instant>>,
@@ -545,13 +545,19 @@ impl PlayerTriviaRuntimeState {
             self.config.minigame_scale,
         )
         .max(0);
-        let reward = match self.economy_events.adjust_reward_at(guild_id, scaled, now) {
-            Ok(reward) => reward.max(0),
-            Err(error) => {
-                warn!(guild_id, %error, "failed to apply daily player-trivia reward event");
-                scaled
-            }
-        };
+        // adjust_reward_at reads SQLite, so it belongs on a blocking thread.
+        let events = Arc::clone(&self.economy_events);
+        let reward =
+            tokio::task::spawn_blocking(move || events.adjust_reward_at(guild_id, scaled, now))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_or_else(
+                    |error| {
+                        warn!(guild_id, %error, "failed to apply daily player-trivia reward event");
+                        scaled
+                    },
+                    |reward| reward.max(0),
+                );
         let repository = self.repository.clone();
         let settlement = tokio::task::spawn_blocking(move || {
             repository
