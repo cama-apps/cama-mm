@@ -172,6 +172,23 @@ impl DiscordDirectMessageError {
     }
 }
 
+/// Whether a frozen Discord destination can still receive a message.
+///
+/// A durable finalization plan freezes its channel ids at link time, so a
+/// destination Discord itself reports as gone or inaccessible can never be
+/// retried into success. Only that proof may turn a required delivery into a
+/// recorded skip; every other failure stays ambiguous and retryable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiscordDestinationStatus {
+    /// Discord answered that the channel does not exist, or that this bot has
+    /// no access to it.
+    Undeliverable,
+    /// Deliverable, or not provable either way -- a transport error, a rate
+    /// limit, or a transport with no probe. Callers must keep retrying.
+    #[default]
+    Unknown,
+}
+
 #[async_trait]
 pub trait DiscordTransport: Send + Sync {
     async fn fetch_message(
@@ -215,6 +232,14 @@ pub trait DiscordTransport: Send + Sync {
         _limit: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
         Ok(None)
+    }
+
+    /// Ask Discord whether `channel_id` is permanently undeliverable for this
+    /// bot. This is consulted only after a delivery has already failed, so it
+    /// costs nothing on the success path. The default proves nothing, which
+    /// keeps every alternate transport on the retry contract.
+    async fn destination_status(&self, _channel_id: u64) -> DiscordDestinationStatus {
+        DiscordDestinationStatus::Unknown
     }
 
     /// Send a message as an inline reply to an existing message in a thread.

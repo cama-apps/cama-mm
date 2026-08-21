@@ -41,9 +41,9 @@ use crate::dig_provider::{
     DigPublicSendFailure, DigPublicSendFailureKind,
 };
 use crate::discord_transport::{
-    DiscordDirectMessageError, DiscordDirectMessageErrorKind, DiscordEmoji,
-    DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt, DiscordMessageSnapshot,
-    DiscordPresence, DiscordTransport, DiscordUserSnapshot,
+    DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
+    DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
+    DiscordMessageSnapshot, DiscordPresence, DiscordTransport, DiscordUserSnapshot,
 };
 use crate::duel_challenges_worker::{
     DuelChannelKind, DuelChannelSnapshot, DuelDiscordPort, DuelGuildSnapshot,
@@ -4176,6 +4176,16 @@ impl DiscordTransport for SerenityDiscordTransport {
             || guild.threads.iter().any(|thread| thread.id == channel_id))
     }
 
+    async fn destination_status(&self, channel_id: u64) -> DiscordDestinationStatus {
+        let Ok(context) = self.context() else {
+            return DiscordDestinationStatus::Unknown;
+        };
+        match context.http.get_channel(ChannelId::new(channel_id)).await {
+            Ok(_) => DiscordDestinationStatus::Unknown,
+            Err(error) => discord_destination_status(&error),
+        }
+    }
+
     async fn mafia_gamba_channel_id(&self, guild_id: u64) -> Result<Option<u64>, String> {
         let context = self.context()?;
         let guild_id = GuildId::new(guild_id);
@@ -4819,6 +4829,26 @@ const fn dig_public_send_failure_kind(status: Option<u16>) -> DigPublicSendFailu
         // boundary.
         Some(400..=499) if !matches!(status, Some(408 | 429)) => DigPublicSendFailureKind::Rejected,
         _ => DigPublicSendFailureKind::Ambiguous,
+    }
+}
+
+fn discord_destination_status(error: &serenity::Error) -> DiscordDestinationStatus {
+    let status = match error {
+        serenity::Error::Http(error) => error.status_code().map(|status| status.as_u16()),
+        _ => None,
+    };
+    discord_destination_status_kind(status)
+}
+
+/// Only a destination-scoped response proves permanence. 404 is Unknown
+/// Channel and 403 is Missing Access/Missing Permissions; both name the
+/// destination itself. Every other outcome -- no status at all, 408, 429, any
+/// 5xx, or a 400 about this particular request body -- may resolve on the next
+/// attempt and must never be allowed to drop an announcement.
+const fn discord_destination_status_kind(status: Option<u16>) -> DiscordDestinationStatus {
+    match status {
+        Some(403 | 404) => DiscordDestinationStatus::Undeliverable,
+        _ => DiscordDestinationStatus::Unknown,
     }
 }
 
