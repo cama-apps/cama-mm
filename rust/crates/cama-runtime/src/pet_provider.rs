@@ -59,6 +59,7 @@ use cama_domain::service_result::ServiceResult;
 use chrono::Utc;
 use tokio::task::JoinError;
 use tokio::time::Instant;
+use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::DiscordTransport;
@@ -2126,7 +2127,10 @@ impl PetInteractionHandler {
         if let Some(message) = last_edited_message(&recorder) {
             let response = outbound_response(message, false);
             return match responder.update(response.clone()).await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    deliver_recorded_followups(&responder, &recorder).await;
+                    Ok(())
+                }
                 Err(error) => {
                     if let Some((receipt, retained)) = challenge_delivery {
                         retained
@@ -2292,6 +2296,7 @@ impl PetInteractionHandler {
                             .map_err(|_| "pet battle receipt lock poisoned".to_owned())?
                             .remove(&brawl_id);
                     }
+                    deliver_recorded_followups(&responder, &recorder).await;
                     Ok(())
                 }
                 Err(error) => {
@@ -3198,6 +3203,38 @@ fn last_edited_message(
         | DiscordEvent::FollowupAttempt(_)
         | DiscordEvent::WaitingForSessionLock { .. } => None,
     })
+}
+
+/// Replay the private acknowledgements the command layer recorded alongside a
+/// message edit.
+///
+/// `PetBrawlCommands` records the pick confirmation -- and the `pet_dead`
+/// accept error -- as a follow-up *before* it edits the shared brawl message.
+/// The component routes deliver only that edit, because the edit is this
+/// interaction's one initial callback, so those private messages were dropped:
+/// picks are secret and the board embed shows only a lock icon, so a picker
+/// could not see which move they locked in. Discord accepts a follow-up only
+/// once the interaction is acknowledged, so they are replayed after the update
+/// lands. A failed acknowledgement never fails the click; the pick is already
+/// recorded.
+async fn deliver_recorded_followups(
+    responder: &Arc<dyn InteractionResponder>,
+    recorder: &InMemoryDiscord,
+) {
+    for message in recorder.events.iter().filter_map(|event| match event {
+        DiscordEvent::FollowupAttempt(message) => Some(message),
+        DiscordEvent::Initial(_)
+        | DiscordEvent::Deferred { .. }
+        | DiscordEvent::Edited { .. }
+        | DiscordEvent::WaitingForSessionLock { .. } => None,
+    }) {
+        if let Err(error) = responder
+            .followup(outbound_response(message, message.ephemeral))
+            .await
+        {
+            warn!("pet brawl acknowledgement follow-up failed: {error}");
+        }
+    }
 }
 
 fn outbound_response(

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use cama_domain::role_derivation::FARM_PRIORITY_MINUTE;
@@ -178,7 +178,12 @@ struct TokenBucket {
     state: Mutex<TokenBucketState>,
 }
 
-static SHARED_RATE_LIMITER: OnceLock<Arc<TokenBucket>> = OnceLock::new();
+/// One token bucket per (endpoint, requests-per-minute) identity. Clients
+/// that share an endpoint and a rate share one bucket; a keyless 60/min client
+/// can no longer pin authenticated traffic to 60/min, and an anonymous client
+/// can no longer inherit a 1200/min bucket from whoever constructed first.
+static SHARED_RATE_LIMITERS: StdMutex<BTreeMap<(String, u32), Arc<TokenBucket>>> =
+    StdMutex::new(BTreeMap::new());
 static OPENDOTA_EXECUTOR: OnceLock<Arc<Runtime>> = OnceLock::new();
 static OPENDOTA_EXECUTOR_INIT: StdMutex<()> = StdMutex::new(());
 static BUNDLED_HERO_NAMES: OnceLock<BTreeMap<i64, String>> = OnceLock::new();
@@ -232,6 +237,18 @@ impl TokenBucket {
     }
 }
 
+fn shared_rate_limiter(base_url: &str, requests_per_minute: u32) -> Arc<TokenBucket> {
+    // Match TokenBucket::new's clamp so the key and the bucket rate agree.
+    let requests_per_minute = requests_per_minute.max(1);
+    let mut limiters = SHARED_RATE_LIMITERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    limiters
+        .entry((base_url.to_owned(), requests_per_minute))
+        .or_insert_with(|| Arc::new(TokenBucket::new(requests_per_minute)))
+        .clone()
+}
+
 /// One cloneable production client implementing the profile, registration,
 /// discovery, enrichment, role, and match-history ports.
 #[derive(Clone)]
@@ -265,7 +282,8 @@ impl fmt::Debug for OpenDotaHttpClient {
 ///
 /// Each accessor returns a cheap clone of the same logical client: reqwest's
 /// connection pool, the token bucket, retry policy, and the dedicated executor
-/// remain shared. The concrete return type implements all of the typed ports,
+/// remain shared. The bucket is shared by (endpoint, requests-per-minute)
+/// identity, so a client built for a different endpoint or rate gets its own. The concrete return type implements all of the typed ports,
 /// so callers cannot accidentally receive a marker or test double.
 #[derive(Clone, Debug)]
 pub struct OpenDotaRuntimeServices {
@@ -459,9 +477,7 @@ impl OpenDotaHttpClient {
             .user_agent("cama-mm-rust/0.1")
             .build()?;
         let executor = dedicated_executor()?;
-        let limiter = SHARED_RATE_LIMITER
-            .get_or_init(|| Arc::new(TokenBucket::new(config.requests_per_minute)))
-            .clone();
+        let limiter = shared_rate_limiter(&config.base_url, config.requests_per_minute);
         Ok(Self {
             http,
             config: Arc::new(config),
