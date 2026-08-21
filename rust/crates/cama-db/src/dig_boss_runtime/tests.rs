@@ -78,6 +78,7 @@ fn victory_commit<'a>(
         artifact: None,
         vanity_tax: 0,
         low_priority_tax: 0,
+        consume_lantern_id: None,
     }
 }
 
@@ -787,4 +788,83 @@ fn cheer_commit_guards_both_tunnels_and_creates_cheerer_atomically() {
             .expect("target cheer data"),
         encoded
     );
+}
+
+#[test]
+fn lantern_claim_rides_inside_the_guarded_settlement() {
+    // The tunnel CAS compares only the tunnel and player snapshot, so a writer
+    // that already claimed the Lantern does not fail it. Claiming the row in a
+    // later transaction would report Conflict for a settlement that had
+    // already committed, and callers read Conflict as "nothing was applied".
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("inventory DB");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+            params![PLAYER, GUILD],
+        )
+        .expect("seed lantern");
+    drop(connection);
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let (lanterns, _) = repository.lantern_state(KEY).expect("lantern state");
+    let lantern_id = lanterns[0];
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = victory_state(&snapshot);
+
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.consume_lantern_id = Some(lantern_id);
+    let outcome = repository.commit(commit).expect("settlement");
+    assert!(matches!(outcome, DigBossRuntimeCommitOutcome::Applied(_)));
+    assert!(
+        repository
+            .lantern_state(KEY)
+            .expect("remaining lanterns")
+            .0
+            .is_empty(),
+        "the Lantern is claimed by the settlement itself"
+    );
+}
+
+#[test]
+fn a_lost_lantern_race_rolls_the_whole_settlement_back() {
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("inventory DB");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+            params![PLAYER, GUILD],
+        )
+        .expect("seed lantern");
+    drop(connection);
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let (lanterns, _) = repository.lantern_state(KEY).expect("lantern state");
+    let lantern_id = lanterns[0];
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = victory_state(&snapshot);
+    let balance_before = snapshot.balance;
+
+    // Another writer claims the Lantern first.
+    assert!(repository.consume_lantern(KEY, lantern_id).expect("claim"));
+
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.consume_lantern_id = Some(lantern_id);
+    let outcome = repository.commit(commit).expect("settlement");
+
+    assert!(
+        matches!(outcome, DigBossRuntimeCommitOutcome::Conflict),
+        "a lost Lantern race reports Conflict, got {outcome:?}"
+    );
+    let after = repository
+        .snapshot(KEY)
+        .expect("snapshot after")
+        .expect("player");
+    assert_eq!(
+        after.balance, balance_before,
+        "Conflict must mean nothing was applied"
+    );
+    assert_eq!(after.depth, snapshot.depth);
 }

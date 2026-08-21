@@ -1649,6 +1649,7 @@ impl PetRepository {
             return Err(PetRepositoryFailure::FundShort.into());
         }
         let mut unpaid = 0_i64;
+        let mut undelivered = BTreeSet::new();
         for (discord_id, amount) in payouts.iter().copied() {
             if amount <= 0 {
                 continue;
@@ -1664,6 +1665,7 @@ impl PetRepository {
                 unpaid = unpaid
                     .checked_add(amount)
                     .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
+                undelivered.insert(discord_id);
             }
         }
         if unpaid != 0 {
@@ -1673,10 +1675,28 @@ impl PetRepository {
                  WHERE guild_id = ?2",
                 params![unpaid, guild_id],
             )?;
+            // The announcement was serialized before the credits ran, so a
+            // payout that matched no players row would otherwise be announced
+            // publicly as paid. Rewrite it to the coins actually delivered,
+            // and drop it entirely when nobody was paid.
+            let remaining = announcement.map(|notice| RefundNotice {
+                payouts: notice
+                    .payouts
+                    .iter()
+                    .filter(|payout| !undelivered.contains(&payout.discord_id))
+                    .cloned()
+                    .collect(),
+                ..notice.clone()
+            });
+            let payload = remaining
+                .as_ref()
+                .filter(|notice| !notice.payouts.is_empty())
+                .map(serialize_refund_announcement);
             transaction.execute(
-                "UPDATE pet_refund_windows SET total_paid = total_paid - ?1
+                "UPDATE pet_refund_windows
+                 SET total_paid = total_paid - ?1, announcement_payload = ?4
                  WHERE guild_id = ?2 AND week_key = ?3",
-                params![unpaid, guild_id, week_key],
+                params![unpaid, guild_id, week_key, payload],
             )?;
         }
         clear_ledger_context(&transaction)?;
@@ -3602,6 +3622,79 @@ mod tests {
                     .get_unannounced_refunds(100)
                     .unwrap()
                     .is_empty()
+            );
+        }
+
+        #[test]
+        fn test_refund_announcement_drops_payouts_that_were_never_credited() {
+            // The payload is serialized before the credits run, so a payout
+            // that matches no players row would otherwise be announced
+            // publicly as paid while the coins went back to the fund.
+            let fixture = rich_fixture();
+            fixture.seed_nonprofit(TEST_GUILD_ID, 500);
+            let mut notice = notice();
+            notice.payouts.push(RefundPayout {
+                discord_id: 999_999,
+                consumed_jc: 10,
+                multiplier_pct: 150,
+                amount: 15,
+            });
+            notice.total_paid = 55;
+
+            assert!(
+                fixture
+                    .repository
+                    .pay_refunds_atomic(
+                        Some(TEST_GUILD_ID),
+                        WEEK,
+                        &[(100, 40), (999_999, 15)],
+                        NOW,
+                        Some(&notice),
+                    )
+                    .unwrap()
+            );
+
+            let announced = fixture.repository.get_unannounced_refunds(100).unwrap();
+            assert_eq!(announced.len(), 1);
+            assert_eq!(
+                announced[0]
+                    .payouts
+                    .iter()
+                    .map(|payout| payout.discord_id)
+                    .collect::<Vec<_>>(),
+                [100],
+                "only the player who was actually paid is announced"
+            );
+            assert_eq!(announced[0].total_paid, 40);
+        }
+
+        #[test]
+        fn test_refund_announcement_is_dropped_when_nobody_was_paid() {
+            let fixture = rich_fixture();
+            fixture.seed_nonprofit(TEST_GUILD_ID, 500);
+            let mut notice = notice();
+            notice.payouts[0].discord_id = 999_999;
+
+            assert!(
+                fixture
+                    .repository
+                    .pay_refunds_atomic(
+                        Some(TEST_GUILD_ID),
+                        WEEK,
+                        &[(999_999, 40)],
+                        NOW,
+                        Some(&notice),
+                    )
+                    .unwrap()
+            );
+
+            assert!(
+                fixture
+                    .repository
+                    .get_unannounced_refunds(100)
+                    .unwrap()
+                    .is_empty(),
+                "an announcement with no delivered payout is not published"
             );
         }
 
